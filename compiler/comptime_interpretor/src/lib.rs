@@ -2542,9 +2542,10 @@ impl<'a> Interpreter<'a> {
             }
             K::ObjectEdit { .. } => self.eval_object_edit(expr, environment),
             K::ObjectQuery { .. } => self.eval_object_query(expr, environment),
-            K::NewtypeRepresentation(_) | K::StructFieldTypes(_) | K::StructFieldNames(_) => {
-                self.eval_observation(expr, environment)
-            }
+            K::NewtypeRepresentation(_)
+            | K::StructFieldTypes(_)
+            | K::StructFieldNames(_)
+            | K::TypeLayout { .. } => self.eval_observation(expr, environment),
             K::TypeListIndex(..) => self.eval_type_list_index(expr, environment),
             K::TypeList(..) => self.eval_type_list(expr, environment),
             K::BitVecType(..) => self.eval_bit_vec_type(expr, environment),

@@ -6708,7 +6708,7 @@ impl Checker<'_, '_> {
                 }
                 H::Application(callee, args) => {
                     if let Some((kind, arg)) = self.type_predicate_kind_call(expr)? {
-                        let operand = self.expr(arg, Some(&p(P::Type)))?;
+                        let operand = self.type_observation_operand(arg)?;
                         let ty = p(if is_never(&operand.ty) {
                             P::Never
                         } else {
@@ -6722,6 +6722,24 @@ impl Checker<'_, '_> {
                             ty,
                             kind: K::TypeKind {
                                 kind,
+                                operand: Box::new(operand),
+                            },
+                        })
+                    } else if let Some((query, arg)) = self.type_layout_query_call(expr)? {
+                        let operand = self.type_observation_operand(arg)?;
+                        let ty = p(if is_never(&operand.ty) {
+                            P::Never
+                        } else {
+                            P::Usize
+                        });
+                        if let Some(expected) = expected {
+                            self.require_expression(&ty, expected, expr.span)?;
+                        }
+                        Ok(n::Expr {
+                            source: source(expr.span),
+                            ty,
+                            kind: K::TypeLayout {
+                                query,
                                 operand: Box::new(operand),
                             },
                         })
@@ -6775,6 +6793,30 @@ impl Checker<'_, '_> {
         } else {
             self.run_computation(value, expected, expr.span)
         }
+    }
+
+    fn type_observation_operand(&mut self, arg: &Expr<'_>) -> Result<n::Expr, Error> {
+        if self.runtime_value_context() {
+            let ty = self.type_expr(arg)?;
+            return Ok(n::Expr {
+                source: source(arg.span),
+                ty: p(P::Type),
+                kind: K::TypeValue(ty),
+            });
+        }
+        let operand = self.expr(arg, Some(&p(P::Type)))?;
+        if !matches!(operand.kind, K::TypeValue(_))
+            && operand.ty == p(P::Type)
+            && let Some(ty) = self.checked_normal_input_in(&operand, &BTreeMap::new(), arg.span)?
+            && ty.sort() == Sort::Type
+        {
+            return Ok(n::Expr {
+                source: operand.source,
+                ty: p(P::Type),
+                kind: K::TypeValue(ty),
+            });
+        }
+        Ok(operand)
     }
 }
 

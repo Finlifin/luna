@@ -5544,7 +5544,8 @@ impl Walker<'_> {
             | K::FunctionResultType { .. }
             | K::ClosureType { .. }
             | K::TypeEqual(..)
-            | K::TypeKind { .. } => self.formation_expression(expr, state, depth),
+            | K::TypeKind { .. }
+            | K::TypeLayout { .. } => self.formation_expression(expr, state, depth),
             K::ErrorConvert { .. }
             | K::OptionalAbsent
             | K::OptionalPresent(_)
@@ -6525,6 +6526,8 @@ fn exportable_postcondition(
             | K::ComptimeIntegerConvert(a)
             | K::SymbolName(a)
             | K::EnumName(a)
+            | K::TypeKind { operand: a, .. }
+            | K::TypeLayout { operand: a, .. }
             | K::BitConvert(a)
             | K::UnsafeScope(a)
             | K::Discard(a) => work.push(a),

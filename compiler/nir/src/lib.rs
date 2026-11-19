@@ -87,6 +87,11 @@ pub mod call_safety;
 
 pub mod intrinsics;
 
+pub mod layout;
+pub use layout::{
+    LayoutError, LayoutWorld, NominalLayout, TypeLayout, TypeLayoutQuery, compute_layout,
+};
+
 pub mod type_budget;
 
 pub mod freshening;

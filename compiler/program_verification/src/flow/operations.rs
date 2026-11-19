@@ -540,6 +540,10 @@ impl Walker<'_> {
             K::TypeKind { operand, .. } => {
                 self.child(operand, state, depth)?;
             }
+            K::TypeLayout { operand, .. } => {
+                self.child(operand, state, depth)?;
+                return self.unknown_value(&expr.ty);
+            }
             _ => return Err(Reason::Unsupported),
         }
         Ok(result)

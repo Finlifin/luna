@@ -1727,7 +1727,8 @@ fn compile_root<'a>(
                     | K::NewtypeRepresentation(_)
                     | K::StructFieldTypes(_)
                     | K::StructFieldNames(_)
-                    | K::EnumStructure { .. } => {
+                    | K::EnumStructure { .. }
+                    | K::TypeLayout { .. } => {
                         use observations::{Kind as O, Observation};
                         let (kind, operand) = match &expr.kind {
                             K::NewtypeRepresentation(operand) => {
@@ -1745,6 +1746,9 @@ fn compile_root<'a>(
                             K::EnumName(operand) => (O::EnumName, operand.as_ref()),
                             K::SymbolName(operand) => (O::SymbolName, operand.as_ref()),
                             K::TextQuery { subject, query } => (O::Text(*query), subject.as_ref()),
+                            K::TypeLayout { query, operand } => {
+                                (O::TypeLayout(*query), operand.as_ref())
+                            }
                             _ => unreachable!(),
                         };
                         let observation = Arc::new(Observation {

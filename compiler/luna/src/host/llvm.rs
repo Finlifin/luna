@@ -123,6 +123,72 @@ impl Ty {
         matches!(self, Self::Int(_, true))
     }
 }
+struct HostLayoutWorld<'a>(&'a iir::Package);
+
+impl nir::LayoutWorld for HostLayoutWorld<'_> {
+    fn target(&self) -> Option<nir::target::TargetData> {
+        self.0.target
+    }
+
+    fn is_tuple_head(&self, head: nir::DeclarationId) -> bool {
+        self.0
+            .normal_forms
+            .iter()
+            .any(|nf| nf.declaration == head && nf.role == nir::normal_forms::Role::Tuple)
+    }
+
+    fn is_list_head(&self, head: nir::DeclarationId) -> bool {
+        self.0
+            .normal_forms
+            .iter()
+            .any(|nf| nf.declaration == head && nf.role == nir::normal_forms::Role::TypeList)
+    }
+
+    fn is_known_nominal(&self, ty: &Term) -> bool {
+        self.0.nominals.iter().any(|n| n.ty == *ty)
+    }
+
+    fn is_template_identity(&self, ty: &Term) -> bool {
+        self.0
+            .templates
+            .iter()
+            .any(|table| table.logical_type() == ty)
+    }
+
+    fn nominal_layout(
+        &self,
+        ty: &Term,
+        _fuel: &mut usize,
+    ) -> Result<Option<nir::NominalLayout>, nir::LayoutError> {
+        let Some(instance) = self.0.nominals.iter().find(|instance| instance.ty == *ty) else {
+            return Ok(None);
+        };
+        Ok(Some(match &instance.definition {
+            iir::NominalDefinition::Struct(def) => {
+                nir::NominalLayout::Struct(def.fields.iter().map(|(_, t)| t.clone()).collect())
+            }
+            iir::NominalDefinition::Newtype(def) => {
+                nir::NominalLayout::Newtype(def.representation.clone())
+            }
+            iir::NominalDefinition::Enum(def) => {
+                if def.symbol_encoding.is_some() {
+                    nir::NominalLayout::EnumSymbol
+                } else if let Some(encoding) = &def.encoding {
+                    let bits = u32::try_from(encoding.width())
+                        .map_err(|_| nir::LayoutError::Unsupported(ty.clone()))?;
+                    nir::NominalLayout::EnumFixedBits(bits)
+                } else if def.variants.iter().all(|v| v.fields.is_empty()) {
+                    nir::NominalLayout::EnumUnit
+                } else {
+                    nir::NominalLayout::EnumAggregate(
+                        def.variants.iter().map(|v| v.fields.clone()).collect(),
+                    )
+                }
+            }
+        }))
+    }
+}
+
 // Never has no value representation. Only the machine return channel uses
 // void; checked failures may return through that channel before propagation.
 fn return_repr(graph: &iir::Package, ty: &Term, checked: bool) -> Result<Ty, String> {
@@ -1597,6 +1663,40 @@ impl Emitter<'_> {
                 return Err(
                     "comptime integer conversion must complete before LLVM lowering".into(),
                 );
+            }
+            K::TypeLayout { query, operand } => {
+                let K::TypeValue(ty) = &operand.kind else {
+                    return Err("host layout query requires a resolved Type value".into());
+                };
+                let layout = nir::compute_layout(&HostLayoutWorld(self.graph), ty, self.fuel)
+                    .map_err(|err| err.to_string())?;
+                let target = self
+                    .graph
+                    .target
+                    .ok_or("host layout query requires target pointer width")?;
+                let bits = target.pointer_bits();
+                let val = u128::from(query.select(layout));
+                if bits < 128
+                    && let Some(limit) = 1u128.checked_shl(bits)
+                    && val >= limit
+                {
+                    return Err("host layout query overflows target usize".into());
+                }
+                Value {
+                    ty: Ty::Int(bits, false),
+                    text: val.to_string(),
+                }
+            }
+            K::TypeKind { kind, operand } => {
+                let K::TypeValue(ty) = &operand.kind else {
+                    return Err("host type predicate requires a resolved Type value".into());
+                };
+                let result = nir::layout::evaluate_kind(&HostLayoutWorld(self.graph), *kind, ty)
+                    .ok_or("host type predicate evaluation is unresolved")?;
+                Value {
+                    ty: Ty::Bool,
+                    text: if result { "true" } else { "false" }.into(),
+                }
             }
             K::IntegerRepresentation(e) => {
                 if !nir::program::integer_representation_valid(&e.ty, &expr.ty) {

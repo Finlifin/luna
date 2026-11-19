@@ -167,8 +167,15 @@ fn predicate_shape(
             | ExprKind::ComptimeIntegerConvert(value)
             | ExprKind::SymbolName(value)
             | ExprKind::EnumName(value)
-            | ExprKind::TypeKind { operand: value, .. }
-            | ExprKind::UnsafeScope(value)
+            | ExprKind::TypeKind { operand: value, .. } => pending.push(value),
+            ExprKind::TypeLayout { operand, .. } => {
+                if matches!(operand.kind, ExprKind::TypeValue(_)) {
+                    charge_type(&operand.ty, remaining)?;
+                } else {
+                    pending.push(operand);
+                }
+            }
+            ExprKind::UnsafeScope(value)
             | ExprKind::Discard(value)
             | ExprKind::AnonymousField { value, .. }
             | ExprKind::Field { value, .. }

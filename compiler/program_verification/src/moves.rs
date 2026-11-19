@@ -7606,7 +7606,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 }
             }
             K::AssociatedValue { .. } => self.observe_associated_value(&expr.ty, source)?,
-            K::ComptimeValue(_) | K::Literal(_) | K::Unit => (),
+            K::ComptimeValue(_) | K::Literal(_) | K::TypeValue(_) | K::Unit => (),
             K::RequirePredicate(condition)
             | K::EnsurePredicate(condition)
             | K::CheckPredicate(condition)
@@ -7701,6 +7701,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             | K::IntegerRepresentation(value)
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
+            | K::TypeKind { operand: value, .. }
+            | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. } => self.observe_guard(value, flow, depth + 1)?,
             K::BitWindow { value, start, end } => {
                 self.observe_guard(value, flow, depth + 1)?;

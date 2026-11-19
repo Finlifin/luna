@@ -1247,6 +1247,11 @@ pub enum ExprKind {
         kind: crate::TypeKind,
         operand: Box<Expr>,
     },
+    /// Query target-aware physical storage layout (`size_of` / `align_of`) of a Type.
+    TypeLayout {
+        query: crate::TypeLayoutQuery,
+        operand: Box<Expr>,
+    },
     /// Builtin scalar equality, including IEEE floats; never type equality.
     ScalarEqual(Box<Expr>, Box<Expr>),
     /// Internal runtime dispatch comparison of validated staged callable
@@ -3447,6 +3452,9 @@ impl fmt::Display for ExprKind {
             Self::TypeKind { kind, operand } => {
                 write!(f, "(type-kind {kind} (operand {operand}))")
             }
+            Self::TypeLayout { query, operand } => {
+                write!(f, "(type-layout {query} (operand {operand}))")
+            }
             Self::AddressOf(place) => write!(f, "(address-of (place {place}))"),
             Self::ReadPointer(pointer) => write!(f, "(read-pointer (pointer {pointer}))"),
             Self::PointerAnonymousField {
@@ -3819,6 +3827,7 @@ impl Expr {
                     | ExprKind::SymbolName(_)
                     | ExprKind::EnumName(_)
                     | ExprKind::TypeKind { .. }
+                    | ExprKind::TypeLayout { .. }
                     | ExprKind::Not(_)
                     | ExprKind::Loop { .. }
                     | ExprKind::WritePointer { .. }
@@ -3926,6 +3935,7 @@ impl Expr {
                 | ExprKind::SymbolName(value)
                 | ExprKind::EnumName(value)
                 | ExprKind::TypeKind { operand: value, .. }
+                | ExprKind::TypeLayout { operand: value, .. }
                 | ExprKind::Not(value)
                 | ExprKind::Loop { body: value, .. } => work.push(Work::Expr(value)),
                 ExprKind::WritePointer {
@@ -4361,6 +4371,7 @@ impl Expr {
             | ExprKind::SymbolName(value)
             | ExprKind::EnumName(value)
             | ExprKind::TypeKind { operand: value, .. }
+            | ExprKind::TypeLayout { operand: value, .. }
             | ExprKind::Not(value)
             | ExprKind::Loop { body: value, .. } => (value).rewrite_with(rewriter)?,
             ExprKind::WritePointer {

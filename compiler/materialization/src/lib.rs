@@ -2953,6 +2953,7 @@ impl Builder<'_> {
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::TypeKind { operand: value, .. }
+                | K::TypeLayout { operand: value, .. }
                 | K::Not(value)
                 | K::Loop { body: value, .. } => pending.push((value, depth + 1)),
                 K::WritePointer {
@@ -3424,6 +3425,7 @@ impl Builder<'_> {
             | K::SymbolName(value)
             | K::EnumName(value)
             | K::TypeKind { operand: value, .. }
+            | K::TypeLayout { operand: value, .. }
             | K::Not(value)
             | K::Loop { body: value, .. } => self.expr(value, depth + 1, comptime)?,
             K::BitWindow { value, start, end } => {

@@ -341,6 +341,8 @@ impl Analyzer<'_, '_, '_, '_> {
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::EnumName(value)
+            | K::TypeKind { operand: value, .. }
+            | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. }
             | K::BitAssign { value, .. }
             | K::Field { value, .. }

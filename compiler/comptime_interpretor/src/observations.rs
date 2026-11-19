@@ -85,6 +85,7 @@ impl Interpreter<'_> {
             K::EnumName(operand) => (O::EnumName, operand.as_ref()),
             K::SymbolName(operand) => (O::SymbolName, operand.as_ref()),
             K::TextQuery { subject, query } => (O::Text(*query), subject.as_ref()),
+            K::TypeLayout { query, operand } => (O::TypeLayout(*query), operand.as_ref()),
             _ => unreachable!("observation dispatcher"),
         };
         let observation = Observation {
@@ -210,6 +211,19 @@ impl Interpreter<'_> {
             }
             O::Text(query) => {
                 if !query.validate(input, output) {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
+            O::TypeLayout(_) => {
+                let never = Term::Primitive(Primitive::Never);
+                let expected = if *input == never {
+                    never.clone()
+                } else {
+                    Term::Primitive(Primitive::Usize)
+                };
+                if *output != expected
+                    || (*input != never && *input != Term::Primitive(Primitive::Type))
+                {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
             }
@@ -368,7 +382,51 @@ impl Interpreter<'_> {
                     _ => Err(self.failure(ErrorKind::Type, Some(source))),
                 }
             }
+            O::TypeLayout(query) => self.observe_type_layout(query, value, source),
         }
+    }
+
+    fn observe_type_layout(
+        &mut self,
+        query: nir::TypeLayoutQuery,
+        value: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let subject = self.type_identity_term(value, source)?;
+        let subject = self.selected_type_view(&subject, Some(source))?;
+        self.check_type_description(&subject, Some(source))?;
+        self.admit_type(&subject, 0).map_err(|mut error| {
+            if error.source.is_none() {
+                error.source = Some(source);
+            }
+            error
+        })?;
+        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let layout = nir::compute_layout(&InterpreterLayoutWorld(self), &subject, &mut fuel);
+        self.budget.steps -= (before - fuel) as u64;
+        let layout = layout.map_err(|err| {
+            let kind = match err {
+                nir::LayoutError::BudgetExhausted => ErrorKind::StepsExhausted,
+                nir::LayoutError::TargetRequired | nir::LayoutError::Unresolved(_) => {
+                    ErrorKind::TypeContractUnresolved
+                }
+                nir::LayoutError::Overflow => ErrorKind::MachineOverflow,
+                nir::LayoutError::ComptimeOnly(_)
+                | nir::LayoutError::Cycle(_)
+                | nir::LayoutError::Unsupported(_) => ErrorKind::Type,
+            };
+            self.failure(kind, Some(source))
+        })?;
+        let val = u128::from(query.select(layout));
+        if let Some(target) = self.target
+            && target.pointer_bits() < 128
+            && let Some(limit) = 1u128.checked_shl(target.pointer_bits())
+            && val >= limit
+        {
+            return Err(self.failure(ErrorKind::MachineOverflow, Some(source)));
+        }
+        Ok(Value::UnsignedInteger(val))
     }
     #[inline(never)]
     pub(super) fn prepare_snapshot(
@@ -401,3 +459,138 @@ impl Interpreter<'_> {
 #[cfg(test)]
 #[path = "metadata_tests.rs"]
 mod metadata_tests;
+
+struct InterpreterLayoutWorld<'a, 'b>(&'a Interpreter<'b>);
+
+impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
+    fn target(&self) -> Option<nir::target::TargetData> {
+        self.0.target
+    }
+
+    fn is_tuple_head(&self, head: DeclarationId) -> bool {
+        self.0
+            .normal_forms
+            .get(&head)
+            .is_some_and(|meta| meta.role == nir::normal_forms::Role::Tuple)
+    }
+
+    fn is_list_head(&self, head: DeclarationId) -> bool {
+        self.0
+            .normal_forms
+            .get(&head)
+            .is_some_and(|meta| meta.role == nir::normal_forms::Role::TypeList)
+    }
+
+    fn is_known_nominal(&self, ty: &Term) -> bool {
+        let Term::Nominal { declaration, .. } = ty else {
+            return false;
+        };
+        if self.0.graph.is_some() {
+            self.0.concrete_nominal(ty).is_some()
+        } else {
+            self.0.structs.contains_key(declaration)
+                || self.0.enums.contains_key(declaration)
+                || self.0.newtypes.get(declaration).is_some()
+        }
+    }
+
+    fn is_template_identity(&self, ty: &Term) -> bool {
+        self.0
+            .graph
+            .is_some_and(|graph| graph.templates.iter().any(|t| t.logical_type() == ty))
+    }
+
+    fn nominal_layout(
+        &self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<nir::NominalLayout>, nir::LayoutError> {
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return Ok(None);
+        };
+        let admission_err = |err: nir::NominalAdmissionError| match err {
+            nir::NominalAdmissionError::Budget => nir::LayoutError::BudgetExhausted,
+            nir::NominalAdmissionError::Unresolved(_) => nir::LayoutError::Unresolved(ty.clone()),
+            nir::NominalAdmissionError::Invalid(_) => nir::LayoutError::Unsupported(ty.clone()),
+        };
+        if self.0.graph.is_some() {
+            let Some(concrete) = self.0.concrete_nominal(ty) else {
+                return Ok(None);
+            };
+            return Ok(Some(match concrete {
+                ConcreteNominal::Struct(def) => {
+                    nir::NominalLayout::Struct(def.fields.iter().map(|(_, t)| t.clone()).collect())
+                }
+                ConcreteNominal::Newtype(def) => {
+                    nir::NominalLayout::Newtype(def.representation.clone())
+                }
+                ConcreteNominal::Enum(def) => {
+                    if def.symbol_encoding.is_some() {
+                        nir::NominalLayout::EnumSymbol
+                    } else if let Some(encoding) = &def.encoding {
+                        let bits = u32::try_from(encoding.width())
+                            .map_err(|_| nir::LayoutError::Unsupported(ty.clone()))?;
+                        nir::NominalLayout::EnumFixedBits(bits)
+                    } else if def.variants.iter().all(|v| v.fields.is_empty()) {
+                        nir::NominalLayout::EnumUnit
+                    } else {
+                        nir::NominalLayout::EnumAggregate(
+                            def.variants.iter().map(|v| v.fields.clone()).collect(),
+                        )
+                    }
+                }
+            }));
+        }
+        if let Some(def) = self.0.structs.get(declaration) {
+            let fields = nir::normal_forms::instantiate_value_fields_checked(
+                &def.type_parameters,
+                &def.parameter_types,
+                arguments,
+                def.fields.iter().map(|(_, t)| t),
+                fuel,
+            )
+            .map_err(admission_err)?;
+            return Ok(Some(nir::NominalLayout::Struct(fields)));
+        }
+        if let Some(def) = self.0.newtypes.get(declaration) {
+            let repr =
+                def.representation_budgeted(arguments, &[], fuel)
+                    .map_err(|err| match err {
+                        nir::newtypes::ConversionError::Budget => nir::LayoutError::BudgetExhausted,
+                        _ => nir::LayoutError::Unsupported(ty.clone()),
+                    })?;
+            return Ok(Some(nir::NominalLayout::Newtype(repr)));
+        }
+        if let Some(def) = self.0.enums.get(declaration) {
+            if def.symbol_encoding.is_some() {
+                return Ok(Some(nir::NominalLayout::EnumSymbol));
+            }
+            if let Some(encoding) = &def.encoding {
+                let bits = u32::try_from(encoding.width())
+                    .map_err(|_| nir::LayoutError::Unsupported(ty.clone()))?;
+                return Ok(Some(nir::NominalLayout::EnumFixedBits(bits)));
+            }
+            if def.variants.iter().all(|v| v.fields.is_empty()) {
+                return Ok(Some(nir::NominalLayout::EnumUnit));
+            }
+            let mut variants = Vec::with_capacity(def.variants.len());
+            for variant in &def.variants {
+                let fields = nir::normal_forms::instantiate_value_fields_checked(
+                    &def.type_parameters,
+                    &def.parameter_types,
+                    arguments,
+                    variant.fields.iter(),
+                    fuel,
+                )
+                .map_err(admission_err)?;
+                variants.push(fields);
+            }
+            return Ok(Some(nir::NominalLayout::EnumAggregate(variants)));
+        }
+        Ok(None)
+    }
+}

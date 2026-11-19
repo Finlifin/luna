@@ -1353,6 +1353,32 @@ impl Checker<'_, '_> {
                 let operand = self.observe_normal_input_in(operand, depth + 1, budget, bindings)?;
                 known_type_kind(&self.context, *kind, &operand, budget).map(Term::Bool)
             }
+            K::TypeLayout { query, operand } => {
+                let operand = self.observe_normal_input_in(operand, depth + 1, budget, bindings)?;
+                let layout = nir::compute_layout(self, &operand, &mut budget.steps).map_err(
+                    |err| match err {
+                        nir::LayoutError::TargetRequired | nir::LayoutError::Unresolved(_) => {
+                            Failure::Unavailable
+                        }
+                        nir::LayoutError::BudgetExhausted => Failure::Steps,
+                        nir::LayoutError::ComptimeOnly(_)
+                        | nir::LayoutError::Cycle(_)
+                        | nir::LayoutError::Unsupported(_)
+                        | nir::LayoutError::Overflow => Failure::Evaluation(err.to_string()),
+                    },
+                )?;
+                let value = u128::from(query.select(layout));
+                if let Some(target) = self.target
+                    && target.pointer_bits() < 128
+                    && let Some(limit) = 1u128.checked_shl(target.pointer_bits())
+                    && value >= limit
+                {
+                    return Err(Failure::Evaluation(
+                        "layout size overflows target usize".into(),
+                    ));
+                }
+                Ok(Term::Integer(comptime_runtime::Integer::from_u128(value)))
+            }
             K::ScalarEqual(left, right)
             | K::ScalarLess(left, right)
             | K::ScalarLessEqual(left, right)
@@ -1775,6 +1801,95 @@ fn known_type_kind(
     let positive = Formula::kind(copy_observed_term(operand, budget)?, kind);
     let negative = Formula::kind(copy_observed_term(operand, budget)?, kind).negate();
     known_type_formula(context, positive, negative, budget)
+}
+
+impl nir::LayoutWorld for Checker<'_, '_> {
+    fn target(&self) -> Option<nir::target::TargetData> {
+        self.target
+    }
+
+    fn is_tuple_head(&self, head: DeclarationId) -> bool {
+        self.protocols.tuple == Some(head)
+    }
+
+    fn is_list_head(&self, head: DeclarationId) -> bool {
+        self.protocols.meta_list == Some(head)
+    }
+
+    fn is_known_nominal(&self, ty: &Term) -> bool {
+        let Term::Nominal { declaration, .. } = ty else {
+            return false;
+        };
+        self.structs.contains_key(declaration)
+            || self.enums.contains_key(declaration)
+            || self.newtypes.contains_key(declaration)
+    }
+
+    fn nominal_layout(
+        &self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<nir::NominalLayout>, nir::LayoutError> {
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return Ok(None);
+        };
+        let admission_err = |err: nir::NominalAdmissionError| match err {
+            nir::NominalAdmissionError::Budget => nir::LayoutError::BudgetExhausted,
+            nir::NominalAdmissionError::Unresolved(_) => nir::LayoutError::Unresolved(ty.clone()),
+            nir::NominalAdmissionError::Invalid(_) => nir::LayoutError::Unsupported(ty.clone()),
+        };
+        if let Some(def) = self.structs.get(declaration) {
+            let fields = nir::normal_forms::instantiate_value_fields_checked(
+                &def.type_parameters,
+                &def.parameter_types,
+                arguments,
+                def.fields.iter().map(|(_, t)| t),
+                fuel,
+            )
+            .map_err(admission_err)?;
+            return Ok(Some(nir::NominalLayout::Struct(fields)));
+        }
+        if let Some(def) = self.newtypes.get(declaration) {
+            let repr =
+                def.representation_budgeted(arguments, &[], fuel)
+                    .map_err(|err| match err {
+                        nir::newtypes::ConversionError::Budget => nir::LayoutError::BudgetExhausted,
+                        _ => nir::LayoutError::Unsupported(ty.clone()),
+                    })?;
+            return Ok(Some(nir::NominalLayout::Newtype(repr)));
+        }
+        if let Some(def) = self.enums.get(declaration) {
+            if def.symbol_encoding.is_some() {
+                return Ok(Some(nir::NominalLayout::EnumSymbol));
+            }
+            if let Some(encoding) = &def.encoding {
+                let bits = u32::try_from(encoding.width())
+                    .map_err(|_| nir::LayoutError::Unsupported(ty.clone()))?;
+                return Ok(Some(nir::NominalLayout::EnumFixedBits(bits)));
+            }
+            if def.variants.iter().all(|v| v.fields.is_empty()) {
+                return Ok(Some(nir::NominalLayout::EnumUnit));
+            }
+            let mut variants = Vec::with_capacity(def.variants.len());
+            for variant in &def.variants {
+                let fields = nir::normal_forms::instantiate_value_fields_checked(
+                    &def.type_parameters,
+                    &def.parameter_types,
+                    arguments,
+                    variant.fields.iter(),
+                    fuel,
+                )
+                .map_err(admission_err)?;
+                variants.push(fields);
+            }
+            return Ok(Some(nir::NominalLayout::EnumAggregate(variants)));
+        }
+        Ok(None)
+    }
 }
 
 fn copy_observed_term(term: &Term, budget: &mut comptime_runtime::Budget) -> Result<Term, Failure> {

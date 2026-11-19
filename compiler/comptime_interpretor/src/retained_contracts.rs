@@ -47,6 +47,15 @@ impl Interpreter<'_> {
                         Some(false) => Rejected,
                         None => Unknown,
                     }
+                } else if matches!(ty, Term::Nominal { declaration, .. }
+                if if self.graph.is_some() {
+                    self.concrete_nominal(ty).is_some()
+                } else {
+                    self.structs.contains_key(declaration)
+                        || self.enums.contains_key(declaration)
+                        || self.newtypes.contains_key(declaration)
+                }) {
+                    Rejected
                 } else {
                     match kind.evaluate(ty) {
                         Some(true) => Satisfied,

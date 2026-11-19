@@ -1648,9 +1648,7 @@ fn evaluate_kind_with_heads(
         if tuple_heads.contains(head) && arguments.len()==1 && arguments[0].sort()==Sort::ComptimeValue)
     {
         Some(TypeKind::Tuple.implies(kind))
-    } else if kind == TypeKind::Tuple
-        && matches!(ty,Term::Nominal {declaration,..} if nominal.contains(declaration))
-    {
+    } else if matches!(ty, Term::Nominal { declaration, .. } if nominal.contains(declaration)) {
         Some(false)
     } else {
         kind.evaluate(ty)

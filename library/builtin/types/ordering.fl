@@ -1,0 +1,46 @@
+use comparison.{Ord, Order}
+
+{-
+    Absence precedes presence. Compare payloads only when both outer layers are
+    present, retaining nested optional layers and the payload's own ordering.
+-}
+impl Ord for ?T where T :- Ord {
+    fn cmp(self, other: Self) -> Order =
+        self match {
+            left? =>
+                other match {
+                    right? => left.as(Ord).cmp(right),
+                    null => .greater,
+                },
+            null =>
+                other match {
+                    _? => .less,
+                    null => .equal,
+                },
+        }
+}
+
+{-
+    Single-label error results order success before failure. Matching branches
+    compare payloads using their Ord implementation without comparing across
+    different branches.
+-}
+impl Ord for !E T
+where
+    T :- Ord,
+    E :- Ord,
+{
+    fn cmp(self, other: Self) -> Order =
+        self match {
+            left! =>
+                other match {
+                    right! => left.as(Ord).cmp(right),
+                    error _ => .less,
+                },
+            error left =>
+                other match {
+                    _! => .greater,
+                    error right => left.as(Ord).cmp(right),
+                },
+        }
+}

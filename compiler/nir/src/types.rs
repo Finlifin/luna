@@ -216,7 +216,7 @@ impl TypeKind {
             Term::Primitive(Primitive::Unit) => return None, // legacy representation
             Term::Primitive(_) => return Some(false),
             Term::Tuple(_) => Self::Tuple,
-            Term::Optional(_) => return Some(false),
+            Term::Optional(_) | Term::ErrorResult { .. } | Term::Record(_) => return Some(false),
             Term::Pointer(_) => Self::Pointer,
             Term::Function { .. }
             | Term::ComptimeFunction(_)

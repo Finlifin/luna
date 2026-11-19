@@ -2053,7 +2053,7 @@ impl Query<'_, '_> {
             K::Literal(nir::program::Literal::String(_)) => Ok(Some(Regions::from(
                 BTreeMap::from([(vec![], BTreeSet::from([TextRegionOrigin::Static]))]),
             ))),
-            K::Literal(_) | K::Unit => Ok(empty),
+            K::Literal(_) | K::TypeValue(_) | K::Unit => Ok(empty),
             K::Function { .. } => self.transfer_function(expr, locals, returned, next),
             K::TraitMethod { .. } => self.transfer_trait_method(expr, locals, returned, next),
             K::FunctionInstance { .. } => {
@@ -2117,6 +2117,8 @@ impl Query<'_, '_> {
             | K::TakeBits(value)
             | K::IntegerRepresentation(value)
             | K::ComptimeIntegerConvert(value)
+            | K::TypeKind { operand: value, .. }
+            | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. } => Ok(self
                 .expr(value, locals, returned, next)?
                 .map(|_| Regions::new())),

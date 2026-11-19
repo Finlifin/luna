@@ -245,6 +245,7 @@ pub(super) fn check(
             | K::ComptimeValue(_)
                 | K::StagedValue(_)
             | K::Literal(_)
+            | K::TypeValue(_)
             | K::Unit
             | K::Local(_)
             | K::Function(_)
@@ -271,6 +272,8 @@ pub(super) fn check(
             | K::ComptimeIntegerConvert(_)
             | K::SymbolName(_)
             | K::EnumName(_)
+            | K::TypeKind { .. }
+            | K::TypeLayout { .. }
             | K::BitSlice { .. }
             | K::BitWindow { .. }
             | K::And(..)

@@ -2260,6 +2260,7 @@ impl Checker<'_, '_> {
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::TypeKind { operand: value, .. }
+                | K::TypeLayout { operand: value, .. }
                 | K::BitConvert(value)
                 | K::ErrorConvert { value: value, .. }
                 | K::NewtypeConvert(value)

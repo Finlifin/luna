@@ -376,7 +376,7 @@ fn loop_may_transfer(
                     }
                     return Ok(false);
                 }
-                K::TypeKind { operand, .. } => {
+                K::TypeKind { operand, .. } | K::TypeLayout { operand, .. } => {
                     pending.push(operand);
                     return Ok(false);
                 }

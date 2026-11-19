@@ -9,6 +9,7 @@ pub enum Kind {
     EnumStructure(nir::program::EnumStructureQuery),
     SymbolName,
     Text(nir::program::TextQueryKind),
+    TypeLayout(nir::TypeLayoutQuery),
 }
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -21,6 +22,7 @@ impl fmt::Display for Kind {
             Self::EnumName => write!(f, "enum-name"),
             Self::SymbolName => write!(f, "symbol-name"),
             Self::Text(query) => write!(f, "(text {query})"),
+            Self::TypeLayout(query) => write!(f, "(type-layout {query})"),
         }
     }
 }

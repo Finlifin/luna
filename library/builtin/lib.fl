@@ -6,7 +6,7 @@
 use numeric.{comparison, math_intrinsics}
 use protocols.formatting.{display, writer}
 use protocols.{conversion, iterator, native_resources, ops, patterns, resources, traits}
-use types.{equality, hashing, option, result, tuple}
+use types.{equality, hashing, option, ordering, result, tuple}
 
 pub use iterator.{
     ChainIterator,

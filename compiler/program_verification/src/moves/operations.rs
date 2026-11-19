@@ -72,6 +72,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             K::AssociatedValue { .. } => self.observe_associated_value(&expr.ty, source)?,
             K::ComptimeValue(_)
             | K::Literal(_)
+            | K::TypeValue(_)
             | K::Unit
             | K::Function(_)
             | K::FunctionInstance { .. }
@@ -209,6 +210,8 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             | K::IntegerRepresentation(value)
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
+            | K::TypeKind { operand: value, .. }
+            | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. } => self.expr(value, flow, depth + 1)?,
             K::BitWindow { value, start, end } => {
                 self.expr(value, flow, depth + 1)?;

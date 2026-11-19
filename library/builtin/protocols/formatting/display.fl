@@ -149,3 +149,33 @@ impl Display for isize {
         }
     }
 }
+
+impl Display for char {
+    fn write(self, output: *W) -> !W.as(ByteWriter).Error void where W :- ByteWriter {
+        let code = self'bitvec.as(u32);
+        if code <= 127 {
+            output.write_byte(code'bitvec[0..8].as(u8))
+        } else if code <= 2047 {
+            let first = (code / 64) + 192;
+            let second = (code % 64) + 128;
+            output.write_byte(first'bitvec[0..8].as(u8))!;
+            output.write_byte(second'bitvec[0..8].as(u8))
+        } else if code <= 65535 {
+            let first = (code / 4096) + 224;
+            let second = (code / 64 % 64) + 128;
+            let third = (code % 64) + 128;
+            output.write_byte(first'bitvec[0..8].as(u8))!;
+            output.write_byte(second'bitvec[0..8].as(u8))!;
+            output.write_byte(third'bitvec[0..8].as(u8))
+        } else {
+            let first = (code / 262144) + 240;
+            let second = (code / 4096 % 64) + 128;
+            let third = (code / 64 % 64) + 128;
+            let fourth = (code % 64) + 128;
+            output.write_byte(first'bitvec[0..8].as(u8))!;
+            output.write_byte(second'bitvec[0..8].as(u8))!;
+            output.write_byte(third'bitvec[0..8].as(u8))!;
+            output.write_byte(fourth'bitvec[0..8].as(u8))
+        }
+    }
+}

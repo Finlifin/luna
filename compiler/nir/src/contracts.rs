@@ -300,7 +300,11 @@ pub fn remap_predicate_metered(
             }
             // Associated identities contain declaration inputs, not local
             // bindings. Type/input substitution is handled before this remap.
-            K::OptionalAbsent | K::AssociatedValue { .. } | K::Literal(_) | K::Unit => {}
+            K::OptionalAbsent
+            | K::AssociatedValue { .. }
+            | K::Literal(_)
+            | K::TypeValue(_)
+            | K::Unit => {}
             K::ReadPointer(v)
             | K::AddressOf(v)
             | K::PointerField { pointer: v, .. }
@@ -320,6 +324,8 @@ pub fn remap_predicate_metered(
             | K::ComptimeIntegerConvert(v)
             | K::SymbolName(v)
             | K::EnumName(v)
+            | K::TypeKind { operand: v, .. }
+            | K::TypeLayout { operand: v, .. }
             | K::UnsafeScope(v)
             | K::Discard(v)
             | K::AnonymousField { value: v, .. }

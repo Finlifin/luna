@@ -2397,6 +2397,9 @@ impl<'a> Analysis<'a> {
                 self.set_code_fields(fields);
                 true
             }
+            K::TypeKind { operand, .. } | K::TypeLayout { operand, .. } => {
+                matches!(operand.kind, K::TypeValue(_)) && self.copy_type(&value.ty)
+            }
             K::TextQuery { subject, query } => {
                 // This primitive consumes an immutable text observation and
                 // returns scalar data; it does not copy arbitrary input owners.

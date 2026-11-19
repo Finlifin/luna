@@ -201,7 +201,9 @@ pub(in crate::program) fn readonly_guard_comparison(
         {
             (left, right)
         }
-        K::TypeKind { operand, .. } => return readonly_guard_operand(operand, fuel, span),
+        K::TypeKind { operand, .. } | K::TypeLayout { operand, .. } => {
+            return readonly_guard_operand(operand, fuel, span);
+        }
         _ => return Ok(false),
     };
     Ok(readonly_guard_operand(left, fuel, span)? && readonly_guard_operand(right, fuel, span)?)
@@ -232,6 +234,7 @@ pub(in crate::program) fn readonly_guard_operand(
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::TypeKind { operand: value, .. }
+            | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. } => pending.push((value, depth + 1)),
             K::IntegerBinary { left, right, .. }
             | K::FloatBinary { left, right, .. }

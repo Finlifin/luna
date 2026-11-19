@@ -5184,9 +5184,12 @@ impl<'a> Infer<'a, '_> {
         }
         match &expr.kind {
             K::ComptimeValue(_) => self.captured_data(expr, depth + 1),
-            K::Literal(_) | K::Unit | K::Local(_) | K::Function(_) | K::FunctionInstance { .. } => {
-                Ok(())
-            }
+            K::Literal(_)
+            | K::TypeValue(_)
+            | K::Unit
+            | K::Local(_)
+            | K::Function(_)
+            | K::FunctionInstance { .. } => Ok(()),
             K::RequirePredicate(condition)
             | K::EnsurePredicate(condition)
             | K::CheckPredicate(condition)
@@ -5227,6 +5230,8 @@ impl<'a> Infer<'a, '_> {
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::EnumName(value)
+            | K::TypeKind { operand: value, .. }
+            | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. } => self.check_guard(value, depth + 1),
             K::BitWindow { value, start, end } => {
                 self.check_guard(value, depth + 1)?;
@@ -6094,7 +6099,12 @@ impl<'a> Infer<'a, '_> {
                 self.may_reject |= !captures.is_empty();
             }
             K::ComptimeValue(_) => self.captured_data(expr, depth + 1)?,
-            K::Unit | K::Literal(_) | K::Local(_) | K::Break(_) | K::Continue(_) => (),
+            K::Unit
+            | K::Literal(_)
+            | K::TypeValue(_)
+            | K::Local(_)
+            | K::Break(_)
+            | K::Continue(_) => (),
             K::NewtypeConvert(inner) => {
                 let package = self
                     .package
@@ -7268,6 +7278,8 @@ impl<'a> Infer<'a, '_> {
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::EnumName(value)
+            | K::TypeKind { operand: value, .. }
+            | K::TypeLayout { operand: value, .. }
             | K::BitSlice { value, .. } => self.walk(value, depth + 1)?,
             K::TextQuery { subject, query } => {
                 if !query.validate(&self.ty(&subject.ty)?, &self.ty(&expr.ty)?) {

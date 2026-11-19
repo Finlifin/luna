@@ -137,6 +137,21 @@ impl Checker<'_, '_> {
         inner(self, expr, 0)
     }
 
+    fn parse_type_predicate_kind(name: &str) -> Option<nir::TypeKind> {
+        Some(match name {
+            "is_boolean" => nir::TypeKind::Boolean,
+            "is_symbol" => nir::TypeKind::Symbol,
+            "is_integer" => nir::TypeKind::Integer,
+            "is_signed_integer" => nir::TypeKind::SignedInteger,
+            "is_unsigned_integer" => nir::TypeKind::UnsignedInteger,
+            "is_floating_point" => nir::TypeKind::FloatingPoint,
+            "is_tuple" => nir::TypeKind::Tuple,
+            "is_pointer" => nir::TypeKind::Pointer,
+            "is_function" => nir::TypeKind::Function,
+            _ => return None,
+        })
+    }
+
     pub(super) fn syntactic_type_predicate_kind_with<'h>(
         expr: &Expr<'h>,
         is_metatype: &impl Fn(&Expr<'_>) -> bool,
@@ -156,10 +171,7 @@ impl Checker<'_, '_> {
         let [Arg::Positional(arg)] = *args else {
             return None;
         };
-        let kind = match pred_name.name.as_str() {
-            "is_tuple" => nir::TypeKind::Tuple,
-            _ => return None,
-        };
+        let kind = Self::parse_type_predicate_kind(pred_name.name.as_str())?;
         Some((kind, *arg))
     }
 
@@ -179,28 +191,14 @@ impl Checker<'_, '_> {
         if namespace.name.as_str() != "predicates" {
             return Ok(None);
         }
-        let is_metatype = if self.is_metatype_base(base) {
-            true
-        } else if let Some(domain) = self.local_field_domain(base)? {
-            domain == p(P::Type) && self.type_expr(base)? == p(P::Type)
-        } else if self.is_type_head(base) {
-            self.type_expr(base)? == p(P::Type)
-        } else if self.runtime_value_context() && !matches!(base.kind, H::ResolvedDef { .. }) {
-            false
-        } else {
-            self.metatype_namespace_receiver(base)?
-        };
-        if !is_metatype {
+        if !self.is_metatype_namespace_receiver(base)? {
             return Ok(None);
         }
-        let kind = match pred_name.name.as_str() {
-            "is_tuple" => nir::TypeKind::Tuple,
-            other => {
-                return Err(error(
-                    pred_name.span,
-                    format!("unsupported Type.predicates predicate `{other}`"),
-                ));
-            }
+        let Some(kind) = Self::parse_type_predicate_kind(pred_name.name.as_str()) else {
+            return Err(error(
+                pred_name.span,
+                format!("unsupported Type.predicates predicate `{}`", pred_name.name),
+            ));
         };
         let [Arg::Positional(arg)] = *args else {
             return Err(error(
@@ -212,6 +210,53 @@ impl Checker<'_, '_> {
             ));
         };
         Ok(Some((kind, *arg)))
+    }
+
+    pub(super) fn type_layout_query_call<'h>(
+        &mut self,
+        expr: &'h Expr<'h>,
+    ) -> Result<Option<(nir::TypeLayoutQuery, &'h Expr<'h>)>, Error> {
+        let H::Application(callee, args) = &expr.kind else {
+            return Ok(None);
+        };
+        let H::Projection(base, method) = &callee.kind else {
+            return Ok(None);
+        };
+        let query = match method.name.as_str() {
+            "size_of" => nir::TypeLayoutQuery::SizeOf,
+            "align_of" => nir::TypeLayoutQuery::AlignOf,
+            _ => return Ok(None),
+        };
+        if !self.is_metatype_namespace_receiver(base)? {
+            return Ok(None);
+        }
+        let [Arg::Positional(arg)] = *args else {
+            return Err(error(
+                expr.span,
+                format!(
+                    "Type.{} requires exactly one positional Type argument",
+                    method.name
+                ),
+            ));
+        };
+        Ok(Some((query, *arg)))
+    }
+
+    pub(super) fn is_metatype_namespace_receiver(
+        &mut self,
+        base: &Expr<'_>,
+    ) -> Result<bool, Error> {
+        if self.is_metatype_base(base) {
+            Ok(true)
+        } else if let Some(domain) = self.local_field_domain(base)? {
+            Ok(domain == p(P::Type) && self.type_expr(base)? == p(P::Type))
+        } else if self.is_type_head(base) {
+            Ok(self.type_expr(base)? == p(P::Type))
+        } else if self.runtime_value_context() && !matches!(base.kind, H::ResolvedDef { .. }) {
+            Ok(false)
+        } else {
+            self.metatype_namespace_receiver(base)
+        }
     }
 
     /// Classify a data-field path by local or comptime call result domains,

@@ -1045,6 +1045,11 @@ impl<'a> PhaseContext<'a> {
                         K::TypeKind { operand, .. } if matches!(operand.kind, K::TypeValue(_)) => {
                             work.push(Work::Expr(operand, false, true), inspection_fuel)?;
                         }
+                        K::TypeLayout { operand, .. }
+                            if matches!(operand.kind, K::TypeValue(_)) =>
+                        {
+                            work.push(Work::Expr(operand, false, true), inspection_fuel)?;
+                        }
                         K::Closure {
                             captures,
                             parameters,
@@ -1479,6 +1484,7 @@ impl<'a> PhaseContext<'a> {
                         | K::SymbolName(value)
                         | K::EnumName(value)
                         | K::TypeKind { operand: value, .. }
+                        | K::TypeLayout { operand: value, .. }
                         | K::Not(value)
                         | K::Loop { body: value, .. } => {
                             work.push(Work::Expr(value, false, ct), inspection_fuel)?

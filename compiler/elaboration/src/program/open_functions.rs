@@ -2878,6 +2878,15 @@ impl Checker<'_, '_> {
                         depth + 1,
                     )?;
                     D::Known(p(P::Bool))
+                } else if let Some((_, arg)) = self.type_layout_query_call(expr)? {
+                    self.describe_open_expression(
+                        arg,
+                        locals,
+                        returns,
+                        Some(&D::Known(p(P::Type))),
+                        depth + 1,
+                    )?;
+                    D::Known(p(P::Usize))
                 } else {
                     self.describe_open_call(
                         expr,

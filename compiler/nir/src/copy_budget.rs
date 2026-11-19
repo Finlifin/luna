@@ -1016,6 +1016,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     | K::SymbolName(value)
                     | K::EnumName(value)
                     | K::TypeKind { operand: value, .. }
+                    | K::TypeLayout { operand: value, .. }
                     | K::Not(value)
                     | K::Loop { body: value, .. }
                     | K::Field { value, .. }

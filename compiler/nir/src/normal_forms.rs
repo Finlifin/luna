@@ -446,7 +446,7 @@ pub fn type_list_input_type(ty: &Term) -> bool {
 // Shape-only callers do not own the Tuple signature. Ordinary list payloads
 // therefore require separate registered list-layout evidence. Formation still
 // checks the tuple's exact parameter domain at its owning declaration.
-fn type_list_fields_with_layouts<'a>(
+pub fn type_list_fields_with_layouts<'a>(
     arguments: &'a [Term],
     is_list: &impl Fn(DeclarationId) -> bool,
 ) -> Option<&'a [Term]> {
