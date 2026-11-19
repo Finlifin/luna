@@ -83,6 +83,16 @@ impl Context {
     pub fn remaining(&self) -> usize {
         self.remaining
     }
+    /// Lend part of the cumulative allowance to a metered service. Reserve
+    /// before running it; return only the unused part on success or failure.
+    pub fn with_allowance<T>(&mut self, limit: usize, run: impl FnOnce(&mut usize) -> T) -> T {
+        let granted = self.remaining.min(limit);
+        self.remaining -= granted;
+        let mut remaining = granted;
+        let result = run(&mut remaining);
+        self.remaining += remaining.min(granted);
+        result
+    }
     pub fn spend<E>(&mut self, steps: usize) -> Result<(), Error<E>> {
         self.remaining = self
             .remaining

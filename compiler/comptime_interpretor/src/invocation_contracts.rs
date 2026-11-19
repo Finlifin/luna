@@ -127,12 +127,12 @@ impl Interpreter<'_> {
         if depth >= 128 {
             return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
         }
-        let term = |value: &Term| -> Result<Option<Term>, Error> {
-            let value = match scope {
-                Some(scope) => scope.rebind(value),
-                None => Ok(value.clone()),
-            }
-            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+        let mut term = |value: &Term| -> Result<Option<Term>, Error> {
+            let value = self.query_admission(Some(source), |_, fuel| match scope {
+                Some(scope) => Ok(scope.rebind_bounded(value, fuel)?),
+                None => nir::copy_budget::clone_term(value, fuel)
+                    .map_err(|_| nir::NominalAdmissionError::Budget),
+            })?;
             Ok(value.check_scope(&[]).is_ok().then_some(value))
         };
         Ok(Some(match predicate {

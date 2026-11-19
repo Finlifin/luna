@@ -2827,6 +2827,65 @@ fn incremental_input_binding_refines_domains_and_recovers_after_rejection() {
 }
 
 #[test]
+fn input_binding_charges_each_expansion_in_its_lexical_frame() {
+    let text = Term::String("x".repeat(512).into());
+    let repeated = Term::NormalForm {
+        head: IDENTITY,
+        sort: Sort::Type,
+        arguments: vec![bound(0, 0, Sort::ComptimeValue); 8],
+    };
+    let signature = Term::Function {
+        parameters: vec![
+            Parameter {
+                sort: Sort::ComptimeValue,
+                ty: primitive(Primitive::Str),
+            },
+            Parameter {
+                sort: Sort::Runtime,
+                ty: repeated.clone(),
+            },
+        ],
+        result: Box::new(repeated.clone()),
+    };
+    let prepare = || {
+        let mut builder = FunctionInputBuilder::new(&signature).unwrap();
+        builder.push(Some(text.clone())).unwrap();
+        builder
+    };
+    let mut builder = prepare();
+    assert!(matches!(
+        builder.next_type_bounded(&mut 1024),
+        Err(nir::type_computations::Error::Budget)
+    ));
+    let expanded = builder.next_type_bounded(&mut 8192).unwrap().clone();
+    builder.push(None).unwrap();
+    assert!(matches!(
+        builder.finish_bounded(&mut 1024),
+        Err(nir::type_computations::Error::Budget)
+    ));
+    let mut builder = prepare();
+    builder.push(None).unwrap();
+    let scope = builder.finish_bounded(&mut 8192).unwrap();
+    assert!(matches!(
+        scope.rebind_bounded(&repeated, &mut 1024),
+        Err(nir::type_computations::Error::Budget)
+    ));
+    assert_eq!(
+        scope.rebind_bounded(&repeated, &mut 8192).unwrap(),
+        expanded
+    );
+
+    let nested = Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::ComptimeValue,
+            ty: primitive(Primitive::Str),
+        }],
+        result: Box::new(repeated),
+    };
+    assert_eq!(scope.rebind_bounded(&nested, &mut 32).unwrap(), nested);
+}
+
+#[test]
 fn incremental_binding_preserves_phase_variadics_and_retained_indices() {
     let signature = Term::UnsafeFunction(Box::new(Term::NormalFormFunction(
         Box::new(Term::Function {

@@ -55,6 +55,7 @@ pub struct FunctionInputBuilder<'a> {
     replacements: Vec<Term>,
     type_slots: BTreeSet<usize>,
     retained: Vec<Parameter>,
+    retained_sorts: Vec<Sort>,
     supplied: Vec<bool>,
     next: Option<Term>,
 }
@@ -72,6 +73,7 @@ impl<'a> FunctionInputBuilder<'a> {
             replacements: Vec::with_capacity(parameters.len()),
             type_slots: BTreeSet::new(),
             retained: Vec::new(),
+            retained_sorts: Vec::new(),
             supplied: Vec::with_capacity(parameters.len()),
             next: None,
         })
@@ -98,6 +100,36 @@ impl<'a> FunctionInputBuilder<'a> {
         self.prepare_next()?;
         Ok(self.next.as_ref().unwrap())
     }
+    pub fn next_type_bounded(
+        &mut self,
+        fuel: &mut usize,
+    ) -> Result<&Term, crate::type_computations::Error> {
+        use crate::type_computations::{Error, charge_frame_expansion};
+        if self.next.is_none() {
+            let index = self.replacements.len();
+            let parameter =
+                self.parameters
+                    .get(index)
+                    .ok_or(Error::Scope(TypeError::ArgumentCount {
+                        expected: self.parameters.len(),
+                        actual: index + 1,
+                    }))?;
+            charge_frame_expansion(&parameter.ty, &self.replacements, fuel)?;
+        }
+        self.next_type().map_err(Error::Scope)
+    }
+
+    /// Commit the receiving world's type view of the pending domain. The view
+    /// must preserve its meaning; slot sort and scope are checked here.
+    pub fn push_viewed(&mut self, input: Option<Term>, domain: Term) -> Result<(), TypeError> {
+        if self.next.is_none() {
+            return Err(TypeError::UnpreparedCallInput(self.replacements.len()));
+        }
+        self.push_domain(input, domain)?;
+        self.next = None;
+        Ok(())
+    }
+
     pub fn push(&mut self, input: Option<Term>) -> Result<(), TypeError> {
         self.prepare_next()?;
         let ty = self.next.take().unwrap();
@@ -107,7 +139,7 @@ impl<'a> FunctionInputBuilder<'a> {
         let index = self.replacements.len();
         let parameter = &self.parameters[index];
         require_sort(&ty, Sort::Type)?;
-        ty.check_scope(&[self.retained.iter().map(|p| p.sort).collect()])?;
+        ty.check_scope(std::slice::from_ref(&self.retained_sorts))?;
         let sort = input_sort(parameter, &ty);
         if let Some(input) = &input {
             input.check_scope(&[])?;
@@ -127,9 +159,19 @@ impl<'a> FunctionInputBuilder<'a> {
                 sort,
             });
             self.retained.push(Parameter { sort, ty });
+            self.retained_sorts.push(sort);
         }
         Ok(())
     }
+    pub fn finish_bounded(
+        self,
+        fuel: &mut usize,
+    ) -> Result<FunctionInputBinding, crate::type_computations::Error> {
+        crate::type_computations::charge_frame_expansion(self.result, &self.replacements, fuel)?;
+        self.finish()
+            .map_err(crate::type_computations::Error::Scope)
+    }
+
     pub fn finish(self) -> Result<FunctionInputBinding, TypeError> {
         if self.replacements.len() != self.parameters.len() {
             return Err(TypeError::ArgumentCount {
@@ -256,6 +298,16 @@ impl FunctionInputBinding {
     /// also carries slot refinements, so these terms alone are not its identity.
     pub fn terms(&self) -> impl Iterator<Item = &Term> {
         std::iter::once(&self.signature).chain(&self.replacements)
+    }
+
+    pub fn rebind_bounded(
+        &self,
+        term: &Term,
+        fuel: &mut usize,
+    ) -> Result<Term, crate::type_computations::Error> {
+        crate::type_computations::charge_frame_expansion(term, &self.replacements, fuel)?;
+        self.rebind(term)
+            .map_err(crate::type_computations::Error::Scope)
     }
 
     /// Rebind annotations from the original function frame. Only a value slot

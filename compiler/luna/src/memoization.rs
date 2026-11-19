@@ -6,7 +6,7 @@
 //! authorize comptime value-reference operations or cache admission.
 use crate::comptime_keys::{Protocol, Snapshot};
 use comptime_executor::{Cache, Context, Error, KeyProtocol, Outcome, QueryId, Scope};
-use comptime_interpretor::{Budget, Interpreter, Value};
+use comptime_interpretor::{AdmittedCall, Budget, Interpreter, Value};
 use elaboration::{
     materialization::{ClosedDeclarations, DeclarationSnapshot, DeclarationSource},
     ptc,
@@ -24,13 +24,15 @@ pub struct Invocation {
     declaration: DeclarationId,
     arguments: Vec<Term>,
     signature: Term,
+    results: Results,
+    budget: ptc::Budget,
+}
+struct Results {
     items: LangItems,
     schemas: Vec<Schema>,
-    requirements: Vec<TypePredicate>,
     capacity: usize,
     protocols: ExactInputs,
     cache: Cache<Snapshot, Value>,
-    budget: ptc::Budget,
 }
 struct Schema {
     inputs: Vec<Term>,
@@ -204,19 +206,18 @@ impl Invocation {
                         .saturating_add(function.capabilities.len()),
                 )
                 .ok_or("memoized requirement collection budget exhausted")?;
-            let mut deferred = Vec::new();
-            let mut check_requirement = |predicate: TypePredicate,
-                                         work: &mut ptc::Budget|
+            let check_requirement = |predicate: TypePredicate,
+                                     work: &mut ptc::Budget|
              -> Result<(), String> {
                 let captures =
                     nir::copy_budget::predicate_capture_slots(&predicate, &frames, &mut work.steps)
                         .map_err(nir::NominalAdmissionError::from)?;
-                if !captures.is_empty() {
-                    deferred.push(predicate);
-                } else if !matches!(
-                    world.check_predicate_metered(&predicate, work)?,
-                    ptc::Outcome::Entailed(_)
-                ) {
+                if captures.is_empty()
+                    && !matches!(
+                        world.check_predicate_metered(&predicate, work)?,
+                        ptc::Outcome::Entailed(_)
+                    )
+                {
                     return Err("memoized function type contract is not established".into());
                 }
                 Ok(())
@@ -286,19 +287,20 @@ impl Invocation {
                 declaration,
                 arguments,
                 signature,
-                items: items.clone(),
-                schemas,
-                requirements: deferred,
-                capacity,
-                protocols: ExactInputs(protocols),
-                cache: Cache::new(
-                    Scope {
-                        definitions: 0,
-                        protocols: 0,
-                        target: 0,
-                    },
+                results: Results {
+                    items: items.clone(),
+                    schemas,
                     capacity,
-                ),
+                    protocols: ExactInputs(protocols),
+                    cache: Cache::new(
+                        Scope {
+                            definitions: 0,
+                            protocols: 0,
+                            target: 0,
+                        },
+                        capacity,
+                    ),
+                },
                 budget,
             })
         })();
@@ -309,7 +311,7 @@ impl Invocation {
         self.stats
     }
     pub fn cached_results(&self) -> usize {
-        self.cache.len()
+        self.results.cache.len()
     }
     pub fn invoke(
         &mut self,
@@ -317,82 +319,148 @@ impl Invocation {
         context: &mut Context,
     ) -> Result<Outcome<Value>, Error<String>> {
         self.stats = Default::default();
-        let (types, result_type) = self.bind_inputs(&values, context)?;
-        // Gate before preparing Eq/Hash, snapshots or cache keys. A dependent
-        // result is classified only after binding this invocation's inputs.
-        if result_type != Term::Primitive(nir::Primitive::Type) {
-            let (value, _) = evaluate(
-                &self.declarations,
-                &mut self.code_session,
-                &mut self.stats,
-                self.budget,
+        let package = self.declarations.source().package();
+        let queries =
+            elaboration::materialization::SourceInvocationQueries::in_closed(&self.declarations);
+        let budget = self.budget;
+        let solver =
+            |predicate: &TypePredicate, steps: &mut u64| queries.check(predicate, budget, steps);
+        let methods = |callee: &nir::program::Expr, steps: &mut u64| queries.resolve(callee, steps);
+        let associated =
+            |access: &nir::program::Expr, steps: &mut u64| queries.associated(access, steps);
+        let mut allowance = Budget {
+            steps: context.remaining() as u64,
+            depth: 128,
+        };
+        let before = allowance.steps;
+        let vm = Interpreter::for_comptime_resolving_in_session(
+            package,
+            &mut self.code_session,
+            comptime_interpretor::SourceResolvers {
+                types: &solver,
+                methods: &methods,
+                associated: &associated,
+            },
+            &mut allowance,
+        );
+        context.spend::<String>((before - allowance.steps) as usize)?;
+        let mut vm = vm.map_err(evaluation_error)?;
+        let result = vm.with_code_session_source(&mut self.code_session, |vm, source_session| {
+            let entry = context.with_allowance(usize::MAX, |remaining| {
+                let arguments = self
+                    .arguments
+                    .iter()
+                    .map(|arg| nir::copy_budget::clone_term(arg, remaining))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| Error::BudgetExhausted)?;
+                vm.admit_source_call(self.declaration, arguments, values, remaining)
+                    .map_err(admission_error)
+            })?;
+            if entry.result_type() != &Term::Primitive(nir::Primitive::Type) {
+                let value = context
+                    .with_allowance(usize::MAX, |remaining| entry.resume(remaining))
+                    .map_err(evaluation_error)?;
+                return Ok(Outcome {
+                    value: std::sync::Arc::new(value),
+                    reused: false,
+                });
+            }
+            self.results.lookup(
+                entry,
                 self.declaration,
-                &self.arguments,
-                &result_type,
-                values,
+                self.declarations.source(),
+                source_session,
+                budget,
                 context,
-                false,
-            )?;
-            return Ok(Outcome {
-                value: std::sync::Arc::new(value),
-                reused: false,
-            });
-        }
+            )
+        });
+        self.stats = crate::invocation::InvocationStats {
+            bytecode_compilations: vm.bytecode_compilations(),
+            bytecode_invocations: vm.bytecode_invocations(),
+        };
+        result
+    }
+}
+
+impl Results {
+    fn lookup(
+        &mut self,
+        entry: AdmittedCall<'_, '_>,
+        declaration: DeclarationId,
+        source: &DeclarationSnapshot,
+        session: &comptime_interpretor::CodeSession,
+        budget: ptc::Budget,
+        context: &mut Context,
+    ) -> Result<Outcome<Value>, Error<String>> {
+        let types = entry.domains();
         let mut transient = None;
         let (operation, inputs) = if let Some(index) = self
             .schemas
             .iter()
-            .position(|s| s.inputs == types && s.result == result_type)
+            .position(|schema| schema.inputs == types && &schema.result == entry.result_type())
         {
-            let slots = self.schemas[index].protocols.clone();
-            let inputs = values
-                .into_iter()
-                .zip(&slots)
-                .map(|(value, slot)| self.protocols.0[*slot].admit(value, context))
+            let inputs = entry
+                .values()
+                .zip(&self.schemas[index].protocols)
+                .map(|(value, &slot)| self.protocols.0[slot].admit_borrowed(value, context))
                 .collect::<Result<Vec<_>, _>>()?;
             (index as u32, inputs)
         } else {
             context.spend::<String>(types.len().saturating_add(1))?;
-            let mut protocol_work = self.budget.steps.min(context.remaining());
-            let before = protocol_work;
-            let prepared = types
-                .iter()
-                .map(|ty| {
-                    Protocol::prepare_in_source_with_session_metered(
-                        self.declarations.source().clone(),
-                        &self.items,
-                        ty,
-                        self.budget,
-                        &mut protocol_work,
-                        &self.code_session,
-                    )
+            let mut protocols = context
+                .with_allowance(budget.steps, |work| {
+                    types
+                        .iter()
+                        .map(|ty| {
+                            Protocol::prepare_in_source_with_session_metered(
+                                source.clone(),
+                                &self.items,
+                                ty,
+                                budget,
+                                work,
+                                session,
+                            )
+                        })
+                        .collect::<Result<Vec<_>, _>>()
                 })
-                .collect::<Result<Vec<_>, _>>();
-            context.spend::<String>(before - protocol_work)?;
-            let mut prepared = prepared.map_err(Error::Protocol)?;
-            let inputs = values
-                .into_iter()
-                .zip(&mut prepared)
-                .map(|(value, protocol)| protocol.admit(value, context))
+                .map_err(Error::Protocol)?;
+            let inputs = entry
+                .values()
+                .zip(&mut protocols)
+                .map(|(value, protocol)| protocol.admit_borrowed(value, context))
                 .collect::<Result<Vec<_>, _>>()?;
             if self.schemas.len() < self.capacity && self.schemas.len() < u32::MAX as usize {
+                let types = context
+                    .with_allowance(usize::MAX, |work| {
+                        types
+                            .iter()
+                            .map(|ty| nir::copy_budget::clone_term(ty, work))
+                            .collect::<Result<Vec<_>, _>>()
+                    })
+                    .map_err(|_| Error::BudgetExhausted)?;
                 let operation = self.schemas.len() as u32;
                 let start = self.protocols.0.len();
-                let slots: Vec<_> = (start..start + prepared.len()).collect();
-                self.protocols.0.extend(prepared);
+                let slots = (start..start + protocols.len()).collect();
+                self.protocols.0.extend(protocols);
                 self.schemas.push(Schema {
                     inputs: types,
-                    result: result_type.clone(),
+                    result: Term::Primitive(nir::Primitive::Type),
                     protocols: slots,
                 });
                 (operation, inputs)
             } else {
-                transient = Some(ExactInputs(prepared));
+                transient = Some(ExactInputs(protocols));
                 (0, inputs)
             }
         };
-        if let Some(mut protocols) = transient {
-            let mut cache = Cache::new(
+        let key = QueryId {
+            package: declaration.package,
+            declaration: declaration.local,
+            operation,
+        };
+        let mut uncached;
+        let (cache, protocols) = if let Some(ref mut protocols) = transient {
+            uncached = Cache::new(
                 Scope {
                     definitions: 0,
                     protocols: 0,
@@ -400,139 +468,18 @@ impl Invocation {
                 },
                 0,
             );
-            execute(
-                &self.declarations,
-                &mut self.code_session,
-                &mut self.stats,
-                self.budget,
-                self.declaration,
-                &self.arguments,
-                &result_type,
-                &mut cache,
-                &mut protocols,
-                operation,
-                inputs,
-                context,
-            )
+            (&mut uncached, protocols)
         } else {
-            execute(
-                &self.declarations,
-                &mut self.code_session,
-                &mut self.stats,
-                self.budget,
-                self.declaration,
-                &self.arguments,
-                &result_type,
-                &mut self.cache,
-                &mut self.protocols,
-                operation,
-                inputs,
-                context,
-            )
-        }
-    }
-    fn bind_inputs(
-        &self,
-        values: &[Value],
-        context: &mut Context,
-    ) -> Result<(Vec<Term>, Term), Error<String>> {
-        let Term::Function { parameters, result } = &self.signature else {
-            unreachable!()
+            (&mut self.cache, &mut self.protocols)
         };
-        if values.len() != parameters.len() {
-            return Err(Error::Protocol(
-                "memoized call argument count mismatch".into(),
-            ));
-        }
-        context.spend::<String>(values.len().saturating_add(1))?;
-        let mut supplied = vec![None; parameters.len()];
-        let mut scope: Option<nir::FunctionInputBinding> = None;
-        let mut types = Vec::with_capacity(parameters.len());
-        for (index, (parameter, value)) in parameters.iter().zip(values).enumerate() {
-            let expected = match &scope {
-                Some(scope) => scope.rebind(&parameter.ty),
-                None => parameter.ty.substitute_partial(&supplied),
-            }
-            .map_err(|e| Error::Protocol(e.to_string()))?;
-            expected.check_scope(&[]).map_err(|_| {
-                Error::Protocol("memoized parameter still needs value-dependent binding".into())
-            })?;
-            if parameter.sort == nir::Sort::Type
-                || (parameter.sort == nir::Sort::ComptimeValue
-                    && expected == Term::Primitive(nir::Primitive::Type))
-            {
-                let Value::Type(ty) = value else {
-                    return Err(Error::Protocol(
-                        "memoized Type parameter requires a Type value".into(),
-                    ));
-                };
-                let work = value
-                    .immutable_copy_work()
-                    .ok_or_else(|| Error::Protocol("unbounded Type input".into()))?;
-                context.spend::<String>(work)?;
-                supplied[index] = Some(ty.clone());
-                scope = Some(
-                    self.signature
-                        .prepare_function_inputs(&supplied)
-                        .map_err(|e| Error::Protocol(e.to_string()))?,
-                );
-            }
-            types.push(expected);
-        }
-        let result = match &scope {
-            Some(scope) => scope.rebind(result),
-            None => result.substitute_partial(&supplied),
-        }
-        .map_err(|e| Error::Protocol(e.to_string()))?;
-        result.check_scope(&[]).map_err(|_| {
-            Error::Protocol("memoized result still needs value-dependent binding".into())
-        })?;
-        let world = self.declarations.capabilities();
-        for requirement in &self.requirements {
-            let predicate = map_requirement(
-                requirement,
-                &mut |term| {
-                    let bound = match &scope {
-                        Some(scope) => scope.rebind(term),
-                        None => term.substitute_partial(&supplied),
-                    }
-                    .map_err(|e| Error::Protocol(e.to_string()))?;
-                    bound
-                        .check_scope(&[])
-                        .map_err(|e| Error::Protocol(e.to_string()))?;
-                    Ok(bound)
-                },
-                context,
-                0,
-            )?;
-            if predicate.trivial_truth() == Some(true) {
-                continue;
-            }
-            let mut proof_budget = ptc::Budget {
-                steps: self.budget.steps.min(context.remaining()),
-                max_depth: self.budget.max_depth,
-            };
-            let before = proof_budget.steps;
-            let outcome = world.check_predicate_metered(&predicate, &mut proof_budget);
-            context.spend::<String>(before - proof_budget.steps)?;
-            match outcome {
-                Ok(ptc::Outcome::Entailed(_)) => {}
-                Err(nir::NominalAdmissionError::Budget)
-                | Ok(ptc::Outcome::Unknown {
-                    reason: ptc::UnknownReason::BudgetExhausted,
-                    ..
-                }) => return Err(Error::BudgetExhausted),
-                Err(error) => return Err(Error::Protocol(error.to_string())),
-                Ok(outcome) => {
-                    return Err(Error::Protocol(format!(
-                        "memoized function bound type contract is not established: {outcome}"
-                    )));
-                }
-            }
-        }
-        Ok((types, result))
+        cache.query_pure_admitted(key, inputs, context, protocols, |_, context| {
+            context
+                .with_allowance(usize::MAX, |remaining| entry.resume_for_export(remaining))
+                .map_err(evaluation_error)
+        })
     }
 }
+
 impl std::fmt::Display for Invocation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -545,140 +492,28 @@ impl std::fmt::Display for Invocation {
         }
         write!(
             f,
-            ") (signature {}) (cached-results {}) (requirements",
+            ") (signature {}) (cached-results {}) (bindings",
             self.signature,
-            self.cache.len()
+            self.results.cache.len()
         )?;
-        for requirement in &self.requirements {
-            write!(f, " {requirement}")?;
-        }
-        f.write_str(") (bindings")?;
-        for schema in &self.schemas {
+        for schema in &self.results.schemas {
             write!(f, " {schema}")?;
         }
         f.write_str("))")
     }
 }
 
-fn execute(
-    declarations: &ClosedDeclarations,
-    code_session: &mut comptime_interpretor::CodeSession,
-    stats: &mut crate::invocation::InvocationStats,
-    budget: ptc::Budget,
-    declaration: DeclarationId,
-    arguments: &[Term],
-    result_type: &Term,
-    cache: &mut Cache<Snapshot, Value>,
-    protocols: &mut ExactInputs,
-    operation: u32,
-    inputs: Vec<Snapshot>,
-    context: &mut Context,
-) -> Result<Outcome<Value>, Error<String>> {
-    cache.query_pure_admitted(
-        QueryId {
-            package: declaration.package,
-            declaration: declaration.local,
-            operation,
-        },
-        inputs,
-        context,
-        protocols,
-        |inputs, context| {
-            for input in inputs {
-                let work = input
-                    .value()
-                    .immutable_clone_work()
-                    .ok_or_else(|| Error::Evaluation("unbounded invocation input".into()))?;
-                context.spend::<String>(work)?;
-            }
-            let values = inputs.iter().map(|input| input.value().clone()).collect();
-            evaluate(
-                declarations,
-                code_session,
-                stats,
-                budget,
-                declaration,
-                arguments,
-                result_type,
-                values,
-                context,
-                true,
-            )
-        },
-    )
-}
-
-fn evaluate(
-    declarations: &ClosedDeclarations,
-    code_session: &mut comptime_interpretor::CodeSession,
-    stats: &mut crate::invocation::InvocationStats,
-    budget: ptc::Budget,
-    declaration: DeclarationId,
-    arguments: &[Term],
-    result_type: &Term,
-    values: Vec<Value>,
-    context: &mut Context,
-    cache_result: bool,
-) -> Result<(Value, bool), Error<String>> {
-    let package = declarations.source().package();
-    let source_queries =
-        elaboration::materialization::SourceInvocationQueries::in_closed(declarations);
-    let solver = |predicate: &TypePredicate, remaining: &mut u64| {
-        source_queries.check(predicate, budget, remaining)
-    };
-    let method_resolver = |callee: &nir::program::Expr, remaining: &mut u64| {
-        source_queries.resolve(callee, remaining)
-    };
-    let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
-        source_queries.associated(access, remaining)
-    };
-    let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
-    let mut vm_budget = Budget { steps, depth: 128 };
-    let prepared_vm = Interpreter::for_comptime_resolving_in_session(
-        package,
-        code_session,
-        comptime_interpretor::SourceResolvers {
-            types: &solver,
-            methods: &method_resolver,
-            associated: &associated_resolver,
-        },
-        &mut vm_budget,
-    );
-    let mut vm = match prepared_vm {
-        Ok(vm) => vm,
-        Err(error) => {
-            context.spend::<String>((steps - vm_budget.steps) as usize)?;
-            return Err(evaluation_error(error));
+fn admission_error(error: comptime_interpretor::Error) -> Error<String> {
+    use comptime_interpretor::ErrorKind;
+    match error.kind {
+        ErrorKind::TypeContractRejected | ErrorKind::TypeContractUnresolved => Error::Protocol(
+            format!("memoized function bound type contract is not established: {error}"),
+        ),
+        ErrorKind::Type | ErrorKind::Arity | ErrorKind::FunctionInputRejected(_) => {
+            Error::Protocol(error.to_string())
         }
-    };
-    let result = vm.with_code_session(code_session, |vm| {
-        let value = vm.invoke_instantiated(declaration, arguments.to_vec(), values)?;
-        let publish = if !cache_result || value.immutable_copy_work().is_none() {
-            false
-        } else {
-            let validation = vm.validate_immutable_input(&value, result_type);
-            match validation {
-                Ok(()) => true,
-                Err(error)
-                    if matches!(
-                        error.kind,
-                        comptime_interpretor::ErrorKind::Type
-                            | comptime_interpretor::ErrorKind::FunctionInputRejected(_)
-                    ) =>
-                {
-                    false
-                }
-                Err(error) => return Err(error),
-            }
-        };
-        Ok((value, publish))
-    });
-    *stats = crate::invocation::InvocationStats {
-        bytecode_compilations: vm.bytecode_compilations(),
-        bytecode_invocations: vm.bytecode_invocations(),
-    };
-    context.spend::<String>((steps - vm.remaining_steps()) as usize)?;
-    result.map_err(evaluation_error)
+        _ => evaluation_error(error),
+    }
 }
 
 fn evaluation_error(error: comptime_interpretor::Error) -> Error<String> {
@@ -690,44 +525,4 @@ fn evaluation_error(error: comptime_interpretor::Error) -> Error<String> {
         return Error::BudgetExhausted;
     }
     Error::Evaluation(error.to_string())
-}
-
-// Only type predicates enter this transformation; state contracts stay in the VM.
-fn map_requirement(
-    predicate: &TypePredicate,
-    map: &mut impl FnMut(&Term) -> Result<Term, Error<String>>,
-    context: &mut Context,
-    depth: usize,
-) -> Result<TypePredicate, Error<String>> {
-    use TypePredicate as P;
-    context.spend::<String>(1)?;
-    if depth >= 128 {
-        return Err(Error::Protocol("memoized contract depth exhausted".into()));
-    }
-    Ok(match predicate {
-        P::Bool(value) => P::Bool(*value),
-        P::Equal(a, b) => P::Equal(map(a)?, map(b)?),
-        P::Trait(requirement) => {
-            let mut bound = requirement.clone();
-            bound.subject = map(&requirement.subject)?;
-            bound.interface_arguments = requirement
-                .interface_arguments
-                .iter()
-                .map(&mut *map)
-                .collect::<Result<_, _>>()?;
-            P::Trait(bound)
-        }
-        P::Not(inner) => P::Not(Box::new(map_requirement(inner, map, context, depth + 1)?)),
-        P::And(parts) | P::Or(parts) => {
-            let parts = parts
-                .iter()
-                .map(|part| map_requirement(part, map, context, depth + 1))
-                .collect::<Result<_, _>>()?;
-            if matches!(predicate, P::And(_)) {
-                P::And(parts)
-            } else {
-                P::Or(parts)
-            }
-        }
-    })
 }

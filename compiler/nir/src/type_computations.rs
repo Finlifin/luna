@@ -683,6 +683,45 @@ pub(crate) fn visit_expansion<'a>(
     replacement: &dyn Fn(DeclarationId) -> Option<&'a Term>,
     visit: &mut dyn FnMut(&Term, u32),
 ) -> Result<(), crate::copy_budget::CopyBudgetExhausted> {
+    visit_replacements(
+        root,
+        fuel,
+        max_depth,
+        &|term, _| match term {
+            Term::Rigid { declaration, .. } => replacement(*declaration),
+            _ => None,
+        },
+        visit,
+    )
+}
+
+/// Charge the materialized tree of an ordinary input substitution. The depth
+/// of a nested function protects its own binders; each use pays for the full
+/// replacement, whose contents are never interpreted as another template.
+pub(crate) fn charge_frame_expansion(
+    root: &Term,
+    inputs: &[Term],
+    fuel: &mut usize,
+) -> Result<(), Error> {
+    Ok(visit_replacements(
+        root,
+        fuel,
+        128,
+        &|term, nesting| match term {
+            Term::Bound { depth, index, .. } if *depth == nesting => inputs.get(*index),
+            _ => None,
+        },
+        &mut |_, _| {},
+    )?)
+}
+
+fn visit_replacements<'a>(
+    root: &Term,
+    fuel: &mut usize,
+    max_depth: usize,
+    replacement: &dyn Fn(&Term, u32) -> Option<&'a Term>,
+    visit: &mut dyn FnMut(&Term, u32),
+) -> Result<(), crate::copy_budget::CopyBudgetExhausted> {
     use crate::copy_budget::CopyBudgetExhausted as Limit;
     let mut work = vec![(root, 0usize, 0u32, true)];
     while let Some((term, depth, nesting, substitute)) = work.pop() {
@@ -690,13 +729,9 @@ pub(crate) fn visit_expansion<'a>(
         if depth >= max_depth.min(128) {
             return Err(Limit::Depth);
         }
-        if substitute {
-            if let Term::Rigid { declaration, .. } = term {
-                if let Some(replacement) = replacement(*declaration) {
-                    work.push((replacement, depth, nesting, false));
-                    continue;
-                }
-            }
+        if substitute && let Some(value) = replacement(term, nesting) {
+            work.push((value, depth, nesting, false));
+            continue;
         }
         visit(term, nesting);
         crate::copy_budget::charge_term_payload(term, fuel)?;

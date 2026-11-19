@@ -46,6 +46,7 @@ mod input_collection;
 mod input_dependencies;
 mod input_domains;
 mod invocation;
+pub use invocation::AdmittedCall;
 pub use invocation::definition_host::{
     DefinitionHostRequest, DefinitionHostResponse, RejectedDefinitionResponse,
 };
@@ -2286,6 +2287,15 @@ impl<'a> Interpreter<'a> {
                 arguments,
             );
         }
+        let target = self.named_invocation_value(function, types)?;
+        self.invoke_value(target, arguments)
+    }
+
+    fn named_invocation_value(
+        &mut self,
+        function: DeclarationId,
+        types: Vec<Term>,
+    ) -> Result<Value, Error> {
         self.tick(None)?;
         for ty in &types {
             let work = scoped_term_value_work_with_callables_in(
@@ -2312,7 +2322,7 @@ impl<'a> Interpreter<'a> {
             .declaration(&function)
             .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
         if definition.type_parameters.is_empty() && types.is_empty() {
-            return self.invoke_value(Value::Function(function), arguments);
+            return Ok(Value::Function(function));
         }
         let signature =
             self.specialize_function_signature(definition, &types, definition.source)?;
@@ -2324,11 +2334,10 @@ impl<'a> Interpreter<'a> {
                 arguments: types,
             },
         };
-        let value = match self.eval_function_instance(&expression, &mut Environment::new())? {
-            Flow::Value(value) => value,
-            _ => return Err(self.failure(ErrorKind::InvalidControlFlow, Some(expression.source))),
-        };
-        self.invoke_value(value, arguments)
+        match self.eval_function_instance(&expression, &mut Environment::new())? {
+            Flow::Value(value) => Ok(value),
+            _ => Err(self.failure(ErrorKind::InvalidControlFlow, Some(expression.source))),
+        }
     }
 
     fn concrete_value<V: std::borrow::Borrow<Value>>(
@@ -2370,6 +2379,7 @@ impl<'a> Interpreter<'a> {
         signature: &Term,
         environment: &mut Environment,
         source: SourceRange,
+        mut observed: Option<&mut Vec<Term>>,
     ) -> Result<Option<nir::FunctionInputBinding>, Error> {
         let Term::Function {
             parameters: types, ..
@@ -2381,31 +2391,34 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::Arity, Some(source)));
         }
         let mut builder: Option<nir::FunctionInputBuilder<'_>> = None;
+        let mut supplied = false;
         for (index, ((binding, argument), parameter)) in
             parameters.iter().zip(arguments).zip(types).enumerate()
         {
             // Type observation may invoke associated programs. Finish it
             // before borrowing the argument's value-reference storage.
-            self.charge_copy_work(Some(source), |fuel| {
-                nir::copy_budget::charge_type_substitution(&parameter.ty, &[], &[], fuel)
-            })?;
-            let expected = match builder.as_mut() {
-                Some(builder) => std::borrow::Cow::Borrowed(
-                    builder
-                        .next_type()
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
-                ),
-                None => std::borrow::Cow::Owned(
-                    parameter
-                        .ty
-                        .substitute_partial(&[])
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?,
-                ),
+            if builder.is_none() && parameter.sort != nir::Sort::Runtime {
+                let mut prefix = nir::FunctionInputBuilder::new(signature)
+                    .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                for _ in 0..index {
+                    self.query_admission(Some(source), |_, fuel| {
+                        prefix.next_type_bounded(fuel)?;
+                        Ok(())
+                    })?;
+                    prefix
+                        .push(None)
+                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                }
+                builder = Some(prefix);
+            }
+            let raw = match &mut builder {
+                Some(prefix) => self
+                    .query_admission(Some(source), |_, fuel| Ok(prefix.next_type_bounded(fuel)?))?,
+                None => &parameter.ty,
             };
-            expected
-                .check_scope(&[])
+            raw.check_scope(&[])
                 .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-            let expected = self.selected_type_view(&expected, Some(source))?;
+            let expected = self.selected_type_view(raw, Some(source))?;
             self.check_comptime_domain(&expected, source)?;
             if self.comptime_only
                 && parameter.sort == nir::Sort::Runtime
@@ -2430,12 +2443,13 @@ impl<'a> Interpreter<'a> {
                 self.check_value_type(representation, &expected, Some(source))?;
                 self.admit_embedded_type_descriptions(representation, 0)?;
                 drop(contents);
-                drop(expected);
-                if let Some(builder) = &mut builder {
-                    builder
-                        .push(None)
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-                }
+                self.commit_input_domain(
+                    builder.as_mut(),
+                    observed.as_deref_mut(),
+                    None,
+                    expected,
+                    source,
+                )?;
                 environment.insert(*binding, argument);
                 continue;
             }
@@ -2486,32 +2500,48 @@ impl<'a> Interpreter<'a> {
             } else {
                 None
             };
-            drop(expected);
-            if input.is_some() && builder.is_none() {
-                let mut prefix = nir::FunctionInputBuilder::new(signature)
-                    .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-                for _ in 0..index {
-                    prefix
-                        .push(None)
-                        .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-                }
-                builder = Some(prefix);
-            }
-            if let Some(builder) = &mut builder {
-                builder
-                    .push(input)
-                    .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
-            }
+            supplied |= input.is_some();
+            self.commit_input_domain(
+                builder.as_mut(),
+                observed.as_deref_mut(),
+                input,
+                expected,
+                source,
+            )?;
             environment.insert(*binding, argument);
         }
-        if let Some(builder) = builder {
-            builder
-                .finish()
-                .map(Some)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))
+        if supplied && let Some(builder) = builder {
+            self.query_admission(Some(source), |_, fuel| {
+                Ok(Some(builder.finish_bounded(fuel)?))
+            })
         } else {
             Ok(None)
         }
+    }
+
+    fn commit_input_domain(
+        &mut self,
+        builder: Option<&mut nir::FunctionInputBuilder<'_>>,
+        observed: Option<&mut Vec<Term>>,
+        input: Option<Term>,
+        domain: Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if let Some(builder) = builder {
+            if let Some(domains) = observed {
+                let copy = self.query_admission(Some(source), |_, fuel| {
+                    nir::copy_budget::clone_term(&domain, fuel)
+                        .map_err(|_| nir::NominalAdmissionError::Budget)
+                })?;
+                domains.push(copy);
+            }
+            builder
+                .push_viewed(input, domain)
+                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+        } else if let Some(domains) = observed {
+            domains.push(domain);
+        }
+        Ok(())
     }
 
     fn specialize_input_types(
@@ -2522,9 +2552,8 @@ impl<'a> Interpreter<'a> {
         let source = expression.source;
         expression.rewrite_types(&mut |ty| {
             self.tick(Some(source))?;
-            let ty = scope
-                .rebind(ty)
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+            let ty =
+                self.query_admission(Some(source), |_, fuel| Ok(scope.rebind_bounded(ty, fuel)?))?;
             ty.check_scope(&[])
                 .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
             Ok(ty)

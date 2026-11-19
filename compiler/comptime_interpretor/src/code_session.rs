@@ -363,12 +363,22 @@ impl<'program> Interpreter<'program> {
         session: &mut CodeSession,
         operation: impl FnOnce(&mut Self) -> T,
     ) -> T {
+        self.with_code_session_source(session, |vm, _| operation(vm))
+    }
+
+    /// The VM has the execution caches while nested consumers can fork the
+    /// session's immutable source preparation for their own VM.
+    pub fn with_code_session_source<T>(
+        &mut self,
+        session: &mut CodeSession,
+        operation: impl FnOnce(&mut Self, &CodeSession) -> T,
+    ) -> T {
         if !session.matches(self) {
-            return operation(self);
+            return operation(self, session);
         }
         session.exchange(self);
         let scope = Scope { session, vm: self };
-        operation(scope.vm)
+        operation(scope.vm, scope.session)
     }
 }
 

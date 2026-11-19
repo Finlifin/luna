@@ -1,6 +1,8 @@
 //! Invocation admission, owned frame state, delivery and caller restoration.
 //! These boundaries are shared by the migration interpreter and linear bodies.
 use super::*;
+mod admitted;
+pub use admitted::AdmittedCall;
 mod contracts;
 pub(super) mod definition_host;
 pub(super) mod host;
@@ -181,6 +183,10 @@ impl<'a> Interpreter<'a> {
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<Value, Error> {
         let activation = self.begin_invocation(function, arguments, context)?;
+        self.run_activation(activation)
+    }
+
+    fn run_activation(&mut self, activation: Box<Activation<'a>>) -> Result<Value, Error> {
         if !self.bytecode_invocation_available() {
             // Tree execution must not retain the large linear VM dispatcher
             // frame at every native recursive call. Admission, completion and
@@ -312,6 +318,16 @@ impl<'a> Interpreter<'a> {
         arguments: Vec<Value>,
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<Box<Activation<'a>>, Error> {
+        self.begin_invocation_observing(function, arguments, context, None)
+    }
+
+    fn begin_invocation_observing(
+        &mut self,
+        function: Value,
+        arguments: Vec<Value>,
+        context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
+        domains: Option<&mut Vec<Term>>,
+    ) -> Result<Box<Activation<'a>>, Error> {
         let target = self.admit_invocation(function, context.is_some())?;
         let cleanup_frame = if self.cleanup_schedule.is_some() && context.is_none() {
             target.cleanup_key()
@@ -320,7 +336,7 @@ impl<'a> Interpreter<'a> {
         };
         let saved = self.enter_invocation(cleanup_frame, context)?;
         let prepared = self
-            .prepare_invocation(target, arguments)
+            .prepare_invocation(target, arguments, domains)
             .and_then(|mut frame| {
                 self.prepare_invocation_step(&mut frame)?;
                 Ok(frame)
@@ -473,6 +489,7 @@ impl<'a> Interpreter<'a> {
         &mut self,
         target: Target<'a>,
         arguments: Vec<Value>,
+        domains: Option<&mut Vec<Term>>,
     ) -> Result<InvocationFrame<'a>, Error> {
         let declaration = target.declaration();
         let (parameters, mut environment, source, signature) = match &target {
@@ -528,19 +545,16 @@ impl<'a> Interpreter<'a> {
                 )
             }
         };
-        let Term::Function {
-            parameters: types,
-            result: result_type,
-        } = signature.callable_signature()
-        else {
-            return Err(self.failure(ErrorKind::Type, None));
-        };
+        self.charge_copy_work(Some(source), |fuel| {
+            nir::copy_budget::charge_term_copy(signature, fuel, 128)
+        })?;
         let type_scope = self.bind_invocation_inputs(
             parameters,
             arguments,
             signature,
             &mut environment,
             source,
+            domains,
         )?;
         if let Some(definition) = declaration
             && (self.comptime_only || matches!(target, Target::Named(_) | Target::Instance { .. }))
@@ -565,15 +579,16 @@ impl<'a> Interpreter<'a> {
             };
             self.check_invocation_contracts(definition, substitution, type_scope.as_ref(), source)?;
         }
-        let result_type = match &type_scope {
-            Some(scope) => scope.rebind(result_type),
-            None => result_type.substitute_partial(&vec![None; types.len()]),
-        }
-        .map_err(|_| self.failure(ErrorKind::Type, None))?;
-        result_type
+        let bound_signature = type_scope
+            .as_ref()
+            .map_or(signature, |scope| scope.signature());
+        let Term::Function { result, .. } = bound_signature.callable_signature() else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        result
             .check_scope(&[])
-            .map_err(|_| self.failure(ErrorKind::Type, None))?;
-        let result_type = self.selected_type_view(&result_type, Some(source))?;
+            .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+        let result_type = self.selected_type_view(result, Some(source))?;
         self.check_comptime_domain(&result_type, source)?;
         if let Term::Computation { effects, .. } = &result_type {
             self.check_effect_environment(effects, None)?;

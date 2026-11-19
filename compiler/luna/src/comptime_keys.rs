@@ -185,6 +185,15 @@ impl Protocol {
     pub fn last_execution_stats(&self) -> crate::invocation::InvocationStats {
         self.execution.stats
     }
+    /// Snapshot a key while the source activation retains its original argument.
+    pub(crate) fn admit_borrowed(
+        &mut self,
+        value: &Value,
+        context: &mut Context,
+    ) -> Result<Snapshot, Error<String>> {
+        input_work(value, context)?;
+        self.admit(value.clone(), context)
+    }
     /// Validate fresh immutable data using this protocol's source session.
     /// Code reuse never supplies the current value's admission evidence.
     pub fn admit(

@@ -14,6 +14,23 @@ fn query(declaration: u32) -> QueryId {
         operation: 0,
     }
 }
+#[test]
+fn lending_fuel_settles_used_work_even_when_the_consumer_fails() {
+    let mut context = Context::new(50);
+    let failed = context.with_allowance(20, |work| {
+        assert_eq!(*work, 20);
+        *work -= 13;
+        Err::<(), _>("rejected")
+    });
+    assert_eq!(failed, Err("rejected"));
+    assert_eq!(context.remaining(), 37);
+    context.with_allowance(100, |work| {
+        assert_eq!(*work, 37);
+        *work = 0;
+    });
+    assert_eq!(context.remaining(), 0);
+}
+
 #[derive(Default)]
 struct FoldCase {
     fail_hash: bool,

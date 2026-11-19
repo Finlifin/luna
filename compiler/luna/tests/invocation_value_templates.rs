@@ -400,3 +400,153 @@ fn type_input_dispatch_uses_source_methods_and_real_meta_cache_protocols() {
         assert_eq!(1_000_000 - recovered.remaining(), work);
     }
 }
+
+#[test]
+fn a_value_dependent_ordinary_requirement_is_checked_before_cache_lookup() {
+    let package = sysroot::compile(
+        "trait Enabled where flag: bool {}
+         impl Enabled<true> for bool {}
+         pure comptime fn Select(comptime flag: bool) -> Type
+         where requires bool :- Enabled<flag>
+         {
+             bool
+         }",
+    )
+    .unwrap();
+    let mut call = luna::memoization::Invocation::prepare(
+        &package,
+        &key_protocols(&package),
+        id(&package, "Select"),
+        vec![],
+        8,
+        Default::default(),
+    )
+    .unwrap();
+    for (enabled, reused) in [(false, false), (true, false), (false, false), (true, true)] {
+        let outcome = call.invoke(vec![Value::Bool(enabled)], &mut Context::new(1_000_000));
+        if enabled {
+            let outcome = outcome.unwrap();
+            assert_eq!(
+                *outcome.value,
+                Value::Type(Term::Primitive(Primitive::Bool))
+            );
+            assert_eq!(outcome.reused, reused);
+        } else {
+            let error = outcome.err().unwrap();
+            assert!(
+                matches!(error, comptime_executor::Error::Protocol(_)),
+                "{error}"
+            );
+            assert_eq!(call.last_execution_stats().bytecode_invocations, 0);
+        }
+    }
+    assert_eq!(call.cached_results(), 1);
+}
+
+#[test]
+fn ordinary_data_binds_the_following_domain_in_the_activation_that_runs() {
+    let package = sysroot::compile(
+        "struct Packet where tag: bool { output: bool }
+         pure comptime fn read(comptime tag: bool, packet: Packet<tag>) -> bool { packet.output }",
+    )
+    .unwrap();
+    let packet = package
+        .structs
+        .iter()
+        .find(|def| def.name == "Packet")
+        .unwrap()
+        .declaration;
+    let mut call = luna::memoization::Invocation::prepare(
+        &package,
+        &Default::default(),
+        id(&package, "read"),
+        vec![],
+        8,
+        Default::default(),
+    )
+    .unwrap();
+    for (tag, actual) in [(true, false), (true, true), (false, false)] {
+        let outcome = call.invoke(
+            vec![
+                Value::Bool(tag),
+                Value::Record {
+                    declaration: packet,
+                    arguments: vec![Term::Bool(actual)],
+                    fields: vec![Value::Bool(!tag)],
+                },
+            ],
+            &mut Context::new(1_000_000),
+        );
+        if actual == tag {
+            let outcome = outcome.unwrap();
+            assert_eq!(*outcome.value, Value::Bool(!tag));
+            assert!(!outcome.reused);
+        } else {
+            assert!(outcome.is_err());
+            assert_eq!(call.last_execution_stats().bytecode_invocations, 0);
+        }
+    }
+    assert_eq!(call.cached_results(), 0);
+}
+
+#[test]
+fn cancelling_an_admitted_root_restores_the_original_vm_without_entering_its_body() {
+    let package = sysroot::compile(
+        "pure comptime fn checked_flag(flag: bool) -> bool { assumes flag; flag }",
+    )
+    .unwrap();
+    let declaration = id(&package, "checked_flag");
+    for reference in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, reference, |vm| {
+            let mut fuel = vm.remaining_steps() as usize;
+            let initial = fuel;
+            let entry = vm
+                .admit_source_call(declaration, vec![], vec![Value::Bool(false)], &mut fuel)
+                .unwrap();
+            assert_eq!(entry.domains(), &[Term::Primitive(Primitive::Bool)]);
+            assert_eq!(entry.values().next(), Some(&Value::Bool(false)));
+            drop(entry);
+            assert!(fuel < initial);
+            assert!(!vm.events().iter().any(|event| matches!(event,
+                comptime_interpretor::Event::EnterFunction(id) if *id == declaration)));
+            let entry = vm
+                .admit_source_call(declaration, vec![], vec![Value::Bool(true)], &mut fuel)
+                .unwrap();
+            assert_eq!(entry.resume(&mut fuel).unwrap(), Value::Bool(true));
+            assert_eq!(fuel as u64, vm.remaining_steps());
+        });
+    }
+}
+
+#[test]
+fn an_associated_domain_can_supply_type_to_an_ordinary_value_slot() {
+    let package = sysroot::compile(
+        "trait Domain { assoc Item: Type; }
+         impl Domain for bool { assoc Item: Type = Type; }
+         pure comptime fn accept_domain(comptime T: Type, comptime value: T.as(Domain).Item) -> bool
+         where requires T :- Domain
+         { true }",
+    )
+    .unwrap();
+    let mut call = prepare(&package, "accept_domain", vec![]);
+    assert!(
+        call.invoke(
+            vec![
+                Value::Type(Term::Primitive(Primitive::Bool)),
+                Value::Bool(false)
+            ],
+            &mut Context::new(1_000_000),
+        )
+        .is_err()
+    );
+    let result = call
+        .invoke(
+            vec![
+                Value::Type(Term::Primitive(Primitive::Bool)),
+                Value::Type(Term::Primitive(Primitive::Char)),
+            ],
+            &mut Context::new(1_000_000),
+        )
+        .unwrap();
+    assert_eq!(*result.value, Value::Bool(true));
+}
