@@ -16,6 +16,9 @@ NIR 的共同入口负责不可变描述的递归成员检查。VM 提供当前�
 
 收集域由声明及受检结构观察提供。即使载荷为空，`meta.List<u8>` 与 `meta.List<Type>` 仍携带各自的域。用 `Tuple<.Es = Es>` 交付已有列表时，整个列表作为一个普通 comptime 值进入具名槽。冻结和恢复保留 NF 头、序列顺序、名义身份、错误标签、嵌套 optional 与 Object 中各项的键及域。Type 描述可携带尚待消费的结构条件；需要类型身份的操作另行取得身份依据。[类型描述与身份](type-descriptions-and-admission.md) · [值表示](../compiler/nir/src/comptime_values.rs)
 
+VM 向调用者恢复带作用域的值时，先按源码字段顺序检查并替换各项的类型，再由显式工作栈组装父值。对象保留重复键与每项各自的域。多处捕获同一个存储单元时，结果仍共享一个新单元；读取原单元的锁持续到其载荷恢复完成。预算、深度或作用域检查失败时，本次恢复结束，调用者不会收到半成品。[结果图恢复](../compiler/comptime_interpretor/src/scoped_restore/packets.rs)
+
+
 调用方授权的抽象值只能在对应 binder 和域中使用。私有 VM 在校验 dispatch 前安装这次调用的作用域，完成整份校验后才可执行。共享代码目录不会把该权限传给下一个闭合 VM。检查普通实参的 trait 义务时，调用者给定的前提和已存在的具体 impl 都可以提供证据；是否执行哪个方法体由方法选择另行决定。程序状态和内存规格归程序验证层。[作用域中的 dispatch 准入](../compiler/materialization/src/input_admission.rs) · [开放与闭合构造用例](../compiler/materialization/tests/scoped_dispatch_inputs.rs)
 
 从源码交给 VM 的权限范围也决定证明的有效期。定义侧可以保留显式 binder 和合法 residual；当接收点要求一个已经完成的普通值时，每个必需槽位都要有实际载荷。通用传送接口的设计应将下列信息随工作传递。

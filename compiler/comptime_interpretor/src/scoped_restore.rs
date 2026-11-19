@@ -1,5 +1,6 @@
 //! Transport invocation results into a caller telescope without mutating their VM.
 use super::*;
+mod packets;
 
 impl Value {
     /// Restore types in an owned value graph, including executable closure data.
@@ -60,64 +61,6 @@ impl Restore<'_> {
         self.spend(values.len())?;
         values.iter().map(|ty| self.ty(ty)).collect()
     }
-    fn values(&mut self, values: &[Value], depth: usize) -> Result<Vec<Value>, ErrorKind> {
-        self.spend(values.len())?;
-        values
-            .iter()
-            .map(|value| self.value(value, depth + 1))
-            .collect()
-    }
-    #[inline(never)]
-    fn object(
-        &mut self,
-        object: &comptime_runtime::object::Object<ObjectValue>,
-        depth: usize,
-    ) -> Result<Value, ErrorKind> {
-        Ok({
-            use comptime_runtime::object::{Entry, Object};
-            self.spend(object.entries().len())?;
-            let mut entries = Vec::new();
-            for entry in object.entries() {
-                let (key, value) = match entry {
-                    Entry::Value(value) => (None, value),
-                    Entry::Property { key, value } => (Some(key), value),
-                };
-                let value = ObjectValue {
-                    ty: self.ty(&value.ty)?,
-                    value: self.value(&value.value, depth + 1)?,
-                };
-                entries.push(if let Some(key) = key {
-                    self.spend(key.len())?;
-                    Entry::Property {
-                        key: key.clone(),
-                        value,
-                    }
-                } else {
-                    Entry::Value(value)
-                });
-            }
-            Value::Object(Object::from_entries(entries))
-        })
-    }
-
-    #[inline(never)]
-    fn cell(&mut self, cell: &Storage, depth: usize) -> Result<Value, ErrorKind> {
-        Ok({
-            let key = Arc::as_ptr(&cell.0) as usize;
-            if let Some(saved) = self.storage.get(&key) {
-                return saved
-                    .clone()
-                    .map(Value::Storage)
-                    .ok_or(ErrorKind::Unsupported);
-            }
-            self.storage.insert(key, None);
-            let payload = cell.contents_for_copy(self.steps, 128 - depth)?;
-            let restored = Storage::new(self.value(payload.value(), depth + 1)?);
-            self.storage.insert(key, Some(restored.clone()));
-            Value::Storage(restored)
-        })
-    }
-
     #[inline(never)]
     fn code(&mut self, code: &CodeValue) -> Result<Value, ErrorKind> {
         use nir::code_values::{ExpressionCode, PatternCode};
@@ -175,44 +118,7 @@ impl Restore<'_> {
         Ok(Arc::new(body))
     }
 
-    #[inline(never)]
-    fn closure(&mut self, closure: &Arc<Closure>, depth: usize) -> Result<Value, ErrorKind> {
-        Ok({
-            let key = Arc::as_ptr(closure) as usize;
-            if let Some(saved) = self.closures.get(&key) {
-                return saved
-                    .clone()
-                    .map(Value::Closure)
-                    .ok_or(ErrorKind::Unsupported);
-            }
-            self.closures.insert(key, None);
-            let body = self.body(&closure.body)?;
-            self.spend(
-                closure.parameters.len() + closure.capture_order.len() + closure.environment.len(),
-            )?;
-            let environment = closure
-                .environment
-                .iter()
-                .map(|(id, value)| Ok((*id, self.value(value, depth + 1)?)))
-                .collect::<Result<_, ErrorKind>>()?;
-            let restored = Arc::new(Closure {
-                definition_source: closure.definition_source,
-                parameters: closure.parameters.clone(),
-                capture_order: closure.capture_order.clone(),
-                environment,
-                body,
-                ty: self.ty(&closure.ty)?,
-            });
-            self.closures.insert(key, Some(restored.clone()));
-            Value::Closure(restored)
-        })
-    }
-
-    fn value(&mut self, value: &Value, depth: usize) -> Result<Value, ErrorKind> {
-        self.spend(1)?;
-        if depth >= 128 {
-            return Err(ErrorKind::DepthExhausted);
-        }
+    fn leaf(&mut self, value: &Value) -> Result<Value, ErrorKind> {
         Ok(match value {
             Value::TypeParameter(declaration) => Value::Type(self.ty(&Term::Rigid {
                 declaration: *declaration,
@@ -235,59 +141,6 @@ impl Restore<'_> {
                     ty: self.ty(ty)?,
                 }
             }
-            Value::List { ty, values } => Value::List {
-                ty: self.ty(ty)?,
-                values: self.values(values, depth)?.into(),
-            },
-            Value::Tuple(values) => Value::Tuple(self.values(values, depth)?),
-            Value::AnonymousRecord(fields) => {
-                self.spend(fields.len())?;
-                Value::AnonymousRecord(
-                    fields
-                        .iter()
-                        .map(|(name, value)| {
-                            self.spend(name.len())?;
-                            Ok((name.clone(), self.value(value, depth + 1)?))
-                        })
-                        .collect::<Result<_, ErrorKind>>()?,
-                )
-            }
-            Value::Record {
-                declaration,
-                arguments,
-                fields,
-            } => Value::Record {
-                declaration: *declaration,
-                arguments: self.types(arguments)?,
-                fields: self.values(fields, depth)?,
-            },
-            Value::Variant {
-                declaration,
-                arguments,
-                index,
-                fields,
-            } => Value::Variant {
-                declaration: *declaration,
-                arguments: self.types(arguments)?,
-                index: *index,
-                fields: self.values(fields, depth)?,
-            },
-            Value::Optional { ty, value } => Value::Optional {
-                ty: self.ty(ty)?,
-                value: value
-                    .as_ref()
-                    .map(|value| self.value(value, depth + 1).map(Box::new))
-                    .transpose()?,
-            },
-            Value::ErrorResult { ty, error, value } => Value::ErrorResult {
-                ty: self.ty(ty)?,
-                error: *error,
-                value: Box::new(self.value(value, depth + 1)?),
-            },
-            Value::Newtype { ty, value } => Value::Newtype {
-                ty: self.ty(ty)?,
-                value: Box::new(self.value(value, depth + 1)?),
-            },
             Value::FunctionInstance {
                 declaration,
                 arguments,
@@ -295,15 +148,10 @@ impl Restore<'_> {
                 declaration: *declaration,
                 arguments: self.types(arguments)?,
             },
-            Value::Object(object) => self.object(object, depth)?,
-
-            Value::Storage(cell) => self.cell(cell, depth)?,
-
             Value::IirCallable(handle) => Value::FunctionInstance {
                 declaration: handle.key.declaration,
                 arguments: self.types(&handle.key.arguments)?,
             },
-            Value::Closure(closure) => self.closure(closure, depth)?,
 
             Value::Code(code) => self.code(code)?,
             Value::RuntimeTraitMethod(method) => {
@@ -320,6 +168,17 @@ impl Restore<'_> {
             Value::Pointer(_) | Value::ComptimeReference(_) => {
                 return Err(ErrorKind::Unsupported);
             }
+            Value::List { .. }
+            | Value::Tuple(_)
+            | Value::AnonymousRecord(_)
+            | Value::Record { .. }
+            | Value::Variant { .. }
+            | Value::Optional { .. }
+            | Value::ErrorResult { .. }
+            | Value::Newtype { .. }
+            | Value::Object(_)
+            | Value::Storage(_)
+            | Value::Closure(_) => unreachable!("graph nodes are restored by the packet traversal"),
             value => {
                 self.spend(
                     value
@@ -588,6 +447,66 @@ mod tests {
         *cell.0.lock().unwrap() = Value::Unit;
         assert_eq!(cell.read().unwrap(), Value::Unit);
     }
+    #[test]
+    fn locked_cells_respect_the_same_depth_limit_and_release_their_guards() {
+        let (parameters, arguments) = inputs();
+        let mut value = Value::TypeParameter(parameters[0].declaration);
+        for _ in 0..127 {
+            value = Value::Storage(Storage::new(value));
+        }
+        let restore =
+            |value: &Value| value.restore_scoped_types(&parameters, &arguments, &[], &mut 10000);
+        let mut restored = restore(&value).unwrap();
+        for _ in 0..127 {
+            let Value::Storage(cell) = restored else {
+                panic!("missing cell")
+            };
+            restored = cell.read().unwrap();
+        }
+        assert_eq!(restored, Value::Type(arguments[0].clone()));
+        let root = Storage::new(value);
+        assert_eq!(
+            restore(&Value::Storage(root.clone())),
+            Err(ErrorKind::DepthExhausted)
+        );
+        assert!(restore(&root.read().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn nested_object_entries_keep_their_own_domains_and_source_order() {
+        let (parameters, arguments) = inputs();
+        let rigid = Term::Rigid {
+            declaration: parameters[0].declaration,
+            sort: nir::Sort::Type,
+        };
+        let wrap = |name: &str, ty: Term, value| ObjectEntry::Property {
+            key: name.into(),
+            value: ObjectValue { ty, value },
+        };
+        let packet = |field_ty: Term| {
+            Value::Object(Object::from_entries(vec![
+                wrap("tag", Term::Primitive(Primitive::Bool), Value::Bool(true)),
+                wrap(
+                    "inner",
+                    Term::Primitive(Primitive::Object),
+                    Value::Object(Object::from_entries(vec![
+                        wrap("first", field_ty.clone(), Value::Unit),
+                        wrap(
+                            "second",
+                            Term::Primitive(Primitive::Type),
+                            Value::Type(field_ty.clone()),
+                        ),
+                    ])),
+                ),
+                wrap("tag", field_ty, Value::Unit),
+            ]))
+        };
+        let restored = packet(rigid)
+            .restore_scoped_types(&parameters, &arguments, &[], &mut 10000)
+            .unwrap();
+        assert_eq!(restored, packet(arguments[0].clone()));
+    }
+
     #[test]
     fn nested_packets_stop_at_the_depth_limit_and_recover() {
         let (parameters, arguments) = inputs();
