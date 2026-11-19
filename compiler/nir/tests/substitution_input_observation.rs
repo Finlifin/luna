@@ -258,3 +258,36 @@ fn declaration_sort_conflicts_and_budget_failures_publish_neither_map() {
     );
     assert_eq!(inputs.parameters, BTreeMap::from([(2, Sort::Type)]));
 }
+
+#[test]
+fn partial_frame_expansion_charges_each_reached_replacement_under_its_binder() {
+    use nir::type_computations::Error;
+    let wide = Term::Tuple(vec![Term::Primitive(Primitive::Bool); 64]);
+    let nested = |outer| Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Tuple(vec![bound(0, 0, Sort::Type), outer])),
+    };
+    let domain = nested(bound(1, 1, Sort::Type));
+    let mut caller = vec![Some(wide), Some(bound(0, 2, Sort::Type)), None];
+    let expected = nested(bound(1, 2, Sort::Type));
+    assert_eq!(
+        domain.substitute_partial_bounded(&caller, &mut 12).unwrap(),
+        expected
+    );
+    let repeated = Term::Tuple(vec![bound(0, 0, Sort::Type); 2]);
+    assert_eq!(
+        repeated.substitute_partial_bounded(&caller, &mut 100),
+        Err(Error::Budget)
+    );
+    assert_eq!(
+        repeated
+            .substitute_partial_bounded(&caller, &mut 200)
+            .unwrap(),
+        repeated.substitute_partial(&caller).unwrap()
+    );
+    caller[1] = None;
+    assert_eq!(
+        domain.substitute_partial_bounded(&caller, &mut 12),
+        Err(Error::Scope(TypeError::MissingArgument(1)))
+    );
+}

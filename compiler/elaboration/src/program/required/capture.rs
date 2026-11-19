@@ -7,6 +7,7 @@ use std::borrow::Cow;
 pub(super) struct Entry<'v> {
     pub(super) function: n::Function,
     pub(super) inputs: Vec<(n::LocalId, Term, Option<Term>)>,
+    pub(super) parameter_slots: Box<[Option<usize>]>,
     live_values: Vec<&'v Value>,
 }
 
@@ -19,6 +20,7 @@ impl<'v> Entry<'v> {
     fn capture(
         root: CaptureBody,
         mut slots: Vec<(n::LocalId, Sort, Option<Cow<'_, Term>>)>,
+        signature_width: usize,
         mut supplies: BTreeMap<n::LocalId, Supply<'v>>,
         fuel: &mut usize,
     ) -> Result<Self, nir::type_computations::Error> {
@@ -34,8 +36,10 @@ impl<'v> Entry<'v> {
             fuel,
         )?;
         let mut inputs = Vec::with_capacity(captured.slots.len());
+        let mut parameter_slots = Vec::with_capacity(captured.slots.len());
         let mut live_values = Vec::new();
         for index in captured.slots {
+            parameter_slots.push((index < signature_width).then_some(index));
             let (binding, _, domain) = &mut slots[index];
             let frozen = match supplies.remove(binding) {
                 Some(Supply::Frozen(value)) => Some(value),
@@ -54,6 +58,7 @@ impl<'v> Entry<'v> {
         Ok(Self {
             function: captured.function,
             inputs,
+            parameter_slots: parameter_slots.into_boxed_slice(),
             live_values,
         })
     }
@@ -128,6 +133,7 @@ impl Checker<'_, '_> {
             }
         }
 
+        let signature_width = slots.len();
         let mut supplies = BTreeMap::new();
         for (binding, ty, value) in inputs {
             if let Some(&(index, staged)) = signature_slots.get(&binding) {
@@ -157,7 +163,7 @@ impl Checker<'_, '_> {
 
         let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let capture = Entry::capture(root, slots, supplies, &mut fuel);
+        let capture = Entry::capture(root, slots, signature_width, supplies, &mut fuel);
         self.required_steps -= (before - fuel) as u64;
         capture.map_err(|failure| {
             use nir::type_computations::Error::MissingCapture;
@@ -191,6 +197,7 @@ mod tests {
             Entry::capture(
                 CaptureBody::analyze(root, fuel)?,
                 vec![(id, Sort::ComptimeValue, Some(Cow::Borrowed(domain)))],
+                1,
                 BTreeMap::new(),
                 fuel,
             )
@@ -294,10 +301,12 @@ mod tests {
             let captured = Entry::capture(
                 CaptureBody::analyze(root.clone(), &mut 1000).unwrap(),
                 slots.clone(),
+                2,
                 supplies,
                 &mut 10000,
             )
             .unwrap();
+            assert_eq!(&*captured.parameter_slots, &[Some(1), None]);
             assert_eq!(captured.function.parameters, [binding(1), binding(2)]);
             assert_eq!(
                 captured

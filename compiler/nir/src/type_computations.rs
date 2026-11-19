@@ -698,12 +698,33 @@ pub(crate) fn charge_frame_expansion(
     inputs: &[Term],
     fuel: &mut usize,
 ) -> Result<(), Error> {
+    charge_frame_slots(root, |index| inputs.get(index), fuel)
+}
+
+impl Term {
+    /// Remove one caller frame, charging only reached replacements and their
+    /// materialized occurrences, including those under nested binders.
+    pub fn substitute_partial_bounded(
+        &self,
+        arguments: &[Option<Term>],
+        fuel: &mut usize,
+    ) -> Result<Term, Error> {
+        charge_frame_slots(self, |index| arguments.get(index)?.as_ref(), fuel)?;
+        self.substitute_partial(arguments).map_err(Error::Scope)
+    }
+}
+
+fn charge_frame_slots<'a>(
+    root: &Term,
+    slot: impl Fn(usize) -> Option<&'a Term>,
+    fuel: &mut usize,
+) -> Result<(), Error> {
     Ok(visit_replacements(
         root,
         fuel,
         128,
         &|term, nesting| match term {
-            Term::Bound { depth, index, .. } if *depth == nesting => inputs.get(*index),
+            Term::Bound { depth, index, .. } if *depth == nesting => slot(*index),
             _ => None,
         },
         &mut |_, _| {},

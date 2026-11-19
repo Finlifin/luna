@@ -180,6 +180,7 @@ impl RequiredWorld {
     }
 }
 
+#[cfg_attr(test, derive(Clone))]
 pub(in crate::program) struct PreparedRequired {
     pub(super) world: Arc<RequiredWorld>,
     pub entry: DeclarationId,
@@ -192,6 +193,9 @@ pub(in crate::program) struct PreparedRequired {
 /// these immutable premises; supplying captures never edits the proof scope.
 #[cfg_attr(test, derive(Clone))]
 pub(super) struct InvocationScope {
+    /// ABI capture position to source parameter. Explicit or live supplies
+    /// outside the signature have no parameter slot in the caller.
+    pub(super) parameter_slots: Box<[Option<usize>]>,
     pub(super) scoped_parameters: Vec<nir::DeclarationParameter>,
     pub(super) scoped_arguments: Vec<Term>,
     pub(super) input_frames: Vec<Vec<Sort>>,
@@ -264,29 +268,82 @@ impl PreparedRequired {
             .is_disjoint(&declarations))
     }
 
-    pub(in crate::program) fn fork(&self) -> Self {
-        Self {
-            world: Arc::clone(&self.world),
-            entry: self.entry,
-            inputs: self.inputs.clone(),
-            result_type: self.result_type.clone(),
-            scope: self.scope.clone(),
-        }
+    pub(in crate::program) fn pending_parameters(
+        &self,
+    ) -> impl Iterator<Item = Option<usize>> + '_ {
+        self.inputs
+            .iter()
+            .zip(&self.scope.parameter_slots)
+            .filter_map(|((_, _, value), slot)| value.is_none().then_some(*slot))
     }
 
-    /// Supply only captured, pending declaration inputs. Check the complete
-    /// assignment before mutating the snapshot; rejected input routing leaves
-    /// the preparation available for a corrected invocation.
-    pub(in crate::program) fn bind_inputs(
-        &mut self,
-        values: Vec<(n::LocalId, Term)>,
+    pub(in crate::program) fn needs_call_world(
+        &self,
+        symbols: &[Option<Term>],
+        live: &[Option<Value>],
+        steps: &mut u64,
         span: Span,
-    ) -> Result<(), Error> {
-        let routes = inputs::routes(&self.inputs, &values, span)?;
-        for (position, (_, value)) in routes.into_iter().zip(values) {
-            self.inputs[position].2 = Some(value);
+    ) -> Result<bool, Error> {
+        *steps = steps
+            .checked_sub(self.inputs.len() as u64)
+            .ok_or_else(|| error(span, "annotation capture selection budget exhausted"))?;
+        if self
+            .pending_parameters()
+            .flatten()
+            .any(|slot| live.get(slot).is_some_and(Option::is_some))
+        {
+            return Ok(true);
         }
-        Ok(())
+        let terms = self
+            .pending_parameters()
+            .flatten()
+            .filter_map(|slot| symbols.get(slot).and_then(Option::as_ref));
+        Ok(!Discovery::Declarations
+            .frozen_references(terms, steps, span)?
+            .is_empty())
+    }
+
+    /// Produce the call's private argument packet directly from the captured
+    /// ABI. The saved code, declaration world, and lexical premises are shared.
+    pub(in crate::program) fn for_annotation_call(
+        &self,
+        symbols: &[Option<Term>],
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<Self, Error> {
+        let inputs = self
+            .inputs
+            .iter()
+            .zip(&self.scope.parameter_slots)
+            .map(|((id, domain, frozen), &slot)| {
+                let value = match frozen {
+                    Some(value) => value,
+                    None => {
+                        let slot = slot.ok_or_else(|| {
+                            error(span, "deferred annotation has an unknown source input")
+                        })?;
+                        symbols.get(slot).and_then(Option::as_ref).ok_or_else(|| {
+                            error(
+                                span,
+                                "deferred annotation needs a completed comptime argument",
+                            )
+                        })?
+                    }
+                };
+                let domain = nominal_fields::metered(steps, |fuel| {
+                    domain.substitute_partial_bounded(symbols, fuel)
+                })
+                .map_err(|failure| error(span, failure.to_string()))?;
+                Ok((*id, domain, Some(super::inputs::copy(value, steps, span)?)))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Self {
+            world: self.world.clone(),
+            entry: self.entry,
+            inputs,
+            result_type: super::inputs::copy(&self.result_type, steps, span)?,
+            scope: self.scope.clone(),
+        })
     }
 
     // Invocation uses only the checked snapshot and the caller's shared budget.
@@ -428,6 +485,7 @@ impl PreparedRequired {
             abstract_value_parameters,
             context: invocation_type_context,
             in_signature,
+            ..
         } = scope.as_ref();
         let inputs = inputs::complete(inputs, values, span)?;
         let scoped_context = if scoped_parameters.is_empty() {
@@ -561,6 +619,12 @@ impl std::fmt::Display for PreparedRequired {
             }
             write!(f, ")")?;
         }
+        write!(f, ") (source-parameters")?;
+        for (capture, slot) in self.scope.parameter_slots.iter().enumerate() {
+            if let Some(slot) = slot {
+                write!(f, " (capture {capture} (parameter {slot}))")?;
+            }
+        }
         write!(f, ") (scope-substitution")?;
         for (parameter, argument) in self
             .scope
@@ -669,6 +733,7 @@ mod tests {
             inputs: vec![],
             result_type,
             scope: Arc::new(InvocationScope {
+                parameter_slots: Box::default(),
                 scoped_parameters: vec![],
                 scoped_arguments: vec![],
                 input_frames: vec![],
@@ -679,6 +744,68 @@ mod tests {
                 in_signature: false,
             }),
         }
+    }
+
+    #[test]
+    fn prepared_annotation_selects_its_source_slots_and_reuses_no_argument_values() {
+        let mut prepared = literal_preparation(true);
+        let binding = |index| n::LocalId { owner: 11, index };
+        let span = Span::default();
+        let bound = Term::Bound {
+            depth: 0,
+            index: 3,
+            sort: Sort::Type,
+        };
+        prepared.inputs = vec![
+            (binding(101), p(P::Str), Some(Term::String("fixed".into()))),
+            (binding(10), p(P::Type), None),
+            (binding(25), bound, None),
+        ];
+        prepared.edit_scope().parameter_slots = Box::from([None, Some(3), Some(4)]);
+        let callback = Term::FunctionValue {
+            declaration: prepared.entry,
+            arguments: vec![],
+        };
+        let mut caller = vec![
+            Some(callback.clone()),
+            None,
+            None,
+            Some(p(P::Bool)),
+            Some(Term::Bool(true)),
+        ];
+        let mut live = vec![Some(Value::Bool(true)), None, None, None, None];
+        let needs_source = |caller: &[Option<Term>], live: &[Option<Value>]| {
+            prepared
+                .needs_call_world(caller, live, &mut 100, span)
+                .unwrap()
+        };
+        assert!(!needs_source(&caller, &live));
+        live[4] = Some(Value::Bool(false));
+        assert!(needs_source(&caller, &live));
+        live[4] = None;
+        caller[4] = Some(Term::TupleValue(vec![callback]));
+        assert!(needs_source(&caller, &live));
+        caller[4] = None;
+        assert!(
+            prepared
+                .for_annotation_call(&caller, &mut 1000, span)
+                .is_err()
+        );
+
+        for value in [false, true] {
+            caller[4] = Some(Term::Bool(value));
+            let call = prepared
+                .for_annotation_call(&caller, &mut 1000, span)
+                .unwrap();
+            assert_eq!(call.inputs[0], prepared.inputs[0]);
+            assert_eq!(
+                call.inputs[2],
+                (binding(25), p(P::Bool), Some(Term::Bool(value)))
+            );
+            assert!(Arc::ptr_eq(&call.world, &prepared.world));
+            assert!(prepared.inputs[2].2.is_none());
+        }
+        assert!(prepared.to_string().contains("(capture 2 (parameter 4))"));
     }
 
     #[test]
@@ -797,7 +924,10 @@ mod tests {
             }
             let mut steps = 100_000;
             assert_eq!(
-                prepared.fork().invoke(&mut steps, Span::default()).unwrap(),
+                prepared
+                    .clone()
+                    .invoke(&mut steps, Span::default())
+                    .unwrap(),
                 (
                     Value::Type(if scoped { bound.clone() } else { rigid.clone() }),
                     p(P::Type)
@@ -805,7 +935,7 @@ mod tests {
             );
             assert!(steps < 100_000);
             // The retained source/code does not authorize an unknown Type input.
-            let mut denied = prepared.fork();
+            let mut denied = prepared.clone();
             denied.edit_scope().abstract_parameters.clear();
             assert!(denied.invoke(&mut 100_000, Span::default()).is_err());
             assert!(prepared.invoke(&mut 100_000, Span::default()).is_ok());
@@ -968,7 +1098,7 @@ mod tests {
         for type_result in [false, true] {
             let prepared = literal_preparation(type_result);
             let expected = prepared
-                .fork()
+                .clone()
                 .invoke(&mut 100_000, Span::default())
                 .unwrap()
                 .0;
@@ -1011,10 +1141,10 @@ mod tests {
             drop(vm);
             drop(code);
             // A warm cache is never an execution allowance or a result cache.
-            assert!(prepared.fork().invoke(&mut 0, Span::default()).is_err());
+            assert!(prepared.clone().invoke(&mut 0, Span::default()).is_err());
             assert_eq!(
                 prepared
-                    .fork()
+                    .clone()
                     .invoke(&mut 100_000, Span::default())
                     .unwrap()
                     .0,
@@ -1057,15 +1187,15 @@ mod tests {
             });
             prepared.edit_scope().context =
                 crate::ptc::Context::from_package(prepared.world.package()).unwrap();
-            let mut granted = prepared.fork();
+            let mut granted = prepared.clone();
             granted.edit_scope().invocation_assumptions.push(premise);
             let expected = granted
-                .fork()
+                .clone()
                 .invoke(&mut 100_000, Span::default())
                 .unwrap()
                 .0;
             let failure = prepared
-                .fork()
+                .clone()
                 .invoke(&mut 100_000, Span::default())
                 .unwrap_err();
             assert!(failure.message.contains("TypeContract"), "{failure}");
@@ -1125,7 +1255,7 @@ mod tests {
             assert!(world.code.lock().unwrap().is_none());
             assert_eq!(
                 prepared
-                    .fork()
+                    .clone()
                     .invoke(&mut 100_000, Span::default())
                     .unwrap()
                     .0,
@@ -1144,52 +1274,24 @@ mod tests {
     }
 
     #[test]
-    fn prepared_forks_share_declarations_and_isolate_input_assignments() {
+    fn annotation_calls_share_declarations_and_isolate_input_assignments() {
         let span = Span::default();
-        let mut prepared = literal_preparation(false);
-        let binding = n::LocalId {
-            owner: 11,
-            index: 0,
-        };
-        prepared.edit_package(|package| {
-            let function = &mut package.functions[0];
-            function.parameters = vec![binding];
-            function.signature = Term::Function {
-                parameters: vec![nir::Parameter {
-                    sort: Sort::ComptimeValue,
-                    ty: p(P::Bool),
-                }],
-                result: Box::new(p(P::Bool)),
-            };
-            function.body.kind = K::Local(binding);
-        });
-        prepared.inputs = vec![(binding, p(P::Bool), None)];
+        let (prepared, _) = pending_boolean_preparation();
         let owner = Arc::downgrade(&prepared.world);
-        let mut first = prepared.fork();
-        let mut second = prepared.fork();
+        let call = |flag| {
+            prepared
+                .for_annotation_call(&[Some(Term::Bool(flag))], &mut 100, span)
+                .unwrap()
+        };
+        let first = call(true);
+        let second = call(false);
         assert!(Arc::ptr_eq(&prepared.world, &first.world));
         assert!(Arc::ptr_eq(&first.scope, &second.scope));
         assert!(std::ptr::eq(
             first.world.capabilities(&[], &first.scope.context).index,
             second.world.capabilities(&[], &second.scope.context).index
         ));
-        assert!(
-            first
-                .bind_inputs(
-                    vec![(binding, Term::Bool(true)), (binding, Term::Bool(false))],
-                    span
-                )
-                .is_err()
-        );
-        assert_eq!(first.inputs, prepared.inputs);
-        first
-            .bind_inputs(vec![(binding, Term::Bool(true))], span)
-            .unwrap();
         assert!(prepared.inputs[0].2.is_none());
-        assert!(second.inputs[0].2.is_none());
-        second
-            .bind_inputs(vec![(binding, Term::Bool(false))], span)
-            .unwrap();
         drop(prepared);
         assert!(owner.upgrade().is_some());
         assert_eq!(
@@ -1221,7 +1323,7 @@ mod tests {
             // demand. Replacing the immutable world starts a fresh code cache.
             let mut baseline = 100_000;
             prepared
-                .fork()
+                .clone()
                 .invoke(&mut baseline, Span::default())
                 .unwrap();
             let allowance = 100_000 - baseline + 1000;
@@ -1290,11 +1392,11 @@ mod tests {
             }
             drop(queries);
             drop(scope);
-            assert!(prepared.fork().invoke(&mut 0, Span::default()).is_err());
+            assert!(prepared.clone().invoke(&mut 0, Span::default()).is_err());
             for _ in 0..2 {
                 let mut remaining = allowance;
                 let actual = prepared
-                    .fork()
+                    .clone()
                     .invoke(&mut remaining, Span::default())
                     .unwrap();
                 let expected = if type_result {
@@ -1320,11 +1422,11 @@ mod tests {
         assert!(!Arc::ptr_eq(&first.world, &second.world));
         for _ in 0..3 {
             assert_eq!(
-                first.fork().invoke(&mut 100_000, span).unwrap().0,
+                first.clone().invoke(&mut 100_000, span).unwrap().0,
                 Value::Bool(true)
             );
             assert_eq!(
-                second.fork().invoke(&mut 100_000, span).unwrap().0,
+                second.clone().invoke(&mut 100_000, span).unwrap().0,
                 Value::Bool(false)
             );
         }
@@ -1531,7 +1633,7 @@ mod tests {
             prepared.world.free_inputs(&mut 1000, span).unwrap(),
             &expected
         );
-        let fork = prepared.fork();
+        let fork = prepared.clone();
         assert_eq!(fork.world.free_inputs(&mut 1, span).unwrap(), &expected);
         assert!(fork.world.free_inputs(&mut 0, span).is_err());
         assert!(
@@ -1964,6 +2066,7 @@ mod tests {
             function.body.kind = K::Local(binding);
         });
         prepared.inputs = vec![(binding, p(P::Bool), None)];
+        prepared.edit_scope().parameter_slots = Box::from([Some(0)]);
         (prepared, binding)
     }
 
@@ -1980,50 +2083,45 @@ mod tests {
                 .contains("unavailable function input")
         );
         assert_eq!(steps, 1000, "an unavailable input must not start execution");
-        let (mut pending, binding) = pending_boolean_preparation();
+        let (pending, binding) = pending_boolean_preparation();
         assert!(pending.to_string().contains("(pending)"));
-        assert!(
-            pending
-                .bind_inputs(
-                    vec![(binding, Term::Bool(true)), (binding, Term::Bool(false))],
-                    span
-                )
-                .is_err()
-        );
-        assert!(pending.inputs[0].2.is_none());
         let foreign = n::LocalId {
             owner: binding.owner + 1,
             ..binding
         };
-        assert!(
-            pending
-                .bind_inputs(
-                    vec![(binding, Term::Bool(true)), (foreign, Term::Bool(false))],
-                    span
-                )
-                .is_err()
-        );
-        assert!(pending.inputs[0].2.is_none());
-        pending
-            .bind_inputs(vec![(binding, Term::Bool(false))], span)
+        for other in [binding, foreign] {
+            assert!(
+                pending
+                    .clone()
+                    .invoke_with_inputs(
+                        vec![(binding, Term::Bool(true)), (other, Term::Bool(false))],
+                        &mut steps,
+                        span
+                    )
+                    .is_err()
+            );
+            assert_eq!(steps, 1000);
+        }
+        let supplied = pending
+            .for_annotation_call(&[Some(Term::Bool(false))], &mut steps, span)
             .unwrap();
         assert!(
-            pending
-                .bind_inputs(vec![(binding, Term::Bool(true))], span)
+            supplied
+                .clone()
+                .invoke_with_inputs(vec![(binding, Term::Bool(true))], &mut steps, span)
                 .is_err()
         );
         assert!(
-            matches!(pending.invoke(&mut steps, span).unwrap(), (Value::Bool(false), ty) if ty == p(P::Bool))
+            matches!(supplied.invoke(&mut steps, span).unwrap(), (Value::Bool(false), ty) if ty == p(P::Bool))
         );
-        assert!(steps < 1000);
-        let (mut pending, binding) = pending_boolean_preparation();
-        pending
-            .bind_inputs(vec![(binding, p(P::U8))], span)
+        let wrong = pending
+            .for_annotation_call(&[Some(p(P::U8))], &mut steps, span)
             .unwrap();
         assert!(
-            pending.invoke(&mut 1000, span).is_err(),
+            wrong.invoke(&mut steps, span).is_err(),
             "binding a value does not bypass input domain checking"
         );
+        assert!(pending.inputs[0].2.is_none());
     }
 
     #[test]
@@ -2040,8 +2138,8 @@ mod tests {
                 1 => vec![(binding, true), (binding, false)],
                 2 => vec![(binding, true), (foreign, false)],
                 3 => {
-                    prepared
-                        .bind_inputs(vec![(binding, Term::Bool(false))], span)
+                    prepared = prepared
+                        .for_annotation_call(&[Some(Term::Bool(false))], &mut 100, span)
                         .unwrap();
                     vec![(binding, true)]
                 }
@@ -2053,7 +2151,7 @@ mod tests {
             let before = prepared.to_string();
             let mut frozen_steps = 1000;
             let frozen = prepared
-                .fork()
+                .clone()
                 .invoke_with_inputs(
                     supplied
                         .iter()
@@ -2065,7 +2163,7 @@ mod tests {
                 .unwrap_err();
             let mut live_steps = 1000;
             let live = prepared
-                .fork()
+                .clone()
                 .invoke_with_live_inputs(
                     supplied
                         .into_iter()
@@ -2131,7 +2229,7 @@ mod tests {
             ];
             assert_eq!(
                 prepared
-                    .fork()
+                    .clone()
                     .invoke_in_world(values, &mut 100_000, span, None, None)
                     .unwrap(),
                 (Value::Type(p(expected)), p(P::Type))
@@ -2303,7 +2401,7 @@ mod tests {
                 let before = steps;
                 assert!(
                     prepared
-                        .fork()
+                        .clone()
                         .invoke_with_live_inputs(invalid, &mut steps, span)
                         .is_err()
                 );
@@ -2311,7 +2409,7 @@ mod tests {
             }
             for expected in [true, false, true] {
                 let (value, ty) = prepared
-                    .fork()
+                    .clone()
                     .invoke_with_live_inputs(vec![(selector, callback.clone())], &mut steps, span)
                     .unwrap();
                 assert_eq!(ty, result_type);
@@ -2356,6 +2454,7 @@ mod tests {
             )],
             result_type: p(P::Type),
             scope: Arc::new(InvocationScope {
+                parameter_slots: Box::default(),
                 scoped_parameters: vec![nir::DeclarationParameter {
                     declaration,
                     sort: Sort::Type,

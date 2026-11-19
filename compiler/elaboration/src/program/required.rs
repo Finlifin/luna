@@ -1293,7 +1293,10 @@ impl Checker<'_, '_> {
                 retained,
             } = self.required_source_closure(std::mem::take(&mut observed.code), expr.span)?;
             let capture::Entry {
-                function, inputs, ..
+                function,
+                inputs,
+                parameter_slots,
+                ..
             } = capture;
             let entry = function.declaration;
             // Signature formation may have produced obligations independently of
@@ -1549,6 +1552,7 @@ impl Checker<'_, '_> {
                 inputs,
                 result_type,
                 scope: std::sync::Arc::new(prepared::InvocationScope {
+                    parameter_slots,
                     scoped_parameters,
                     scoped_arguments,
                     input_frames,

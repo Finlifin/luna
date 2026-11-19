@@ -5956,16 +5956,11 @@ impl Checker<'_, '_> {
                     let ready = match &annotation {
                         Annotation::Pending(computation) => {
                             !self.open_computation_uses_clauses(computation, &all, expr.span)?
-                                && computation.inputs.iter().all(|(binding, _, value)| {
-                                    value.is_some()
-                                        || sig
-                                            .params
-                                            .iter()
-                                            .position(|p| local(p.hir_id) == *binding)
-                                            .is_some_and(|index| {
-                                                checked.symbols[index].is_some()
-                                                    || checked.live[index].is_some()
-                                            })
+                                && computation.pending_parameters().all(|slot| {
+                                    slot.is_some_and(|index| {
+                                        checked.symbols[index].is_some()
+                                            || checked.live[index].is_some()
+                                    })
                                 })
                         }
                         Annotation::InputType { slot } => checked.symbols[*slot].is_some(),

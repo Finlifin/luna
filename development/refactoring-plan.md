@@ -190,6 +190,15 @@ dispatch 从这样的入口遍历调用体及 sysroot 的声明，超过其默�
 required invocation 的结果和原域模板建立一次同时替换，用它检查包内每个字段。
 这条返回路径不再按参数身份回查全局声明表。
 
+已检查的开放函数注解还保留从捕获位置到源码形参槽位的映射。比如
+`echo(comptime unused, comptime flag, value: defer Choose(flag))` 的注解
+只读取 `flag`。即使调用者在 `unused` 处传入函数，检查器也能复用定义端准备好的
+计算。目标域本身引用的形参同样属于捕获。每次调用从自己的槽位取值，按实际展开的
+项给替换计费。选中的实参携带活动闭包或函数声明时，要在调用者可见的声明环境中
+重新准备；新生成的定义改变了身份分配游标时仍沿用重新准备路径。
+[捕获映射](../compiler/elaboration/src/program/required/capture.rs) ·
+[注解调用](../compiler/elaboration/src/program/open_functions/annotations.rs)
+
 例如声明含有 `where T, field: T` 时，表达式 `bool` 自身的类型已经确定；
 它作为 `field` 的身份还需经过声明域检查。若产生 `T` 的调用返回 `Type`，
 `field` 可以接收这个类型值；若返回 `bool`，这里应接收布尔值。准备期间将
@@ -222,7 +231,16 @@ let-pattern 把新绑定交给父作用域。字节码用自己的寄存器作�
   普通实参 `9` 的检查都要接收同一次执行的结果。提前发布带自由形参的签名会
   让普通调用检查器把声明端的绑定当成调用者已有的证据。
 
-当前输入帧能处理的等待位置已有受检 NIR。真实 sysroot 的入口在获得 Package
+当前输入帧能处理的等待位置已有受检 NIR。具体断点在声明输入准备的完成方式。
+`CallableCompletion` 选择 `InputChecking::Typed`，即使元素域待定，
+列表文字也必须立即产生一个带类型的表达式。`PreparedDeclarationInputs::into_typed`
+据此生成有序的 let 和声明槽位上的读取。NF 与名义类型的输入计划已经能携带
+待域的文字、聚合和块。普通 callable 若沿用此计划，还需要由它的消费者接管
+实例形成和后续实参的检查。单独放宽列表文字检查会丢失这个消费者。
+[callable 完成点](../compiler/elaboration/src/program/dynamic_instances.rs) ·
+[声明输入计划](../compiler/comptime_compiler/src/declaration_inputs.rs)
+
+真实 sysroot 的入口在获得 Package
 后也可单独创建解释器；一个只存在于先前 Checker 中的 HIR 借用无法在这个入口
 恢复。需要原 HIR 的检查应留在与声明世界匹配的源码服务中，由会话关联请求、
 世界和返回位置；已独立检查、仅需兑现域的操作则可随代码交付。两者共用原

@@ -539,3 +539,19 @@ fn member_alias_keeps_a_domain_capture_while_omitting_an_unrelated_parent_slot()
         &["check", "packet"],
     );
 }
+
+#[test]
+fn open_annotations_project_their_captures_across_calls_with_unrelated_code() {
+    let source = r#"
+        comptime fn Unused() -> Type { assumes false; bool }
+        comptime fn Choose(flag: bool) -> Type { if flag { bool } else { u8 } }
+        fn echo(comptime unused: comptime fn() -> Type, comptime flag: bool,
+                value: defer Choose(flag)) -> defer Choose(flag) { value }
+        fn run() -> bool {
+            echo(Unused, true, true) and echo(Unused, false, 255) == 255
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let failure = sysroot::compile(&source.replace("false, 255", "false, true")).unwrap_err();
+    assert!(failure.contains("type mismatch"), "{failure}");
+}

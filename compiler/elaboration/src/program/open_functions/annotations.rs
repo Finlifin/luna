@@ -326,21 +326,27 @@ impl Checker<'_, '_> {
         live: &[Option<comptime_interpretor::Value>],
         span: Span,
     ) -> Result<CompletedType, Error> {
-        // A definition-side snapshot cannot contain a callable declaration
-        // supplied only at this call site. Rebuild its dependency closure with
-        // the completed inputs, just as for an active closure environment.
-        let callable_input = annotation.awaits_inputs()
-            && !required::Discovery::Declarations
-                .frozen_references(symbols.iter().flatten(), &mut self.required_steps, span)?
-                .is_empty();
-        // A generated Type supplied by this caller may postdate the frozen
-        // declaration snapshot. Reprepare completed source with these inputs;
-        // never graft current inference state into a saved computation.
-        let late_definitions = matches!(annotation, Annotation::Pending(computation)
-            if computation.definition_identity_cursor() != self.definition_identities.next());
-        if !annotation.awaits_inputs()
-            || (live.iter().all(Option::is_none) && !callable_input && !late_definitions)
-        {
+        // A checked computation already selected its captures, including inputs
+        // referenced only in another capture's domain. Source-only annotations
+        // still require the caller environment until their source is checked.
+        let needs_call_world = match annotation {
+            Annotation::Known(_) | Annotation::Description(_) => false,
+            Annotation::Pending(prepared) => {
+                prepared.definition_identity_cursor() != self.definition_identities.next()
+                    || prepared.needs_call_world(symbols, live, &mut self.required_steps, span)?
+            }
+            Annotation::InputType { .. } | Annotation::Suspended { .. } => {
+                live.iter().any(Option::is_some)
+                    || !required::Discovery::Declarations
+                        .frozen_references(
+                            symbols.iter().flatten(),
+                            &mut self.required_steps,
+                            span,
+                        )?
+                        .is_empty()
+            }
+        };
+        if !needs_call_world {
             return self
                 .instantiate_open_annotation_in_scope(annotation, sig, symbols, parameters, span);
         }
@@ -394,9 +400,10 @@ impl Checker<'_, '_> {
         let CompletedType::Identity(ty) = data else {
             return Ok(data);
         };
-        let ty = ty
-            .substitute_partial(symbols)
-            .map_err(|failure| error(span, failure.to_string()))?;
+        let ty = nominal_fields::metered(&mut self.required_steps, |fuel| {
+            ty.substitute_partial_bounded(symbols, fuel)
+        })
+        .map_err(|failure| error(span, failure.to_string()))?;
         self.callable_input_view(&ty, span)
             .map(CompletedType::Identity)
     }
@@ -467,33 +474,8 @@ impl Checker<'_, '_> {
                 CompletedType::Identity(ty.clone())
             }
             Annotation::Pending(computation) => {
-                let mut values = Vec::new();
-                for (binding, _, value) in &computation.inputs {
-                    if value.is_some() {
-                        continue;
-                    }
-                    let slot = sig
-                        .params
-                        .iter()
-                        .position(|parameter| local(parameter.hir_id) == *binding)
-                        .ok_or_else(|| {
-                            error(span, "deferred annotation has an unknown source input")
-                        })?;
-                    let value = symbols.get(slot).and_then(Option::as_ref).ok_or_else(|| {
-                        error(
-                            span,
-                            "deferred annotation needs a completed comptime argument",
-                        )
-                    })?;
-                    values.push((*binding, value.clone()));
-                }
-                let mut invocation = computation.fork();
-                for (_, ty, _) in &mut invocation.inputs {
-                    *ty = ty
-                        .substitute_partial(symbols)
-                        .map_err(|failure| error(span, failure.to_string()))?;
-                }
-                invocation.bind_inputs(values, span)?;
+                let invocation =
+                    computation.for_annotation_call(symbols, &mut self.required_steps, span)?;
                 let owner = sig
                     .params
                     .first()
