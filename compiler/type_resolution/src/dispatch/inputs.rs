@@ -14,7 +14,8 @@ impl DeclarationWorld<'_> {
         budget.steps = budget.steps.checked_sub(1).ok_or(AdmissionError::Budget)?;
         let contract = self
             .scope
-            .package
+            .source
+            .package()
             .traits
             .iter()
             .find(|contract| contract.declaration == declaration)

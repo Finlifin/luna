@@ -6,21 +6,37 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Observe code, formation contracts and clause domains. A rigid owned by a
 /// callable is supplied on entry to that declaration. Remove its telescope
 /// locally so the same identity can still be a free input in another carrier.
-pub fn retained_callable_inputs(
-    functions: &[n::Function],
-    identities: &[n::RuntimeFunctionIdentity],
+pub fn retained_program_inputs(
+    package: &n::Package,
+    programs: &crate::associated_initializers::MemberPrograms,
     domains: &BTreeMap<DeclarationId, Term>,
     steps: &mut u64,
 ) -> Result<BTreeSet<DeclarationId>, CopyBudgetExhausted> {
     let mut free = BTreeSet::new();
-    for (node, binders) in functions
+    // A member template may use an outer declaration input even when its
+    // helpers do not. Only its own implementation telescope is supplied locally.
+    *steps = steps
+        .checked_sub(package.implementations.len() as u64)
+        .ok_or(CopyBudgetExhausted::Steps)?;
+    let initializers = package.implementations.iter().flat_map(|row| {
+        crate::associated_initializers::programs_for(row, Some(programs)).map(|(_, template)| {
+            (
+                Node::Expr(template.expression()),
+                row.type_parameters.as_slice(),
+            )
+        })
+    });
+    for (node, binders) in package
+        .functions
         .iter()
         .map(|f| (Node::Function(f), f.type_parameters.as_slice()))
         .chain(
-            identities
+            package
+                .runtime_function_identities
                 .iter()
                 .map(|f| (Node::Formation(f.into()), f.type_parameters.as_slice())),
         )
+        .chain(initializers)
     {
         *steps = steps
             .checked_sub(binders.len() as u64)

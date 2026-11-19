@@ -23,17 +23,30 @@ pub struct DeclarationWorld<'a> {
 /// retain an exclusive borrow of the method normalization cache.
 #[derive(Clone)]
 pub struct DeclarationScope<'a> {
-    package: &'a n::Package,
+    source: DeclarationSource<'a>,
     metadata: Arc<catalog::DeclarationMetadata>,
     context: Context,
     assumptions: Arc<[n::TraitRequirement]>,
 }
-impl DeclarationScope<'_> {
+impl<'a> DeclarationScope<'a> {
+    pub(crate) fn member_program(
+        &self,
+        owner: Id,
+        member: Id,
+    ) -> Option<&'a nir::associated_initializers::AssociatedInitializer> {
+        match self.source {
+            DeclarationSource::Borrowed(_) => None,
+            DeclarationSource::Snapshot(snapshot) => {
+                snapshot.member_programs().get(&owner)?.get(&member)
+            }
+        }
+    }
+
     /// A query view of this exact source, declaration index and premise scope.
     /// It carries no executable contracts or persistent proof authority.
     pub fn capabilities(&self) -> crate::capabilities::World<'_> {
         self.metadata
-            .capabilities(self.package, &self.context, &self.assumptions)
+            .capabilities(self.source.package(), &self.context, &self.assumptions)
     }
 }
 impl<'a> DeclarationWorld<'a> {
@@ -63,7 +76,6 @@ impl<'a> DeclarationWorld<'a> {
         budget: &mut Budget,
         context: Option<(&Context, &[n::TraitRequirement])>,
     ) -> Result<Self, AdmissionError> {
-        let package = source.package();
         construction::requirements(
             context.map_or(&[], |(_, assumptions)| assumptions),
             &mut budget.steps,
@@ -77,7 +89,7 @@ impl<'a> DeclarationWorld<'a> {
         Ok(Self {
             normalized_types: HashMap::new(),
             scope: DeclarationScope {
-                package,
+                source,
                 metadata,
                 context,
                 assumptions,
@@ -88,7 +100,7 @@ impl<'a> DeclarationWorld<'a> {
     pub fn function_declaration(&self, declaration: Id) -> Option<&'a n::Function> {
         self.scope
             .metadata
-            .function(self.scope.package, declaration)
+            .function(self.scope.source.package(), declaration)
     }
     pub fn runtime_function_identity(
         &self,
@@ -98,7 +110,7 @@ impl<'a> DeclarationWorld<'a> {
             .metadata
             .runtime_callables
             .get(&declaration)
-            .map(|slot| &self.scope.package.runtime_function_identities[*slot])
+            .map(|slot| &self.scope.source.package().runtime_function_identities[*slot])
     }
     pub fn function_formation(
         &self,
@@ -117,7 +129,7 @@ impl<'a> DeclarationWorld<'a> {
             .metadata
             .normal_heads
             .get(&declaration)
-            .map(|slot| &self.scope.package.normal_forms[*slot])
+            .map(|slot| &self.scope.source.package().normal_forms[*slot])
     }
 
     pub fn scope(&self) -> &DeclarationScope<'a> {
@@ -210,11 +222,12 @@ impl<'a> DeclarationWorld<'a> {
             } => self.callable_signature(declaration, arguments, frames, fuel),
             nir::CallableValueRef::Method(method) => {
                 *fuel = fuel
-                    .checked_sub(self.scope.package.traits.len().saturating_add(1))
+                    .checked_sub(self.scope.source.package().traits.len().saturating_add(1))
                     .ok_or(AdmissionError::Budget)?;
                 let Some(interface) = self
                     .scope
-                    .package
+                    .source
+                    .package()
                     .traits
                     .iter()
                     .find(|t| t.declaration == method.interface.declaration)
@@ -315,7 +328,12 @@ impl<'a> DeclarationWorld<'a> {
                         return Ok(fields.to_vec());
                     }
                 }
-                nir::normal_forms::query_nominal_value_fields(self.scope.package, ty, variant, fuel)
+                nir::normal_forms::query_nominal_value_fields(
+                    self.scope.source.package(),
+                    ty,
+                    variant,
+                    fuel,
+                )
             },
             declared: &mut |_, _, _| Ok(false),
             collection: &mut |domain, fuel| {
@@ -333,7 +351,7 @@ impl<'a> DeclarationWorld<'a> {
                 self.callable_value_signature(value, frames, fuel)
                     .map(|signature| signature.map(std::borrow::Cow::Owned))
             },
-            target: self.scope.package.target,
+            target: self.scope.source.package().target,
         })
     }
 
@@ -430,7 +448,8 @@ impl DeclarationWorld<'_> {
     ) -> Result<MethodInputs<'_>, AdmissionError> {
         let contract = self
             .scope
-            .package
+            .source
+            .package()
             .traits
             .iter()
             .find(|t| t.declaration == instance.interface)
@@ -474,7 +493,8 @@ impl DeclarationWorld<'_> {
             .collect();
         let implementation = self
             .scope
-            .package
+            .source
+            .package()
             .implementations
             .iter()
             .find(|i| i.declaration == instance.implementation)

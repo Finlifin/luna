@@ -10,6 +10,7 @@ pub struct DeclarationSnapshot(Arc<SnapshotData>);
 
 struct SnapshotData {
     package: Arc<n::Package>,
+    programs: Arc<nir::associated_initializers::MemberPrograms>,
     theory: OnceLock<DeclarationTheory>,
     metadata: OnceLock<Arc<DeclarationMetadata>>,
 }
@@ -65,11 +66,62 @@ impl std::fmt::Display for ClosedDeclarations {
 
 impl DeclarationSnapshot {
     pub fn new(package: Arc<n::Package>) -> Self {
+        Self::from_parts(package, Default::default())
+    }
+
+    /// Freeze one source, moving executable member templates out of its proof
+    /// rows. The directory and declaration headers cannot come from different
+    /// revisions. Completed associated data stays visible to type projections.
+    pub fn capture_member_programs(
+        mut package: n::Package,
+        fuel: &mut usize,
+    ) -> Result<Self, AdmissionError> {
+        let mut programs = nir::associated_initializers::MemberPrograms::new();
+        construction::spend(fuel, package.implementations.len())?;
+        for row in &mut package.implementations {
+            if row.associated_initializers.is_empty() {
+                continue;
+            }
+            construction::spend(
+                fuel,
+                row.associated_initializers
+                    .len()
+                    .saturating_add(row.associated.len()),
+            )?;
+            let mut members = std::collections::BTreeMap::new();
+            for (member, program) in row.associated_initializers.drain(..) {
+                if members.insert(member, program).is_some() {
+                    return Err("selected implementation has duplicate associated values".into());
+                }
+            }
+            if row
+                .associated
+                .iter()
+                .any(|(member, _)| members.contains_key(member))
+            {
+                return Err("selected implementation has duplicate associated values".into());
+            }
+            if programs.insert(row.declaration, members).is_some() {
+                return Err("duplicate implementation declaration".into());
+            }
+        }
+        Ok(Self::from_parts(Arc::new(package), Arc::new(programs)))
+    }
+
+    fn from_parts(
+        package: Arc<n::Package>,
+        programs: Arc<nir::associated_initializers::MemberPrograms>,
+    ) -> Self {
         Self(Arc::new(SnapshotData {
             package,
+            programs,
             theory: OnceLock::new(),
             metadata: OnceLock::new(),
         }))
+    }
+
+    pub fn member_programs(&self) -> &nir::associated_initializers::MemberPrograms {
+        &self.0.programs
     }
 
     pub fn package(&self) -> &Arc<n::Package> {
@@ -149,6 +201,16 @@ pub enum DeclarationSource<'a> {
     Snapshot(&'a DeclarationSnapshot),
 }
 impl<'a> DeclarationSource<'a> {
+    pub fn phase_inspection(self) -> nir::phases::Inspection<'a> {
+        let inspection = nir::phases::Inspection::new(self.package());
+        match self {
+            Self::Snapshot(snapshot) if !snapshot.member_programs().is_empty() => {
+                inspection.with_member_programs(snapshot.0.programs.clone())
+            }
+            _ => inspection,
+        }
+    }
+
     pub fn package(self) -> &'a n::Package {
         match self {
             Self::Borrowed(package) => package,
@@ -212,8 +274,18 @@ impl<'a> DeclarationSource<'a> {
             Self::Snapshot(snapshot) if snapshot.package().dispatch_instances.is_empty() => {
                 Ok(snapshot.clone())
             }
-            _ => nir::copy_budget::clone_declaration_source(self.package(), fuel)
-                .map(|package| DeclarationSnapshot::new(Arc::new(package))),
+            _ => {
+                let package = Arc::new(nir::copy_budget::clone_declaration_source(
+                    self.package(),
+                    fuel,
+                )?);
+                Ok(match self {
+                    Self::Snapshot(snapshot) => {
+                        DeclarationSnapshot::from_parts(package, snapshot.0.programs.clone())
+                    }
+                    Self::Borrowed(_) => DeclarationSnapshot::new(package),
+                })
+            }
         }
     }
 
@@ -313,7 +385,17 @@ impl DeclarationMetadata {
 
 impl std::fmt::Display for DeclarationSnapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "(declaration-snapshot (source {}))", self.package())
+        write!(f, "(declaration-snapshot (source {})", self.package())?;
+        if !self.0.programs.is_empty() {
+            f.write_str(" (member-programs")?;
+            for (owner, members) in self.0.programs.iter() {
+                for (member, program) in members {
+                    write!(f, " (member {owner} {member} {program})")?;
+                }
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(")")
     }
 }
 

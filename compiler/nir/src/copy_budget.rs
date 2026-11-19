@@ -2,7 +2,7 @@
 use crate::{Term, program as n, program::ExprKind as K};
 mod callable_inputs;
 mod package;
-pub use callable_inputs::retained_callable_inputs;
+pub use callable_inputs::retained_program_inputs;
 pub use package::{
     charge_implementation_metadata, charge_normal_form_payload, charge_representation_metadata,
     charge_trait_metadata, clone_declaration_source,

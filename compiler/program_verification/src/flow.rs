@@ -5697,7 +5697,7 @@ fn validate_machine_owners(
     }
     if !owners.initializers().is_empty() {
         for row in &package.implementations {
-            for (member, initializer) in &row.associated_initializers {
+            for (member, initializer) in owners.programs_for(row) {
                 if owners.initializers().contains(&(row.declaration, *member)) {
                     let mut limits = Limits::default();
                     let body = finite_domains::Initializer::new(

@@ -54,18 +54,56 @@ impl RequiredWorld {
         })
     }
 
-    pub(super) fn with_phase(
-        package: Arc<n::Package>,
+    /// Only publish a callable source after both its declarations and its
+    /// separately stored programs have passed phase and arithmetic inspection.
+    pub(super) fn capture(
+        package: n::Package,
+        steps: &mut u64,
+        span: Span,
+        expansions: &[n::ExpansionSource],
+    ) -> Result<Arc<Self>, Error> {
+        use crate::verification::flow;
+        let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = (|| {
+            let snapshot = DeclarationSnapshot::capture_member_programs(package, &mut fuel)
+                .map_err(|failure| error(span, failure.to_string()))?;
+            let phase = DeclarationSource::Snapshot(&snapshot).phase_inspection()
+                .check_package_with_evidence(&mut fuel)
+                .map_err(|e| flow::Error { source: e.source, reason: flow::Reason::Phase(e.message) })
+                .and_then(|phase| {
+                    flow::validate_machine_operations_checked(&phase)?;
+                    Ok(phase)
+                })
+                .map_err(|mut failure| {
+                    failure.source = failure.source.original(expansions).unwrap_or(failure.source);
+                    let message = match failure.reason {
+                        flow::Reason::Phase("runtime function is unavailable during comptime execution") =>
+                            format!("required comptime evaluation cannot execute a runtime function or normal-form head: {failure}"),
+                        _ => failure.to_string(),
+                    };
+                    error(span, message)
+                })?;
+            Self::with_phase(snapshot.clone(), &phase)
+                .map_err(|failure| error(span, failure.to_string()))
+        })();
+        *steps -= (before - fuel) as u64;
+        result
+    }
+
+    fn with_phase(
+        source: DeclarationSnapshot,
         phase: &nir::phases::PhaseCheckedPackage<'_>,
     ) -> Result<Arc<Self>, comptime_interpretor::Error> {
-        let phase = phase
-            .retain_in(package.clone())
-            .ok_or(comptime_interpretor::Error {
-                kind: comptime_interpretor::ErrorKind::InvalidCallPlan,
-                source: None,
-            })?;
+        let phase =
+            phase
+                .retain_in(source.package().clone())
+                .ok_or(comptime_interpretor::Error {
+                    kind: comptime_interpretor::ErrorKind::InvalidCallPlan,
+                    source: None,
+                })?;
         Ok(Arc::new(Self {
-            source: DeclarationSnapshot::new(package),
+            source,
             phase: Some(phase),
             code: Mutex::new(None),
             free_inputs: OnceLock::new(),
@@ -96,9 +134,9 @@ impl RequiredWorld {
                 &owned
             }
         };
-        let completed = nir::copy_budget::retained_callable_inputs(
-            &package.functions,
-            &package.runtime_function_identities,
+        let completed = nir::copy_budget::retained_program_inputs(
+            package,
+            self.source.member_programs(),
             domains,
             steps,
         )
@@ -125,7 +163,7 @@ impl RequiredWorld {
         }
     }
 
-    fn package(&self) -> &n::Package {
+    pub(super) fn package(&self) -> &n::Package {
         self.source.package()
     }
 
@@ -470,7 +508,12 @@ impl PreparedRequired {
         }
         let value = interpreter.with_code_session(code.session(), |vm| {
             vm.start_prepared_invocation(entry, inputs)?
-                .run_to_completion()
+                .run_with_associated(|request| match source_queries.associated_request(request) {
+                    crate::materialization::AssociatedAnswer::Ready(response) => response,
+                    crate::materialization::AssociatedAnswer::NeedsSource(pending) => {
+                        pending.read_source()
+                    }
+                })
         });
         *steps = interpreter.remaining_steps();
         let value = value.map_err(|failure| {
@@ -1043,7 +1086,8 @@ mod tests {
             .check_package_with_evidence(&mut fuel)
             .unwrap();
         let phase_cost = 100_000 - fuel;
-        prepared.world = RequiredWorld::with_phase(package.clone(), &phase).unwrap();
+        prepared.world =
+            RequiredWorld::with_phase(DeclarationSnapshot::new(package.clone()), &phase).unwrap();
         let outer = prepared.world.code();
         for _ in 0..2 {
             let mut nested = prepared.world.code();

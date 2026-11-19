@@ -426,81 +426,44 @@ LocalId（包括准备语句引入的绑定）。字节码保留这份不可变�
 已访问的依赖不必在每次迭代后重新扫描。队列使用当前 required invocation 的
 准备预算，库中可达声明的个数没有额外的 256 项门槛。
 
-关联值的依赖由接收者、完整接口实例和成员共同确定。例如，`read(comptime T: Type)`
-有约束 `T :- Flag<bool>`，在主体中读取 `T.as(Flag<bool>).enabled`。准备这次调用时
-可以排除 `Flag<u8>` 的初始化器，即使 T 仍是开放输入。反过来，如果 U 开放而
-接收者已知，`Holder<true>.as(Flag<U>).enabled` 可以排除其他接收者。候选行的
-泛型初始化器可能调用辅助函数，这些代码随初始化器进入执行闭包。完整包仍检查每项
-声明。快照保留所有实现关系和已完成的关联数据，类型理论因而仍可取得关联类型等式。
+#### 关联成员的选择、代码与调用
 
-如果两个接收者都实现 `Flag<bool>`，调用 `read(First)` 的准备阶段仍会观察两者。
-已复现的边界是 `Second.enabled` 引用这次调用正在形成的常量，导致伪循环。
-要消除这条依赖，需等 VM 取得具体接收者并选中实现，再向源码取得这一项供应，
-将响应交回原 activation。重跑正在形成的常量会重复其先前执行的操作。
-[源码复现](repros/required-selected-member.fl) 可用真实 sysroot 执行 `luna check`。
-其中 `result()` 应得到 true。若把 `read(First)` 改成 `read(Second)`，
-选中的成员与 `saved` 确实相互依赖，必须在读取时拒绝。
-[关联值检查](../compiler/elaboration/src/program/interfaces/associated.rs) · [执行世界投影](../compiler/elaboration/src/program/required/trait_world.rs)
+以 `read(comptime T: Type)` 读取 `T.as(Flag<bool>).enabled` 为例。运行到读取点时，
+VM 已取得具体接收者。选择服务在原声明世界中检查完整接口实参、阶段、类型和
+capability 前提。所选实现、实现实参、成员和实例化结果域由同一份选择凭据持有。
+服务可以在这时释放可变查询目录；后续读取沿用这份凭据。[成员选择](../compiler/type_resolution/src/associated/values.rs)
 
-关联项现在有两个可观察的步骤。`select_associated_member` 在原声明世界中检查成员域、
-接口成立条件和实现阶段，返回实现身份、成员身份与代入后的结果域。即使被选行尚未
-持有值，也可以取得这个选择结果。随后取供应时才读取该行，检查代入后的表达式。
-Type 投影和普通值读取共用同一选择过程；Type 投影只接受完成的 Type 模板。
+实现行保留已完成的数据。类型投影可以从已完成的 Type 模板取得等式。
+`required` 冻结源码时，把实现行上的初始化程序移动到同一快照持有的目录，
+按实现和成员编号索引。来源同时持有程序引用的辅助函数。快照的声明查询、代码目录
+和阶段证据绑定到具体包实例。另一个包可以具有完全相同的声明编号。
+[源码快照](../compiler/type_resolution/src/dispatch/catalog.rs) · [调用准备](../compiler/elaboration/src/program/required/prepared.rs)
 
-求解器返回的 `AssociatedSelection` 直接交给 materialization 或 VM。`Completed`
-携带可以在空词法环境里还原的值，`Initializer` 携带需执行的 comptime 程序。
-普通函数调用只能走后者。VM 恢复时仍检查这次访问的结果域；初始化器进入循环检测，
-完成值进入数据目录。关联元组的字段布局由接收世界登记的 Tuple 头及其参数的
-List 头共同确认。当前 required 源码准备仍预先取得结构相容的候选供应；
-VM 选中缺失供应后向原源码区域挂起、取回并恢复的接线仍待实现。届时源码请求要带上
-选中实现的声明身份、实现实参和成员身份。选择凭据借用本次调用的世界；在源码区域
-检查出初始化器之后，原请求仍须在自己的结果域中接收它。让源码检查重新发起顶层
-调用会重做已经发生的前缀效果，也会把原来的调用预算和取消边界丢掉。
+当实现行没有值时，`SelectedSourceRequest` 同时持有原 VM 请求和选择凭据。
+它能在原快照中取得模板，按原实现行的 telescope 代入，核对结果域，再把响应交给
+等待中的 activation。挂起期间，预算跟着请求走。初始化器在空局部环境中执行，
+辅助函数通过原 VM 的调用目录进入。源码用例先调用 `before()`，再读取泛型
+`Flag.enabled`；恢复后，`before()` 和初始化器调用的 `test_type(bool)` 各进入一次。
+同步发生的类型观察也从同一个源码目录取程序。原快照仍无供应时，错误保留选中的
+实现、实参、成员、结果域和读取位置。[调用请求](../compiler/materialization/src/source_queries.rs) · [恢复用例](../compiler/luna/tests/trait_query_failures.rs)
 
-这处挂起还涉及两种不同的所有权。选择证据归原来的声明世界；选中项尚缺的定义体
-归正在检查源码的 owner。供应用到其他 comptime 函数时，原 VM 还需要这些声明的
-阶段检查和算术安全证据。仅把选中项的表达式塞回冻结包，会漏掉辅助函数以及
-完成值携带的函数身份。来源检查也可能嵌套发起声明查询，所以在进入来源之前必须
-释放 `SourceInvocationQueries` 对可变查询目录的借用。VM 的线性请求保留接收者、
-接口实参、结果域和剩余额度。定义编号从同一个分配器预留，生成的描述仍由各自的
-调用接收和发布。[源码查询](../compiler/materialization/src/source_queries.rs) · [宿主请求与恢复](../compiler/comptime_interpretor/src/invocation/host.rs)
-[关联成员选择](../compiler/type_resolution/src/associated/values.rs) · [VM 接收](../compiler/comptime_interpretor/src/associated_execution.rs)
+源码发布前，阶段检查在实现自己的参数域内检查模板。程序验证层负责机器整数范围。
+例如，`Holder<N>` 的 `N: u8`，`assoc value: u8 = N + 1;` 在 `N = 255` 时溢出，
+即使没有使用点也会被拒绝。改成 `N + 0` 可以通过，`Holder<255>` 读取到 255。
+移出实现行的程序也须通过同一套检查。VM 接收代入后的程序时还会检查当前源码可见的
+阶段、词法 unsafe 权限和结果域。[算术与阶段检查](../compiler/program_verification/src/flow.rs) · [VM 接收](../compiler/comptime_interpretor/src/associated_execution.rs)
 
-现在 `SourceInvocationQueries::select_associated` 会交付可独立持有的
-`PreparedAssociatedMember`。凭据保留原源码包、实现行位置、词法前提和已完成的
-选择证明。持有它时，同一调用可以解析其他方法；释放查询服务后仍能读取这项供应。
-读取不重做选择。两个包即使复用了相同声明编号，行顺序和成员内容也各自独立。
-[选择与读取](../compiler/type_resolution/src/associated/values.rs) · [调用查询](../compiler/materialization/src/source_queries.rs)
+**仍有一处过早的源码依赖。** 形成 `required` 快照时，检查器依据接收者和接口实参
+排除结构不相容的实现，随后为其余候选收集程序及可调用依赖。若 `First`、`Second`
+都实现 `Flag<bool>`，而 `Second.enabled` 引用正在形成的 `saved = read(First)`，
+收集阶段就会误报循环。把调用改为 `read(Second)` 才存在真正的依赖环。
+[源码复现](repros/required-selected-member.fl) · [依赖收集](../compiler/elaboration/src/program/required/source_closure.rs)
 
-读取缺失时，持有凭据的调用方得到 `NeedsSource` 及原凭据；已经封闭的同步调用
-将其转成带源位置的 `MissingAssociatedSource`，保留实现编号、实现实参、成员和
-实例化结果域。行中同时出现完成值与初始化器是声明错误。耗尽额度是资源错误。
-required 源码检查和类型查询共用 NIR 的成员读取规则。这一步把请求的身份传到了
-VM 边界。接下来需要源码区域持有原请求并交付受检的代码及依赖；目前
-`read(First)` 的准备仍会先遇到 `Second.enabled`。
-
-具体的交接点是 VM 的 `AssociatedHostRequest`。它持有本次执行的预算和响应目的地，
-选中项缺源码时，应与 `PendingAssociatedSource` 一同留在调用方。来源先按
-`(implementation, member)` 检查声明模板；泛型实参和结果域由原选择持有。
-例如初始化器调用 `helper()`，交付内容还须让同一 activation 找到 helper 的签名、
-阶段证据和主体。现有 `Callables` 的位置只对创建它的函数切片有效；
-新包即使复用相同声明编号，也不能拿原 `CodeSession` 的位置来取代码。
-这给后续接线划定了边界：补充代码的可见性与新的类型证明权限要分别管理。
-[宿主请求](../compiler/comptime_interpretor/src/invocation/host.rs) · [函数目录](../compiler/nir/src/callable_source.rs) · [代码会话](../compiler/comptime_interpretor/src/code_session.rs)
-
-泛型关联初始化器本身就是待检查的程序。例如，`Holder<N>` 的 `N: u8`，
-成员声明为 `assoc value: u8 = N + 1;`。即使程序从未读取这个成员，`N = 255`
-也足以使其通用定义缺少机器整数范围证明。包级阶段检查现在记录具体的
-`(实现声明, 接口成员)`，程序验证在该实现的类型参数和约束下检查主体。
-把加数改为零即可通过，并能在 `Holder<255>` 中读到 255。有限整数类型枚举只
-代入声明域为 `Type` 的绑定，余下的值绑定仍归原声明所有。
-
-接收 VM 在将宿主返回的值或初始化器加入调用目录以前，用自己的声明目录检查
-其中的代码及词法 `unsafe` 权限。缺少辅助函数声明、越阶段调用或无权限的
-unsafe 调用都不能留下一个已经接收的条目。这个检查只授予阶段与调用权限；
-机器整数证明由形成初始化器的来源负责。把新代码带入尚在运行的 VM 时，来源还须
-交付它的依赖与程序证明。
-[包级检查](../compiler/nir/src/phases.rs) · [算术证明](../compiler/program_verification/src/flow.rs) · [响应接收](../compiler/comptime_interpretor/src/associated_execution.rs)
+下一步的交接发生在尚在 elaboration 的源码 owner。它需要在收到具体成员请求后形成
+模板，交付新发现的可调用声明、主体及其程序证明。原 activation 的选择、操作前缀、
+局部值和预算继续有效。代码位置属于提供它的不可变源码；执行新辅助函数时，调用帧
+需要保留该位置和它的所有者。通过声明编号在旧函数切片中解释新位置会执行错误的主体。
+[调用目录](../compiler/nir/src/callable_source.rs) · [代码会话](../compiler/comptime_interpretor/src/code_session.rs)
 
 源码检查具体成员读取时，先用接收者和接口实参代入成员声明域。普通数据和函数值
 在 NIR 中保留 `AssociatedValue` 及其成员身份。同一大字符串被四十个函数引用时，

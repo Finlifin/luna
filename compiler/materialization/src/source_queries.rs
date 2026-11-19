@@ -96,13 +96,54 @@ impl<'a> SourceInvocationQueries<'a> {
         remaining: &mut u64,
     ) -> Result<comptime_interpretor::AssociatedSelection, comptime_interpretor::Error> {
         query_budget::invocation(remaining, unlimited_steps(), |budget| {
-            let selection = self.select_associated(access, budget)?;
             associated_selection::finish(
-                selection.read(budget),
+                self.select_associated(access, budget)?
+                    .read_in_source(budget),
                 access.source,
-                associated::PendingAssociatedSource::into_source_demand,
             )
         })
+    }
+
+    fn read_associated(
+        &self,
+        access: &n::Expr,
+        budget: &mut Budget,
+    ) -> Result<
+        associated::AssociatedRead<associated::PendingAssociatedSource<'a>>,
+        comptime_interpretor::Error,
+    > {
+        self.select_associated(access, budget)?
+            .read(budget)
+            .map_err(|failure| invocation_failure(failure, access.source))
+    }
+
+    /// Select in the request's declaration world, then release the query cache.
+    /// A missing source keeps the VM ticket and the original selection together.
+    pub fn associated_request<'vm>(
+        &self,
+        mut request: comptime_interpretor::AssociatedHostRequest<'vm>,
+    ) -> AssociatedAnswer<'vm, 'a> {
+        if !std::ptr::eq(request.source_world(), self.source.package()) {
+            let error = comptime_interpretor::Error {
+                kind: comptime_interpretor::ErrorKind::InvalidCallPlan,
+                source: Some(request.access().source),
+            };
+            return AssociatedAnswer::Ready(request.respond(Err(error)));
+        }
+        let read = request.query(|access, remaining| {
+            query_budget::invocation(remaining, unlimited_steps(), |budget| {
+                self.read_associated(access, budget)
+            })
+        });
+        match read {
+            Ok(associated::AssociatedRead::NeedsSource(selection)) => {
+                AssociatedAnswer::NeedsSource(SelectedSourceRequest { request, selection })
+            }
+            Ok(associated::AssociatedRead::Ready(value)) => {
+                AssociatedAnswer::Ready(request.respond(Ok(value.supply)))
+            }
+            Err(error) => AssociatedAnswer::Ready(request.respond(Err(error))),
+        }
     }
 
     /// Release the mutable method cache before handing the selected declaration
@@ -147,6 +188,45 @@ impl<'a> SourceInvocationQueries<'a> {
             })
         });
         contract_result(result)
+    }
+}
+
+pub enum AssociatedAnswer<'vm, 'source> {
+    Ready(comptime_interpretor::AssociatedHostResponse<'vm>),
+    NeedsSource(SelectedSourceRequest<'vm, 'source>),
+}
+
+pub struct SelectedSourceRequest<'vm, 'source> {
+    request: comptime_interpretor::AssociatedHostRequest<'vm>,
+    selection: associated::PendingAssociatedSource<'source>,
+}
+
+impl<'vm> SelectedSourceRequest<'vm, '_> {
+    pub fn source_slot(&self) -> (Id, Id) {
+        self.selection.source_slot()
+    }
+
+    pub fn remaining_steps_mut(&mut self) -> &mut u64 {
+        self.request.remaining_steps_mut()
+    }
+
+    /// Read only the template captured by the source of the original query.
+    pub fn read_source(self) -> comptime_interpretor::AssociatedHostResponse<'vm> {
+        self.request.resolve(|access, remaining| {
+            query_budget::invocation(remaining, unlimited_steps(), |budget| {
+                associated_selection::finish(self.selection.read_source(budget), access.source)
+            })
+        })
+    }
+}
+
+impl std::fmt::Display for SelectedSourceRequest<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(selected-source-request {} {})",
+            self.request, self.selection
+        )
     }
 }
 

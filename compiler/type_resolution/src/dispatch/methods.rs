@@ -73,14 +73,16 @@ impl DeclarationWorld<'_> {
                 self.select_interface(&interface, &requirement.subject, budget)?;
             let contract = self
                 .scope
-                .package
+                .source
+                .package()
                 .traits
                 .iter()
                 .find(|t| t.declaration == requirement.interface)
                 .ok_or("missing method interface")?;
             let implementation_contract = self
                 .scope
-                .package
+                .source
+                .package()
                 .implementations
                 .iter()
                 .find(|i| i.declaration == implementation)

@@ -1395,34 +1395,16 @@ impl Checker<'_, '_> {
                         .unwrap_or(failure.source);
                     error(expr.span, failure.to_string())
                 })?;
-            // Freeze the source before publishing phase evidence. Arithmetic
-            // safety consumes the same source receipt, and the eventual VM can
-            // reuse that completed traversal without inheriting safety or scope
-            // permissions. Preparation and invocation share one phase allowance.
-            let package = std::sync::Arc::new(package);
-            let mut phase_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-            let before = phase_fuel;
-            let phase =
-                nir::phases::Inspection::new(&package).check_package_with_evidence(&mut phase_fuel);
-            self.required_steps -= (before - phase_fuel) as u64;
-            let phase = phase.map_err(|failure| crate::verification::flow::Error {
-                source: failure.source,
-                reason: crate::verification::flow::Reason::Phase(failure.message),
-            }).and_then(|phase| {
-                crate::verification::flow::validate_machine_operations_checked(&phase)?;
-                Ok(phase)
-            }).map_err(|mut failure| {
-                    failure.source = failure.source.original(&self.expansion_sources).unwrap_or(failure.source);
-                    if matches!(failure.reason, crate::verification::flow::Reason::Phase("runtime function is unavailable during comptime execution")) {
-                        error(expr.span, format!("required comptime evaluation cannot execute a runtime function or normal-form head: {failure}"))
-                    } else { error(expr.span, failure.to_string()) }
-                })?;
-            let world = prepared::RequiredWorld::with_phase(package.clone(), &phase)
-                .map_err(|failure| error(expr.span, failure.to_string()))?;
+            let world = prepared::RequiredWorld::capture(
+                package,
+                &mut self.required_steps,
+                expr.span,
+                &self.expansion_sources,
+            )?;
             let invocation_assumptions =
                 if let Some(implementation) = self.initializer_implementation() {
                     crate::capabilities::capability_sources(
-                        &package.traits,
+                        &world.package().traits,
                         &implementation.capabilities,
                         crate::ptc::Budget::default(),
                     )

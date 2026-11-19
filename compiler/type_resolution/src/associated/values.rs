@@ -260,6 +260,13 @@ impl<'source> crate::dispatch::DeclarationScope<'source> {
 }
 
 impl<'source> PreparedAssociatedMember<'source> {
+    pub fn read_in_source(self, budget: &mut Budget) -> Result<AssociatedRead, QueryError> {
+        match self.read(budget)? {
+            AssociatedRead::Ready(value) => Ok(AssociatedRead::Ready(value)),
+            AssociatedRead::NeedsSource(selection) => selection.read_source(budget),
+        }
+    }
+
     pub fn read(
         self,
         budget: &mut Budget,
@@ -284,6 +291,23 @@ pub struct PendingAssociatedSource<'source>(PreparedAssociatedMember<'source>);
 impl PendingAssociatedSource<'_> {
     pub fn source_slot(&self) -> (nir::DeclarationId, nir::DeclarationId) {
         (self.0.facts.evidence.implementation, self.0.facts.member)
+    }
+
+    /// Read from the original source owner after releasing the selection
+    /// service. No replacement row, world or premises enter this admission.
+    pub fn read_source(self, budget: &mut Budget) -> Result<AssociatedRead, QueryError> {
+        let (owner, member) = self.source_slot();
+        budget.steps = budget.steps.checked_sub(1).ok_or(QueryError::Budget)?;
+        let Some(program) = self.0.scope.member_program(owner, member) else {
+            return Ok(AssociatedRead::NeedsSource(self.into_source_demand()));
+        };
+        let selected = SelectedAssociatedMember {
+            world: &self.0.scope.capabilities(),
+            facts: self.0.facts,
+        };
+        selected
+            .admit(MemberSource::Initializer(program), budget)
+            .map(AssociatedRead::Ready)
     }
 
     pub fn into_source_demand(self) -> AssociatedSourceDemand {

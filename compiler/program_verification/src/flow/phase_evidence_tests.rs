@@ -275,3 +275,54 @@ fn a_default_cannot_use_the_entry_assumption_that_proves_the_body() {
         Reason::MissingMachineProof
     );
 }
+
+#[test]
+fn source_owned_member_programs_keep_their_machine_proofs_in_the_original_world() {
+    use type_resolution::dispatch::DeclarationSnapshot;
+    let id = |local| DeclarationId { package: 1, local };
+    for left in [254, 255] {
+        let body = package(left, false).functions.pop().unwrap().body;
+        let template =
+            nir::associated_initializers::AssociatedInitializer::new(body, &mut 1000).unwrap();
+        let source = Package {
+            implementations: vec![Implementation {
+                declaration: id(1),
+                phases: Default::default(),
+                interface: None,
+                interface_arguments: vec![],
+                subject: Term::Primitive(Primitive::U8),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                associated: vec![],
+                associated_initializers: vec![(id(2), template)],
+                methods: vec![],
+            }],
+            ..Default::default()
+        };
+        let snapshot = DeclarationSnapshot::capture_member_programs(source, &mut 1000).unwrap();
+        let phase = type_resolution::dispatch::DeclarationSource::Snapshot(&snapshot)
+            .phase_inspection()
+            .check_package_with_evidence(&mut 1000)
+            .unwrap();
+        assert!(
+            phase
+                .arithmetic_obligations()
+                .initializers()
+                .contains(&(id(1), id(2)))
+        );
+        let checked = validate_machine_operations_checked(&phase);
+        if left == 254 {
+            checked.unwrap();
+        } else {
+            assert_eq!(checked.unwrap_err().reason, Reason::MissingMachineProof);
+        }
+
+        let bare = nir::phases::Inspection::new(snapshot.package())
+            .check_package_with_evidence(&mut 1000)
+            .unwrap();
+        assert!(bare.arithmetic_obligations().initializers().is_empty());
+        validate_machine_operations_checked(&bare).unwrap();
+    }
+}

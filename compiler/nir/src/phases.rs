@@ -96,12 +96,25 @@ impl Error {
 /// identified by the implementation and the interface member together.
 #[derive(Clone, Debug)]
 pub struct ArithmeticObligations {
+    programs: Option<std::sync::Arc<crate::associated_initializers::MemberPrograms>>,
     domains: std::sync::Arc<BTreeMap<crate::DeclarationId, Term>>,
     functions: BTreeSet<crate::DeclarationId>,
     initializers: BTreeSet<(crate::DeclarationId, crate::DeclarationId)>,
 }
 
 impl ArithmeticObligations {
+    pub fn programs_for<'a>(
+        &'a self,
+        row: &'a crate::program::Implementation,
+    ) -> impl Iterator<
+        Item = (
+            &'a crate::DeclarationId,
+            &'a crate::associated_initializers::AssociatedInitializer,
+        ),
+    > {
+        crate::associated_initializers::programs_for(row, self.programs.as_deref())
+    }
+
     pub fn parameter_domains(&self) -> &BTreeMap<crate::DeclarationId, Term> {
         &self.domains
     }
@@ -148,7 +161,7 @@ fn arithmetic_obligations_with_budgets(
     inspection_fuel: &mut usize,
 ) -> Result<ArithmeticObligations, Error> {
     let declarations = declarations::Declarations::new(package, declaration_fuel)?;
-    PhaseContext::new(package, &declarations).check_package(inspection_fuel)
+    PhaseContext::new(package, &declarations).check_package(inspection_fuel, None)
 }
 
 /// Inspect the dependency package and a lexical region in the same declaration
@@ -186,7 +199,7 @@ pub fn inspect_definition_region_obligations(
     context
         .callables
         .import_declarations(imports, &mut declaration_fuel)?;
-    let owners = context.check_package(&mut inspection_fuel)?;
+    let owners = context.check_package(&mut inspection_fuel, None)?;
     let arithmetic = context.inspect(program, &mut inspection_fuel)?;
     // Check the use in its own phase first. For a legal reference, also
     // inspect everything exported by the supplying declaration.
@@ -229,8 +242,13 @@ impl<'a> PhaseContext<'a> {
         }
     }
 
-    fn check_package(&mut self, fuel: &mut usize) -> Result<ArithmeticObligations, Error> {
+    fn check_package(
+        &mut self,
+        fuel: &mut usize,
+        programs: Option<std::sync::Arc<crate::associated_initializers::MemberPrograms>>,
+    ) -> Result<ArithmeticObligations, Error> {
         let mut machine_owners = ArithmeticObligations {
+            programs: programs.clone(),
             domains: self.declarations.parameter_domains.clone(),
             functions: BTreeSet::new(),
             initializers: BTreeSet::new(),
@@ -289,7 +307,9 @@ impl<'a> PhaseContext<'a> {
                 )
             })?;
         for row in &self.package.implementations {
-            for (member, initializer) in &row.associated_initializers {
+            for (member, initializer) in
+                crate::associated_initializers::programs_for(row, programs.as_deref())
+            {
                 let expr = initializer.expression();
                 if self.inspect_comptime_body(expr, &row.type_parameters, fuel)? {
                     machine_owners

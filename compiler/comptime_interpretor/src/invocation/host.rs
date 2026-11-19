@@ -106,11 +106,16 @@ impl<'world> AssociatedHostRequest<'world> {
         }
     }
 
+    /// Inspect the access and debit this request while retaining the ticket.
+    pub fn query<T>(&mut self, query: impl FnOnce(&Expr, &mut u64) -> T) -> T {
+        query(self.request.access(), &mut self.lease.remaining)
+    }
+
     pub fn resolve(
         mut self,
         resolver: impl FnOnce(&Expr, &mut u64) -> Result<AssociatedSelection, Error>,
     ) -> AssociatedHostResponse<'world> {
-        let selection = resolver(self.request.access(), &mut self.lease.remaining);
+        let selection = self.query(resolver);
         self.respond(selection)
     }
 
@@ -189,13 +194,20 @@ impl<'world> Interpreter<'world> {
 impl<'world> InvocationSession<'_, 'world> {
     /// Complete a fresh invocation using the semantic services of its source
     /// world. Each request owns its allowance until the response is admitted.
-    pub fn run_to_completion(mut self) -> Result<Value, Error> {
+    pub fn run_to_completion(self) -> Result<Value, Error> {
+        self.run_with_associated(AssociatedHostRequest::prepare)
+    }
+
+    pub fn run_with_associated(
+        mut self,
+        mut associated: impl FnMut(AssociatedHostRequest<'world>) -> AssociatedHostResponse<'world>,
+    ) -> Result<Value, Error> {
         loop {
             match self.poll()? {
                 InvocationProgress::Complete(value) => return Ok(value),
                 InvocationProgress::Running => {}
                 InvocationProgress::Associated(request) => self
-                    .resume(request.prepare())
+                    .resume(associated(request))
                     .map_err(|rejected| rejected.error().clone())?,
                 InvocationProgress::Definition(request) => self
                     .resume_definition(request.prepare())

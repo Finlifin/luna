@@ -56,17 +56,25 @@ impl Checker<'_, '_> {
                     methods.push((name.clone(), *body));
                 }
             }
-            let associated_initializers = row
-                .associated_initializers
-                .iter()
-                .filter(|(member, _)| {
-                    retained.contains(&Dependency::ImplementationMember {
-                        implementation: row.declaration,
-                        member: Member::Associated(*member),
-                    })
-                })
-                .cloned()
-                .collect();
+            let mut associated_initializers = Vec::new();
+            for (member, program) in &row.associated_initializers {
+                if retained.contains(&Dependency::ImplementationMember {
+                    implementation: row.declaration,
+                    member: Member::Associated(*member),
+                }) {
+                    nir::copy_budget::charge_expression(
+                        program.expression(),
+                        &mut self.required_steps,
+                    )
+                    .map_err(|_| {
+                        error(
+                            span,
+                            "required associated program snapshot budget exhausted",
+                        )
+                    })?;
+                    associated_initializers.push((*member, program.clone()));
+                }
+            }
             implementations.push(n::Implementation {
                 declaration: row.declaration,
                 interface: row.interface,

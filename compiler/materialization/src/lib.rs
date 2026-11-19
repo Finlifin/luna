@@ -13,7 +13,8 @@ mod publication;
 mod query_budget;
 mod source_queries;
 pub use source_queries::{
-    SourceInvocationQueries, check_world_predicate, resolve_method_for_invocation,
+    AssociatedAnswer, SelectedSourceRequest, SourceInvocationQueries, check_world_predicate,
+    resolve_method_for_invocation,
 };
 mod recursive_factories;
 mod staged;
@@ -454,7 +455,8 @@ impl<'a> InstantiationSession<'a> {
             .checked_sub(1)
             .ok_or("IIR phase evidence access budget exhausted")?;
         if !self.phase_checked {
-            nir::phases::Inspection::new(package)
+            source
+                .phase_inspection()
                 .check_package(&mut construction_budget.steps)
                 .map_err(|e| format!("IIR input phase: {}", e.message))?;
             // This certifies only source phase structure, even if later graph
@@ -2382,14 +2384,18 @@ impl Builder<'_> {
             steps: self.fuel,
             ..self.budget
         };
-        let selected = crate::capabilities::World {
-            index: self.world.index(),
-            implementations: &self.package.implementations,
-            traits: &self.package.traits,
-            assumptions: self.world.assumptions(),
-            context: self.world.context(),
-        }
-        .resolve_associated_value_plan_metered(interface, member, subject, &mut budget);
+        let selected = self
+            .world
+            .scope()
+            .clone()
+            .prepare_associated_member(interface, member, subject, &mut budget)
+            .and_then(|selected| selected.read_in_source(&mut budget))
+            .and_then(|read| match read {
+                associated::AssociatedRead::Ready(value) => Ok(value),
+                associated::AssociatedRead::NeedsSource(_) => {
+                    Err("selected implementation has no associated value".into())
+                }
+            });
         self.fuel = budget.steps;
         selected.map_err(String::from)
     }

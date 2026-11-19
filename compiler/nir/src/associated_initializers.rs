@@ -7,6 +7,30 @@ use crate::{
 };
 use std::fmt;
 
+/// Source-owned programs, indexed by implementation and member. Selecting a
+/// row grants no authority to execute a template from this directory.
+pub type MemberPrograms = std::collections::BTreeMap<
+    crate::DeclarationId,
+    std::collections::BTreeMap<crate::DeclarationId, AssociatedInitializer>,
+>;
+
+/// Iterate executable sources in the implementation's lexical frame. A
+/// captured source moves each template into exactly one of these locations.
+pub fn programs_for<'a>(
+    row: &'a crate::program::Implementation,
+    captured: Option<&'a MemberPrograms>,
+) -> impl Iterator<Item = (&'a crate::DeclarationId, &'a AssociatedInitializer)> {
+    row.associated_initializers
+        .iter()
+        .map(|(id, template)| (id, template))
+        .chain(
+            captured
+                .and_then(|programs| programs.get(&row.declaration))
+                .into_iter()
+                .flatten(),
+        )
+}
+
 /// A concrete selection whose declaration source has yet to supply the member.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssociatedSourceDemand {

@@ -14,6 +14,7 @@ enum Source<'a> {
 /// This does not certify package typing, resource safety or arbitrary bodies.
 #[derive(Clone)]
 pub struct Inspection<'a> {
+    programs: Option<Arc<crate::associated_initializers::MemberPrograms>>,
     source: Source<'a>,
     declarations: Arc<OnceLock<Declarations>>,
 }
@@ -74,9 +75,19 @@ impl std::fmt::Display for PhaseCheckedPackage<'_> {
 impl<'a> Inspection<'a> {
     pub fn new(package: &'a Package) -> Self {
         Self {
+            programs: None,
             source: Source::Borrowed(package),
             declarations: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// The resulting phase receipt owns every captured program it inspected.
+    pub fn with_member_programs(
+        mut self,
+        programs: Arc<crate::associated_initializers::MemberPrograms>,
+    ) -> Self {
+        self.programs = Some(programs);
+        self
     }
 
     fn package(&self) -> &Package {
@@ -90,6 +101,7 @@ impl<'a> Inspection<'a> {
     /// owner. Matching declaration IDs or equal package content is insufficient.
     pub fn retain_in(&self, source: Arc<Package>) -> Option<Inspection<'static>> {
         std::ptr::eq(self.package(), source.as_ref()).then(|| Inspection {
+            programs: self.programs.clone(),
             source: Source::Owned(source),
             declarations: self.declarations.clone(),
         })
@@ -142,7 +154,7 @@ impl<'a> Inspection<'a> {
 
     fn package_obligations(&self, fuel: &mut usize) -> Result<super::ArithmeticObligations, Error> {
         let declarations = self.declarations(super::SourceRange { start: 0, end: 0 }, fuel)?;
-        PhaseContext::new(self.package(), declarations).check_package(fuel)
+        PhaseContext::new(self.package(), declarations).check_package(fuel, self.programs.clone())
     }
 
     /// Publish evidence only after the entire package traversal succeeds.

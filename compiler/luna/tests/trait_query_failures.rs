@@ -1071,3 +1071,137 @@ fn generic_member_initializers_own_their_machine_arithmetic_obligations() {
         Value::UnsignedInteger(255)
     );
 }
+
+#[test]
+fn source_owner_supplies_a_selected_generic_member_to_the_waiting_invocation() {
+    use comptime_interpretor::{ErrorKind, Event, InvocationProgress};
+    use elaboration::materialization::{
+        AssociatedAnswer, DeclarationSnapshot, DeclarationSource, SourceInvocationQueries,
+    };
+    let package = sysroot::compile(
+        "trait Flag { assoc enabled: bool; }
+         comptime fn test_type(comptime T: Type) -> bool { T == bool }
+         impl Flag for T where T { assoc enabled: bool = test_type(T); }
+         comptime fn before() -> bool { true }
+         comptime fn read() -> bool { before() and bool.as(Flag).enabled }
+         fn run() -> bool { bool.as(Flag).enabled }",
+    )
+    .unwrap();
+    let entry = |name: &str| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    let read = entry("read");
+    let before = entry("before");
+    let helper = entry("test_type");
+    let runtime = entry("run");
+    let interface = package
+        .traits
+        .iter()
+        .find(|t| t.name == "Flag")
+        .unwrap()
+        .declaration;
+    let row = package
+        .implementations
+        .iter()
+        .find(|r| r.interface == Some(interface))
+        .unwrap();
+    let slot = (row.declaration, row.associated_initializers[0].0);
+    let snapshot = DeclarationSnapshot::capture_member_programs(package, &mut 1_000_000).unwrap();
+    let package = snapshot.package().as_ref();
+    let context = elaboration::ptc::Context::from_package(package).unwrap();
+    let queries =
+        SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&snapshot), &context, &[]);
+    let no_programs = SourceInvocationQueries::new(package, &context, &[]);
+    let foreign = package.clone();
+    let foreign_queries = SourceInvocationQueries::new(&foreign, &context, &[]);
+    #[derive(Debug, Copy, Clone, PartialEq)]
+    enum Supply {
+        Captured,
+        Missing,
+        Foreign,
+        Exhausted,
+    }
+    for variant in [
+        Supply::Captured,
+        Supply::Missing,
+        Supply::Foreign,
+        Supply::Exhausted,
+    ] {
+        sysroot::with_comptime(package, sysroot::COMPTIME_BUDGET, false, |vm| {
+            let mut session = vm.start_invocation(Value::Function(read), vec![]).unwrap();
+            let request = loop {
+                match session.poll().unwrap() {
+                    InvocationProgress::Associated(request) => break request,
+                    InvocationProgress::Running => {}
+                    _ => panic!("expected the selected member read"),
+                }
+            };
+            let service = match variant {
+                Supply::Foreign => &foreign_queries,
+                Supply::Missing => &no_programs,
+                _ => &queries,
+            };
+            let response = match service.associated_request(request) {
+                AssociatedAnswer::Ready(response) => {
+                    assert_eq!(variant, Supply::Foreign);
+                    response
+                }
+                AssociatedAnswer::NeedsSource(mut pending) => {
+                    assert_eq!(pending.source_slot(), slot);
+                    assert!(matches!(
+                        session.poll().unwrap(),
+                        InvocationProgress::Waiting
+                    ));
+                    if variant == Supply::Exhausted {
+                        *pending.remaining_steps_mut() = 0;
+                    }
+                    pending.read_source()
+                }
+            };
+            session.resume(response).unwrap();
+            let result = session.run_to_completion();
+            match variant {
+                Supply::Captured => assert_eq!(result.unwrap(), Value::Bool(true)),
+                Supply::Missing => assert!(matches!(
+                    result.unwrap_err().kind,
+                    ErrorKind::MissingAssociatedSource(_)
+                )),
+                Supply::Foreign => assert_eq!(result.unwrap_err().kind, ErrorKind::InvalidCallPlan),
+                Supply::Exhausted => {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::StepsExhausted)
+                }
+            }
+            let enters = |id| {
+                vm.events()
+                    .iter()
+                    .filter(|e| matches!(e, Event::EnterFunction(i) if *i == id))
+                    .count()
+            };
+            assert_eq!(enters(before), 1);
+            assert_eq!(enters(helper), usize::from(variant == Supply::Captured));
+        });
+    }
+    let graph = elaboration::materialization::instantiate_in_source(
+        DeclarationSource::Snapshot(&snapshot),
+        &[iir::InstanceKey {
+            declaration: runtime,
+            arguments: Default::default(),
+        }],
+        Default::default(),
+        elaboration::ptc::Budget {
+            steps: 3_000_000,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
