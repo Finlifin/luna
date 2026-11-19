@@ -118,7 +118,7 @@ impl Checker<'_, '_> {
             ));
         }
         let saved_pending = self.pending_type_uses.replace(Vec::new());
-        let result = self.in_default_declaration(owner, |this| {
+        let result = self.in_formal_declaration(owner, |this| {
             this.check_parameter_default(owner, index, span, prepared)
         });
         let uses = std::mem::replace(&mut self.pending_type_uses, saved_pending).unwrap();
@@ -255,7 +255,7 @@ impl Checker<'_, '_> {
         if !self.active_defaults.insert((owner, variant, index)) {
             return Err(error(field.span, "cyclic field default elaboration"));
         }
-        let checked = self.in_default_declaration(owner, |this| {
+        let checked = self.in_formal_declaration(owner, |this| {
             this.context = this.definition_context(owner);
             let id = declaration(this.package, &this.package_identities, owner);
             let domain = match variant {

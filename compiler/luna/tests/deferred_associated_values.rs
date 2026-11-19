@@ -14,6 +14,29 @@ const SOURCE: &str = "typealias Type=.Type'builtin; typealias char=.char'builtin
     comptime fn run()->bool { enabled(bool) and not enabled(char) and enabled(bool) }";
 
 #[test]
+fn a_default_can_read_another_implementation_then_resume_its_own() {
+    let source = r#"
+        struct Slot {}
+        struct Peer {}
+        trait Flag where T {
+            assoc enabled: bool;
+            assoc check: bool = Peer.as(Flag<bool>).enabled and Self.as(Flag<T>).enabled;
+        }
+        impl Flag<bool> for Peer { assoc enabled: bool = true; }
+        impl Flag<bool> for Slot { assoc enabled: bool = false; }
+        impl Flag<Peer> for Slot { assoc enabled: bool = true; }
+        comptime fn run() -> bool {
+            not Slot.as(Flag<bool>).check and Slot.as(Flag<Peer>).check
+        }
+    "#;
+    let package = support::compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
 fn ordinary_type_inputs_select_associated_values_during_invocation() {
     let package = support::compile_with_protocols(SOURCE, &Default::default()).unwrap();
     assert_eq!(

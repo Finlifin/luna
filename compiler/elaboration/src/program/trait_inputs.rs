@@ -269,7 +269,7 @@ impl Checker<'_, '_> {
             .saturating_sub(clauses.len());
         let parameters = self.type_parameters[&owner][inherited..].to_vec();
         let domains = &domains[inherited..];
-        self.in_default_declaration(owner, |this| {
+        self.in_formal_declaration(owner, |this| {
             this.in_required_comptime = true;
             this.context = this.definition_context(owner);
             this.input_facts.supplied = this.input_facts.supplied.child(

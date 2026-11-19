@@ -760,7 +760,7 @@ impl<'h> Checker<'_, 'h> {
         {
             return self.check_normal_defaults(owner);
         }
-        self.in_default_declaration(owner, |this| {
+        self.in_formal_declaration(owner, |this| {
             this.in_required_comptime = true;
             this.context = this.binder_context(owner);
             let offset = this.type_parameters[&owner].len() - clauses.len();

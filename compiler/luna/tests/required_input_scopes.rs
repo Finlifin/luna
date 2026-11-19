@@ -4,6 +4,39 @@
 mod sysroot;
 use comptime_interpretor::{Budget, Interpreter, Value};
 
+#[test]
+fn quoting_a_constant_does_not_supply_a_splice_position_to_its_initializer() {
+    for (declaration, reference) in [
+        ("const VALUE: bool = ~<'(true)>;", "VALUE"),
+        (
+            "struct Holder where T { pub const VALUE: bool = ~<'(true)>; }",
+            "Holder<bool>.VALUE",
+        ),
+    ] {
+        let witness = format!("const CHECK: bool = do {{ const code = '({reference}); true }};");
+        for source in [
+            format!("{declaration} {witness}"),
+            format!("{witness} {declaration}"),
+        ] {
+            let error = sysroot::compile(&source).unwrap_err();
+            assert!(
+                error.contains("code splice requires a runtime position"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_constant_and_its_requester_each_own_their_quote_hole() {
+    let source = r#"
+        const CHECK: bool = do { const code = '(VALUE and ~<'(true)>); true };
+        const VALUE: bool = do { const code = '(~<'(true)>); true };
+        fn run() -> bool { CHECK and VALUE }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
 fn check_required_and_published(source: &str) -> nir::program::Package {
     let package = sysroot::compile(source).unwrap();
     let entry = package

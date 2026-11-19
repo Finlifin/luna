@@ -2460,7 +2460,7 @@ impl Checker<'_, '_> {
                 "normal-form input has no default",
             ));
         };
-        self.in_default_declaration(owner, |this| {
+        self.in_formal_declaration(owner, |this| {
             this.in_required_comptime = true;
             this.context = this.binder_context(owner);
             let parameters = &this.normal_parameters[&owner];

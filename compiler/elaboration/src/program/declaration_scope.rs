@@ -15,16 +15,31 @@ impl Checker<'_, '_> {
         self.with_lexical_scope(owner, None, input_facts::State::default(), |this| {
             let saved_code = std::mem::take(&mut this.in_code_body);
             let saved_holes = std::mem::take(&mut this.quote_holes);
+            let pattern_quote = this.pattern_quote_pending.take();
+            let checking_generator = std::mem::take(&mut this.checking_code_generator);
+            let generator_data = std::mem::take(&mut this.generator_data);
+            let generator_cells = std::mem::take(&mut this.generator_cells);
+            let dependencies = std::mem::take(&mut this.abstract_code_dependencies);
+            let codes = std::mem::take(&mut this.code_values);
+            let patterns = std::mem::take(&mut this.pattern_codes);
             let result = check(this);
+            this.pattern_codes = patterns;
+            this.code_values = codes;
+            this.abstract_code_dependencies = dependencies;
+            this.generator_cells = generator_cells;
+            this.generator_data = generator_data;
+            this.checking_code_generator = checking_generator;
+            this.pattern_quote_pending = pattern_quote;
             this.in_code_body = saved_code;
             this.quote_holes = saved_holes;
             result
         })
     }
 
-    /// A stored default is checked against formal declaration inputs. A
-    /// consumer connects its actual prefix when it uses the checked code.
-    pub(super) fn in_default_declaration<R>(
+    /// Enter a declaration without substitutions from the requesting expression.
+    /// Defaults bind their formal prefix; projected initializers install the
+    /// selected container inputs before checking their source.
+    pub(super) fn in_formal_declaration<R>(
         &mut self,
         owner: OwnerId,
         check: impl FnOnce(&mut Self) -> Result<R, Error>,

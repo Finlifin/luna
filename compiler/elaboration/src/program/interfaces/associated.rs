@@ -21,9 +21,9 @@ impl Checker<'_, '_> {
                 "parameterized associated values require dependent member elaboration not yet implemented",
             ));
         }
-        let saved = self.signature_owner.replace(owner);
-        let result = (|| {
-            let ty = self.type_expr(associated.ty)?;
+        self.in_formal_declaration(owner, |this| {
+            this.context = this.definition_context(owner);
+            let ty = this.type_expr(associated.ty)?;
             let default = if let Some(initializer) = associated.default.filter(|_| evaluate_default)
             {
                 // A definition-side Type value may contain its stable Self or
@@ -33,24 +33,22 @@ impl Checker<'_, '_> {
                     Some(n::Expr {
                         ty: ty.clone(),
                         source: source(initializer.span),
-                        kind: K::TypeValue(self.type_expr(initializer)?),
+                        kind: K::TypeValue(this.type_expr(initializer)?),
                     })
                 } else {
-                    Some(self.constant_value(owner, item.span)?)
+                    Some(this.constant_value(owner, item.span)?)
                 }
             } else {
                 None
             };
             Ok(n::AssociatedContract {
-                phase: self.member_phases.get(&owner).copied().unwrap_or_default(),
-                declaration: declaration(self.package, &self.package_identities, owner),
+                phase: this.member_phases.get(&owner).copied().unwrap_or_default(),
+                declaration: declaration(this.package, &this.package_identities, owner),
                 name: item.ident.name.to_string(),
                 ty,
                 default,
             })
-        })();
-        self.signature_owner = saved;
-        result
+        })
     }
 }
 
@@ -101,16 +99,27 @@ impl Checker<'_, '_> {
         // The declaration is checked separately under its abstract binders.
         // While evaluating a selected initializer, queries use its concrete
         // (or implementation-generic) Self and interface arguments.
+        let mut steps = self.required_steps;
         if let Some((parameters, arguments)) = self.initializer_substitution() {
-            let substitution = self
-                .input_substitution(parameters, arguments, &[])
-                .map_err(|e| error(span, e.to_string()))?;
-            requested = substitution
-                .instantiate_interface_bounded(&requested, &mut 100_000)
-                .map_err(|e| error(span, e.to_string()))?;
-            subject = substitution
-                .instantiate(&subject)
-                .map_err(|e| error(span, e.to_string()))?;
+            let domains = parameters
+                .iter()
+                .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                .collect::<Vec<_>>();
+            let view = nominal_fields::metered(&mut steps, |fuel| {
+                let substitution = nir::DeclarationSubstitution::bounded(
+                    parameters,
+                    &domains,
+                    arguments,
+                    &[],
+                    fuel,
+                )?;
+                Ok((
+                    substitution.instantiate_interface_bounded(&requested, fuel)?,
+                    substitution.instantiate_bounded(&subject, fuel)?,
+                ))
+            });
+            self.required_steps = steps;
+            (requested, subject) = view.map_err(|e| error(span, e.to_string()))?;
         }
         if self.checked_traits.is_empty() && !self.interfaces_ready {
             return self.declaration_associated_projection(subject, requested, name, span);
@@ -152,10 +161,13 @@ impl Checker<'_, '_> {
                 },
             }));
         }
-        if let Some(implementation) =
-            self.initializer_projection_selection(&interface, &subject, member)
+        if let Some(implementation) = self.initializer_implementation()
+            && implementation.subject == subject
+            && implementation.interface == Some(interface.declaration)
+            && implementation.interface_arguments == interface.arguments
         {
-            let mut value = self.selected_associated_value(implementation, member, span)?;
+            let mut value =
+                self.selected_associated_value(implementation.declaration, member, span)?;
             value.source = source(span);
             return Ok(Some(value));
         }
@@ -353,9 +365,7 @@ impl Checker<'_, '_> {
                 "cyclic or excessively deep associated value dependency",
             ));
         }
-        let saved_selection = self
-            .selected_associated_implementation
-            .replace(implementation);
+        let saved_selection = self.selected_associated_initializer.replace(key);
         let mut deferred = None;
         let result = (|| {
             let generic = self
@@ -450,7 +460,7 @@ impl Checker<'_, '_> {
             })
             .map_err(|e| error(span, e.to_string()))
         })();
-        self.selected_associated_implementation = saved_selection;
+        self.selected_associated_initializer = saved_selection;
         self.active_associated_values.remove(&key);
         if let Some(initializer) = deferred {
             self.checked_implementations
@@ -754,7 +764,11 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(span, "associated value has no originating interface member"))?;
         let mut value = self.selected_associated_value(implementation, member, span)?;
         if original != implementation
-            && self.selected_associated_implementation != Some(implementation)
+            && self
+                .signature_owner
+                .and_then(|owner| self.initializer_bindings(owner))
+                .map(|(id, _, _)| id)
+                != Some(implementation)
         {
             let canonical = self
                 .checked_implementations
@@ -1049,29 +1063,26 @@ impl Checker<'_, '_> {
     /// Selection is local to checking an associated initializer, never a method
     /// body reached by comptime dependency discovery.
     fn initializer_selection(&self, member: DeclarationId) -> Option<DeclarationId> {
-        let selected = self.selected_associated_implementation?;
-        let owner = self.signature_owner?;
-        if !matches!(
-            self.package.item(owner).map(|item| &item.kind),
-            Some(ItemKind::Associated(_))
-        ) {
-            return None;
-        }
-        let implementation = self
-            .checked_implementations
-            .iter()
-            .find(|i| i.declaration == selected)?;
+        let implementation = self.initializer_implementation()?;
         let interface = self.checked_traits.by_id(implementation.interface?)?;
         interface
             .associated
             .iter()
             .any(|a| a.declaration == member)
-            .then_some(selected)
+            .then_some(implementation.declaration)
+    }
+
+    pub(in crate::program) fn initializer_bindings(
+        &self,
+        owner: OwnerId,
+    ) -> Option<(DeclarationId, &[DeclarationId], &[Term])> {
+        let key = self.selected_associated_initializer?;
+        let (initializer, parameters, arguments) = &self.associated_initializers[&key];
+        (*initializer == owner).then_some((key.0, parameters, arguments))
     }
 
     pub(in crate::program) fn initializer_implementation(&self) -> Option<&n::Implementation> {
-        self.initializer_substitution()?;
-        let selected = self.selected_associated_implementation?;
+        let (selected, _, _) = self.initializer_bindings(self.signature_owner?)?;
         self.checked_implementations
             .iter()
             .find(|i| i.declaration == selected)
@@ -1080,45 +1091,8 @@ impl Checker<'_, '_> {
     pub(in crate::program) fn initializer_substitution(
         &self,
     ) -> Option<(&[DeclarationId], &[Term])> {
-        let selected = self.selected_associated_implementation?;
-        let owner = self.signature_owner?;
-        let (_, parameters, arguments) = self
-            .associated_initializers
-            .iter()
-            .find(|((implementation, _), (initializer, _, _))| {
-                *implementation == selected && *initializer == owner
-            })?
-            .1;
+        let (_, parameters, arguments) = self.initializer_bindings(self.signature_owner?)?;
         Some((parameters, arguments))
-    }
-
-    fn initializer_projection_selection(
-        &self,
-        interface: &n::InterfaceInstance,
-        subject: &Term,
-        member: DeclarationId,
-    ) -> Option<DeclarationId> {
-        let selected = self.initializer_selection(member)?;
-        let owner = self.signature_owner?;
-        let (_, parameters, arguments) = self
-            .associated_initializers
-            .iter()
-            .find(|((implementation, _), (initializer, _, _))| {
-                *implementation == selected && *initializer == owner
-            })?
-            .1;
-        let implementation = self
-            .checked_implementations
-            .iter()
-            .find(|i| i.declaration == selected)?;
-        let substitution = self.input_substitution(parameters, arguments, &[]).ok()?;
-        let subject = substitution.instantiate(subject).ok()?;
-        let interface = substitution
-            .instantiate_interface_bounded(interface, &mut 100_000)
-            .ok()?;
-        (subject == implementation.subject
-            && Some(interface) == implementation.interface_instance())
-        .then_some(selected)
     }
 
     fn associated_default_template(
@@ -1131,31 +1105,16 @@ impl Checker<'_, '_> {
             unreachable!()
         };
         let initializer = associated.default.unwrap();
-        let saved_owner = self.signature_owner.replace(owner);
-        let saved_context = self.context.clone();
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_checking = std::mem::replace(&mut self.checking_contract, false);
-        let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
-        let saved_numeric = std::mem::replace(&mut self.numeric_defaults, true);
-        let saved_control = std::mem::take(&mut self.control);
-        let saved_captures = std::mem::take(&mut self.captures);
-        self.context = self.definition_context(owner);
-        let result = self.expr(initializer, Some(expected)).and_then(|expr| {
-            let mut fuel = self.required_steps.min(100_000) as usize;
-            let before = fuel;
+        self.in_formal_declaration(owner, |this| {
+            this.in_required_comptime = true;
+            this.context = this.definition_context(owner);
+            let expr = this.expr(initializer, Some(expected))?;
+            let before = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
             let template =
                 nir::associated_initializers::AssociatedInitializer::new(expr, &mut fuel);
-            self.required_steps -= (before - fuel) as u64;
+            this.required_steps -= (before - fuel) as u64;
             template.map_err(|message| error(initializer.span, message))
-        });
-        self.signature_owner = saved_owner;
-        self.context = saved_context;
-        self.locals = saved_locals;
-        self.checking_contract = saved_checking;
-        self.in_required_comptime = saved_mode;
-        self.numeric_defaults = saved_numeric;
-        self.control = saved_control;
-        self.captures = saved_captures;
-        result
+        })
     }
 }

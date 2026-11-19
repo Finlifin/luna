@@ -570,6 +570,17 @@ NIR Function 继续代表已检查产物；不能给 body 塞占位表达式或�
 `fn(bool) -> bool`，其默认 lambda 就按 runtime 检查；回到 `AnswerType` 后继续
 原先的 comptime 计算。[作用域回归](../compiler/luna/tests/required_input_scopes.rs)
 
+常量初始化器也会被提前索取。例如 `'(VALUE)` 可以触发模块常量 `VALUE`
+的首次检查。初始化器在自己的 comptime 环境中执行，外层 quote 的 runtime
+位置与 splice 计数在返回后恢复。因此 `const VALUE: bool = ~<'(true)>;` 在引用
+前后声明都会被拒绝。闭合常量按声明保存已完成的值；`Holder<T>.Payload` 则只带入
+所选容器及其词法父级的参数与操作数绑定，保留依赖这些输入的计算。[初始化器](../compiler/elaboration/src/program/constants/initializers.rs)
+
+关联默认值的求值环境由选中的 impl 和来源成员共同标识。索取另一个成员时保存
+原选择，返回时恢复。检查 `Self.as(Flag<T>).enabled` 时先实例化 subject 与 trait
+实参，再确认二者是否与当前 impl 相符；同一个默认值可服务于同一类型的不同
+`Flag<T>` 实现。[关联值的实现](../compiler/elaboration/src/program/interfaces/associated.rs) · [跨实现投影用例](../compiler/luna/tests/deferred_associated_values.rs)
+
 结构体与枚举命名载荷的字段默认值也可能在 comptime 类型观察中被首次索取。
 例如 `(Actions {})'type` 需要检查字段的初始化来源；字段声明的 runtime 回调仍在它的
 声明环境中检查。字段的 HIR 身份标识这份受检表达式。试探调用保存字段表的持久化根，

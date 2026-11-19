@@ -50,6 +50,13 @@ fn operation(name: &str) -> bool {
 }
 
 impl Checker<'_, '_> {
+    fn binding_annotation(&mut self, owner: OwnerId, annotation: &Expr<'_>) -> Result<Term, Error> {
+        self.in_formal_declaration(owner, |this| {
+            this.context = this.definition_context(owner);
+            this.type_expr(annotation)
+        })
+    }
+
     pub(super) fn builtin_normal_form_constant(
         &mut self,
         owner: OwnerId,
@@ -82,7 +89,7 @@ impl Checker<'_, '_> {
         if canonical != owner {
             let value = self.normal_form_value(initializer, canonical, None)?;
             if !matches!(annotation.kind, H::TyPlaceholder) {
-                let expected = self.type_expr(annotation)?;
+                let expected = self.binding_annotation(owner, annotation)?;
                 self.require_expression(&value.ty, &expected, span)?;
             }
             return Ok(Some(value));
@@ -92,7 +99,7 @@ impl Checker<'_, '_> {
                 return Err(error(span, "cyclic builtin constructor signature"));
             }
             let prepared = (|| {
-                let ty = self.type_expr(annotation)?;
+                let ty = self.binding_annotation(owner, annotation)?;
                 let inputs = function_types::normal_form_inputs(annotation)
                     .ok_or_else(|| error(span, "builtin constructor binding requires an explicit normal-form callable signature"))?;
                 if ty != expected {
@@ -221,7 +228,7 @@ impl Checker<'_, '_> {
                                     "cyclic compiler operation signature",
                                 ));
                             }
-                            let actual = self.type_expr(annotation);
+                            let actual = self.binding_annotation(annotated_owner, annotation);
                             self.active_signatures.remove(&annotated_owner);
                             let actual = actual?;
                             if annotated_owner == owner
