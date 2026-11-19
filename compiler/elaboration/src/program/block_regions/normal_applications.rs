@@ -4,7 +4,7 @@ use super::*;
 use declaration_inputs::{Completion, InputChecking, PreparedDeclarationInputs, preparation};
 
 pub(super) struct Complete {
-    owner: OwnerId,
+    application: normal::Application,
     destination: Destination,
     preserve_effect: Option<bool>,
 }
@@ -26,7 +26,7 @@ impl Completion for Complete {
             p(P::Type)
         };
         checker.check_formation_application(
-            self.owner,
+            self.application.head,
             inputs.observations.into_formation(),
             span,
         )?;
@@ -37,7 +37,11 @@ impl Completion for Complete {
             source: source(span),
             ty,
             kind: K::NormalFormType {
-                head: declaration(checker.package, &checker.package_identities, self.owner),
+                head: declaration(
+                    checker.package,
+                    &checker.package_identities,
+                    self.application.head,
+                ),
                 arguments: inputs.arguments,
                 plan: Some(inputs.plan),
             },
@@ -54,8 +58,8 @@ impl std::fmt::Display for Complete {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(normal-application-completion (owner {}) {} (effect-delivery {}))",
-            self.owner,
+            "(normal-application-completion {} {} (effect-delivery {}))",
+            self.application,
             self.destination,
             match self.preserve_effect {
                 None => "caller",
@@ -71,12 +75,13 @@ pub(super) type Frame<'h> = preparation::Frame<'h, Complete>;
 impl<'h> Frame<'h> {
     pub(super) fn begin_normal_application<'a: 'h, 'arena: 'h>(
         checker: &mut Checker<'a, 'arena>,
-        owner: OwnerId,
+        application: normal::Application,
         inputs: &[Arg<'h>],
         span: Span,
         destination: Destination,
         own_effect_delivery: bool,
     ) -> Result<Self, Error> {
+        let owner = application.head;
         checker.ensure_signature(owner, span)?;
         checker.ensure_contract(owner, span)?;
         let parameters = checker.normal_parameters[&owner]
@@ -98,14 +103,14 @@ impl<'h> Frame<'h> {
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let completion = Complete {
-            owner,
+            application,
             destination,
             preserve_effect: own_effect_delivery
                 .then(|| std::mem::take(&mut checker.preserve_effect_value)),
         };
         preparation::Frame::begin(
             checker,
-            owner,
+            application.interface,
             inputs,
             span,
             parameters,

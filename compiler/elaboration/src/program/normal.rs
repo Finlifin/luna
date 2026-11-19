@@ -9,6 +9,33 @@ pub(super) mod known_scalars;
 pub(super) mod observation;
 mod values;
 
+/// A statically selected NF application may expose a different supply interface
+/// from the declaration whose opaque identity and formation contract it uses.
+#[derive(Clone, Copy)]
+pub(super) struct Application {
+    pub(super) head: OwnerId,
+    pub(super) interface: OwnerId,
+}
+
+impl Application {
+    fn direct(head: OwnerId) -> Self {
+        Self {
+            head,
+            interface: head,
+        }
+    }
+}
+
+impl std::fmt::Display for Application {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(normal-application (head {}) (interface {}))",
+            self.head, self.interface
+        )
+    }
+}
+
 /// Expand syntax before assigning dependent contexts. Evaluating a literal
 /// tuple first would default its numeric fields independently of preceding
 /// Type arguments. Variadic List<Type> tails have a different collection rule.
@@ -453,36 +480,45 @@ impl Checker<'_, '_> {
         signature.map_err(|reason| error(span, reason.to_string()))
     }
 
-    pub(super) fn normal_form_constant_target(
+    pub(super) fn static_normal_application(
         &mut self,
-        head: &Expr<'_>,
-    ) -> Result<Option<OwnerId>, Error> {
-        let H::ResolvedDef { def_id, .. } = head.kind else {
-            return Ok(None);
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<Option<Application>, Error> {
+        let annotation = match self.package.item(owner).map(|item| &item.kind) {
+            Some(ItemKind::Fn(signature, _)) if signature.modifiers.is_normal_form_head => {
+                return Ok(Some(Application::direct(owner)));
+            }
+            Some(ItemKind::Const(annotation, _)) => annotation,
+            _ => return Ok(None),
         };
-        let Some(owner) = self.package.definition_owner(def_id) else {
-            return Ok(None);
-        };
-        if !matches!(
-            self.package.item(owner).map(|item| &item.kind),
-            Some(ItemKind::Const(..))
-        ) {
-            return Ok(None);
-        }
-        let value = self.constant_value(owner, head.span)?;
+        let value = self.constant_value(owner, span)?;
         if !value.ty.is_normal_form_callable() {
             return Ok(None);
         }
         let K::Function(identity) = value.kind else {
             return Err(error(
-                head.span,
+                span,
                 "normal-form constant has no completed declaration identity",
             ));
         };
-        self.source_declarations
+        let implementation = self
+            .source_declarations
             .owner(identity)
-            .map(Some)
-            .ok_or_else(|| error(head.span, "normal-form callable declaration is unavailable"))
+            .ok_or_else(|| error(span, "normal-form callable declaration is unavailable"))?;
+        // A written telescope supplies the public slots even when the
+        // initializer selects another function. Computed callable types still
+        // lack a published supply protocol; their existing declaration view
+        // must be retired together with the corresponding dynamic path.
+        let interface = if function_types::normal_form_inputs(annotation).is_some() {
+            owner
+        } else {
+            implementation
+        };
+        Ok(Some(Application {
+            head: implementation,
+            interface,
+        }))
     }
 
     /// Type positions consume the same checked input plan as value positions.
@@ -491,18 +527,18 @@ impl Checker<'_, '_> {
     pub(super) fn normal_type_annotation(
         &mut self,
         expr: &Expr<'_>,
-        owner: OwnerId,
+        application: Application,
         inputs: &[Arg<'_>],
     ) -> Result<CompletedType, Error> {
         // Input producers belong to comptime here. Runtime Splice must not
         // intercept packet formation while checking a type annotation.
         let checked = self.with_staged_input(true, |this| {
-            this.normal_type_expression(expr, owner, inputs, Some(&p(P::Type)))
+            this.normal_type_expression(expr, application, inputs, Some(&p(P::Type)))
         })?;
         if let Some(ty) = self.checked_normal_input_in(&checked, &BTreeMap::new(), expr.span)?
             && let Term::NormalForm { arguments, .. } = &ty
         {
-            self.check_type_application(owner, arguments, expr.span)?;
+            self.check_type_application(application.head, arguments, expr.span)?;
             return Ok(CompletedType::Identity(ty));
         }
         // The input plan owns its lexical prefix. Its fields may be gradual
@@ -513,11 +549,11 @@ impl Checker<'_, '_> {
     pub(super) fn normal_type_expression(
         &mut self,
         expr: &Expr<'_>,
-        owner: OwnerId,
+        application: Application,
         inputs: &[Arg<'_>],
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
-        self.check_normal_application_region(owner, inputs, expr.span, expected)
+        self.check_normal_application_region(application, inputs, expr.span, expected)
     }
 }
 

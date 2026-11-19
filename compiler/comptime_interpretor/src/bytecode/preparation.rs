@@ -437,14 +437,8 @@ impl<'a> Interpreter<'a> {
         setup: CallSetup,
     ) -> Result<(), Error> {
         let source = instruction.source;
-        let missing = || Error {
-            kind: ErrorKind::MissingBinding,
-            source: Some(source),
-        };
         let Op::BeginCall {
             call,
-            callee_source,
-            normal_form,
             parameter_bindings,
             prepare_defaults,
             ..
@@ -457,28 +451,9 @@ impl<'a> Interpreter<'a> {
             program: interface_program,
             parameters: interface_parameters,
         } = setup;
-        let callee = if normal_form.is_none() {
-            self.resolve_invocation_identity(callee)?
-        } else {
-            callee
-        };
-        let (normal_head, parameters, count) = if let Some((ty, count)) = normal_form {
-            if !self.has_type(&callee, ty) {
-                return Err(self.failure(ErrorKind::Type, Some(*callee_source)));
-            }
-            let Value::Function(head) = &callee else {
-                return Err(self.failure(ErrorKind::Type, Some(*callee_source)));
-            };
-            let metadata = self.normal_forms.get(head).ok_or_else(missing)?;
-            if !parameter_bindings.is_empty() || *count != metadata.parameters.len() {
-                return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-            }
-            (Some(*head), vec![], *count)
-        } else {
-            let parameters = self.call_parameters(&callee, source)?;
-            let count = parameters.len();
-            (None, parameters, count)
-        };
+        let callee = self.resolve_invocation_identity(callee)?;
+        let parameters = self.call_parameters(&callee, source)?;
+        let count = parameters.len();
         let preparation_parameters = interface_parameters.as_ref().unwrap_or(&parameters);
         if !parameter_bindings.is_empty()
             && (*parameter_bindings != *preparation_parameters || parameter_bindings.len() != count)
@@ -490,10 +465,9 @@ impl<'a> Interpreter<'a> {
             *call,
             PendingCall {
                 callee,
-                normal_head,
                 trait_defaults,
                 interface: interface_parameters.map(|parameters| (interface_program, parameters)),
-                arguments: (0..count).map(|_| None).collect(),
+                arguments: vec![None; count],
                 parameter_bindings: if *prepare_defaults {
                     parameter_bindings.clone()
                 } else {

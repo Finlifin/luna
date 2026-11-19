@@ -447,7 +447,7 @@ fn normal_form_dynamic_applications_preserve_selection_order_and_contracts() {
         assert_eq!(success(&output), success(expected), "{entry}");
     }
     let dump = sandbox.run(&["input.fl", "--emit", "nir"]);
-    assert!(success(&dump).contains("(normal-form-apply "));
+    assert!(success(&dump).contains("(apply-normal-form (callee "));
     let dependent = sandbox.run(&["input.fl", "--invoke-comptime", "Dependent"]);
     let direct = sandbox.run(&["input.fl", "--invoke-comptime", "DirectDependent"]);
     assert_eq!(success(&dependent), success(&direct));

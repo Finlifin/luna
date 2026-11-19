@@ -335,29 +335,6 @@ impl Checker<'_, '_> {
                 return Ok(CompletedType::Identity(p(P::BitVec(width))));
             }
         }
-        if let Some(owner) = self.normal_form_constant_target(head)?
-            && !matches!(head.kind, H::ResolvedDef { def_id, .. } if self.package.definition_owner(def_id) == Some(owner))
-        {
-            let definition = self.package.owner_definition(owner).ok_or_else(|| {
-                error(
-                    expr.span,
-                    "normal-form callable has no declaration identity",
-                )
-            })?;
-            let target = Expr {
-                kind: H::ResolvedDef {
-                    name: self.package.item(owner).unwrap().ident.name,
-                    has_clause_param: true,
-                    def_id: definition,
-                },
-                ..head.clone()
-            };
-            let application = Expr {
-                kind: H::NFApplication(&target, args),
-                ..expr.clone()
-            };
-            return self.completed_type(&application);
-        }
         let H::ResolvedDef { def_id, .. } = head.kind else {
             return CompletedType::from_value(self.required_value(expr, P::Type)?, expr.span);
         };
@@ -365,11 +342,8 @@ impl Checker<'_, '_> {
             .package
             .definition_owner(def_id)
             .ok_or_else(|| error(expr.span, "type definition has no HIR owner"))?;
-        if self.normal_parameters.contains_key(&owner)
-            || matches!(&self.package.item(owner).unwrap().kind,
-                    ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)
-        {
-            return self.normal_type_annotation(expr, owner, args);
+        if let Some(application) = self.static_normal_application(owner, head.span)? {
+            return self.normal_type_annotation(expr, application, args);
         }
         if let Some(ItemKind::TypeAlias(target, ..)) =
             self.package.item(owner).map(|item| &item.kind)

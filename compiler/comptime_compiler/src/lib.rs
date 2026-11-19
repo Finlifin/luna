@@ -400,7 +400,6 @@ pub enum Op {
         call: Register,
         callee: Register,
         callee_source: SourceRange,
-        normal_form: Option<(Term, usize)>,
         parameter_bindings: Vec<LocalId>,
         prepare_defaults: bool,
         method: Option<Arc<methods::Method>>,
@@ -1134,7 +1133,6 @@ impl fmt::Display for Program {
                     call,
                     callee,
                     callee_source,
-                    normal_form,
                     parameter_bindings,
                     prepare_defaults,
                     method,
@@ -1150,9 +1148,6 @@ impl fmt::Display for Program {
                     write!(f, ")")?;
                     if let Some(method) = method {
                         write!(f, " (interface-method {method})")?;
-                    }
-                    if let Some((ty, count)) = normal_form {
-                        write!(f, " (normal-form (type {ty}) (inputs {count}))")?;
                     }
                     write!(f, ")")?;
                 }
@@ -1867,7 +1862,10 @@ fn compile_root<'a>(
                         callee,
                         arguments,
                         parameter_bindings,
-                    } if !callee.ty.is_normal_form_callable() || parameter_bindings.is_empty() => {
+                    } => {
+                        if callee.ty.is_normal_form_callable() {
+                            return Err(Error::InvalidPreparation(source));
+                        }
                         *fuel = fuel
                             .checked_sub(arguments.len() + parameter_bindings.len())
                             .ok_or(Error::Budget(source))?;
@@ -1883,11 +1881,7 @@ fn compile_root<'a>(
                         for argument in arguments.iter().rev() {
                             let value = fresh();
                             work.push(Work::Emit(
-                                if callee.ty.is_normal_form_callable() {
-                                    argument.value.source
-                                } else {
-                                    source
-                                },
+                                source,
                                 Op::StoreCallArgument {
                                     call,
                                     parameter: argument.parameter,
@@ -1980,13 +1974,6 @@ fn compile_root<'a>(
                                 call,
                                 callee: target,
                                 callee_source: callee.source,
-                                normal_form: if callee.ty.is_normal_form_callable() {
-                                    nir::type_computations::charge_term(&callee.ty, fuel)
-                                        .map_err(|_| Error::Budget(source))?;
-                                    Some((callee.ty.clone(), arguments.len()))
-                                } else {
-                                    None
-                                },
                                 parameter_bindings: parameter_bindings.clone(),
                                 prepare_defaults: arguments.iter().any(|a| a.is_default),
                                 method: if matches!(callee.kind, K::TraitMethod { .. }) {
@@ -3195,7 +3182,6 @@ fn compile_root<'a>(
                     K::And(..) | K::Or(..) => return Err(Error::Unsupported(source)),
                     // Normal-form calls with parameter bindings still require
                     // a preparation protocol; reference execution rejects them too.
-                    K::Call { .. } => return Err(Error::Unsupported(source)),
                     K::AddressOf(_)
                     | K::ReadPointer(_)
                     | K::WritePointer { .. }

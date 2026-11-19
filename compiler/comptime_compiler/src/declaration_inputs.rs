@@ -104,7 +104,7 @@ impl DeclarationInputPlan {
             nir::free_bindings::input_plan_bindings(expr, fuel).map_err(|error| match error {
                 nir::free_bindings::Error::Budget(_) => Error::Budget(view.source),
                 nir::free_bindings::Error::Depth(_) => Error::Depth(view.source),
-                nir::free_bindings::Error::Invalid(_) => Error::Unsupported(view.source),
+                nir::free_bindings::Error::Invalid(_) => Error::InvalidPreparation(view.source),
             })?;
         *fuel = fuel
             .checked_sub(bindings.locals.len())

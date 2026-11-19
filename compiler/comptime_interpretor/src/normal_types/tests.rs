@@ -1624,7 +1624,7 @@ fn contextual_fragment_does_not_replace_nested_normal_form_identity() {
 
 #[test]
 fn dynamic_normal_calls_compile_and_preserve_order_plan_checks_and_identity() {
-    use nir::program::{ArgumentPassing, CallArgument};
+    use nir::program::NormalFormInputPlan;
     let head = DeclarationId {
         package: 71,
         local: 1,
@@ -1693,74 +1693,116 @@ fn dynamic_normal_calls_compile_and_preserve_order_plan_checks_and_identity() {
             })),
         },
     };
-    for compiled in [false, true] {
-        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-        for case in 0..7 {
-            let mut arguments = vec![
-                CallArgument {
-                    parameter: 0,
-                    passing: ArgumentPassing::Value,
-                    is_default: false,
-                    value: first.clone(),
-                },
-                CallArgument {
-                    parameter: if case == 1 { 0 } else { 1 },
-                    passing: ArgumentPassing::Value,
-                    is_default: case == 3,
-                    value: expr(Primitive::Bool, K::Local(trace)),
-                },
-            ];
-            if case == 2 {
-                arguments.pop();
-            }
-            if case == 5 {
-                arguments[1].value = expr(Primitive::Char, K::Literal(Literal::Char('x')));
-            }
-            let body = expr(
-                Primitive::Type,
-                K::Call {
-                    callee: Box::new(callee.clone()),
-                    arguments,
-                    parameter_bindings: vec![],
-                },
-            );
-            let mut env =
-                Environment::from([(trace, Value::Bool(true)), (factory, Value::Function(head))]);
-            let result = if compiled {
-                let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
-                assert!(code.to_string().contains("(normal-form (type "));
-                vm.execute_code(&code, &mut env)
-            } else {
-                vm.eval(&body, &mut env)
-            };
-            if matches!(case, 0 | 4 | 6) {
-                let Flow::Value(value) = result.unwrap() else {
-                    panic!("expected a Type value")
-                };
-                assert_eq!(
-                    value,
-                    Value::Type(Term::NormalForm {
-                        head,
-                        sort: nir::Sort::Type,
-                        arguments: vec![Term::Bool(false), Term::Bool(true)]
-                    })
-                );
-            } else {
-                assert_eq!(
-                    result.unwrap_err().kind,
-                    if case == 5 {
-                        ErrorKind::Type
-                    } else {
-                        ErrorKind::InvalidCallPlan
-                    }
-                );
-            }
-            assert_eq!(
-                vm.local_value(&env, trace, Some(SOURCE)).unwrap(),
-                Value::Bool(case != 2)
-            );
-            assert_eq!(vm.depth, 0);
+    // Resolve closed primitive equalities in the receiving world. Other
+    // propositions need evidence outside this test package.
+    let solver = |predicate: &nir::program::TypePredicate| match predicate {
+        nir::program::TypePredicate::Equal(Term::Primitive(a), Term::Primitive(b)) if a == b => {
+            ContractOutcome::Satisfied
         }
+        nir::program::TypePredicate::Equal(Term::Primitive(_), Term::Primitive(_)) => {
+            ContractOutcome::Rejected
+        }
+        _ => ContractOutcome::Unknown,
+    };
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_type_solver(&solver);
+        let mut execute = |body: &Expr, env: &mut Environment| {
+            if compiled {
+                let code = Arc::new(vm.compile_body(body)?);
+                vm.execute_code(&code, env)
+            } else {
+                vm.eval(body, env)
+            }
+        };
+        let inputs = vec![
+            DeclarationId {
+                package: 72,
+                local: 0,
+            },
+            DeclarationId {
+                package: 72,
+                local: 1,
+            },
+        ];
+        let arguments = vec![
+            A::Value(first.clone()),
+            A::Value(expr(Primitive::Bool, K::Local(trace))),
+        ];
+        let selected = Arc::new(callee.clone());
+        let application = |arguments, order: Option<Vec<usize>>| {
+            expr(
+                Primitive::Type,
+                K::ApplyNormalForm {
+                    callee: Arc::clone(&selected),
+                    input_ids: inputs.clone(),
+                    arguments,
+                    plan: order.map(|order| NormalFormInputPlan {
+                        order,
+                        bindings: vec![
+                            LocalId {
+                                owner: 72,
+                                index: 0,
+                            },
+                            LocalId {
+                                owner: 72,
+                                index: 1,
+                            },
+                        ],
+                        preparations: vec![],
+                    }),
+                },
+            )
+        };
+        let environment =
+            || Environment::from([(trace, Value::Bool(true)), (factory, Value::Function(head))]);
+
+        let mut wrong_domain = arguments.clone();
+        wrong_domain[1] = A::Value(expr(Primitive::Char, K::Literal(Literal::Char('x'))));
+        let ordinary = expr(
+            Primitive::Type,
+            K::Call {
+                callee: Box::new(callee.clone()),
+                arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        );
+        for (invalid, reason) in [
+            (ordinary, ErrorKind::Type),
+            (
+                application(arguments.clone(), Some(vec![0, 0])),
+                ErrorKind::Type,
+            ),
+            (application(arguments[..1].to_vec(), None), ErrorKind::Type),
+            (
+                application(wrong_domain, None),
+                ErrorKind::TypeContractRejected,
+            ),
+        ] {
+            assert_eq!(
+                execute(&invalid, &mut environment()).unwrap_err().kind,
+                reason,
+                "compiled={compiled} {invalid}"
+            );
+        }
+        for (order, second) in [(None, true), (Some(vec![1, 0]), false)] {
+            let body = application(arguments.clone(), order);
+            let mut env = environment();
+            let Flow::Value(value) = execute(&body, &mut env).unwrap() else {
+                panic!("expected a Type value")
+            };
+            assert_eq!(
+                value,
+                Value::Type(Term::NormalForm {
+                    head,
+                    sort: nir::Sort::Type,
+                    arguments: vec![Term::Bool(false), Term::Bool(second)],
+                })
+            );
+            assert_eq!(env[&trace], Value::Bool(true));
+        }
+        assert_eq!(vm.depth, 0);
     }
 }
 

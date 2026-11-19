@@ -436,7 +436,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
 
     pub(in crate::program) fn check_normal_application_region(
         &mut self,
-        owner: OwnerId,
+        application: normal::Application,
         inputs: &[Arg<'_>],
         span: Span,
         expected: Option<&Term>,
@@ -452,7 +452,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         )?;
         let frame = normal_applications::Frame::begin_normal_application(
             self,
-            owner,
+            application,
             inputs,
             span,
             destination,

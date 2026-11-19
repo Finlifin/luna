@@ -135,11 +135,10 @@ fn invocation_code_distinguishes_normal_form_application() {
         unreachable!()
     };
     callee.ty = Term::NormalFormFunction(Box::new(signature), None);
-    let normal_dump = compile(&body, &mut 1000).unwrap().to_string();
-    assert!(normal_dump.contains("(normal-form (type "));
-    assert!(normal_dump.contains("(inputs 0)"));
-    assert_ne!(dump, normal_dump);
-    assert_eq!(normal_dump, compile(&body, &mut 1000).unwrap().to_string());
+    assert!(matches!(
+        compile(&body, &mut 1000),
+        Err(Error::InvalidPreparation(source)) if source == body.source
+    ));
 }
 
 #[test]
@@ -865,7 +864,7 @@ fn normal_plan_templates_own_inputs_and_capture_only_free_bindings() {
         plan.order = vec![0, 0];
         assert!(matches!(
             compile(&body, &mut 10000),
-            Err(Error::Unsupported(_))
+            Err(Error::InvalidPreparation(source)) if source == body.source
         ));
         code
     };

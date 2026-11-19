@@ -93,24 +93,22 @@ fn normal_form_values_require_matching_metadata_and_comptime_storage() {
         parameters: vec![],
         result: Box::new(Term::Primitive(Primitive::Type)),
     };
+    assert!(nir::phases::validate(&application).is_err());
+    application.functions[0].body.kind = K::ApplyNormalForm {
+        callee: std::sync::Arc::new(package.functions[0].body.clone()),
+        input_ids: vec![],
+        arguments: vec![],
+        plan: None,
+    };
     nir::phases::validate(&application).unwrap();
     assert!(
         application.functions[0]
             .body
             .to_string()
-            .contains("(normal-form-apply ")
+            .contains("(apply-normal-form ")
     );
-    let mut invalid = application.clone();
-    invalid.functions[0].body.ty = Term::Primitive(Primitive::Bool);
-    assert!(nir::phases::validate(&invalid).is_err());
-    let mut invalid = application;
-    if let K::Call {
-        parameter_bindings, ..
-    } = &mut invalid.functions[0].body.kind
-    {
-        parameter_bindings.push(LocalId { owner: 1, index: 0 });
-    }
-    assert!(nir::phases::validate(&invalid).is_err());
+    application.functions[0].body.ty = Term::Primitive(Primitive::Bool);
+    assert!(nir::phases::validate(&application).is_err());
     let mut bad = package.clone();
     bad.normal_forms.clear();
     assert!(nir::phases::validate(&bad).is_err());

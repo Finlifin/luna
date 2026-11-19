@@ -77,9 +77,9 @@ typealias CollectedRight = pure comptime fn<...Right: meta.List<Type>> -> Type;
 但函数返回、类型别名、列表／记录载荷、生成定义或 metadata 传送不携带它，
 就会再次出现“同一个值在不同入口具有不同调用能力”的偏差。
 
-常量标注还暴露了一个方向相反的错误。以下程序中 `Factory` 的调用者应能使用
-`.Public`。当前用它形成 `Selected` 会在输入路由时报未知参数名；把这一处改成
-`.Actual` 却通过检查。
+显式写出接口的常量调用已接通按槽适配。这里 `.Public` 是调用入口，形成的
+不透明类型仍为 `Head` 的应用。表达式和类型标注都接受 `.Public`，都拒绝
+未在该接口声明的 `.Actual`。
 
 ```flurry
 pure comptime fn Head<...Actual: meta.List<Type>> -> Type { bool }
@@ -87,10 +87,12 @@ const Factory: pure comptime fn<...Public: meta.List<Type>> -> Type = Head;
 typealias Selected = Factory<.Public = [u8]>;
 ```
 
-`normal_form_constant_target` 从完成的常量取得 `Head` 的声明身份。这个身份能确定
-构造出的 NF 头，输入路由却也用它读回了实现的槽名。迁移后的常量直调和经过函数
-参数转发的调用都需使用同一份目标接口；两条路径须同时覆盖“接受 Public”和“拒绝
-Actual”。[常量目标解析](../compiler/elaboration/src/program/normal.rs)
+`static_normal_application` 对一次静态调用保留两个声明身份。输入准备器从公开声明
+读取供应协议，从实际头取得有序域与形成约束；类型标注直接消费同一份受检计划。
+将带默认参数的头交给必填位置接口后，调用者须显式供应该槽。实际头的 `requires`
+仍用这些实参检查。该路径涵盖显式写出 NF 函数签名的模块常量。经类型别名、函数
+返回或参数转发的接口还缺稳定表示；仅凭完成的函数值查到实际头，会重新暴露实现名。
+[静态调用选择](../compiler/elaboration/src/program/normal.rs) · [两种位置及双执行器用例](../compiler/luna/tests/declaration_input_plans.rs)
 
 ### 必须随载体迁移的消费者
 
@@ -145,7 +147,9 @@ Actual”。[常量目标解析](../compiler/elaboration/src/program/normal.rs)
 动态位置调用保留为 NIR 的 `apply-normal-form`。callee 在原调用环境中先求值
 一次。其公开位置签名给出本次输入的域和依赖，实际选择的声明给出形成契约
 及最终 NF 头。两种执行器都按照源顺序推进输入计划。字节码先将 callee 存入
-寄存器，再将计划所需的自由绑定交给输入帧。
+寄存器，再将计划所需的自由绑定交给输入帧。普通 `Call` 只处理函数调用；
+阶段检查和执行入口拒绝将 NF 头交给它。普通字节码调用帧因此只保存值实参，
+无需为构造类型保留另一套参数冻结、槽位排序和执行分支。
 
 例如 `factory<...prefix(), 1, 255>` 的固定包可以到执行时才产生 `u8`。
 帧在这个域下检查两个文字并构造收集值。操作数中的提前退出仍回到原调用，

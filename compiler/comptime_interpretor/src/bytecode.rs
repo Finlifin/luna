@@ -159,33 +159,18 @@ enum Waiting {
 
 struct PendingCall {
     callee: Value,
-    normal_head: Option<DeclarationId>,
     trait_defaults: Option<method_catalog::Inputs<Term>>,
     interface: Option<(nir::contracts::ProgramContract, Vec<LocalId>)>,
-    arguments: Vec<Option<PreparedArgument>>,
+    arguments: Vec<Option<Value>>,
     parameter_bindings: Vec<LocalId>,
     defaults: Environment,
     last_default: Option<usize>,
-}
-
-enum PreparedArgument {
-    Value(Value),
-    Normal(nir::described_applications::DataArgument),
 }
 
 struct PendingClosure {
     constructor: Arc<comptime_compiler::closures::Constructor>,
     environment: Environment,
     next: usize,
-}
-
-impl std::fmt::Display for PreparedArgument {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Value(value) => write!(f, "(value {value})"),
-            Self::Normal(term) => write!(f, "(normal-input {term})"),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -328,9 +313,6 @@ impl fmt::Display for Frame {
         write!(f, ") (calls")?;
         for (id, call) in &self.calls {
             write!(f, " ({id} (callee {})", call.callee)?;
-            if let Some(head) = call.normal_head {
-                write!(f, " (normal-head {head})")?;
-            }
             if let Some(inputs) = &call.trait_defaults {
                 write!(f, " {inputs}")?;
             }
@@ -2272,11 +2254,6 @@ impl<'a> Interpreter<'a> {
                         );
                     }
                     let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
-                    if pending.normal_head.is_some()
-                        && (*is_default || *passing != nir::program::ArgumentPassing::Value)
-                    {
-                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-                    }
                     if *parameter >= pending.arguments.len()
                         || pending.arguments[*parameter].is_some()
                     {
@@ -2347,19 +2324,13 @@ impl<'a> Interpreter<'a> {
                     let value = frame.slots[*value].take().ok_or_else(missing)?;
                     let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
                     let slot = pending.arguments.get_mut(*parameter).ok_or_else(missing)?;
-                    if pending.normal_head.is_some() {
-                        *slot = Some(PreparedArgument::Normal(
-                            self.freeze_normal_argument(&value, source)?,
-                        ));
-                        continue;
-                    }
                     let value = self.prepare_argument(*parameter, source, value)?;
                     if !pending.parameter_bindings.is_empty() {
                         pending
                             .defaults
                             .insert(pending.parameter_bindings[*parameter], value.clone());
                     }
-                    *slot = Some(PreparedArgument::Value(value));
+                    *slot = Some(value);
                 }
                 Op::Invoke { call, destination } => {
                     let pending = frame.calls.remove(call).ok_or_else(missing)?;
@@ -2368,29 +2339,6 @@ impl<'a> Interpreter<'a> {
                         .into_iter()
                         .collect::<Option<Vec<_>>>()
                         .ok_or_else(|| self.failure(ErrorKind::Arity, Some(source)))?;
-                    if let Some(head) = pending.normal_head {
-                        let inputs = arguments
-                            .into_iter()
-                            .map(|argument| match argument {
-                                PreparedArgument::Normal(term) => Ok(term),
-                                PreparedArgument::Value(_) => {
-                                    Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)))
-                                }
-                            })
-                            .collect::<Result<Vec<_>, _>>()?;
-                        frame.slots[*destination] =
-                            Some(self.complete_normal_data(head, inputs, source)?);
-                        continue;
-                    }
-                    let arguments = arguments
-                        .into_iter()
-                        .map(|argument| match argument {
-                            PreparedArgument::Value(value) => Ok(value),
-                            PreparedArgument::Normal(_) => {
-                                Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)))
-                            }
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
                     if let Some((program, parameters)) = pending.interface {
                         if !program.is_empty() {
                             let mut interface = Box::new(interface::InterfaceCall::new(

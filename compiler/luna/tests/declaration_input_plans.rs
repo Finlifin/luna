@@ -531,3 +531,53 @@ fn dependent_nominal_domains_receive_collection_and_callable_evidence() {
         &["check", "items", "Domain"],
     );
 }
+
+#[test]
+fn ascribed_normal_form_constants_use_public_slots_and_implementation_contracts() {
+    let declarations = r#"
+        pure comptime fn Head<T, ...Actual: meta.List<T>> -> Type
+        where requires T == bool
+        { T }
+        const Factory: pure comptime fn<U: Type, ...Public: meta.List<U>> -> Type = Head;
+        pure comptime fn Defaulted<.hidden: Type = u8> -> Type { bool }
+        const Fixed: pure comptime fn<Type> -> Type = Defaulted;
+    "#;
+    let source = format!(
+        r#"{declarations}
+        comptime fn select() -> pure comptime fn<V: Type, ...Inner: meta.List<V>> -> Type {{ Head }}
+        const Computed: pure comptime fn<W: Type, ...Fields: meta.List<W>> -> Type = select();
+        typealias Selected = Factory<bool, .Public = [true, false]>;
+        typealias Explicit = Fixed<bool>;
+        comptime fn check() -> bool {{
+            Selected == Head<bool, true, false>
+                and Factory<bool, .Public = []> == Head<bool>
+                and Computed<bool, .Fields = [true, false]> == Selected
+                and Explicit == Defaulted<.hidden = bool>
+                and Fixed<u8> == Defaulted<>
+        }}
+    "#
+    );
+    check_both(&source, &["check"]);
+    for (application, diagnostic) in [
+        (
+            "Factory<bool, .Actual = [true]>",
+            "unknown named normal-form argument",
+        ),
+        ("Factory<bool, .Public = [7]>", "fixed-width integer target"),
+        (
+            "Factory<u8, .Public = [7]>",
+            "type requirement is not satisfied",
+        ),
+        ("Fixed<>", "argument count mismatch"),
+        ("Fixed<.hidden = u8>", "unknown named normal-form argument"),
+    ] {
+        for context in [
+            "typealias Bad = CALL;",
+            "comptime fn Bad() -> Type { CALL }",
+        ] {
+            let invalid = format!("{declarations} {}", context.replace("CALL", application));
+            let failure = sysroot::compile(&invalid).unwrap_err();
+            assert!(failure.contains(diagnostic), "{application}: {failure}");
+        }
+    }
+}

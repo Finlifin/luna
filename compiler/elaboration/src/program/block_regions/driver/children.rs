@@ -62,19 +62,10 @@ pub(super) fn enter<'h, 'a: 'h, 'arena: 'h>(
                 } else {
                     false
                 };
-                let owner = if captured {
-                    None
-                } else if let Some(owner) = checker.normal_form_constant_target(head)? {
-                    Some(owner)
-                } else {
-                    source_owner.filter(|owner| {
-                        matches!(
-                            checker.package.item(*owner).map(|item| &item.kind),
-                            Some(ItemKind::Fn(sig, _)) if sig.modifiers.is_normal_form_head
-                        )
-                    })
-                };
-                if let Some(owner) = owner
+                if !captured
+                    && let Some(owner) = source_owner
+                    && let Some(application) =
+                        checker.static_normal_application(owner, head.span)?
                     && checker.prepare_region_callable_delivery(
                         expr,
                         view.expected,
@@ -84,7 +75,7 @@ pub(super) fn enter<'h, 'a: 'h, 'arena: 'h>(
                     frames.push(RegionFrame::NormalApplication(
                         normal_applications::Frame::begin_normal_application(
                             checker,
-                            owner,
+                            application,
                             inputs,
                             expr.span,
                             destination,

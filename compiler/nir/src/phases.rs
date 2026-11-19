@@ -807,21 +807,9 @@ impl<'a> PhaseContext<'a> {
                             arguments,
                             parameter_bindings,
                         } => {
-                            if callee.ty.is_normal_form_callable()
-                                && (!ct
-                                    || !parameter_bindings.is_empty()
-                                    || !matches!(
-                                        expr.ty,
-                                        Term::Primitive(Primitive::Type | Primitive::Never)
-                                    )
-                                    || arguments.iter().any(|argument| {
-                                        argument.is_default
-                                            || argument.passing
-                                                != crate::program::ArgumentPassing::Value
-                                    }))
-                            {
+                            if callee.ty.is_normal_form_callable() {
                                 return Err(error(
-                                    "invalid normal-form application phase or argument plan",
+                                    "ordinary call cannot invoke a normal-form head",
                                 ));
                             }
                             for argument in arguments {
@@ -1040,6 +1028,12 @@ impl<'a> PhaseContext<'a> {
                                 return Err(error(
                                     "normal-form type construction requires comptime",
                                 ));
+                            }
+                            if !matches!(
+                                expr.ty,
+                                Term::Primitive(Primitive::Type | Primitive::Never)
+                            ) {
+                                return Err(error("normal-form application must produce Type"));
                             }
                             let count = match &expr.kind {
                                 K::NormalFormType { head, .. } => package

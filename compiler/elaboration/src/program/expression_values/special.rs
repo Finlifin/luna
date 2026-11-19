@@ -326,13 +326,13 @@ impl Checker<'_, '_> {
                         .map(Some);
                 }
             }
-            if let Some(owner) = self.normal_form_constant_target(head)? {
-                return self
-                    .normal_type_expression(expr, owner, arguments, expected)
-                    .map(Some);
-            }
             if let H::ResolvedDef { def_id, .. } = head.kind {
                 if let Some(owner) = self.package.definition_owner(def_id) {
+                    if let Some(application) = self.static_normal_application(owner, head.span)? {
+                        return self
+                            .normal_type_expression(expr, application, arguments, expected)
+                            .map(Some);
+                    }
                     if (self.has_optional_type_clauses(owner)
                         || self
                             .trait_domains(owner)?
@@ -449,12 +449,6 @@ impl Checker<'_, '_> {
                     {
                         return self
                             .applied_alias_expression(owner, target, arguments, expr.span, expected)
-                            .map(Some);
-                    }
-                    if matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_normal_form_head)
-                    {
-                        return self
-                            .normal_type_expression(expr, owner, arguments, expected)
                             .map(Some);
                     }
                 }
