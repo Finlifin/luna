@@ -96,11 +96,29 @@ impl<'a> SourceInvocationQueries<'a> {
         remaining: &mut u64,
     ) -> Result<comptime_interpretor::AssociatedSelection, comptime_interpretor::Error> {
         query_budget::invocation(remaining, unlimited_steps(), |budget| {
-            self.query(budget, |world, budget| {
-                associated_selection::select(&world.capabilities(), access, budget)
-            })
+            let selection = self.select_associated(access, budget)?;
+            associated_selection::finish(
+                selection.read(budget),
+                access.source,
+                associated::PendingAssociatedSource::into_source_demand,
+            )
         })
-        .map_err(|failure| invocation_failure(failure, access.source))
+    }
+
+    /// Release the mutable method cache before handing the selected declaration
+    /// to the invoker. The retained scope fixes the source of later admission.
+    pub fn select_associated(
+        &self,
+        access: &n::Expr,
+        budget: &mut Budget,
+    ) -> Result<associated::PreparedAssociatedMember<'a>, comptime_interpretor::Error> {
+        let (interface, subject, member) = associated_selection::operands(access)?;
+        let scope = self
+            .query(budget, |world, _| Ok(world.scope().clone()))
+            .map_err(|failure| invocation_failure(failure, access.source))?;
+        scope
+            .prepare_associated_member(interface, member, subject, budget)
+            .map_err(|failure| invocation_failure(failure, access.source))
     }
 
     pub fn check(

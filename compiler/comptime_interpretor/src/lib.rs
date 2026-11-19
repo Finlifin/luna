@@ -837,6 +837,7 @@ pub enum ErrorKind {
     InvalidPointer,
     InvalidValueReference,
     UnmaterializedDispatch,
+    MissingAssociatedSource(Box<nir::associated_initializers::AssociatedSourceDemand>),
     Arity,
     Type,
     Unsupported,
@@ -866,6 +867,9 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
+            ErrorKind::MissingAssociatedSource(demand) => {
+                write!(f, "missing declaration source: {demand}")?
+            }
             ErrorKind::CyclicAssociatedInitializer(member) => {
                 write!(f, "cyclic associated initializer for member {member}")?
             }

@@ -1641,6 +1641,27 @@ fn associated_queries_complete_dependent_type_value_domains() {
     selected.interface_arguments = vec![rigid(8), index];
     let inputs = vec![ty(P::Type), ty(P::Bool)];
     let root = projection(ty(P::Bool), inputs.clone());
+    let mut missing = selected.clone();
+    missing.associated.clear();
+    with_world(std::slice::from_ref(&interface), &[missing], |world| {
+        let mut budget = Budget::default();
+        let request = nir::program::InterfaceInstance {
+            declaration: id(1),
+            arguments: inputs.clone(),
+        };
+        let read = world
+            .select_associated_member(&request, id(2), &ty(P::Bool), &mut budget)
+            .unwrap()
+            .read(&mut budget)
+            .unwrap();
+        let type_resolution::associated::AssociatedRead::NeedsSource(demand) = read else {
+            panic!("missing parameterized implementation supply")
+        };
+        assert_eq!(demand.implementation, selected.declaration);
+        assert_eq!(demand.member, id(2));
+        assert_eq!(demand.arguments, inputs);
+        assert_eq!(demand.result, ty(P::Type));
+    });
     with_world(&[interface], &[selected], |world| {
         assert!(
             world

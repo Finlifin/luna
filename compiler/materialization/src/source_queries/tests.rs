@@ -763,3 +763,72 @@ fn failed_retained_construction_is_retryable_without_publishing_partial_metadata
     assert_eq!(next.resolve(&method, &mut warm).unwrap().body, id(6));
     assert!(warm > cold && warm < 100_000);
 }
+
+#[test]
+fn selected_read_retains_its_row_and_premises_across_other_queries() {
+    use associated::AssociatedRead;
+    let (package, method, access, _) = mixed_fixture();
+    let mut absent_package = package.clone();
+    absent_package.implementations[0].associated.clear();
+    absent_package.implementations.reverse();
+    let context = Context::from_package(&package).unwrap();
+    let absent_context = Context::from_package(&absent_package).unwrap();
+    let mut budget = Budget::default();
+    let ready = {
+        let queries = SourceInvocationQueries::new(&package, &context, &[]);
+        let selected = queries.select_associated(&access, &mut budget).unwrap();
+        assert_eq!(
+            queries.identity(&method, &mut budget.steps).unwrap().body,
+            id(6)
+        );
+        selected
+    };
+    let absent = SourceInvocationQueries::new(&absent_package, &absent_context, &[]);
+    let missing = absent.select_associated(&access, &mut budget).unwrap();
+    let AssociatedRead::Ready(resolution) = ready.read(&mut budget).unwrap() else {
+        panic!("original implementation contains enabled")
+    };
+    assert!(matches!(
+        resolution.supply.expression().kind,
+        K::Literal(n::Literal::Bool(true))
+    ));
+    let AssociatedRead::NeedsSource(selection) = missing.read(&mut budget).unwrap() else {
+        panic!("changed source has no member supply")
+    };
+    assert_eq!(selection.source_slot(), (id(5), id(50)));
+    let demand = selection.into_source_demand();
+    assert_eq!(demand.implementation, id(5));
+    assert_eq!(demand.member, id(50));
+    assert_eq!(demand.result, access.ty);
+    assert!(demand.arguments.is_empty());
+    let error = absent.associated(&access, &mut 100_000).unwrap_err();
+    assert_eq!(error.source, Some(access.source));
+    assert!(error.to_string().contains(&demand.to_string()));
+    assert_eq!(
+        error.kind,
+        ErrorKind::MissingAssociatedSource(Box::new(demand))
+    );
+}
+
+#[test]
+fn duplicate_supply_and_an_exhausted_read_are_not_missing_source() {
+    let (mut package, _, access, _) = mixed_fixture();
+    let row = &mut package.implementations[0];
+    let (member, value) = row.associated[0].clone();
+    let initializer =
+        nir::associated_initializers::AssociatedInitializer::new(value, &mut 100).unwrap();
+    row.associated_initializers.push((member, initializer));
+    let context = Context::from_package(&package).unwrap();
+    let queries = SourceInvocationQueries::new(&package, &context, &[]);
+    let mut budget = Budget::default();
+    let selected = queries.select_associated(&access, &mut budget).unwrap();
+    budget.steps = 0;
+    assert!(matches!(
+        selected.read(&mut budget),
+        Err(nir::NominalAdmissionError::Budget)
+    ));
+    assert_eq!(
+        queries.associated(&access, &mut 100_000).unwrap_err().kind,
+        ErrorKind::UnmaterializedDispatch
+    );
+}

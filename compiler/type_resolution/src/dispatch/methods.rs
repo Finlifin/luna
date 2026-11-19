@@ -1,9 +1,6 @@
 //! A source member selection closes type obligations, never executable code.
 use super::*;
-use crate::{
-    capabilities::World,
-    ptc::{Outcome, UnknownReason},
-};
+use crate::ptc::{Outcome, UnknownReason};
 use std::collections::{HashSet, VecDeque};
 
 impl DeclarationWorld<'_> {
@@ -67,13 +64,7 @@ impl DeclarationWorld<'_> {
             )) {
                 continue;
             }
-            let world = World {
-                index: &self.metadata.index,
-                implementations: &self.package.implementations,
-                traits: &self.package.traits,
-                assumptions: &self.assumptions,
-                context: &self.context,
-            };
+            let world = self.capabilities();
             if !root && world.given_metered(&requirement, budget)?.is_some() {
                 continue;
             }
@@ -81,12 +72,14 @@ impl DeclarationWorld<'_> {
             let (implementation, arguments) =
                 self.select_interface(&interface, &requirement.subject, budget)?;
             let contract = self
+                .scope
                 .package
                 .traits
                 .iter()
                 .find(|t| t.declaration == requirement.interface)
                 .ok_or("missing method interface")?;
             let implementation_contract = self
+                .scope
                 .package
                 .implementations
                 .iter()

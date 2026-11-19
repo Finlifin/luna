@@ -3,6 +3,7 @@
 use super::*;
 use crate::ptc::{Budget, Formula, Outcome};
 mod associated;
+pub(super) use associated::associated_source;
 mod contracts;
 pub(super) use contracts::CheckedTraits;
 mod declarations;

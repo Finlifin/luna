@@ -466,6 +466,28 @@ VM 选中缺失供应后向原源码区域挂起、取回并恢复的接线仍�
 调用接收和发布。[源码查询](../compiler/materialization/src/source_queries.rs) · [宿主请求与恢复](../compiler/comptime_interpretor/src/invocation/host.rs)
 [关联成员选择](../compiler/type_resolution/src/associated/values.rs) · [VM 接收](../compiler/comptime_interpretor/src/associated_execution.rs)
 
+现在 `SourceInvocationQueries::select_associated` 会交付可独立持有的
+`PreparedAssociatedMember`。凭据保留原源码包、实现行位置、词法前提和已完成的
+选择证明。持有它时，同一调用可以解析其他方法；释放查询服务后仍能读取这项供应。
+读取不重做选择。两个包即使复用了相同声明编号，行顺序和成员内容也各自独立。
+[选择与读取](../compiler/type_resolution/src/associated/values.rs) · [调用查询](../compiler/materialization/src/source_queries.rs)
+
+读取缺失时，持有凭据的调用方得到 `NeedsSource` 及原凭据；已经封闭的同步调用
+将其转成带源位置的 `MissingAssociatedSource`，保留实现编号、实现实参、成员和
+实例化结果域。行中同时出现完成值与初始化器是声明错误。耗尽额度是资源错误。
+required 源码检查和类型查询共用 NIR 的成员读取规则。这一步把请求的身份传到了
+VM 边界。接下来需要源码区域持有原请求并交付受检的代码及依赖；目前
+`read(First)` 的准备仍会先遇到 `Second.enabled`。
+
+具体的交接点是 VM 的 `AssociatedHostRequest`。它持有本次执行的预算和响应目的地，
+选中项缺源码时，应与 `PendingAssociatedSource` 一同留在调用方。来源先按
+`(implementation, member)` 检查声明模板；泛型实参和结果域由原选择持有。
+例如初始化器调用 `helper()`，交付内容还须让同一 activation 找到 helper 的签名、
+阶段证据和主体。现有 `Callables` 的位置只对创建它的函数切片有效；
+新包即使复用相同声明编号，也不能拿原 `CodeSession` 的位置来取代码。
+这给后续接线划定了边界：补充代码的可见性与新的类型证明权限要分别管理。
+[宿主请求](../compiler/comptime_interpretor/src/invocation/host.rs) · [函数目录](../compiler/nir/src/callable_source.rs) · [代码会话](../compiler/comptime_interpretor/src/code_session.rs)
+
 源码检查具体成员读取时，先用接收者和接口实参代入成员声明域。普通数据和函数值
 在 NIR 中保留 `AssociatedValue` 及其成员身份。同一大字符串被四十个函数引用时，
 四十处只保存读取节点。Type 投影用于后续类型形成时仍需取得对应的 Type 身份。

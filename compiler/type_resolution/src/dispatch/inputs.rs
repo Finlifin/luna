@@ -13,6 +13,7 @@ impl DeclarationWorld<'_> {
     ) -> Result<Vec<Term>, AdmissionError> {
         budget.steps = budget.steps.checked_sub(1).ok_or(AdmissionError::Budget)?;
         let contract = self
+            .scope
             .package
             .traits
             .iter()

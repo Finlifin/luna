@@ -1,7 +1,9 @@
 //! Associated member selection and admission of its instantiated supply.
 use super::*;
 use crate::implementation::TypeAssessment;
-use nir::associated_initializers::{AssociatedInitializer, AssociatedSelection};
+use nir::associated_initializers::{
+    AssociatedInitializer, AssociatedSelection, AssociatedSourceDemand, MemberSource,
+};
 use nir::completed_values::CompletedValue;
 
 /// An admitted associated value and the exact selection evidence supporting it.
@@ -28,7 +30,11 @@ impl fmt::Display for AssociatedValueResolution {
 /// payload. The same world owns the assumptions, substitution and layout facts.
 pub struct SelectedAssociatedMember<'a, 'world> {
     world: &'a World<'world>,
-    row: &'world nir::program::Implementation,
+    facts: SelectionFacts,
+}
+
+struct SelectionFacts {
+    row: usize,
     member: nir::DeclarationId,
     member_type: Term,
     evidence: TypeEvidence,
@@ -94,7 +100,10 @@ impl<'world> World<'world> {
             Err(QueryError::Unresolved(_)) => return Ok(None),
             Err(failure) => return Err(failure),
         };
-        let Some(MemberSource::Value(value)) = selected.source(&mut budget.steps)? else {
+        let Some(MemberSource::Value(value)) = selected
+            .row()
+            .associated_source(member, &mut budget.steps)?
+        else {
             return Ok(None);
         };
         selected.complete_value(value, budget).map(Some)
@@ -194,31 +203,124 @@ impl<'world> World<'world> {
         else {
             return Err("associated value selection lacks capability evidence".into());
         };
-        let implementation = self
-            .implementations
-            .iter()
-            .find(|i| i.declaration == selected)
-            .ok_or("associated value selection has no implementation contract")?;
+        let mut rows = self.implementations.iter().enumerate();
+        let (row, implementation) = loop {
+            let (slot, row) = rows
+                .next()
+                .ok_or("associated value selection has no implementation contract")?;
+            budget.steps = budget.steps.checked_sub(1).ok_or(QueryError::Budget)?;
+            if row.declaration == selected {
+                break (slot, row);
+            }
+        };
         if member.phase == nir::program::TraitPhase::Comptime && !implementation.phases.comptime {
             return Err("selected implementation lacks comptime trait phase".into());
         }
         Ok(SelectedAssociatedMember {
             world: self,
-            row: implementation,
-            member: member_id,
-            member_type,
-            evidence,
-            qualification,
+            facts: SelectionFacts {
+                row,
+                member: member_id,
+                member_type,
+                evidence,
+                qualification,
+            },
         })
     }
 }
 
-enum MemberSource<'a> {
-    Value(&'a nir::program::Expr),
-    Initializer(&'a AssociatedInitializer),
+/// Only a successful implementation selection can request source. Absence is
+/// distinct from an invalid payload, an undecided obligation or a budget limit.
+pub enum AssociatedRead<Missing = AssociatedSourceDemand> {
+    Ready(AssociatedValueResolution),
+    NeedsSource(Missing),
+}
+
+/// A linear selection in its original source and premise scope. It can be
+/// held across another declaration query without keeping a query cache borrowed.
+pub struct PreparedAssociatedMember<'source> {
+    scope: crate::dispatch::DeclarationScope<'source>,
+    facts: SelectionFacts,
+}
+
+impl<'source> crate::dispatch::DeclarationScope<'source> {
+    pub fn prepare_associated_member(
+        self,
+        interface: &InterfaceInstance,
+        member: nir::DeclarationId,
+        subject: &Term,
+        budget: &mut Budget,
+    ) -> Result<PreparedAssociatedMember<'source>, QueryError> {
+        let facts = self
+            .capabilities()
+            .select_associated_member(interface, member, subject, budget)?
+            .facts;
+        Ok(PreparedAssociatedMember { scope: self, facts })
+    }
+}
+
+impl<'source> PreparedAssociatedMember<'source> {
+    pub fn read(
+        self,
+        budget: &mut Budget,
+    ) -> Result<AssociatedRead<PendingAssociatedSource<'source>>, QueryError> {
+        SelectedAssociatedMember {
+            world: &self.scope.capabilities(),
+            facts: self.facts,
+        }
+        .read_with(budget, |facts| {
+            PendingAssociatedSource(PreparedAssociatedMember {
+                scope: self.scope.clone(),
+                facts,
+            })
+        })
+    }
+}
+
+/// The checked row lacks this member. Only a source owner can satisfy it;
+/// rereading the immutable row cannot advance the computation.
+pub struct PendingAssociatedSource<'source>(PreparedAssociatedMember<'source>);
+
+impl PendingAssociatedSource<'_> {
+    pub fn source_slot(&self) -> (nir::DeclarationId, nir::DeclarationId) {
+        (self.0.facts.evidence.implementation, self.0.facts.member)
+    }
+
+    pub fn into_source_demand(self) -> AssociatedSourceDemand {
+        self.0.facts.into_source_demand()
+    }
+}
+
+impl fmt::Display for PendingAssociatedSource<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(pending-associated-source {})", self.0)
+    }
+}
+
+impl SelectionFacts {
+    fn into_source_demand(self) -> AssociatedSourceDemand {
+        AssociatedSourceDemand {
+            implementation: self.evidence.implementation,
+            arguments: self.evidence.type_arguments,
+            member: self.member,
+            result: self.member_type,
+        }
+    }
+}
+
+impl fmt::Display for PreparedAssociatedMember<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.facts.fmt(f)
+    }
 }
 
 impl fmt::Display for SelectedAssociatedMember<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.facts.fmt(f)
+    }
+}
+
+impl fmt::Display for SelectionFacts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -232,28 +334,60 @@ impl fmt::Display for SelectedAssociatedMember<'_, '_> {
     }
 }
 
-impl SelectedAssociatedMember<'_, '_> {
+impl<'a, 'world> SelectedAssociatedMember<'a, 'world> {
+    fn row(&self) -> &'world nir::program::Implementation {
+        &self.world.implementations[self.facts.row]
+    }
+
     pub fn implementation(&self) -> nir::DeclarationId {
-        self.evidence.implementation
+        self.facts.evidence.implementation
     }
 
     pub fn implementation_arguments(&self) -> &[Term] {
-        &self.evidence.type_arguments
+        &self.facts.evidence.type_arguments
     }
 
     pub fn member(&self) -> nir::DeclarationId {
-        self.member
+        self.facts.member
     }
 
     pub fn result_domain(&self) -> &Term {
-        &self.member_type
+        &self.facts.member_type
     }
 
     /// Substitute the selected implementation arguments and admit its supply.
     pub fn supply(self, budget: &mut Budget) -> Result<AssociatedValueResolution, QueryError> {
-        let source = self
-            .source(&mut budget.steps)?
-            .ok_or("selected implementation has no associated value")?;
+        match self.read(budget)? {
+            AssociatedRead::Ready(value) => Ok(value),
+            AssociatedRead::NeedsSource(_) => {
+                Err("selected implementation has no associated value".into())
+            }
+        }
+    }
+
+    pub fn read(self, budget: &mut Budget) -> Result<AssociatedRead, QueryError> {
+        self.read_with(budget, SelectionFacts::into_source_demand)
+    }
+
+    fn read_with<M>(
+        self,
+        budget: &mut Budget,
+        missing: impl FnOnce(SelectionFacts) -> M,
+    ) -> Result<AssociatedRead<M>, QueryError> {
+        let Some(source) = self
+            .row()
+            .associated_source(self.facts.member, &mut budget.steps)?
+        else {
+            return Ok(AssociatedRead::NeedsSource(missing(self.facts)));
+        };
+        self.admit(source, budget).map(AssociatedRead::Ready)
+    }
+
+    fn admit(
+        self,
+        source: MemberSource<'_>,
+        budget: &mut Budget,
+    ) -> Result<AssociatedValueResolution, QueryError> {
         let supply = match source {
             MemberSource::Value(value) => {
                 AssociatedSelection::Completed(self.complete_value(value, budget)?)
@@ -268,8 +402,8 @@ impl SelectedAssociatedMember<'_, '_> {
         };
         Ok(AssociatedValueResolution {
             supply,
-            evidence: self.evidence,
-            qualification: self.qualification,
+            evidence: self.facts.evidence,
+            qualification: self.facts.qualification,
         })
     }
 
@@ -315,7 +449,7 @@ impl SelectedAssociatedMember<'_, '_> {
             cache.extend(completed);
             Ok::<_, QueryError>(normalized)
         };
-        let expected = normalize(&self.member_type)?;
+        let expected = normalize(&self.facts.member_type)?;
         let actual = normalize(&value.ty)?;
         if actual.value != expected.value {
             return Err("selected associated value disagrees with its member contract".into());
@@ -324,40 +458,23 @@ impl SelectedAssociatedMember<'_, '_> {
         Ok(value)
     }
 
-    fn source(&self, fuel: &mut usize) -> Result<Option<MemberSource<'_>>, QueryError> {
-        let entries = self
-            .row
-            .associated
-            .iter()
-            .map(|(id, value)| (id, MemberSource::Value(value)))
-            .chain(
-                self.row
-                    .associated_initializers
-                    .iter()
-                    .map(|(id, template)| (id, MemberSource::Initializer(template))),
-            );
-        let mut found = None;
-        for (id, entry) in entries {
-            *fuel = fuel.checked_sub(1).ok_or(QueryError::Budget)?;
-            if *id == self.member && found.replace(entry).is_some() {
-                return Err("selected implementation has duplicate associated values".into());
-            }
-        }
-        Ok(found)
-    }
-
     fn instantiate(
         &self,
         value: &nir::program::Expr,
         fuel: &mut usize,
     ) -> Result<nir::program::Expr, QueryError> {
-        let binders = self.row.parameter_binders().map_err(|e| e.to_string())?;
-        nir::copy_budget::charge_substitution(value, &binders, &self.evidence.type_arguments, fuel)
-            .map_err(|_| QueryError::Budget)?;
+        let binders = self.row().parameter_binders().map_err(|e| e.to_string())?;
+        nir::copy_budget::charge_substitution(
+            value,
+            &binders,
+            &self.facts.evidence.type_arguments,
+            fuel,
+        )
+        .map_err(|_| QueryError::Budget)?;
         let substitution = nir::DeclarationSubstitution::bounded(
-            &self.row.type_parameters,
-            &self.row.parameter_types,
-            &self.evidence.type_arguments,
+            &self.row().type_parameters,
+            &self.row().parameter_types,
+            &self.facts.evidence.type_arguments,
             &[],
             fuel,
         )?;
@@ -371,7 +488,7 @@ impl SelectedAssociatedMember<'_, '_> {
         self,
         fuel: &mut usize,
     ) -> Result<AssociatedTypeResolution, QueryError> {
-        let Some(source) = self.source(fuel)? else {
+        let Some(source) = self.row().associated_source(self.facts.member, fuel)? else {
             return Err("selected implementation has no associated Type value".into());
         };
         let MemberSource::Value(source) = source else {
@@ -391,8 +508,8 @@ impl SelectedAssociatedMember<'_, '_> {
         }
         Ok(AssociatedTypeResolution {
             value,
-            evidence: self.evidence,
-            qualification: self.qualification,
+            evidence: self.facts.evidence,
+            qualification: self.facts.qualification,
         })
     }
 }

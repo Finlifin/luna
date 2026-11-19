@@ -8,7 +8,7 @@ use crate::{
 };
 use nir::value_admission::Error as AdmissionError;
 use nir::{DeclarationId as Id, Term, program as n};
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 mod catalog;
 pub use catalog::{ClosedDeclarations, DeclarationSnapshot, DeclarationSource};
 mod inputs;
@@ -16,10 +16,25 @@ mod methods;
 
 pub struct DeclarationWorld<'a> {
     normalized_types: HashMap<Term, Term>,
+    scope: DeclarationScope<'a>,
+}
+
+/// Immutable declaration and premise authority. Retaining a scope does not
+/// retain an exclusive borrow of the method normalization cache.
+#[derive(Clone)]
+pub struct DeclarationScope<'a> {
     package: &'a n::Package,
-    metadata: std::sync::Arc<catalog::DeclarationMetadata>,
+    metadata: Arc<catalog::DeclarationMetadata>,
     context: Context,
-    assumptions: Vec<n::TraitRequirement>,
+    assumptions: Arc<[n::TraitRequirement]>,
+}
+impl DeclarationScope<'_> {
+    /// A query view of this exact source, declaration index and premise scope.
+    /// It carries no executable contracts or persistent proof authority.
+    pub fn capabilities(&self) -> crate::capabilities::World<'_> {
+        self.metadata
+            .capabilities(self.package, &self.context, &self.assumptions)
+    }
 }
 impl<'a> DeclarationWorld<'a> {
     pub fn new(
@@ -53,9 +68,7 @@ impl<'a> DeclarationWorld<'a> {
             context.map_or(&[], |(_, assumptions)| assumptions),
             &mut budget.steps,
         )?;
-        let assumptions = context
-            .map(|(_, assumptions)| assumptions.to_vec())
-            .unwrap_or_default();
+        let assumptions = Arc::from(context.map_or(&[][..], |(_, assumptions)| assumptions));
         let context = match context {
             Some((context, _)) => context.clone(),
             None => source.closed_context(&mut budget.steps)?,
@@ -63,24 +76,29 @@ impl<'a> DeclarationWorld<'a> {
         let metadata = source.metadata(budget)?;
         Ok(Self {
             normalized_types: HashMap::new(),
-            package,
-            metadata,
-            context,
-            assumptions,
+            scope: DeclarationScope {
+                package,
+                metadata,
+                context,
+                assumptions,
+            },
         })
     }
     /// Borrow checked metadata without scanning or copying executable bodies.
     pub fn function_declaration(&self, declaration: Id) -> Option<&'a n::Function> {
-        self.metadata.function(self.package, declaration)
+        self.scope
+            .metadata
+            .function(self.scope.package, declaration)
     }
     pub fn runtime_function_identity(
         &self,
         declaration: Id,
     ) -> Option<&'a n::RuntimeFunctionIdentity> {
-        self.metadata
+        self.scope
+            .metadata
             .runtime_callables
             .get(&declaration)
-            .map(|slot| &self.package.runtime_function_identities[*slot])
+            .map(|slot| &self.scope.package.runtime_function_identities[*slot])
     }
     pub fn function_formation(
         &self,
@@ -95,27 +113,29 @@ impl<'a> DeclarationWorld<'a> {
     }
 
     fn normal_head(&self, declaration: Id) -> Option<&'a nir::normal_forms::Head> {
-        self.metadata
+        self.scope
+            .metadata
             .normal_heads
             .get(&declaration)
-            .map(|slot| &self.package.normal_forms[*slot])
+            .map(|slot| &self.scope.package.normal_forms[*slot])
     }
 
-    /// A query view of this exact source, declaration index and premise scope.
-    /// It carries no executable contracts or persistent proof authority.
+    pub fn scope(&self) -> &DeclarationScope<'a> {
+        &self.scope
+    }
+
     pub fn capabilities(&self) -> crate::capabilities::World<'_> {
-        self.metadata
-            .capabilities(self.package, &self.context, &self.assumptions)
+        self.scope.capabilities()
     }
 
     pub fn index(&self) -> &Index {
-        &self.metadata.index
+        &self.scope.metadata.index
     }
     pub fn context(&self) -> &Context {
-        &self.context
+        &self.scope.context
     }
     pub fn assumptions(&self) -> &[n::TraitRequirement] {
-        &self.assumptions
+        &self.scope.assumptions
     }
     pub fn input_domains(
         &self,
@@ -129,6 +149,7 @@ impl<'a> DeclarationWorld<'a> {
             .iter()
             .map(|id| {
                 let domain = self
+                    .scope
                     .metadata
                     .index
                     .parameter_domains()
@@ -189,9 +210,10 @@ impl<'a> DeclarationWorld<'a> {
             } => self.callable_signature(declaration, arguments, frames, fuel),
             nir::CallableValueRef::Method(method) => {
                 *fuel = fuel
-                    .checked_sub(self.package.traits.len().saturating_add(1))
+                    .checked_sub(self.scope.package.traits.len().saturating_add(1))
                     .ok_or(AdmissionError::Budget)?;
                 let Some(interface) = self
+                    .scope
                     .package
                     .traits
                     .iter()
@@ -293,7 +315,7 @@ impl<'a> DeclarationWorld<'a> {
                         return Ok(fields.to_vec());
                     }
                 }
-                nir::normal_forms::query_nominal_value_fields(self.package, ty, variant, fuel)
+                nir::normal_forms::query_nominal_value_fields(self.scope.package, ty, variant, fuel)
             },
             declared: &mut |_, _, _| Ok(false),
             collection: &mut |domain, fuel| {
@@ -311,7 +333,7 @@ impl<'a> DeclarationWorld<'a> {
                 self.callable_value_signature(value, frames, fuel)
                     .map(|signature| signature.map(std::borrow::Cow::Owned))
             },
-            target: self.package.target,
+            target: self.scope.package.target,
         })
     }
 
@@ -407,6 +429,7 @@ impl DeclarationWorld<'_> {
         fuel: &mut usize,
     ) -> Result<MethodInputs<'_>, AdmissionError> {
         let contract = self
+            .scope
             .package
             .traits
             .iter()
@@ -450,6 +473,7 @@ impl DeclarationWorld<'_> {
             .chain(method_arguments.iter().cloned())
             .collect();
         let implementation = self
+            .scope
             .package
             .implementations
             .iter()

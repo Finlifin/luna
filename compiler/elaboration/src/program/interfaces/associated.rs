@@ -1,6 +1,20 @@
 //! Associated signatures are admitted before their values are demanded.
 //! Only completed values enter published implementation tables.
 use super::*;
+use nir::associated_initializers::MemberSource;
+
+pub(in crate::program) fn associated_source<'a>(
+    row: &'a n::Implementation,
+    member: DeclarationId,
+    steps: &mut u64,
+    span: Span,
+) -> Result<Option<MemberSource<'a>>, Error> {
+    let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+    let mut fuel = before;
+    let result = row.associated_source(member, &mut fuel);
+    *steps -= (before - fuel) as u64;
+    result.map_err(|failure| error(span, failure))
+}
 
 enum Supply {
     Value(n::Expr),
@@ -356,15 +370,15 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         let slot = self.ensure_associated_value(implementation, member, span)?;
         let selected = &self.checked_implementations[slot];
-        if let Some((_, value)) = selected.associated.iter().find(|(id, _)| *id == member) {
-            constants::charge_copy(value, &mut self.required_steps, span)?;
-            return Ok(value.clone());
-        }
-        let (_, initializer) = selected
-            .associated_initializers
-            .iter()
-            .find(|(id, _)| *id == member)
-            .expect("prepared associated initializer");
+        let initializer = match associated_source(selected, member, &mut self.required_steps, span)?
+            .expect("prepared associated supply")
+        {
+            MemberSource::Value(value) => {
+                constants::charge_copy(value, &mut self.required_steps, span)?;
+                return Ok(value.clone());
+            }
+            MemberSource::Initializer(initializer) => initializer,
+        };
         Ok(n::Expr {
             ty: initializer.expression().ty.clone(),
             source: source(span),
@@ -423,12 +437,7 @@ impl Checker<'_, '_> {
     ) -> Result<usize, Error> {
         let (slot, _) = self.associated_supply_contract(implementation, member, span)?;
         let selected = &self.checked_implementations[slot];
-        if selected.associated.iter().any(|(id, _)| *id == member)
-            || selected
-                .associated_initializers
-                .iter()
-                .any(|(id, _)| *id == member)
-        {
+        if associated_source(selected, member, &mut self.required_steps, span)?.is_some() {
             return Ok(slot);
         }
         let generic = !selected.type_parameters.is_empty();

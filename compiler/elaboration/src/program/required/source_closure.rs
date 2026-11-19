@@ -35,20 +35,14 @@ impl Checker<'_, '_> {
                     }
                     if let Some(&slot) = self.implementation_positions.get(&implementation) {
                         let row = &self.checked_implementations[slot];
-                        let value = row
-                            .associated
-                            .iter()
-                            .find(|(id, _)| *id == member)
-                            .map(|(_, value)| value)
-                            .or_else(|| {
-                                row.associated_initializers
-                                    .iter()
-                                    .find(|(id, _)| *id == member)
-                                    .map(|(_, initializer)| initializer.expression())
-                            });
-                        if let Some(value) = value {
+                        if let Some(source) = interfaces::associated_source(
+                            row,
+                            member,
+                            &mut self.required_steps,
+                            span,
+                        )? {
                             let found = Discovery::Required(&self.implementation_index)
-                                .references(value, &mut self.required_steps)
+                                .references(source.expression(), &mut self.required_steps)
                                 .map_err(|failure| error(span, failure.to_string()))?;
                             work.extend(found, &mut self.required_steps, span)?;
                         }

@@ -984,3 +984,66 @@ fn production_invocations_combine_type_method_and_associated_queries() {
     assert_eq!(other.invoke(1_000_000).unwrap(), Value::Bool(false));
     assert_eq!(prepared.invoke(1_000_000).unwrap(), Value::Bool(true));
 }
+
+#[test]
+fn source_vm_observes_only_the_selected_rows_supply() {
+    use comptime_interpretor::ErrorKind;
+    let mut package = sysroot::compile(
+        "struct Holder where T {}
+         trait Flag { assoc enabled: bool; }
+         comptime fn helper() -> bool { true }
+         impl Flag for Holder<T> where T { assoc enabled: bool = helper(); }
+         impl Flag for char { assoc enabled: bool = false; }
+         comptime fn read(comptime T: Type) -> bool
+         where requires T :- Flag
+         {
+             T.as(Flag).enabled
+         }
+         comptime fn ready() -> bool { read(Holder<u8>) }
+         comptime fn missing() -> bool { read(char) }",
+    )
+    .unwrap();
+    package.dispatch_instances.clear();
+    let flag = package.traits.iter().find(|t| t.name == "Flag").unwrap();
+    let member = flag.associated[0].declaration;
+    let generic = package
+        .implementations
+        .iter()
+        .find(|row| row.interface == Some(flag.declaration) && !row.type_parameters.is_empty())
+        .unwrap();
+    assert_eq!(generic.associated_initializers[0].0, member);
+    let missing = package
+        .implementations
+        .iter_mut()
+        .find(|row| {
+            row.interface == Some(flag.declaration)
+                && row.subject == Term::Primitive(Primitive::Char)
+        })
+        .unwrap();
+    let missing_row = missing.declaration;
+    assert_eq!(missing.associated.pop().unwrap().0, member);
+    let entry = |name| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    for reference in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, reference, |vm| {
+            assert_eq!(
+                vm.invoke(entry("ready"), vec![]).unwrap(),
+                Value::Bool(true)
+            );
+            let error = vm.invoke(entry("missing"), vec![]).unwrap_err();
+            let ErrorKind::MissingAssociatedSource(demand) = error.kind else {
+                panic!("expected the selected member, got {error}");
+            };
+            assert_eq!(demand.implementation, missing_row);
+            assert_eq!(demand.member, member);
+            assert_eq!(demand.result, Term::Primitive(Primitive::Bool));
+            assert!(error.source.is_some());
+        });
+    }
+}
