@@ -1478,7 +1478,7 @@ impl<'a> PhaseContext<'a> {
                         | K::IntegerNegate(value)
                         | K::FloatNegate(value)
                         | K::BitConvert(value)
-                        | K::ErrorConvert { value: value, .. }
+                        | K::ErrorConvert { value, .. }
                         | K::NewtypeConvert(value)
                         | K::TakeBits(value)
                         | K::SymbolName(value)
@@ -1507,6 +1507,15 @@ impl<'a> PhaseContext<'a> {
                                 return Err(fail(
                                     expr.source,
                                     "integer representation domain mismatch",
+                                ));
+                            }
+                            work.push(Work::Expr(value, false, ct), inspection_fuel)?;
+                        }
+                        K::TryIntegerConvert(value) => {
+                            if !crate::program::try_integer_convert_valid(&value.ty, &expr.ty) {
+                                return Err(fail(
+                                    expr.source,
+                                    "try integer conversion domain mismatch",
                                 ));
                             }
                             work.push(Work::Expr(value, false, ct), inspection_fuel)?;

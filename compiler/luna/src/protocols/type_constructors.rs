@@ -973,6 +973,11 @@ mod repository_bindings_tests {
                     "std.platform.linux.target.System.{}",
                     operation.name().strip_prefix("linux_").unwrap()
                 )
+            } else if operation.is_memory() {
+                format!(
+                    "builtin.mem_impl.raw.target.Memory.{}",
+                    operation.name().strip_prefix("mem_").unwrap()
+                )
             } else {
                 format!(
                     "builtin.numeric.math_intrinsics.target.Scalar.{}",

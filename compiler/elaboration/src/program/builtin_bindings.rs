@@ -12,6 +12,7 @@ fn operation(name: &str) -> bool {
             | "comptime_integer_div_trunc"
             | "comptime_integer_rem_trunc"
             | "integer_representation"
+            | "try_integer_convert"
             | "str_byte_length"
             | "str_byte"
             | "str_slice"
@@ -206,7 +207,9 @@ impl Checker<'_, '_> {
                     if (signatures::text_query(name.as_str()).is_some()
                         || matches!(
                             name.as_str(),
-                            "integer_representation" | "comptime_integer_convert"
+                            "integer_representation"
+                                | "try_integer_convert"
+                                | "comptime_integer_convert"
                         ))
                         && !annotations.iter().any(|(annotated, _)| *annotated == owner)
                     {
@@ -236,13 +239,19 @@ impl Checker<'_, '_> {
                             if annotated_owner == owner
                                 && matches!(
                                     name.as_str(),
-                                    "integer_representation" | "comptime_integer_convert"
+                                    "integer_representation"
+                                        | "try_integer_convert"
+                                        | "comptime_integer_convert"
                                 )
                             {
-                                let valid = if name.as_str() == "integer_representation" {
-                                    signatures::integer_representation(&actual)
-                                } else {
-                                    signatures::integer_conversion(&actual)
+                                let valid = match name.as_str() {
+                                    "integer_representation" => {
+                                        signatures::integer_representation(&actual)
+                                    }
+                                    "try_integer_convert" => {
+                                        signatures::try_integer_convert(&actual)
+                                    }
+                                    _ => signatures::integer_conversion(&actual),
                                 };
                                 if !valid {
                                     return Err(error(

@@ -18,10 +18,11 @@ use data.{
     text,
 }
 use definitions.{enums, newtypes, structs}
-use numeric.{equality, ordering, scalar_math}
+use numeric.{conversions, equality, ordering, scalar_math}
 use reflection.structure;
 use types.equality as type_equality;
 
+pub use conversions.{ComptimeTryFrom, ComptimeTryInto}
 pub use enums.*;
 pub use equality.ComptimeEq;
 pub use errors.ComptimeErrorResultOps;
@@ -43,6 +44,7 @@ pub mod math {
 pub mod prelude {
     pub use .List;
     pub use .Object;
+    pub use conversions.{ComptimeTryFrom, ComptimeTryInto}
     pub use equality.ComptimeEq;
     pub use errors.ComptimeErrorResultOps;
     pub use hashing.ComptimeHash;

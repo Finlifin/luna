@@ -20,8 +20,14 @@ fn compile(source: &str) -> Result<nir::program::Package, String> {
 fn invoke(source: &str) -> Result<Value, String> {
     let meta = include!("support/meta_source.rs");
     let package = compile(&format!("mod meta {{ {meta} }} {source}"))?;
-    let mut vm =
-        Interpreter::for_comptime(&package, Default::default()).map_err(|e| e.to_string())?;
+    let mut vm = Interpreter::for_comptime(
+        &package,
+        comptime_interpretor::Budget {
+            steps: 1_000_000,
+            ..Default::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
     vm.invoke(support::id(&package, "run"), vec![])
         .map_err(|e| e.to_string())
 }

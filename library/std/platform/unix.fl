@@ -52,3 +52,21 @@ pub fn close(fd: i32) -> !Error void {
 pub fn getpid() -> i64 {
     linux.getpid()
 }
+
+pub unsafe fn write_raw(fd: i32, addr: usize, len: u64) -> !Error u64 {
+    while true {
+        let result = linux.write_raw(fd, addr, len);
+        if result != linux.interrupted {
+            return check(result)!'bitvec.as(u64);
+        }
+    }
+}
+
+pub unsafe fn read_raw(fd: i32, addr: usize, len: u64) -> !Error u64 {
+    while true {
+        let result = linux.read_raw(fd, addr, len);
+        if result != linux.interrupted {
+            return check(result)!'bitvec.as(u64);
+        }
+    }
+}

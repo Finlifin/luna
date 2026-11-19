@@ -208,6 +208,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             | K::TakeBits(value)
             | K::TextQuery { subject: value, .. }
             | K::IntegerRepresentation(value)
+            | K::TryIntegerConvert(value)
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::TypeKind { operand: value, .. }

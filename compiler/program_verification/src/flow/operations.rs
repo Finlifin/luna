@@ -62,6 +62,7 @@ impl Walker<'_> {
             | K::TakeBits(value)
             | K::TextQuery { subject: value, .. }
             | K::IntegerRepresentation(value)
+            | K::TryIntegerConvert(value)
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::EnumName(value) => {

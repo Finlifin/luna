@@ -269,6 +269,7 @@ pub(super) fn check(
             | K::TakeBits(_)
             | K::TextQuery { subject: _, .. }
             | K::IntegerRepresentation(_)
+            | K::TryIntegerConvert(_)
             | K::ComptimeIntegerConvert(_)
             | K::SymbolName(_)
             | K::EnumName(_)

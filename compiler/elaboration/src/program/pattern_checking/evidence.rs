@@ -231,6 +231,7 @@ pub(in crate::program) fn readonly_guard_operand(
             | K::TakeBits(value)
             | K::TextQuery { subject: value, .. }
             | K::IntegerRepresentation(value)
+            | K::TryIntegerConvert(value)
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::TypeKind { operand: value, .. }

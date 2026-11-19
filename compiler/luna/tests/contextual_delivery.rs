@@ -1,5 +1,5 @@
 //! Destination delivery retains presence layers, source effects and exits.
-use comptime_interpretor::{Budget, Interpreter, Value};
+use comptime_interpretor::{Interpreter, Value};
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
@@ -63,9 +63,9 @@ fn nested_destinations_preserve_contextual_values_calls_and_control_exits() {
     .unwrap();
     for tree in [false, true] {
         let mut vm = if tree {
-            Interpreter::for_comptime_tree(&package, Budget::default())
+            Interpreter::for_comptime_tree(&package, sysroot::COMPTIME_BUDGET)
         } else {
-            Interpreter::for_comptime(&package, Budget::default())
+            Interpreter::for_comptime(&package, sysroot::COMPTIME_BUDGET)
         }
         .unwrap();
         let id = |name| {

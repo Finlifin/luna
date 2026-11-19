@@ -1,0 +1,126 @@
+use bindings.{try_u128_to_usize, usize_representation}
+use numeric.math_intrinsics;
+use primitives.{Type, bool, i32, u128, u8, usize}
+
+{-
+    Low-level raw host memory intrinsics and target-portable checked usize
+    arithmetic. Typed raw reads/writes move raw bit patterns without runtime
+    resource tracking; callers hold the unsafe obligation.
+-}
+pub mod target {
+    ^intrinsic_enum
+    pub enum Memory {
+        raw_read,
+        raw_write,
+        copy,
+        copy_nonoverlapping,
+        set_bytes,
+        compare_bytes,
+    }
+}
+
+pub unsafe fn raw_read(addr: usize) -> T where T {
+    target.Memory.raw_read'intrinsic(addr).as(T)
+}
+
+pub unsafe fn raw_write(addr: usize, value: T) where T {
+    target.Memory.raw_write'intrinsic(addr, value)
+}
+
+pub unsafe fn copy_bytes(dst: usize, src: usize, count: usize) {
+    target.Memory.copy'intrinsic(dst, src, count)
+}
+
+pub unsafe fn copy_bytes_nonoverlapping(dst: usize, src: usize, count: usize) {
+    target.Memory.copy_nonoverlapping'intrinsic(dst, src, count)
+}
+
+pub unsafe fn set_bytes(dst: usize, byte: u8, count: usize) {
+    target.Memory.set_bytes'intrinsic(dst, byte, count)
+}
+
+pub unsafe fn compare_bytes(lhs: usize, rhs: usize, count: usize) -> i32 {
+    target
+        .Memory
+        .compare_bytes'intrinsic(lhs, rhs, count)
+        .as(i32)
+}
+
+pub pure fn usize_max() -> usize {
+    let one: usize = 1;
+    let msb = math_intrinsics.bit_reverse(one);
+    let low_ones = math_intrinsics.saturating_sub(msb, one);
+    math_intrinsics.bit_or(msb, low_ones)
+}
+
+pub fn checked_add_usize(a: usize, b: usize) -> ?usize {
+    let raw_a = usize_representation(a);
+    let raw_b = usize_representation(b);
+    let u128_max: u128 = 340282366920938463463374607431768211455;
+    if raw_a > u128_max - raw_b {
+        return null;
+    }
+    try_u128_to_usize(raw_a + raw_b)
+}
+
+pub pure fn checked_sub_usize(a: usize, b: usize) -> ?usize {
+    if a < b {
+        return null;
+    }
+    a - b
+}
+
+pub fn checked_mul_usize(a: usize, b: usize) -> ?usize {
+    let raw_a = usize_representation(a);
+    let raw_b = usize_representation(b);
+    let zero: usize = 0;
+    if raw_a == 0 {
+        return zero;
+    }
+    if raw_b == 0 {
+        return zero;
+    }
+    let max64: u128 = 18446744073709551615;
+    if raw_a <= max64 {
+        if raw_b <= max64 {
+            return try_u128_to_usize(raw_a * raw_b);
+        }
+    }
+    let half: u128 = 18446744073709551616;
+    let a_hi = raw_a / half;
+    let a_lo = raw_a % half;
+    let b_hi = raw_b / half;
+    let b_lo = raw_b % half;
+    if a_hi != 0 {
+        if b_hi != 0 {
+            return null;
+        }
+    }
+    let low_prod = a_lo * b_lo;
+    let cross = if a_hi != 0 { a_hi * b_lo } else { a_lo * b_hi }
+    if cross > max64 {
+        return null;
+    }
+    let high_shifted = cross * half;
+    let u128_max: u128 = 340282366920938463463374607431768211455;
+    if low_prod > u128_max - high_shifted {
+        return null;
+    }
+    try_u128_to_usize(high_shifted + low_prod)
+}
+
+pub fn align_up_usize(value: usize, align: usize) -> ?usize {
+    if align == 0 {
+        return null;
+    }
+    let one: usize = 1;
+    let mask = align - one;
+    if math_intrinsics.bit_and(align, mask) != 0 {
+        return null;
+    }
+    let rounded = checked_add_usize(value, mask) match {
+        next? => next,
+        null => return null,
+    }
+    math_intrinsics.bit_and(rounded, math_intrinsics.bit_xor(usize_max(), mask))
+}

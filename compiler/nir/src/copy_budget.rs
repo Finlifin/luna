@@ -1006,12 +1006,13 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     | K::UnsafeScope(value)
                     | K::Discard(value)
                     | K::BitConvert(value)
-                    | K::ErrorConvert { value: value, .. }
+                    | K::ErrorConvert { value, .. }
                     | K::NewtypeConvert(value)
                     | K::Snapshot(value)
                     | K::TakeBits(value)
                     | K::TextQuery { subject: value, .. }
                     | K::IntegerRepresentation(value)
+                    | K::TryIntegerConvert(value)
                     | K::ComptimeIntegerConvert(value)
                     | K::SymbolName(value)
                     | K::EnumName(value)

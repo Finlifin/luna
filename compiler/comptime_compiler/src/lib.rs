@@ -1542,6 +1542,7 @@ fn compile_root<'a>(
                 match &expr.kind {
                     K::ComptimeIntegerConvert(_)
                     | K::IntegerRepresentation(_)
+                    | K::TryIntegerConvert(_)
                     | K::IntegerBinary { .. }
                     | K::IntegerNegate(_)
                     | K::FloatNegate(_)

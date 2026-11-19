@@ -234,6 +234,37 @@ fn field_borrows(
     Ok(fields)
 }
 
+fn register_missing_roots(
+    missing: Vec<drop::RequiredDropInstance>,
+    initial_roots_len: usize,
+    roots: &mut Vec<iir::InstanceKey>,
+    receivers: &mut Vec<(iir::InstanceKey, nir::Term)>,
+) -> Result<bool, String> {
+    if missing.is_empty() {
+        return Ok(false);
+    }
+    for item in missing {
+        let method = iir::InstanceKey {
+            declaration: item.declaration,
+            arguments: item.arguments.into(),
+        };
+        if roots[..initial_roots_len].contains(&method) {
+            return Err("destructor runtime instance was not materialized".into());
+        }
+        if !roots.contains(&method) {
+            roots.push(method.clone());
+        }
+        if let Some((_, subject)) = receivers.iter().find(|(key, _)| *key == method) {
+            if subject != &item.subject {
+                return Err("cleanup method has inconsistent receiver types".into());
+            }
+        } else {
+            receivers.push((method, item.subject));
+        }
+    }
+    Ok(true)
+}
+
 pub fn prepare_source(
     package: &Package,
     world: &World<'_>,
@@ -394,7 +425,10 @@ fn prepare_source_impl(
             .collect();
         let package = layouts.as_ref();
         let previous = (roots.len(), types.len());
-        for instance in &graph.functions {
+        let initial_roots_len = roots.len();
+        let mut deferred = false;
+        let mut deferred_nested = false;
+        'instances: for instance in &graph.functions {
             // Higher-order bodies are verified against each call's concrete
             // inputs below, never published as an unconditional root schedule.
             if !moves::callable_parameter_paths(
@@ -457,9 +491,31 @@ fn prepare_source_impl(
                     // Moving an aggregate need not borrow its pointees. Try an
                     // unconditional plan before demanding field validity.
                     let allowance = (*fuel / 2).min(4096);
-                    match crate::protocols::analyze_cleanup_with_borrows(
-                        package, world, items, function, allowance, budget, &borrows,
-                    ) {
+                    let (result, missing) =
+                        crate::protocols::analyze_cleanup_with_borrowed_code_context_requiring_instances(
+                            package,
+                            world,
+                            items,
+                            function,
+                            allowance,
+                            budget,
+                            &borrows,
+                            &[],
+                            &[],
+                            vec![],
+                            &[],
+                            &[],
+                        );
+                    if register_missing_roots(
+                        missing,
+                        initial_roots_len,
+                        &mut roots,
+                        &mut receivers,
+                    )? {
+                        deferred = true;
+                        continue 'instances;
+                    }
+                    match result {
                         Ok(report) => {
                             fields.clear();
                             independent_report = Some(report);
@@ -508,20 +564,26 @@ fn prepare_source_impl(
             let report = if let Some(report) = independent_report {
                 report
             } else {
-                crate::protocols::analyze_cleanup_with_field_context(
-                    package,
-                    world,
-                    items,
-                    function,
-                    *fuel,
-                    budget,
-                    &borrows,
-                    &[],
-                    &[],
-                    vec![],
-                    &fields,
-                )
-                .map_err(|e| e.to_string())?
+                let (result, missing) =
+                    crate::protocols::analyze_cleanup_with_borrowed_code_context_requiring_instances(
+                        package,
+                        world,
+                        items,
+                        function,
+                        *fuel,
+                        budget,
+                        &borrows,
+                        &[],
+                        &[],
+                        vec![],
+                        &fields,
+                        &[],
+                    );
+                if register_missing_roots(missing, initial_roots_len, &mut roots, &mut receivers)? {
+                    deferred = true;
+                    continue 'instances;
+                }
+                result.map_err(|e| e.to_string())?
             };
             if report.borrowed_parameters != borrows || report.borrowed_fields != fields {
                 return Err("cleanup report disagrees with borrowed entry premises".into());
@@ -923,18 +985,31 @@ fn prepare_source_impl(
                         let effects = moves::copy_effect_inputs(&call.effects, fuel, call.source)
                             .map_err(|e| e.to_string())?;
                         let allowance = (*fuel / 2).min(4096);
-                        match crate::protocols::analyze_cleanup_with_effect_context(
-                            package,
-                            world,
-                            items,
-                            &child,
-                            allowance,
-                            budget,
-                            &borrows,
-                            &call.callables,
-                            &call.enums,
-                            effects,
-                        ) {
+                        let (result, missing) =
+                            crate::protocols::analyze_cleanup_with_borrowed_code_context_requiring_instances(
+                                package,
+                                world,
+                                items,
+                                &child,
+                                allowance,
+                                budget,
+                                &borrows,
+                                &call.callables,
+                                &call.enums,
+                                effects,
+                                &[],
+                                &[],
+                            );
+                        if register_missing_roots(
+                            missing,
+                            initial_roots_len,
+                            &mut roots,
+                            &mut receivers,
+                        )? {
+                            deferred_nested = true;
+                            continue 'instances;
+                        }
+                        match result {
                             Ok(report) => {
                                 fields.clear();
                                 independent_invocation = Some(report);
@@ -943,20 +1018,31 @@ fn prepare_source_impl(
                         }
                     }
                     if !borrows.is_empty() || !fields.is_empty() {
-                        let footprint = crate::protocols::infer_borrowed_callable_memory(
-                            package,
-                            world,
-                            items,
-                            key.declaration,
-                            &key.arguments,
-                            &call.callables,
-                            &call.enums,
-                            &call.effects,
-                            &call.borrowed_code,
-                            fuel,
-                            budget,
-                            call.source,
-                        )?;
+                        let (result, missing) =
+                            crate::protocols::infer_borrowed_callable_memory_requiring_instances(
+                                package,
+                                world,
+                                items,
+                                key.declaration,
+                                &key.arguments,
+                                &call.callables,
+                                &call.enums,
+                                &call.effects,
+                                &call.borrowed_code,
+                                fuel,
+                                budget,
+                                call.source,
+                            );
+                        if register_missing_roots(
+                            missing,
+                            initial_roots_len,
+                            &mut roots,
+                            &mut receivers,
+                        )? {
+                            deferred_nested = true;
+                            continue 'instances;
+                        }
+                        let footprint = result?;
                         if footprint.signature != child.signature {
                             return Err(
                                 "contextual helper signature disagrees with memory footprint"
@@ -967,22 +1053,33 @@ fn prepare_source_impl(
                     let invocation = if let Some(report) = independent_invocation {
                         report
                     } else {
-                        crate::protocols::analyze_cleanup_with_borrowed_code_context(
-                            package,
-                            world,
-                            items,
-                            &child,
-                            *fuel,
-                            budget,
-                            &borrows,
-                            &call.callables,
-                            &call.enums,
-                            moves::copy_effect_inputs(&call.effects, fuel, call.source)
-                                .map_err(|e| e.to_string())?,
-                            &fields,
-                            &call.borrowed_code,
-                        )
-                        .map_err(|e| e.to_string())?
+                        let effects = moves::copy_effect_inputs(&call.effects, fuel, call.source)
+                            .map_err(|e| e.to_string())?;
+                        let (result, missing) =
+                            crate::protocols::analyze_cleanup_with_borrowed_code_context_requiring_instances(
+                                package,
+                                world,
+                                items,
+                                &child,
+                                *fuel,
+                                budget,
+                                &borrows,
+                                &call.callables,
+                                &call.enums,
+                                effects,
+                                &fields,
+                                &call.borrowed_code,
+                            );
+                        if register_missing_roots(
+                            missing,
+                            initial_roots_len,
+                            &mut roots,
+                            &mut receivers,
+                        )? {
+                            deferred_nested = true;
+                            continue 'instances;
+                        }
+                        result.map_err(|e| e.to_string())?
                     };
                     if invocation.borrowed_parameters != borrows
                         || invocation.borrowed_fields != fields
@@ -1427,10 +1524,13 @@ fn prepare_source_impl(
                 });
             }
         }
-        if cleanup_changed {
+        if cleanup_changed || deferred_nested {
             // Every caller must be rechecked against the grown transitive footprint.
             // No schedule from a provisional body-only round is published.
             schedule = Schedule::default();
+            continue;
+        }
+        if deferred {
             continue;
         }
         if previous == (roots.len(), types.len()) {

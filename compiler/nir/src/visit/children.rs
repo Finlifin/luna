@@ -225,12 +225,13 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
             | K::IntegerNegate(value)
             | K::FloatNegate(value)
             | K::BitConvert(value)
-            | K::ErrorConvert { value: value, .. }
+            | K::ErrorConvert { value, .. }
             | K::NewtypeConvert(value)
             | K::Snapshot(value)
             | K::TakeBits(value)
             | K::TextQuery { subject: value, .. }
             | K::IntegerRepresentation(value)
+            | K::TryIntegerConvert(value)
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::EnumName(value)

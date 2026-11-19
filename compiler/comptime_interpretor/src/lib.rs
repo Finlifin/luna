@@ -2600,6 +2600,7 @@ impl<'a> Interpreter<'a> {
             K::Snapshot(_) => self.eval_snapshot(expr, environment),
             K::ComptimeIntegerConvert(_) => self.eval_scalar_operation(expr, environment),
             K::IntegerRepresentation(_) => self.eval_scalar_operation(expr, environment),
+            K::TryIntegerConvert(_) => self.eval_scalar_operation(expr, environment),
             K::TakeBits(..) => self.eval_bit_values(expr, environment),
             K::Not(..) => self.eval_not(expr, environment),
             K::And(..) | K::Or(..) => self.eval_and(expr, environment),

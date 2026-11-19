@@ -1,0 +1,881 @@
+use builtin.{i128, i16, i32, i64, i8, isize, u128, u16, u32, u64, u8, usize}
+use numeric.bindings;
+
+-- Checked machine-integer conversions for comptime contexts.
+pub pure comptime trait ComptimeTryInto where Target {
+    pure comptime fn try_into(self) -> ?Target;
+}
+
+pub pure comptime trait ComptimeTryFrom where Source {
+    pure comptime fn try_from(source: Source) -> ?Self;
+}
+
+comptime impl ComptimeTryInto<Target> for Source where Source, Target :- ComptimeTryFrom<Source> {
+    pure comptime fn try_into(self) -> ?Target {
+        Target.as(ComptimeTryFrom<Source>).try_from(self)
+    }
+}
+
+comptime impl ComptimeTryFrom<u8> for u8 {
+    pure comptime fn try_from(source: u8) -> ?Self {
+        source
+    }
+}
+
+comptime impl ComptimeTryFrom<u16> for u8 {
+    pure comptime fn try_from(source: u16) -> ?Self {
+        bindings.try_u16_to_u8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u32> for u8 {
+    pure comptime fn try_from(source: u32) -> ?Self {
+        bindings.try_u32_to_u8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u64> for u8 {
+    pure comptime fn try_from(source: u64) -> ?Self {
+        bindings.try_u64_to_u8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u128> for u8 {
+    pure comptime fn try_from(source: u128) -> ?Self {
+        bindings.try_u128_to_u8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<usize> for u8 {
+    pure comptime fn try_from(source: usize) -> ?Self {
+        bindings.try_usize_to_u8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i8> for u8 {
+    pure comptime fn try_from(source: i8) -> ?Self {
+        bindings.try_i8_to_u8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i16> for u8 {
+    pure comptime fn try_from(source: i16) -> ?Self {
+        bindings.try_i16_to_u8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i32> for u8 {
+    pure comptime fn try_from(source: i32) -> ?Self {
+        bindings.try_i32_to_u8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i64> for u8 {
+    pure comptime fn try_from(source: i64) -> ?Self {
+        bindings.try_i64_to_u8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i128> for u8 {
+    pure comptime fn try_from(source: i128) -> ?Self {
+        bindings.try_i128_to_u8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<isize> for u8 {
+    pure comptime fn try_from(source: isize) -> ?Self {
+        bindings.try_isize_to_u8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u8> for u16 {
+    pure comptime fn try_from(source: u8) -> ?Self {
+        bindings.try_u8_to_u16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u16> for u16 {
+    pure comptime fn try_from(source: u16) -> ?Self {
+        source
+    }
+}
+
+comptime impl ComptimeTryFrom<u32> for u16 {
+    pure comptime fn try_from(source: u32) -> ?Self {
+        bindings.try_u32_to_u16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u64> for u16 {
+    pure comptime fn try_from(source: u64) -> ?Self {
+        bindings.try_u64_to_u16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u128> for u16 {
+    pure comptime fn try_from(source: u128) -> ?Self {
+        bindings.try_u128_to_u16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<usize> for u16 {
+    pure comptime fn try_from(source: usize) -> ?Self {
+        bindings.try_usize_to_u16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i8> for u16 {
+    pure comptime fn try_from(source: i8) -> ?Self {
+        bindings.try_i8_to_u16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i16> for u16 {
+    pure comptime fn try_from(source: i16) -> ?Self {
+        bindings.try_i16_to_u16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i32> for u16 {
+    pure comptime fn try_from(source: i32) -> ?Self {
+        bindings.try_i32_to_u16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i64> for u16 {
+    pure comptime fn try_from(source: i64) -> ?Self {
+        bindings.try_i64_to_u16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i128> for u16 {
+    pure comptime fn try_from(source: i128) -> ?Self {
+        bindings.try_i128_to_u16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<isize> for u16 {
+    pure comptime fn try_from(source: isize) -> ?Self {
+        bindings.try_isize_to_u16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u8> for u32 {
+    pure comptime fn try_from(source: u8) -> ?Self {
+        bindings.try_u8_to_u32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u16> for u32 {
+    pure comptime fn try_from(source: u16) -> ?Self {
+        bindings.try_u16_to_u32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u32> for u32 {
+    pure comptime fn try_from(source: u32) -> ?Self {
+        source
+    }
+}
+
+comptime impl ComptimeTryFrom<u64> for u32 {
+    pure comptime fn try_from(source: u64) -> ?Self {
+        bindings.try_u64_to_u32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u128> for u32 {
+    pure comptime fn try_from(source: u128) -> ?Self {
+        bindings.try_u128_to_u32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<usize> for u32 {
+    pure comptime fn try_from(source: usize) -> ?Self {
+        bindings.try_usize_to_u32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i8> for u32 {
+    pure comptime fn try_from(source: i8) -> ?Self {
+        bindings.try_i8_to_u32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i16> for u32 {
+    pure comptime fn try_from(source: i16) -> ?Self {
+        bindings.try_i16_to_u32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i32> for u32 {
+    pure comptime fn try_from(source: i32) -> ?Self {
+        bindings.try_i32_to_u32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i64> for u32 {
+    pure comptime fn try_from(source: i64) -> ?Self {
+        bindings.try_i64_to_u32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i128> for u32 {
+    pure comptime fn try_from(source: i128) -> ?Self {
+        bindings.try_i128_to_u32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<isize> for u32 {
+    pure comptime fn try_from(source: isize) -> ?Self {
+        bindings.try_isize_to_u32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u8> for u64 {
+    pure comptime fn try_from(source: u8) -> ?Self {
+        bindings.try_u8_to_u64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u16> for u64 {
+    pure comptime fn try_from(source: u16) -> ?Self {
+        bindings.try_u16_to_u64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u32> for u64 {
+    pure comptime fn try_from(source: u32) -> ?Self {
+        bindings.try_u32_to_u64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u64> for u64 {
+    pure comptime fn try_from(source: u64) -> ?Self {
+        source
+    }
+}
+
+comptime impl ComptimeTryFrom<u128> for u64 {
+    pure comptime fn try_from(source: u128) -> ?Self {
+        bindings.try_u128_to_u64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<usize> for u64 {
+    pure comptime fn try_from(source: usize) -> ?Self {
+        bindings.try_usize_to_u64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i8> for u64 {
+    pure comptime fn try_from(source: i8) -> ?Self {
+        bindings.try_i8_to_u64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i16> for u64 {
+    pure comptime fn try_from(source: i16) -> ?Self {
+        bindings.try_i16_to_u64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i32> for u64 {
+    pure comptime fn try_from(source: i32) -> ?Self {
+        bindings.try_i32_to_u64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i64> for u64 {
+    pure comptime fn try_from(source: i64) -> ?Self {
+        bindings.try_i64_to_u64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i128> for u64 {
+    pure comptime fn try_from(source: i128) -> ?Self {
+        bindings.try_i128_to_u64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<isize> for u64 {
+    pure comptime fn try_from(source: isize) -> ?Self {
+        bindings.try_isize_to_u64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u8> for u128 {
+    pure comptime fn try_from(source: u8) -> ?Self {
+        bindings.try_u8_to_u128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u16> for u128 {
+    pure comptime fn try_from(source: u16) -> ?Self {
+        bindings.try_u16_to_u128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u32> for u128 {
+    pure comptime fn try_from(source: u32) -> ?Self {
+        bindings.try_u32_to_u128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u64> for u128 {
+    pure comptime fn try_from(source: u64) -> ?Self {
+        bindings.try_u64_to_u128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u128> for u128 {
+    pure comptime fn try_from(source: u128) -> ?Self {
+        source
+    }
+}
+
+comptime impl ComptimeTryFrom<usize> for u128 {
+    pure comptime fn try_from(source: usize) -> ?Self {
+        bindings.try_usize_to_u128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i8> for u128 {
+    pure comptime fn try_from(source: i8) -> ?Self {
+        bindings.try_i8_to_u128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i16> for u128 {
+    pure comptime fn try_from(source: i16) -> ?Self {
+        bindings.try_i16_to_u128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i32> for u128 {
+    pure comptime fn try_from(source: i32) -> ?Self {
+        bindings.try_i32_to_u128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i64> for u128 {
+    pure comptime fn try_from(source: i64) -> ?Self {
+        bindings.try_i64_to_u128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i128> for u128 {
+    pure comptime fn try_from(source: i128) -> ?Self {
+        bindings.try_i128_to_u128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<isize> for u128 {
+    pure comptime fn try_from(source: isize) -> ?Self {
+        bindings.try_isize_to_u128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u8> for usize {
+    pure comptime fn try_from(source: u8) -> ?Self {
+        bindings.try_u8_to_usize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u16> for usize {
+    pure comptime fn try_from(source: u16) -> ?Self {
+        bindings.try_u16_to_usize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u32> for usize {
+    pure comptime fn try_from(source: u32) -> ?Self {
+        bindings.try_u32_to_usize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u64> for usize {
+    pure comptime fn try_from(source: u64) -> ?Self {
+        bindings.try_u64_to_usize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u128> for usize {
+    pure comptime fn try_from(source: u128) -> ?Self {
+        bindings.try_u128_to_usize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<usize> for usize {
+    pure comptime fn try_from(source: usize) -> ?Self {
+        source
+    }
+}
+
+comptime impl ComptimeTryFrom<i8> for usize {
+    pure comptime fn try_from(source: i8) -> ?Self {
+        bindings.try_i8_to_usize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i16> for usize {
+    pure comptime fn try_from(source: i16) -> ?Self {
+        bindings.try_i16_to_usize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i32> for usize {
+    pure comptime fn try_from(source: i32) -> ?Self {
+        bindings.try_i32_to_usize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i64> for usize {
+    pure comptime fn try_from(source: i64) -> ?Self {
+        bindings.try_i64_to_usize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i128> for usize {
+    pure comptime fn try_from(source: i128) -> ?Self {
+        bindings.try_i128_to_usize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<isize> for usize {
+    pure comptime fn try_from(source: isize) -> ?Self {
+        bindings.try_isize_to_usize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u8> for i8 {
+    pure comptime fn try_from(source: u8) -> ?Self {
+        bindings.try_u8_to_i8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u16> for i8 {
+    pure comptime fn try_from(source: u16) -> ?Self {
+        bindings.try_u16_to_i8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u32> for i8 {
+    pure comptime fn try_from(source: u32) -> ?Self {
+        bindings.try_u32_to_i8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u64> for i8 {
+    pure comptime fn try_from(source: u64) -> ?Self {
+        bindings.try_u64_to_i8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u128> for i8 {
+    pure comptime fn try_from(source: u128) -> ?Self {
+        bindings.try_u128_to_i8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<usize> for i8 {
+    pure comptime fn try_from(source: usize) -> ?Self {
+        bindings.try_usize_to_i8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i8> for i8 {
+    pure comptime fn try_from(source: i8) -> ?Self {
+        source
+    }
+}
+
+comptime impl ComptimeTryFrom<i16> for i8 {
+    pure comptime fn try_from(source: i16) -> ?Self {
+        bindings.try_i16_to_i8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i32> for i8 {
+    pure comptime fn try_from(source: i32) -> ?Self {
+        bindings.try_i32_to_i8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i64> for i8 {
+    pure comptime fn try_from(source: i64) -> ?Self {
+        bindings.try_i64_to_i8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i128> for i8 {
+    pure comptime fn try_from(source: i128) -> ?Self {
+        bindings.try_i128_to_i8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<isize> for i8 {
+    pure comptime fn try_from(source: isize) -> ?Self {
+        bindings.try_isize_to_i8(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u8> for i16 {
+    pure comptime fn try_from(source: u8) -> ?Self {
+        bindings.try_u8_to_i16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u16> for i16 {
+    pure comptime fn try_from(source: u16) -> ?Self {
+        bindings.try_u16_to_i16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u32> for i16 {
+    pure comptime fn try_from(source: u32) -> ?Self {
+        bindings.try_u32_to_i16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u64> for i16 {
+    pure comptime fn try_from(source: u64) -> ?Self {
+        bindings.try_u64_to_i16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u128> for i16 {
+    pure comptime fn try_from(source: u128) -> ?Self {
+        bindings.try_u128_to_i16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<usize> for i16 {
+    pure comptime fn try_from(source: usize) -> ?Self {
+        bindings.try_usize_to_i16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i8> for i16 {
+    pure comptime fn try_from(source: i8) -> ?Self {
+        bindings.try_i8_to_i16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i16> for i16 {
+    pure comptime fn try_from(source: i16) -> ?Self {
+        source
+    }
+}
+
+comptime impl ComptimeTryFrom<i32> for i16 {
+    pure comptime fn try_from(source: i32) -> ?Self {
+        bindings.try_i32_to_i16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i64> for i16 {
+    pure comptime fn try_from(source: i64) -> ?Self {
+        bindings.try_i64_to_i16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i128> for i16 {
+    pure comptime fn try_from(source: i128) -> ?Self {
+        bindings.try_i128_to_i16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<isize> for i16 {
+    pure comptime fn try_from(source: isize) -> ?Self {
+        bindings.try_isize_to_i16(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u8> for i32 {
+    pure comptime fn try_from(source: u8) -> ?Self {
+        bindings.try_u8_to_i32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u16> for i32 {
+    pure comptime fn try_from(source: u16) -> ?Self {
+        bindings.try_u16_to_i32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u32> for i32 {
+    pure comptime fn try_from(source: u32) -> ?Self {
+        bindings.try_u32_to_i32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u64> for i32 {
+    pure comptime fn try_from(source: u64) -> ?Self {
+        bindings.try_u64_to_i32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u128> for i32 {
+    pure comptime fn try_from(source: u128) -> ?Self {
+        bindings.try_u128_to_i32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<usize> for i32 {
+    pure comptime fn try_from(source: usize) -> ?Self {
+        bindings.try_usize_to_i32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i8> for i32 {
+    pure comptime fn try_from(source: i8) -> ?Self {
+        bindings.try_i8_to_i32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i16> for i32 {
+    pure comptime fn try_from(source: i16) -> ?Self {
+        bindings.try_i16_to_i32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i32> for i32 {
+    pure comptime fn try_from(source: i32) -> ?Self {
+        source
+    }
+}
+
+comptime impl ComptimeTryFrom<i64> for i32 {
+    pure comptime fn try_from(source: i64) -> ?Self {
+        bindings.try_i64_to_i32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i128> for i32 {
+    pure comptime fn try_from(source: i128) -> ?Self {
+        bindings.try_i128_to_i32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<isize> for i32 {
+    pure comptime fn try_from(source: isize) -> ?Self {
+        bindings.try_isize_to_i32(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u8> for i64 {
+    pure comptime fn try_from(source: u8) -> ?Self {
+        bindings.try_u8_to_i64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u16> for i64 {
+    pure comptime fn try_from(source: u16) -> ?Self {
+        bindings.try_u16_to_i64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u32> for i64 {
+    pure comptime fn try_from(source: u32) -> ?Self {
+        bindings.try_u32_to_i64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u64> for i64 {
+    pure comptime fn try_from(source: u64) -> ?Self {
+        bindings.try_u64_to_i64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u128> for i64 {
+    pure comptime fn try_from(source: u128) -> ?Self {
+        bindings.try_u128_to_i64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<usize> for i64 {
+    pure comptime fn try_from(source: usize) -> ?Self {
+        bindings.try_usize_to_i64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i8> for i64 {
+    pure comptime fn try_from(source: i8) -> ?Self {
+        bindings.try_i8_to_i64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i16> for i64 {
+    pure comptime fn try_from(source: i16) -> ?Self {
+        bindings.try_i16_to_i64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i32> for i64 {
+    pure comptime fn try_from(source: i32) -> ?Self {
+        bindings.try_i32_to_i64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i64> for i64 {
+    pure comptime fn try_from(source: i64) -> ?Self {
+        source
+    }
+}
+
+comptime impl ComptimeTryFrom<i128> for i64 {
+    pure comptime fn try_from(source: i128) -> ?Self {
+        bindings.try_i128_to_i64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<isize> for i64 {
+    pure comptime fn try_from(source: isize) -> ?Self {
+        bindings.try_isize_to_i64(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u8> for i128 {
+    pure comptime fn try_from(source: u8) -> ?Self {
+        bindings.try_u8_to_i128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u16> for i128 {
+    pure comptime fn try_from(source: u16) -> ?Self {
+        bindings.try_u16_to_i128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u32> for i128 {
+    pure comptime fn try_from(source: u32) -> ?Self {
+        bindings.try_u32_to_i128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u64> for i128 {
+    pure comptime fn try_from(source: u64) -> ?Self {
+        bindings.try_u64_to_i128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u128> for i128 {
+    pure comptime fn try_from(source: u128) -> ?Self {
+        bindings.try_u128_to_i128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<usize> for i128 {
+    pure comptime fn try_from(source: usize) -> ?Self {
+        bindings.try_usize_to_i128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i8> for i128 {
+    pure comptime fn try_from(source: i8) -> ?Self {
+        bindings.try_i8_to_i128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i16> for i128 {
+    pure comptime fn try_from(source: i16) -> ?Self {
+        bindings.try_i16_to_i128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i32> for i128 {
+    pure comptime fn try_from(source: i32) -> ?Self {
+        bindings.try_i32_to_i128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i64> for i128 {
+    pure comptime fn try_from(source: i64) -> ?Self {
+        bindings.try_i64_to_i128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i128> for i128 {
+    pure comptime fn try_from(source: i128) -> ?Self {
+        source
+    }
+}
+
+comptime impl ComptimeTryFrom<isize> for i128 {
+    pure comptime fn try_from(source: isize) -> ?Self {
+        bindings.try_isize_to_i128(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u8> for isize {
+    pure comptime fn try_from(source: u8) -> ?Self {
+        bindings.try_u8_to_isize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u16> for isize {
+    pure comptime fn try_from(source: u16) -> ?Self {
+        bindings.try_u16_to_isize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u32> for isize {
+    pure comptime fn try_from(source: u32) -> ?Self {
+        bindings.try_u32_to_isize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u64> for isize {
+    pure comptime fn try_from(source: u64) -> ?Self {
+        bindings.try_u64_to_isize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<u128> for isize {
+    pure comptime fn try_from(source: u128) -> ?Self {
+        bindings.try_u128_to_isize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<usize> for isize {
+    pure comptime fn try_from(source: usize) -> ?Self {
+        bindings.try_usize_to_isize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i8> for isize {
+    pure comptime fn try_from(source: i8) -> ?Self {
+        bindings.try_i8_to_isize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i16> for isize {
+    pure comptime fn try_from(source: i16) -> ?Self {
+        bindings.try_i16_to_isize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i32> for isize {
+    pure comptime fn try_from(source: i32) -> ?Self {
+        bindings.try_i32_to_isize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i64> for isize {
+    pure comptime fn try_from(source: i64) -> ?Self {
+        bindings.try_i64_to_isize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<i128> for isize {
+    pure comptime fn try_from(source: i128) -> ?Self {
+        bindings.try_i128_to_isize(source)
+    }
+}
+
+comptime impl ComptimeTryFrom<isize> for isize {
+    pure comptime fn try_from(source: isize) -> ?Self {
+        source
+    }
+}

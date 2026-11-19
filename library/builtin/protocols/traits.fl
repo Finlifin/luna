@@ -191,7 +191,7 @@ impl Hash for isize {
 }
 
 -- ── Conversion ─────────────────────────────────────────────────────────────
-pub use conversion.{From, Into}
+pub use conversion.{From, Into, TryFrom, TryInto}
 
 -- ── Default ────────────────────────────────────────────────────────────────
 pub trait Default {

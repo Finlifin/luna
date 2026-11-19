@@ -306,6 +306,52 @@ pub fn analyze_cleanup_with_borrowed_code_context(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn analyze_cleanup_with_borrowed_code_context_requiring_instances(
+    package: &nir::program::Package,
+    world: &World<'_>,
+    items: &LangItems,
+    function: &nir::program::Function,
+    fuel: usize,
+    query_budget: Budget,
+    borrows: &[(usize, nir::Term)],
+    callables: &[elaboration::verification::moves::CallableParameter],
+    enums: &[elaboration::verification::moves::EnumParameter],
+    effects: Vec<elaboration::verification::moves::EffectResultInput>,
+    fields: &[elaboration::verification::moves::BorrowedField],
+    borrowed: &[elaboration::verification::moves::BorrowedCode],
+) -> (
+    Result<elaboration::verification::moves::Report, elaboration::verification::moves::Error>,
+    Vec<elaboration::verification::drop::RequiredDropInstance>,
+) {
+    use elaboration::verification::{drop::CleanupSession, moves};
+    let Some(LangItemDef::UserDef(protocol)) = items.get(LangItem::Drop) else {
+        return (
+            Err(moves::Error {
+                source: function.body.source,
+                reason: "Drop language item is not bound to a source trait".into(),
+            }),
+            vec![],
+        );
+    };
+    let mut session =
+        CleanupSession::new(package, world, protocol, query_budget).require_runtime_instances();
+    let result = moves::analyze_in_package_with_borrowed_code_context(
+        package,
+        function,
+        |ty| copy_delivery(package, world, items, ty, query_budget),
+        fuel,
+        Some(&mut session),
+        borrows,
+        callables,
+        enums,
+        effects,
+        fields,
+        borrowed,
+    );
+    (result, session.into_missing_runtime_instances())
+}
+
 /// Resolve the comptime phase using trusted language-item identity. Returned
 /// program/capability obligations still need discharge before invocation.
 pub fn select_comptime_key(
@@ -371,6 +417,48 @@ pub fn infer_borrowed_callable_memory(
         fuel,
         source,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn infer_borrowed_callable_memory_requiring_instances(
+    package: &nir::program::Package,
+    world: &World<'_>,
+    items: &LangItems,
+    declaration: nir::DeclarationId,
+    arguments: &[nir::Term],
+    callables: &[elaboration::verification::moves::CallableParameter],
+    enums: &[elaboration::verification::moves::EnumParameter],
+    effects: &[elaboration::verification::moves::EffectResultInput],
+    borrowed: &[elaboration::verification::moves::BorrowedCode],
+    fuel: &mut usize,
+    budget: Budget,
+    source: nir::program::SourceRange,
+) -> (
+    Result<elaboration::verification::memory::Summary, String>,
+    Vec<elaboration::verification::drop::RequiredDropInstance>,
+) {
+    use elaboration::verification::{drop::CleanupSession, moves};
+    let Some(LangItemDef::UserDef(protocol)) = items.get(LangItem::Drop) else {
+        return (
+            Err("Drop language item is not bound to a source trait".into()),
+            vec![],
+        );
+    };
+    let mut session =
+        CleanupSession::new(package, world, protocol, budget).require_runtime_instances();
+    let result = moves::infer_callable_memory_with_borrowed_cleanup_context(
+        package,
+        declaration,
+        arguments,
+        callables,
+        enums,
+        effects,
+        borrowed,
+        Some(&mut session),
+        fuel,
+        source,
+    );
+    (result, session.into_missing_runtime_instances())
 }
 
 /// Invocation-scoped resource evidence, including the interface frame used to

@@ -1437,13 +1437,18 @@ fn elaborate_candidate<'a, 'h>(
         .iter()
         .any(|i| !i.type_parameters.is_empty() || !i.requirements.is_empty())
     {
+        let default_dispatch_fuel = crate::ptc::Budget::default()
+            .steps
+            .saturating_add(output.functions.len().saturating_mul(1_000))
+            .saturating_add(output.implementations.len().saturating_mul(1_000))
+            .min(16_000_000);
         output.dispatch_instances = crate::materialization::dispatch_instances(
             &output,
             crate::ptc::Budget {
                 steps: checker
                     .protocols
                     .dispatch_fuel
-                    .unwrap_or(crate::ptc::Budget::default().steps),
+                    .unwrap_or(default_dispatch_fuel),
                 ..crate::ptc::Budget::default()
             },
         )

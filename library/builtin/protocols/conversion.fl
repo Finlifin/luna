@@ -6,3 +6,11 @@ pub trait Into where Target {
 pub trait From where Source {
     fn from(source: Source) -> Self;
 }
+
+pub trait TryInto where Target {
+    fn try_into(self) -> ?Target;
+}
+
+pub trait TryFrom where Source {
+    fn try_from(source: Source) -> ?Self;
+}

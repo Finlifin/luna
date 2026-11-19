@@ -1258,13 +1258,23 @@ impl Builder<'_> {
             ));
         }
         self.output[slot].methods.push(method.clone());
-        self.queue.push_back(Task::Type(
-            specialized
-                .signature
-                .ordinary()
+        let contract_signature = specialized
+            .signature
+            .ordinary()
+            .map_err(|e| e.to_string())?
+            .clone();
+        self.queue.push_back(Task::Type(contract_signature.clone()));
+        if self.instances.is_none() {
+            if let Some(body_signature) = self
+                .world
+                .callable_signature(method.body, &method.arguments, &[], &mut self.fuel)
                 .map_err(|e| e.to_string())?
-                .clone(),
-        ));
+            {
+                if body_signature != contract_signature {
+                    self.queue.push_back(Task::Type(body_signature));
+                }
+            }
+        }
         if self.instances.is_some() {
             for argument in method_arguments {
                 self.queue.push_back(Task::Type(argument.clone()));
@@ -2361,16 +2371,7 @@ impl Builder<'_> {
             .normalized_type(ty, self.budget, &mut self.fuel)
             .map_err(String::from)
     }
-    fn staging_type_view(&mut self, ty: &Term) -> Result<Term, String> {
-        // The annotation walker also visits complete interface identity inputs.
-        if ty.sort() != nir::Sort::Type {
-            // This walker also visits invocation identity inputs. Preserve
-            // values for their domain-aware staging checks; an annotation view
-            // must not submit them to the associated-Type normalizer or impose
-            // the narrower trait-index representation rules on them.
-            crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
-            return Ok(ty.clone());
-        }
+    fn staging_term_view(&mut self, term: &Term) -> Result<Term, String> {
         let mut budget = Budget {
             steps: self.fuel,
             ..self.budget
@@ -2382,10 +2383,67 @@ impl Builder<'_> {
             assumptions: self.world.assumptions(),
             context: self.world.context(),
         }
-        .associated_type_view_cached_metered(ty, &mut budget, &mut self.staging_views);
+        .associated_type_view_cached_metered(term, &mut budget, &mut self.staging_views);
         self.fuel = budget.steps;
         Ok(view?.value)
     }
+
+    fn staging_type_view(&mut self, ty: &Term) -> Result<Term, String> {
+        // The annotation walker also visits complete interface identity inputs.
+        if ty.sort() != nir::Sort::Type {
+            // This walker also visits invocation identity inputs. Preserve
+            // values for their domain-aware staging checks; an annotation view
+            // must not submit them to the associated-Type normalizer or impose
+            // the narrower trait-index representation rules on them.
+            crate::associated::charge_projection_copy(ty, &mut self.fuel)?;
+            return Ok(ty.clone());
+        }
+        self.staging_term_view(ty)
+    }
+
+    fn retain_staged_associated_types(&mut self, root: &Term) -> Result<(), String> {
+        let mut pending = vec![(root, 0usize)];
+        while let Some((node, depth)) = pending.pop() {
+            self.tick(depth)?;
+            if let Term::AssociatedType {
+                origin,
+                arguments,
+                subject,
+            } = node
+                && node.check_scope(&[]).is_ok()
+            {
+                if self.world.assumptions().is_empty() {
+                    crate::associated::charge_projection_copy(node, &mut self.fuel)?;
+                    self.queue.push_back(Task::Type(node.clone()));
+                    continue;
+                }
+                let normalized_subject = self.staging_type_view(subject)?;
+                let mut normalized_arguments = Vec::with_capacity(arguments.len());
+                for argument in arguments {
+                    normalized_arguments.push(self.staging_type_view(argument)?);
+                }
+                let key = Term::AssociatedType {
+                    origin: origin.clone(),
+                    arguments: normalized_arguments,
+                    subject: Box::new(normalized_subject),
+                };
+                if self
+                    .staging_views
+                    .get(&key)
+                    .is_some_and(|resolved| resolved != &key)
+                {
+                    crate::associated::charge_projection_copy(&key, &mut self.fuel)?;
+                    self.queue.push_back(Task::Type(key));
+                }
+            }
+            node.visit_children(|child| {
+                pending.push((child, depth + 1));
+                Ok::<_, String>(())
+            })?;
+        }
+        Ok(())
+    }
+
     fn ty(&mut self, ty: Term) -> Result<(), String> {
         if !self.types.insert(ty.clone()) {
             return Ok(());
@@ -2398,6 +2456,7 @@ impl Builder<'_> {
             // binds it. Validate the complete retained callable view instead;
             // concrete dependency closure runs after invocation input staging.
             self.staging_type_view(&ty)?;
+            self.retain_staged_associated_types(&ty)?;
             return Ok(());
         }
         if self.instances.is_some() {
@@ -2949,6 +3008,7 @@ impl Builder<'_> {
                 | K::TakeBits(value)
                 | K::TextQuery { subject: value, .. }
                 | K::IntegerRepresentation(value)
+                | K::TryIntegerConvert(value)
                 | K::ComptimeIntegerConvert(value)
                 | K::SymbolName(value)
                 | K::EnumName(value)
@@ -3421,6 +3481,7 @@ impl Builder<'_> {
             | K::TakeBits(value)
             | K::TextQuery { subject: value, .. }
             | K::IntegerRepresentation(value)
+            | K::TryIntegerConvert(value)
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::EnumName(value)

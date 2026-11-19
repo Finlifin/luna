@@ -10,6 +10,7 @@ mod enums;
 mod errors;
 mod frames;
 mod half_fma;
+mod memory;
 mod named_calls;
 mod optional;
 mod platform;
@@ -1206,6 +1207,10 @@ impl Emitter<'_> {
                 if checked.operation().is_platform() {
                     return self.platform_intrinsic(checked.operation(), &values);
                 }
+                if checked.operation().is_memory() {
+                    let result_ty = repr(self.graph, &expr.ty, self.checked)?;
+                    return self.memory_intrinsic(checked.operation(), &values, result_ty);
+                }
                 let width = checked
                     .validate_target_layout(self.graph.target).map_err(str::to_owned)?
                     .ok_or("host intrinsic requires concrete width (platform integers need an explicit pointer-width)")?;
@@ -1722,6 +1727,17 @@ impl Emitter<'_> {
                     }
                 }
             }
+            K::TryIntegerConvert(e) => {
+                if !nir::program::try_integer_convert_valid(&e.ty, &expr.ty) {
+                    return Err("host try integer convert domain mismatch".into());
+                }
+                let value = self.expr(e, depth)?;
+                if self.terminated {
+                    Value::unit()
+                } else {
+                    self.emit_try_integer_convert(&value, &expr.ty)?
+                }
+            }
             K::TakeBits(e) => {
                 let value = self.expr(e, depth)?;
                 if self.terminated {
@@ -1915,6 +1931,154 @@ impl Emitter<'_> {
                     expr.source.start, expr.source.end, expr.kind
                 ));
             }
+        })
+    }
+
+    fn emit_try_integer_convert(
+        &mut self,
+        value: &Value,
+        result_ty: &Term,
+    ) -> Result<Value, String> {
+        let Ty::Int(src_bits, src_signed) = value.ty else {
+            return Err("host try integer convert requires an integer input".into());
+        };
+        let opt_ty = repr(self.graph, result_ty, self.checked)?;
+        let Ty::Optional(dst_ty_arc) = &opt_ty else {
+            return Err("host try integer convert requires an optional result".into());
+        };
+        let dst_ty = (**dst_ty_arc).clone();
+        let Ty::Int(dst_bits, dst_signed) = dst_ty else {
+            return Err("host try integer convert requires an integer destination".into());
+        };
+        let mask_u128 = |bits: u32| -> u128 {
+            if bits == 128 {
+                u128::MAX
+            } else {
+                (1u128 << bits) - 1
+            }
+        };
+        let signed_min = |bits: u32| -> i128 {
+            if bits == 128 {
+                i128::MIN
+            } else {
+                -(1i128 << (bits - 1))
+            }
+        };
+        let signed_max = |bits: u32| -> i128 {
+            if bits == 128 {
+                i128::MAX
+            } else {
+                (1i128 << (bits - 1)) - 1
+            }
+        };
+        let src_llvm = value.ty.llvm();
+        let in_range: Option<Value> =
+            match (src_signed, dst_signed) {
+                (false, false) => {
+                    if src_bits <= dst_bits {
+                        None
+                    } else {
+                        let dst_max = mask_u128(dst_bits);
+                        Some(self.instruction(
+                            Ty::Bool,
+                            format!("icmp ule {src_llvm} {}, {dst_max}", value.text),
+                        ))
+                    }
+                }
+                (false, true) => {
+                    if src_bits < dst_bits {
+                        None
+                    } else {
+                        let dst_max = signed_max(dst_bits) as u128;
+                        Some(self.instruction(
+                            Ty::Bool,
+                            format!("icmp ule {src_llvm} {}, {dst_max}", value.text),
+                        ))
+                    }
+                }
+                (true, false) => {
+                    let dst_max = mask_u128(dst_bits);
+                    let src_max = signed_max(src_bits) as u128;
+                    if src_max <= dst_max {
+                        Some(self.instruction(
+                            Ty::Bool,
+                            format!("icmp sge {src_llvm} {}, 0", value.text),
+                        ))
+                    } else {
+                        Some(self.instruction(
+                            Ty::Bool,
+                            format!("icmp ule {src_llvm} {}, {dst_max}", value.text),
+                        ))
+                    }
+                }
+                (true, true) => {
+                    if src_bits <= dst_bits {
+                        None
+                    } else {
+                        let lo = self.instruction(
+                            Ty::Bool,
+                            format!(
+                                "icmp sge {src_llvm} {}, {}",
+                                value.text,
+                                signed_min(dst_bits)
+                            ),
+                        );
+                        let hi = self.instruction(
+                            Ty::Bool,
+                            format!(
+                                "icmp sle {src_llvm} {}, {}",
+                                value.text,
+                                signed_max(dst_bits)
+                            ),
+                        );
+                        Some(self.instruction(Ty::Bool, format!("and i1 {}, {}", lo.text, hi.text)))
+                    }
+                }
+            };
+        let dst_llvm = dst_ty.llvm();
+        let converted = if src_bits == dst_bits {
+            Value {
+                ty: dst_ty.clone(),
+                text: value.text.clone(),
+            }
+        } else if src_bits > dst_bits {
+            self.instruction(
+                dst_ty.clone(),
+                format!("trunc {src_llvm} {} to {dst_llvm}", value.text),
+            )
+        } else if src_signed {
+            self.instruction(
+                dst_ty.clone(),
+                format!("sext {src_llvm} {} to {dst_llvm}", value.text),
+            )
+        } else {
+            self.instruction(
+                dst_ty.clone(),
+                format!("zext {src_llvm} {} to {dst_llvm}", value.text),
+            )
+        };
+        let opt_llvm = opt_ty.llvm();
+        let present_tag = self.instruction(
+            opt_ty.clone(),
+            format!("insertvalue {opt_llvm} zeroinitializer, i1 true, 0"),
+        );
+        let present = self.instruction(
+            opt_ty.clone(),
+            format!(
+                "insertvalue {opt_llvm} {}, {dst_llvm} {}, 1",
+                present_tag.text, converted.text
+            ),
+        );
+        Ok(if let Some(cond) = in_range {
+            self.instruction(
+                opt_ty,
+                format!(
+                    "select i1 {}, {opt_llvm} {}, {opt_llvm} zeroinitializer",
+                    cond.text, present.text
+                ),
+            )
+        } else {
+            present
         })
     }
 }

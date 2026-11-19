@@ -51,6 +51,52 @@ impl Interpreter<'_> {
         };
         Ok(Value::UnsignedInteger(bits & (u128::MAX >> (128 - width))))
     }
+    pub(super) fn try_convert_integer(
+        &mut self,
+        scalar: Scalar<'_>,
+        value: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let Term::Primitive(src) = *scalar.left else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        let (src_signed, src_width) = self
+            .integer_layout(src)
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        let Term::Optional(inner) = scalar.result else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        let Term::Primitive(dst) = inner.as_ref() else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        let (dst_signed, dst_width) = self
+            .integer_layout(*dst)
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
+        self.check_retained_value(&value, scalar.left, Some(source))?;
+        let integer = match (&value, src_signed) {
+            (Value::UnsignedInteger(raw), false) => {
+                MachineInteger::from_unsigned(*raw, src_width as u16)
+                    .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                comptime_runtime::Integer::from_u128(*raw)
+            }
+            (Value::SignedInteger(raw), true) => {
+                MachineInteger::from_signed(*raw, src_width as u16)
+                    .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+                comptime_runtime::Integer::from_i128(*raw)
+            }
+            _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+        };
+        self.tick(Some(source))?;
+        let converted = if dst_signed {
+            integer.to_signed(dst_width).ok().map(Value::SignedInteger)
+        } else {
+            integer
+                .to_unsigned(dst_width)
+                .ok()
+                .map(Value::UnsignedInteger)
+        };
+        self.complete_optional(scalar.result, converted, source)
+    }
 }
 
 #[cfg(test)]

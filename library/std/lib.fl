@@ -4,7 +4,7 @@ use fmt_impl.arguments;
 use fmt_impl.parse;
 use fs_impl.file;
 use io_impl.{errors, writer}
-use mem_impl.layout;
+use mem_impl.{allocator, boxed, layout}
 use platform.{linux as linux_impl, unix as unix_impl}
 
 pub mod os {
@@ -29,6 +29,8 @@ pub mod fs {
 }
 
 pub mod mem {
+    pub use allocator.*;
+    pub use boxed.Box;
     pub use layout.Layout;
 }
 

@@ -830,8 +830,7 @@ impl Checker<'_, '_> {
             .checked_sub(1)
             .ok_or_else(|| error(span, "type condition budget exhausted"))?;
         if let Some(source_expr) = source_expr {
-            if matches!(source_expr.kind, H::TraitBound(..)) || self.is_type_assumption(source_expr)
-            {
+            if matches!(source_expr.kind, H::TraitBound(..)) {
                 let predicate = self.type_predicate(source_expr)?;
                 let fact = F::from_predicate(&predicate);
                 let mut budget = crate::ptc::Budget {

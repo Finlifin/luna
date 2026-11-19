@@ -379,3 +379,407 @@ fn constructor_scope_does_not_make_malformed_dispatch_payloads_valid() {
     );
     assert_eq!(budget.steps, 0);
 }
+
+fn staged_associated_fixture(second_associated_on_body: bool) -> n::Package {
+    let source = nir::program::SourceRange { start: 0, end: 0 };
+    let expr = |kind, ty| n::Expr { source, ty, kind };
+    let assoc_term = |interface, member, subject| Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin { interface, member }),
+        arguments: vec![],
+        subject: Box::new(subject),
+    };
+    let project_id = id(1);
+    let project_self = id(2);
+    let project_out = id(3);
+    let project_method = id(4);
+    let second_id = id(5);
+    let second_self = id(6);
+    let second_out = id(7);
+    let project_contract_sig = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::ComptimeValue,
+            ty: Term::Rigid {
+                declaration: project_self,
+                sort: Sort::Type,
+            },
+        }],
+        result: Box::new(assoc_term(
+            project_id,
+            project_out,
+            Term::Rigid {
+                declaration: project_self,
+                sort: Sort::Type,
+            },
+        )),
+    };
+    let bool_param_sig = |result: Term| Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::ComptimeValue,
+            ty: boolean(),
+        }],
+        result: Box::new(result),
+    };
+    let body_result = if second_associated_on_body {
+        assoc_term(second_id, second_out, boolean())
+    } else {
+        boolean()
+    };
+    let mut package = n::Package {
+        traits: vec![n::Trait {
+            comptime_only: false,
+            declaration: project_id,
+            self_parameter: project_self,
+            name: "Project".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            associated: vec![n::AssociatedContract {
+                phase: Default::default(),
+                declaration: project_out,
+                name: "Out".into(),
+                ty: Term::Primitive(Primitive::Type),
+                default: None,
+            }],
+            requirements: vec![],
+            capabilities: vec![],
+            parents: vec![],
+            methods: vec![n::MethodContract {
+                source,
+                phase: Default::default(),
+                is_quote: false,
+                pure: false,
+                is_unsafe: false,
+                type_arguments: vec![],
+                type_parameters: vec![],
+                capabilities: vec![],
+                program: Default::default(),
+                parameter_bindings: vec![n::LocalId { owner: 4, index: 0 }],
+                by_value_receiver: false,
+                by_reference_receiver: false,
+                declaration: project_method,
+                name: "project".into(),
+                signature: project_contract_sig.into(),
+                requirements: vec![],
+                default: None,
+            }],
+        }],
+        implementations: vec![n::Implementation {
+            declaration: id(10),
+            phases: n::ImplementationPhases {
+                runtime: true,
+                comptime: true,
+            },
+            type_parameters: vec![],
+            parameter_types: vec![],
+            interface: Some(project_id),
+            interface_arguments: vec![],
+            subject: boolean(),
+            requirements: vec![],
+            capabilities: vec![],
+            associated: vec![(
+                project_out,
+                expr(
+                    n::ExprKind::TypeValue(boolean()),
+                    Term::Primitive(Primitive::Type),
+                ),
+            )],
+            associated_initializers: vec![],
+            methods: vec![("project".into(), id(11))],
+        }],
+        functions: vec![
+            n::Function {
+                interface: n::FunctionDeclaration {
+                    source,
+                    declaration: id(11),
+                    name: "project_bool".into(),
+                    phase: n::FunctionPhase::Runtime,
+                    pure: false,
+                    inline: false,
+                    is_unsafe: false,
+                    type_parameters: vec![],
+                    parameters: vec![n::LocalId {
+                        owner: 11,
+                        index: 0,
+                    }],
+                    signature: bool_param_sig(body_result),
+                    defaults: vec![],
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
+                    entry_snapshots: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                },
+                body: expr(n::ExprKind::Literal(n::Literal::Bool(true)), boolean()),
+            },
+            n::Function {
+                interface: n::FunctionDeclaration {
+                    source,
+                    declaration: id(20),
+                    name: "caller".into(),
+                    phase: n::FunctionPhase::Runtime,
+                    pure: false,
+                    inline: false,
+                    is_unsafe: false,
+                    type_parameters: vec![],
+                    parameters: vec![],
+                    signature: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(boolean()),
+                    },
+                    defaults: vec![],
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
+                    entry_snapshots: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                },
+                body: expr(
+                    n::ExprKind::Call {
+                        callee: Box::new(expr(
+                            n::ExprKind::TraitMethod {
+                                method_arguments: vec![],
+                                interface_arguments: vec![],
+                                interface: project_id,
+                                member: project_method,
+                                subject: boolean(),
+                            },
+                            bool_param_sig(assoc_term(project_id, project_out, boolean())),
+                        )),
+                        arguments: vec![n::CallArgument {
+                            passing: Default::default(),
+                            parameter: 0,
+                            value: expr(n::ExprKind::Literal(n::Literal::Bool(true)), boolean()),
+                            is_default: false,
+                        }],
+                        parameter_bindings: vec![n::LocalId {
+                            owner: 20,
+                            index: 0,
+                        }],
+                    },
+                    boolean(),
+                ),
+            },
+        ],
+        ..Default::default()
+    };
+    if second_associated_on_body {
+        package.traits.push(n::Trait {
+            comptime_only: false,
+            declaration: second_id,
+            self_parameter: second_self,
+            name: "Second".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            associated: vec![n::AssociatedContract {
+                phase: Default::default(),
+                declaration: second_out,
+                name: "Out".into(),
+                ty: Term::Primitive(Primitive::Type),
+                default: None,
+            }],
+            requirements: vec![],
+            capabilities: vec![],
+            parents: vec![],
+            methods: vec![],
+        });
+        package.implementations.push(n::Implementation {
+            declaration: id(12),
+            phases: n::ImplementationPhases {
+                runtime: true,
+                comptime: true,
+            },
+            type_parameters: vec![],
+            parameter_types: vec![],
+            interface: Some(second_id),
+            interface_arguments: vec![],
+            subject: boolean(),
+            requirements: vec![],
+            capabilities: vec![],
+            associated: vec![(
+                second_out,
+                expr(
+                    n::ExprKind::TypeValue(boolean()),
+                    Term::Primitive(Primitive::Type),
+                ),
+            )],
+            associated_initializers: vec![],
+            methods: vec![],
+        });
+    }
+    package
+}
+
+#[test]
+fn staged_trait_method_retains_associated_type_in_contract_signature() {
+    use comptime_interpretor::{Budget as VmBudget, Interpreter};
+    let mut package = staged_associated_fixture(false);
+    package.dispatch_instances = dispatch_instances(&package, Budget::default()).unwrap();
+    let project = package
+        .dispatch_instances
+        .iter()
+        .find(|instance| instance.interface == id(1) && instance.subject == boolean())
+        .expect("Project dispatch instance");
+    assert_eq!(project.methods.len(), 1);
+    assert!(
+        project
+            .associated
+            .iter()
+            .any(|(member, _)| *member == id(3)),
+        "expected Out associated type to be retained, got {:?}",
+        project.associated
+    );
+    Interpreter::for_comptime(&package, VmBudget::default()).unwrap();
+}
+
+#[test]
+fn staged_trait_method_retains_associated_type_from_implementation_body_signature() {
+    use comptime_interpretor::{Budget as VmBudget, Interpreter};
+    let mut package = staged_associated_fixture(true);
+    package.dispatch_instances = dispatch_instances(&package, Budget::default()).unwrap();
+    let project = package
+        .dispatch_instances
+        .iter()
+        .find(|instance| instance.interface == id(1) && instance.subject == boolean())
+        .expect("Project dispatch instance");
+    let second = package
+        .dispatch_instances
+        .iter()
+        .find(|instance| instance.interface == id(5) && instance.subject == boolean())
+        .expect("Second dispatch instance");
+    assert!(
+        project
+            .associated
+            .iter()
+            .any(|(member, _)| *member == id(3))
+    );
+    assert!(second.associated.iter().any(|(member, _)| *member == id(7)));
+    Interpreter::for_comptime(&package, VmBudget::default()).unwrap();
+}
+
+#[test]
+fn staged_callable_with_dependent_and_closed_associated_types_retains_only_closed_supply() {
+    let source = nir::program::SourceRange { start: 0, end: 0 };
+    let expr = |kind, ty| n::Expr { source, ty, kind };
+    let project_id = id(1);
+    let project_out = id(3);
+    let assoc_term = |subject| Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: project_id,
+            member: project_out,
+        }),
+        arguments: vec![],
+        subject: Box::new(subject),
+    };
+    let package = n::Package {
+        traits: vec![n::Trait {
+            comptime_only: false,
+            declaration: project_id,
+            self_parameter: id(2),
+            name: "Project".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            associated: vec![n::AssociatedContract {
+                phase: Default::default(),
+                declaration: project_out,
+                name: "Out".into(),
+                ty: Term::Primitive(Primitive::Type),
+                default: None,
+            }],
+            requirements: vec![],
+            capabilities: vec![],
+            parents: vec![],
+            methods: vec![],
+        }],
+        implementations: vec![n::Implementation {
+            declaration: id(10),
+            phases: n::ImplementationPhases {
+                runtime: true,
+                comptime: true,
+            },
+            type_parameters: vec![],
+            parameter_types: vec![],
+            interface: Some(project_id),
+            interface_arguments: vec![],
+            subject: boolean(),
+            requirements: vec![],
+            capabilities: vec![],
+            associated: vec![(
+                project_out,
+                expr(
+                    n::ExprKind::TypeValue(boolean()),
+                    Term::Primitive(Primitive::Type),
+                ),
+            )],
+            associated_initializers: vec![],
+            methods: vec![],
+        }],
+        functions: vec![n::Function {
+            interface: n::FunctionDeclaration {
+                source,
+                declaration: id(21),
+                name: "mixed_staged".into(),
+                phase: n::FunctionPhase::Runtime,
+                pure: false,
+                inline: false,
+                is_unsafe: false,
+                type_parameters: vec![],
+                parameters: vec![
+                    n::LocalId {
+                        owner: 21,
+                        index: 0,
+                    },
+                    n::LocalId {
+                        owner: 21,
+                        index: 1,
+                    },
+                ],
+                signature: Term::Function {
+                    parameters: vec![
+                        nir::Parameter {
+                            sort: Sort::Type,
+                            ty: Term::Primitive(Primitive::Type),
+                        },
+                        nir::Parameter {
+                            sort: Sort::Runtime,
+                            ty: assoc_term(Term::Bound {
+                                depth: 0,
+                                index: 0,
+                                sort: Sort::Type,
+                            }),
+                        },
+                    ],
+                    result: Box::new(assoc_term(boolean())),
+                },
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
+            body: expr(n::ExprKind::Literal(n::Literal::Bool(true)), boolean()),
+        }],
+        ..Default::default()
+    };
+    let dispatch = dispatch_instances(&package, Budget::default()).unwrap();
+    let project = dispatch
+        .iter()
+        .find(|instance| instance.interface == project_id && instance.subject == boolean())
+        .expect("closed Project dispatch instance");
+    assert!(
+        project
+            .associated
+            .iter()
+            .any(|(member, _)| *member == project_out),
+        "expected closed Out supply to be retained, got {:?}",
+        project.associated
+    );
+}

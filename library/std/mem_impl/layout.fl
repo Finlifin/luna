@@ -49,6 +49,14 @@ impl Layout {
         self.alignment
     }
 
+    pub fn byte_size_usize(self) -> ?usize {
+        builtin.compiler.try_u64_to_usize(self.size)
+    }
+
+    pub fn byte_alignment_usize(self) -> ?usize {
+        builtin.compiler.try_u64_to_usize(self.alignment)
+    }
+
     pub pure fn repeat(self, count: u64) -> ?Self {
         if self.alignment == 0 {
             return null;
@@ -142,9 +150,5 @@ impl Layout {
 }
 
 fn usize_to_u64(value: usize) -> ?u64 {
-    let raw = builtin.compiler.usize_representation(value);
-    if raw > 18446744073709551615 {
-        return null;
-    }
-    raw'bitvec[0..64].as(u64)
+    builtin.compiler.try_usize_to_u64(value)
 }

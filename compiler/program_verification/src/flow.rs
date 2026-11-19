@@ -6523,6 +6523,7 @@ fn exportable_postcondition(
             | K::TakeBits(a)
             | K::TextQuery { subject: a, .. }
             | K::IntegerRepresentation(a)
+            | K::TryIntegerConvert(a)
             | K::ComptimeIntegerConvert(a)
             | K::SymbolName(a)
             | K::EnumName(a)

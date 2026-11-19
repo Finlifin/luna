@@ -1819,7 +1819,7 @@ fn scalar_intrinsic_predicates_revalidate_evidence_and_all_operands() {
                 binding: Some(binding),
             },
         );
-        if operation.is_platform() {
+        if !operation.is_pure() {
             assert!(!checkable_predicate(&predicate(original)), "{operation:?}");
             continue;
         }
@@ -2260,5 +2260,189 @@ fn linux_bindings_check_operand_roles_and_refuse_comptime_evidence() {
         let mut too_many = inputs;
         too_many.push(Term::Primitive(P::I32));
         assert!(registry.check(tag, &too_many, &output).is_err());
+    }
+    for (operation, operands, result) in [
+        (
+            Operation::LinuxWriteRaw,
+            vec![P::I32, P::Usize, P::U64],
+            P::I64,
+        ),
+        (
+            Operation::LinuxReadRaw,
+            vec![P::I32, P::Usize, P::U64],
+            P::I64,
+        ),
+        (Operation::LinuxAlloc, vec![P::U64, P::U64], P::Usize),
+        (
+            Operation::LinuxDealloc,
+            vec![P::Usize, P::U64, P::U64],
+            P::Void,
+        ),
+    ] {
+        let registry = Registry::new(&package, &[(tag, operation)]).unwrap();
+        let inputs: Vec<_> = operands.into_iter().map(Term::Primitive).collect();
+        let output = Term::Primitive(result);
+        let binding = registry.check(tag, &inputs, &output).unwrap();
+        assert!(!binding.operation().is_pure());
+        assert!(binding.validate_types(tag, inputs.iter(), &output).is_ok());
+        assert!(
+            binding
+                .for_comptime()
+                .validate_types(tag, inputs.iter(), &output)
+                .is_err()
+        );
+        let wrong_output = if result == P::I64 { P::U64 } else { P::I64 };
+        assert!(
+            registry
+                .check(tag, &inputs, &Term::Primitive(wrong_output))
+                .is_err()
+        );
+        for index in 0..inputs.len() {
+            let mut wrong = inputs.clone();
+            wrong[index] = Term::Primitive(P::Bool);
+            assert!(registry.check(tag, &wrong, &output).is_err());
+        }
+        let mut too_many = inputs;
+        too_many.push(Term::Primitive(P::I32));
+        assert!(registry.check(tag, &too_many, &output).is_err());
+    }
+}
+
+#[test]
+fn memory_bindings_check_payloads_defer_templates_and_refuse_comptime_evidence() {
+    let package = support::compile("^intrinsic_enum enum Memory {op}");
+    let tag = tag(&package, "Memory", 0);
+    for (operation, operands, result) in [
+        (
+            Operation::MemCopy,
+            vec![P::Usize, P::Usize, P::Usize],
+            P::Void,
+        ),
+        (
+            Operation::MemCopyNonOverlapping,
+            vec![P::Usize, P::Usize, P::Usize],
+            P::Void,
+        ),
+        (
+            Operation::MemSetBytes,
+            vec![P::Usize, P::U8, P::Usize],
+            P::Void,
+        ),
+        (
+            Operation::MemCompareBytes,
+            vec![P::Usize, P::Usize, P::Usize],
+            P::I32,
+        ),
+    ] {
+        let registry = Registry::new(&package, &[(tag, operation)]).unwrap();
+        let inputs: Vec<_> = operands.into_iter().map(Term::Primitive).collect();
+        let output = Term::Primitive(result);
+        let binding = registry.check(tag, &inputs, &output).unwrap();
+        assert!(binding.operation().is_memory());
+        assert!(!binding.operation().is_pure());
+        assert!(binding.validate_types(tag, inputs.iter(), &output).is_ok());
+        assert!(
+            binding
+                .for_comptime()
+                .validate_types(tag, inputs.iter(), &output)
+                .is_err()
+        );
+        let wrong_output = if result == P::I32 { P::Void } else { P::I32 };
+        assert!(
+            registry
+                .check(tag, &inputs, &Term::Primitive(wrong_output))
+                .is_err()
+        );
+        for index in 0..inputs.len() {
+            let mut wrong = inputs.clone();
+            wrong[index] = Term::Primitive(P::Bool);
+            assert!(registry.check(tag, &wrong, &output).is_err());
+        }
+    }
+
+    let make = |ty: Term, kind: nir::program::ExprKind| nir::program::Expr {
+        source: nir::program::SourceRange { start: 0, end: 1 },
+        ty,
+        kind,
+    };
+    let payloads = [
+        Term::Primitive(P::U64),
+        Term::Primitive(P::Bool),
+        Term::Tuple(vec![Term::Primitive(P::U8), Term::Primitive(P::I32)]),
+        Term::Tuple(vec![]),
+    ];
+    for operation in [Operation::MemRawRead, Operation::MemRawWrite] {
+        let registry = Registry::new(&package, &[(tag, operation)]).unwrap();
+        for payload in &payloads {
+            let input_types: Vec<_> = (0..operation.operand_count())
+                .map(|i| operation.operand_type(payload, i))
+                .collect();
+            let output = operation.result_type(payload);
+            let binding = registry.check(tag, &input_types, &output).unwrap();
+            assert!(!binding.operation().is_pure());
+            assert!(
+                binding
+                    .validate_types(tag, input_types.iter(), &output)
+                    .is_ok()
+            );
+            assert!(
+                binding
+                    .for_comptime()
+                    .validate_types(tag, input_types.iter(), &output)
+                    .is_err()
+            );
+            assert!(registry.defer(tag, &input_types, &output).is_err());
+        }
+
+        let abstract_ty = Term::Rigid {
+            declaration: nir::DeclarationId {
+                package: 9,
+                local: 7,
+            },
+            sort: nir::Sort::Type,
+        };
+        let input_types: Vec<_> = (0..operation.operand_count())
+            .map(|i| operation.operand_type(&abstract_ty, i))
+            .collect();
+        let output = operation.result_type(&abstract_ty);
+        assert!(registry.check(tag, &input_types, &output).is_err());
+        let pending = registry.defer(tag, &input_types, &output).unwrap();
+        let inputs: Vec<_> = input_types
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| {
+                make(
+                    ty.clone(),
+                    nir::program::ExprKind::Local(nir::program::LocalId {
+                        owner: 9,
+                        index: i as u32,
+                    }),
+                )
+            })
+            .collect();
+        let expr = make(
+            output.clone(),
+            nir::program::ExprKind::Intrinsic {
+                tag,
+                inputs,
+                binding: Some(pending.clone()),
+            },
+        );
+        assert!(
+            pending
+                .validate_template(
+                    tag,
+                    match &expr.kind {
+                        nir::program::ExprKind::Intrinsic { inputs, .. } => inputs,
+                        _ => unreachable!(),
+                    },
+                    &expr.ty
+                )
+                .is_ok()
+        );
+        assert!(
+            nir::intrinsics::checked(&expr).is_err(),
+            "unspecialized polymorphic memory template must not authorize execution"
+        );
     }
 }

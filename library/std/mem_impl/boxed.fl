@@ -1,0 +1,104 @@
+use mem_impl.allocator.{AllocError, Allocator, RawBlock, SystemAllocator}
+use mem_impl.layout.Layout;
+
+{-
+    Single-owner heap allocation holding one initialized value of T.
+    Box<T> is affine (Once) and drops T in place before releasing the backing
+    RawBlock. Zero-sized payloads use a non-zero aligned dangling address with
+    no OS allocation while still running T's Drop on destruction.
+-}
+pub struct Box where T {
+    raw_addr: usize,
+    raw_layout: Layout,
+}
+
+fn retire_value(value: T) where T {}
+
+impl Drop for Box<T> where T {
+    fn drop(*self) {
+        let addr = self.raw_addr.*;
+        if addr != 0 {
+            let layout = self.raw_layout.*;
+            self.raw_addr.* = 0;
+            retire_value(unsafe { builtin.mem.raw_read<T>(addr) });
+            if layout.byte_size() != 0 {
+                let alloc = SystemAllocator {}
+                unsafe {
+                    alloc
+                        .as(Allocator)
+                        .deallocate(RawBlock.from_raw_parts(addr, layout));
+                }
+            }
+        }
+    }
+}
+
+impl Box<T> where T {
+    fn take_raw(*self) -> RawBlock {
+        let addr = self.raw_addr.*;
+        let layout = self.raw_layout.*;
+        self.raw_addr.* = 0;
+        RawBlock.from_raw_parts(addr, layout)
+    }
+
+    pub fn new(value: T) -> !AllocError Self {
+        let layout = Layout.of<T>() match {
+            found? => found,
+            null => return error AllocError.invalid_layout,
+        }
+        let alloc = SystemAllocator {}
+        let block = alloc.as(Allocator).allocate(layout)!;
+        unsafe {
+            builtin.mem.raw_write<T>(block.address(), value);
+        }
+        Box<T> {
+            raw_addr: block.address(),
+            raw_layout: block.layout(),
+        }
+    }
+
+    pub fn into_inner(self) -> T {
+        var this = self;
+        let block = this.ref.take_raw();
+        let value = unsafe { builtin.mem.raw_read<T>(block.address()) }
+        if block.byte_size() != 0 {
+            let alloc = SystemAllocator {}
+            unsafe {
+                alloc.as(Allocator).deallocate(block);
+            }
+        }
+        value
+    }
+
+    pub fn replace(*self, value: T) -> T {
+        let addr = self.raw_addr.*;
+        let old = unsafe { builtin.mem.raw_read<T>(addr) }
+        unsafe {
+            builtin.mem.raw_write<T>(addr, value);
+        }
+        old
+    }
+
+    pub fn set(*self, value: T) {
+        let addr = self.raw_addr.*;
+        let old = unsafe { builtin.mem.raw_read<T>(addr) }
+        unsafe {
+            builtin.mem.raw_write<T>(addr, value);
+        }
+        retire_value(old);
+    }
+
+    pub fn address(*self) -> usize {
+        self.raw_addr.*
+    }
+
+    pub fn layout(*self) -> Layout {
+        self.raw_layout.*
+    }
+}
+
+impl Box<T> where T :- Copy {
+    pub fn get(*self) -> T {
+        unsafe { builtin.mem.raw_read<T>(self.raw_addr.*) }
+    }
+}

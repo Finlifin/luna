@@ -442,6 +442,55 @@ pub fn acquire_cleanup(
     }
     acquire(package, world, protocol, ty, budget, fuel, 0)
 }
+#[derive(Clone, Debug, PartialEq)]
+pub struct RequiredDropInstance {
+    pub declaration: DeclarationId,
+    pub arguments: Vec<Term>,
+    pub subject: Term,
+}
+impl fmt::Display for RequiredDropInstance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(required-drop-instance (declaration {}) (arguments",
+            self.declaration
+        )?;
+        for argument in &self.arguments {
+            write!(f, " {argument}")?;
+        }
+        write!(f, ") (subject {}))", self.subject)
+    }
+}
+pub(super) fn record_missing_runtime_instance(
+    missing: &mut Vec<RequiredDropInstance>,
+    declaration: DeclarationId,
+    arguments: &[Term],
+    subject: &Term,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    *fuel = fuel
+        .checked_sub(missing.len().saturating_add(1))
+        .ok_or("missing destructor instance budget exhausted")?;
+    if let Some(existing) = missing
+        .iter()
+        .find(|item| item.declaration == declaration && item.arguments == arguments)
+    {
+        if &existing.subject != subject {
+            return Err("cleanup method has inconsistent receiver types".into());
+        }
+        return Ok(());
+    }
+    for argument in arguments {
+        crate::memory::bound_type(argument, fuel)?;
+    }
+    crate::memory::bound_type(subject, fuel)?;
+    missing.push(RequiredDropInstance {
+        declaration,
+        arguments: arguments.to_vec(),
+        subject: subject.clone(),
+    });
+    Ok(())
+}
 struct Planner<'a, 'w> {
     package: &'a Package,
     world: &'a World<'w>,
@@ -453,6 +502,7 @@ struct Planner<'a, 'w> {
     pointers: Option<PointerMemory<'a>>,
     retired: Vec<Place>,
     variant_layouts: std::collections::BTreeMap<Place, super::access::VariantLayout>,
+    missing_runtime_instances: Option<&'a mut Vec<RequiredDropInstance>>,
 }
 impl Planner<'_, '_> {
     fn shape(&mut self, binding: &AcquiredCleanup, depth: usize) -> Result<Shape, String> {
@@ -669,53 +719,72 @@ impl Planner<'_, '_> {
                         "cleanup program specification obligations are not discharged".into(),
                     );
                 }
-                let guarded;
-                let access_state = if conditional {
-                    guarded = state
-                        .under_construction_guard(&tree.place, true, self.fuel)
-                        .map_err(|e| format!("cleanup construction guard: {e:?}"))?;
-                    &guarded
-                } else {
-                    state
-                };
-                let access = super::access::check_access_with_layout(
-                    self.package,
-                    self.world,
-                    selected,
-                    access_state,
-                    &tree.place,
-                    self.pointers,
-                    &self.variant_layouts,
-                    self.fuel,
-                )
-                .map_err(|e| {
-                    if conditional {
-                        format!(
-                            "construction guard does not establish destructor field access: {e}"
+                if let Some(missing) = self.missing_runtime_instances.as_deref_mut()
+                    && self
+                        .package
+                        .runtime_instance_body_checked(
+                            selected.method.body,
+                            &selected.method.arguments,
                         )
+                        .map_err(str::to_owned)?
+                        .is_none()
+                {
+                    record_missing_runtime_instance(
+                        missing,
+                        selected.method.body,
+                        &selected.method.arguments,
+                        &selected.subject,
+                        self.fuel,
+                    )?;
+                } else {
+                    let guarded;
+                    let access_state = if conditional {
+                        guarded = state
+                            .under_construction_guard(&tree.place, true, self.fuel)
+                            .map_err(|e| format!("cleanup construction guard: {e:?}"))?;
+                        &guarded
                     } else {
-                        e
-                    }
-                })?;
-                for (access, targets) in access.footprint.accesses.iter().zip(&access.targets) {
-                    if access.read_value {
-                        for target in targets {
-                            super::access::check_retired(&self.retired, target, self.fuel)?;
+                        state
+                    };
+                    let access = super::access::check_access_with_layout(
+                        self.package,
+                        self.world,
+                        selected,
+                        access_state,
+                        &tree.place,
+                        self.pointers,
+                        &self.variant_layouts,
+                        self.fuel,
+                    )
+                    .map_err(|e| {
+                        if conditional {
+                            format!(
+                                "construction guard does not establish destructor field access: {e}"
+                            )
+                        } else {
+                            e
+                        }
+                    })?;
+                    for (access, targets) in access.footprint.accesses.iter().zip(&access.targets) {
+                        if access.read_value {
+                            for target in targets {
+                                super::access::check_retired(&self.retired, target, self.fuel)?;
+                            }
                         }
                     }
+                    let invoke = CleanupStep::Invoke {
+                        selected: selected.clone(),
+                        access,
+                    };
+                    steps.push(if conditional {
+                        CleanupStep::IfConstructed {
+                            place: tree.place.clone(),
+                            steps: vec![invoke],
+                        }
+                    } else {
+                        invoke
+                    });
                 }
-                let invoke = CleanupStep::Invoke {
-                    selected: selected.clone(),
-                    access,
-                };
-                steps.push(if conditional {
-                    CleanupStep::IfConstructed {
-                        place: tree.place.clone(),
-                        steps: vec![invoke],
-                    }
-                } else {
-                    invoke
-                });
             }
         }
         match &binding.layout {
@@ -824,6 +893,23 @@ fn plan_cleanup_with_domains(
     variants: &[VariantSelection],
     domains: &BTreeMap<Vec<usize>, BTreeSet<usize>>,
     pointers: Option<PointerMemory<'_>>,
+    fuel: &mut usize,
+) -> Result<CleanupPlan, String> {
+    plan_cleanup_with_domains_internal(
+        package, world, acquired, state, receiver, variants, domains, pointers, None, fuel,
+    )
+}
+
+fn plan_cleanup_with_domains_internal(
+    package: &Package,
+    world: &World<'_>,
+    acquired: &AcquiredCleanup,
+    state: &State,
+    receiver: &Place,
+    variants: &[VariantSelection],
+    domains: &BTreeMap<Vec<usize>, BTreeSet<usize>>,
+    pointers: Option<PointerMemory<'_>>,
+    missing_runtime_instances: Option<&mut Vec<RequiredDropInstance>>,
     fuel: &mut usize,
 ) -> Result<CleanupPlan, String> {
     step(fuel, 0)?;
@@ -952,6 +1038,7 @@ fn plan_cleanup_with_domains(
             pointers,
             retired: vec![],
             variant_layouts: Default::default(),
+            missing_runtime_instances,
         }
         .visit(acquired, state, tree, 0, &mut steps)?;
     }
@@ -985,6 +1072,8 @@ pub struct CleanupSession<'a, 'w> {
     read_footprints: std::collections::HashMap<Term, CleanupReadFootprint>,
     memory_inert_types: std::collections::HashSet<Term>,
     nonrejecting_types: std::collections::HashSet<Term>,
+    require_runtime_instances: bool,
+    missing_runtime_instances: Vec<RequiredDropInstance>,
 }
 impl<'a, 'w> CleanupSession<'a, 'w> {
     pub fn new(
@@ -1007,19 +1096,39 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
             read_footprints: Default::default(),
             memory_inert_types: Default::default(),
             nonrejecting_types: Default::default(),
+            require_runtime_instances: false,
+            missing_runtime_instances: vec![],
         }
+    }
+    pub fn require_runtime_instances(mut self) -> Self {
+        self.require_runtime_instances = true;
+        self
+    }
+    pub fn missing_runtime_instances(&self) -> &[RequiredDropInstance] {
+        &self.missing_runtime_instances
+    }
+    pub fn into_missing_runtime_instances(self) -> Vec<RequiredDropInstance> {
+        self.missing_runtime_instances
     }
     fn find<'b>(
         &'b self,
         ty: &Term,
         fuel: &mut usize,
     ) -> Result<Option<&'b AcquiredCleanup>, String> {
+        Self::find_in_bindings(&self.bindings, &self.binding_paths, ty, fuel)
+    }
+    fn find_in_bindings<'b>(
+        bindings: &'b [AcquiredCleanup],
+        binding_paths: &std::collections::HashMap<Term, (usize, Vec<usize>)>,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<&'b AcquiredCleanup>, String> {
         crate::memory::bound_type(ty, fuel)?;
         step(fuel, 0)?;
-        let Some((root, path)) = self.binding_paths.get(ty) else {
+        let Some((root, path)) = binding_paths.get(ty) else {
             return Ok(None);
         };
-        let mut binding = &self.bindings[*root];
+        let mut binding = &bindings[*root];
         let mut indices = path.iter();
         while let Some(index) = indices.next() {
             step(fuel, 0)?;
@@ -1144,7 +1253,12 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
                     for argument in &selected.method.arguments {
                         crate::memory::bound_type(argument, fuel)?;
                     }
-                    methods.push((selected.method.body, selected.method.arguments.clone()));
+                    crate::memory::bound_type(&selected.subject, fuel)?;
+                    methods.push((
+                        selected.method.body,
+                        selected.method.arguments.clone(),
+                        selected.subject.clone(),
+                    ));
                 }
                 _ => unresolved = true,
             }
@@ -1152,6 +1266,29 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         })?;
         if unresolved {
             return Ok(true);
+        }
+        if self.require_runtime_instances {
+            let mut missing_instance = false;
+            for (method, arguments, subject) in &methods {
+                if self
+                    .package
+                    .runtime_instance_body_checked(*method, arguments)
+                    .map_err(str::to_owned)?
+                    .is_none()
+                {
+                    record_missing_runtime_instance(
+                        &mut self.missing_runtime_instances,
+                        *method,
+                        arguments,
+                        subject,
+                        fuel,
+                    )?;
+                    missing_instance = true;
+                }
+            }
+            if missing_instance {
+                return Ok(true);
+            }
         }
         self.rejection_stack.push(ty.clone());
         let result = (|| {
@@ -1161,7 +1298,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             // If retirement is its only uncertainty, inspect nested cleanup
             // against this same captured implementation world.
             let mut rejection = crate::rejection::Cache::new(Some(package));
-            for (method, arguments) in methods {
+            for (method, arguments, _) in methods {
                 let summary = crate::memory::infer_in_package(package, method, &arguments, fuel)?;
                 if summary.may_reject
                     && rejection
@@ -1264,10 +1401,9 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         pointers: Option<PointerMemory<'_>>,
         fuel: &mut usize,
     ) -> Result<CleanupPlan, String> {
-        let binding = self
-            .find(ty, fuel)?
+        let binding = Self::find_in_bindings(&self.bindings, &self.binding_paths, ty, fuel)?
             .ok_or("cleanup responsibility has no acquired binding")?;
-        plan_cleanup_with_domains(
+        plan_cleanup_with_domains_internal(
             self.package,
             self.world,
             binding,
@@ -1276,6 +1412,8 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             variants,
             domains,
             pointers,
+            self.require_runtime_instances
+                .then_some(&mut self.missing_runtime_instances),
             fuel,
         )
     }
@@ -1288,19 +1426,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         pointers: Option<PointerMemory<'_>>,
         fuel: &mut usize,
     ) -> Result<CleanupPlan, String> {
-        let binding = self
-            .find(ty, fuel)?
-            .ok_or("cleanup responsibility has no acquired binding")?;
-        plan_cleanup_with_memory(
-            self.package,
-            self.world,
-            binding,
-            state,
-            place,
-            variants,
-            pointers,
-            fuel,
-        )
+        self.plan_with_domains(ty, state, place, variants, &BTreeMap::new(), pointers, fuel)
     }
 }
 

@@ -206,6 +206,7 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::TakeBits(value)
         | K::TextQuery { subject: value, .. }
         | K::IntegerRepresentation(value)
+        | K::TryIntegerConvert(value)
         | K::ComptimeIntegerConvert(value)
         | K::SymbolName(value)
         | K::EnumName(value)

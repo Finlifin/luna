@@ -16,15 +16,30 @@ impl Emitter<'_> {
                     .into(),
             );
         }
+        self.declarations
+            .insert("declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)".into());
         self.declarations.insert(include_str!("platform.ll").into());
         let arguments = values
             .iter()
             .map(|value| format!("{} {}", value.ty.llvm(), value.text))
             .collect::<Vec<_>>()
             .join(", ");
-        Ok(self.instruction(
-            Ty::Int(64, true),
-            format!("call i64 @flurry_{}({arguments})", operation.name()),
-        ))
+        match operation {
+            nir::intrinsics::Operation::LinuxDealloc => {
+                self.line(format!(
+                    "call void @flurry_{}({arguments})",
+                    operation.name()
+                ));
+                Ok(Value::unit())
+            }
+            nir::intrinsics::Operation::LinuxAlloc => Ok(self.instruction(
+                Ty::Int(64, false),
+                format!("call i64 @flurry_{}({arguments})", operation.name()),
+            )),
+            _ => Ok(self.instruction(
+                Ty::Int(64, true),
+                format!("call i64 @flurry_{}({arguments})", operation.name()),
+            )),
+        }
     }
 }

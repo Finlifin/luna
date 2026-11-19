@@ -304,6 +304,28 @@ impl CleanupSession<'_, '_> {
                 return Ok(None);
             }
             let package = self.package;
+            if self.require_runtime_instances {
+                let mut missing_instance = false;
+                for reader in &readers {
+                    if package
+                        .runtime_instance_body_checked(reader.method.body, &reader.method.arguments)
+                        .map_err(str::to_owned)?
+                        .is_none()
+                    {
+                        super::record_missing_runtime_instance(
+                            &mut self.missing_runtime_instances,
+                            reader.method.body,
+                            &reader.method.arguments,
+                            &reader.receiver_type,
+                            fuel,
+                        )?;
+                        missing_instance = true;
+                    }
+                }
+                if missing_instance {
+                    return Ok(None);
+                }
+            }
             for reader in &mut readers {
                 let projection =
                     memory::project_owned_storage(Some(package), ty, &reader.receiver_path, fuel)?;

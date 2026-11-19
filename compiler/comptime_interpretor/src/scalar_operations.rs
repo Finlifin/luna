@@ -12,6 +12,7 @@ use nir::program::IntegerOp;
 pub(super) enum Plan {
     ComptimeIntegerConvert,
     IntegerRepresentation,
+    TryIntegerConvert,
     Integer(Option<IntegerOp>),
     Machine {
         signed: bool,
@@ -57,6 +58,14 @@ impl Interpreter<'_> {
                     return Err(invalid());
                 }
                 Ok(Plan::IntegerRepresentation)
+            }
+            ScalarKind::TryIntegerConvert => {
+                if scalar.right.is_some()
+                    || !nir::program::try_integer_convert_valid(scalar.left, scalar.result)
+                {
+                    return Err(invalid());
+                }
+                Ok(Plan::TryIntegerConvert)
             }
 
             ScalarKind::Float(op) => {
@@ -165,7 +174,10 @@ impl Interpreter<'_> {
     ) -> Result<(), Error> {
         if matches!(
             plan,
-            Plan::Compare(_) | Plan::ComptimeIntegerConvert | Plan::IntegerRepresentation
+            Plan::Compare(_)
+                | Plan::ComptimeIntegerConvert
+                | Plan::IntegerRepresentation
+                | Plan::TryIntegerConvert
         ) {
             return Ok(());
         }
@@ -176,7 +188,10 @@ impl Interpreter<'_> {
             Plan::Float(_) => true,
             Plan::Integer(_) => matches!(value, Value::Integer(_)),
             Plan::Machine { signed, width, .. } => machine(value, signed, width).is_ok(),
-            Plan::Compare(_) | Plan::ComptimeIntegerConvert | Plan::IntegerRepresentation => {
+            Plan::Compare(_)
+            | Plan::ComptimeIntegerConvert
+            | Plan::IntegerRepresentation
+            | Plan::TryIntegerConvert => {
                 unreachable!()
             }
         };
@@ -198,6 +213,7 @@ impl Interpreter<'_> {
         match plan {
             Plan::ComptimeIntegerConvert => self.convert_comptime_integer(scalar, a, source),
             Plan::IntegerRepresentation => self.read_integer_representation(scalar, a, source),
+            Plan::TryIntegerConvert => self.try_convert_integer(scalar, a, source),
             Plan::Float(op) => self.float_values(scalar, op, a, b, source),
             Plan::Integer(op) => {
                 let Value::Integer(left) = a else {

@@ -2256,13 +2256,14 @@ impl Checker<'_, '_> {
                 | K::TakeBits(value)
                 | K::TextQuery { subject: value, .. }
                 | K::IntegerRepresentation(value)
+                | K::TryIntegerConvert(value)
                 | K::ComptimeIntegerConvert(value)
                 | K::SymbolName(value)
                 | K::EnumName(value)
                 | K::TypeKind { operand: value, .. }
                 | K::TypeLayout { operand: value, .. }
                 | K::BitConvert(value)
-                | K::ErrorConvert { value: value, .. }
+                | K::ErrorConvert { value, .. }
                 | K::NewtypeConvert(value)
                 | K::BitSlice { value, .. }
                 | K::Field { value, .. }

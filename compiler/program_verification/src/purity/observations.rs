@@ -54,7 +54,14 @@ pub fn validate_defaults<'a>(
     obligations: impl IntoIterator<Item = &'a StableObservation>,
     protocols: &Protocols,
 ) -> Result<(), Error> {
-    validate_with_budget(package, obligations, protocols, &mut 100_000)
+    let obligations = obligations.into_iter().collect::<Vec<_>>();
+    if obligations.is_empty() {
+        return Ok(());
+    }
+    let mut fuel = package_preparation_fuel(package)
+        .saturating_add(obligations.len().saturating_mul(PER_FUNCTION_FUEL))
+        .min(MAX_PREPARATION_FUEL);
+    validate_with_budget(package, obligations, protocols, &mut fuel)
 }
 
 fn validate_with_budget<'a>(

@@ -2116,6 +2116,7 @@ impl Query<'_, '_> {
             | K::BitConvert(value)
             | K::TakeBits(value)
             | K::IntegerRepresentation(value)
+            | K::TryIntegerConvert(value)
             | K::ComptimeIntegerConvert(value)
             | K::TypeKind { operand: value, .. }
             | K::TypeLayout { operand: value, .. }

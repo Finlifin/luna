@@ -55,7 +55,35 @@ fn spend(fuel: &mut usize) -> Result<(), Error> {
     *fuel = fuel.checked_sub(1).ok_or(Error::BudgetExhausted)?;
     Ok(())
 }
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum KeyDiscriminant {
+    Primitive(nir::Primitive),
+    Nominal(DeclarationId),
+    Tuple,
+    Optional,
+    Pointer,
+    ComptimeFunction,
+    NormalFormFunction(Option<usize>),
+    UnsafeFunction,
+}
+
 impl Key {
+    fn discriminant(&self) -> Option<KeyDiscriminant> {
+        match self {
+            Self::Leaf(Term::Primitive(primitive)) => Some(KeyDiscriminant::Primitive(*primitive)),
+            Self::Node(Head::Nominal(id), _) => Some(KeyDiscriminant::Nominal(*id)),
+            Self::Node(Head::Tuple, _) => Some(KeyDiscriminant::Tuple),
+            Self::Node(Head::Optional, _) => Some(KeyDiscriminant::Optional),
+            Self::Node(Head::Pointer, _) => Some(KeyDiscriminant::Pointer),
+            Self::Node(Head::ComptimeFunction, _) => Some(KeyDiscriminant::ComptimeFunction),
+            Self::Node(Head::NormalFormFunction(collector), _) => {
+                Some(KeyDiscriminant::NormalFormFunction(*collector))
+            }
+            Self::Node(Head::UnsafeFunction, _) => Some(KeyDiscriminant::UnsafeFunction),
+            _ => None,
+        }
+    }
+
     /// Rigid parameters and unresolved environments remain wildcard positions.
     /// Opaque normal forms are identity leaves only after all their inputs are
     /// stable. They are never decomposed into invertible constructor arguments.
@@ -396,6 +424,126 @@ struct Entry {
     precision: usize,
     phases: [Option<DeclarationId>; 2],
 }
+#[derive(Clone, Copy)]
+enum ArgFilter<'a> {
+    Any,
+    Empty,
+    First(Option<&'a KeyDiscriminant>),
+}
+
+#[derive(Default)]
+struct SubjectBucket {
+    no_args: BTreeSet<DeclarationId>,
+    open_arg0: BTreeSet<DeclarationId>,
+    by_arg0: BTreeMap<KeyDiscriminant, BTreeSet<DeclarationId>>,
+}
+
+impl SubjectBucket {
+    fn insert(&mut self, id: DeclarationId, arguments: &[Key]) {
+        if let Some(first) = arguments.first() {
+            match first.discriminant() {
+                Some(disc) => {
+                    self.by_arg0.entry(disc).or_default().insert(id);
+                }
+                None => {
+                    self.open_arg0.insert(id);
+                }
+            }
+        } else {
+            self.no_args.insert(id);
+        }
+    }
+
+    fn visit(
+        &self,
+        filter: ArgFilter<'_>,
+        visit_id: &mut impl FnMut(&DeclarationId) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        match filter {
+            ArgFilter::Any => {
+                for id in &self.no_args {
+                    visit_id(id)?;
+                }
+                for id in &self.open_arg0 {
+                    visit_id(id)?;
+                }
+                for ids in self.by_arg0.values() {
+                    for id in ids {
+                        visit_id(id)?;
+                    }
+                }
+            }
+            ArgFilter::Empty => {
+                for id in &self.no_args {
+                    visit_id(id)?;
+                }
+            }
+            ArgFilter::First(Some(disc)) => {
+                for id in &self.open_arg0 {
+                    visit_id(id)?;
+                }
+                if let Some(ids) = self.by_arg0.get(disc) {
+                    for id in ids {
+                        visit_id(id)?;
+                    }
+                }
+            }
+            ArgFilter::First(None) => {
+                for id in &self.open_arg0 {
+                    visit_id(id)?;
+                }
+                for ids in self.by_arg0.values() {
+                    for id in ids {
+                        visit_id(id)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct InterfaceBucket {
+    open_subject: SubjectBucket,
+    by_subject: BTreeMap<KeyDiscriminant, SubjectBucket>,
+}
+
+impl InterfaceBucket {
+    fn insert(&mut self, id: DeclarationId, key: &Key, arguments: &[Key]) {
+        match key.discriminant() {
+            Some(disc) => self
+                .by_subject
+                .entry(disc)
+                .or_default()
+                .insert(id, arguments),
+            None => self.open_subject.insert(id, arguments),
+        }
+    }
+
+    fn visit(
+        &self,
+        subject: Option<&KeyDiscriminant>,
+        filter: ArgFilter<'_>,
+        visit_id: &mut impl FnMut(&DeclarationId) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        self.open_subject.visit(filter, visit_id)?;
+        match subject {
+            Some(disc) => {
+                if let Some(bucket) = self.by_subject.get(disc) {
+                    bucket.visit(filter, visit_id)?;
+                }
+            }
+            None => {
+                for bucket in self.by_subject.values() {
+                    bucket.visit(filter, visit_id)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct Index {
     builtin_packages: BTreeSet<u64>,
     pub(crate) parameter_domains: BTreeMap<DeclarationId, Term>,
@@ -403,7 +551,7 @@ pub struct Index {
     identity: u64,
     entries: BTreeMap<DeclarationId, Entry>,
     contributions: BTreeSet<DeclarationId>,
-    buckets: BTreeMap<Option<DeclarationId>, BTreeSet<DeclarationId>>,
+    buckets: BTreeMap<Option<DeclarationId>, InterfaceBucket>,
     revision: u64,
 }
 impl Default for Index {
@@ -624,23 +772,25 @@ impl Index {
         self.check_ownership(&head, fuel, budget.max_depth)?;
         let key = Key::with_fuel(&head.subject, fuel, budget.max_depth)?;
         let precision = key.precision();
-        let arguments = head
+        let arguments: Vec<Key> = head
             .interface_arguments
             .iter()
             .map(|ty| Key::with_fuel(ty, fuel, budget.max_depth))
             .collect::<Result<_, _>>()?;
         // Publish only after all keys have validated successfully.
+        let cut_key = key.cut(precision);
         self.contributions.insert(head.declaration);
-        self.buckets
-            .entry(head.interface)
-            .or_default()
-            .insert(head.declaration);
+        self.buckets.entry(head.interface).or_default().insert(
+            head.declaration,
+            &cut_key,
+            &arguments,
+        );
         let phases = [Some(head.declaration), None];
         self.entries.insert(
             head.declaration,
             Entry {
                 head,
-                key: key.cut(precision),
+                key: cut_key,
                 arguments,
                 precision,
                 phases,
@@ -675,19 +825,34 @@ impl Index {
             .collect::<Result<Vec<_>, _>>()?;
         let fixed_interface = interface.is_some() && arguments.iter().all(|arg| !arg.is_open());
         let mut candidates = Vec::new();
-        let buckets: Vec<_> = match interface {
+        let subject_disc = subject.discriminant();
+        let arg0_disc = arguments.first().and_then(Key::discriminant);
+        let buckets: Vec<(Option<DeclarationId>, &InterfaceBucket)> = match interface {
             Some(id) => [Some(id), None]
                 .into_iter()
-                .filter_map(|key| self.buckets.get(&key))
+                .filter_map(|key| self.buckets.get(&key).map(|bucket| (key, bucket)))
                 .collect(),
-            None => self.buckets.values().collect(),
+            None => self
+                .buckets
+                .iter()
+                .map(|(key, bucket)| (*key, bucket))
+                .collect(),
         };
-        for bucket in buckets {
-            for id in bucket {
+        for (bucket_interface, bucket) in buckets {
+            let arg_filter = if interface.is_some() && bucket_interface.is_some() {
+                if arguments.is_empty() {
+                    ArgFilter::Empty
+                } else {
+                    ArgFilter::First(arg0_disc.as_ref())
+                }
+            } else {
+                ArgFilter::Any
+            };
+            bucket.visit(subject_disc.as_ref(), arg_filter, &mut |id| {
                 spend(remaining)?;
                 let entry = &self.entries[id];
                 if !entry.key.compatible(&subject, remaining)? {
-                    continue;
+                    return Ok(());
                 }
                 let mut compatible = true;
                 if interface.is_some() && entry.head.interface.is_some() {
@@ -704,7 +869,8 @@ impl Index {
                 if compatible {
                     candidates.push(*id);
                 }
-            }
+                Ok(())
+            })?;
         }
         candidates.sort_by_key(|id| (std::cmp::Reverse(self.entries[id].precision), *id));
         Ok(Candidates {

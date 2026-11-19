@@ -1,11 +1,9 @@
-# 分配布局
+# 内存管理与堆分配
 
-`Layout.new(size, alignment)` 检查非零二次幂对齐及向上对齐的溢出边界，返回
-`?Layout`。`Layout.of<T>()` 与 `Layout.array<T>(count)` 基于 `Type.size_of(T)` 和
-`Type.align_of(T)` 构造类型与数组布局；`byte_size()`、`byte_alignment()` 观察布局，
-`repeat(count)` 按对齐后步长计算数组布局，`pad_to_align()` 按自身对齐补齐，
-`append(next)` 计算顺序拼接后的组合布局及下一字段偏移，并检查乘法与加法溢出。
-零大小、零元素数有效。
+`std.mem` 在 `Layout` 之上提供底层未类型化块元数据、分配器协议及单所有权堆盒：
 
-大小使用 u64。真正分配时仍须检查目标地址空间限制并建立 memory view、初始化、
-归属与释放契约。当前没有 allocator、arena 或假分配实现。
+- `Layout`：`Layout.new(size, alignment)`、`Layout.of<T>()`、`Layout.array<T>(count)`、`repeat`、`pad_to_align`、`append`，以及面向 `usize` 地址空间的 `byte_size_usize` / `byte_alignment_usize`。
+- `AllocError` / `ReallocError`：描述布局无效与内存耗尽错误。
+- `RawBlock`：携带已检查对齐的非空或悬空地址与 `Layout`，不包含隐式释放责任。
+- `Allocator` 与 `SystemAllocator`：`allocate`、`allocate_zeroed`、`deallocate`、`reallocate`；零大小布局返回对齐的悬空块且不触发系统分配。
+- `Box<T>`：单所有权（`Once`）堆分配包装，在 `Drop` 时先消费并析构内部 `T` 再释放块，并提供 `new`、`into_inner`、`replace`、`set`、`get`、`address`、`layout`。

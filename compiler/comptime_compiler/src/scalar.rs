@@ -7,6 +7,7 @@ use std::fmt;
 pub enum ScalarKind {
     ComptimeIntegerConvert,
     IntegerRepresentation,
+    TryIntegerConvert,
     Integer(Option<IntegerOp>),
     Compare(IntegerOp),
     Float(Option<FloatOp>),
@@ -27,6 +28,7 @@ impl<'a> Scalar<'a> {
             K::IntegerRepresentation(value) => {
                 (ScalarKind::IntegerRepresentation, value.as_ref(), None)
             }
+            K::TryIntegerConvert(value) => (ScalarKind::TryIntegerConvert, value.as_ref(), None),
             K::IntegerBinary { op, left, right } => (
                 ScalarKind::Integer(Some(*op)),
                 left.as_ref(),
@@ -83,6 +85,7 @@ impl fmt::Display for Scalar<'_> {
         match self.kind {
             ScalarKind::ComptimeIntegerConvert => write!(f, "(comptime-integer-convert")?,
             ScalarKind::IntegerRepresentation => write!(f, "(integer-representation")?,
+            ScalarKind::TryIntegerConvert => write!(f, "(try-integer-convert")?,
             ScalarKind::Float(None) => write!(f, "(float negate")?,
             ScalarKind::Float(Some(op)) => write!(f, "(float {op}")?,
             ScalarKind::Integer(None) => write!(f, "(integer negate")?,

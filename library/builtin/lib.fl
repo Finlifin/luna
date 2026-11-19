@@ -3,7 +3,7 @@
   Public root re-exports also supply names to builtin's own child modules.
   The prelude supplies default imports to other packages.
 -}
-use numeric.{comparison, math_intrinsics}
+use numeric.{comparison, conversions, math_intrinsics}
 use protocols.formatting.{display, writer}
 use protocols.{conversion, iterator, native_resources, ops, patterns, resources, traits}
 use types.{equality, hashing, option, ordering, result, tuple}
@@ -41,6 +41,10 @@ pub use tuple.Tuple;
 {- Shared operation identities for the other builtin packages; not a prelude. -}
 pub mod compiler {
     pub use bindings.*;
+}
+
+pub mod mem {
+    pub use mem_impl.raw.*;
 }
 
 pub mod fmt {

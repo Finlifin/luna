@@ -321,6 +321,7 @@ pub fn remap_predicate_metered(
             | K::TakeBits(v)
             | K::TextQuery { subject: v, .. }
             | K::IntegerRepresentation(v)
+            | K::TryIntegerConvert(v)
             | K::ComptimeIntegerConvert(v)
             | K::SymbolName(v)
             | K::EnumName(v)

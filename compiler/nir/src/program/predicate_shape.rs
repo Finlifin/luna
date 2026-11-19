@@ -158,12 +158,13 @@ fn predicate_shape(
             | ExprKind::FloatNegate(value)
             | ExprKind::BitConvert(value)
             | ExprKind::OptionalPresent(value)
-            | ExprKind::ErrorConvert { value: value, .. }
+            | ExprKind::ErrorConvert { value, .. }
             | ExprKind::NewtypeConvert(value)
             | ExprKind::Snapshot(value)
             | ExprKind::TakeBits(value)
             | ExprKind::TextQuery { subject: value, .. }
             | ExprKind::IntegerRepresentation(value)
+            | ExprKind::TryIntegerConvert(value)
             | ExprKind::ComptimeIntegerConvert(value)
             | ExprKind::SymbolName(value)
             | ExprKind::EnumName(value)

@@ -93,6 +93,9 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
     if name == "integer_representation" {
         return K::IntegerRepresentation(Box::new(inputs.remove(0)));
     }
+    if name == "try_integer_convert" {
+        return K::TryIntegerConvert(Box::new(inputs.remove(0)));
+    }
     if let Some(query) = signatures::text_query(name) {
         return K::TextQuery {
             query,

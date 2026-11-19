@@ -9,6 +9,138 @@ const symbol_byte_length_operation: fn(Symbol) -> u64 = .symbol_byte_length'buil
 const symbol_byte_operation: fn(Symbol, u64) -> ?u8 = .symbol_byte'builtin;
 const usize_representation_operation: fn(usize) -> u128 = .integer_representation'builtin;
 const isize_representation_operation: fn(isize) -> u128 = .integer_representation'builtin;
+const try_u8_to_u16_operation: fn(u8) -> ?u16 = .try_integer_convert'builtin;
+const try_u8_to_u32_operation: fn(u8) -> ?u32 = .try_integer_convert'builtin;
+const try_u8_to_u64_operation: fn(u8) -> ?u64 = .try_integer_convert'builtin;
+const try_u8_to_u128_operation: fn(u8) -> ?u128 = .try_integer_convert'builtin;
+const try_u8_to_usize_operation: fn(u8) -> ?usize = .try_integer_convert'builtin;
+const try_u8_to_i8_operation: fn(u8) -> ?i8 = .try_integer_convert'builtin;
+const try_u8_to_i16_operation: fn(u8) -> ?i16 = .try_integer_convert'builtin;
+const try_u8_to_i32_operation: fn(u8) -> ?i32 = .try_integer_convert'builtin;
+const try_u8_to_i64_operation: fn(u8) -> ?i64 = .try_integer_convert'builtin;
+const try_u8_to_i128_operation: fn(u8) -> ?i128 = .try_integer_convert'builtin;
+const try_u8_to_isize_operation: fn(u8) -> ?isize = .try_integer_convert'builtin;
+const try_u16_to_u8_operation: fn(u16) -> ?u8 = .try_integer_convert'builtin;
+const try_u16_to_u32_operation: fn(u16) -> ?u32 = .try_integer_convert'builtin;
+const try_u16_to_u64_operation: fn(u16) -> ?u64 = .try_integer_convert'builtin;
+const try_u16_to_u128_operation: fn(u16) -> ?u128 = .try_integer_convert'builtin;
+const try_u16_to_usize_operation: fn(u16) -> ?usize = .try_integer_convert'builtin;
+const try_u16_to_i8_operation: fn(u16) -> ?i8 = .try_integer_convert'builtin;
+const try_u16_to_i16_operation: fn(u16) -> ?i16 = .try_integer_convert'builtin;
+const try_u16_to_i32_operation: fn(u16) -> ?i32 = .try_integer_convert'builtin;
+const try_u16_to_i64_operation: fn(u16) -> ?i64 = .try_integer_convert'builtin;
+const try_u16_to_i128_operation: fn(u16) -> ?i128 = .try_integer_convert'builtin;
+const try_u16_to_isize_operation: fn(u16) -> ?isize = .try_integer_convert'builtin;
+const try_u32_to_u8_operation: fn(u32) -> ?u8 = .try_integer_convert'builtin;
+const try_u32_to_u16_operation: fn(u32) -> ?u16 = .try_integer_convert'builtin;
+const try_u32_to_u64_operation: fn(u32) -> ?u64 = .try_integer_convert'builtin;
+const try_u32_to_u128_operation: fn(u32) -> ?u128 = .try_integer_convert'builtin;
+const try_u32_to_usize_operation: fn(u32) -> ?usize = .try_integer_convert'builtin;
+const try_u32_to_i8_operation: fn(u32) -> ?i8 = .try_integer_convert'builtin;
+const try_u32_to_i16_operation: fn(u32) -> ?i16 = .try_integer_convert'builtin;
+const try_u32_to_i32_operation: fn(u32) -> ?i32 = .try_integer_convert'builtin;
+const try_u32_to_i64_operation: fn(u32) -> ?i64 = .try_integer_convert'builtin;
+const try_u32_to_i128_operation: fn(u32) -> ?i128 = .try_integer_convert'builtin;
+const try_u32_to_isize_operation: fn(u32) -> ?isize = .try_integer_convert'builtin;
+const try_u64_to_u8_operation: fn(u64) -> ?u8 = .try_integer_convert'builtin;
+const try_u64_to_u16_operation: fn(u64) -> ?u16 = .try_integer_convert'builtin;
+const try_u64_to_u32_operation: fn(u64) -> ?u32 = .try_integer_convert'builtin;
+const try_u64_to_u128_operation: fn(u64) -> ?u128 = .try_integer_convert'builtin;
+const try_u64_to_usize_operation: fn(u64) -> ?usize = .try_integer_convert'builtin;
+const try_u64_to_i8_operation: fn(u64) -> ?i8 = .try_integer_convert'builtin;
+const try_u64_to_i16_operation: fn(u64) -> ?i16 = .try_integer_convert'builtin;
+const try_u64_to_i32_operation: fn(u64) -> ?i32 = .try_integer_convert'builtin;
+const try_u64_to_i64_operation: fn(u64) -> ?i64 = .try_integer_convert'builtin;
+const try_u64_to_i128_operation: fn(u64) -> ?i128 = .try_integer_convert'builtin;
+const try_u64_to_isize_operation: fn(u64) -> ?isize = .try_integer_convert'builtin;
+const try_u128_to_u8_operation: fn(u128) -> ?u8 = .try_integer_convert'builtin;
+const try_u128_to_u16_operation: fn(u128) -> ?u16 = .try_integer_convert'builtin;
+const try_u128_to_u32_operation: fn(u128) -> ?u32 = .try_integer_convert'builtin;
+const try_u128_to_u64_operation: fn(u128) -> ?u64 = .try_integer_convert'builtin;
+const try_u128_to_usize_operation: fn(u128) -> ?usize = .try_integer_convert'builtin;
+const try_u128_to_i8_operation: fn(u128) -> ?i8 = .try_integer_convert'builtin;
+const try_u128_to_i16_operation: fn(u128) -> ?i16 = .try_integer_convert'builtin;
+const try_u128_to_i32_operation: fn(u128) -> ?i32 = .try_integer_convert'builtin;
+const try_u128_to_i64_operation: fn(u128) -> ?i64 = .try_integer_convert'builtin;
+const try_u128_to_i128_operation: fn(u128) -> ?i128 = .try_integer_convert'builtin;
+const try_u128_to_isize_operation: fn(u128) -> ?isize = .try_integer_convert'builtin;
+const try_usize_to_u8_operation: fn(usize) -> ?u8 = .try_integer_convert'builtin;
+const try_usize_to_u16_operation: fn(usize) -> ?u16 = .try_integer_convert'builtin;
+const try_usize_to_u32_operation: fn(usize) -> ?u32 = .try_integer_convert'builtin;
+const try_usize_to_u64_operation: fn(usize) -> ?u64 = .try_integer_convert'builtin;
+const try_usize_to_u128_operation: fn(usize) -> ?u128 = .try_integer_convert'builtin;
+const try_usize_to_i8_operation: fn(usize) -> ?i8 = .try_integer_convert'builtin;
+const try_usize_to_i16_operation: fn(usize) -> ?i16 = .try_integer_convert'builtin;
+const try_usize_to_i32_operation: fn(usize) -> ?i32 = .try_integer_convert'builtin;
+const try_usize_to_i64_operation: fn(usize) -> ?i64 = .try_integer_convert'builtin;
+const try_usize_to_i128_operation: fn(usize) -> ?i128 = .try_integer_convert'builtin;
+const try_usize_to_isize_operation: fn(usize) -> ?isize = .try_integer_convert'builtin;
+const try_i8_to_u8_operation: fn(i8) -> ?u8 = .try_integer_convert'builtin;
+const try_i8_to_u16_operation: fn(i8) -> ?u16 = .try_integer_convert'builtin;
+const try_i8_to_u32_operation: fn(i8) -> ?u32 = .try_integer_convert'builtin;
+const try_i8_to_u64_operation: fn(i8) -> ?u64 = .try_integer_convert'builtin;
+const try_i8_to_u128_operation: fn(i8) -> ?u128 = .try_integer_convert'builtin;
+const try_i8_to_usize_operation: fn(i8) -> ?usize = .try_integer_convert'builtin;
+const try_i8_to_i16_operation: fn(i8) -> ?i16 = .try_integer_convert'builtin;
+const try_i8_to_i32_operation: fn(i8) -> ?i32 = .try_integer_convert'builtin;
+const try_i8_to_i64_operation: fn(i8) -> ?i64 = .try_integer_convert'builtin;
+const try_i8_to_i128_operation: fn(i8) -> ?i128 = .try_integer_convert'builtin;
+const try_i8_to_isize_operation: fn(i8) -> ?isize = .try_integer_convert'builtin;
+const try_i16_to_u8_operation: fn(i16) -> ?u8 = .try_integer_convert'builtin;
+const try_i16_to_u16_operation: fn(i16) -> ?u16 = .try_integer_convert'builtin;
+const try_i16_to_u32_operation: fn(i16) -> ?u32 = .try_integer_convert'builtin;
+const try_i16_to_u64_operation: fn(i16) -> ?u64 = .try_integer_convert'builtin;
+const try_i16_to_u128_operation: fn(i16) -> ?u128 = .try_integer_convert'builtin;
+const try_i16_to_usize_operation: fn(i16) -> ?usize = .try_integer_convert'builtin;
+const try_i16_to_i8_operation: fn(i16) -> ?i8 = .try_integer_convert'builtin;
+const try_i16_to_i32_operation: fn(i16) -> ?i32 = .try_integer_convert'builtin;
+const try_i16_to_i64_operation: fn(i16) -> ?i64 = .try_integer_convert'builtin;
+const try_i16_to_i128_operation: fn(i16) -> ?i128 = .try_integer_convert'builtin;
+const try_i16_to_isize_operation: fn(i16) -> ?isize = .try_integer_convert'builtin;
+const try_i32_to_u8_operation: fn(i32) -> ?u8 = .try_integer_convert'builtin;
+const try_i32_to_u16_operation: fn(i32) -> ?u16 = .try_integer_convert'builtin;
+const try_i32_to_u32_operation: fn(i32) -> ?u32 = .try_integer_convert'builtin;
+const try_i32_to_u64_operation: fn(i32) -> ?u64 = .try_integer_convert'builtin;
+const try_i32_to_u128_operation: fn(i32) -> ?u128 = .try_integer_convert'builtin;
+const try_i32_to_usize_operation: fn(i32) -> ?usize = .try_integer_convert'builtin;
+const try_i32_to_i8_operation: fn(i32) -> ?i8 = .try_integer_convert'builtin;
+const try_i32_to_i16_operation: fn(i32) -> ?i16 = .try_integer_convert'builtin;
+const try_i32_to_i64_operation: fn(i32) -> ?i64 = .try_integer_convert'builtin;
+const try_i32_to_i128_operation: fn(i32) -> ?i128 = .try_integer_convert'builtin;
+const try_i32_to_isize_operation: fn(i32) -> ?isize = .try_integer_convert'builtin;
+const try_i64_to_u8_operation: fn(i64) -> ?u8 = .try_integer_convert'builtin;
+const try_i64_to_u16_operation: fn(i64) -> ?u16 = .try_integer_convert'builtin;
+const try_i64_to_u32_operation: fn(i64) -> ?u32 = .try_integer_convert'builtin;
+const try_i64_to_u64_operation: fn(i64) -> ?u64 = .try_integer_convert'builtin;
+const try_i64_to_u128_operation: fn(i64) -> ?u128 = .try_integer_convert'builtin;
+const try_i64_to_usize_operation: fn(i64) -> ?usize = .try_integer_convert'builtin;
+const try_i64_to_i8_operation: fn(i64) -> ?i8 = .try_integer_convert'builtin;
+const try_i64_to_i16_operation: fn(i64) -> ?i16 = .try_integer_convert'builtin;
+const try_i64_to_i32_operation: fn(i64) -> ?i32 = .try_integer_convert'builtin;
+const try_i64_to_i128_operation: fn(i64) -> ?i128 = .try_integer_convert'builtin;
+const try_i64_to_isize_operation: fn(i64) -> ?isize = .try_integer_convert'builtin;
+const try_i128_to_u8_operation: fn(i128) -> ?u8 = .try_integer_convert'builtin;
+const try_i128_to_u16_operation: fn(i128) -> ?u16 = .try_integer_convert'builtin;
+const try_i128_to_u32_operation: fn(i128) -> ?u32 = .try_integer_convert'builtin;
+const try_i128_to_u64_operation: fn(i128) -> ?u64 = .try_integer_convert'builtin;
+const try_i128_to_u128_operation: fn(i128) -> ?u128 = .try_integer_convert'builtin;
+const try_i128_to_usize_operation: fn(i128) -> ?usize = .try_integer_convert'builtin;
+const try_i128_to_i8_operation: fn(i128) -> ?i8 = .try_integer_convert'builtin;
+const try_i128_to_i16_operation: fn(i128) -> ?i16 = .try_integer_convert'builtin;
+const try_i128_to_i32_operation: fn(i128) -> ?i32 = .try_integer_convert'builtin;
+const try_i128_to_i64_operation: fn(i128) -> ?i64 = .try_integer_convert'builtin;
+const try_i128_to_isize_operation: fn(i128) -> ?isize = .try_integer_convert'builtin;
+const try_isize_to_u8_operation: fn(isize) -> ?u8 = .try_integer_convert'builtin;
+const try_isize_to_u16_operation: fn(isize) -> ?u16 = .try_integer_convert'builtin;
+const try_isize_to_u32_operation: fn(isize) -> ?u32 = .try_integer_convert'builtin;
+const try_isize_to_u64_operation: fn(isize) -> ?u64 = .try_integer_convert'builtin;
+const try_isize_to_u128_operation: fn(isize) -> ?u128 = .try_integer_convert'builtin;
+const try_isize_to_usize_operation: fn(isize) -> ?usize = .try_integer_convert'builtin;
+const try_isize_to_i8_operation: fn(isize) -> ?i8 = .try_integer_convert'builtin;
+const try_isize_to_i16_operation: fn(isize) -> ?i16 = .try_integer_convert'builtin;
+const try_isize_to_i32_operation: fn(isize) -> ?i32 = .try_integer_convert'builtin;
+const try_isize_to_i64_operation: fn(isize) -> ?i64 = .try_integer_convert'builtin;
+const try_isize_to_i128_operation: fn(isize) -> ?i128 = .try_integer_convert'builtin;
 
 {-
     Select compiler operation identities as explicit comptime inputs. The public
@@ -37,4 +169,532 @@ pub fn usize_representation(value: usize) -> u128 {
 
 pub fn isize_representation(value: isize) -> u128 {
     invoke_one(isize_representation_operation, value)
+}
+
+pub fn try_u8_to_u16(value: u8) -> ?u16 {
+    invoke_one(try_u8_to_u16_operation, value)
+}
+
+pub fn try_u8_to_u32(value: u8) -> ?u32 {
+    invoke_one(try_u8_to_u32_operation, value)
+}
+
+pub fn try_u8_to_u64(value: u8) -> ?u64 {
+    invoke_one(try_u8_to_u64_operation, value)
+}
+
+pub fn try_u8_to_u128(value: u8) -> ?u128 {
+    invoke_one(try_u8_to_u128_operation, value)
+}
+
+pub fn try_u8_to_usize(value: u8) -> ?usize {
+    invoke_one(try_u8_to_usize_operation, value)
+}
+
+pub fn try_u8_to_i8(value: u8) -> ?i8 {
+    invoke_one(try_u8_to_i8_operation, value)
+}
+
+pub fn try_u8_to_i16(value: u8) -> ?i16 {
+    invoke_one(try_u8_to_i16_operation, value)
+}
+
+pub fn try_u8_to_i32(value: u8) -> ?i32 {
+    invoke_one(try_u8_to_i32_operation, value)
+}
+
+pub fn try_u8_to_i64(value: u8) -> ?i64 {
+    invoke_one(try_u8_to_i64_operation, value)
+}
+
+pub fn try_u8_to_i128(value: u8) -> ?i128 {
+    invoke_one(try_u8_to_i128_operation, value)
+}
+
+pub fn try_u8_to_isize(value: u8) -> ?isize {
+    invoke_one(try_u8_to_isize_operation, value)
+}
+
+pub fn try_u16_to_u8(value: u16) -> ?u8 {
+    invoke_one(try_u16_to_u8_operation, value)
+}
+
+pub fn try_u16_to_u32(value: u16) -> ?u32 {
+    invoke_one(try_u16_to_u32_operation, value)
+}
+
+pub fn try_u16_to_u64(value: u16) -> ?u64 {
+    invoke_one(try_u16_to_u64_operation, value)
+}
+
+pub fn try_u16_to_u128(value: u16) -> ?u128 {
+    invoke_one(try_u16_to_u128_operation, value)
+}
+
+pub fn try_u16_to_usize(value: u16) -> ?usize {
+    invoke_one(try_u16_to_usize_operation, value)
+}
+
+pub fn try_u16_to_i8(value: u16) -> ?i8 {
+    invoke_one(try_u16_to_i8_operation, value)
+}
+
+pub fn try_u16_to_i16(value: u16) -> ?i16 {
+    invoke_one(try_u16_to_i16_operation, value)
+}
+
+pub fn try_u16_to_i32(value: u16) -> ?i32 {
+    invoke_one(try_u16_to_i32_operation, value)
+}
+
+pub fn try_u16_to_i64(value: u16) -> ?i64 {
+    invoke_one(try_u16_to_i64_operation, value)
+}
+
+pub fn try_u16_to_i128(value: u16) -> ?i128 {
+    invoke_one(try_u16_to_i128_operation, value)
+}
+
+pub fn try_u16_to_isize(value: u16) -> ?isize {
+    invoke_one(try_u16_to_isize_operation, value)
+}
+
+pub fn try_u32_to_u8(value: u32) -> ?u8 {
+    invoke_one(try_u32_to_u8_operation, value)
+}
+
+pub fn try_u32_to_u16(value: u32) -> ?u16 {
+    invoke_one(try_u32_to_u16_operation, value)
+}
+
+pub fn try_u32_to_u64(value: u32) -> ?u64 {
+    invoke_one(try_u32_to_u64_operation, value)
+}
+
+pub fn try_u32_to_u128(value: u32) -> ?u128 {
+    invoke_one(try_u32_to_u128_operation, value)
+}
+
+pub fn try_u32_to_usize(value: u32) -> ?usize {
+    invoke_one(try_u32_to_usize_operation, value)
+}
+
+pub fn try_u32_to_i8(value: u32) -> ?i8 {
+    invoke_one(try_u32_to_i8_operation, value)
+}
+
+pub fn try_u32_to_i16(value: u32) -> ?i16 {
+    invoke_one(try_u32_to_i16_operation, value)
+}
+
+pub fn try_u32_to_i32(value: u32) -> ?i32 {
+    invoke_one(try_u32_to_i32_operation, value)
+}
+
+pub fn try_u32_to_i64(value: u32) -> ?i64 {
+    invoke_one(try_u32_to_i64_operation, value)
+}
+
+pub fn try_u32_to_i128(value: u32) -> ?i128 {
+    invoke_one(try_u32_to_i128_operation, value)
+}
+
+pub fn try_u32_to_isize(value: u32) -> ?isize {
+    invoke_one(try_u32_to_isize_operation, value)
+}
+
+pub fn try_u64_to_u8(value: u64) -> ?u8 {
+    invoke_one(try_u64_to_u8_operation, value)
+}
+
+pub fn try_u64_to_u16(value: u64) -> ?u16 {
+    invoke_one(try_u64_to_u16_operation, value)
+}
+
+pub fn try_u64_to_u32(value: u64) -> ?u32 {
+    invoke_one(try_u64_to_u32_operation, value)
+}
+
+pub fn try_u64_to_u128(value: u64) -> ?u128 {
+    invoke_one(try_u64_to_u128_operation, value)
+}
+
+pub fn try_u64_to_usize(value: u64) -> ?usize {
+    invoke_one(try_u64_to_usize_operation, value)
+}
+
+pub fn try_u64_to_i8(value: u64) -> ?i8 {
+    invoke_one(try_u64_to_i8_operation, value)
+}
+
+pub fn try_u64_to_i16(value: u64) -> ?i16 {
+    invoke_one(try_u64_to_i16_operation, value)
+}
+
+pub fn try_u64_to_i32(value: u64) -> ?i32 {
+    invoke_one(try_u64_to_i32_operation, value)
+}
+
+pub fn try_u64_to_i64(value: u64) -> ?i64 {
+    invoke_one(try_u64_to_i64_operation, value)
+}
+
+pub fn try_u64_to_i128(value: u64) -> ?i128 {
+    invoke_one(try_u64_to_i128_operation, value)
+}
+
+pub fn try_u64_to_isize(value: u64) -> ?isize {
+    invoke_one(try_u64_to_isize_operation, value)
+}
+
+pub fn try_u128_to_u8(value: u128) -> ?u8 {
+    invoke_one(try_u128_to_u8_operation, value)
+}
+
+pub fn try_u128_to_u16(value: u128) -> ?u16 {
+    invoke_one(try_u128_to_u16_operation, value)
+}
+
+pub fn try_u128_to_u32(value: u128) -> ?u32 {
+    invoke_one(try_u128_to_u32_operation, value)
+}
+
+pub fn try_u128_to_u64(value: u128) -> ?u64 {
+    invoke_one(try_u128_to_u64_operation, value)
+}
+
+pub fn try_u128_to_usize(value: u128) -> ?usize {
+    invoke_one(try_u128_to_usize_operation, value)
+}
+
+pub fn try_u128_to_i8(value: u128) -> ?i8 {
+    invoke_one(try_u128_to_i8_operation, value)
+}
+
+pub fn try_u128_to_i16(value: u128) -> ?i16 {
+    invoke_one(try_u128_to_i16_operation, value)
+}
+
+pub fn try_u128_to_i32(value: u128) -> ?i32 {
+    invoke_one(try_u128_to_i32_operation, value)
+}
+
+pub fn try_u128_to_i64(value: u128) -> ?i64 {
+    invoke_one(try_u128_to_i64_operation, value)
+}
+
+pub fn try_u128_to_i128(value: u128) -> ?i128 {
+    invoke_one(try_u128_to_i128_operation, value)
+}
+
+pub fn try_u128_to_isize(value: u128) -> ?isize {
+    invoke_one(try_u128_to_isize_operation, value)
+}
+
+pub fn try_usize_to_u8(value: usize) -> ?u8 {
+    invoke_one(try_usize_to_u8_operation, value)
+}
+
+pub fn try_usize_to_u16(value: usize) -> ?u16 {
+    invoke_one(try_usize_to_u16_operation, value)
+}
+
+pub fn try_usize_to_u32(value: usize) -> ?u32 {
+    invoke_one(try_usize_to_u32_operation, value)
+}
+
+pub fn try_usize_to_u64(value: usize) -> ?u64 {
+    invoke_one(try_usize_to_u64_operation, value)
+}
+
+pub fn try_usize_to_u128(value: usize) -> ?u128 {
+    invoke_one(try_usize_to_u128_operation, value)
+}
+
+pub fn try_usize_to_i8(value: usize) -> ?i8 {
+    invoke_one(try_usize_to_i8_operation, value)
+}
+
+pub fn try_usize_to_i16(value: usize) -> ?i16 {
+    invoke_one(try_usize_to_i16_operation, value)
+}
+
+pub fn try_usize_to_i32(value: usize) -> ?i32 {
+    invoke_one(try_usize_to_i32_operation, value)
+}
+
+pub fn try_usize_to_i64(value: usize) -> ?i64 {
+    invoke_one(try_usize_to_i64_operation, value)
+}
+
+pub fn try_usize_to_i128(value: usize) -> ?i128 {
+    invoke_one(try_usize_to_i128_operation, value)
+}
+
+pub fn try_usize_to_isize(value: usize) -> ?isize {
+    invoke_one(try_usize_to_isize_operation, value)
+}
+
+pub fn try_i8_to_u8(value: i8) -> ?u8 {
+    invoke_one(try_i8_to_u8_operation, value)
+}
+
+pub fn try_i8_to_u16(value: i8) -> ?u16 {
+    invoke_one(try_i8_to_u16_operation, value)
+}
+
+pub fn try_i8_to_u32(value: i8) -> ?u32 {
+    invoke_one(try_i8_to_u32_operation, value)
+}
+
+pub fn try_i8_to_u64(value: i8) -> ?u64 {
+    invoke_one(try_i8_to_u64_operation, value)
+}
+
+pub fn try_i8_to_u128(value: i8) -> ?u128 {
+    invoke_one(try_i8_to_u128_operation, value)
+}
+
+pub fn try_i8_to_usize(value: i8) -> ?usize {
+    invoke_one(try_i8_to_usize_operation, value)
+}
+
+pub fn try_i8_to_i16(value: i8) -> ?i16 {
+    invoke_one(try_i8_to_i16_operation, value)
+}
+
+pub fn try_i8_to_i32(value: i8) -> ?i32 {
+    invoke_one(try_i8_to_i32_operation, value)
+}
+
+pub fn try_i8_to_i64(value: i8) -> ?i64 {
+    invoke_one(try_i8_to_i64_operation, value)
+}
+
+pub fn try_i8_to_i128(value: i8) -> ?i128 {
+    invoke_one(try_i8_to_i128_operation, value)
+}
+
+pub fn try_i8_to_isize(value: i8) -> ?isize {
+    invoke_one(try_i8_to_isize_operation, value)
+}
+
+pub fn try_i16_to_u8(value: i16) -> ?u8 {
+    invoke_one(try_i16_to_u8_operation, value)
+}
+
+pub fn try_i16_to_u16(value: i16) -> ?u16 {
+    invoke_one(try_i16_to_u16_operation, value)
+}
+
+pub fn try_i16_to_u32(value: i16) -> ?u32 {
+    invoke_one(try_i16_to_u32_operation, value)
+}
+
+pub fn try_i16_to_u64(value: i16) -> ?u64 {
+    invoke_one(try_i16_to_u64_operation, value)
+}
+
+pub fn try_i16_to_u128(value: i16) -> ?u128 {
+    invoke_one(try_i16_to_u128_operation, value)
+}
+
+pub fn try_i16_to_usize(value: i16) -> ?usize {
+    invoke_one(try_i16_to_usize_operation, value)
+}
+
+pub fn try_i16_to_i8(value: i16) -> ?i8 {
+    invoke_one(try_i16_to_i8_operation, value)
+}
+
+pub fn try_i16_to_i32(value: i16) -> ?i32 {
+    invoke_one(try_i16_to_i32_operation, value)
+}
+
+pub fn try_i16_to_i64(value: i16) -> ?i64 {
+    invoke_one(try_i16_to_i64_operation, value)
+}
+
+pub fn try_i16_to_i128(value: i16) -> ?i128 {
+    invoke_one(try_i16_to_i128_operation, value)
+}
+
+pub fn try_i16_to_isize(value: i16) -> ?isize {
+    invoke_one(try_i16_to_isize_operation, value)
+}
+
+pub fn try_i32_to_u8(value: i32) -> ?u8 {
+    invoke_one(try_i32_to_u8_operation, value)
+}
+
+pub fn try_i32_to_u16(value: i32) -> ?u16 {
+    invoke_one(try_i32_to_u16_operation, value)
+}
+
+pub fn try_i32_to_u32(value: i32) -> ?u32 {
+    invoke_one(try_i32_to_u32_operation, value)
+}
+
+pub fn try_i32_to_u64(value: i32) -> ?u64 {
+    invoke_one(try_i32_to_u64_operation, value)
+}
+
+pub fn try_i32_to_u128(value: i32) -> ?u128 {
+    invoke_one(try_i32_to_u128_operation, value)
+}
+
+pub fn try_i32_to_usize(value: i32) -> ?usize {
+    invoke_one(try_i32_to_usize_operation, value)
+}
+
+pub fn try_i32_to_i8(value: i32) -> ?i8 {
+    invoke_one(try_i32_to_i8_operation, value)
+}
+
+pub fn try_i32_to_i16(value: i32) -> ?i16 {
+    invoke_one(try_i32_to_i16_operation, value)
+}
+
+pub fn try_i32_to_i64(value: i32) -> ?i64 {
+    invoke_one(try_i32_to_i64_operation, value)
+}
+
+pub fn try_i32_to_i128(value: i32) -> ?i128 {
+    invoke_one(try_i32_to_i128_operation, value)
+}
+
+pub fn try_i32_to_isize(value: i32) -> ?isize {
+    invoke_one(try_i32_to_isize_operation, value)
+}
+
+pub fn try_i64_to_u8(value: i64) -> ?u8 {
+    invoke_one(try_i64_to_u8_operation, value)
+}
+
+pub fn try_i64_to_u16(value: i64) -> ?u16 {
+    invoke_one(try_i64_to_u16_operation, value)
+}
+
+pub fn try_i64_to_u32(value: i64) -> ?u32 {
+    invoke_one(try_i64_to_u32_operation, value)
+}
+
+pub fn try_i64_to_u64(value: i64) -> ?u64 {
+    invoke_one(try_i64_to_u64_operation, value)
+}
+
+pub fn try_i64_to_u128(value: i64) -> ?u128 {
+    invoke_one(try_i64_to_u128_operation, value)
+}
+
+pub fn try_i64_to_usize(value: i64) -> ?usize {
+    invoke_one(try_i64_to_usize_operation, value)
+}
+
+pub fn try_i64_to_i8(value: i64) -> ?i8 {
+    invoke_one(try_i64_to_i8_operation, value)
+}
+
+pub fn try_i64_to_i16(value: i64) -> ?i16 {
+    invoke_one(try_i64_to_i16_operation, value)
+}
+
+pub fn try_i64_to_i32(value: i64) -> ?i32 {
+    invoke_one(try_i64_to_i32_operation, value)
+}
+
+pub fn try_i64_to_i128(value: i64) -> ?i128 {
+    invoke_one(try_i64_to_i128_operation, value)
+}
+
+pub fn try_i64_to_isize(value: i64) -> ?isize {
+    invoke_one(try_i64_to_isize_operation, value)
+}
+
+pub fn try_i128_to_u8(value: i128) -> ?u8 {
+    invoke_one(try_i128_to_u8_operation, value)
+}
+
+pub fn try_i128_to_u16(value: i128) -> ?u16 {
+    invoke_one(try_i128_to_u16_operation, value)
+}
+
+pub fn try_i128_to_u32(value: i128) -> ?u32 {
+    invoke_one(try_i128_to_u32_operation, value)
+}
+
+pub fn try_i128_to_u64(value: i128) -> ?u64 {
+    invoke_one(try_i128_to_u64_operation, value)
+}
+
+pub fn try_i128_to_u128(value: i128) -> ?u128 {
+    invoke_one(try_i128_to_u128_operation, value)
+}
+
+pub fn try_i128_to_usize(value: i128) -> ?usize {
+    invoke_one(try_i128_to_usize_operation, value)
+}
+
+pub fn try_i128_to_i8(value: i128) -> ?i8 {
+    invoke_one(try_i128_to_i8_operation, value)
+}
+
+pub fn try_i128_to_i16(value: i128) -> ?i16 {
+    invoke_one(try_i128_to_i16_operation, value)
+}
+
+pub fn try_i128_to_i32(value: i128) -> ?i32 {
+    invoke_one(try_i128_to_i32_operation, value)
+}
+
+pub fn try_i128_to_i64(value: i128) -> ?i64 {
+    invoke_one(try_i128_to_i64_operation, value)
+}
+
+pub fn try_i128_to_isize(value: i128) -> ?isize {
+    invoke_one(try_i128_to_isize_operation, value)
+}
+
+pub fn try_isize_to_u8(value: isize) -> ?u8 {
+    invoke_one(try_isize_to_u8_operation, value)
+}
+
+pub fn try_isize_to_u16(value: isize) -> ?u16 {
+    invoke_one(try_isize_to_u16_operation, value)
+}
+
+pub fn try_isize_to_u32(value: isize) -> ?u32 {
+    invoke_one(try_isize_to_u32_operation, value)
+}
+
+pub fn try_isize_to_u64(value: isize) -> ?u64 {
+    invoke_one(try_isize_to_u64_operation, value)
+}
+
+pub fn try_isize_to_u128(value: isize) -> ?u128 {
+    invoke_one(try_isize_to_u128_operation, value)
+}
+
+pub fn try_isize_to_usize(value: isize) -> ?usize {
+    invoke_one(try_isize_to_usize_operation, value)
+}
+
+pub fn try_isize_to_i8(value: isize) -> ?i8 {
+    invoke_one(try_isize_to_i8_operation, value)
+}
+
+pub fn try_isize_to_i16(value: isize) -> ?i16 {
+    invoke_one(try_isize_to_i16_operation, value)
+}
+
+pub fn try_isize_to_i32(value: isize) -> ?i32 {
+    invoke_one(try_isize_to_i32_operation, value)
+}
+
+pub fn try_isize_to_i64(value: isize) -> ?i64 {
+    invoke_one(try_isize_to_i64_operation, value)
+}
+
+pub fn try_isize_to_i128(value: isize) -> ?i128 {
+    invoke_one(try_isize_to_i128_operation, value)
 }

@@ -101,12 +101,14 @@ impl Checker<'_, '_> {
             let registry = nir::intrinsics::Registry::for_family(family, variant, *operation)
                 .map_err(|reason| error(expr.span, reason))?;
             let types: Vec<_> = inputs.iter().map(|input| input.ty.clone()).collect();
-            let scalar = if operation.is_float_predicate() {
-                types.first().unwrap_or(&output)
-            } else {
-                &output
-            };
-            let admission = if matches!(
+            let scalar = operation.payload_or_scalar(&types, &output);
+            let admission = if operation.is_polymorphic_memory() {
+                if nir::intrinsics::concrete_payload(scalar) {
+                    registry.check(tag, &types, &output)
+                } else {
+                    registry.defer(tag, &types, &output)
+                }
+            } else if matches!(
                 scalar,
                 Term::Rigid {
                     sort: Sort::Type,
@@ -135,6 +137,9 @@ impl Checker<'_, '_> {
                 .map_err(|reason| error(expr.span, reason))?;
             if comptime && operation.is_platform() {
                 return Err(error(expr.span, "platform operations are runtime-only"));
+            }
+            if comptime && operation.is_memory() {
+                return Err(error(expr.span, "raw memory operations are runtime-only"));
             }
             Some(if comptime {
                 admission.for_comptime()

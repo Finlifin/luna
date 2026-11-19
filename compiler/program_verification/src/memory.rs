@@ -5227,6 +5227,7 @@ impl<'a> Infer<'a, '_> {
             | K::TakeBits(value)
             | K::TextQuery { subject: value, .. }
             | K::IntegerRepresentation(value)
+            | K::TryIntegerConvert(value)
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::EnumName(value)
@@ -6014,8 +6015,27 @@ impl<'a> Infer<'a, '_> {
             K::AddressOf(value) => {
                 self.local_address(value, depth + 1)?;
             }
-            K::Intrinsic { inputs, .. } => {
-                nir::intrinsics::checked(expr)
+            K::Intrinsic {
+                tag,
+                inputs,
+                binding,
+            } => {
+                let binding = binding
+                    .as_ref()
+                    .ok_or("intrinsic memory behavior requires a valid target protocol")?;
+                binding
+                    .charge_copy(self.fuel)
+                    .map_err(|_| "memory summary budget exhausted")?;
+                let output = self.ty(&expr.ty)?;
+                let mut input_types = Vec::with_capacity(inputs.len());
+                for input in inputs {
+                    input_types.push(self.ty(&input.ty)?);
+                }
+                binding
+                    .validate_specialized(*tag, &input_types, &output, |ty| {
+                        *ty = self.ty(ty)?;
+                        Ok::<(), String>(())
+                    })?
                     .map_err(|_| "intrinsic memory behavior requires a valid target protocol")?;
                 for input in inputs {
                     self.walk(input, depth + 1)?;
@@ -7275,6 +7295,7 @@ impl<'a> Infer<'a, '_> {
             | K::Snapshot(value)
             | K::TakeBits(value)
             | K::IntegerRepresentation(value)
+            | K::TryIntegerConvert(value)
             | K::ComptimeIntegerConvert(value)
             | K::SymbolName(value)
             | K::EnumName(value)

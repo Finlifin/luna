@@ -575,8 +575,13 @@ impl Checker<'_, '_> {
         index.set_normal_form_metadata(normal_forms.clone());
         inherent_index.set_normal_form_metadata(normal_forms);
         let coherence_context = self.nominal_context();
-        let coherence = index.check_type_coherence(&coherence_context, Budget::default());
-        if !index.verify_type_coherence(&coherence, &coherence_context, Budget::default()) {
+        let coherence =
+            index.check_type_coherence_by_interface(&coherence_context, Budget::default());
+        if !index.verify_type_coherence_by_interface(
+            &coherence,
+            &coherence_context,
+            Budget::default(),
+        ) {
             let pair = coherence
                 .pairs
                 .iter()

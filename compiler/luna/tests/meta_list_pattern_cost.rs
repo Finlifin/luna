@@ -90,18 +90,35 @@ fn staged_list_getter_avoids_an_additional_full_list_copy() {
 fn staged_list_pattern_handles_empty_input_and_budget_exhaustion() {
     for width in [32, 64] {
         let package = compile(width, false);
-        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut vm = Interpreter::for_comptime(
+            &package,
+            Budget {
+                steps: 1_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let construction = 1_000_000 - vm.remaining_steps();
+        let mut cost_512 = 0;
         for length in [0, 1, 512, 0] {
+            let before = vm.remaining_steps();
             assert_eq!(
                 vm.invoke(support::id(&package, "First"), arguments(&package, length))
                     .unwrap(),
                 Value::Type(Term::Primitive(Primitive::Bool)),
             );
+            if length == 512 {
+                cost_512 = before - vm.remaining_steps();
+            }
         }
+        assert!(
+            cost_512 > 1,
+            "expected First(512) to consume steps: {cost_512}"
+        );
         let mut limited = Interpreter::for_comptime(
             &package,
             Budget {
-                steps: 10_000,
+                steps: construction + cost_512 / 2,
                 ..Default::default()
             },
         )
@@ -120,7 +137,14 @@ fn staged_list_pattern_handles_empty_input_and_budget_exhaustion() {
 fn ordinary_list_method_checks_indices_and_recovers_after_failure() {
     for width in [32, 64] {
         let package = compile(width, false);
-        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut vm = Interpreter::for_comptime(
+            &package,
+            Budget {
+                steps: 1_000_000,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         for (length, index) in [(0, 0), (3, 3), (3, u32::MAX)] {
             let mut args = arguments(&package, length);
             args.push(Value::UnsignedInteger(index as u128));

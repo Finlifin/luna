@@ -13,6 +13,10 @@ pub mod target {
         close,
         unlink,
         getpid,
+        alloc,
+        dealloc,
+        write_raw,
+        read_raw,
     }
 }
 
@@ -42,6 +46,22 @@ pub fn unlink() -> i64 where path: str {
 
 pub fn getpid() -> i64 {
     unsafe { target.System.getpid'intrinsic().as(i64) }
+}
+
+pub unsafe fn alloc(size: u64, align: u64) -> usize {
+    target.System.alloc'intrinsic(size, align).as(usize)
+}
+
+pub unsafe fn dealloc(addr: usize, size: u64, align: u64) {
+    target.System.dealloc'intrinsic(addr, size, align)
+}
+
+pub unsafe fn write_raw(fd: i32, addr: usize, len: u64) -> i64 {
+    target.System.write_raw'intrinsic(fd, addr, len).as(i64)
+}
+
+pub unsafe fn read_raw(fd: i32, addr: usize, len: u64) -> i64 {
+    target.System.read_raw'intrinsic(fd, addr, len).as(i64)
 }
 
 pub const read_only: i32 = 0;

@@ -105,6 +105,16 @@ pub enum Operation {
     LinuxClose,
     LinuxUnlink,
     LinuxGetPid,
+    LinuxAlloc,
+    LinuxDealloc,
+    LinuxWriteRaw,
+    LinuxReadRaw,
+    MemRawRead,
+    MemRawWrite,
+    MemCopy,
+    MemCopyNonOverlapping,
+    MemSetBytes,
+    MemCompareBytes,
 }
 impl Operation {
     /// Stable target-operation names used by host configuration, not source tag identities.
@@ -160,6 +170,16 @@ impl Operation {
         Self::LinuxClose,
         Self::LinuxUnlink,
         Self::LinuxGetPid,
+        Self::LinuxAlloc,
+        Self::LinuxDealloc,
+        Self::LinuxWriteRaw,
+        Self::LinuxReadRaw,
+        Self::MemRawRead,
+        Self::MemRawWrite,
+        Self::MemCopy,
+        Self::MemCopyNonOverlapping,
+        Self::MemSetBytes,
+        Self::MemCompareBytes,
     ];
 
     pub const fn name(self) -> &'static str {
@@ -215,6 +235,16 @@ impl Operation {
             Self::LinuxClose => "linux_close",
             Self::LinuxUnlink => "linux_unlink",
             Self::LinuxGetPid => "linux_getpid",
+            Self::LinuxAlloc => "linux_alloc",
+            Self::LinuxDealloc => "linux_dealloc",
+            Self::LinuxWriteRaw => "linux_write_raw",
+            Self::LinuxReadRaw => "linux_read_raw",
+            Self::MemRawRead => "mem_raw_read",
+            Self::MemRawWrite => "mem_raw_write",
+            Self::MemCopy => "mem_copy",
+            Self::MemCopyNonOverlapping => "mem_copy_nonoverlapping",
+            Self::MemSetBytes => "mem_set_bytes",
+            Self::MemCompareBytes => "mem_compare_bytes",
         }
     }
 
@@ -230,19 +260,46 @@ impl Operation {
                 | Self::LinuxClose
                 | Self::LinuxUnlink
                 | Self::LinuxGetPid
+                | Self::LinuxAlloc
+                | Self::LinuxDealloc
+                | Self::LinuxWriteRaw
+                | Self::LinuxReadRaw
         )
     }
 
-    /// Numeric operations exported by the scalar math libraries. Platform
-    /// operations have their own declaration families and runtime-only ABI.
+    /// Raw host memory primitives execute in runtime `unsafe` blocks only.
+    pub fn is_memory(self) -> bool {
+        matches!(
+            self,
+            Self::MemRawRead
+                | Self::MemRawWrite
+                | Self::MemCopy
+                | Self::MemCopyNonOverlapping
+                | Self::MemSetBytes
+                | Self::MemCompareBytes
+        )
+    }
+
+    /// Raw typed reads and writes accept an arbitrary `Type` payload instead of a fixed scalar set.
+    pub fn is_polymorphic_memory(self) -> bool {
+        matches!(self, Self::MemRawRead | Self::MemRawWrite)
+    }
+
+    /// Runtime-only host operations cannot execute at comptime or satisfy pure observations.
+    pub fn is_runtime_only(self) -> bool {
+        self.is_platform() || self.is_memory()
+    }
+
+    /// Numeric operations exported by the scalar math libraries. Platform and
+    /// raw memory operations have their own declaration families and runtime-only ABI.
     pub fn scalar_math() -> impl Iterator<Item = &'static Self> {
         Self::ALL
             .iter()
-            .filter(|operation| !operation.is_platform())
+            .filter(|operation| !operation.is_runtime_only())
     }
 
     pub fn is_pure(self) -> bool {
-        !self.is_platform()
+        !self.is_runtime_only()
     }
 
     pub fn is_float_predicate(self) -> bool {
@@ -260,6 +317,16 @@ impl Operation {
         matches!(self, Self::IntegerPower | Self::ScaleByPowerOfTwo)
     }
 
+    pub fn payload_or_scalar<'a>(self, inputs: &'a [Term], output: &'a Term) -> &'a Term {
+        if self.is_float_predicate() {
+            inputs.first().unwrap_or(output)
+        } else if matches!(self, Self::MemRawWrite) {
+            inputs.get(1).unwrap_or(output)
+        } else {
+            output
+        }
+    }
+
     /// Concrete operand roles are independent of the result's scalar family.
     /// Integer-exponent operations retain their floating base/result type.
     pub fn operand_type(self, scalar: &Term, index: usize) -> Term {
@@ -270,13 +337,37 @@ impl Operation {
                 | (Self::LinuxWriteByte, 0)
                 | (Self::LinuxReadByte, 0)
                 | (Self::LinuxClose, 0)
-                | (Self::LinuxOpen, 1) => I32,
+                | (Self::LinuxOpen, 1)
+                | (Self::LinuxWriteRaw, 0)
+                | (Self::LinuxReadRaw, 0) => I32,
                 (Self::LinuxWrite, 1) | (Self::LinuxOpen, 0) | (Self::LinuxUnlink, 0) => Str,
-                (Self::LinuxWrite, 2) => U64,
+                (Self::LinuxWrite, 2)
+                | (Self::LinuxAlloc, 0)
+                | (Self::LinuxAlloc, 1)
+                | (Self::LinuxDealloc, 1)
+                | (Self::LinuxDealloc, 2)
+                | (Self::LinuxWriteRaw, 2)
+                | (Self::LinuxReadRaw, 2) => U64,
+                (Self::LinuxDealloc, 0) | (Self::LinuxWriteRaw, 1) | (Self::LinuxReadRaw, 1) => {
+                    Usize
+                }
                 (Self::LinuxWriteByte, 1) => U8,
                 (Self::LinuxOpen, 2) => U32,
                 _ => unreachable!("platform operand index validated by arity"),
             })
+        } else if self.is_memory() {
+            use Primitive::*;
+            match (self, index) {
+                (Self::MemRawWrite, 1) => scalar.clone(),
+                (Self::MemRawRead, 0)
+                | (Self::MemRawWrite, 0)
+                | (Self::MemCopy, 0 | 1 | 2)
+                | (Self::MemCopyNonOverlapping, 0 | 1 | 2)
+                | (Self::MemSetBytes, 0 | 2)
+                | (Self::MemCompareBytes, 0 | 1 | 2) => Term::Primitive(Usize),
+                (Self::MemSetBytes, 1) => Term::Primitive(U8),
+                _ => unreachable!("memory operand index validated by arity"),
+            }
         } else if self.has_integer_exponent() && index == 1 {
             Term::Primitive(Primitive::I32)
         } else {
@@ -284,12 +375,18 @@ impl Operation {
         }
     }
     pub fn result_type(self, scalar: &Term) -> Term {
-        if self.is_platform() {
-            Term::Primitive(Primitive::I64)
-        } else if self.is_float_predicate() {
-            Term::Primitive(Primitive::Bool)
-        } else {
-            scalar.clone()
+        match self {
+            Self::LinuxAlloc => Term::Primitive(Primitive::Usize),
+            Self::LinuxDealloc
+            | Self::MemRawWrite
+            | Self::MemCopy
+            | Self::MemCopyNonOverlapping
+            | Self::MemSetBytes => Term::Primitive(Primitive::Void),
+            Self::MemRawRead => scalar.clone(),
+            Self::MemCompareBytes => Term::Primitive(Primitive::I32),
+            _ if self.is_platform() => Term::Primitive(Primitive::I64),
+            _ if self.is_float_predicate() => Term::Primitive(Primitive::Bool),
+            _ => scalar.clone(),
         }
     }
 
@@ -307,7 +404,16 @@ impl Operation {
             | Self::LinuxOpen
             | Self::LinuxClose
             | Self::LinuxUnlink
-            | Self::LinuxGetPid => &[I64],
+            | Self::LinuxGetPid
+            | Self::LinuxWriteRaw
+            | Self::LinuxReadRaw => &[I64],
+            Self::LinuxAlloc | Self::MemRawRead => &[Usize],
+            Self::MemCompareBytes => &[I32],
+            Self::LinuxDealloc
+            | Self::MemRawWrite
+            | Self::MemCopy
+            | Self::MemCopyNonOverlapping
+            | Self::MemSetBytes => &[Void],
             Self::WrappingAbsoluteValue => &[I8, I16, I32, I64, I128, Isize],
             Self::BitAnd | Self::BitOr | Self::BitXor => &[
                 U8, U16, U32, U64, U128, I8, I16, I32, I64, I128, Usize, Isize,
@@ -359,9 +465,17 @@ impl Operation {
 
     pub fn operand_count(self) -> usize {
         match self {
-            Self::LinuxWrite | Self::LinuxOpen => 3,
-            Self::LinuxWriteByte => 2,
-            Self::LinuxReadByte | Self::LinuxClose | Self::LinuxUnlink => 1,
+            Self::LinuxWrite
+            | Self::LinuxOpen
+            | Self::LinuxDealloc
+            | Self::LinuxWriteRaw
+            | Self::LinuxReadRaw
+            | Self::MemCopy
+            | Self::MemCopyNonOverlapping
+            | Self::MemSetBytes
+            | Self::MemCompareBytes => 3,
+            Self::LinuxWriteByte | Self::LinuxAlloc | Self::MemRawWrite => 2,
+            Self::LinuxReadByte | Self::LinuxClose | Self::LinuxUnlink | Self::MemRawRead => 1,
             Self::LinuxGetPid => 0,
             Self::FusedMultiplyAdd | Self::FunnelShiftLeft | Self::FunnelShiftRight => 3,
             Self::SquareRoot
@@ -543,12 +657,15 @@ impl Registry {
                 expected: operation.operand_count(),
             });
         }
-        let scalar = if operation.is_float_predicate() {
-            &inputs[0]
-        } else {
-            output
-        };
-        if *output != operation.result_type(scalar) || !parameter(scalar) {
+        let scalar = operation.payload_or_scalar(inputs, output);
+        if *output != operation.result_type(scalar) {
+            return Err(Error::OutputType(tag));
+        }
+        if operation.is_polymorphic_memory() {
+            if scalar.sort() != crate::Sort::Type || concrete_payload(scalar) {
+                return Err(Error::OutputType(tag));
+            }
+        } else if !parameter(scalar) {
             return Err(Error::OutputType(tag));
         }
         for (index, input) in inputs.iter().enumerate() {
@@ -556,11 +673,16 @@ impl Registry {
                 return Err(Error::OperandType { tag, index });
             }
         }
+        let signature = if operation.is_polymorphic_memory() {
+            Signature::Payload(scalar.clone())
+        } else {
+            Signature::Pending(scalar.clone())
+        };
         Ok(Checked {
             comptime: false,
             tag,
             operation,
-            signature: Signature::Pending(scalar.clone()),
+            signature,
         })
     }
 
@@ -575,13 +697,25 @@ impl Registry {
                 expected: operation.operand_count(),
             });
         }
-        let scalar = if operation.is_float_predicate() {
-            &inputs[0]
-        } else {
-            output
-        };
+        let scalar = operation.payload_or_scalar(inputs, output);
         if *output != operation.result_type(scalar) {
             return Err(Error::OutputType(tag));
+        }
+        if operation.is_polymorphic_memory() {
+            if !concrete_payload(scalar) {
+                return Err(Error::OutputType(tag));
+            }
+            for (index, input) in inputs.iter().enumerate() {
+                if *input != operation.operand_type(scalar, index) {
+                    return Err(Error::OperandType { tag, index });
+                }
+            }
+            return Ok(Checked {
+                comptime: false,
+                tag,
+                operation,
+                signature: Signature::Payload(scalar.clone()),
+            });
         }
         let Term::Primitive(primitive) = scalar else {
             return Err(Error::OutputType(tag));
@@ -619,6 +753,7 @@ pub struct Checked {
 enum Signature {
     Concrete(Primitive),
     Pending(Term),
+    Payload(Term),
 }
 fn parameter(ty: &Term) -> bool {
     matches!(
@@ -629,8 +764,23 @@ fn parameter(ty: &Term) -> bool {
         }
     )
 }
+pub fn concrete_payload(ty: &Term) -> bool {
+    ty.sort() == crate::Sort::Type
+        && ty.check_scope(&[]).is_ok()
+        && !ty.structural_terms().any(|term| {
+            matches!(
+                term,
+                Term::Rigid { .. }
+                    | Term::Bound { .. }
+                    | Term::Hole { .. }
+                    | Term::AssociatedType { .. }
+                    | Term::ListConcat { .. }
+                    | Term::Runtime(_)
+            )
+        })
+}
 impl Checked {
-    /// Bound ownership transfer of checked evidence, including pending types.
+    /// Bound ownership transfer of checked evidence, including pending and payload types.
     pub fn charge_copy(
         &self,
         fuel: &mut usize,
@@ -638,7 +788,7 @@ impl Checked {
         *fuel = fuel
             .checked_sub(1)
             .ok_or(crate::copy_budget::CopyBudgetExhausted::Steps)?;
-        if let Signature::Pending(ty) = &self.signature {
+        if let Signature::Pending(ty) | Signature::Payload(ty) = &self.signature {
             crate::copy_budget::charge_type_substitution(ty, &[], &[], fuel)?;
         }
         Ok(())
@@ -669,11 +819,28 @@ impl Checked {
         output: &Term,
     ) -> Result<(), &'static str> {
         self.validate_template_types(tag, inputs, output)?;
-        if !matches!(self.signature, Signature::Concrete(_)) {
-            return Err("intrinsic binding requires concrete specialization");
+        match &self.signature {
+            Signature::Concrete(_) => Ok(()),
+            Signature::Payload(ty) if concrete_payload(ty) => Ok(()),
+            Signature::Pending(_) | Signature::Payload(_) => {
+                Err("intrinsic binding requires concrete specialization")
+            }
         }
-        Ok(())
     }
+    /// Validate against specialized operand/result types by rewriting any
+    /// deferred pending or payload type with `transform` first.
+    pub fn validate_specialized<E>(
+        &self,
+        tag: Tag,
+        inputs: &[Term],
+        output: &Term,
+        mut transform: impl FnMut(&mut Term) -> Result<(), E>,
+    ) -> Result<Result<(), &'static str>, E> {
+        let mut specialized = self.clone();
+        specialized.rewrite_pending(true, &mut transform)?;
+        Ok(specialized.validate_types(tag, inputs.iter(), output))
+    }
+
     pub fn validate_template(
         &self,
         tag: Tag,
@@ -691,14 +858,27 @@ impl Checked {
         if self.comptime && self.operation.is_platform() {
             return Err("platform operations are runtime-only");
         }
+        if self.comptime && self.operation.is_memory() {
+            return Err("raw memory operations are runtime-only");
+        }
         if tag != self.tag {
             return Err("intrinsic binding has a different tag identity");
         }
         let expected = match &self.signature {
-            Signature::Concrete(primitive) if self.operation.scalar_types().contains(primitive) => {
+            Signature::Concrete(primitive)
+                if !self.operation.is_polymorphic_memory()
+                    && self.operation.scalar_types().contains(primitive) =>
+            {
                 Term::Primitive(*primitive)
             }
-            Signature::Pending(ty) if parameter(ty) => ty.clone(),
+            Signature::Pending(ty) if !self.operation.is_polymorphic_memory() && parameter(ty) => {
+                ty.clone()
+            }
+            Signature::Payload(ty)
+                if self.operation.is_polymorphic_memory() && ty.sort() == crate::Sort::Type =>
+            {
+                ty.clone()
+            }
             _ => return Err("invalid intrinsic scalar specialization"),
         };
         if inputs.len() == self.operation.operand_count()
@@ -725,7 +905,7 @@ impl Checked {
         self.width_for_target(None)
     }
     pub fn width_for_target(&self, target: Option<crate::target::TargetData>) -> Option<u32> {
-        match self.signature {
+        match &self.signature {
             Signature::Concrete(primitive) => match primitive {
                 Primitive::U8 | Primitive::I8 => Some(8),
                 Primitive::U16 | Primitive::I16 | Primitive::F16 | Primitive::Bf16 => Some(16),
@@ -735,7 +915,7 @@ impl Checked {
                 Primitive::Usize | Primitive::Isize => target.map(|target| target.pointer_bits()),
                 _ => None,
             },
-            Signature::Pending(_) => None,
+            Signature::Pending(_) | Signature::Payload(_) => None,
         }
     }
     /// Check layout-specific restrictions without selecting a missing target.
@@ -756,25 +936,31 @@ impl Checked {
 
     pub(crate) fn pending_type(&self) -> Option<&Term> {
         match &self.signature {
-            Signature::Pending(ty) => Some(ty),
+            Signature::Pending(ty) | Signature::Payload(ty) => Some(ty),
             Signature::Concrete(_) => None,
         }
     }
 
-    /// Concrete evidence is immutable; only a pending type may be substituted.
+    /// Concrete evidence is immutable; only pending or payload types may be substituted.
     pub(crate) fn rewrite_pending<E>(
         &mut self,
         specialize: bool,
         transform: &mut impl FnMut(&mut Term) -> Result<(), E>,
     ) -> Result<(), E> {
-        if let Signature::Pending(ty) = &mut self.signature {
-            transform(ty)?;
-            if specialize
-                && let Term::Primitive(primitive) = ty
-                && self.operation.scalar_types().contains(primitive)
-            {
-                self.signature = Signature::Concrete(*primitive);
+        match &mut self.signature {
+            Signature::Pending(ty) => {
+                transform(ty)?;
+                if specialize
+                    && let Term::Primitive(primitive) = ty
+                    && self.operation.scalar_types().contains(primitive)
+                {
+                    self.signature = Signature::Concrete(*primitive);
+                }
             }
+            Signature::Payload(ty) => {
+                transform(ty)?;
+            }
+            Signature::Concrete(_) => {}
         }
         Ok(())
     }
@@ -819,6 +1005,7 @@ impl fmt::Display for Checked {
                 write!(f, "(scalar-type {}))", Term::Primitive(*primitive))
             }
             Signature::Pending(ty) => write!(f, "(pending-type {ty}))"),
+            Signature::Payload(ty) => write!(f, "(payload-type {ty}))"),
         }
     }
 }
@@ -896,6 +1083,89 @@ mod pending_dependency_tests {
         assert_eq!(
             crate::copy_budget::expression_declaration_inputs(&expression, &mut 100).unwrap(),
             std::collections::BTreeSet::from([input]),
+        );
+    }
+
+    #[test]
+    fn validate_specialized_handles_pending_scalar_and_payload_types() {
+        let tag = Tag {
+            family: DeclarationId {
+                package: 1,
+                local: 9,
+            },
+            variant: 0,
+        };
+        let input_param = DeclarationId {
+            package: 1,
+            local: 10,
+        };
+        let rigid_t = Term::Rigid {
+            declaration: input_param,
+            sort: crate::Sort::Type,
+        };
+        let f64_ty = Term::Primitive(Primitive::F64);
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let pending_sqrt = Checked {
+            comptime: false,
+            tag,
+            operation: Operation::SquareRoot,
+            signature: Signature::Pending(rigid_t.clone()),
+        };
+        assert_eq!(
+            pending_sqrt
+                .validate_specialized(tag, std::slice::from_ref(&f64_ty), &f64_ty, |ty| {
+                    if *ty == rigid_t {
+                        *ty = f64_ty.clone();
+                    }
+                    Ok::<(), ()>(())
+                })
+                .unwrap(),
+            Ok(())
+        );
+        assert!(
+            pending_sqrt
+                .validate_specialized(tag, std::slice::from_ref(&bool_ty), &bool_ty, |ty| {
+                    if *ty == rigid_t {
+                        *ty = bool_ty.clone();
+                    }
+                    Ok::<(), ()>(())
+                })
+                .unwrap()
+                .is_err()
+        );
+
+        let nominal = Term::Nominal {
+            declaration: DeclarationId {
+                package: 2,
+                local: 3,
+            },
+            arguments: vec![f64_ty.clone()],
+        };
+        let usize_ty = Term::Primitive(Primitive::Usize);
+        let payload_read = Checked {
+            comptime: false,
+            tag,
+            operation: Operation::MemRawRead,
+            signature: Signature::Payload(rigid_t.clone()),
+        };
+        assert_eq!(
+            payload_read
+                .validate_specialized(tag, std::slice::from_ref(&usize_ty), &nominal, |ty| {
+                    if *ty == rigid_t {
+                        *ty = nominal.clone();
+                    }
+                    Ok::<(), ()>(())
+                })
+                .unwrap(),
+            Ok(())
+        );
+        assert!(
+            payload_read
+                .validate_specialized(tag, std::slice::from_ref(&usize_ty), &rigid_t, |_| {
+                    Ok::<(), ()>(())
+                })
+                .unwrap()
+                .is_err()
         );
     }
 }

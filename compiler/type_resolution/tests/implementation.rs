@@ -4019,3 +4019,225 @@ fn public_replay_preserves_unresolved_domains_and_recovers_with_evidence() {
     assert_eq!(failure, EvidenceError::Proof(ProofError::Invalid));
     replay(&complete, Budget::default()).unwrap();
 }
+
+#[test]
+fn coherence_by_interface_handles_large_multi_trait_sysroot_and_argument_heads() {
+    use type_resolution::implementation::PairAssessment;
+    use type_resolution::ptc::Context;
+
+    let types = [
+        P::U8,
+        P::U16,
+        P::U32,
+        P::U64,
+        P::U128,
+        P::Usize,
+        P::I8,
+        P::I16,
+        P::I32,
+        P::I64,
+        P::I128,
+        P::Isize,
+    ];
+    let mut index = Index::default();
+    let mut next_decl = 10_000u32;
+
+    // Simulate >400 impls across multiple interfaces including 144 (Src, Dst) TryFrom impls.
+    for trait_idx in 0..2u32 {
+        let interface = id(500 + trait_idx);
+        for &dst in &types {
+            for &src in &types {
+                let mut h = head(next_decl, ty(dst));
+                next_decl += 1;
+                h.type_parameters.clear();
+                h.interface = Some(interface);
+                h.interface_arguments = vec![ty(src)];
+                index.insert(h, Budget::default()).unwrap();
+            }
+        }
+    }
+    for group in 0..10u32 {
+        let interface = id(600 + group);
+        for member in 0..20u32 {
+            let mut h = head(next_decl, node(2000 + member, vec![]));
+            next_decl += 1;
+            h.type_parameters.clear();
+            h.interface = Some(interface);
+            index.insert(h, Budget::default()).unwrap();
+        }
+    }
+    // Same subject type with distinct interface type argument constructors must pass.
+    let mut arg_a = head(next_decl, ty(P::U64));
+    next_decl += 1;
+    arg_a.type_parameters.clear();
+    arg_a.interface = Some(id(700));
+    arg_a.interface_arguments = vec![ty(P::Bool)];
+    index.insert(arg_a, Budget::default()).unwrap();
+
+    let mut arg_b = head(next_decl, ty(P::U64));
+    next_decl += 1;
+    arg_b.type_parameters.clear();
+    arg_b.interface = Some(id(700));
+    arg_b.interface_arguments = vec![ty(P::Char)];
+    index.insert(arg_b, Budget::default()).unwrap();
+
+    let context = Context::default();
+    let report = index.check_type_coherence_by_interface(&context, Budget::default());
+    assert!(report.is_proved(), "{report}");
+    assert!(index.verify_type_coherence_by_interface(&report, &context, Budget::default()));
+    assert!(
+        report
+            .pairs
+            .iter()
+            .any(|(_, _, a)| matches!(a, PairAssessment::DistinctTypeHeads))
+    );
+
+    // Exhausted per-interface budget fails.
+    let exhausted = Budget {
+        steps: 100,
+        ..Budget::default()
+    };
+    assert!(
+        !index
+            .check_type_coherence_by_interface(&context, exhausted)
+            .is_proved()
+    );
+    assert!(!index.verify_type_coherence_by_interface(&report, &context, exhausted));
+
+    // Genuine overlap within one interface fails, and forging DistinctTypeHeads fails replay.
+    let mut non_distinct_a = head(next_decl, node(3000, vec![var(1)]));
+    next_decl += 1;
+    non_distinct_a.type_parameters = vec![id(1)];
+    non_distinct_a.interface = Some(id(800));
+    index.insert(non_distinct_a, Budget::default()).unwrap();
+
+    let mut non_distinct_b = head(next_decl, node(3000, vec![var(1)]));
+    next_decl += 1;
+    non_distinct_b.type_parameters = vec![id(1)];
+    non_distinct_b.interface = Some(id(800));
+    index.insert(non_distinct_b, Budget::default()).unwrap();
+
+    let bad_report = index.check_type_coherence_by_interface(&context, Budget::default());
+    assert!(!bad_report.is_proved());
+    let mut forged = bad_report.clone();
+    forged.pairs.last_mut().unwrap().2 = PairAssessment::DistinctTypeHeads;
+    assert!(!index.verify_type_coherence_by_interface(&forged, &context, Budget::default()));
+
+    // Open interface head fails.
+    let mut open_head = head(next_decl, ty(P::Bool));
+    open_head.type_parameters.clear();
+    open_head.interface = None;
+    index.insert(open_head, Budget::default()).unwrap();
+    let open_report = index.check_type_coherence_by_interface(&context, Budget::default());
+    assert!(!open_report.is_proved());
+    assert!(!index.verify_type_coherence_by_interface(&open_report, &context, Budget::default()));
+}
+
+#[test]
+fn candidates_metered_subindexes_concrete_subjects_and_arguments_while_preserving_open_queries() {
+    let primitives = [
+        P::U8,
+        P::U16,
+        P::U32,
+        P::U64,
+        P::U128,
+        P::Usize,
+        P::I8,
+        P::I16,
+        P::I32,
+        P::I64,
+        P::I128,
+        P::Isize,
+    ];
+    let trait_id = id(100);
+    let other_trait_id = id(101);
+    let mut index = Index::for_builtin_packages(None, [0]);
+    let mut next_decl = 200u32;
+    let mut target_u64_from_u32 = None;
+    for &dst in &primitives {
+        for &src in &primitives {
+            let decl = next_decl;
+            next_decl += 1;
+            if dst == P::U64 && src == P::U32 {
+                target_u64_from_u32 = Some(id(decl));
+            }
+            let mut h = head(decl, ty(dst));
+            h.type_parameters.clear();
+            h.interface = Some(trait_id);
+            h.interface_arguments = vec![ty(src)];
+            index.insert(h, Budget::default()).unwrap();
+        }
+    }
+    let blanket_decl = id(next_decl);
+    next_decl += 1;
+    let mut blanket = head(blanket_decl.local, var(1));
+    blanket.type_parameters = vec![id(1), id(2)];
+    blanket.interface = Some(trait_id);
+    blanket.interface_arguments = vec![var(2)];
+    index.insert(blanket, Budget::default()).unwrap();
+
+    let other_decl = id(next_decl);
+    let mut other = head(other_decl.local, ty(P::Bool));
+    other.type_parameters.clear();
+    other.interface = Some(other_trait_id);
+    other.interface_arguments = vec![ty(P::Bool)];
+    index.insert(other, Budget::default()).unwrap();
+
+    // Concrete query touches only matching subject/arg0 sub-buckets and open buckets.
+    let mut concrete_budget = Budget {
+        steps: 1000,
+        ..Budget::default()
+    };
+    let concrete = index
+        .candidates_metered(
+            Some(trait_id),
+            &[ty(P::U32)],
+            &ty(P::U64),
+            &mut concrete_budget,
+        )
+        .unwrap();
+    let spent = 1000 - concrete_budget.steps;
+    assert!(
+        spent < 50,
+        "expected sub-indexed lookup cost, spent {spent}"
+    );
+    assert_eq!(
+        concrete.declarations(),
+        &[target_u64_from_u32.unwrap(), blanket_decl]
+    );
+
+    // Wildcard/opaque subject and arg0 queries still return every compatible entry.
+    let opaque = Term::NormalForm {
+        head: id(900),
+        sort: Sort::Type,
+        arguments: vec![ty(P::Bool)],
+    };
+    let wildcard_subject = index
+        .candidates_metered(
+            Some(trait_id),
+            &[ty(P::U32)],
+            &opaque,
+            &mut Budget::default(),
+        )
+        .unwrap();
+    assert_eq!(wildcard_subject.declarations().len(), 13);
+    assert!(wildcard_subject.declarations().contains(&blanket_decl));
+
+    let wildcard_arg0 = index
+        .candidates_metered(
+            Some(trait_id),
+            &[opaque.clone()],
+            &ty(P::U64),
+            &mut Budget::default(),
+        )
+        .unwrap();
+    assert_eq!(wildcard_arg0.declarations().len(), 13);
+    assert!(wildcard_arg0.declarations().contains(&blanket_decl));
+
+    // Open interface query scans across traits while matching subject sub-buckets.
+    let open_iface = index
+        .candidates_metered(None, &[], &ty(P::Bool), &mut Budget::default())
+        .unwrap();
+    assert!(open_iface.declarations().contains(&other_decl));
+    assert!(open_iface.declarations().contains(&blanket_decl));
+}

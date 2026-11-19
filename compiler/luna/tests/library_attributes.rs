@@ -251,7 +251,7 @@ fn sysroot_attribute_constructor_returns_the_public_meta_domain() {
          comptime fn metadata() -> Metadata { convention(.c) }",
     )
     .unwrap();
-    let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let mut vm = Interpreter::for_comptime(&package, sysroot::COMPTIME_BUDGET).unwrap();
     let Value::Object(object) = vm
         .invoke(support::id(&package, "metadata"), vec![])
         .unwrap()

@@ -33,10 +33,13 @@ fn ordinary_value_defaults_wait_for_captured_type_inference() {
             .declaration;
         for tree in [false, true] {
             let mut vm = if tree {
-                comptime_interpretor::Interpreter::for_comptime_tree(&package, Default::default())
-                    .unwrap()
+                comptime_interpretor::Interpreter::for_comptime_tree(
+                    &package,
+                    sysroot::COMPTIME_BUDGET,
+                )
+                .unwrap()
             } else {
-                comptime_interpretor::Interpreter::for_comptime(&package, Default::default())
+                comptime_interpretor::Interpreter::for_comptime(&package, sysroot::COMPTIME_BUDGET)
                     .unwrap()
             };
             assert_eq!(

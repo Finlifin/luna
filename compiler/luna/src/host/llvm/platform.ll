@@ -8,7 +8,8 @@ declare i32 @close(i32)
 declare i32 @unlink(ptr)
 declare i32 @getpid()
 declare ptr @memchr(ptr, i32, i64)
-declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)
+declare i32 @posix_memalign(ptr, i64, i64)
+declare void @free(ptr)
 
 define internal i64 @flurry_linux_error() {
 entry:
@@ -144,4 +145,89 @@ entry:
   %pid = call i32 @getpid()
   %wide = zext i32 %pid to i64
   ret i64 %wide
+}
+define internal i64 @flurry_linux_alloc(i64 %size, i64 %align) {
+entry:
+  %zero_size = icmp eq i64 %size, 0
+  %zero_align = icmp eq i64 %align, 0
+  %bad_pair = or i1 %zero_size, %zero_align
+  br i1 %bad_pair, label %fail, label %check_pow2
+check_pow2:
+  %align_m1 = sub i64 %align, 1
+  %rem = and i64 %align, %align_m1
+  %not_pow2 = icmp ne i64 %rem, 0
+  br i1 %not_pow2, label %fail, label %clamp_align
+clamp_align:
+  %small = icmp ult i64 %align, 8
+  %eff_align = select i1 %small, i64 8, i64 %align
+  %slot = alloca ptr
+  store ptr null, ptr %slot
+  %rc = call i32 @posix_memalign(ptr %slot, i64 %eff_align, i64 %size)
+  %ok = icmp eq i32 %rc, 0
+  br i1 %ok, label %success, label %fail
+success:
+  %raw = load ptr, ptr %slot
+  %addr = ptrtoint ptr %raw to i64
+  ret i64 %addr
+fail:
+  ret i64 0
+}
+define internal void @flurry_linux_dealloc(i64 %addr, i64 %_size, i64 %_align) {
+entry:
+  %is_null = icmp eq i64 %addr, 0
+  br i1 %is_null, label %done, label %release
+release:
+  %raw = inttoptr i64 %addr to ptr
+  call void @free(ptr %raw)
+  br label %done
+done:
+  ret void
+}
+define internal i64 @flurry_linux_write_raw(i32 %fd, i64 %addr, i64 %len) {
+entry:
+  %empty = icmp eq i64 %len, 0
+  br i1 %empty, label %done_zero, label %check_ptr
+done_zero:
+  ret i64 0
+check_ptr:
+  %is_null = icmp eq i64 %addr, 0
+  br i1 %is_null, label %fault, label %transfer
+fault:
+  ret i64 -14
+transfer:
+  %large = icmp ugt i64 %len, 2147479552
+  %count = select i1 %large, i64 2147479552, i64 %len
+  %raw = inttoptr i64 %addr to ptr
+  %result = call i64 @write(i32 %fd, ptr %raw, i64 %count)
+  %failed = icmp slt i64 %result, 0
+  br i1 %failed, label %error, label %done
+error:
+  %reason = call i64 @flurry_linux_error()
+  ret i64 %reason
+done:
+  ret i64 %result
+}
+define internal i64 @flurry_linux_read_raw(i32 %fd, i64 %addr, i64 %len) {
+entry:
+  %empty = icmp eq i64 %len, 0
+  br i1 %empty, label %done_zero, label %check_ptr
+done_zero:
+  ret i64 0
+check_ptr:
+  %is_null = icmp eq i64 %addr, 0
+  br i1 %is_null, label %fault, label %transfer
+fault:
+  ret i64 -14
+transfer:
+  %large = icmp ugt i64 %len, 2147479552
+  %count = select i1 %large, i64 2147479552, i64 %len
+  %raw = inttoptr i64 %addr to ptr
+  %result = call i64 @read(i32 %fd, ptr %raw, i64 %count)
+  %failed = icmp slt i64 %result, 0
+  br i1 %failed, label %error, label %done
+error:
+  %reason = call i64 @flurry_linux_error()
+  ret i64 %reason
+done:
+  ret i64 %result
 }

@@ -36,6 +36,17 @@ impl Walker<'_> {
         }
         let mut result = self.unknown_value(&expr.ty)?;
         use Operation::*;
+        if matches!(
+            checked.operation(),
+            MemRawWrite | MemCopy | MemCopyNonOverlapping | MemSetBytes | LinuxReadRaw
+        ) {
+            state.havoc_with_retained_reads(
+                Some(&self.addressed_locals),
+                BTreeMap::new(),
+                self.limits,
+            )?;
+            return Ok(result);
+        }
         if matches!(checked.operation(), BitAnd | BitOr | BitXor) {
             let Term::Primitive(primitive) = &expr.ty else {
                 return Err(Reason::InvalidSignature);

@@ -642,8 +642,24 @@ mod behavior_code_snapshot_tests {
 }
 type Key = (DeclarationId, Vec<Term>, Inputs);
 
+const PER_FUNCTION_FUEL: usize = 100_000;
+const MAX_PREPARATION_FUEL: usize = 16_000_000;
+
+fn package_preparation_fuel(package: &n::Package) -> usize {
+    PER_FUNCTION_FUEL
+        .saturating_add(package.functions.len().saturating_mul(256))
+        .saturating_add(package.implementations.len().saturating_mul(512))
+        .saturating_add(package.structs.len().saturating_mul(256))
+        .saturating_add(package.enums.len().saturating_mul(256))
+        .saturating_add(package.traits.len().saturating_mul(256))
+        .saturating_add(package.newtypes.len().saturating_mul(128))
+        .saturating_add(package.alias_contracts.len().saturating_mul(128))
+        .saturating_add(package.normal_forms.len().saturating_mul(128))
+        .min(MAX_PREPARATION_FUEL)
+}
+
 pub fn validate_runtime_promises(package: &n::Package, protocols: &Protocols) -> Result<(), Error> {
-    let mut analysis = Analysis::new(package, false);
+    let mut analysis = Analysis::with_fuel(package, false, package_preparation_fuel(package));
     analysis.protocols = protocols.clone();
     if analysis.parameter_sorts.is_none() {
         return Err(error(
@@ -651,10 +667,21 @@ pub fn validate_runtime_promises(package: &n::Package, protocols: &Protocols) ->
             "invalid declaration parameter sorts in purity analysis",
         ));
     }
+    if protocols.drop.is_some()
+        && package
+            .functions
+            .iter()
+            .any(|function| function.phase == n::FunctionPhase::Runtime && function.pure)
+    {
+        // Prepare and cache the immutable resource world under package-scaled fuel
+        // before assigning an independent budget to each runtime pure function.
+        let _ = analysis.resource_world_parts();
+    }
     for function in &package.functions {
         if function.phase != n::FunctionPhase::Runtime || !function.pure {
             continue;
         }
+        analysis.fuel = PER_FUNCTION_FUEL;
         let types = function
             .type_parameters
             .iter()
@@ -671,10 +698,12 @@ pub fn validate_runtime_promises(package: &n::Package, protocols: &Protocols) ->
             .collect::<Vec<_>>();
         let cases = type_domains::cases(function, &types, &mut analysis.fuel);
         let valid = if let Some(cases) = cases {
-            cases
-                .iter()
-                .all(|types| analysis.function(function.declaration, types, 0))
+            cases.iter().all(|types| {
+                analysis.fuel = PER_FUNCTION_FUEL;
+                analysis.function(function.declaration, types, 0)
+            })
         } else {
+            analysis.fuel = PER_FUNCTION_FUEL;
             analysis.function(function.declaration, &types, 0)
         };
         if !valid {
@@ -725,8 +754,9 @@ struct Analysis<'a> {
 }
 
 impl<'a> Analysis<'a> {
+    #[cfg(test)]
     fn new(package: &'a n::Package, finite: bool) -> Self {
-        Self::with_fuel(package, finite, 100_000)
+        Self::with_fuel(package, finite, PER_FUNCTION_FUEL)
     }
 
     fn with_fuel(package: &'a n::Package, finite: bool, mut fuel: usize) -> Self {
@@ -2405,6 +2435,11 @@ impl<'a> Analysis<'a> {
                 // returns scalar data; it does not copy arbitrary input owners.
                 query.validate(&subject.ty, &value.ty)
                     && self.expression(subject, private, returns, depth + 1)
+            }
+            K::TryIntegerConvert(inner) => {
+                nir::program::try_integer_convert_valid(&inner.ty, &value.ty)
+                    && self.copy_type(&inner.ty)
+                    && self.expression(inner, private, returns, depth + 1)
             }
             K::Not(inner)
             | K::FloatNegate(inner)
@@ -4832,5 +4867,124 @@ mod resource_world_tests {
             "preparation cost must remain charged"
         );
         assert!(warm_cost > 0);
+    }
+
+    #[test]
+    fn runtime_promises_separate_package_world_preparation_and_per_function_budgets() {
+        let mut package = implementation_package(320, true);
+        let protocols = Protocols {
+            copy: Some(DeclarationId {
+                package: 1,
+                local: 1,
+            }),
+            drop: Some(DeclarationId {
+                package: 1,
+                local: 11,
+            }),
+        };
+        for index in 0..80u32 {
+            package.functions.push(n::Function {
+                interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange {
+                        start: index,
+                        end: index + 1,
+                    },
+                    phase: n::FunctionPhase::Runtime,
+                    inline: false,
+                    pure: true,
+                    is_unsafe: false,
+                    declaration: DeclarationId {
+                        package: 2,
+                        local: index + 1,
+                    },
+                    name: format!("pure_{index}"),
+                    signature: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(p(P::Bool)),
+                    },
+                    parameters: vec![],
+                    type_parameters: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
+                    entry_snapshots: vec![],
+                    defaults: vec![],
+                },
+                body: n::Expr {
+                    source: n::SourceRange {
+                        start: index,
+                        end: index + 1,
+                    },
+                    ty: p(P::Bool),
+                    kind: K::Literal(n::Literal::Bool(true)),
+                },
+            });
+        }
+        validate_runtime_promises(&package, &protocols).unwrap();
+
+        let unknown = DeclarationId {
+            package: 2,
+            local: 9999,
+        };
+        package.functions.push(n::Function {
+            interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange {
+                    start: 500,
+                    end: 505,
+                },
+                phase: n::FunctionPhase::Runtime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                declaration: DeclarationId {
+                    package: 2,
+                    local: 500,
+                },
+                name: "invalid_tail".into(),
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(p(P::Bool)),
+                },
+                parameters: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                defaults: vec![],
+            },
+            body: n::Expr {
+                source: n::SourceRange {
+                    start: 500,
+                    end: 505,
+                },
+                ty: p(P::Bool),
+                kind: K::Call {
+                    callee: Box::new(n::Expr {
+                        source: n::SourceRange {
+                            start: 500,
+                            end: 505,
+                        },
+                        ty: Term::Function {
+                            parameters: vec![],
+                            result: Box::new(p(P::Bool)),
+                        },
+                        kind: K::Function(unknown),
+                    }),
+                    arguments: vec![],
+                    parameter_bindings: vec![],
+                },
+            },
+        });
+        let err = validate_runtime_promises(&package, &protocols).unwrap_err();
+        assert!(err.message.contains("invalid_tail"), "{err}");
     }
 }

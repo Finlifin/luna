@@ -29,7 +29,112 @@ impl PairAssessment {
 // Only admitted rigid outer constructors can bypass the full query. Replay
 // recomputes this same theory decision from the indexed heads.
 fn distinct_type_heads(left: &ImplementationHead, right: &ImplementationHead) -> bool {
+    if left.interface_arguments.len() != right.interface_arguments.len() {
+        return false;
+    }
+    for (left_arg, right_arg) in left
+        .interface_arguments
+        .iter()
+        .zip(&right.interface_arguments)
+    {
+        if !matches!(
+            (left_arg.sort(), right_arg.sort()),
+            (Sort::Type, Sort::Type) | (Sort::ComptimeValue, Sort::ComptimeValue)
+        ) {
+            return false;
+        }
+    }
     crate::ptc::distinct_outer_type_heads(&left.subject, &right.subject)
+        || left
+            .interface_arguments
+            .iter()
+            .zip(&right.interface_arguments)
+            .any(|(left_arg, right_arg)| {
+                left_arg.sort() == Sort::Type
+                    && crate::ptc::distinct_outer_type_heads(left_arg, right_arg)
+            })
+}
+
+fn interface_group_allowances(
+    entries: &[&Entry],
+    budget: Budget,
+) -> Option<(usize, std::collections::BTreeMap<usize, usize>)> {
+    let count = entries.len();
+    let pairs = count.checked_mul(count.saturating_sub(1))? / 2;
+    let remaining = budget
+        .steps
+        .checked_sub(count.checked_mul(2)?.checked_add(pairs.checked_mul(2)?)?)?;
+    let mut groups = std::collections::BTreeMap::new();
+    for (i, a) in entries.iter().enumerate() {
+        for b in &entries[i + 1..] {
+            if a.precision == b.precision && !distinct_type_heads(&a.head, &b.head) {
+                *groups.entry(a.precision).or_insert(0usize) += 1;
+            }
+        }
+    }
+    let group_budget = remaining / groups.len().max(1);
+    let allowances = groups
+        .into_iter()
+        .map(|(precision, obligations)| (precision, group_budget / obligations))
+        .collect();
+    Some((pairs, allowances))
+}
+
+fn assess_same_interface_pair(
+    a: &Entry,
+    b: &Entry,
+    context: &Context,
+    proof_steps: usize,
+    budget: Budget,
+) -> PairAssessment {
+    if a.precision != b.precision {
+        PairAssessment::OrderedPrecision {
+            left: a.precision,
+            right: b.precision,
+        }
+    } else if distinct_type_heads(&a.head, &b.head) {
+        PairAssessment::DistinctTypeHeads
+    } else {
+        a.head.assess_type_overlap(
+            &b.head,
+            context,
+            Budget {
+                steps: proof_steps,
+                ..budget
+            },
+        )
+    }
+}
+
+fn verify_same_interface_pair(
+    a: &Entry,
+    b: &Entry,
+    assessment: &PairAssessment,
+    context: &Context,
+    proof_steps: usize,
+    budget: Budget,
+) -> bool {
+    if a.precision != b.precision {
+        matches!(
+            assessment,
+            PairAssessment::OrderedPrecision { left, right }
+                if *left == a.precision && *right == b.precision
+        )
+    } else if distinct_type_heads(&a.head, &b.head) {
+        matches!(assessment, PairAssessment::DistinctTypeHeads)
+    } else if let PairAssessment::Disjoint(proof) = assessment {
+        a.head.verify_disjointness(
+            &b.head,
+            proof,
+            context,
+            Budget {
+                steps: proof_steps,
+                ..budget
+            },
+        )
+    } else {
+        false
+    }
 }
 
 // An overapproximation of value-index overlap. Known record/scalar
@@ -532,22 +637,10 @@ impl Index {
                 }
                 let valid = if a.head.interface != b.head.interface {
                     matches!(assessment, PairAssessment::DifferentInterfaces)
-                } else if a.precision != b.precision {
-                    matches!(assessment, PairAssessment::OrderedPrecision { left,right } if *left == a.precision && *right == b.precision)
-                } else if distinct_type_heads(&a.head, &b.head) {
-                    matches!(assessment, PairAssessment::DistinctTypeHeads)
-                } else if let PairAssessment::Disjoint(proof) = assessment {
-                    a.head.verify_disjointness(
-                        &b.head,
-                        proof,
-                        context,
-                        Budget {
-                            steps: allowances[&(a.head.interface.unwrap(), a.precision)],
-                            ..budget
-                        },
-                    )
                 } else {
-                    false
+                    let key = (a.head.interface.unwrap(), a.precision);
+                    let steps = allowances.get(&key).copied().unwrap_or(0);
+                    verify_same_interface_pair(a, b, assessment, context, steps, budget)
                 };
                 if !valid {
                     return false;
@@ -581,22 +674,10 @@ impl Index {
                     PairAssessment::Unresolved("open interface head".into())
                 } else if a.head.interface != b.head.interface {
                     PairAssessment::DifferentInterfaces
-                } else if a.precision != b.precision {
-                    PairAssessment::OrderedPrecision {
-                        left: a.precision,
-                        right: b.precision,
-                    }
-                } else if distinct_type_heads(&a.head, &b.head) {
-                    PairAssessment::DistinctTypeHeads
                 } else {
-                    a.head.assess_type_overlap(
-                        &b.head,
-                        context,
-                        Budget {
-                            steps: allowances[&(a.head.interface.unwrap(), a.precision)],
-                            ..budget
-                        },
-                    )
+                    let key = (a.head.interface.unwrap(), a.precision);
+                    let steps = allowances.get(&key).copied().unwrap_or(0);
+                    assess_same_interface_pair(a, b, context, steps, budget)
                 };
                 report
                     .pairs
@@ -604,6 +685,99 @@ impl Index {
             }
         }
         report
+    }
+
+    /// Check coherence per interface declaration so unrelated interfaces never
+    /// consume quadratic cross-trait budget or starve solver obligations.
+    pub fn check_type_coherence_by_interface(
+        &self,
+        context: &Context,
+        budget: Budget,
+    ) -> CoherenceReport {
+        let mut report = CoherenceReport {
+            identity: self.identity,
+            revision: self.revision,
+            pairs: Vec::new(),
+            open_interfaces: Vec::new(),
+            complete: true,
+        };
+        let mut by_interface: std::collections::BTreeMap<DeclarationId, Vec<&Entry>> =
+            std::collections::BTreeMap::new();
+        for entry in self.entries.values() {
+            match entry.head.interface {
+                Some(interface) => by_interface.entry(interface).or_default().push(entry),
+                None => report.open_interfaces.push(entry.head.declaration),
+            }
+        }
+        for entries in by_interface.values() {
+            let Some((_, allowances)) = interface_group_allowances(entries, budget) else {
+                report.complete = false;
+                return report;
+            };
+            for (i, a) in entries.iter().enumerate() {
+                for b in &entries[i + 1..] {
+                    let steps = allowances.get(&a.precision).copied().unwrap_or(0);
+                    let assessment = assess_same_interface_pair(a, b, context, steps, budget);
+                    report
+                        .pairs
+                        .push((a.head.declaration, b.head.declaration, assessment));
+                }
+            }
+        }
+        report
+    }
+
+    /// Replay a report produced by `check_type_coherence_by_interface`.
+    pub fn verify_type_coherence_by_interface(
+        &self,
+        report: &CoherenceReport,
+        context: &Context,
+        budget: Budget,
+    ) -> bool {
+        if !self.type_coherence_is_current(report) || !report.is_proved() {
+            return false;
+        }
+        let mut by_interface: std::collections::BTreeMap<DeclarationId, Vec<&Entry>> =
+            std::collections::BTreeMap::new();
+        for entry in self.entries.values() {
+            let Some(interface) = entry.head.interface else {
+                return false;
+            };
+            by_interface.entry(interface).or_default().push(entry);
+        }
+        let mut total_pairs = 0usize;
+        let mut group_allowances = Vec::with_capacity(by_interface.len());
+        for entries in by_interface.values() {
+            let Some((pairs, allowances)) = interface_group_allowances(entries, budget) else {
+                return false;
+            };
+            total_pairs = match total_pairs.checked_add(pairs) {
+                Some(total) => total,
+                None => return false,
+            };
+            group_allowances.push((entries, allowances));
+        }
+        if report.pairs.len() != total_pairs {
+            return false;
+        }
+        let mut reported = report.pairs.iter();
+        for (entries, allowances) in group_allowances {
+            for (i, a) in entries.iter().enumerate() {
+                for b in &entries[i + 1..] {
+                    let Some((left, right, assessment)) = reported.next() else {
+                        return false;
+                    };
+                    if *left != a.head.declaration || *right != b.head.declaration {
+                        return false;
+                    }
+                    let steps = allowances.get(&a.precision).copied().unwrap_or(0);
+                    if !verify_same_interface_pair(a, b, assessment, context, steps, budget) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
     }
 }
 impl fmt::Display for PairAssessment {

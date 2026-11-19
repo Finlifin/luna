@@ -10,7 +10,7 @@ concat!(
     "mod text_impl {mod bindings {\n", include_str!("../../../../library/meta/text_impl/bindings.fl"), "\n}}\n",
     "mod types {mod bindings {\n", include_str!("../../../../library/meta/types/bindings.fl"),
     "\n} mod equality {\n", include_str!("../../../../library/meta/types/equality.fl"), "\n}}\n",
-    "mod numeric {mod bindings {\n", include_str!("../../../../library/meta/numeric/bindings.fl"), "\n} mod ordering {\n", include_str!("../../../../library/meta/numeric/ordering.fl"), "\n} mod equality {\n", include_str!("../../../../library/meta/numeric/equality.fl"), "\n}}\n",
+    "mod numeric {mod bindings {\n", include_str!("../../../../library/meta/numeric/bindings.fl"), "\n} mod conversions {\n", include_str!("../../../../library/meta/numeric/conversions.fl"), "\n} mod ordering {\n", include_str!("../../../../library/meta/numeric/ordering.fl"), "\n} mod equality {\n", include_str!("../../../../library/meta/numeric/equality.fl"), "\n}}\n",
     "mod data {\n",
     "mod hashing {\n", include_str!("../../../../library/meta/data/hashing.fl"), "\n}\n",
     "mod patterns {\n", include_str!("../../../../library/meta/data/patterns.fl"), "\n}\n",
@@ -32,4 +32,4 @@ concat!(
     "mod newtypes {\n", include_str!("../../../../library/meta/definitions/newtypes.fl"), "\n}\n",
     "}\n",
     include_str!("../../../../library/meta/lib.fl"),
-).replace("use numeric.{equality, ordering, scalar_math}\n", "use numeric.{equality, ordering}\n").replace("pub mod math {\n    pub use scalar_math.*;\n}\n\n", "")
+).replace("use numeric.{conversions, equality, ordering, scalar_math}\n", "use numeric.{conversions, equality, ordering}\n").replace("pub mod math {\n    pub use scalar_math.*;\n}\n\n", "")
