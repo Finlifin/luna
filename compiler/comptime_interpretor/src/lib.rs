@@ -40,6 +40,7 @@ mod iir_execution;
 use iir_execution::ConcreteNominal;
 mod expression_invocation;
 mod host_budget;
+pub use host_budget::checked as with_host_selection_budget;
 mod immutable_storage;
 mod input_bodies;
 mod input_collection;
@@ -838,6 +839,7 @@ pub enum ErrorKind {
     InvalidPointer,
     InvalidValueReference,
     UnmaterializedDispatch,
+    AssociatedSourceFailure,
     MissingAssociatedSource(Box<nir::associated_initializers::AssociatedSourceDemand>),
     Arity,
     Type,

@@ -288,7 +288,7 @@ impl<'source> PreparedAssociatedMember<'source> {
 /// rereading the immutable row cannot advance the computation.
 pub struct PendingAssociatedSource<'source>(PreparedAssociatedMember<'source>);
 
-impl PendingAssociatedSource<'_> {
+impl<'source> PendingAssociatedSource<'source> {
     pub fn source_slot(&self) -> (nir::DeclarationId, nir::DeclarationId) {
         (self.0.facts.evidence.implementation, self.0.facts.member)
     }
@@ -296,22 +296,65 @@ impl PendingAssociatedSource<'_> {
     /// Read from the original source owner after releasing the selection
     /// service. No replacement row, world or premises enter this admission.
     pub fn read_source(self, budget: &mut Budget) -> Result<AssociatedRead, QueryError> {
+        Ok(match self.read_captured(budget)? {
+            AssociatedRead::Ready(value) => AssociatedRead::Ready(value),
+            AssociatedRead::NeedsSource(pending) => {
+                AssociatedRead::NeedsSource(pending.into_source_demand())
+            }
+        })
+    }
+
+    /// Keep the selected row and its original evidence when its source is
+    /// still being formed. A missing template never starts a second selection.
+    pub fn read_captured(self, budget: &mut Budget) -> Result<AssociatedRead<Self>, QueryError> {
         let (owner, member) = self.source_slot();
         budget.steps = budget.steps.checked_sub(1).ok_or(QueryError::Budget)?;
         let Some(program) = self.0.scope.member_program(owner, member) else {
-            return Ok(AssociatedRead::NeedsSource(self.into_source_demand()));
+            return Ok(AssociatedRead::NeedsSource(self));
         };
-        let selected = SelectedAssociatedMember {
+        self.admit_source(MemberSource::Initializer(program), budget)
+            .map(AssociatedRead::Ready)
+    }
+
+    pub fn for_data_owner(
+        self,
+        owner: &crate::dispatch::MemberDataSource,
+    ) -> Result<SelectedMemberData<'source>, AssociatedSourceDemand> {
+        let (row, member) = self.source_slot();
+        if self.0.scope.accepts_data(owner, row, member) {
+            Ok(SelectedMemberData(self))
+        } else {
+            Err(self.into_source_demand())
+        }
+    }
+
+    fn admit_source(
+        self,
+        source: MemberSource<'_>,
+        budget: &mut Budget,
+    ) -> Result<AssociatedValueResolution, QueryError> {
+        SelectedAssociatedMember {
             world: &self.0.scope.capabilities(),
             facts: self.0.facts,
-        };
-        selected
-            .admit(MemberSource::Initializer(program), budget)
-            .map(AssociatedRead::Ready)
+        }
+        .admit(source, budget)
     }
 
     pub fn into_source_demand(self) -> AssociatedSourceDemand {
         self.0.facts.into_source_demand()
+    }
+}
+
+/// A pending read paired with the data owner registered by its source.
+pub struct SelectedMemberData<'source>(PendingAssociatedSource<'source>);
+
+impl SelectedMemberData<'_> {
+    pub fn admit(
+        self,
+        value: &nir::program::Expr,
+        budget: &mut Budget,
+    ) -> Result<AssociatedValueResolution, QueryError> {
+        self.0.admit_source(MemberSource::Value(value), budget)
     }
 }
 

@@ -13,7 +13,16 @@ impl Checker<'_, '_> {
             .collect();
         let mut merged = BTreeMap::new();
         let mut alternatives = Vec::new();
-        for ((own, member), (owner, parameters, arguments)) in &self.associated_initializers {
+        for (
+            (own, member),
+            AssociatedRecipe {
+                owner,
+                parameters,
+                arguments,
+                independent_data,
+            },
+        ) in &self.associated_initializers
+        {
             let canonical = relationships.get(own).copied().unwrap_or(*own);
             let span = self.package.item(*owner).unwrap().span;
             self.required_steps = self
@@ -65,7 +74,12 @@ impl Checker<'_, '_> {
                 .checked_sub(1 + parameters.len() as u64 + arguments.len() as u64)
                 .ok_or_else(|| error(span, "associated contribution merge budget exhausted"))?;
             let key = (canonical, *member);
-            let recipe = (*owner, parameters, arguments);
+            let recipe = AssociatedRecipe {
+                owner: *owner,
+                parameters,
+                arguments,
+                independent_data: *independent_data,
+            };
             if merged.contains_key(&key) {
                 alternatives.push((key, recipe));
             } else {
@@ -87,7 +101,7 @@ impl Checker<'_, '_> {
          */
         for (key, alternative) in std::mem::take(&mut self.complementary_associated) {
             let (implementation, member) = key;
-            let span = self.package.item(alternative.0).unwrap().span;
+            let span = self.package.item(alternative.owner).unwrap().span;
             let slot = self
                 .checked_implementations
                 .iter()

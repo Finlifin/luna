@@ -568,6 +568,7 @@ fn elaborate_with_attributes(
         contract_uses: BTreeMap::new(),
         input_facts: Default::default(),
         required_steps: *invocation_steps,
+        member_sources: Default::default(),
         in_required_comptime: false,
         in_staged_input: false,
         preparing_inputs: None,
@@ -938,6 +939,7 @@ fn elaborate_candidate<'a, 'h>(
         crate::splice::protocol(&checker.checked_traits, id)
             .map_err(|reason| error(span, reason))?;
     }
+    checker.member_sources = required::MemberSources::capture(checker)?;
     checker.interfaces_ready = true;
     for operator in crate::arithmetic::Operator::ALL {
         if let Some(id) = checker.protocols.arithmetic[operator as usize] {
@@ -1580,13 +1582,9 @@ struct Checker<'a, 'h> {
     checked_traits: std::sync::Arc<interfaces::CheckedTraits>,
     checked_implementations: Vec<n::Implementation>,
     implementation_positions: BTreeMap<DeclarationId, usize>,
-    associated_initializers:
-        BTreeMap<(DeclarationId, DeclarationId), (OwnerId, Vec<DeclarationId>, Vec<Term>)>,
+    associated_initializers: BTreeMap<(DeclarationId, DeclarationId), interfaces::AssociatedRecipe>,
     implementation_relationships: BTreeMap<DeclarationId, DeclarationId>,
-    complementary_associated: Vec<(
-        (DeclarationId, DeclarationId),
-        (OwnerId, Vec<DeclarationId>, Vec<Term>),
-    )>,
+    complementary_associated: Vec<((DeclarationId, DeclarationId), interfaces::AssociatedRecipe)>,
     active_associated_values: BTreeSet<(DeclarationId, DeclarationId)>,
     selected_associated_initializer: Option<(DeclarationId, DeclarationId)>,
     active_associated_signatures: BTreeSet<OwnerId>,
@@ -1679,6 +1677,7 @@ struct Checker<'a, 'h> {
         BTreeMap<(OwnerId, usize), Vec<(Option<OwnerId>, bool, OwnerId, FormationInputs, Span)>>,
     contract_uses: BTreeMap<OwnerId, Vec<(Option<OwnerId>, bool, OwnerId, FormationInputs, Span)>>,
     required_steps: u64,
+    member_sources: required::MemberSources,
     input_facts: input_facts::State,
     in_required_comptime: bool,
     in_staged_input: bool,

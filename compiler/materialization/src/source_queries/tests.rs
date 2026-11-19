@@ -832,3 +832,56 @@ fn duplicate_supply_and_an_exhausted_read_are_not_missing_source() {
         ErrorKind::UnmaterializedDispatch
     );
 }
+
+#[test]
+fn selected_data_uses_the_owner_once_and_admits_the_response_in_the_original_world() {
+    let (mut package, method, access, _) = mixed_fixture();
+    let (member, expected) = package.implementations[0].associated.pop().unwrap();
+    let context = Context::from_package(&package).unwrap();
+    let slots = || MemberDataSource::new([(id(5), member)].into_iter().collect());
+    let owner = slots();
+    let snapshot =
+        DeclarationSnapshot::capture_for_data_owner(package, &mut 100_000, &owner).unwrap();
+    let queries =
+        SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&snapshot), &context, &[]);
+    let foreign = queries
+        .associated_with_data(&access, &mut 100_000, &slots(), |_, _, _| {
+            panic!("another source with matching declaration IDs cannot supply the member")
+        })
+        .unwrap_err();
+    assert!(matches!(
+        foreign.kind,
+        ErrorKind::MissingAssociatedSource(_)
+    ));
+    let bad = n::Expr {
+        ty: ty(Primitive::Char),
+        kind: K::Literal(n::Literal::Char('a')),
+        ..expected.clone()
+    };
+    let mut remaining = 100_000;
+    for (input, success) in [(bad, false), (expected.clone(), true)] {
+        let before = remaining;
+        let result =
+            queries.associated_with_data(&access, &mut remaining, &owner, |row, slot, work| {
+                assert_eq!((row, slot), (id(5), member));
+                // A source owner can re-enter declaration queries while the
+                // original selection waits with no mutable directory borrow.
+                assert_eq!(queries.resolve(&method, work)?.body, id(6));
+                Ok(input)
+            });
+        assert!(remaining < before);
+        if success {
+            assert_eq!(result.unwrap().expression(), &expected);
+        } else {
+            assert_eq!(result.unwrap_err().source, Some(access.source));
+        }
+    }
+    let error = queries
+        .associated_with_data(&access, &mut remaining, &owner, |_, _, work| {
+            *work += 1;
+            Ok(expected)
+        })
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::StepsExhausted);
+    assert_eq!(remaining, 0);
+}

@@ -1315,5 +1315,5 @@ mod shared_cache_tests {
 mod values;
 pub use values::{
     AssociatedRead, AssociatedValueResolution, PendingAssociatedSource, PreparedAssociatedMember,
-    SelectedAssociatedMember,
+    SelectedAssociatedMember, SelectedMemberData,
 };

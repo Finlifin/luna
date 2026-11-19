@@ -41,9 +41,12 @@ impl Checker<'_, '_> {
                             &mut self.required_steps,
                             span,
                         )? {
-                            let found = Discovery::Required(&self.implementation_index)
-                                .references(source.expression(), &mut self.required_steps)
-                                .map_err(|failure| error(span, failure.to_string()))?;
+                            let found = Discovery::Required(
+                                &self.implementation_index,
+                                &self.member_sources,
+                            )
+                            .references(source.expression(), &mut self.required_steps)
+                            .map_err(|failure| error(span, failure.to_string()))?;
                             work.extend(found, &mut self.required_steps, span)?;
                         }
                     }
@@ -75,9 +78,10 @@ impl Checker<'_, '_> {
                         .iter()
                         .chain(&contract.program.postconditions)
                     {
-                        let found = Discovery::Required(&self.implementation_index)
-                            .references(expression, &mut self.required_steps)
-                            .map_err(|failure| error(span, failure.to_string()))?;
+                        let found =
+                            Discovery::Required(&self.implementation_index, &self.member_sources)
+                                .references(expression, &mut self.required_steps)
+                                .map_err(|failure| error(span, failure.to_string()))?;
                         work.extend(found, &mut self.required_steps, span)?;
                     }
                     continue;
@@ -147,9 +151,10 @@ impl Checker<'_, '_> {
                     let function = self.generated_functions.body(id).ok_or_else(|| {
                         error(span, "required comptime code is still being checked")
                     })?;
-                    let found = Discovery::Required(&self.implementation_index)
-                        .function_references(function, &mut self.required_steps)
-                        .map_err(|failure| error(span, failure.to_string()))?;
+                    let found =
+                        Discovery::Required(&self.implementation_index, &self.member_sources)
+                            .function_references(function, &mut self.required_steps)
+                            .map_err(|failure| error(span, failure.to_string()))?;
                     work.extend(found, &mut self.required_steps, span)?;
                     functions.push(
                         nir::copy_budget::clone_function(function, &mut self.required_steps)
@@ -195,7 +200,7 @@ impl Checker<'_, '_> {
                 continue;
             }
             let function = self.required_function(owner, span)?;
-            let found = Discovery::Required(&self.implementation_index)
+            let found = Discovery::Required(&self.implementation_index, &self.member_sources)
                 .function_references(&function, &mut self.required_steps)
                 .map_err(|failure| error(span, failure.to_string()))?;
             work.extend(found, &mut self.required_steps, span)?;

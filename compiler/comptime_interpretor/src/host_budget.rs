@@ -16,7 +16,7 @@ pub(super) fn clamped<T>(steps: &mut u64, host: impl FnOnce(&mut u64) -> T) -> T
 }
 
 /// Selection protocols reject a replenishing response before admitting it.
-pub(super) fn checked<T>(
+pub fn checked<T>(
     steps: &mut u64,
     source: Option<SourceRange>,
     host: impl FnOnce(&mut u64) -> Result<T, Error>,

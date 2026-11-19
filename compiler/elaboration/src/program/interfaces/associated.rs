@@ -433,7 +433,12 @@ impl Checker<'_, '_> {
         }
         let generic = !selected.type_parameters.is_empty();
         let key = (implementation, member);
-        let (owner, parameters, arguments) = self
+        let AssociatedRecipe {
+            owner,
+            parameters,
+            arguments,
+            ..
+        } = self
             .associated_initializers
             .get(&key)
             .cloned()
@@ -558,7 +563,7 @@ impl Checker<'_, '_> {
         let mut pending: Vec<_> = self.associated_initializers.keys().copied().collect();
         pending.sort_by_key(|(_, member)| !type_members.contains(member));
         for (implementation, member) in pending {
-            let owner = self.associated_initializers[&(implementation, member)].0;
+            let owner = self.associated_initializers[&(implementation, member)].owner;
             self.ensure_associated_value(
                 implementation,
                 member,
@@ -1120,8 +1125,8 @@ impl Checker<'_, '_> {
         owner: OwnerId,
     ) -> Option<(DeclarationId, &[DeclarationId], &[Term])> {
         let key = self.selected_associated_initializer?;
-        let (initializer, parameters, arguments) = &self.associated_initializers[&key];
-        (*initializer == owner).then_some((key.0, parameters, arguments))
+        let recipe = &self.associated_initializers[&key];
+        (recipe.owner == owner).then_some((key.0, &recipe.parameters, &recipe.arguments))
     }
 
     pub(in crate::program) fn initializer_implementation(&self) -> Option<&n::Implementation> {

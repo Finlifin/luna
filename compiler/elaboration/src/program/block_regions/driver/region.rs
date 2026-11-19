@@ -61,7 +61,7 @@ impl<'h, R: Root<'h>> PendingInvocation<'h, R> {
     pub(super) fn execute(mut self, checker: &mut Checker<'_, '_>) -> Region<'h, R> {
         self.parent.returned = self
             .operation
-            .execute(&mut checker.required_steps)
+            .execute(checker)
             .and_then(|reply| self.parent.root.resume(checker, reply))
             .map(|()| None);
         self.parent

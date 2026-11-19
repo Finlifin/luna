@@ -8,7 +8,23 @@ use std::sync::{Arc, OnceLock};
 #[derive(Clone)]
 pub struct DeclarationSnapshot(Arc<SnapshotData>);
 
+/// Identifies the checker that can supply completed data for these declaration
+/// slots. Independently created checkers may reuse all the same declaration IDs.
+#[derive(Clone, Default)]
+pub struct MemberDataSource(Arc<std::collections::BTreeSet<(Id, Id)>>);
+
+impl MemberDataSource {
+    pub fn new(slots: std::collections::BTreeSet<(Id, Id)>) -> Self {
+        Self(Arc::new(slots))
+    }
+
+    pub fn contains(&self, row: Id, member: Id) -> bool {
+        self.0.contains(&(row, member))
+    }
+}
+
 struct SnapshotData {
+    data: Option<MemberDataSource>,
     package: Arc<n::Package>,
     programs: Arc<nir::associated_initializers::MemberPrograms>,
     theory: OnceLock<DeclarationTheory>,
@@ -67,15 +83,31 @@ impl std::fmt::Display for ClosedDeclarations {
 
 impl DeclarationSnapshot {
     pub fn new(package: Arc<n::Package>) -> Self {
-        Self::from_parts(package, Default::default())
+        Self::from_parts(package, Default::default(), None)
     }
 
     /// Freeze one source, moving executable member templates out of its proof
     /// rows. The directory and declaration headers cannot come from different
     /// revisions. Completed associated data stays visible to type projections.
     pub fn capture_member_programs(
+        package: n::Package,
+        fuel: &mut usize,
+    ) -> Result<Self, AdmissionError> {
+        Self::capture_sources(package, fuel, None)
+    }
+
+    pub fn capture_for_data_owner(
+        package: n::Package,
+        fuel: &mut usize,
+        owner: &MemberDataSource,
+    ) -> Result<Self, AdmissionError> {
+        Self::capture_sources(package, fuel, Some(owner.clone()))
+    }
+
+    fn capture_sources(
         mut package: n::Package,
         fuel: &mut usize,
+        data: Option<MemberDataSource>,
     ) -> Result<Self, AdmissionError> {
         let mut programs = nir::associated_initializers::MemberPrograms::new();
         construction::spend(fuel, package.implementations.len())?;
@@ -106,19 +138,33 @@ impl DeclarationSnapshot {
                 return Err("duplicate implementation declaration".into());
             }
         }
-        Ok(Self::from_parts(Arc::new(package), Arc::new(programs)))
+        Ok(Self::from_parts(
+            Arc::new(package),
+            Arc::new(programs),
+            data,
+        ))
     }
 
     fn from_parts(
         package: Arc<n::Package>,
         programs: Arc<nir::associated_initializers::MemberPrograms>,
+        data: Option<MemberDataSource>,
     ) -> Self {
         Self(Arc::new(SnapshotData {
             package,
             programs,
+            data,
             theory: OnceLock::new(),
             metadata: OnceLock::new(),
         }))
+    }
+
+    pub(super) fn accepts_data(&self, owner: &MemberDataSource, row: Id, member: Id) -> bool {
+        self.0
+            .data
+            .as_ref()
+            .is_some_and(|source| Arc::ptr_eq(&source.0, &owner.0))
+            && owner.contains(row, member)
     }
 
     pub fn member_programs(&self) -> &nir::associated_initializers::MemberPrograms {
@@ -281,9 +327,11 @@ impl<'a> DeclarationSource<'a> {
                     fuel,
                 )?);
                 Ok(match self {
-                    Self::Snapshot(snapshot) => {
-                        DeclarationSnapshot::from_parts(package, snapshot.0.programs.clone())
-                    }
+                    Self::Snapshot(snapshot) => DeclarationSnapshot::from_parts(
+                        package,
+                        snapshot.0.programs.clone(),
+                        snapshot.0.data.clone(),
+                    ),
                     Self::Borrowed(_) => DeclarationSnapshot::new(package),
                 })
             }

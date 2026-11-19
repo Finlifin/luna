@@ -7,6 +7,60 @@ use comptime_interpretor::Value;
 use nir::{Primitive, Term};
 
 #[test]
+fn required_data_waits_for_the_selected_owner_and_reports_real_cycles() {
+    let source = include_str!("../../../development/repros/required-selected-member.fl");
+    let package = sysroot::compile(source).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "result", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+
+    // The closed row's instantiated contract also determines data delivery.
+    let dependent = source.replace("assoc enabled: bool;", "assoc enabled: U;");
+    let package = sysroot::compile(&dependent).unwrap();
+    assert_eq!(
+        luna::invocation::invoke(&package, "result", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+
+    let cycle = source.replace("= read(First);", "= read(Second);");
+    let failure = sysroot::compile(&cycle).unwrap_err();
+    assert!(failure.contains("cyclic"), "{failure}");
+}
+
+#[test]
+fn forming_a_late_member_preserves_the_callers_shared_closure() {
+    let source = r#"
+        struct First {}
+        struct Second {}
+        trait Flag { assoc enabled: bool; }
+        impl Flag for Second { assoc enabled: bool = saved; }
+        impl Flag for First { assoc enabled: bool = initial(); }
+        comptime fn initial() -> bool { true }
+
+        typealias Tick = %{count: Integer} comptime fn() -> Integer;
+        comptime fn counter() -> Tick {
+            var count: Integer = 0;
+            || { count = count + 1; count }
+        }
+        comptime fn read(comptime T: Type, tick: Tick) -> bool
+        where requires T :- Flag
+        {
+            tick();
+            T.as(Flag).enabled
+        }
+        comptime fn once() -> bool {
+            let tick = counter();
+            let flag = read(First, tick);
+            flag and tick() == 2
+        }
+        const saved: bool = once();
+        fn run() -> bool { saved }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
 fn member_default_specializes_a_value_input_after_its_domain_is_known() {
     let source = r#"
         comptime fn accept(comptime T: Type, comptime value: T) -> bool { true }

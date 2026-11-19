@@ -69,7 +69,7 @@ impl Worklist {
 #[derive(Clone, Copy)]
 pub(in crate::program) enum Discovery<'w> {
     Declarations,
-    Required(&'w crate::implementation::Index),
+    Required(&'w crate::implementation::Index, &'w MemberSources),
 }
 
 impl Discovery<'_> {
@@ -83,9 +83,14 @@ impl Discovery<'_> {
         fuel: &mut usize,
     ) -> Result<(), nir::visit::Error> {
         found.insert(Dependency::InterfaceMember(member));
-        let Self::Required(index) = self else {
+        let Self::Required(index, data) = self else {
             return Ok(());
         };
+        if let Member::Associated(id) = member
+            && data.only_data(id)
+        {
+            return Ok(());
+        }
         let mut budget = crate::ptc::Budget {
             steps: *fuel,
             ..Default::default()
@@ -95,12 +100,14 @@ impl Discovery<'_> {
         let candidates = candidates.map_err(|_| {
             nir::visit::Error::Budget("required trait member dependency search exhausted")
         })?;
-        found.extend(candidates.declarations().iter().map(|&implementation| {
-            Dependency::ImplementationMember {
-                implementation,
-                member,
+        for &implementation in candidates.declarations() {
+            if !matches!(member, Member::Associated(id) if data.supplies(implementation, id)) {
+                found.insert(Dependency::ImplementationMember {
+                    implementation,
+                    member,
+                });
             }
-        }));
+        }
         Ok(())
     }
 

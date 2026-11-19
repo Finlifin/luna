@@ -61,12 +61,13 @@ impl RequiredWorld {
         steps: &mut u64,
         span: Span,
         expansions: &[n::ExpansionSource],
+        owner: &::materialization::MemberDataSource,
     ) -> Result<Arc<Self>, Error> {
         use crate::verification::flow;
         let before = usize::try_from(*steps).unwrap_or(usize::MAX);
         let mut fuel = before;
         let result = (|| {
-            let snapshot = DeclarationSnapshot::capture_member_programs(package, &mut fuel)
+            let snapshot = DeclarationSnapshot::capture_for_data_owner(package, &mut fuel, owner)
                 .map_err(|failure| error(span, failure.to_string()))?;
             let phase = DeclarationSource::Snapshot(&snapshot).phase_inspection()
                 .check_package_with_evidence(&mut fuel)
@@ -312,6 +313,7 @@ impl PreparedRequired {
             steps,
             span,
             None,
+            None,
         )
     }
 
@@ -332,6 +334,7 @@ impl PreparedRequired {
             steps,
             span,
             None,
+            None,
         )
     }
 
@@ -342,6 +345,7 @@ impl PreparedRequired {
         span: Span,
         package_identity: u64,
         identities: crate::definitions::DefinitionIdentities,
+        reader: Option<data::Reader<'_>>,
     ) -> Result<((Value, Term), crate::definitions::PublishedDefinitions), Error> {
         let world = Arc::clone(&self.world);
         // The receiver installs concrete descriptors into the package. Only the
@@ -370,6 +374,7 @@ impl PreparedRequired {
             steps,
             span,
             Some(&publisher),
+            reader,
         );
         let diagnostic = publisher.last_diagnostic();
         let (definitions, _) = publisher.finish();
@@ -386,6 +391,7 @@ impl PreparedRequired {
         steps: &mut u64,
         span: Span,
         builder: Option<&dyn crate::definitions::StructBuildService>,
+        reader: Option<data::Reader<'_>>,
     ) -> Result<(Value, Term), Error> {
         let world = Arc::clone(&self.world);
         let package = world.package();
@@ -473,8 +479,12 @@ impl PreparedRequired {
                 remaining,
             )
         };
-        let associated_resolver =
-            |access: &n::Expr, remaining: &mut u64| source_queries.associated(access, remaining);
+        let associated_resolver = |access: &n::Expr, remaining: &mut u64| match reader {
+            Some(reader) => {
+                source_queries.associated_with_data(access, remaining, reader.owner, reader.form)
+            }
+            None => source_queries.associated(access, remaining),
+        };
         let method_resolver =
             |callee: &n::Expr, remaining: &mut u64| source_queries.resolve(callee, remaining);
         // Inputs are already complete. Type results use the ordinary invocation
@@ -508,12 +518,7 @@ impl PreparedRequired {
         }
         let value = interpreter.with_code_session(code.session(), |vm| {
             vm.start_prepared_invocation(entry, inputs)?
-                .run_with_associated(|request| match source_queries.associated_request(request) {
-                    crate::materialization::AssociatedAnswer::Ready(response) => response,
-                    crate::materialization::AssociatedAnswer::NeedsSource(pending) => {
-                        pending.read_source()
-                    }
-                })
+                .run_to_completion()
         });
         *steps = interpreter.remaining_steps();
         let value = value.map_err(|failure| {
@@ -865,6 +870,7 @@ mod tests {
                 Span::default(),
                 7,
                 identities.clone(),
+                None,
             );
             assert_eq!(identities.next(), 61, "the request reached the publisher");
             match (actual, result) {
@@ -2126,7 +2132,7 @@ mod tests {
             assert_eq!(
                 prepared
                     .fork()
-                    .invoke_in_world(values, &mut 100_000, span, None)
+                    .invoke_in_world(values, &mut 100_000, span, None, None)
                     .unwrap(),
                 (Value::Type(p(expected)), p(P::Type))
             );

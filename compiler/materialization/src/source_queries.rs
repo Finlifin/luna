@@ -105,6 +105,52 @@ impl<'a> SourceInvocationQueries<'a> {
         })
     }
 
+    /// Service an execution whose declaration owner can finish a missing data
+    /// member. Release the world borrow before invoking the owner. Both the
+    /// selection and its eventual admission spend this request's allowance.
+    pub fn associated_with_data(
+        &self,
+        access: &n::Expr,
+        remaining: &mut u64,
+        owner: &MemberDataSource,
+        form: impl FnOnce(Id, Id, &mut u64) -> Result<n::Expr, comptime_interpretor::Error>,
+    ) -> Result<comptime_interpretor::AssociatedSelection, comptime_interpretor::Error> {
+        use associated::AssociatedRead;
+        let read = query_budget::invocation(remaining, unlimited_steps(), |budget| {
+            match self.read_associated(access, budget)? {
+                AssociatedRead::Ready(value) => Ok(AssociatedRead::Ready(value)),
+                AssociatedRead::NeedsSource(selected) => selected
+                    .read_captured(budget)
+                    .map_err(|error| invocation_failure(error, access.source)),
+            }
+        })?;
+        let selected = match read {
+            AssociatedRead::Ready(value) => return Ok(value.supply),
+            AssociatedRead::NeedsSource(selected) => selected,
+        };
+        let (implementation, member) = selected.source_slot();
+        let selected = match selected.for_data_owner(owner) {
+            Ok(selected) => selected,
+            Err(demand) => {
+                return associated_selection::finish(
+                    Ok(AssociatedRead::NeedsSource(demand)),
+                    access.source,
+                );
+            }
+        };
+        let data = comptime_interpretor::with_host_selection_budget(
+            remaining,
+            Some(access.source),
+            |work| form(implementation, member, work),
+        )?;
+        query_budget::invocation(remaining, unlimited_steps(), |budget| {
+            selected
+                .admit(&data, budget)
+                .map(|value| value.supply)
+                .map_err(|error| invocation_failure(error, access.source))
+        })
+    }
+
     fn read_associated(
         &self,
         access: &n::Expr,

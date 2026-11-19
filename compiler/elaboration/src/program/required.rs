@@ -5,6 +5,8 @@ use super::*;
 use comptime_interpretor::{Budget, Interpreter, Value};
 use std::collections::VecDeque;
 mod capture;
+mod data;
+pub(super) use data::{MemberSources, independent_member_data};
 mod dependencies;
 pub(super) mod inputs;
 pub(super) mod prepared;
@@ -24,8 +26,8 @@ pub(super) enum RootKind {
     CallableInputs,
 }
 
-/// A prepared VM operation owns its world and live inputs. During execution
-/// it can consume fuel and fresh identities, but cannot edit the caller scope.
+/// A prepared operation owns its selection world and live inputs. Its source
+/// owner forms requested declarations in their original lexical environments.
 pub(super) struct Invocation {
     prepared: PreparedRequired,
     values: Vec<(n::LocalId, Value)>,
@@ -41,14 +43,45 @@ pub(super) struct CompletedInvocation {
 }
 
 impl Invocation {
-    pub(super) fn execute(self, steps: &mut u64) -> Result<CompletedInvocation, Error> {
-        let (result, definitions) = self.prepared.invoke_publishing(
+    pub(super) fn execute(
+        self,
+        checker: &mut Checker<'_, '_>,
+    ) -> Result<CompletedInvocation, Error> {
+        let mut steps = std::mem::take(&mut checker.required_steps);
+        let span = self.span;
+        let owner = checker.member_sources.owner.clone();
+        let checker = std::cell::RefCell::new(checker);
+        let source_failure = std::cell::Cell::new(None);
+        let lookup = |implementation, member, remaining: &mut u64| {
+            let mut checker = checker.borrow_mut();
+            std::mem::swap(remaining, &mut checker.required_steps);
+            let value = checker.required_member_data(implementation, member);
+            std::mem::swap(remaining, &mut checker.required_steps);
+            value.map_err(|failure| {
+                let source = Some(failure.source);
+                source_failure.set(Some(failure));
+                comptime_interpretor::Error {
+                    source,
+                    kind: comptime_interpretor::ErrorKind::AssociatedSourceFailure,
+                }
+            })
+        };
+        let result = self.prepared.invoke_publishing(
             self.values,
-            steps,
-            self.span,
+            &mut steps,
+            span,
             self.package,
             self.identities,
-        )?;
+            Some(data::Reader {
+                owner: &owner,
+                form: &lookup,
+            }),
+        );
+        checker.into_inner().required_steps = steps;
+        if let Some(failure) = source_failure.take() {
+            return Err(failure);
+        }
+        let (result, definitions) = result?;
         Ok(CompletedInvocation {
             result,
             definitions,
@@ -793,7 +826,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<(Value, Term), Error> {
         self.required_invocation(prepared, values, owner, span)
-            .execute(&mut self.required_steps)?
+            .execute(self)?
             .publish(self)
     }
 
@@ -1248,7 +1281,7 @@ impl Checker<'_, '_> {
             }
             let capture = self.capture_required_entry(root, inputs, live, expr.span)?;
             let mut observed = capture.observe(
-                Discovery::Required(&self.implementation_index),
+                Discovery::Required(&self.implementation_index, &self.member_sources),
                 &mut self.required_steps,
                 expr.span,
             )?;
@@ -1400,6 +1433,7 @@ impl Checker<'_, '_> {
                 &mut self.required_steps,
                 expr.span,
                 &self.expansion_sources,
+                &self.member_sources.owner,
             )?;
             let invocation_assumptions =
                 if let Some(implementation) = self.initializer_implementation() {

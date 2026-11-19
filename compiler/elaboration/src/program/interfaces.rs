@@ -16,6 +16,16 @@ mod program_contracts;
 mod signatures;
 mod values;
 
+/// The result domain is known when the implementation is admitted. Closed
+/// data can be formed by this owner without linking code into its consumer.
+#[derive(Clone)]
+pub(super) struct AssociatedRecipe {
+    pub(super) owner: OwnerId,
+    pub(super) parameters: Vec<DeclarationId>,
+    pub(super) arguments: Vec<Term>,
+    pub(super) independent_data: bool,
+}
+
 // Associated reads in program contracts need the complete implementation world.
 // Retain their exact declaration context without assuming the obligation itself.
 pub(super) struct PendingProjection {
@@ -1106,12 +1116,18 @@ impl Checker<'_, '_> {
                             "associated value cannot be supplied by a method",
                         ));
                     }
-                    let expected = trait_definition
-                        .input_substitution(&arguments, &[], &mut 100_000)
-                        .and_then(|substitution| {
-                            substitution.instantiate_bounded(&contract.ty, &mut 100_000)
-                        })
-                        .map_err(|e| error(item.span, e.to_string()))?;
+                    let expected = nominal_fields::metered(&mut self.required_steps, |fuel| {
+                        Ok(trait_definition
+                            .input_substitution(&arguments, &[], fuel)?
+                            .instantiate_bounded(&contract.ty, fuel)?)
+                    })
+                    .map_err(|e| error(item.span, e.to_string()))?;
+                    let independent_data = parameters.is_empty()
+                        && required::independent_member_data(
+                            &expected,
+                            &mut self.required_steps,
+                            item.span,
+                        )?;
                     let (initializer, parameters, substitution) = if let Some(actual) =
                         supplied_associated.remove(&contract.name)
                     {
@@ -1171,7 +1187,12 @@ impl Checker<'_, '_> {
                             declaration(self.package, &self.package_identities, owner),
                             contract.declaration,
                         ),
-                        (initializer_owner, parameters, substitution),
+                        AssociatedRecipe {
+                            owner: initializer_owner,
+                            parameters,
+                            arguments: substitution,
+                            independent_data,
+                        },
                     );
                 }
             }
@@ -1405,7 +1426,12 @@ impl Checker<'_, '_> {
                     if member.ty != p(P::Type) {
                         continue;
                     }
-                    let Some((owner, parameters, arguments)) = self
+                    let Some(AssociatedRecipe {
+                        owner,
+                        parameters,
+                        arguments,
+                        ..
+                    }) = self
                         .associated_initializers
                         .get(&(implementation.declaration, member.declaration))
                         .cloned()

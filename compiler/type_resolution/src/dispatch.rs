@@ -10,7 +10,7 @@ use nir::value_admission::Error as AdmissionError;
 use nir::{DeclarationId as Id, Term, program as n};
 use std::{collections::HashMap, sync::Arc};
 mod catalog;
-pub use catalog::{ClosedDeclarations, DeclarationSnapshot, DeclarationSource};
+pub use catalog::{ClosedDeclarations, DeclarationSnapshot, DeclarationSource, MemberDataSource};
 mod inputs;
 mod methods;
 
@@ -29,6 +29,10 @@ pub struct DeclarationScope<'a> {
     assumptions: Arc<[n::TraitRequirement]>,
 }
 impl<'a> DeclarationScope<'a> {
+    pub(crate) fn accepts_data(&self, owner: &MemberDataSource, row: Id, member: Id) -> bool {
+        matches!(self.source, DeclarationSource::Snapshot(snapshot) if snapshot.accepts_data(owner, row, member))
+    }
+
     pub(crate) fn member_program(
         &self,
         owner: Id,

@@ -128,7 +128,7 @@ impl dependent_inputs::tasks::Frame {
 
 impl driver::Execution for required::Invocation {
     type Reply = required::CompletedInvocation;
-    fn execute(self, steps: &mut u64) -> Result<Self::Reply, Error> {
-        self.execute(steps)
+    fn execute(self, checker: &mut Checker<'_, '_>) -> Result<Self::Reply, Error> {
+        self.execute(checker)
     }
 }

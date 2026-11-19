@@ -6,12 +6,12 @@ pub(in crate::program::block_regions) trait Execution:
     std::fmt::Display
 {
     type Reply;
-    fn execute(self, steps: &mut u64) -> Result<Self::Reply, Error>;
+    fn execute(self, checker: &mut Checker<'_, '_>) -> Result<Self::Reply, Error>;
 }
 
 impl Execution for std::convert::Infallible {
     type Reply = Self;
-    fn execute(self, _: &mut u64) -> Result<Self, Error> {
+    fn execute(self, _: &mut Checker<'_, '_>) -> Result<Self, Error> {
         match self {}
     }
 }

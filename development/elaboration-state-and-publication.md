@@ -470,11 +470,10 @@ capability 前提。所选实现、实现实参、成员和实例化结果域由
 复用同一次实参准入；即使字段吻合，缺少该实例的 capability 证据也不能通过。
 [默认方法用例](../compiler/luna/tests/newtypes.rs) · [被动观察用例](../compiler/comptime_interpretor/src/value_types/tests/passive_views.rs)
 
-**仍有一处过早的源码依赖。** 形成 `required` 快照时，检查器依据接收者和接口实参
-排除结构不相容的实现，随后为其余候选收集程序及可调用依赖。若 `First`、`Second`
-都实现 `Flag<bool>`，而 `Second.enabled` 引用正在形成的 `saved = read(First)`，
-收集阶段就会误报循环。把调用改为 `read(Second)` 才存在真正的依赖环。
-[源码复现](repros/required-selected-member.fl) · [依赖收集](../compiler/elaboration/src/program/required/source_closure.rs)
+对已经闭合的实现行，检查器先将接口实参代入成员声明域。标量数据及由它们组成的结构积、记录、可选值和错误结果，可以由声明所在的检查器直接交付。若成员的全部实现都属于这一类，准备调用时只收集接口成员；若同时存在需要链接的实现，则只为那些实现收集程序。完整的实现选择仍发生在执行读取的位置。
+
+例如，`First` 和 `Second` 都实现 `Flag<bool>`，而 `Second.enabled` 的定义引用 `saved = read(First)`。计算 `saved` 时只读取 `First.enabled`，完成后即可用 `saved` 形成 `Second.enabled`。若改成 `read(Second)`，同一次读取就会回到正在形成的声明，检查器在该依赖处报告循环。
+[源码复现](repros/required-selected-member.fl) · [实现依赖收集](../compiler/elaboration/src/program/required/dependencies.rs)
 
 VM 在准入命名调用时固定定义位置。源码函数借用其包内的具体定义，泛型实例另外保留
 声明实参。IIR 调用先核对句柄归本台 VM 所有，再固定图内的实例位置。同一个声明的
@@ -482,20 +481,11 @@ VM 在准入命名调用时固定定义位置。源码函数借用其包内的�
 只有通过入口条件后才准备执行代码。树解释与字节码共用这条路径。
 [调用目标准入](../compiler/comptime_interpretor/src/invocation/target.rs) · [同声明多实例用例](../compiler/comptime_interpretor/src/iir_execution.rs)
 
-尚在 elaboration 的 owner 仍需在收到具体成员请求后形成模板，交付新发现的可调用
-声明、主体和程序证明。当前调用帧借用 VM 启动时已经存在的不可变包。后续交付的代码
-需要有足够长的所有者寿命，其缓存也要绑定到供应世界。这个交接决定何时能删除
-上面的候选依赖收集。
+如果选中成员的数据尚未形成，VM 保留当前调用帧和选择凭据。快照记录了可按需供应的声明槽位及其所属检查器。即使两个检查器的声明编号相同，也只有登记的检查器能够响应。查询服务释放对方法缓存的借用后，源码检查器在该实现的词法环境中形成选中的值，使用原读取请求的剩余预算。成功时按原选择的替换和类型契约准入数据；失败时保留源码诊断。回归用例在读取前后调用同一个可变闭包，验证恢复执行时闭包状态和调用次数都得到保留。
+[源码供应](../compiler/elaboration/src/program/required/data.rs) · [选择与准入](../compiler/materialization/src/source_queries.rs) · [真实 sysroot 用例](../compiler/luna/tests/trait_query_failures.rs)
 
-这要求改变两处接口。今天 region 将整个 `Invocation` 连同剩余预算交给
-`execute`，收到完成值后才重新进入检查器。下一步需要让驱动在成员请求处
-交回控制权，连同尚未恢复的调用和原选择凭据一起保存。检查器据此在实现声明的
-词法环境中形成对应成员。模板若引用辅助函数，响应还需带上已经通过阶段检查和
-程序验证的函数定义；原调用帧继续持有启动时固定的定义，新调用固定响应提供的
-定义。安装期间的失败应返回给原读取点，任何未完成的定义都不能进入代码缓存。
-验收时应分别观察 `read(First)` 顺利返回、`read(Second)` 在实际依赖处报告
-循环，以及读取前已执行的 comptime 副作用只出现一次。
-[region 交接](../compiler/elaboration/src/program/block_regions/driver/region.rs) · [当前 VM 驱动](../compiler/elaboration/src/program/required/prepared.rs)
+泛型实现、以 Type 或可调用对象为结果的成员，以及需要比较互补定义的成员，仍使用捕获程序路径。后续若要在执行期间再供应这些程序，还须同时交付它们引用的函数、布局和阶段检查证据，让新调用能固定到有所有者的定义。当前数据响应只交付已形成的值。
+[快照捕获](../compiler/type_resolution/src/dispatch/catalog.rs) · [required VM 驱动](../compiler/elaboration/src/program/required/prepared.rs)
 
 源码检查具体成员读取时，先用接收者和接口实参代入成员声明域。普通数据和函数值
 在 NIR 中保留 `AssociatedValue` 及其成员身份。同一大字符串被四十个函数引用时，
