@@ -14,6 +14,7 @@ use std::sync::Arc;
 mod closed_inputs;
 mod conditions;
 mod given;
+mod proposition_inputs;
 mod propositions;
 mod qualification;
 pub use conditions::ConditionSupport;
@@ -746,7 +747,13 @@ impl Solver<'_, '_> {
         if depth >= budget.max_depth.min(64) {
             return Err(QueryError::Budget);
         }
-        if ty.is_structural_index_value() {
+        if ty.is_structural_index_value()
+            && !nir::type_computations::contains_associated_projection(
+                ty,
+                &mut self.remaining,
+                budget.max_depth.saturating_sub(depth),
+            )?
+        {
             crate::associated::charge_projection_copy(ty, &mut self.remaining)?;
             ty.check_scope(self.world.context.scope())
                 .map_err(|e| e.to_string())?;

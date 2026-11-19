@@ -304,9 +304,13 @@ impl SelectedAssociatedMember<'_, '_> {
         // Compare completed type views without unfolding opaque normal-form heads.
         let mut cache = std::collections::HashMap::new();
         let mut normalize = |ty: &Term| {
-            let result =
-                self.world
-                    .normalize_associated_types_mode(ty, budget, false, Some(&cache), None);
+            let result = self.world.normalize_associated_types_mode(
+                ty,
+                budget,
+                ProjectionView::ConcreteType,
+                Some(&cache),
+                None,
+            );
             let (normalized, _, completed) = result?;
             cache.extend(completed);
             Ok::<_, QueryError>(normalized)

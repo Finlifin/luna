@@ -338,7 +338,7 @@ impl<'program> Interpreter<'program> {
             Some(indexes) => {
                 let mut vm = Self::from_source_indexes(package, allowance, indexes.clone())?;
                 vm.comptime_only = true;
-                vm.type_solver = Some(TypeSolver::Budgeted(resolvers.types));
+                vm.type_solver = Some(TypeSolver::Declarations(resolvers.types));
                 vm.method_resolver = Some(resolvers.methods);
                 vm.associated_resolver = Some(resolvers.associated);
                 vm

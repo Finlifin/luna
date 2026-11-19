@@ -79,7 +79,7 @@ impl<'world> DefinitionAdmissionSession<'world> {
         )?;
         vm.phase_inspection = Some(inspection);
         vm.comptime_only = true;
-        vm.type_solver = Some(TypeSolver::Budgeted(solver));
+        vm.type_solver = Some(TypeSolver::Declarations(solver));
         budget.steps = vm.remaining_steps();
         Ok(Self {
             vm,

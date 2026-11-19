@@ -186,6 +186,13 @@ pub struct AssociatedTypeStep {
     pub resolution: AssociatedTypeResolution,
 }
 
+#[derive(Clone, Copy)]
+enum ProjectionView {
+    ConcreteType,
+    ScopedType,
+    ScopedOperand,
+}
+
 impl World<'_> {
     /// Resolve projections throughout type structure after caller substitution.
     /// Opaque normal-form heads are retained; only their inputs are traversed.
@@ -205,8 +212,14 @@ impl World<'_> {
         ty: &Term,
         budget: Budget,
     ) -> Result<(AssociatedTypeNormalization, usize), QueryError> {
-        self.normalize_associated_types_mode(ty, &mut { budget }, false, None, None)
-            .map(|(result, remaining, _)| (result, remaining))
+        self.normalize_associated_types_mode(
+            ty,
+            &mut { budget },
+            ProjectionView::ConcreteType,
+            None,
+            None,
+        )
+        .map(|(result, remaining, _)| (result, remaining))
     }
 
     /// The caller owns this cache for one immutable implementation world.
@@ -237,8 +250,14 @@ impl World<'_> {
         ),
         QueryError,
     > {
-        self.normalize_associated_types_mode(ty, budget, false, Some(cache), None)
-            .map(|(result, _, completed)| (result, completed))
+        self.normalize_associated_types_mode(
+            ty,
+            budget,
+            ProjectionView::ConcreteType,
+            Some(cache),
+            None,
+        )
+        .map(|(result, _, completed)| (result, completed))
     }
 
     /// Definition-side type view: given interfaces with open inputs remain
@@ -257,7 +276,7 @@ impl World<'_> {
         ty: &Term,
         budget: &mut Budget,
     ) -> Result<AssociatedTypeNormalization, QueryError> {
-        self.normalize_associated_types_mode(ty, budget, true, None, None)
+        self.normalize_associated_types_mode(ty, budget, ProjectionView::ScopedType, None, None)
             .map(|(value, _, _)| value)
     }
 
@@ -269,10 +288,32 @@ impl World<'_> {
         budget: &mut Budget,
         cache: &mut std::collections::HashMap<Term, Term>,
     ) -> Result<AssociatedTypeNormalization, QueryError> {
-        let (value, _, completed) =
-            self.normalize_associated_types_mode(ty, budget, true, Some(cache), None)?;
+        let (value, _, completed) = self.normalize_associated_types_mode(
+            ty,
+            budget,
+            ProjectionView::ScopedType,
+            Some(cache),
+            None,
+        )?;
         cache.extend(completed);
         Ok(value)
+    }
+
+    pub(crate) fn projection_operand_view_cached(
+        &self,
+        operand: &Term,
+        budget: &mut Budget,
+        completed: &mut std::collections::HashMap<Term, Term>,
+    ) -> Result<AssociatedTypeNormalization, QueryError> {
+        let (view, _, new) = self.normalize_associated_types_mode(
+            operand,
+            budget,
+            ProjectionView::ScopedOperand,
+            Some(completed),
+            None,
+        )?;
+        completed.extend(new);
+        Ok(view)
     }
 
     pub(crate) fn associated_type_view_for_selection(
@@ -285,15 +326,21 @@ impl World<'_> {
             &mut Budget,
         ) -> Result<crate::capabilities::Resolution, QueryError>,
     ) -> Result<(Term, usize), QueryError> {
-        self.normalize_associated_types_mode(ty, budget, true, None, Some(resolve))
-            .map(|(result, remaining, _)| (result.value, remaining))
+        self.normalize_associated_types_mode(
+            ty,
+            budget,
+            ProjectionView::ScopedOperand,
+            None,
+            Some(resolve),
+        )
+        .map(|(result, remaining, _)| (result.value, remaining))
     }
 
     fn normalize_associated_types_mode(
         &self,
         ty: &Term,
         budget: &mut Budget,
-        preserve_given: bool,
+        mode: ProjectionView,
         shared: Option<&std::collections::HashMap<Term, Term>>,
         resolve: Option<
             &mut dyn FnMut(
@@ -310,6 +357,7 @@ impl World<'_> {
         ),
         QueryError,
     > {
+        let preserve_given = !matches!(mode, ProjectionView::ConcreteType);
         let mut normalizer = Normalizer {
             world: self,
             resolve,
@@ -330,7 +378,7 @@ impl World<'_> {
             normalizer.charge_copy(ty)?;
             ty.check_scope(&normalizer.frames)
                 .map_err(|e| e.to_string())?;
-            if ty.sort() != nir::Sort::Type {
+            if !matches!(mode, ProjectionView::ScopedOperand) && ty.sort() != nir::Sort::Type {
                 return Err("associated normalization requires a Type".into());
             }
             let value = normalizer.normalize(ty, 0)?;
@@ -645,6 +693,33 @@ impl Normalizer<'_, '_, '_> {
                 sort: *sort,
                 arguments: self.many(arguments, depth + 1)?,
             },
+            Term::FunctionValue {
+                declaration,
+                arguments,
+            } => Term::FunctionValue {
+                declaration: *declaration,
+                arguments: self.many(arguments, depth + 1)?,
+            },
+            Term::ClosureSnapshot { factory, arguments } => Term::ClosureSnapshot {
+                factory: *factory,
+                arguments: self.many(arguments, depth + 1)?,
+            },
+            Term::ClosureContextValue(items) => {
+                Term::ClosureContextValue(self.many(items, depth + 1)?)
+            }
+            Term::ContextualClosure { context, signature } => Term::ContextualClosure {
+                context: Box::new(self.normalize(context, depth + 1)?),
+                signature: Box::new(self.normalize(signature, depth + 1)?),
+            },
+            Term::MethodValue(method) => Term::MethodValue(Box::new(nir::TraitMethodIdentity {
+                interface: InterfaceInstance {
+                    declaration: method.interface.declaration,
+                    arguments: self.many(&method.interface.arguments, depth + 1)?,
+                },
+                member: method.member,
+                method_arguments: self.many(&method.method_arguments, depth + 1)?,
+                subject: self.normalize(&method.subject, depth + 1)?,
+            })),
             Term::Tuple(items) => Term::Tuple(self.many(items, depth + 1)?),
             Term::TupleValue(items) => Term::TupleValue(self.many(items, depth + 1)?),
             Term::ListConcat { ty, parts } => {

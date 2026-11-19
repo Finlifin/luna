@@ -412,6 +412,134 @@ fn with_world<R>(
 }
 
 #[test]
+fn projection_equations_are_proved_and_replayed_in_their_declaration_world() {
+    use type_resolution::ptc::{Formula, Outcome, ProofError};
+
+    let source = ty(P::Bool);
+    let goal = Formula::equal(
+        Term::Pointer(Box::new(projection(source.clone(), vec![]))),
+        Term::Pointer(Box::new(ty(P::Char))),
+    );
+    let traits = [contract()];
+    with_world(
+        &traits,
+        &[implementation(source.clone(), ty(P::Char))],
+        |world| {
+            let answer = world
+                .prove_proposition(goal.clone(), Budget::default())
+                .unwrap();
+            assert!(matches!(answer.outcome(), Outcome::Entailed(_)), "{answer}");
+            assert!(answer.decisions().is_empty());
+            answer.verify(world, Budget::default()).unwrap();
+            assert!(world.context.assumptions().is_empty());
+            with_world(&traits, &[implementation(source, ty(P::Bool))], |other| {
+                assert_eq!(
+                    answer.verify(other, Budget::default()),
+                    Err(ProofError::Invalid)
+                );
+                let opposite = other
+                    .prove_proposition(goal.negate(), Budget::default())
+                    .unwrap();
+                assert!(
+                    matches!(opposite.outcome(), Outcome::Entailed(_)),
+                    "{opposite}"
+                );
+                opposite.verify(other, Budget::default()).unwrap();
+            });
+        },
+    );
+}
+
+#[test]
+fn a_projection_in_a_kind_premise_can_prove_a_goal_without_trait_atoms() {
+    use type_resolution::ptc::{Formula, Outcome, TypeKind};
+
+    let subject = ty(P::Char);
+    let bound = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let goal = Formula::equal(bound, ty(P::Char));
+    let mut context = Context::with_scope(vec![vec![Sort::Type]]);
+    context.assume(
+        Formula::kind(projection(subject.clone(), vec![]), TypeKind::Boolean).implies(goal.clone()),
+    );
+    assert!(!matches!(
+        context.prove(goal.clone(), Budget::default()),
+        Outcome::Entailed(_)
+    ));
+    with_world(
+        &[contract()],
+        &[implementation(subject, ty(P::Bool))],
+        |base| {
+            let scoped = World {
+                context: &context,
+                ..*base
+            };
+            let proved = scoped.prove_proposition(goal, Budget::default()).unwrap();
+            assert!(matches!(proved.outcome(), Outcome::Entailed(_)), "{proved}");
+            proved.verify(&scoped, Budget::default()).unwrap();
+        },
+    );
+}
+
+#[test]
+fn conditional_trait_atoms_select_with_projected_arguments() {
+    use type_resolution::implementation::Selection;
+
+    let interface = |local, parameters| Trait {
+        declaration: id(local),
+        self_parameter: id(local + 1),
+        name: format!("Interface{local}"),
+        type_parameters: parameters,
+        associated: vec![],
+        ..contract()
+    };
+    let source = ty(P::Bool);
+    let indexed = Implementation {
+        declaration: id(21),
+        interface: Some(id(11)),
+        interface_arguments: vec![ty(P::Char)],
+        associated: vec![],
+        ..implementation(source.clone(), ty(P::Char))
+    };
+    let select = Implementation {
+        declaration: id(22),
+        interface: Some(id(15)),
+        requirements: vec![TypePredicate::Trait(TraitRequirement {
+            interface: id(11),
+            subject: source.clone(),
+            interface_arguments: vec![projection(source.clone(), vec![])],
+        })],
+        associated: vec![],
+        ..implementation(source.clone(), ty(P::Char))
+    };
+    let traits = [
+        contract(),
+        interface(11, vec![id(13)]),
+        interface(15, vec![]),
+    ];
+    for (item, expected) in [
+        (P::Char, Selection::Selected(id(22))),
+        (P::Bool, Selection::NoApplicableCandidate),
+    ] {
+        let rows = [
+            implementation(source.clone(), ty(item)),
+            indexed.clone(),
+            select.clone(),
+        ];
+        with_world(&traits, &rows, |world| {
+            let resolution = world.resolve(id(15), &source, Budget::default()).unwrap();
+            assert_eq!(resolution.types.selection, expected, "{resolution}");
+            world
+                .verify_condition_support(&resolution, Budget::default())
+                .unwrap();
+        });
+    }
+}
+
+#[test]
 fn selecting_a_member_does_not_require_its_supply() {
     let mut row = implementation(ty(P::Bool), ty(P::Char));
     row.associated.clear();

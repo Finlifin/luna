@@ -1,5 +1,6 @@
 //! Trait truth justified by one borrowed, immutable implementation world.
 //! Decisions are deliberately not global PTC assumptions or runtime dispatch.
+use super::proposition_inputs::{ProjectionEquation, PropositionInputs};
 use super::*;
 use crate::implementation::TypeAssessment;
 use crate::ptc::{TraitQuery, UnknownReason};
@@ -19,6 +20,7 @@ pub struct TraitDecision<'a, 'w> {
     given: Option<TraitRequirement>,
     resolution: Option<Resolution>,
     input_equalities: Vec<crate::ptc::Proof>,
+    input_projections: Vec<ProjectionEquation>,
 }
 
 /// Owns the PTC result and its additional evidence while borrowing the exact
@@ -26,6 +28,7 @@ pub struct TraitDecision<'a, 'w> {
 pub struct WorldProposition<'a, 'w> {
     world: &'a World<'w>,
     decisions: Vec<TraitDecision<'a, 'w>>,
+    projections: Vec<ProjectionEquation>,
     context: Context,
     outcome: Outcome,
 }
@@ -44,6 +47,20 @@ impl WorldProposition<'_, '_> {
         let Outcome::Entailed(proof) = &self.outcome else {
             return Err(crate::ptc::ProofError::Invalid);
         };
+        let mut budget = budget;
+        let mut completed = std::collections::HashMap::new();
+        for equation in self
+            .projections
+            .iter()
+            .chain(self.decisions.iter().flat_map(|d| &d.input_projections))
+        {
+            equation
+                .replay(world, &mut budget, &mut completed)
+                .map_err(|failure| match failure {
+                    QueryError::Budget => crate::ptc::ProofError::BudgetExhausted,
+                    _ => crate::ptc::ProofError::Invalid,
+                })?;
+        }
         self.context.verify_proof(proof, budget)
     }
 }
@@ -84,7 +101,7 @@ fn metered<T>(fuel: &mut usize, allowance: Budget, run: impl FnOnce(&mut Budget)
 }
 
 /// A direct PTC answer needs an implementation world only when unresolved
-/// trait atoms in the goal or its assumptions can change that answer.
+/// trait atoms or associated Type projections can change that answer.
 pub fn check_predicate_with(
     context: &Context,
     predicate: &nir::program::TypePredicate,
@@ -103,32 +120,37 @@ pub fn check_predicate_with(
         Outcome::Unknown { residual, .. } => residual,
         Outcome::Entailed(_) | Outcome::IllFormed(_) => return Ok(direct),
     };
-    let queries = trait_queries(context, goal, budget)?;
-    if queries.is_empty() {
+    let inputs =
+        PropositionInputs::collect(context, goal, budget.max_depth.min(128), &mut budget.steps)?;
+    if inputs.is_empty() {
         return Ok(direct);
     }
     world(
         PredicateDemand {
             context,
             goal,
-            queries,
+            inputs,
         },
         budget,
     )
 }
 
-/// Borrow exactly the restored context and trait queries of this proof.
+/// Borrow the restored context and declaration observations for this proof.
 pub struct PredicateDemand<'a> {
     context: &'a Context,
     goal: &'a Formula,
-    queries: Vec<&'a TraitQuery>,
+    inputs: PropositionInputs<'a>,
 }
 
 impl fmt::Display for PredicateDemand<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(predicate-demand (goal {}) (traits", self.goal)?;
-        for query in &self.queries {
+        for query in &self.inputs.traits {
             write!(f, " {query}")?;
+        }
+        f.write_str(") (projection-operands")?;
+        for operand in &self.inputs.projections {
+            write!(f, " {operand}")?;
         }
         f.write_str("))")
     }
@@ -141,40 +163,9 @@ impl PredicateDemand<'_> {
             ..*world
         };
         Ok(scoped
-            .prove_with_queries(self.goal, self.queries, budget)?
+            .prove_with_inputs(self.goal, self.inputs, budget)?
             .outcome)
     }
-}
-
-fn trait_queries<'a>(
-    context: &'a Context,
-    goal: &'a Formula,
-    budget: &mut Budget,
-) -> Result<Vec<&'a TraitQuery>, QueryError> {
-    let mut fuel = budget.steps;
-    for formula in context.assumptions().iter().chain(std::iter::once(goal)) {
-        if !crate::ptc::within_limits(formula, budget.max_depth.min(128), &mut fuel) {
-            budget.steps = fuel;
-            return Err(QueryError::Budget);
-        }
-    }
-    budget.steps = fuel;
-    let mut pending: Vec<_> = context
-        .assumptions()
-        .iter()
-        .chain(std::iter::once(goal))
-        .collect();
-    let mut queries = Vec::new();
-    let mut seen = HashSet::new();
-    while let Some(formula) = pending.pop() {
-        match formula {
-            Formula::Trait(query) if seen.insert(query) => queries.push(query),
-            Formula::Not(inner) => pending.push(inner),
-            Formula::And(items) | Formula::Or(items) => pending.extend(items),
-            _ => {}
-        }
-    }
-    Ok(queries)
 }
 
 impl<'w> World<'w> {
@@ -211,14 +202,19 @@ impl<'w> World<'w> {
         goal: Formula,
         budget: &mut Budget,
     ) -> Result<WorldProposition<'a, 'w>, QueryError> {
-        let queries = trait_queries(self.context, &goal, budget)?;
-        self.prove_with_queries(&goal, queries, budget)
+        let inputs = PropositionInputs::collect(
+            self.context,
+            &goal,
+            budget.max_depth.min(128),
+            &mut budget.steps,
+        )?;
+        self.prove_with_inputs(&goal, inputs, budget)
     }
 
-    fn prove_with_queries<'a>(
+    fn prove_with_inputs<'a>(
         &'a self,
         goal: &Formula,
-        queries: Vec<&TraitQuery>,
+        inputs: PropositionInputs<'_>,
         budget: &mut Budget,
     ) -> Result<WorldProposition<'a, 'w>, QueryError> {
         // Metered queries share the remaining allowance. Fixed per-atom
@@ -227,7 +223,29 @@ impl<'w> World<'w> {
         let mut context = self.context.fork();
         let mut decisions = Vec::new();
         let mut pending_reason = None;
-        for query in queries {
+        let mut projections = Vec::new();
+        let mut completed = std::collections::HashMap::new();
+        for term in inputs.projections {
+            match self.projection_operand_view_cached(term, budget, &mut completed) {
+                Ok(view) if view.value != *term => {
+                    ProjectionEquation::retain(
+                        term,
+                        &view.value,
+                        &mut projections,
+                        &mut budget.steps,
+                    )?;
+                    crate::associated::charge_projection_copy(term, &mut budget.steps)?;
+                    context.assume(Formula::equal(term.clone(), view.value));
+                }
+                Ok(_) => {}
+                Err(QueryError::Invalid(message)) => return Err(QueryError::Invalid(message)),
+                Err(QueryError::Budget) => pending_reason = Some(UnknownReason::BudgetExhausted),
+                Err(QueryError::Unresolved(message)) => {
+                    pending_reason.get_or_insert(UnknownReason::UnresolvedPrerequisite(message));
+                }
+            }
+        }
+        for query in inputs.traits {
             let decision = match self.decide_trait_metered(query, budget) {
                 Ok(decision) => decision,
                 Err(QueryError::Invalid(reason)) => return Err(QueryError::Invalid(reason)),
@@ -259,6 +277,7 @@ impl<'w> World<'w> {
         Ok(WorldProposition {
             world: self,
             decisions,
+            projections,
             context,
             outcome,
         })
@@ -268,24 +287,46 @@ impl<'w> World<'w> {
         &self,
         query: &TraitQuery,
         budget: &mut Budget,
-    ) -> Result<(TraitQuery, Vec<crate::ptc::Proof>), QueryError> {
+    ) -> Result<(TraitQuery, Vec<crate::ptc::Proof>, Vec<ProjectionEquation>), QueryError> {
         let mut proofs = Vec::new();
+        let mut projections = Vec::new();
+        let mut completed = std::collections::HashMap::new();
         let mut view = |ty: &Term| -> Result<Term, QueryError> {
             nir::type_budget::charge_structure(ty, &mut budget.steps)
                 .map_err(|_| QueryError::Budget)?;
-            if ty.check_scope(&[]).is_ok() {
-                return Ok(ty.clone());
-            }
-            let (result, consumed) = self.context.structural_view_metered(ty, *budget);
-            budget.steps -= consumed;
-            match result {
-                Ok(Some((value, proof))) => {
-                    proofs.push(proof);
-                    Ok(value)
+            let structural;
+            let operand = if ty.check_scope(&[]).is_ok() {
+                ty
+            } else {
+                let (result, consumed) = self.context.structural_view_metered(ty, *budget);
+                budget.steps -= consumed;
+                match result {
+                    Ok(Some((value, proof))) => {
+                        proofs.push(proof);
+                        structural = value;
+                        &structural
+                    }
+                    Err(UnknownReason::BudgetExhausted) => return Err(QueryError::Budget),
+                    _ => ty,
                 }
-                Err(crate::ptc::UnknownReason::BudgetExhausted) => Err(QueryError::Budget),
-                _ => Ok(ty.clone()),
+            };
+            if nir::type_computations::contains_associated_projection(
+                operand,
+                &mut budget.steps,
+                budget.max_depth,
+            )? {
+                let normalized = self
+                    .projection_operand_view_cached(operand, budget, &mut completed)?
+                    .value;
+                ProjectionEquation::retain(
+                    operand,
+                    &normalized,
+                    &mut projections,
+                    &mut budget.steps,
+                )?;
+                return Ok(normalized);
             }
+            Ok(operand.clone())
         };
         let subject = view(&query.subject)?;
         let arguments = query
@@ -300,6 +341,7 @@ impl<'w> World<'w> {
                 arguments,
             },
             proofs,
+            projections,
         ))
     }
 
@@ -419,7 +461,7 @@ impl<'w> World<'w> {
                 })?
                 .is_none()
                 {
-                    let (formed, _) = metered(&mut fuel, allowance, |budget| {
+                    let (formed, _, _) = metered(&mut fuel, allowance, |budget| {
                         self.proposition_input_views(&TraitQuery::from(&requirement), budget)
                     })?;
                     if formed.inputs().any(|ty| ty.check_scope(&[]).is_err()) {
@@ -461,15 +503,17 @@ impl<'w> World<'w> {
                         given: Some(given),
                         resolution: None,
                         input_equalities: Vec::new(),
+                        input_projections: Vec::new(),
                     });
                 }
                 Ok(None) => None,
                 Err(error @ nir::NominalAdmissionError::Invalid(_)) => return Err(error.into()),
                 Err(error) => Some(error),
             };
-            let (selected_query, input_equalities) = metered(&mut fuel, allowance, |budget| {
-                self.proposition_input_views(query, budget)
-            })?;
+            let (selected_query, input_equalities, input_projections) =
+                metered(&mut fuel, allowance, |budget| {
+                    self.proposition_input_views(query, budget)
+                })?;
             if selected_query
                 .inputs()
                 .any(|ty| ty.check_scope(&[]).is_err())
@@ -487,6 +531,7 @@ impl<'w> World<'w> {
                     given: None,
                     resolution: None,
                     input_equalities,
+                    input_projections,
                 });
             }
             // Independent implementation evidence may establish the query
@@ -570,6 +615,7 @@ impl<'w> World<'w> {
                 given: None,
                 resolution: Some(resolution),
                 input_equalities,
+                input_projections,
             })
         })();
         remaining.steps = fuel;
@@ -595,6 +641,13 @@ impl fmt::Display for TraitDecision<'_, '_> {
             }
             f.write_str(")")?;
         }
+        for equation in &self.input_projections {
+            write!(
+                f,
+                " (input-projection {} {})",
+                equation.source, equation.value
+            )?;
+        }
         if let Some(given) = &self.given {
             write!(f, " (given {given})")?;
         }
@@ -614,6 +667,10 @@ impl fmt::Display for WorldProposition<'_, '_> {
         )?;
         for decision in &self.decisions {
             write!(f, " {decision}")?;
+        }
+        f.write_str(") (projection-equations")?;
+        for equation in &self.projections {
+            write!(f, " (equal {} {})", equation.source, equation.value)?;
         }
         f.write_str("))")
     }

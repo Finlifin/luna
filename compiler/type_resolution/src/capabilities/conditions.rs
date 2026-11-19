@@ -1,5 +1,6 @@
 //! Candidate-local Boolean requirements. Nested queries reuse Solver::active;
 //! their facts and index-scoped resolutions accompany the resulting proof.
+use super::proposition_inputs::{ProjectionEquation, PropositionInputs};
 use super::*;
 use crate::implementation::{EvidenceError, TypeAssessment};
 use crate::ptc::{Proof, ProofError, TraitQuery, UnknownReason};
@@ -8,16 +9,8 @@ use crate::ptc::{Proof, ProofError, TraitQuery, UnknownReason};
 pub struct ConditionSupport {
     context: Context,
     facts: Vec<ConditionFact>,
-    projections: Vec<ConditionProjection>,
+    projections: Vec<ProjectionEquation>,
     proof: Proof,
-}
-
-/// Candidate-local associated reductions, never equations for opaque heads.
-/// Replay recomputes the view in the same immutable implementation world.
-#[derive(Debug)]
-struct ConditionProjection {
-    source: Term,
-    value: Term,
 }
 
 #[derive(Debug)]
@@ -26,6 +19,7 @@ struct ConditionFact {
     truth: bool,
     given: Option<TraitRequirement>,
     resolution: Option<Box<Resolution>>,
+    input_projections: Vec<ProjectionEquation>,
 }
 
 #[cfg(test)]
@@ -67,7 +61,7 @@ mod tests {
                 context: context.clone(),
                 facts: vec![],
                 proof,
-                projections: vec![ConditionProjection {
+                projections: vec![ProjectionEquation {
                     source: source.clone(),
                     value: subject,
                 }],
@@ -327,44 +321,24 @@ impl Solver<'_, '_> {
         if matches!(direct, Outcome::Entailed(_) | Outcome::IllFormed(_)) {
             return direct;
         }
-        let mut pending = vec![&goal];
-        pending.extend(self.world.context.assumptions());
-        let mut queries = Vec::new();
-        let mut seen = HashSet::new();
-        let mut projection_types = Vec::new();
-        let mut seen_types = HashSet::new();
-        while let Some(formula) = pending.pop() {
-            if self.remaining == 0 {
-                return unknown(goal);
-            }
-            self.remaining -= 1;
-            match formula {
-                Formula::Trait(query) if seen.insert(query) => queries.push(query),
-                Formula::Equal(crate::ptc::Equality(left, right)) => {
-                    for ty in [left, right] {
-                        if ty.sort() == nir::Sort::Type
-                            && !matches!(ty, Term::Primitive(_))
-                            && seen_types.insert(ty)
-                        {
-                            projection_types.push(ty);
-                        }
-                    }
-                }
-                Formula::Not(inner) => pending.push(inner),
-                Formula::And(items) | Formula::Or(items) => pending.extend(items),
-                _ => {}
-            }
-        }
-        if queries.is_empty() && projection_types.is_empty() {
+        let Ok(inputs) = PropositionInputs::collect(
+            self.world.context,
+            &goal,
+            budget.max_depth.min(128) - depth,
+            &mut self.remaining,
+        ) else {
+            return unknown(goal);
+        };
+        if inputs.is_empty() {
             return direct;
         }
         // Keep a share for the final proof, while returning unused search
         // work to the following obligations instead of stranding fixed slices.
-        let mut obligations = queries.len() + projection_types.len();
+        let mut obligations = inputs.traits.len() + inputs.projections.len();
         let mut context = self.world.context.fork();
         let mut facts = Vec::new();
         let mut pending_reason = None;
-        for query in queries {
+        for query in inputs.traits {
             let allowance = Budget {
                 steps: self.remaining / (obligations + 1),
                 ..budget
@@ -388,7 +362,7 @@ impl Solver<'_, '_> {
             }
         }
         let mut projections = Vec::new();
-        for ty in projection_types {
+        for ty in inputs.projections {
             let allowance = Budget {
                 steps: self.remaining / (obligations + 1),
                 ..budget
@@ -399,7 +373,7 @@ impl Solver<'_, '_> {
             match self.prerequisite_type(ty, allowance, depth + 1) {
                 Ok(value) if value != *ty => {
                     context.assume(Formula::equal(ty.clone(), value.clone()));
-                    projections.push(ConditionProjection {
+                    projections.push(ProjectionEquation {
                         source: ty.clone(),
                         value,
                     });
@@ -555,15 +529,46 @@ impl Solver<'_, '_> {
                     truth: true,
                     given: Some(given),
                     resolution: None,
+                    input_projections: Vec::new(),
                 });
             }
             Ok(None) => None,
             Err(error @ nir::NominalAdmissionError::Invalid(_)) => return Err(error),
             Err(error) => Some(error),
         };
+        let mut input_projections = Vec::new();
+        let mut operand = |source: &Term| -> Result<Term, QueryError> {
+            if !nir::type_computations::contains_associated_projection(
+                source,
+                &mut self.remaining,
+                budget.max_depth.saturating_sub(depth),
+            )? {
+                return Ok(source.clone());
+            }
+            let value = self.prerequisite_type(source, budget, depth + 1)?;
+            ProjectionEquation::retain(
+                source,
+                &value,
+                &mut input_projections,
+                &mut self.remaining,
+            )?;
+            Ok(value)
+        };
+        let selected = TraitQuery {
+            subject: operand(&query.subject)?,
+            arguments: query
+                .arguments
+                .iter()
+                .map(&mut operand)
+                .collect::<Result<_, _>>()?,
+            interface: query.interface,
+        };
         let resolution = self.resolve(
-            &requirement.interface_instance(),
-            &query.subject,
+            &InterfaceInstance {
+                declaration: selected.interface,
+                arguments: selected.arguments.clone(),
+            },
+            &selected.subject,
             budget,
             depth,
         )?;
@@ -592,7 +597,7 @@ impl Solver<'_, '_> {
                 let before = allowance.steps;
                 let closed = self
                     .world
-                    .closed_trait_inputs_metered(query, &mut allowance);
+                    .closed_trait_inputs_metered(&selected, &mut allowance);
                 self.remaining -= before - allowance.steps;
                 if !closed? {
                     return Err(QueryError::Unresolved(
@@ -613,6 +618,7 @@ impl Solver<'_, '_> {
             truth,
             given: None,
             resolution: Some(Box::new(resolution)),
+            input_projections,
         })
     }
 }
@@ -750,21 +756,27 @@ impl World<'_> {
                         }
                     }
                     let mut completed = std::collections::HashMap::new();
+                    for projection in support
+                        .facts
+                        .iter()
+                        .flat_map(|fact| &fact.input_projections)
+                    {
+                        let mut allowance = Budget {
+                            steps: fuel,
+                            ..*budget
+                        };
+                        let result = projection.replay(self, &mut allowance, &mut completed);
+                        fuel = allowance.steps;
+                        result?;
+                    }
                     for projection in &support.projections {
                         let mut allowance = Budget {
                             steps: fuel,
                             ..*budget
                         };
-                        let normalized = self.associated_type_view_cached_metered(
-                            &projection.source,
-                            &mut allowance,
-                            &mut completed,
-                        );
+                        let checked = projection.replay(self, &mut allowance, &mut completed);
                         fuel = allowance.steps;
-                        let normalized = normalized?;
-                        if normalized.value != projection.value {
-                            return Err(ProofError::Invalid.into());
-                        }
+                        checked?;
                         expected.assume(Formula::equal(
                             projection.source.clone(),
                             projection.value.clone(),
@@ -799,6 +811,13 @@ impl fmt::Display for ConditionSupport {
             }
             if let Some(resolution) = &fact.resolution {
                 write!(f, " (resolution {resolution})")?;
+            }
+            for equation in &fact.input_projections {
+                write!(
+                    f,
+                    " (input-projection {} {})",
+                    equation.source, equation.value
+                )?;
             }
             f.write_str(")")?;
         }

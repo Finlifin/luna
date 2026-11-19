@@ -991,6 +991,8 @@ pub type AssociatedResolver<'a> =
 enum TypeSolver<'a> {
     Unmetered(&'a dyn Fn(&nir::program::TypePredicate) -> ContractOutcome),
     Budgeted(&'a BudgetedTypeSolver<'a>),
+    /// Observes projected operands in the same declaration world as dispatch.
+    Declarations(&'a BudgetedTypeSolver<'a>),
 }
 
 enum PointerCopyPermission<'a> {
@@ -1958,7 +1960,7 @@ impl<'a> Interpreter<'a> {
         }
         interpreter.admit_dispatch_inputs(dispatch_instances, &implementations)?;
         if let SourceDispatch::Resolving(resolvers) = dispatch {
-            interpreter.type_solver = Some(TypeSolver::Budgeted(resolvers.types));
+            interpreter.type_solver = Some(TypeSolver::Declarations(resolvers.types));
             interpreter.method_resolver = Some(resolvers.methods);
             interpreter.associated_resolver = Some(resolvers.associated);
         }
@@ -2116,7 +2118,7 @@ impl<'a> Interpreter<'a> {
     ) -> ContractQueryResult {
         match &self.type_solver {
             Some(TypeSolver::Unmetered(solver)) => Ok(solver(predicate)),
-            Some(TypeSolver::Budgeted(solver)) => {
+            Some(TypeSolver::Budgeted(solver) | TypeSolver::Declarations(solver)) => {
                 if self.budget.steps == 0 {
                     return Err(ErrorKind::StepsExhausted);
                 }
@@ -3565,7 +3567,11 @@ impl<'a> Interpreter<'a> {
         source: SourceRange,
     ) -> Result<(), Error> {
         let normalized;
-        let predicate = if predicate.trivial_truth().is_none() && !self.associated_values.is_empty()
+        // A resolving VM retains only the associated values already demanded
+        // by execution. The declaration solver owns the full projection world.
+        let predicate = if !matches!(self.type_solver, Some(TypeSolver::Declarations(_)))
+            && predicate.trivial_truth().is_none()
+            && !self.associated_values.is_empty()
         {
             let mut fuel = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
             let result =

@@ -559,6 +559,20 @@ pub(crate) fn charge_expanded_term(
     visit_expanded_term(root, fuel, max_depth, replacements, &mut |_| {})
 }
 
+/// Check for a projection anywhere in an operand without unfolding its heads
+/// or extracting terms from under callable binders.
+pub fn contains_associated_projection(
+    root: &Term,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<bool, Error> {
+    let mut found = false;
+    visit_expanded_term(root, fuel, depth, &BTreeMap::new(), &mut |term| {
+        found |= matches!(term, Term::AssociatedType { .. });
+    })?;
+    Ok(found)
+}
+
 /// Inspect open declaration inputs without cloning the type or unfolding heads.
 pub fn has_rigid_parameters_bounded(root: &Term, fuel: &mut usize) -> Result<bool, Error> {
     mentions_rigid_bounded(root, fuel, |_| true)
