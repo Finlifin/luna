@@ -14,6 +14,8 @@
 
 NIR 的共同入口负责不可变描述的递归成员检查。VM 提供当前世界的布局、声明域、集合、callable 和目标信息。结构上匹配的名义值还须检查形成义务；嵌套载荷遵循同样的检查。只读观察可使用已有见证，主动接收时要在接收作用域重验。查询耗尽预算、前提未决、输入非法分别交还给调用者。一次可选查询没有找到见证，只说明该查询的结果。[共同值域检查](../compiler/nir/src/value_admission.rs) · [VM 的域查询](../compiler/comptime_interpretor/src/admission.rs) · [实际值检查](../compiler/comptime_interpretor/src/value_types.rs)
 
+解释器用当前调用的剩余步数检查 VM 值。形参与返回值、标量操作数、冻结的函数身份和指针写入共用这份预算。只读检查只能消费已有证据：缺少名义能力的见证返回 `TypeContractUnresolved`，具体值与域不匹配返回 `Type`，遍历耗尽返回 `StepsExhausted`。例如，写指针时即使已取得 Copy 许可、新值也通过检查，旧载荷检查耗尽仍须保留原值。IIR 模板身份按选定图的实例键与逻辑签名检查；签名吻合只授权这次传送。[指针写入](../compiler/comptime_interpretor/src/memory.rs) · [模板查询](../compiler/comptime_interpretor/src/iir_execution/indexes/targets.rs)
+
 收集域由声明及受检结构观察提供。即使载荷为空，`meta.List<u8>` 与 `meta.List<Type>` 仍携带各自的域。用 `Tuple<.Es = Es>` 交付已有列表时，整个列表作为一个普通 comptime 值进入具名槽。冻结和恢复保留 NF 头、序列顺序、名义身份、错误标签、嵌套 optional 与 Object 中各项的键及域。Type 描述可携带尚待消费的结构条件；需要类型身份的操作另行取得身份依据。[类型描述与身份](type-descriptions-and-admission.md) · [值表示](../compiler/nir/src/comptime_values.rs)
 
 VM 向调用者恢复带作用域的值时，先按源码字段顺序检查并替换各项的类型，再由显式工作栈组装父值。对象保留重复键与每项各自的域。多处捕获同一个存储单元时，结果仍共享一个新单元；读取原单元的锁持续到其载荷恢复完成。预算、深度或作用域检查失败时，本次恢复结束，调用者不会收到半成品。[结果图恢复](../compiler/comptime_interpretor/src/scoped_restore/packets.rs)

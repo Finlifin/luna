@@ -242,8 +242,8 @@ impl Interpreter<'_> {
             }
             B::Index => {
                 let index = values.next().unwrap();
-                if !self.has_type(&index, types[1])
-                    || *types[0] != Term::Primitive(Primitive::BitVec(bits.width()))
+                self.check_retained_value(&index, types[1], Some(source))?;
+                if *types[0] != Term::Primitive(Primitive::BitVec(bits.width()))
                     || *output != Term::Primitive(Primitive::BitVec(1))
                 {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
@@ -262,10 +262,9 @@ impl Interpreter<'_> {
             B::Window => {
                 let lower = values.next().unwrap();
                 let upper = values.next().unwrap();
-                if !self.has_type(&lower, types[1])
-                    || !self.has_type(&upper, types[2])
-                    || *types[0] != Term::Primitive(Primitive::BitVec(bits.width()))
-                {
+                self.check_retained_value(&lower, types[1], Some(source))?;
+                self.check_retained_value(&upper, types[2], Some(source))?;
+                if *types[0] != Term::Primitive(Primitive::BitVec(bits.width())) {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
                 let (Some(start), Some(end)) = (position(lower), position(upper)) else {

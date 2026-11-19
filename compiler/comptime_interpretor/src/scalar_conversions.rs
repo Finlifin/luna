@@ -7,9 +7,7 @@ impl Interpreter<'_> {
         value: Value,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        if !self.has_type(&value, scalar.left) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        self.check_retained_value(&value, scalar.left, Some(source))?;
         let integer = match value {
             Value::Integer(value) => value,
             Value::UnsignedInteger(value) => comptime_runtime::Integer::from_u128(value),
@@ -34,7 +32,7 @@ impl Interpreter<'_> {
         .map_err(|_| self.failure(ErrorKind::MachineOverflow, Some(source)))
     }
     pub(super) fn read_integer_representation(
-        &self,
+        &mut self,
         scalar: Scalar<'_>,
         value: Value,
         source: SourceRange,
@@ -45,9 +43,7 @@ impl Interpreter<'_> {
         let (_, width) = self
             .integer_layout(primitive)
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
-        if !self.has_type(&value, scalar.left) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        self.check_retained_value(&value, scalar.left, Some(source))?;
         let bits = match value {
             Value::UnsignedInteger(value) => value,
             Value::SignedInteger(value) => value as u128,

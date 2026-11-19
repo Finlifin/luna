@@ -272,9 +272,7 @@ impl Interpreter<'_> {
                             }
                         };
                         let value = value!(provided);
-                        if !self.has_type(&value, result) {
-                            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                        }
+                        self.check_retained_value(&value, result, Some(expr.source))?;
                         *entry.activation.provided.lock().map_err(|_| {
                             self.failure(ErrorKind::InvalidControlFlow, Some(expr.source))
                         })? = Some(value);
@@ -306,9 +304,7 @@ impl Interpreter<'_> {
                 let mut values = Vec::new();
                 for (slot, (argument, parameter)) in arguments.iter().zip(parameters).enumerate() {
                     let value = value!(this.eval(argument, environment));
-                    if !this.has_type(&value, &parameter.ty) {
-                        return Err(this.failure(ErrorKind::Type, Some(expr.source)));
-                    }
+                    this.check_retained_value(&value, &parameter.ty, Some(expr.source))?;
                     this.retain_prepared(slot, argument.source, &value)?;
                     values.push(value);
                 }
@@ -335,9 +331,7 @@ impl Interpreter<'_> {
                         }
                     };
                 if let Flow::Value(value) = &delivered {
-                    if !this.has_type(value, result) {
-                        return Err(this.failure(ErrorKind::Type, Some(expr.source)));
-                    }
+                    this.check_retained_value(value, result, Some(expr.source))?;
                 }
                 Ok(delivered)
             }),

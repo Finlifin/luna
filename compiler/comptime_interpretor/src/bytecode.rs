@@ -1275,14 +1275,12 @@ impl<'a> Interpreter<'a> {
                     let mut inputs = Vec::new();
                     for input in selection.inputs() {
                         let value = frame.slots[input.register].take().ok_or_else(missing)?;
-                        if !self.has_type(&value, &input.ty) {
-                            let location = if matches!(selection, L::Index(_)) {
-                                input.source
-                            } else {
-                                source
-                            };
-                            return Err(self.failure(ErrorKind::Type, Some(location)));
-                        }
+                        let location = if matches!(selection, L::Index(_)) {
+                            input.source
+                        } else {
+                            source
+                        };
+                        self.check_retained_value(&value, &input.ty, Some(location))?;
                         inputs.push(value);
                     }
                     let mut inputs = inputs.into_iter();

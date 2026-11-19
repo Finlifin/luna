@@ -48,12 +48,9 @@ impl Interpreter<'_> {
         b: Option<Value>,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        if !self.has_type(&a, scalar.left)
-            || b.as_ref()
-                .zip(scalar.right)
-                .is_some_and(|(value, ty)| !self.has_type(value, ty))
-        {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
+        self.check_retained_value(&a, scalar.left, Some(source))?;
+        if let Some((value, ty)) = b.as_ref().zip(scalar.right) {
+            self.check_retained_value(value, ty, Some(source))?;
         }
         if let Some(op) = op {
             let b = b.ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;

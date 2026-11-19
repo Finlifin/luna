@@ -224,13 +224,12 @@ impl Interpreter<'_> {
         }
         self.tick(None)?;
         self.cleanup_path_work(base)?;
-        let valid = storage
+        storage
             .owned_pointer(program.ty.clone(), base)
-            .and_then(|pointer| pointer.inspect(|value| self.has_type(value, &program.ty)))
-            .map_err(|e| self.failure(e, None))?;
-        if !valid {
-            return Err(self.failure(ErrorKind::Type, None));
-        }
+            .and_then(|pointer| {
+                pointer.inspect(|value| self.check_retained_value(value, &program.ty, None))
+            })
+            .map_err(|kind| self.failure(kind, None))??;
         for (path, tag) in &program.guards {
             self.tick(None)?;
             let path: Vec<_> = base.iter().chain(path).copied().collect();
@@ -2001,7 +2000,11 @@ mod representation_copy_tests {
         };
         copied_cell
             .pointer(Term::Primitive(Primitive::Bool), vec![])
-            .write(Value::Bool(false), |v| matches!(v, Value::Bool(_)))
+            .write(Value::Bool(false), |v| {
+                matches!(v, Value::Bool(_))
+                    .then_some(())
+                    .ok_or(ErrorKind::Type)
+            })
             .unwrap();
         assert_eq!(copied_cell.read().unwrap(), Value::Bool(false));
         assert_eq!(cell.read().unwrap(), Value::Bool(true));
@@ -2037,7 +2040,11 @@ mod representation_copy_tests {
         };
         copied_slot
             .pointer(Term::Primitive(Primitive::Bool), vec![])
-            .write(Value::Bool(true), |value| matches!(value, Value::Bool(_)))
+            .write(Value::Bool(true), |value| {
+                matches!(value, Value::Bool(_))
+                    .then_some(())
+                    .ok_or(ErrorKind::Type)
+            })
             .unwrap();
         assert_eq!(copied_slot.read().unwrap(), Value::Bool(true));
         assert_eq!(original_slot.read().unwrap(), Value::Bool(false));
@@ -2045,7 +2052,11 @@ mod representation_copy_tests {
             panic!("pointer")
         };
         copied_pointer
-            .write(Value::Bool(true), |value| matches!(value, Value::Bool(_)))
+            .write(Value::Bool(true), |value| {
+                matches!(value, Value::Bool(_))
+                    .then_some(())
+                    .ok_or(ErrorKind::Type)
+            })
             .unwrap();
         assert_eq!(pointer.read().unwrap(), Value::Bool(true));
         assert_eq!(external.read().unwrap(), Value::Bool(true));

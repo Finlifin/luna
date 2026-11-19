@@ -29,9 +29,8 @@ impl<'a> Interpreter<'a> {
             Flow::Value(value) => value,
             flow => return Ok(flow),
         };
-        if !self.has_type(&a, &left.ty) || !self.has_type(&b, &right.ty) {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
+        self.check_retained_value(&a, &left.ty, Some(expr.source))?;
+        self.check_retained_value(&b, &right.ty, Some(expr.source))?;
         if [&a, &b].iter().any(|value| {
             !matches!(
                 value,
@@ -438,7 +437,9 @@ impl<'a> Interpreter<'a> {
         let transport = self.comptime_only && !output.is_comptime_callable();
         let value = if transport
             || self
-                .iir_template_type(key.declaration, &key.arguments)
+                .query_admission(Some(source), |vm, fuel| {
+                    vm.iir_template_type(key.declaration, &key.arguments, fuel)
+                })?
                 .is_some()
         {
             if let Some(method) = method {

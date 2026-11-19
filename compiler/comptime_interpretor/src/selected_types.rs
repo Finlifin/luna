@@ -124,14 +124,18 @@ pub(super) fn same(
     values: &Values<'_>,
     fuel: &mut usize,
 ) -> Result<bool, ErrorKind> {
-    // Even reflexive structural comparison must account for its traversal.
-    charge_copy(a, fuel)?;
-    charge_copy(b, fuel)?;
-    if a == b {
+    if identical(a, b, fuel)? {
         return Ok(true);
     }
     Ok(view(a, values, fuel)? == view(b, values, fuel)?)
 }
+/// Structural identity before selection, including the cost of traversing both terms.
+pub(super) fn identical(a: &Term, b: &Term, fuel: &mut usize) -> Result<bool, ErrorKind> {
+    charge_copy(a, fuel)?;
+    charge_copy(b, fuel)?;
+    Ok(a == b)
+}
+
 pub(super) fn view(ty: &Term, values: &Values<'_>, fuel: &mut usize) -> Result<Term, ErrorKind> {
     normalize(ty, values, fuel, 0)
 }

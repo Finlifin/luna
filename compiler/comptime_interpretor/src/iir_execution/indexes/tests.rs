@@ -124,8 +124,18 @@ fn concrete_value_and_reflection_costs_ignore_unrelated_instances() {
                 .decode_immutable_input(&input, &ty(local, boolean()))
                 .unwrap();
             assert_eq!(decoded, expected);
-            assert!(vm.has_type(&decoded, &ty(local, boolean())));
-            assert!(!vm.has_type(&decoded, &ty(local, Term::Primitive(Primitive::Char))));
+            assert!(
+                vm.check_retained_value(&decoded, &ty(local, boolean()), None)
+                    .is_ok()
+            );
+            assert!(
+                vm.check_retained_value(
+                    &decoded,
+                    &ty(local, Term::Primitive(Primitive::Char)),
+                    None
+                )
+                .is_err()
+            );
         }
         assert_eq!(
             vm.reflect_struct(&ty(1, boolean())).unwrap().fields[0].ty,

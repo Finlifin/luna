@@ -12,13 +12,13 @@ enum ValueObligation {
     CallableType { signature: Term, expected: Term },
 }
 
-struct ValueChecks {
+struct ValueChecks<'a> {
     // None denotes a read-only probe requiring retained evidence.
-    obligations: Option<Vec<ValueObligation>>,
-    remaining: usize,
+    obligations: Option<&'a mut Vec<ValueObligation>>,
+    remaining: &'a mut usize,
     failure: Option<ErrorKind>,
 }
-impl ValueChecks {
+impl ValueChecks<'_> {
     fn admit<T>(
         &mut self,
         operation: impl FnOnce(&mut usize) -> Result<T, nir::NominalAdmissionError>,
@@ -41,7 +41,7 @@ impl ValueChecks {
         if self.failure.is_some() {
             return None;
         }
-        match operation(&mut self.remaining) {
+        match operation(self.remaining) {
             Ok(value) => Some(value),
             Err(failure) => {
                 self.failure = Some(failure);
@@ -50,11 +50,6 @@ impl ValueChecks {
         }
     }
     fn visit(&mut self) -> bool {
-        // Retained probes previously had no per-value traversal allowance.
-        // Their local fuel bounds observations, not a new scalar width limit.
-        if self.obligations.is_none() {
-            return self.failure.is_none();
-        }
         self.observe(|fuel| {
             *fuel = fuel.checked_sub(1).ok_or(ErrorKind::StepsExhausted)?;
             Ok(())
@@ -114,7 +109,7 @@ impl ValueChecks {
         // Retained evidence settles ordinary signatures without allocating a
         // pending task. Only a missing associated view needs active observation;
         // budget failures and known mismatches must not trigger a second query.
-        match selected_types::same(signature, expected, values, &mut self.remaining) {
+        match selected_types::same(signature, expected, values, self.remaining) {
             Ok(equal) => return equal,
             Err(ErrorKind::UnmaterializedDispatch) if self.defers_contracts() => {}
             Err(failure) => {
@@ -196,7 +191,15 @@ impl Interpreter<'_> {
                 checks
                     .admit(|fuel| Ok(inputs.instantiate_requirement(capability, fuel)?))
                     .is_some_and(|bound| {
-                        checks.observe(|fuel| self.retains_capability(&bound, fuel)) == Some(true)
+                        checks
+                            .observe(|fuel| {
+                                if self.retains_capability(&bound, fuel)? {
+                                    Ok(())
+                                } else {
+                                    Err(ErrorKind::TypeContractUnresolved)
+                                }
+                            })
+                            .is_some()
                     })
             })
     }
@@ -209,33 +212,14 @@ impl Interpreter<'_> {
         ty: &Term,
         source: Option<SourceRange>,
     ) -> Result<(), Error> {
-        if !self.comptime_only {
-            return if self.has_type(value, ty) {
-                Ok(())
-            } else {
-                Err(self.failure(ErrorKind::Type, source))
-            };
-        }
-        let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let mut checks = ValueChecks {
-            obligations: Some(vec![]),
-            remaining: before,
-            failure: None,
-        };
-        let matched = self.has_type_at(value, ty, 0, &mut checks);
-        let ValueChecks {
-            obligations,
-            remaining,
-            failure,
-        } = checks;
-        self.budget.steps -= (before - remaining) as u64;
-        if let Some(kind) = failure {
-            return Err(self.failure(kind, source));
-        }
-        if !matched {
-            return Err(self.failure(ErrorKind::Type, source));
-        }
-        for obligation in obligations.expect("active shape obligations") {
+        let mut obligations = Vec::new();
+        self.check_value_shape(
+            value,
+            ty,
+            source,
+            self.comptime_only.then_some(&mut obligations),
+        )?;
+        for obligation in obligations {
             match obligation {
                 ValueObligation::Nominal(domain) => self.admit_type(&domain, 0)?,
                 ValueObligation::RuntimeMethod(method) => {
@@ -257,20 +241,38 @@ impl Interpreter<'_> {
         }
         Ok(())
     }
-    pub(super) fn has_type(&self, value: &Value, ty: &Term) -> bool {
-        // Legacy read-only probes have no mutable invocation owner. Use one
-        // finite allowance for the entire probe, never one per projection.
-        self.has_type_at(
-            value,
-            ty,
-            0,
-            &mut ValueChecks {
-                obligations: None,
-                remaining: 100_000,
-                failure: None,
-            },
-        )
+    /// Inspect retained evidence without dispatching a proof or running code.
+    pub(super) fn check_retained_value(
+        &mut self,
+        value: &Value,
+        ty: &Term,
+        source: Option<SourceRange>,
+    ) -> Result<(), Error> {
+        self.check_value_shape(value, ty, source, None)
     }
+
+    fn check_value_shape(
+        &mut self,
+        value: &Value,
+        ty: &Term,
+        source: Option<SourceRange>,
+        obligations: Option<&mut Vec<ValueObligation>>,
+    ) -> Result<(), Error> {
+        self.query_descriptions(source, |vm, fuel| {
+            let mut checks = ValueChecks {
+                obligations,
+                remaining: fuel,
+                failure: None,
+            };
+            let matched = vm.has_type_at(value, ty, 0, &mut checks);
+            match checks.failure {
+                Some(kind) => Err(kind),
+                None if matched => Ok(()),
+                None => Err(ErrorKind::Type),
+            }
+        })
+    }
+
     fn has_type_at(
         &self,
         value: &Value,
@@ -299,9 +301,13 @@ impl Interpreter<'_> {
                         });
                 }
                 Value::RuntimeTraitMethod(identity) => {
-                    return self
-                        .iir_template_method_type(identity)
-                        .is_some_and(|logical| logical == ty);
+                    return checks
+                        .admit(|fuel| self.iir_template_method_type(identity, fuel))
+                        .flatten()
+                        .is_some_and(|logical| {
+                            checks.observe(|fuel| selected_types::identical(logical, ty, fuel))
+                                == Some(true)
+                        });
                 }
                 Value::FunctionInstance {
                     declaration,
@@ -321,9 +327,13 @@ impl Interpreter<'_> {
                     declaration,
                     arguments,
                 } => {
-                    return self
-                        .iir_template_type(*declaration, arguments)
-                        .is_some_and(|logical| logical == ty);
+                    return checks
+                        .admit(|fuel| self.iir_template_type(*declaration, arguments, fuel))
+                        .flatten()
+                        .is_some_and(|logical| {
+                            checks.observe(|fuel| selected_types::identical(logical, ty, fuel))
+                                == Some(true)
+                        });
                 }
                 _ => {}
             }

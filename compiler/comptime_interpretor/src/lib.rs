@@ -2569,12 +2569,11 @@ impl<'a> Interpreter<'a> {
                     unreachable!()
                 };
                 let pointer = storage.pointer(place.ty.clone(), fields);
-                let valid = pointer
-                    .inspect(|target| self.has_type(target, &place.ty))
-                    .map_err(|kind| self.failure(kind, Some(expr.source)))?;
-                if !valid {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
+                pointer
+                    .inspect(|target| {
+                        self.check_retained_value(target, &place.ty, Some(expr.source))
+                    })
+                    .map_err(|kind| self.failure(kind, Some(expr.source)))??;
                 Value::Pointer(pointer)
             }
             K::PointerAnonymousField {
@@ -2621,9 +2620,7 @@ impl<'a> Interpreter<'a> {
                 let value = pointer
                     .inspect(|value| self.copy_representation(value, expr.source, 0))
                     .map_err(|kind| self.failure(kind, Some(expr.source)))??;
-                if !self.has_type(&value, &expr.ty) {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
+                self.check_retained_value(&value, &expr.ty, Some(expr.source))?;
                 value
             }
             K::WritePointer { pointer, value } => {
@@ -2634,11 +2631,12 @@ impl<'a> Interpreter<'a> {
                 if !self.permits_pointer_copy(&pointer.pointee) {
                     return Err(self.failure(ErrorKind::Unsupported, Some(expr.source)));
                 }
-                if !self.has_type(&value, &pointer.pointee) {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
+                self.check_retained_value(&value, &pointer.pointee, Some(expr.source))?;
                 pointer
-                    .write(value, |old| self.has_type(old, &pointer.pointee))
+                    .write(value, |old| {
+                        self.check_retained_value(old, &pointer.pointee, Some(expr.source))
+                            .map_err(|error| error.kind)
+                    })
                     .map_err(|kind| self.failure(kind, Some(expr.source)))?;
                 Value::Unit
             }
@@ -3919,9 +3917,7 @@ impl<'a> Interpreter<'a> {
                         Flow::Value(value) => value,
                         control => return Ok(SelectedBitRange::Control(control)),
                     };
-                    if !self.has_type(&evaluated, &index.ty) {
-                        return Err(self.failure(ErrorKind::Type, Some(index.source)));
-                    }
+                    self.check_retained_value(&evaluated, &index.ty, Some(index.source))?;
                     let lo = position(evaluated).ok_or_else(|| {
                         self.failure(ErrorKind::IndexOutOfBounds, Some(index.source))
                     })?;
@@ -3939,9 +3935,8 @@ impl<'a> Interpreter<'a> {
                         Flow::Value(value) => value,
                         control => return Ok(SelectedBitRange::Control(control)),
                     };
-                    if !self.has_type(&lower, &start.ty) || !self.has_type(&upper, &end.ty) {
-                        return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                    }
+                    self.check_retained_value(&lower, &start.ty, Some(expr.source))?;
+                    self.check_retained_value(&upper, &end.ty, Some(expr.source))?;
                     let lo = position(lower).ok_or_else(|| {
                         self.failure(ErrorKind::IndexOutOfBounds, Some(start.source))
                     })?;
@@ -3977,9 +3972,7 @@ impl<'a> Interpreter<'a> {
         start: usize,
         rhs: &comptime_runtime::bitvec::BitVec,
     ) -> Result<Value, Error> {
-        if !self.has_type(target, storage_type) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        self.check_retained_value(target, storage_type, Some(source))?;
         Ok(match target {
             Value::BitVec(bits) => Value::BitVec(
                 self.bit_operation(source, |budget| bits.replaced(start, rhs, budget))?,
@@ -4072,9 +4065,7 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
         let target_value = value!(self.eval(pointer, environment));
-        if !self.has_type(&target_value, &pointer.ty) {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
+        self.check_retained_value(&target_value, &pointer.ty, Some(expr.source))?;
         let Value::Pointer(target) = target_value else {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         };
@@ -4093,7 +4084,10 @@ impl<'a> Interpreter<'a> {
             .inspect(|old| self.replaced_bit_value(expr.source, storage_type, old, start, &rhs))
             .map_err(|kind| self.failure(kind, Some(expr.source)))??;
         target
-            .write(changed, |old| self.has_type(old, storage_type))
+            .write(changed, |old| {
+                self.check_retained_value(old, storage_type, Some(expr.source))
+                    .map_err(|error| error.kind)
+            })
             .map_err(|kind| self.failure(kind, Some(expr.source)))?;
         Ok(Flow::Value(Value::Unit))
     }
@@ -4207,7 +4201,7 @@ impl<'a> Interpreter<'a> {
                         .assignment_pointer(expression.ty.clone(), &place.fields)
                         .map_err(|e| self.failure(e, Some(expr.source)))?;
                     pointer
-                        .write(value, |_| true)
+                        .write(value, |_| Ok(()))
                         .map_err(|e| self.failure(e, Some(expr.source)))?;
                     return Ok(Flow::Value(Value::Unit));
                 }
@@ -4471,9 +4465,11 @@ impl<'a> Interpreter<'a> {
                             Value::Bool(left)
                         } else {
                             let right = value!(self.eval(b, environment));
-                            if !self.has_type(&right, &Term::Primitive(Primitive::Bool)) {
-                                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                            }
+                            self.check_retained_value(
+                                &right,
+                                &Term::Primitive(Primitive::Bool),
+                                Some(expr.source),
+                            )?;
                             right
                         }
                     }
@@ -5662,25 +5658,39 @@ mod computation_type_tests {
             ..Default::default()
         };
         let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
-        assert!(vm.has_type(&Value::Function(id), &ty));
-        assert!(!vm.has_type(
-            &Value::Function(id),
-            &ty.callable_signature().clone().with_comptime_phase(true)
-        ));
-        assert!(!vm.has_type(
-            &Value::Function(DeclarationId {
-                package: 9,
-                local: 2
-            }),
-            &ty
-        ));
+        assert!(
+            vm.check_retained_value(&Value::Function(id), &ty, None)
+                .is_ok()
+        );
+        assert!(
+            vm.check_retained_value(
+                &Value::Function(id),
+                &ty.callable_signature().clone().with_comptime_phase(true),
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            vm.check_retained_value(
+                &Value::Function(DeclarationId {
+                    package: 9,
+                    local: 2
+                }),
+                &ty,
+                None
+            )
+            .is_err()
+        );
         assert!(matches!(
             vm.invoke_value(Value::Function(id), vec![])
                 .unwrap_err()
                 .kind,
             ErrorKind::PhaseMismatch
         ));
-        assert!(vm.has_type(&Value::Function(id), &ty));
+        assert!(
+            vm.check_retained_value(&Value::Function(id), &ty, None)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -6605,6 +6615,7 @@ mod pointer_copy_budget_tests {
         )
         .unwrap()
         .with_budgeted_pointer_copy_permission(&permission);
+        let before_eval = vm.remaining_steps();
         assert_eq!(
             vm.eval(&expr, &mut environment).unwrap_err().kind,
             ErrorKind::Unsupported
@@ -6619,12 +6630,28 @@ mod pointer_copy_budget_tests {
             Value::Tuple(vec![Value::Bool(false)])
         );
         assert_eq!(vm.depth, 0);
+        let operand_cost = before_eval - observed.get();
+        // Both tuple inspections must finish before the write commits.
+        // With three visits left, the old tuple's final field is still unchecked.
+        vm.budget.steps = operand_cost + 20 + 3;
+        assert_eq!(
+            vm.eval(&expr, &mut environment).unwrap_err(),
+            Error {
+                kind: ErrorKind::StepsExhausted,
+                source: Some(source)
+            }
+        );
+        assert_eq!(
+            storage.read().unwrap(),
+            Value::Tuple(vec![Value::Bool(false)])
+        );
+        assert_eq!(vm.remaining_steps(), 0);
         vm.budget.steps = 40;
         assert!(matches!(
             vm.eval(&expr, &mut environment).unwrap(),
             Flow::Value(Value::Unit)
         ));
-        assert_eq!(vm.remaining_steps(), observed.get() - 20);
+        assert_eq!(vm.remaining_steps(), observed.get() - 20 - 4);
         assert_eq!(
             storage.read().unwrap(),
             Value::Tuple(vec![Value::Bool(true)])

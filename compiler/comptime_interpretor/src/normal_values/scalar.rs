@@ -25,9 +25,7 @@ impl Interpreter<'_> {
                 let Flow::Value(value) = self.eval(&expression, &mut Environment::new())? else {
                     return Err(self.failure(ErrorKind::InvalidCallPlan, None));
                 };
-                if !self.has_type(&value, ty) {
-                    return Err(self.failure(ErrorKind::Type, None));
-                }
+                self.check_retained_value(&value, ty, None)?;
                 value
             }
             (Term::Bool(value), _) => Value::Bool(*value),
@@ -81,9 +79,10 @@ impl Interpreter<'_> {
                 // A frozen head carries identity, not an executable body or
                 // applied generic arguments. Its telescope belongs to metadata.
                 let value = Value::Function(*declaration);
-                if !arguments.is_empty() || !self.has_type(&value, ty) {
+                if !arguments.is_empty() {
                     return Err(self.failure(ErrorKind::Type, None));
                 }
+                self.check_retained_value(&value, ty, None)?;
                 value
             }
             (

@@ -120,10 +120,21 @@ fn retained_capability_limits_cannot_trigger_a_second_proof_attempt() {
 #[test]
 fn read_only_scalar_shapes_do_not_invent_a_new_width_limit() {
     let package = Package::default();
-    let vm = Interpreter::new(&package, Budget::default()).unwrap();
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     let values = Value::Tuple(vec![Value::Bool(true); 100_001]);
     let ty = Term::Tuple(vec![Term::Primitive(Primitive::Bool); 100_001]);
-    assert!(vm.has_type(&values, &ty));
+    vm.budget.steps = 100_000;
+    assert_eq!(
+        vm.check_value_type(&values, &ty, Some(SOURCE)).unwrap_err(),
+        Error {
+            kind: ErrorKind::StepsExhausted,
+            source: Some(SOURCE)
+        }
+    );
+    assert_eq!(vm.remaining_steps(), 0);
+    vm.budget.steps = 200_000;
+    vm.check_retained_value(&values, &ty, Some(SOURCE)).unwrap();
+    assert_eq!(vm.remaining_steps(), 200_000 - 100_002);
 }
 
 #[test]
@@ -177,11 +188,11 @@ fn passive_nominal_checks_use_the_admitted_dependent_input_for_capabilities() {
             declaration: id(1),
             arguments,
         };
-        let absent = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-        assert!(!absent.has_type(&value, &ty));
-        let vm =
+        let mut absent = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        assert!(absent.check_retained_value(&value, &ty, None).is_err());
+        let mut vm =
             Interpreter::for_comptime_with_assumptions(&package, &[requirement], Budget::default())
                 .unwrap();
-        assert!(vm.has_type(&value, &ty));
+        assert!(vm.check_retained_value(&value, &ty, None).is_ok());
     }
 }

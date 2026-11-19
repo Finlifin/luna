@@ -47,7 +47,7 @@ impl<'a> Interpreter<'a> {
             .and_then(|keys| keys.get(arguments))
         {
             graph.callable_identities[*position].closed_signature()?
-        } else if let Some(signature) = self.iir_template_type(declaration, arguments) {
+        } else if let Some(signature) = self.iir_template_at_key(declaration, arguments) {
             signature
         } else if let Some(position) = self.iir_function_position(declaration, arguments) {
             let function = &graph.functions[position].function.interface;
@@ -61,6 +61,18 @@ impl<'a> Interpreter<'a> {
     }
 
     pub(crate) fn iir_template_type(
+        &self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<Option<&'a Term>, AdmissionError> {
+        for argument in arguments {
+            nir::type_computations::charge_term(argument, fuel)?;
+        }
+        Ok(self.iir_template_at_key(declaration, arguments))
+    }
+
+    fn iir_template_at_key(
         &self,
         declaration: DeclarationId,
         arguments: &[Term],
@@ -90,16 +102,29 @@ impl<'a> Interpreter<'a> {
     pub(crate) fn iir_template_method_type(
         &self,
         identity: &TraitMethodIdentity,
-    ) -> Option<&'a Term> {
-        let (outer, inner) = self.graph_indexes.as_ref()?.dispatch.get(
+        fuel: &mut usize,
+    ) -> Result<Option<&'a Term>, AdmissionError> {
+        for term in identity.terms() {
+            nir::type_computations::charge_term(term, fuel)?;
+        }
+        let Some(graph) = self.graph else {
+            return Ok(None);
+        };
+        let indexes = self
+            .graph_indexes
+            .as_ref()
+            .expect("validated graph indexes");
+        let Some((outer, inner)) = indexes.dispatch.get(
             identity.interface.declaration,
             &identity.interface.arguments,
             &identity.subject,
             identity.member,
             &identity.method_arguments,
-        )?;
-        let method = &self.graph?.dispatch[outer].methods[inner];
-        self.iir_template_type(method.body, &method.arguments)
+        ) else {
+            return Ok(None);
+        };
+        let method = &graph.dispatch[outer].methods[inner];
+        self.iir_template_type(method.body, &method.arguments, fuel)
     }
 }
 
@@ -180,7 +205,7 @@ mod tests {
                 .unwrap(),
             );
         }
-        let vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
+        let mut vm = Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap();
         for local in 0..128 {
             for value in [true, false] {
                 let key = key(local, value);
@@ -188,8 +213,11 @@ mod tests {
                     declaration: key.declaration,
                     arguments: key.arguments.to_vec(),
                 };
-                assert!(vm.has_type(&handle, &signature));
-                assert!(!vm.has_type(&handle, &Term::Primitive(Primitive::Bool)));
+                assert!(vm.check_retained_value(&handle, &signature, None).is_ok());
+                assert!(
+                    vm.check_retained_value(&handle, &Term::Primitive(Primitive::Bool), None)
+                        .is_err()
+                );
                 assert!(
                     vm.iir_function_position(key.declaration, &key.arguments)
                         .is_none()
@@ -197,21 +225,62 @@ mod tests {
             }
         }
         assert!(
-            vm.iir_template_type(key(128, true).declaration, &[Term::Bool(true)])
+            vm.iir_template_type(key(128, true).declaration, &[Term::Bool(true)], &mut 100)
+                .unwrap()
                 .is_none()
         );
         assert!(
-            vm.iir_template_type(key(0, true).declaration, &[])
+            vm.iir_template_type(key(0, true).declaration, &[], &mut 100)
+                .unwrap()
                 .is_none()
         );
+        let mut runtime = Interpreter::from_iir(&graph, Budget::default()).unwrap();
+        let instance = key(0, true);
+        let value = Value::FunctionInstance {
+            declaration: instance.declaration,
+            arguments: instance.arguments.to_vec(),
+        };
+        let source = Some(SourceRange { start: 3, end: 8 });
+        let before = runtime.remaining_steps();
+        runtime
+            .check_value_type(&value, &signature, source)
+            .unwrap();
+        let cost = before - runtime.remaining_steps();
+        assert!(
+            cost > 1,
+            "template lookup and signature comparison must both be charged"
+        );
+        for steps in 0..cost {
+            runtime.budget.steps = steps;
+            assert_eq!(
+                runtime
+                    .check_value_type(&value, &signature, source)
+                    .unwrap_err(),
+                Error {
+                    kind: ErrorKind::StepsExhausted,
+                    source
+                }
+            );
+        }
+        runtime.budget.steps = cost;
+        runtime
+            .check_value_type(&value, &signature, source)
+            .unwrap();
+        assert_eq!(runtime.remaining_steps(), 0);
+        assert!(runtime.events.is_empty());
         let empty = iir::Package::default();
-        let other = Interpreter::from_iir_for_comptime(&empty, Budget::default()).unwrap();
-        assert!(!other.has_type(
-            &Value::FunctionInstance {
-                declaration: key(0, true).declaration,
-                arguments: key(0, true).arguments.to_vec()
-            },
-            &signature
-        ));
+        let mut other = Interpreter::from_iir_for_comptime(&empty, Budget::default()).unwrap();
+        assert!(
+            other
+                .check_retained_value(
+                    &Value::FunctionInstance {
+                        declaration: key(0, true).declaration,
+                        arguments: key(0, true).arguments.to_vec()
+                    },
+                    &signature,
+                    None
+                )
+                .is_err()
+        );
     }
 }

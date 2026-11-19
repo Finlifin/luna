@@ -583,12 +583,10 @@ impl PointerValue {
     pub(crate) fn write(
         &self,
         value: Value,
-        check: impl FnOnce(&Value) -> bool,
+        check: impl FnOnce(&Value) -> Result<(), ErrorKind>,
     ) -> Result<(), ErrorKind> {
         self.with_position(|target, path, arities| {
-            if !check(target) {
-                return Err(ErrorKind::Type);
-            }
+            check(target)?;
             let responsibility = self
                 .responsibility
                 .upgrade()
@@ -798,7 +796,7 @@ mod record_storage_tests {
             assert_eq!(fields[0], Value::Storage(child.clone()));
             child
                 .pointer(boolean(), vec![])
-                .write(Value::Bool(true), |_| true)
+                .write(Value::Bool(true), |_| Ok(()))
                 .unwrap();
             let Value::Storage(alias) = &fields[0] else {
                 panic!()
@@ -864,7 +862,7 @@ mod record_storage_tests {
             vm.observe_pointer_scalar(&pointer).unwrap(),
             Some(Value::Bool(false))
         );
-        pointer.write(Value::Bool(true), |_| true).unwrap();
+        pointer.write(Value::Bool(true), |_| Ok(())).unwrap();
         assert_eq!(
             vm.observe_pointer_scalar(&pointer).unwrap(),
             Some(Value::Bool(true))
@@ -907,7 +905,7 @@ mod record_storage_tests {
         );
         child
             .pointer(boolean(), vec![])
-            .write(Value::Bool(true), |_| true)
+            .write(Value::Bool(true), |_| Ok(()))
             .unwrap();
         let Value::Storage(read_child) = &values[0] else {
             panic!()
@@ -950,7 +948,7 @@ mod record_storage_tests {
             panic!()
         };
         *owner.0.lock().unwrap() = Value::Bool(true);
-        pointer.write(Value::Bool(true), |_| true).unwrap();
+        pointer.write(Value::Bool(true), |_| Ok(())).unwrap();
         assert_eq!(saved[0], Value::Bool(false));
         let Value::Pointer(saved_pointer) = &saved[1] else {
             panic!()
@@ -988,7 +986,7 @@ mod record_storage_tests {
             .checkpoint_owned_graph(&[Value::Storage(owner.clone()), Value::Storage(child.clone())])
             .unwrap();
         assert_eq!(checkpoint.to_string(), "(owned-graph-checkpoint (cells 2))");
-        pointer.write(Value::Bool(true), |_| true).unwrap();
+        pointer.write(Value::Bool(true), |_| Ok(())).unwrap();
         ownership.transfer().unwrap();
         assert!(!ownership.is_constructed().unwrap());
         // Recovery does not need fresh fuel after a failed invocation.
@@ -1015,7 +1013,7 @@ mod record_storage_tests {
             .checkpoint_owned_graph(&[Value::Pointer(pointer.clone())])
             .unwrap();
         assert_eq!(checkpoint.to_string(), "(owned-graph-checkpoint (cells 0))");
-        pointer.write(Value::Bool(true), |_| true).unwrap();
+        pointer.write(Value::Bool(true), |_| Ok(())).unwrap();
         checkpoint.restore().unwrap();
         assert_eq!(foreign.read().unwrap(), Value::Bool(true));
 
@@ -1025,10 +1023,10 @@ mod record_storage_tests {
             .checkpoint_owned_graph(&[Value::Storage(a.clone()), Value::Storage(b.clone())])
             .unwrap();
         a.pointer(boolean(), vec![])
-            .write(Value::Bool(true), |_| true)
+            .write(Value::Bool(true), |_| Ok(()))
             .unwrap();
         b.pointer(boolean(), vec![])
-            .write(Value::Bool(true), |_| true)
+            .write(Value::Bool(true), |_| Ok(()))
             .unwrap();
         let last = checkpoint.entries.last().unwrap().0.clone();
         let guard = last.0.lock().unwrap();
@@ -1080,14 +1078,20 @@ mod record_storage_tests {
         let second = storage.owned_pointer(boolean(), &[1, 0]).unwrap();
         assert_eq!(second.read().unwrap(), Value::Bool(false));
         second
-            .write(Value::Bool(true), |value| matches!(value, Value::Bool(_)))
+            .write(Value::Bool(true), |value| {
+                matches!(value, Value::Bool(_))
+                    .then_some(())
+                    .ok_or(ErrorKind::Type)
+            })
             .unwrap();
         assert_eq!(first.read().unwrap(), Value::Bool(true));
         assert_eq!(second.read().unwrap(), Value::Bool(true));
-        second.write(Value::Unit, |_| true).unwrap();
+        second.write(Value::Unit, |_| Ok(())).unwrap();
         assert_eq!(first.read().unwrap(), Value::Bool(true));
         assert_eq!(
-            second.write(Value::Bool(false), |value| matches!(value, Value::Bool(_))),
+            second.write(Value::Bool(false), |value| matches!(value, Value::Bool(_))
+                .then_some(())
+                .ok_or(ErrorKind::Type)),
             Err(ErrorKind::Type)
         );
         assert_eq!(second.read().unwrap(), Value::Unit);
@@ -1108,13 +1112,13 @@ mod record_storage_tests {
             .unwrap();
         root.write(
             Value::AnonymousRecord(vec![("other".into(), Value::Bool(false))]),
-            |_| true,
+            |_| Ok(()),
         )
         .unwrap();
         assert_eq!(pointer.read(), Err(ErrorKind::InvalidPointer));
         root.write(
             Value::AnonymousRecord(vec![("flag".into(), Value::Bool(false))]),
-            |_| true,
+            |_| Ok(()),
         )
         .unwrap();
         assert_eq!(pointer.read().unwrap(), Value::Bool(false));
@@ -1133,7 +1137,11 @@ mod record_storage_tests {
         )]));
         let pointer = outer.owned_pointer(boolean(), &[0, 0]).unwrap();
         pointer
-            .write(Value::Bool(false), |value| matches!(value, Value::Bool(_)))
+            .write(Value::Bool(false), |value| {
+                matches!(value, Value::Bool(_))
+                    .then_some(())
+                    .ok_or(ErrorKind::Type)
+            })
             .unwrap();
         assert_eq!(
             child.read().unwrap(),
@@ -1164,7 +1172,7 @@ mod responsibility_tests {
         assert!(!owner.is_constructed().unwrap());
         assert_eq!(owner.transfer(), Err(ErrorKind::InvalidCallPlan));
         assert_eq!(owner.release(), Err(ErrorKind::InvalidCallPlan));
-        owner.write(Value::Unit, |_| true).unwrap();
+        owner.write(Value::Unit, |_| Ok(())).unwrap();
         assert!(owner.is_constructed().unwrap());
         owner.release().unwrap();
         assert!(!owner.is_constructed().unwrap());
@@ -1180,7 +1188,7 @@ mod responsibility_tests {
         assert!(first.is_constructed().unwrap());
         assert!(!second.is_constructed().unwrap());
         assert_eq!(parent.transfer(), Err(ErrorKind::InvalidCallPlan));
-        second.write(Value::Unit, |_| true).unwrap();
+        second.write(Value::Unit, |_| Ok(())).unwrap();
         parent.transfer().unwrap();
         assert!(!first.is_constructed().unwrap());
         assert!(!second.is_constructed().unwrap());
@@ -1196,11 +1204,11 @@ mod responsibility_tests {
         let nested = pointer(&storage, &[1]);
         let leaf = pointer(&storage, &[1, 0]);
         parent.transfer().unwrap();
-        leaf.write(Value::Unit, |_| true).unwrap();
+        leaf.write(Value::Unit, |_| Ok(())).unwrap();
         assert!(nested.is_constructed().unwrap());
         assert!(!parent.is_constructed().unwrap());
         assert!(!first.is_constructed().unwrap());
-        first.write(Value::Unit, |_| true).unwrap();
+        first.write(Value::Unit, |_| Ok(())).unwrap();
         assert!(parent.is_constructed().unwrap());
         parent.transfer().unwrap();
     }
@@ -1214,7 +1222,7 @@ mod responsibility_tests {
         local.transfer().unwrap();
         assert!(!through_environment.is_constructed().unwrap());
         assert!(pointer(&fresh, &[]).is_constructed().unwrap());
-        through_environment.write(Value::Unit, |_| true).unwrap();
+        through_environment.write(Value::Unit, |_| Ok(())).unwrap();
         assert!(local.is_constructed().unwrap());
         drop(environment);
         drop(captured);
@@ -1226,7 +1234,7 @@ mod responsibility_tests {
         let leaf = pointer(&storage, &[0]);
         leaf.transfer().unwrap();
         assert_eq!(
-            leaf.write(Value::Bool(false), |_| false),
+            leaf.write(Value::Bool(false), |_| Err(ErrorKind::Type)),
             Err(ErrorKind::Type)
         );
         assert!(!leaf.is_constructed().unwrap());
@@ -1348,7 +1356,7 @@ mod newtype_storage_tests {
                 ty: ty(nir::Primitive::Char),
                 value: Box::new(Value::Char('x')),
             },
-            |_| true,
+            |_| Ok(()),
         )
         .unwrap();
         assert_eq!(payload.read(), Err(ErrorKind::InvalidPointer));
@@ -1373,14 +1381,14 @@ mod error_result_projection_tests {
         assert_eq!(payload.read().unwrap(), Value::Bool(true));
         assert!(payload.to_string().contains("(error-payload"));
         assert!(storage.owned_pointer(boolean.clone(), &[1]).is_err());
-        root.write(packet(ty.clone(), Some(0)), |_| true).unwrap();
+        root.write(packet(ty.clone(), Some(0)), |_| Ok(())).unwrap();
         assert_eq!(payload.read().unwrap_err(), ErrorKind::InvalidPointer);
         let failure = storage.owned_pointer(boolean.clone(), &[0]).unwrap();
         let wider = Term::error_result(
             vec![boolean.clone(), Term::Primitive(nir::Primitive::U8)],
             boolean,
         );
-        root.write(packet(wider, Some(0)), |_| true).unwrap();
+        root.write(packet(wider, Some(0)), |_| Ok(())).unwrap();
         assert_eq!(failure.read().unwrap_err(), ErrorKind::InvalidPointer);
     }
 }
@@ -1408,7 +1416,7 @@ mod optional_projection_tests {
                 ty: ty.clone(),
                 value: None,
             },
-            |_| true,
+            |_| Ok(()),
         )
         .unwrap();
         assert_eq!(payload.read().unwrap_err(), ErrorKind::InvalidPointer);
@@ -1418,7 +1426,7 @@ mod optional_projection_tests {
                 ty: Term::Optional(Box::new(Term::Primitive(nir::Primitive::Char))),
                 value: Some(Box::new(Value::Char('x'))),
             },
-            |_| true,
+            |_| Ok(()),
         )
         .unwrap();
         assert_eq!(payload.read().unwrap_err(), ErrorKind::InvalidPointer);
@@ -1436,7 +1444,7 @@ mod optional_projection_tests {
         };
         let checkpoint = vm.checkpoint_owned_graph(&[root.clone()]).unwrap();
         let pointer = cell.owned_pointer(boolean, &[]).unwrap();
-        pointer.write(Value::Bool(true), |_| true).unwrap();
+        pointer.write(Value::Bool(true), |_| Ok(())).unwrap();
         assert_eq!(cell.read().unwrap(), Value::Bool(true));
         checkpoint.restore().unwrap();
         assert_eq!(cell.read().unwrap(), Value::Bool(false));

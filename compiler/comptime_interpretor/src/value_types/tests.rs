@@ -56,12 +56,26 @@ fn active_value_checks_discharge_local_obligations_without_retaining_assumptions
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
         .with_budgeted_type_solver(&solver);
-    assert!(!vm.has_type(&value, &ty));
+    assert_eq!(
+        vm.check_retained_value(&value, &ty, Some(SOURCE))
+            .unwrap_err(),
+        Error {
+            kind: ErrorKind::TypeContractUnresolved,
+            source: Some(SOURCE)
+        }
+    );
     let before = vm.remaining_steps();
     vm.check_value_type(&value, &ty, Some(SOURCE)).unwrap();
     assert!(vm.remaining_steps() < before - 7);
     assert_eq!(calls.get(), 1);
-    assert!(!vm.has_type(&value, &ty));
+    assert_eq!(
+        vm.check_retained_value(&value, &ty, Some(SOURCE))
+            .unwrap_err(),
+        Error {
+            kind: ErrorKind::TypeContractUnresolved,
+            source: Some(SOURCE)
+        }
+    );
     assert!(vm.assumed_interfaces.is_empty());
     for (result, expected) in [
         (ContractOutcome::Unknown, ErrorKind::TypeContractUnresolved),

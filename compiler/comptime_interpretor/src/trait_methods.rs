@@ -61,7 +61,11 @@ impl Interpreter<'_> {
                 )?
                 .ok_or_else(|| self.failure(ErrorKind::UnmaterializedDispatch, Some(source)))?;
             if !contract.program.preconditions.is_empty()
-                && self.iir_template_method_type(identity).is_none()
+                && self
+                    .query_admission(Some(source), |vm, fuel| {
+                        vm.iir_template_method_type(identity, fuel)
+                    })?
+                    .is_none()
             {
                 return Err(self.failure(ErrorKind::Unsupported, Some(source)));
             }

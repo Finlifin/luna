@@ -312,9 +312,8 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<Value, Error> {
         use std::cmp::Ordering::*;
-        if !self.has_type(&a, scalar.left) || !self.has_type(&b, scalar.right.unwrap()) {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        }
+        self.check_retained_value(&a, scalar.left, Some(source))?;
+        self.check_retained_value(&b, scalar.right.unwrap(), Some(source))?;
         if matches!(a, Value::AbstractValue { .. }) || matches!(b, Value::AbstractValue { .. }) {
             return Err(self.failure(ErrorKind::AbstractValueUnresolved, Some(source)));
         }

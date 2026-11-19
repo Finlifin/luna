@@ -15,9 +15,7 @@ impl Interpreter<'_> {
         Ok(match value {
             Value::BitVec(bits) if bits.width() == width => Value::BitVec(bits),
             value @ Value::Variant { .. } => {
-                if !self.has_type(&value, input) {
-                    return Err(self.failure(ErrorKind::Type, Some(source)));
-                }
+                self.check_retained_value(&value, input, Some(source))?;
                 let Value::Variant {
                     declaration,
                     index,
@@ -28,7 +26,7 @@ impl Interpreter<'_> {
                     unreachable!()
                 };
                 let definition = if self.graph.is_some() {
-                    // has_type may have selected an associated input view. Use
+                    // The value check may have selected an associated input view. Use
                     // the checked value's full concrete identity for lookup.
                     let subject = Term::Nominal {
                         declaration,
@@ -99,10 +97,10 @@ impl Interpreter<'_> {
                     .readable_scalar_width_in(self.target)
                     .map(|w| w as usize)
                     != Some(width)
-                    || !self.has_type(&value, input)
                 {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
+                self.check_retained_value(&value, input, Some(source))?;
                 let raw = match value {
                     Value::SignedInteger(v) => v as u128,
                     Value::UnsignedInteger(v) => v,
