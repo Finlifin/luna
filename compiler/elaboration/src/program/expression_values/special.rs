@@ -317,7 +317,7 @@ impl Checker<'_, '_> {
                 let callee = self.invocation_callee(head)?;
                 if callee.ty.is_normal_form_callable() {
                     return self
-                        .dynamic_normal_form_application(expr, callee, arguments, expected)
+                        .dynamic_normal_form_application(expr, head, callee, arguments, expected)
                         .map(Some);
                 }
                 if self.method_instance_shape(&callee).is_some() {

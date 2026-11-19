@@ -2380,7 +2380,7 @@ impl Checker<'_, '_> {
                 self.ensure_signature(owner, expr.span)?;
                 let parameters = self.normal_parameters[&owner].clone();
                 let clauses = self.type_clause_params(owner);
-                let collector = self.clause_has_collector(owner).then(|| clauses.len() - 1);
+                let collector = self.clause_collector(owner).map(|(slot, _)| slot);
                 let mut routing =
                     clause_inputs::ClauseInputRouting::new(&clauses, arguments, expr.span)?;
                 // Retain source order. The final marker distinguishes a single

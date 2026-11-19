@@ -74,7 +74,7 @@ fn tuple_layout(head: nir::DeclarationId) -> nir::normal_forms::Head {
     nir::normal_forms::Head {
         declaration: head,
         role: nir::normal_forms::Role::Tuple,
-        collector: Some(0),
+        collector: Some(nir::normal_forms::Collector::positional(0)),
         parameters: vec![nir::normal_forms::Parameter {
             declaration: nir::DeclarationId {
                 package: head.package,

@@ -15,24 +15,29 @@ pub(super) struct Interface<'h> {
 }
 
 impl<'h> Interface<'h> {
-    pub(super) fn positional(
+    pub(super) fn callable(
         count: usize,
-        collector: Option<usize>,
+        collector: Option<&nir::normal_forms::Collector>,
         span: Span,
     ) -> Result<Self, Error> {
-        if collector.is_some_and(|slot| slot.checked_add(1) != Some(count)) {
+        if collector.is_some_and(|entry| entry.slot.checked_add(1) != Some(count)) {
             return Err(error(
                 span,
                 "normal-form callable collector must be the final input",
             ));
         }
-        let entries = (0..count)
-            .map(|slot| input_routing::Entry {
-                variadic: collector == Some(slot),
+        let mut entries = vec![
+            input_routing::Entry {
                 post_target: false,
                 ..input_routing::Entry::anchored()
-            })
-            .collect();
+            };
+            count
+        ];
+        if let Some(collector) = collector {
+            let entry = &mut entries[collector.slot];
+            entry.variadic = true;
+            entry.name = collector.name.as_deref().map(hir::Symbol::intern);
+        }
         Ok(Self {
             entries,
             defaults: vec![None; count],
@@ -107,15 +112,30 @@ mod tests {
     #[test]
     fn positional_projection_has_no_invented_names_or_default_providers() {
         let span = Span::default();
-        let interface = Interface::positional(2, Some(1), span).unwrap();
+        let interface =
+            Interface::callable(2, Some(&nir::normal_forms::Collector::positional(1)), span)
+                .unwrap();
         assert!(interface.entries().iter().all(|entry| entry.name.is_none()));
         assert!(interface.default(0).is_none());
         assert!(interface.default(1).is_none());
         assert!(!interface.is_collector(0));
         assert!(interface.is_collector(1));
-        assert!(Interface::positional(2, Some(0), span).is_err());
-        assert!(Interface::positional(0, Some(0), span).is_err());
-        assert!(Interface::positional(2, Some(usize::MAX), span).is_err());
+        assert!(
+            Interface::callable(2, Some(&nir::normal_forms::Collector::positional(0)), span)
+                .is_err()
+        );
+        assert!(
+            Interface::callable(0, Some(&nir::normal_forms::Collector::positional(0)), span)
+                .is_err()
+        );
+        assert!(
+            Interface::callable(
+                2,
+                Some(&nir::normal_forms::Collector::positional(usize::MAX)),
+                span
+            )
+            .is_err()
+        );
         assert_eq!(
             interface.to_string(),
             "(input-interface-projection (slot 0 (name) (optional false) (collector false)) (slot 1 (name) (optional false) (collector true)))"

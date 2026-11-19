@@ -1,27 +1,29 @@
 //! Function-value NF inputs use the same slot, packet and collection preparation
-//! as declarations. The current callable type exposes only positional entries.
+//! as declarations. The receiving source interface controls named supplies.
 use super::*;
 
 impl Checker<'_, '_> {
     pub(in crate::program) fn dynamic_normal_form_application(
         &mut self,
         expr: &Expr<'_>,
+        head: &Expr<'_>,
         callee: n::Expr,
         inputs: &[Arg<'_>],
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
         if self.protocols.splice.is_some() && self.runtime_value_context() {
             let value = self.with_staged_input(true, |this| {
-                this.prepare_dynamic_normal_inputs(expr, callee, inputs, None)
+                this.prepare_dynamic_normal_inputs(expr, head, callee, inputs, None)
             })?;
             return self.deliver_comptime_result(expr, value, expected);
         }
-        self.prepare_dynamic_normal_inputs(expr, callee, inputs, expected)
+        self.prepare_dynamic_normal_inputs(expr, head, callee, inputs, expected)
     }
 
     fn prepare_dynamic_normal_inputs(
         &mut self,
         expr: &Expr<'_>,
+        head: &Expr<'_>,
         callee: n::Expr,
         inputs: &[Arg<'_>],
         expected: Option<&Term>,
@@ -51,7 +53,9 @@ impl Checker<'_, '_> {
             nir::normal_forms::open_inputs(&callee.ty, &ids, fuel)
         })
         .map_err(|failure| error(expr.span, failure.to_string()))?;
-        let inputs = self.planned_positional_inputs(inputs, expr.span, parameters, *collector)?;
+        let collector = self.value_collector(head, *collector, expr.span)?;
+        let inputs =
+            self.planned_callable_inputs(inputs, expr.span, parameters, collector.as_ref())?;
         let ty = if inputs.diverges() {
             p(P::Never)
         } else {

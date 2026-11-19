@@ -309,7 +309,7 @@ mod tests {
         };
         validate_opaque_metadata(&package, &mut exact).unwrap();
         assert_eq!(exact.steps, 0);
-        package.normal_forms[0].collector = Some(0);
+        package.normal_forms[0].collector = Some(nir::normal_forms::Collector::positional(0));
         assert_eq!(
             validate_opaque_metadata(&package, &mut generous)
                 .unwrap_err()

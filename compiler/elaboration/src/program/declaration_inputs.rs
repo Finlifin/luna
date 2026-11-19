@@ -243,14 +243,14 @@ impl Checker<'_, '_> {
 }
 
 impl Checker<'_, '_> {
-    pub(super) fn planned_positional_inputs(
+    pub(super) fn planned_callable_inputs(
         &mut self,
         inputs: &[Arg<'_>],
         span: Span,
         parameters: Vec<(DeclarationId, Sort, Term)>,
-        collector: Option<usize>,
+        collector: Option<&nir::normal_forms::Collector>,
     ) -> Result<PreparedDeclarationInputs, Error> {
-        let preparation = preparation::Frame::positional(
+        let preparation = preparation::Frame::callable(
             self,
             inputs,
             span,

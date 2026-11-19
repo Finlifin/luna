@@ -1,6 +1,6 @@
 {-
-    Expected: the public builtin binding follows the same complete-input rule
-    as user-defined NF callables. This remains a known failing source repro.
+    The public builtin binding follows the same complete-input rule as
+    user-defined normal-form callables.
 -}
 comptime fn Apply(factory: pure comptime fn<...Es: meta.List<Type>> -> Type) -> Type {
     let elements: meta.List<Type> = [bool, u8];

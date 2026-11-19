@@ -31,7 +31,7 @@ fn tuple_head() -> Head {
     Head {
         declaration: id(9),
         role: nir::normal_forms::Role::Tuple,
-        collector: Some(0),
+        collector: Some(nir::normal_forms::Collector::positional(0)),
         requirements: vec![],
         parameters: vec![parameter(
             10,
@@ -99,7 +99,7 @@ fn value(name: &str, value: Term) -> Term {
 #[test]
 fn callable_metadata_abstracts_dependent_domains_and_checks_collectors() {
     let mut descriptor = Head {
-        collector: Some(1),
+        collector: Some(nir::normal_forms::Collector::named(1, "Items")),
         role: nir::normal_forms::Role::Opaque,
         declaration: id(0),
         parameters: vec![
@@ -132,9 +132,13 @@ fn callable_metadata_abstracts_dependent_domains_and_checks_collectors() {
             Some(0)
         )
     );
-    assert!(descriptor.to_string().contains("(collector 1)"));
+    assert!(
+        descriptor
+            .to_string()
+            .contains(r#"(collector (slot 1 (name "Items")))"#)
+    );
     for invalid in [0, 2, usize::MAX] {
-        descriptor.collector = Some(invalid);
+        descriptor.collector = Some(nir::normal_forms::Collector::positional(invalid));
         assert!(descriptor.callable_type().is_err());
     }
     descriptor.collector = None;
@@ -1393,7 +1397,7 @@ fn registered_layout_views_read_typed_list_payloads_without_unfolding_heads() {
     let tuple = Head {
         declaration: id(80),
         role: Role::Tuple,
-        collector: Some(0),
+        collector: Some(nir::normal_forms::Collector::positional(0)),
         parameters: vec![parameter(81, Kind::Value, domain.clone())],
         requirements: vec![],
     };

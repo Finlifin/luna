@@ -1880,7 +1880,7 @@ mod tuple_layout_tests {
         let head = Head {
             declaration: id(2),
             role: Role::Tuple,
-            collector: Some(0),
+            collector: Some(nir::normal_forms::Collector::positional(0)),
             requirements: vec![],
             parameters: vec![Parameter {
                 declaration: id(3),

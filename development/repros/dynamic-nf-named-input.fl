@@ -1,7 +1,6 @@
 {-
-    Expected: accept the complete collector value through the callable's
-    declared Items entry. Current dynamic NF routing rejects named inputs.
-    No tuple head or builtin spelling is involved in this constructor.
+    The declared Items entry accepts a complete collection. The user-defined
+    constructor retains its opaque identity.
 -}
 pure comptime fn Bundle<...Items: meta.List<Type>> -> Type { bool }
 

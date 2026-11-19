@@ -7,34 +7,10 @@ mod dynamic_inputs;
 pub(super) mod known_patterns;
 pub(super) mod known_scalars;
 pub(super) mod observation;
+mod supply;
 mod values;
 
-/// A statically selected NF application may expose a different supply interface
-/// from the declaration whose opaque identity and formation contract it uses.
-#[derive(Clone, Copy)]
-pub(super) struct Application {
-    pub(super) head: OwnerId,
-    pub(super) interface: OwnerId,
-}
-
-impl Application {
-    fn direct(head: OwnerId) -> Self {
-        Self {
-            head,
-            interface: head,
-        }
-    }
-}
-
-impl std::fmt::Display for Application {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "(normal-application (head {}) (interface {}))",
-            self.head, self.interface
-        )
-    }
-}
+pub(super) use supply::{Application, Supply};
 
 /// Expand syntax before assigning dependent contexts. Evaluating a literal
 /// tuple first would default its numeric fields independently of preceding
@@ -89,7 +65,7 @@ impl Checker<'_, '_> {
             .get(&owner)
             .ok_or_else(|| error(span, "bound Tuple declaration is not a normal-form head"))?;
         if parameters.len() != 1
-            || !self.clause_has_collector(owner)
+            || self.clause_collector(owner).is_none()
             || !self.is_type_list_type(&parameters[0].2)
         {
             return Err(error(
@@ -378,8 +354,8 @@ impl Checker<'_, '_> {
         let parameters = self.normal_parameters.get(&owner)?;
         Some(nir::normal_forms::Head {
             collector: self
-                .clause_has_collector(owner)
-                .then(|| parameters.len() - 1),
+                .clause_collector(owner)
+                .map(|(slot, name)| nir::normal_forms::Collector::named(slot, name.as_str())),
             role: if Some(declaration(self.package, &self.package_identities, owner))
                 == self.protocols.tuple
             {
@@ -458,7 +434,7 @@ impl Checker<'_, '_> {
             .normal_parameters
             .get(&owner)
             .ok_or_else(|| error(span, "normal-form callable is missing declaration metadata"))?;
-        let collector = self.clause_has_collector(owner).then(|| inputs.len() - 1);
+        let collector = self.clause_collector(owner).map(|(slot, _)| slot);
         let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let mut fuel = before;
         let signature = nir::normal_forms::callable_type_from_declarations(
@@ -485,17 +461,20 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         span: Span,
     ) -> Result<Option<Application>, Error> {
-        let annotation = match self.package.item(owner).map(|item| &item.kind) {
+        match self.package.item(owner).map(|item| &item.kind) {
             Some(ItemKind::Fn(signature, _)) if signature.modifiers.is_normal_form_head => {
-                return Ok(Some(Application::direct(owner)));
+                return Ok(Some(Application {
+                    head: owner,
+                    interface: Supply::Declaration(owner),
+                }));
             }
-            Some(ItemKind::Const(annotation, _)) => annotation,
+            Some(ItemKind::Const(..)) => {}
             _ => return Ok(None),
-        };
-        let value = self.constant_value(owner, span)?;
-        if !value.ty.is_normal_form_callable() {
-            return Ok(None);
         }
+        let value = self.constant_value(owner, span)?;
+        let Term::NormalFormFunction(_, slot) = &value.ty else {
+            return Ok(None);
+        };
         let K::Function(identity) = value.kind else {
             return Err(error(
                 span,
@@ -506,15 +485,7 @@ impl Checker<'_, '_> {
             .source_declarations
             .owner(identity)
             .ok_or_else(|| error(span, "normal-form callable declaration is unavailable"))?;
-        // A written telescope supplies the public slots even when the
-        // initializer selects another function. Computed callable types still
-        // lack a published supply protocol; their existing declaration view
-        // must be retired together with the corresponding dynamic path.
-        let interface = if function_types::normal_form_inputs(annotation).is_some() {
-            owner
-        } else {
-            implementation
-        };
+        let interface = self.constant_normal_supply(owner, *slot, span)?;
         Ok(Some(Application {
             head: implementation,
             interface,
@@ -532,13 +503,14 @@ impl Checker<'_, '_> {
     ) -> Result<CompletedType, Error> {
         // Input producers belong to comptime here. Runtime Splice must not
         // intercept packet formation while checking a type annotation.
+        let head = application.head;
         let checked = self.with_staged_input(true, |this| {
             this.normal_type_expression(expr, application, inputs, Some(&p(P::Type)))
         })?;
         if let Some(ty) = self.checked_normal_input_in(&checked, &BTreeMap::new(), expr.span)?
             && let Term::NormalForm { arguments, .. } = &ty
         {
-            self.check_type_application(application.head, arguments, expr.span)?;
+            self.check_type_application(head, arguments, expr.span)?;
             return Ok(CompletedType::Identity(ty));
         }
         // The input plan owns its lexical prefix. Its fields may be gradual

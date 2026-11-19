@@ -567,7 +567,7 @@ mod tests {
         let metadata = Head {
             declaration: decl(2),
             role: Role::Tuple,
-            collector: Some(0),
+            collector: Some(nir::normal_forms::Collector::positional(0)),
             requirements: vec![],
             parameters: vec![Parameter {
                 declaration: decl(3),

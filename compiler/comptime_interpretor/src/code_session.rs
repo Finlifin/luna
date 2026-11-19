@@ -466,7 +466,7 @@ mod tests {
             ErrorKind::StepsExhausted
         );
         let mut changed = copied;
-        changed.normal_forms[0].collector = Some(0);
+        changed.normal_forms[0].collector = Some(nir::normal_forms::Collector::positional(0));
         assert!(matches!(
             Interpreter::for_comptime_with_index(
                 &changed,

@@ -216,7 +216,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         expected: Option<&Term>,
         allow_optional: bool,
     ) -> Result<Option<n::Expr>, Error> {
-        if !self.clause_has_collector(owner) || self.in_code_body {
+        if self.clause_collector(owner).is_none() || self.in_code_body {
             return Ok(None);
         }
         let inputs = self.required_callable_clause_arguments(expr, owner, args, prefix)?;
@@ -474,7 +474,7 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         args: &[Arg<'_>],
     ) -> Result<Vec<Term>, Error> {
         let prefix = self.lexical_function_arguments(owner, expr.span)?;
-        if self.clause_has_collector(owner) {
+        if self.clause_collector(owner).is_some() {
             self.required_callable_clause_arguments(expr, owner, args, &prefix)
         } else {
             self.type_clause_arguments_with_prefix(owner, args, None, expr.span, prefix)

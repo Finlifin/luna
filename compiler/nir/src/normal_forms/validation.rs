@@ -90,7 +90,8 @@ pub fn validate_in(package: &Package, fuel: &mut usize) -> Result<(), Validation
         }
         if head
             .collector
-            .is_some_and(|index| index.checked_add(1) != Some(head.parameters.len()))
+            .as_ref()
+            .is_some_and(|entry| entry.slot.checked_add(1) != Some(head.parameters.len()))
         {
             return Err(Invalid("normal-form collector must be the final input"));
         }

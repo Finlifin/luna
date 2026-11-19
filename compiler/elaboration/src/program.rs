@@ -3696,7 +3696,7 @@ impl Checker<'_, '_> {
                     context.admit_list_inference_head(head);
                 }
                 if Some(head) == self.protocols.tuple
-                    && self.clause_has_collector(*owner)
+                    && self.clause_collector(*owner).is_some()
                     && self.normal_parameters[owner].len() == 1
                     && self.is_type_list_type(&self.normal_parameters[owner][0].2)
                 {

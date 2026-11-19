@@ -378,7 +378,7 @@ fn tuple_representation_requires_its_exact_registered_collection_domain() {
     let tuple_head = Head {
         declaration: id(30),
         role: Role::Tuple,
-        collector: Some(0),
+        collector: Some(nir::normal_forms::Collector::positional(0)),
         requirements: vec![],
         parameters: vec![Parameter {
             declaration: id(31),

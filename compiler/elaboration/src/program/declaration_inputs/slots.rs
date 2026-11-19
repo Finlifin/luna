@@ -543,7 +543,7 @@ mod tests {
         .unwrap();
         let mut frame = Frame::new(
             span,
-            interface::Interface::positional(1, None, span).unwrap(),
+            interface::Interface::callable(1, None, span).unwrap(),
             None,
             InputChecking::Typed,
             vec![None],

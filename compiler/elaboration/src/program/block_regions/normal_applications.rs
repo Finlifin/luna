@@ -4,7 +4,7 @@ use super::*;
 use declaration_inputs::{Completion, InputChecking, PreparedDeclarationInputs, preparation};
 
 pub(super) struct Complete {
-    application: normal::Application,
+    head: OwnerId,
     destination: Destination,
     preserve_effect: Option<bool>,
 }
@@ -26,7 +26,7 @@ impl Completion for Complete {
             p(P::Type)
         };
         checker.check_formation_application(
-            self.application.head,
+            self.head,
             inputs.observations.into_formation(),
             span,
         )?;
@@ -37,11 +37,7 @@ impl Completion for Complete {
             source: source(span),
             ty,
             kind: K::NormalFormType {
-                head: declaration(
-                    checker.package,
-                    &checker.package_identities,
-                    self.application.head,
-                ),
+                head: declaration(checker.package, &checker.package_identities, self.head),
                 arguments: inputs.arguments,
                 plan: Some(inputs.plan),
             },
@@ -58,8 +54,8 @@ impl std::fmt::Display for Complete {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(normal-application-completion {} {} (effect-delivery {}))",
-            self.application,
+            "(normal-application-completion (head {}) {} (effect-delivery {}))",
+            self.head,
             self.destination,
             match self.preserve_effect {
                 None => "caller",
@@ -103,20 +99,30 @@ impl<'h> Frame<'h> {
             })
             .collect::<Result<Vec<_>, Error>>()?;
         let completion = Complete {
-            application,
+            head: owner,
             destination,
             preserve_effect: own_effect_delivery
                 .then(|| std::mem::take(&mut checker.preserve_effect_value)),
         };
-        preparation::Frame::begin(
-            checker,
-            application.interface,
-            inputs,
-            span,
-            parameters,
-            declaration_inputs::KnownInputs::default(),
-            None,
-            completion,
-        )
+        match application.interface {
+            normal::Supply::Declaration(owner) => preparation::Frame::begin(
+                checker,
+                owner,
+                inputs,
+                span,
+                parameters,
+                declaration_inputs::KnownInputs::default(),
+                None,
+                completion,
+            ),
+            normal::Supply::Callable { collector } => preparation::Frame::callable(
+                checker,
+                inputs,
+                span,
+                parameters,
+                collector.as_ref(),
+                completion,
+            ),
+        }
     }
 }

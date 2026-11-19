@@ -5,15 +5,18 @@ mod sysroot;
 use comptime_interpretor::{Event, Value};
 
 fn check_both(source: &str, calls: &[&str]) {
-    let package = sysroot::compile(source).unwrap();
+    check_entry(&sysroot::compile(source).unwrap(), "check", calls);
+}
+
+fn check_entry(package: &nir::program::Package, name: &str, calls: &[&str]) {
     let entry = package
         .functions
         .iter()
-        .find(|f| f.name == "check")
+        .find(|f| f.name == name)
         .unwrap()
         .declaration;
     for tree in [false, true] {
-        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+        sysroot::with_comptime(package, sysroot::COMPTIME_BUDGET, tree, |vm| {
             assert_eq!(
                 vm.invoke(entry, vec![]).unwrap(),
                 Value::Bool(true),
@@ -580,4 +583,81 @@ fn ascribed_normal_form_constants_use_public_slots_and_implementation_contracts(
             assert!(failure.contains(diagnostic), "{application}: {failure}");
         }
     }
+}
+
+#[test]
+fn ascription_survives_type_aliases_reexports_and_declared_call_results() {
+    let declarations = r#"
+        pure comptime fn Head<T, ...Actual: meta.List<T>> -> Type { T }
+        typealias Factory = pure comptime fn<T: Type, ...Public: meta.List<T>> -> Type;
+        typealias Alias = Factory;
+        const First: Alias = Head;
+        const Second = First;
+        comptime fn factory() -> Factory { Head }
+        const Selected = factory();
+        pure comptime fn Defaulted<.hidden: Type = u8> -> Type { bool }
+        typealias Required = pure comptime fn<Type> -> Type;
+        const Fixed: Required = Defaulted;
+    "#;
+    let accepted = format!(
+        r#"{declarations}
+        typealias Result = First<bool, .Public = [true]>;
+        comptime fn check() -> bool {{
+            Second<bool, .Public = [true]> == Result
+                and Selected<bool, .Public = [true]> == Head<bool, true>
+                and Fixed<bool> == Defaulted<.hidden = bool>
+        }}
+    "#
+    );
+    check_both(&accepted, &["check"]);
+    for application in [
+        "Second<bool, .Actual = [true]>",
+        "Selected<bool, .Actual = [true]>",
+        "Fixed<.hidden = bool>",
+        "Fixed<>",
+    ] {
+        let invalid = format!("{declarations} typealias Bad = {application};");
+        let failure = sysroot::compile(&invalid).unwrap_err();
+        assert!(
+            failure.contains("unknown named normal-form argument")
+                || failure.contains("argument count mismatch"),
+            "{application}: {failure}"
+        );
+    }
+}
+
+#[test]
+fn higher_order_normal_heads_use_the_receiving_collector_name() {
+    let source = include_str!("../../../development/repros/dynamic-nf-interface-forwarding.fl");
+    let package = sysroot::compile(source).unwrap();
+    check_entry(
+        &package,
+        "verify",
+        &[
+            "verify", "select", "forward", "Apply", "select", "forward", "Apply",
+        ],
+    );
+    let names: Vec<_> = package
+        .normal_forms
+        .iter()
+        .filter_map(|head| head.collector.as_ref())
+        .filter(|entry| entry.slot == 0)
+        .filter_map(|entry| entry.name.as_deref())
+        .collect();
+    for required in ["Left", "Right", "Es"] {
+        assert!(
+            names.contains(&required),
+            "missing published collector {required}: {names:?}"
+        );
+    }
+    for label in ["Left", "Right"] {
+        let invalid = source.replace("factory<.Items", &format!("factory<.{label}"));
+        let error = sysroot::compile(&invalid).unwrap_err();
+        assert!(
+            error.contains("unknown named normal-form argument"),
+            "{error}"
+        );
+    }
+    let builtin = include_str!("../../../development/repros/dynamic-nf-builtin-input.fl");
+    assert_eq!(sysroot::run(builtin), Value::Bool(true));
 }

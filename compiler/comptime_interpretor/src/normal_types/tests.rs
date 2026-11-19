@@ -475,7 +475,7 @@ fn container_package() -> Package {
             },
             Head {
                 declaration: id(6),
-                collector: Some(0),
+                collector: Some(nir::normal_forms::Collector::positional(0)),
                 role: Role::Tuple,
                 requirements: vec![],
                 parameters: vec![param(

@@ -139,10 +139,41 @@ impl fmt::Display for Role {
         })
     }
 }
+/// The slot accepts positional collection; a published name also admits a
+/// complete value at that slot. Anonymous interfaces promise only collection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Collector {
+    pub slot: usize,
+    pub name: Option<std::sync::Arc<str>>,
+}
+
+impl Collector {
+    pub fn named(slot: usize, name: &str) -> Self {
+        Self {
+            slot,
+            name: Some(name.into()),
+        }
+    }
+
+    pub fn positional(slot: usize) -> Self {
+        Self { slot, name: None }
+    }
+}
+
+impl fmt::Display for Collector {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(slot {}", self.slot)?;
+        if let Some(name) = &self.name {
+            write!(f, " (name {name:?})")?;
+        }
+        f.write_str(")")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Head {
     /// Position collected at the source call boundary, independent of domain.
-    pub collector: Option<usize>,
+    pub collector: Option<Collector>,
     /// Trusted language-item contract, independent of the definition body.
     pub role: Role,
     pub declaration: DeclarationId,
@@ -177,7 +208,7 @@ impl fmt::Display for Head {
             write!(f, " {parameter}")?;
         }
         f.write_str(") (collector ")?;
-        match self.collector {
+        match &self.collector {
             Some(index) => write!(f, "{index}")?,
             None => f.write_str("none")?,
         }
@@ -556,7 +587,7 @@ impl Head {
                     &input.ty,
                 )
             }),
-            self.collector,
+            self.collector.as_ref().map(|entry| entry.slot),
             fuel,
         )
     }

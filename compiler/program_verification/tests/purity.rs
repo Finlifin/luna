@@ -179,7 +179,7 @@ fn stable_defaults_discard_tuple_values_using_registered_collector_layout() {
     let head = Head {
         declaration: id(1),
         role: Role::Tuple,
-        collector: Some(0),
+        collector: Some(nir::normal_forms::Collector::positional(0)),
         parameters: vec![Parameter {
             declaration: id(2),
             binding: LocalId { owner: 1, index: 0 },

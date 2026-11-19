@@ -54,16 +54,16 @@ impl<'h, C: Completion> Frame<'h, C> {
         )
     }
 
-    pub(super) fn positional(
+    pub(in crate::program) fn callable(
         checker: &mut Checker<'_, '_>,
         inputs: &[Arg<'h>],
         span: Span,
         parameters: Vec<(DeclarationId, Sort, Term)>,
-        collector: Option<usize>,
+        collector: Option<&nir::normal_forms::Collector>,
         completion: C,
     ) -> Result<Self, Error> {
         environment::charge(&mut checker.required_steps, parameters.len(), span)?;
-        let interface = interface::Interface::positional(parameters.len(), collector, span)?;
+        let interface = interface::Interface::callable(parameters.len(), collector, span)?;
         Self::new(
             checker,
             inputs,

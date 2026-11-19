@@ -221,7 +221,7 @@ fn check(
     let tuple = tuple.map(|declaration| nir::normal_forms::Head {
         declaration,
         role: nir::normal_forms::Role::Tuple,
-        collector: Some(0),
+        collector: Some(nir::normal_forms::Collector::positional(0)),
         parameters: vec![nir::normal_forms::Parameter {
             declaration: id(7),
             binding: nir::program::LocalId {
@@ -742,7 +742,7 @@ fn ordinary_tuple_payloads_use_declared_layout_in_baseline_and_candidate_worlds(
     let head = Head {
         declaration: id(5),
         role: Role::Tuple,
-        collector: Some(0),
+        collector: Some(nir::normal_forms::Collector::positional(0)),
         parameters: vec![Parameter {
             declaration: id(7),
             binding: nir::program::LocalId { owner: 5, index: 0 },

@@ -55,7 +55,7 @@ python3 -B development/check.py --timeout 900 -- test -p luna --test type_input_
 
 ## 公开接口与值传送
 
-动态 NF 的位置输入已经进入声明输入计划。具名供应 `F<.Es = Es>` 仍需要目标函数类型承载公开名；完整列表本身就是一个普通 comptime 值。按槽位适配的实现可以将该槽声明为 `Items`，调用点仍按目标接口使用 `Es`，默认供应也由目标接口决定。更名、前向转交与缺省值的证据须随接口传送。通过名字识别 Tuple 或把列表改为特殊 NF 参数均不能交付这个协议。[接口设计](callable-input-interfaces.md) · [动态入口复现](repros/dynamic-nf-interface-forwarding.fl)
+动态 NF 的具名完整供应已从形参的公开接口进入同一声明输入计划。经选择与转发后，实际头可把该槽声明为 `Left` 或 `Right`，调用者仍使用目标接口的 `Items`。完整列表是一个普通 comptime 值。NIR 头记录声明的收集名，独立 callable Type 的 metadata 仍缺少接口传送。[接口设计](callable-input-interfaces.md) · [转发示例](repros/dynamic-nf-interface-forwarding.fl)
 
 NF 保留头身份。具体 Type 描述能为消费者提供参数域或结构观察，不能令不透明头与函数体返回类型相等。值的准入还须核对接收世界。恒等交付一个已授权的抽象错误结果时，可以保留原值；需要重映射错误标签时才观察具体分支。comptime 值引用的存储同样由当前会话所有；runtime 指针的存在不能用来推导 comptime 的取址能力。[值与发布](values-staging-and-publication.md) · [值准入](comptime-value-admission.md)
 

@@ -184,13 +184,15 @@ impl std::fmt::Display for ClauseCollection {
 }
 
 impl Checker<'_, '_> {
-    pub(super) fn clause_has_collector(&self, owner: OwnerId) -> bool {
-        self.type_clause_params(owner)
-            .last()
-            .is_some_and(|parameter| {
-                matches!(parameter.kind, hir::clause::ClauseParamKind::Varadic(..))
-            })
+    pub(super) fn clause_collector(&self, owner: OwnerId) -> Option<(usize, hir::Symbol)> {
+        let clauses = self.type_clause_params(owner);
+        let (last, prefix) = clauses.split_last()?;
+        match last.kind {
+            hir::clause::ClauseParamKind::Varadic(name, _) => Some((prefix.len(), name.name)),
+            _ => None,
+        }
     }
+
     /// Assemble already checked inputs without moving their producers. Both
     /// ordinary clause packets and opaque head plans use this expression.
     pub(super) fn clause_collection_expression(
