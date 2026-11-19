@@ -181,7 +181,7 @@ Waiting 与 Unresolved 不混用。没有就绪任务时，先区分外部请求
 | `block_regions/ordinary_calls.rs` 与 `dependent_inputs/tasks.rs` | 直接显式 comptime 实例的子句检查向同一区域交付 callee。区域持有普通实参的原始 HIR，按已形成的签名完成路由、依赖观察、默认供应和 NIR 调用 | 运行中的 VM 尚不能把签名依赖的 Type 交还给此区域。一般成员选择和需要推断的候选仍由相应检查器驱动 |
 | `elaboration/src/program/declaration_inputs/progress.rs` | producer、身份、检查次序与源码 schedule 分开 | Typed 路径仍要求普通完整 Expr，Contextual 仍保留 NormalFormArgument |
 | `elaboration/src/program/dynamic_instances.rs` | callable packet 保留实际 producer、静态身份与 pending 集合 | 签名仍提及 pending 参数时直接拒绝发布 |
-| `elaboration/src/program/function_bodies.rs` | 最终函数与 required 依赖共用主体检查 | 必须检查出完整 body 才能构造 NIR Function |
+| `elaboration/src/program/declaration_scope.rs`、`function_bodies.rs` | 签名、契约、默认值和主体在声明自己的作用域检查；开放定义可单独导入契约接口 | VM 的可执行目录仍要求完整的 comptime 函数 |
 | `elaboration/src/program/required.rs`、`required/prepared.rs` | 完整根、输入准入、冻结声明世界和代码缓存所有权 | build 必须返回完整 Expr；没有源区域的增量根 |
 | `comptime_interpretor/src/invocation/{host,session}.rs` | 同次 activation、契约进度、方法／关联／定义宿主请求 | 没有取得下一段受检源码的生产入口；Fragment 根仅供测试 |
 | `comptime_interpretor/src/bytecode/bindings.rs` | 帧持有导入／导出绑定，完整验证后移动交付 | 不提供源作用域、外部控制出口或任意切点许可 |
@@ -558,17 +558,26 @@ NIR Function 继续代表已检查产物；不能给 body 塞占位表达式或�
 旧字段投影通过 Deref 借用同一份声明；需要拆开可变借用或转移字段所有权的消费者
 显式访问 interface，不通过额外 clone 规避所有权边界。
 
-`check_source_function` 在检查主体之前组装受检声明，主体成功后才交付完整 Function；
-失败仍恢复 Type 输入事实与 quote 检查状态，不把声明塞入执行函数表。VM 的
-`invocation_declaration` 以及程序／类型契约的替换、能力检查只接收 FunctionDeclaration，
+包发射、required 函数和开放定义的契约导入都通过 `bind_source_declaration` 建立
+参数与程序契约。契约导入取得 `FunctionDeclaration` 后即可返回。包发射另附声明的
+默认表达式；required 调用按其调用计划取得本次选中的默认值。后两条路径都在主体
+通过后才产生 `Function`。
+
+签名、契约和默认值可以在检查另一个表达式时首次被索取。每个查询安装声明自己的
+词法作用域，按需重建参数前缀与 PTC 前提，返回时恢复调用者的局部绑定、返回目标、
+效应环境和表达式结果上下文。例如 `AnswerType()` 在 comptime 观察
+`choose(false)'type` 时，可以首次触发 `choose` 的默认参数检查。若该参数声明为
+`fn(bool) -> bool`，其默认 lambda 就按 runtime 检查；回到 `AnswerType` 后继续
+原先的 comptime 计算。[作用域回归](../compiler/luna/tests/required_input_scopes.rs)
+
+VM 的 `invocation_declaration` 以及程序／类型契约的替换、能力检查只接收 `FunctionDeclaration`，
 主体在执行器推进 NeedBody 时取得。required 收集生成的 runtime 函数身份时只复制所需声明字段，
 需要执行的依赖仍保留完整代码。独立声明和完整函数的 S-expression dump 都包含声明
 来源；完整函数还显示主体和表达式各自的来源。
 
-这是已有受检产物的所有权拆分，尚非完整公开供应接口。公开参数名／默认提供者的
-跨值传送、源码模板的独立发布、未完成主体请求及原区域 Type 响应仍待接通；
-当前 Package 与 VM 注册表仍只收录完整函数。不能因为声明类型不含 body 就宣称
-未调用定义可跳过检查，或已经能在等待 Type 时恢复同一次 invocation。
+公开参数名与默认提供者的跨值传送、源码模板的独立发布，以及原区域的 Type 响应仍待接通。
+当前 required 世界为每个可执行的 comptime 函数依赖保留完整受检主体；
+未调用定义仍接受定义端检查。
 
 普通输入帧的结构准入现在使用
 `CallableProgram::validate_input_frame`，直接接收声明视图：检查 callable telescope、

@@ -1769,7 +1769,7 @@ impl Checker<'_, '_> {
                 "cyclic or excessively deep ordinary open-definition dependency",
             ));
         }
-        let checked = self.in_function_scope(owner, None, |this| {
+        let checked = self.in_open_function_scope(owner, None, |this| {
             let item = this.package.item(owner).unwrap();
             let (sig, body) = match &item.kind {
                 ItemKind::Fn(sig, body) => (sig, Some(*body)),
@@ -5602,7 +5602,7 @@ impl Checker<'_, '_> {
             symbols[slot] = Some(self.normal_value_argument(&route.expression(call), &domain)?);
             return Ok(());
         }
-        let term = self.in_function_scope(owner, None, |this| {
+        let term = self.in_open_function_scope(owner, None, |this| {
             let ItemKind::Fn(sig, _) = &this.package.item(owner).unwrap().kind else {
                 unreachable!()
             };
@@ -7354,7 +7354,7 @@ impl Checker<'_, '_> {
             },
         );
         self.open_instantiation_depth += 1;
-        let body = self.in_function_scope(owner, Some(Arc::clone(&instance)), |this| {
+        let body = self.in_open_function_scope(owner, Some(Arc::clone(&instance)), |this| {
             let signature = &instance.signature;
             let item = this.package.item(owner).unwrap();
             let ItemKind::Fn(sig, body) = &item.kind else {

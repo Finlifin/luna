@@ -99,97 +99,23 @@ impl Checker<'_, '_> {
                 "cyclic or excessively deep function default dependency",
             ));
         }
-        let saved_stage = std::mem::replace(&mut self.in_staged_input, false);
-        let saved_owner = self.signature_owner.replace(owner);
-        let saved_locals = std::mem::take(&mut self.locals);
-        let inputs = lexical_domains::DeclarationScope::enter(self);
-        let saved_captures = std::mem::take(&mut self.captures);
-        let saved_control = std::mem::take(&mut self.control);
-        let saved_immutable = std::mem::take(&mut self.immutable);
-        let saved_context = self.context.clone();
-        let saved_contract = std::mem::replace(&mut self.checking_contract, false);
-        let saved_numeric = std::mem::replace(&mut self.numeric_defaults, true);
         let saved_pending = self.pending_type_uses.replace(Vec::new());
-        let result = (|| {
-            self.ensure_signature(owner, span)?;
-            self.ensure_contract(owner, span)?;
-            self.context = self.definition_context(owner);
-            let item = self.package.item(owner).unwrap();
-            let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
-                return Err(error(
-                    span,
-                    "default preparation needs a function declaration",
-                ));
-            };
-            let parameter = sig
-                .params
-                .get(index)
-                .ok_or_else(|| error(span, "unknown default parameter"))?;
-            // A single demand builds just its prefix. Package checking advances
-            // the same persistent roots once for all defaults in source order.
-            let ty = match prepared {
-                Some((prefix, ty)) => {
-                    self.locals = prefix.locals.clone();
-                    self.input_facts.parameters = prefix.parameters.clone();
-                    ty.clone()
-                }
-                None => {
-                    let signature = self.declared_signature(owner).ok_or_else(|| {
-                        error(
-                            span,
-                            "ordinary default requires a formed declaration signature",
-                        )
-                    })?;
-                    let Term::Function { parameters, .. } = signature.as_ref() else {
-                        unreachable!("declaration has a function telescope")
-                    };
-                    let mut prefix = Prefix::default();
-                    for (slot, (earlier, ty)) in
-                        sig.params.iter().zip(parameters).take(index).enumerate()
-                    {
-                        prefix.bind(local(earlier.hir_id), slot, ty);
-                    }
-                    let ty = parameters[index].clone();
-                    self.locals = prefix.locals;
-                    self.input_facts.parameters = prefix.parameters;
-                    ty
-                }
-            };
-            let default = if let TyParamKind::Optional(_, _, value) = parameter.ty.kind {
-                let value = self.with_staged_input(ty.sort != Sort::Runtime, |this| {
-                    this.expr(value, Some(&ty.ty))
-                })?;
-                if !sig.modifiers.is_comptime && !parameter.ty.is_comptime() {
-                    self.require_stable_default(&value, parameter.span)?;
-                }
-                Some(value)
-            } else {
-                None
-            };
-            Ok((sig.params.len(), default))
-        })();
+        let result = self.in_declaration_scope(owner, |this| {
+            this.check_parameter_default(owner, index, span, prepared)
+        });
         let uses = std::mem::replace(&mut self.pending_type_uses, saved_pending).unwrap();
-        self.in_staged_input = saved_stage;
-        self.signature_owner = saved_owner;
-        self.locals = saved_locals;
-        inputs.restore(self);
-        self.captures = saved_captures;
-        self.control = saved_control;
-        self.immutable = saved_immutable;
-        self.context = saved_context.clone();
-        self.checking_contract = saved_contract;
-        self.numeric_defaults = saved_numeric;
         self.active_function_defaults.remove(&key);
         let (count, default) = result?;
         if self.pending_type_uses.is_none() {
             for (scope, assume, target, arguments, span) in &uses {
-                self.context = match scope {
+                let context = match scope {
                     Some(scope) if *assume => self.definition_context(*scope),
                     Some(scope) => self.binder_context(*scope),
                     None => self.nominal_context(),
                 };
+                let caller = std::mem::replace(&mut self.context, context);
                 let checked = self.check_formation_requirements(*target, arguments, *span);
-                self.context = saved_context.clone();
+                self.context = caller;
                 checked?;
             }
         } else {
@@ -206,6 +132,71 @@ impl Checker<'_, '_> {
         }
         defaults[index] = default;
         Ok(())
+    }
+
+    fn check_parameter_default(
+        &mut self,
+        owner: OwnerId,
+        index: usize,
+        span: Span,
+        prepared: Option<(&Prefix, &Parameter)>,
+    ) -> Result<(usize, Option<n::Expr>), Error> {
+        self.ensure_signature(owner, span)?;
+        self.ensure_contract(owner, span)?;
+        self.context = self.definition_context(owner);
+        let item = self.package.item(owner).unwrap();
+        let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
+            return Err(error(
+                span,
+                "default preparation needs a function declaration",
+            ));
+        };
+        let parameter = sig
+            .params
+            .get(index)
+            .ok_or_else(|| error(span, "unknown default parameter"))?;
+        // A single demand builds just its prefix. Package checking advances
+        // the same persistent roots once for all defaults in source order.
+        let ty = match prepared {
+            Some((prefix, ty)) => {
+                self.locals = prefix.locals.clone();
+                self.input_facts.parameters = prefix.parameters.clone();
+                ty.clone()
+            }
+            None => {
+                let signature = self.declared_signature(owner).ok_or_else(|| {
+                    error(
+                        span,
+                        "ordinary default requires a formed declaration signature",
+                    )
+                })?;
+                let Term::Function { parameters, .. } = signature.as_ref() else {
+                    unreachable!("declaration has a function telescope")
+                };
+                let mut prefix = Prefix::default();
+                for (slot, (earlier, ty)) in
+                    sig.params.iter().zip(parameters).take(index).enumerate()
+                {
+                    prefix.bind(local(earlier.hir_id), slot, ty);
+                }
+                let ty = parameters[index].clone();
+                self.locals = prefix.locals;
+                self.input_facts.parameters = prefix.parameters;
+                ty
+            }
+        };
+        let default = if let TyParamKind::Optional(_, _, value) = parameter.ty.kind {
+            let value = self.with_staged_input(ty.sort != Sort::Runtime, |this| {
+                this.expr(value, Some(&ty.ty))
+            })?;
+            if !sig.modifiers.is_comptime && !parameter.ty.is_comptime() {
+                self.require_stable_default(&value, parameter.span)?;
+            }
+            Some(value)
+        } else {
+            None
+        };
+        Ok((sig.params.len(), default))
     }
 
     pub(super) fn require_stable_default(

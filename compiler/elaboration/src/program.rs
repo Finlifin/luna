@@ -42,6 +42,7 @@ use checking_attempts::Disposition as CheckingDisposition;
 mod cmtt;
 mod constants;
 mod declaration_inputs;
+mod declaration_scope;
 mod defaults;
 mod dependent_inputs;
 mod derivation;
@@ -1287,14 +1288,11 @@ fn elaborate_candidate<'a, 'h>(
         if checker.open_functions.contains_key(&owner) {
             continue;
         }
-        checker.signature_owner = Some(owner);
-        checker.context = checker.definition_context(owner);
-        checker.locals.clear();
         let signature = checker.signatures[&owner].clone();
         let mut function = checker.check_source_function(
             owner,
             signature,
-            function_bodies::Defaults::Definition,
+            function_bodies::SourceBody::Package,
             item.span,
         )?;
         if sig.modifiers.is_function_template && !sig.modifiers.is_pure {
@@ -1768,15 +1766,12 @@ impl Checker<'_, '_> {
         if !self.active_signatures.insert(owner) {
             return Err(error(span, "cyclic function signature dependency"));
         }
-        let saved_owner = self.signature_owner.replace(owner);
-        let inputs = lexical_domains::DeclarationScope::enter(self);
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_captures = std::mem::take(&mut self.captures);
-        let saved_control = std::mem::take(&mut self.control);
-        let saved_immutable = std::mem::take(&mut self.immutable);
-        let saved_context = self.context.clone();
-        let saved_contract = std::mem::replace(&mut self.checking_contract, false);
-        let saved_defaults = std::mem::replace(&mut self.numeric_defaults, true);
+        let checked = self.in_declaration_scope(owner, |this| this.form_signature(owner, span));
+        self.active_signatures.remove(&owner);
+        checked
+    }
+
+    fn form_signature(&mut self, owner: OwnerId, span: Span) -> Result<(), Error> {
         self.context = self.nominal_context();
         // Declaration obligations survive a failed caller-side inference probe;
         // keep them separate from the caller's speculative obligations.
@@ -2166,16 +2161,6 @@ impl Checker<'_, '_> {
         if checked.is_ok() {
             self.signature_type_uses.extend(signature_pending);
         }
-        self.signature_owner = saved_owner;
-        inputs.restore(self);
-        self.locals = saved_locals;
-        self.captures = saved_captures;
-        self.control = saved_control;
-        self.immutable = saved_immutable;
-        self.context = saved_context;
-        self.checking_contract = saved_contract;
-        self.numeric_defaults = saved_defaults;
-        self.active_signatures.remove(&owner);
         self.normal_input_prefixes.remove(&owner);
         self.signature_domains.remove(&owner);
         if checked.is_err() {

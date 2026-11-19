@@ -313,15 +313,7 @@ impl Checker<'_, '_> {
                 else {
                     continue;
                 };
-                self.in_function_scope(owner, None, |this| {
-                    this.with_source_declaration(
-                        owner,
-                        signature,
-                        function_bodies::Defaults::CallPlan,
-                        span,
-                        |_, declaration| Ok(declaration),
-                    )
-                })?
+                self.check_source_interface(owner, signature, span)?
             };
             for contract in declaration
                 .preconditions

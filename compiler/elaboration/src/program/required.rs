@@ -231,12 +231,15 @@ impl Checker<'_, '_> {
                 "cyclic or excessively deep declaration contract dependency",
             ));
         }
-        let saved_owner = self.signature_owner.replace(owner);
-        let saved_context = self.context.clone();
-        let saved_checking = std::mem::replace(&mut self.checking_contract, true);
+        let checked = self.in_declaration_scope(owner, |this| this.form_contract(owner, span));
+        self.active_contracts.remove(&owner);
+        checked
+    }
+
+    fn form_contract(&mut self, owner: OwnerId, span: Span) -> Result<(), Error> {
+        self.checking_contract = true;
         let saved_pending = self.pending_type_uses.replace(Vec::new());
         let saved_capabilities = self.capabilities.get(&owner).cloned();
-        let inputs = lexical_domains::DeclarationScope::enter(self);
         // A required invocation can request this contract after a nested
         // signature check restored its caller's input environment. Rebuild
         // declaration inputs from checked domains, never from that caller.
@@ -267,12 +270,11 @@ impl Checker<'_, '_> {
                     sig.params.iter().zip(domains).enumerate()
                 {
                     if let Some(domain) = domain {
-                        self.input_facts.parameters.bind(
-                            local(parameter.hir_id),
-                            index,
-                            sort,
-                            &domain,
-                        );
+                        let binding = local(parameter.hir_id);
+                        self.input_facts
+                            .parameters
+                            .bind(binding, index, sort, &domain);
+                        self.locals.insert(binding, domain);
                     }
                 }
             }
@@ -371,11 +373,6 @@ impl Checker<'_, '_> {
             Ok(requirements)
         })();
         let uses = std::mem::replace(&mut self.pending_type_uses, saved_pending).unwrap();
-        inputs.restore(self);
-        self.signature_owner = saved_owner;
-        self.context = saved_context;
-        self.checking_contract = saved_checking;
-        self.active_contracts.remove(&owner);
         if result.is_err() {
             match saved_capabilities {
                 Some(capabilities) => {
@@ -1612,13 +1609,12 @@ impl Checker<'_, '_> {
                     "required comptime function signature still needs invocation inputs",
                 )
             })?;
-        // The demand is mandatory, but its caller's open-instance refinements,
-        // locals and projected parameter slots do not belong to this definition.
-        let required = self.in_required_comptime;
-        self.in_function_scope(owner, None, |this| {
-            this.in_required_comptime = required;
-            this.check_source_function(owner, signature, function_bodies::Defaults::CallPlan, span)
-        })
+        self.check_source_function(
+            owner,
+            signature,
+            function_bodies::SourceBody::Required,
+            span,
+        )
     }
 }
 

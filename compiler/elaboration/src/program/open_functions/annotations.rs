@@ -353,7 +353,7 @@ impl Checker<'_, '_> {
             return Err(error(span, "live annotation must use defer"));
         };
         let assumptions = self.context.assumptions().to_vec();
-        let ty = self.in_function_scope(owner, None, |this| {
+        let ty = self.in_open_function_scope(owner, None, |this| {
             for assumption in assumptions {
                 this.context.assume(assumption);
             }
@@ -426,7 +426,7 @@ impl Checker<'_, '_> {
                 // while evaluating this resumed annotation, without changing
                 // the definition-side check of the open function body.
                 let caller_assumptions = self.context.assumptions().to_vec();
-                self.in_function_scope(*owner, None, |this| {
+                self.in_open_function_scope(*owner, None, |this| {
                     for assumption in caller_assumptions {
                         this.context.assume(assumption);
                     }

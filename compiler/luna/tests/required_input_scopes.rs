@@ -226,3 +226,17 @@ fn deferred_type_calls_keep_callable_inputs_of_named_instances() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn required_type_observation_checks_a_runtime_default_in_its_declaration() {
+    let source = r#"
+        typealias Answer = AnswerType();
+        comptime fn AnswerType() -> Type { choose(false)'type }
+
+        fn choose(value: bool, .apply: fn(bool) -> bool = |x: bool| not x) -> bool {
+            apply(value)
+        }
+        fn run() -> Answer { choose(false) and not choose(true) }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
