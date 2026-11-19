@@ -430,14 +430,18 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         }
     }
 
-    pub(super) fn finish(self) -> Result<(PreparedTelescope, PreparedDeclarationInputs), Error> {
+    pub(super) fn finish(
+        self,
+        checker: &mut Checker<'_, '_>,
+    ) -> Result<(PreparedTelescope, PreparedDeclarationInputs), Error> {
         if !self.complete || self.pending.is_some() {
             return Err(error(
                 self.span,
                 "declaration inputs are not completely checked",
             ));
         }
-        self.progress.finish(self.preparations, self.span)
+        self.progress
+            .finish(self.preparations, &mut checker.required_steps, self.span)
     }
 }
 
@@ -537,6 +541,7 @@ mod tests {
             vec![binding],
             vec![0],
             KnownInputs::default(),
+            vec![],
             &mut 100,
             span,
         )

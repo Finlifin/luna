@@ -155,33 +155,30 @@ impl Bindings {
                 return vm.instantiate_selected_domain(ty, selected, source);
             }
         }
-        // A changed sort needs the declaration domains as evidence, including
-        // completed inputs that are absent from the term being rewritten.
-        vm.integer_operation(Some(source), |budget| budget.consume(self.parameters.len()))?;
+        // Structural queries use the transitive domain dependencies of this
+        // result. Admission still needs the receiving world's entire telescope.
         let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = before;
         let result = match self.sort_change {
             SortChange::Substitute => {
-                let ids = self
-                    .parameters
-                    .iter()
-                    .map(|p| p.declaration)
-                    .collect::<Vec<_>>();
-                nir::DeclarationSubstitution::bounded(
-                    &ids,
-                    &self.domains,
-                    &self.arguments,
+                let mut described = false;
+                let domain = nir::instantiate_observed_domain(
+                    ty,
+                    |id| {
+                        let &slot = self.positions.get(&id)?;
+                        described |= self.descriptions.contains_key(&slot);
+                        let index = self.slots[slot]?;
+                        Some((&self.domains[index], &self.arguments[index]))
+                    },
                     &[],
                     &mut remaining,
-                )
-                .and_then(|substitution| substitution.instantiate_bounded(ty, &mut remaining))
-                .map_err(|error| {
-                    if matches!(error, nir::type_computations::Error::Budget) {
-                        ErrorKind::StepsExhausted
-                    } else {
-                        ErrorKind::Type
-                    }
-                })
+                );
+                match domain {
+                    Err(nir::type_computations::Error::Budget) => Err(ErrorKind::StepsExhausted),
+                    _ if described => Err(ErrorKind::AbstractValueUnresolved),
+                    Err(_) => Err(ErrorKind::Type),
+                    Ok(domain) => Ok(domain),
+                }
             }
             SortChange::Admit => self.instantiate_admitted(vm, ty, &mut remaining),
         };

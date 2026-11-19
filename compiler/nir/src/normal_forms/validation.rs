@@ -100,13 +100,12 @@ pub fn validate_in(package: &Package, fuel: &mut usize) -> Result<(), Validation
                 "normal-form metadata requires a pure opaque definition",
             ));
         }
-        let mut declarations = BTreeSet::new();
+        let mut prior = BTreeMap::new();
         let mut bindings = BTreeSet::new();
         let mut types = Vec::new();
         let mut values = Vec::new();
-        let mut prior = Vec::new();
         for parameter in &head.parameters {
-            if !declarations.insert(parameter.declaration) || !bindings.insert(parameter.binding) {
+            if prior.contains_key(&parameter.declaration) || !bindings.insert(parameter.binding) {
                 return Err(Invalid("duplicate normal-form input identity"));
             }
             match parameter.kind {
@@ -117,9 +116,9 @@ pub fn validate_in(package: &Package, fuel: &mut usize) -> Result<(), Validation
                     types.push(parameter.declaration);
                 }
                 Kind::Value => {
-                    let supported = supported_input_type_with_collections_budgeted(
+                    let supported = supported_input_type_in_scope(
                         &parameter.ty,
-                        &prior,
+                        |id, sort, _| Ok(prior.get(&id) == Some(&sort)),
                         |id| {
                             descriptors
                                 .get(&id)
@@ -143,14 +142,14 @@ pub fn validate_in(package: &Package, fuel: &mut usize) -> Result<(), Validation
                     values.push(parameter);
                 }
             }
-            prior.push(crate::DeclarationParameter {
-                declaration: parameter.declaration,
-                sort: if parameter.kind == Kind::Type {
+            prior.insert(
+                parameter.declaration,
+                if parameter.kind == Kind::Type {
                     Sort::Type
                 } else {
                     Sort::ComptimeValue
                 },
-            });
+            );
         }
         spend(fuel, head.requirements.len())?;
         for predicate in &head.requirements {

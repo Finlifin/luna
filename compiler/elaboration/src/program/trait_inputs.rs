@@ -144,34 +144,6 @@ impl Checker<'_, '_> {
         Ok(None)
     }
 
-    pub(super) fn input_binders_in(
-        &self,
-        parameters: &[DeclarationId],
-        fuel: &mut usize,
-    ) -> Result<Vec<nir::DeclarationParameter>, nir::type_computations::Error> {
-        use nir::type_computations::Error as QueryError;
-        *fuel = fuel
-            .checked_sub(parameters.len())
-            .ok_or(QueryError::Budget)?;
-        parameters
-            .iter()
-            .map(|id| {
-                let domain = self.observe_input_domain(*id, || {
-                    *fuel = fuel.checked_sub(1).ok_or(QueryError::Budget)?;
-                    Ok(())
-                })?;
-                Ok(nir::DeclarationParameter {
-                    declaration: *id,
-                    sort: if domain.is_some_and(|ty| !matches!(ty, Term::Primitive(P::Type))) {
-                        Sort::ComptimeValue
-                    } else {
-                        Sort::Type
-                    },
-                })
-            })
-            .collect()
-    }
-
     pub(super) fn substituted_trait_domain(
         &mut self,
         domain: &Term,

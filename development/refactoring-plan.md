@@ -151,6 +151,12 @@ where T, flag: bool
 再给普通实参提供 u8 上下文。Byte 是普通 comptime 执行，不能按 NF 头处理或展开
 一个 opaque 头来推导其结果。列表只是接收域的一种消费者，不因此获得特殊等待规则。
 
+已观察到的身份现在按域中实际出现的声明引用做替换。宽度回归用真实 sysroot 构造
+720 个独立的 `bool` 子句参数并调用该函数。相同输入在 `a933e92c` 的
+`luna comptime` 中耗尽前端预算，改动后返回 `true`。把宽度提高到 1000 时，
+仅声明该函数的对照通过，形成实际调用仍会耗尽值准入预算。这个量级的成本和上述 `Byte()` 的执行恢复是两个
+独立问题。[宽度用例](../compiler/luna/tests/contextual_input_costs.rs) · [域检查边界](elaboration-state-and-publication.md#检查帧与探测)
+
 当前所有权边界如下。
 
 | 持有者 | 已接通的路径 | 仍缺的交接 |

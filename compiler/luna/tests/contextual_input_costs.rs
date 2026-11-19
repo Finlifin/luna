@@ -141,3 +141,25 @@ fn repeated_fixed_spreads_compile_once_but_read_the_current_iteration() {
         "extra activations recompiled lexical code"
     );
 }
+
+#[test]
+fn a_wide_callable_checks_independent_clause_domains_in_the_real_sysroot() {
+    const WIDTH: usize = 720;
+    let parameters = (0..WIDTH)
+        .map(|index| format!("v{index}: bool"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let arguments = (0..WIDTH)
+        .map(|index| if index + 1 == WIDTH { "false" } else { "true" })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let last = WIDTH - 1;
+    let source = format!(
+        "comptime fn pick() -> bool where {parameters} {{ v0 and not v{last} }}
+         comptime fn check() -> bool {{ pick<{arguments}>() }}"
+    );
+    assert_eq!(
+        sysroot::invoke(&source, "check").unwrap(),
+        Value::Bool(true)
+    );
+}

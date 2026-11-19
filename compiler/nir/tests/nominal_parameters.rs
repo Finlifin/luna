@@ -1801,3 +1801,94 @@ fn telescope_admission_preserves_query_failures_and_can_retry() {
         }
     }
 }
+
+#[test]
+fn projected_domain_checks_transitive_sorts_without_following_caller_replacements() {
+    let ty = Term::Primitive(P::Type);
+    let a = rigid(1, Sort::Type);
+    let b = rigid(2, Sort::ComptimeValue);
+    let template = Term::NormalForm {
+        head: id(99),
+        sort: Sort::Type,
+        arguments: vec![b.clone(), b.clone()],
+    };
+    // The caller supplies a rigid with the same identity as the callee's A.
+    // Only B's declaration domain links back to A.
+    let mut reads = Vec::new();
+    let result = nir::instantiate_observed_domain(
+        &template,
+        |key| {
+            reads.push(key);
+            if key == id(2) {
+                Some((&a, &a))
+            } else if key == id(1) {
+                Some((&ty, &ty))
+            } else {
+                None
+            }
+        },
+        &[],
+        &mut 256,
+    )
+    .unwrap();
+    assert_eq!(reads, [id(2), id(1)]);
+    assert_eq!(
+        result,
+        Term::NormalForm {
+            head: id(99),
+            sort: Sort::Type,
+            arguments: vec![a.clone(), a.clone()],
+        }
+    );
+
+    let boolean = Term::Primitive(P::Bool);
+    let invalid = nir::instantiate_observed_domain(
+        &b,
+        |key| {
+            if key == id(2) {
+                Some((&a, &a))
+            } else {
+                Some((&ty, &boolean))
+            }
+        },
+        &[],
+        &mut 256,
+    );
+    assert!(matches!(
+        invalid,
+        Err(nir::type_computations::Error::Scope(
+            TypeError::WrongSort { .. }
+        ))
+    ));
+}
+
+#[test]
+fn unused_observations_are_checked_at_handoff_and_projection_keeps_caller_scope() {
+    let ty = Term::Primitive(P::Type);
+    let bound = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let inputs = [(id(1), &ty, &bound)];
+    let query = |term: &Term, frames: &[Vec<Sort>], fuel: &mut usize| {
+        nir::instantiate_observed_domain(
+            term,
+            |key| (key == id(1)).then_some((&ty, &bound)),
+            frames,
+            fuel,
+        )
+    };
+    assert_eq!(query(&ty, &[], &mut 32).unwrap(), ty);
+    assert!(nir::check_observed_inputs(inputs.into_iter(), &[], &mut 64).is_err());
+    let frames = [vec![Sort::Type]];
+    nir::check_observed_inputs(inputs.into_iter(), &frames, &mut 64).unwrap();
+    assert!(matches!(
+        query(&rigid(1, Sort::Type), &frames, &mut 0),
+        Err(nir::type_computations::Error::Budget)
+    ));
+    assert_eq!(
+        query(&rigid(1, Sort::Type), &frames, &mut 64).unwrap(),
+        bound
+    );
+}

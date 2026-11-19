@@ -210,6 +210,37 @@ pub fn supported_input_type_with_collections_budgeted(
     target: Option<crate::target::TargetData>,
     fuel: &mut usize,
 ) -> Result<bool, crate::type_computations::Error> {
+    supported_input_type_in_scope(
+        ty,
+        |id, sort, fuel| {
+            *fuel = fuel
+                .checked_sub(prior.len())
+                .ok_or(crate::type_computations::Error::Budget)?;
+            Ok(prior.iter().any(|p| p.declaration == id && p.sort == sort))
+        },
+        is_tuple,
+        is_list,
+        is_nominal,
+        target,
+        fuel,
+    )
+}
+
+/// A domain asks its enclosing declaration about an input only when it
+/// encounters a rigid reference. The provider owns visibility and binder sorts.
+pub fn supported_input_type_in_scope(
+    ty: &Term,
+    mut visible: impl FnMut(
+        DeclarationId,
+        Sort,
+        &mut usize,
+    ) -> Result<bool, crate::type_computations::Error>,
+    is_tuple: impl Fn(DeclarationId) -> bool,
+    is_list: impl Fn(DeclarationId) -> bool,
+    is_nominal: impl Fn(DeclarationId) -> bool,
+    target: Option<crate::target::TargetData>,
+    fuel: &mut usize,
+) -> Result<bool, crate::type_computations::Error> {
     use crate::type_computations::{Error, charge_term};
     // Prepay the borrowed worklist and all payload inspections before growing
     // it. Scope checks below still consume their additional traversal cost.
@@ -263,16 +294,12 @@ pub fn supported_input_type_with_collections_budgeted(
                 declaration,
                 sort: Sort::Type,
             } => {
-                *fuel = fuel.checked_sub(prior.len()).ok_or(Error::Budget)?;
-                if !prior
-                    .iter()
-                    .any(|p| p.declaration == *declaration && p.sort == Sort::Type)
-                {
+                if !visible(*declaration, Sort::Type, fuel)? {
                     return Ok(false);
                 }
             }
             Term::Nominal { declaration, .. } if is_nominal(*declaration) => {
-                if !nominal_domain_scope(ty, prior, fuel)? {
+                if !nominal_domain_scope(ty, &mut visible, fuel)? {
                     return Ok(false);
                 }
             }
@@ -283,7 +310,7 @@ pub fn supported_input_type_with_collections_budgeted(
                 // Runtime callable identities are ordinary comptime data too.
                 // Their signature may describe runtime-only argument domains;
                 // admitting the identity does not execute the function.
-                if !nominal_domain_scope(ty, prior, fuel)? {
+                if !nominal_domain_scope(ty, &mut visible, fuel)? {
                     return Ok(false);
                 }
             }
@@ -291,7 +318,7 @@ pub fn supported_input_type_with_collections_budgeted(
                 // Declaration-side projections are symbolic domains, just as
                 // a prior Type input is. Selection must resolve the actual
                 // value representation before admitting a completed input.
-                if !nominal_domain_scope(ty, prior, fuel)? {
+                if !nominal_domain_scope(ty, &mut visible, fuel)? {
                     return Ok(false);
                 }
             }
@@ -326,7 +353,7 @@ pub fn supported_input_type_with_collections_budgeted(
                     // An open domain need not expose a completed value layout.
                     // Formation has checked the head application; argument
                     // admission checks its instantiated representation later.
-                    if !nominal_domain_scope(ty, prior, fuel)? {
+                    if !nominal_domain_scope(ty, &mut visible, fuel)? {
                         return Ok(false);
                     }
                     // Scope admission above already proves that every rigid
@@ -345,7 +372,7 @@ pub fn supported_input_type_with_collections_budgeted(
                 // Opaque user heads are ordinary parameter domains. Do not
                 // unfold them or require a builtin collection role merely to
                 // declare an input; values still need completed admission.
-                if !nominal_domain_scope(ty, prior, fuel)? {
+                if !nominal_domain_scope(ty, &mut visible, fuel)? {
                     return Ok(false);
                 }
             }
@@ -1048,88 +1075,20 @@ pub fn instantiate_value_fields_checked<'a>(
 
 fn nominal_domain_scope(
     ty: &Term,
-    prior: &[crate::DeclarationParameter],
+    visible: &mut impl FnMut(
+        DeclarationId,
+        Sort,
+        &mut usize,
+    ) -> Result<bool, crate::type_computations::Error>,
     fuel: &mut usize,
 ) -> Result<bool, crate::type_computations::Error> {
-    use crate::type_computations::Error;
     crate::type_computations::charge_term(ty, fuel)?;
-    let mut pending = vec![ty];
-    while let Some(term) = pending.pop() {
+    for term in ty.structural_terms() {
         match term {
-            Term::Rigid { declaration, sort } => {
-                *fuel = fuel.checked_sub(prior.len()).ok_or(Error::Budget)?;
-                if !prior
-                    .iter()
-                    .any(|p| p.declaration == *declaration && p.sort == *sort)
-                {
-                    return Ok(false);
-                }
-            }
-            Term::Hole { .. } | Term::Runtime(_) | Term::Value { .. } => {
+            Term::Rigid { declaration, sort } if !visible(*declaration, *sort, fuel)? => {
                 return Ok(false);
             }
-            Term::Nominal { arguments, .. }
-            | Term::NormalForm { arguments, .. }
-            | Term::Tuple(arguments)
-            | Term::TupleValue(arguments)
-            | Term::ClosureContextValue(arguments) => pending.extend(arguments),
-            Term::Record(fields) | Term::RecordValue(fields) => {
-                pending.extend(fields.iter().map(|(_, ty)| ty))
-            }
-            Term::OptionalValue { ty, value } => {
-                pending.push(ty);
-                if let Some(value) = value {
-                    pending.push(value);
-                }
-            }
-
-            Term::ErrorValue { ty, label, value } => {
-                pending.push(ty);
-                if let Some(label) = label {
-                    pending.push(label);
-                }
-                pending.push(value);
-            }
-            Term::ListConcat { ty, parts: fields } | Term::NominalValue { ty, fields, .. } => {
-                pending.push(ty);
-                pending.extend(fields);
-            }
-            Term::Optional(inner)
-            | Term::Pointer(inner)
-            | Term::ComptimeFunction(inner)
-            | Term::NormalFormFunction(inner, _)
-            | Term::UnsafeFunction(inner) => pending.push(inner),
-            Term::Function { parameters, result } => {
-                pending.push(result);
-                pending.extend(parameters.iter().map(|p| &p.ty));
-            }
-            Term::ContextualClosure { context, signature } => {
-                pending.push(context);
-                pending.push(signature);
-            }
-            Term::Closure {
-                environment,
-                signature,
-            } => {
-                pending.push(signature);
-                pending.extend(environment);
-            }
-            Term::ErrorResult { errors, result } => {
-                pending.push(result);
-                pending.extend(errors);
-            }
-            Term::Computation { effects, result } => {
-                pending.push(result);
-                for effect in effects {
-                    pending.extend(&effect.arguments);
-                }
-            }
-            Term::AssociatedType {
-                subject, arguments, ..
-            } => {
-                pending.push(subject);
-                pending.extend(arguments);
-            }
+            Term::Hole { .. } | Term::Runtime(_) | Term::Value { .. } => return Ok(false),
             _ => {}
         }
     }

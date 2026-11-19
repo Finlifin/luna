@@ -44,6 +44,73 @@ impl Binders {
         Ok(Self { ordered, positions })
     }
 
+    pub(super) fn bounded_substitution<D: Borrow<Term>, V: Borrow<Term>>(
+        ids: &[DeclarationId],
+        domains: &[D],
+        arguments: &[V],
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Self, QueryError> {
+        use crate::type_computations::{Error, charge_term};
+        // Scope checks borrow the caller's frames and look up referenced slots.
+        // Retaining an owned copy is charged by into_owned.
+        *fuel = fuel.checked_sub(ids.len()).ok_or(Error::Budget)?;
+        for domain in domains {
+            charge_term(domain.borrow(), fuel)?;
+        }
+        for argument in arguments {
+            charge_term(argument.borrow(), fuel)?;
+        }
+        let parameters = Binders::new(ids, domains).map_err(Error::Scope)?;
+        if arguments.len() != ids.len() {
+            return Err(Error::Scope(TypeError::ArgumentCount {
+                expected: ids.len(),
+                actual: arguments.len(),
+            }));
+        }
+        for (parameter, domain) in parameters.ordered.iter().zip(domains) {
+            if parameter.sort == Sort::ComptimeValue {
+                parameters.charge_expansion(domain.borrow(), arguments, fuel)?;
+            }
+        }
+        parameters
+            .check_substitution(domains, arguments, frames)
+            .map_err(Error::Scope)?;
+        Ok(parameters)
+    }
+
+    pub(super) fn check_substitution<D: Borrow<Term>, V: Borrow<Term>>(
+        &self,
+        domains: &[D],
+        arguments: &[V],
+        frames: &[Vec<Sort>],
+    ) -> Result<(), TypeError> {
+        if self.ordered.len() != arguments.len() {
+            return Err(TypeError::ArgumentCount {
+                expected: self.ordered.len(),
+                actual: arguments.len(),
+            });
+        }
+        for argument in arguments {
+            argument.borrow().check_scope(frames)?;
+        }
+        for (index, (parameter, argument)) in self.ordered.iter().zip(arguments).enumerate() {
+            let expected = if parameter.sort == Sort::Type {
+                Sort::Type
+            } else {
+                let domain = self.instantiate(domains[index].borrow(), arguments, frames)?;
+                Sort::of_comptime_domain(&domain)
+            };
+            if expected != argument.borrow().sort() {
+                return Err(TypeError::WrongSort {
+                    expected,
+                    actual: argument.borrow().sort(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     // Callers have checked arity, argument scope and the original binder
     // identities. Replacements are caller terms and are never substituted again.
     pub(super) fn instantiate<T: Borrow<Term>>(

@@ -1678,3 +1678,50 @@ fn receiving_world_fields_admit_registered_products_in_nested_nominal_inputs() {
     }
     check(&package, &value, &mut 100_000).unwrap();
 }
+
+#[test]
+fn a_callable_value_in_an_opaque_domain_exposes_its_captures_but_not_its_identity() {
+    let domain = |leaf| Term::NormalForm {
+        head: id(82),
+        sort: Sort::Type,
+        arguments: vec![Term::ClosureSnapshot {
+            factory: id(83),
+            arguments: vec![Term::NormalForm {
+                head: id(84),
+                sort: Sort::Type,
+                arguments: vec![leaf],
+            }],
+        }],
+    };
+    let visible = |ty: &Term, allowed| {
+        nir::normal_forms::supported_input_type_in_scope(
+            ty,
+            |key, sort, _| {
+                assert_eq!(key, id(4));
+                Ok(allowed == Some(sort))
+            },
+            |_| false,
+            |_| false,
+            |_| false,
+            None,
+            &mut 256,
+        )
+        .unwrap()
+    };
+    let captured = domain(Term::Rigid {
+        declaration: id(4),
+        sort: Sort::ComptimeValue,
+    });
+    assert!(visible(&captured, Some(Sort::ComptimeValue)));
+    assert!(!visible(&captured, Some(Sort::Type)));
+    assert!(!visible(&captured, None));
+    assert!(!visible(
+        &domain(Term::Hole {
+            index: 0,
+            sort: Sort::Type
+        }),
+        None
+    ));
+    assert!(!visible(&domain(Term::Value { store: 1, index: 0 }), None));
+    assert!(visible(&domain(Term::Bool(true)), None));
+}

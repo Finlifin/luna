@@ -315,6 +315,60 @@ fn display_frames(f: &mut std::fmt::Formatter<'_>, frames: &[Vec<Sort>]) -> std:
     f.write_str(")")
 }
 
+/// Check the complete observed substitution at handoff without taking ownership
+/// of the values. This establishes scope and effective sorts only.
+pub fn check_observed_inputs<'a>(
+    observed: impl Iterator<Item = (DeclarationId, &'a Term, &'a Term)>,
+    frames: &[Vec<Sort>],
+    fuel: &mut usize,
+) -> Result<(), crate::type_computations::Error> {
+    let mut ids = Vec::new();
+    let mut domains = Vec::new();
+    let mut values = Vec::new();
+    for (id, domain, value) in observed {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or(crate::type_computations::Error::Budget)?;
+        ids.push(id);
+        domains.push(domain);
+        values.push(value);
+    }
+    Binders::bounded_substitution(&ids, &domains, &values, frames, fuel)?;
+    Ok(())
+}
+
+/// Specialize one domain using only its observed declaration inputs. Follow
+/// dependencies in declaration domains to check a replacement's effective sort.
+/// Replacement values belong to the caller and are never followed as templates.
+pub fn instantiate_observed_domain<'a>(
+    domain: &Term,
+    mut observed: impl FnMut(DeclarationId) -> Option<(&'a Term, &'a Term)>,
+    frames: &[Vec<Sort>],
+    fuel: &mut usize,
+) -> Result<Term, crate::type_computations::Error> {
+    use crate::type_computations::rigid_declarations_bounded;
+    use std::collections::BTreeSet;
+
+    let mut pending = BTreeSet::new();
+    rigid_declarations_bounded(domain, fuel, &mut pending)?;
+    let mut seen = BTreeSet::new();
+    let mut ids = Vec::new();
+    let mut domains = Vec::new();
+    let mut values = Vec::new();
+    while let Some(id) = pending.pop_first() {
+        if seen.insert(id)
+            && let Some((template, value)) = observed(id)
+        {
+            rigid_declarations_bounded(template, fuel, &mut pending)?;
+            ids.push(id);
+            domains.push(template);
+            values.push(value);
+        }
+    }
+    let binders = Binders::bounded_substitution(&ids, &domains, &values, frames, fuel)?;
+    binders.instantiate_bounded(domain, &values, frames, fuel)
+}
+
 impl<'a> DeclarationSubstitution<'a> {
     pub fn new(
         ids: &[DeclarationId],
@@ -335,30 +389,7 @@ impl<'a> DeclarationSubstitution<'a> {
         arguments: &'a [Term],
         scope: DeclarationInputScope<'a>,
     ) -> Result<Self, TypeError> {
-        if parameters.ordered.len() != arguments.len() {
-            return Err(TypeError::ArgumentCount {
-                expected: parameters.ordered.len(),
-                actual: arguments.len(),
-            });
-        }
-        for argument in arguments {
-            argument.check_scope(scope.input())?;
-        }
-        for (index, (parameter, argument)) in parameters.ordered.iter().zip(arguments).enumerate() {
-            let expected = if parameter.sort == Sort::Type {
-                Sort::Type
-            } else {
-                let domain =
-                    parameters.instantiate(domains[index].borrow(), arguments, scope.input())?;
-                Sort::of_comptime_domain(&domain)
-            };
-            if expected != argument.sort() {
-                return Err(TypeError::WrongSort {
-                    expected,
-                    actual: argument.sort(),
-                });
-            }
-        }
+        parameters.check_substitution(domains, arguments, scope.input())?;
         Ok(Self {
             parameters,
             arguments: Cow::Borrowed(arguments),
@@ -388,29 +419,13 @@ impl<'a> DeclarationSubstitution<'a> {
         scope: DeclarationInputScope<'a>,
         fuel: &mut usize,
     ) -> Result<Self, crate::type_computations::Error> {
-        use crate::type_computations::{Error, charge_term};
-        // Scope checks borrow the caller's frames and look up referenced slots.
-        // Retaining an owned copy is charged by into_owned.
-        *fuel = fuel.checked_sub(ids.len()).ok_or(Error::Budget)?;
-        for domain in domains {
-            charge_term(domain.borrow(), fuel)?;
-        }
-        for argument in arguments {
-            charge_term(argument, fuel)?;
-        }
-        let parameters = Binders::new(ids, domains).map_err(Error::Scope)?;
-        if arguments.len() != ids.len() {
-            return Err(Error::Scope(TypeError::ArgumentCount {
-                expected: ids.len(),
-                actual: arguments.len(),
-            }));
-        }
-        for (parameter, domain) in parameters.ordered.iter().zip(domains) {
-            if parameter.sort == Sort::ComptimeValue {
-                parameters.charge_expansion(domain.borrow(), arguments, fuel)?;
-            }
-        }
-        Self::from_parameters(parameters, domains, arguments, scope).map_err(Error::Scope)
+        let parameters =
+            Binders::bounded_substitution(ids, domains, arguments, scope.input(), fuel)?;
+        Ok(Self {
+            parameters,
+            arguments: Cow::Borrowed(arguments),
+            frames: Cow::Borrowed(scope.template()),
+        })
     }
     /// Check and take ownership of the caller's existing buffers. Unlike
     /// retaining a borrowed substitution, this does not copy any terms.

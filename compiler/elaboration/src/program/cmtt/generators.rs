@@ -2241,7 +2241,6 @@ impl Checker<'_, '_> {
     ) -> Result<bool, nir::type_computations::Error> {
         use nir::type_computations::Error as QueryError;
         nir::type_computations::charge_term(ty, fuel)?;
-        let prior = self.input_binders_in(parameters, fuel)?;
         let mut pending = vec![(ty, 0usize)];
         while let Some((ty, depth)) = pending.pop() {
             if depth >= 128 {
@@ -2278,7 +2277,7 @@ impl Checker<'_, '_> {
                     };
                     pending.extend(fields.iter().map(|ty| (ty, depth + 1)));
                 }
-                _ if self.input_domain_in(ty, &prior, fuel)? => {}
+                _ if self.input_domain_with_visible_ids(ty, parameters, fuel)? => {}
                 _ => return Ok(false),
             }
         }

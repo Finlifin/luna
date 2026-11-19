@@ -242,6 +242,18 @@ SchedulingBudget 保留等待和已交付输入，不将队列改为 Failed；�
 当前输入事实边界仍需遍历成员并计费。声明实参准备只保留自己会恢复的局部类型根，
 默认供应另行保存调用者的签名 owner、PTC 前提和三组按完整 DeclarationId 索引的绑定：类型替换、值对应的 LocalId、默认参数对应的 LocalId 与类型。供应前缀按预算保存新实参，只遮蔽同一声明的绑定。形成条件保存调用者的类型替换，剔除被调声明自己的参数。已保存的普通参数域按位置共享，包括域仍待确定的槽位；从借用的签名首次取得这份域时按预算复制。
 
+**子句参数域。** 在 `where T, value: T, flag: bool` 中，定义侧按声明顺序登记每个绑定的 sort。
+检查 `value` 的域会读取前面的 `T`，检查 `bool` 则无需读取前缀。捕获的函数值也可能把
+声明参数带进 opaque head 的参数里；作用域检查沿值的结构访问这些参数，保留函数和 head 的身份。
+[声明侧域检查](../compiler/elaboration/src/program/input_domains.rs) · [NIR 表示检查](../compiler/nir/src/normal_forms.rs)
+
+调用侧在每个槽位保存生产者和已观察到的身份，路由与默认供应共享本次调用者的 binder frame。
+若上例的 `T` 取值为 `Type`，对 `value` 的引用还需查询 `T`，才能检查替换值的实际 sort。
+查询只沿**声明域**传递。实参中的同号 rigid 属于调用者，再沿它做替换会捕获错误的变量。
+整组已观察实参在交付前统一检查作用域和 sort，包括没有被后续域引用的实参。
+VM 对 opaque head 的结构替换复用这项查询；名义类型的值域准入仍须取得接收世界的证据。
+未知的 Type 生产者仍待原 invocation 执行。[槽位准备](../compiler/elaboration/src/program/declaration_inputs/progress.rs) · [结构替换](../compiler/nir/src/nominal_parameters.rs)
+
 **候选与存储。** Attempt 独占一次提交或恢复权。子规则缺少上下文时，Probe 可在
 还原控制、捕获、默认值、输入事实及候选私有绑定后继续搜索。域错误、预算耗尽和恢复失败
 向外传播，已花的预算不退还。生成器存储检查点单独保留 cell 身份及所拥有的值图；

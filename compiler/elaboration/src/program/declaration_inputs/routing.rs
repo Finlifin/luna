@@ -92,6 +92,7 @@ struct PendingPacket {
 pub(super) struct Frame<'h> {
     span: Span,
     telescope: domain::Telescope,
+    caller_frames: Vec<Vec<Sort>>,
     prefix: KnownInputs,
     inputs: Vec<Arg<'h>>,
     widths: PacketWidths,
@@ -130,6 +131,7 @@ impl<'h> Frame<'h> {
         Ok(Self {
             span,
             telescope,
+            caller_frames: checker.call_input_frames(),
             prefix,
             inputs: inputs.to_vec(),
             widths,
@@ -302,12 +304,19 @@ impl<'h> Frame<'h> {
                 .map(|ty| environment::copy_term(ty, &mut checker.required_steps, span))
                 .collect()
         } else {
-            self.prefix
-                .with_substitution(checker, span, |substitution, fuel| {
-                    domains
-                        .map(|ty| substitution.instantiate_bounded(ty, fuel))
-                        .collect()
-                })
+            nominal_fields::metered(&mut checker.required_steps, |fuel| {
+                domains
+                    .map(|ty| {
+                        nir::instantiate_observed_domain(
+                            ty,
+                            |id| self.prefix.observed(id),
+                            &self.caller_frames,
+                            fuel,
+                        )
+                    })
+                    .collect()
+            })
+            .map_err(|reason| error(span, reason.to_string()))
         }
     }
 
@@ -452,6 +461,7 @@ impl<'h> Frame<'h> {
             bindings,
             self.order,
             self.prefix,
+            self.caller_frames,
             &mut checker.required_steps,
             self.span,
         )?;
@@ -500,7 +510,7 @@ impl std::fmt::Display for Frame<'_> {
             }
         }
         f.write_str(") ")?;
-        self.prefix.fmt_prefix(self.prefix.values.len(), f)?;
+        write!(f, "{}", self.prefix)?;
         f.write_str(" (domains")?;
         for (id, sort, domain) in &self.telescope.parameters {
             write!(f, " (input {id} {sort} {domain})")?;
@@ -545,6 +555,7 @@ mod tests {
             kind: H::Unit,
         };
         let frame = Frame {
+            caller_frames: vec![],
             prefix: KnownInputs::default(),
             span,
             telescope: domain::Telescope::new(Vec::new(), &mut 100, span).unwrap(),

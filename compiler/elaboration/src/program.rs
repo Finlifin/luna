@@ -1863,85 +1863,36 @@ impl Checker<'_, '_> {
                 };
                 required::signature_capability_atoms(&atom, &mut pending_capabilities, 0)?;
             }
-            let mut normal_parameters = Vec::new();
-            for parameter in sig.clause_params {
-                let prefix = self.normal_input_prefixes.entry(owner).or_default();
-                let prepared = prefix.len();
-                prefix.extend(normal_parameters[prepared..].iter().cloned());
+            let inherited = type_parameters.len();
+            let mut local_sorts = BTreeMap::new();
+            self.normal_input_prefixes.entry(owner).or_default();
+            for (slot, parameter) in sig.clause_params.iter().enumerate() {
+                use hir::clause::ClauseParamKind as Clause;
                 self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
-                if let hir::clause::ClauseParamKind::Varadic(_, declared) = parameter.kind {
-                    let ty = self.type_expr(declared)?;
-                    if self.list_element_type(&ty).is_none() {
-                        return Err(error(
-                            parameter.span,
-                            "variadic clause input requires a bound meta.List<T>",
-                        ));
-                    }
-                    if !std::ptr::eq(parameter, sig.clause_params.last().unwrap()) {
-                        return Err(error(
-                            parameter.span,
-                            "variadic clause input must be the final parameter",
-                        ));
-                    }
-                    let id = parameter.definition.ok_or_else(|| {
-                        error(parameter.span, "missing normal-form parameter identity")
-                    })?;
-                    if !sig.modifiers.is_normal_form_head {
-                        type_parameters.push(DeclarationId {
-                            package: semantic_package(&self.package_identities, id.pkg),
-                            local: id.index,
-                        });
-                    }
-                    normal_parameters.push((
-                        DeclarationId {
-                            package: semantic_package(&self.package_identities, id.pkg),
-                            local: id.index,
-                        },
-                        local(parameter.hir_id),
-                        ty,
-                    ));
-                    continue;
-                }
-                if let hir::clause::ClauseParamKind::Positional(_, ty) = parameter.kind {
-                    let ty = self.type_expr(ty)?;
-                    if !self.normal_input_domain_supported(
-                        &ty,
-                        &type_parameters,
-                        &normal_parameters,
-                        parameter.span,
-                    )? {
-                        return Err(error(
-                            parameter.span,
-                            "normal-form parameter type is not yet supported",
-                        ));
-                    }
-                    if ty != p(P::Type) {
-                        let id = parameter.definition.ok_or_else(|| {
-                            error(parameter.span, "missing normal-form parameter identity")
-                        })?;
-                        if !sig.modifiers.is_normal_form_head {
-                            type_parameters.push(DeclarationId {
-                                package: semantic_package(&self.package_identities, id.pkg),
-                                local: id.index,
-                            });
+                let domain = match parameter.kind {
+                    Clause::Type(_) | Clause::TraitBound(..) => p(P::Type),
+                    Clause::Varadic(_, declared) => {
+                        let domain = self.type_expr(declared)?;
+                        if self.list_element_type(&domain).is_none() {
+                            return Err(error(
+                                parameter.span,
+                                "variadic clause input requires a bound meta.List<T>",
+                            ));
                         }
-                        normal_parameters.push((
-                            DeclarationId {
-                                package: semantic_package(&self.package_identities, id.pkg),
-                                local: id.index,
-                            },
-                            local(parameter.hir_id),
-                            ty,
-                        ));
-                        continue;
+                        if slot + 1 != sig.clause_params.len() {
+                            return Err(error(
+                                parameter.span,
+                                "variadic clause input must be the final parameter",
+                            ));
+                        }
+                        domain
                     }
-                } else if let hir::clause::ClauseParamKind::Optional(_, ty, _) = parameter.kind {
-                    let ty = self.type_expr(ty)?;
-                    if ty != p(P::Type) {
+                    Clause::Positional(_, declared) | Clause::Optional(_, declared, _) => {
+                        let domain = self.type_expr(declared)?;
                         if !self.normal_input_domain_supported(
-                            &ty,
-                            &type_parameters,
-                            &normal_parameters,
+                            &domain,
+                            &type_parameters[..inherited],
+                            &local_sorts,
                             parameter.span,
                         )? {
                             return Err(error(
@@ -1949,59 +1900,41 @@ impl Checker<'_, '_> {
                                 "normal-form parameter type is not yet supported",
                             ));
                         }
-                        let id = parameter.definition.ok_or_else(|| {
-                            error(parameter.span, "missing normal-form parameter identity")
-                        })?;
-                        if !sig.modifiers.is_normal_form_head {
-                            type_parameters.push(DeclarationId {
-                                package: semantic_package(&self.package_identities, id.pkg),
-                                local: id.index,
-                            });
-                        }
-                        normal_parameters.push((
-                            DeclarationId {
-                                package: semantic_package(&self.package_identities, id.pkg),
-                                local: id.index,
-                            },
-                            local(parameter.hir_id),
-                            ty,
-                        ));
-                        continue;
+                        domain
                     }
-                } else if !matches!(
-                    parameter.kind,
-                    hir::clause::ClauseParamKind::Type(_)
-                        | hir::clause::ClauseParamKind::TraitBound(..)
-                ) {
-                    return Err(error(
-                        parameter.span,
-                        "comptime/generic/contract clause kind is not implemented",
-                    ));
-                }
-                let id = parameter
+                    Clause::Quote(_) => {
+                        return Err(error(
+                            parameter.span,
+                            "comptime/generic/contract clause kind is not implemented",
+                        ));
+                    }
+                };
+                let definition = parameter
                     .definition
                     .ok_or_else(|| error(parameter.span, "missing clause parameter identity"))?;
-                type_parameters.push(DeclarationId {
-                    package: semantic_package(&self.package_identities, id.pkg),
-                    local: id.index,
-                });
-                if sig.modifiers.is_normal_form_head {
-                    // Later input types may refer only to Type inputs already
-                    // encountered in this declaration telescope.
-                    self.type_parameters.insert(owner, type_parameters.clone());
-                }
-                normal_parameters.push((
-                    DeclarationId {
-                        package: semantic_package(&self.package_identities, id.pkg),
-                        local: id.index,
-                    },
+                let id = DeclarationId {
+                    package: semantic_package(&self.package_identities, definition.pkg),
+                    local: definition.index,
+                };
+                let sort = Sort::of_comptime_domain(&domain);
+                local_sorts.insert(id, sort);
+                self.normal_input_prefixes.get_mut(&owner).unwrap().push((
+                    id,
                     local(parameter.hir_id),
-                    p(P::Type),
+                    domain,
                 ));
+                if !sig.modifiers.is_normal_form_head || sort == Sort::Type {
+                    if sig.modifiers.is_normal_form_head {
+                        // Publish each Type binder for the next domain check.
+                        if type_parameters.len() == inherited {
+                            self.type_parameters.insert(owner, type_parameters.clone());
+                        }
+                        self.type_parameters.get_mut(&owner).unwrap().push(id);
+                    }
+                    type_parameters.push(id);
+                }
             }
-            let prefix = self.normal_input_prefixes.entry(owner).or_default();
-            let prepared = prefix.len();
-            prefix.extend(normal_parameters[prepared..].iter().cloned());
+            let normal_parameters = &self.normal_input_prefixes[&owner];
             capabilities = self.capabilities.get(&owner).cloned().unwrap_or_default();
             if had_contract {
                 for requirement in saved_capabilities.iter().flatten() {
@@ -2012,16 +1945,10 @@ impl Checker<'_, '_> {
             }
             self.capabilities.insert(owner, capabilities);
             if !sig.modifiers.is_normal_form_head {
-                let domains: Vec<_> = type_parameters
+                let domains: Vec<_> = type_parameters[..inherited]
                     .iter()
-                    .map(|id| {
-                        normal_parameters
-                            .iter()
-                            .find(|(input, _, _)| input == id)
-                            .map(|(_, _, ty)| ty.clone())
-                            .or_else(|| self.trait_input_domain(*id))
-                            .unwrap_or_else(|| p(P::Type))
-                    })
+                    .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
+                    .chain(normal_parameters.iter().map(|(_, _, ty)| ty.clone()))
                     .collect();
                 for (id, domain) in type_parameters.iter().zip(&domains) {
                     self.implementation_index
@@ -2043,7 +1970,8 @@ impl Checker<'_, '_> {
                 })
                 .collect::<Vec<_>>();
             if sig.modifiers.is_normal_form_head {
-                self.normal_parameters.insert(owner, normal_parameters);
+                self.normal_parameters
+                    .insert(owner, normal_parameters.clone());
             }
             for clause in sig.clause_constraints {
                 if let hir::clause::ClauseConstraintKind::Requires(value) = clause.kind {

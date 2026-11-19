@@ -151,7 +151,7 @@ impl<'h, C: Completion> Frame<'h, C> {
                         unreachable!()
                     };
                     frame.unwind(checker);
-                    let (telescope, inputs) = (*frame).finish()?;
+                    let (telescope, inputs) = (*frame).finish(checker)?;
                     // Formation and result conversion belong to the caller,
                     // never to the last default provider or input observation.
                     self.leave(checker);

@@ -366,11 +366,7 @@ impl Checker<'_, '_> {
             &mut self.expansion_sources,
             span,
         )?;
-        progress
-            .known
-            .with_substitution(self, span, |substitution, fuel| {
-                value.rewrite_types(&mut |ty| substitution.instantiate_bounded(ty, fuel))
-            })?;
+        value.rewrite_types(&mut |ty| progress.instantiate(ty, &mut self.required_steps, span))?;
         Ok(value)
     }
 

@@ -7,6 +7,7 @@ use super::*;
 #[derive(Default)]
 pub(in crate::program) struct KnownInputs {
     pub(super) ids: Vec<DeclarationId>,
+    positions: BTreeMap<DeclarationId, usize>,
     pub(super) domains: Vec<Term>,
     pub(super) values: Vec<Term>,
 }
@@ -34,32 +35,24 @@ impl KnownInputs {
             .iter()
             .map(|value| environment::copy_term(value, steps, span))
             .collect::<Result<_, _>>()?;
+        let mut positions = BTreeMap::new();
+        for (slot, &id) in ids[..prefix.len()].iter().enumerate() {
+            if positions.insert(id, slot).is_some() {
+                return Err(error(
+                    span,
+                    nir::TypeError::DuplicateDeclarationParameter(id).to_string(),
+                ));
+            }
+        }
         Ok((
             Self {
                 ids: ids[..prefix.len()].to_vec(),
+                positions,
                 domains,
                 values,
             },
             local,
         ))
-    }
-
-    pub(super) fn fmt_prefix(
-        &self,
-        count: usize,
-        f: &mut std::fmt::Formatter<'_>,
-    ) -> std::fmt::Result {
-        f.write_str("(captured")?;
-        for ((id, domain), value) in self
-            .ids
-            .iter()
-            .zip(&self.domains)
-            .zip(&self.values)
-            .take(count)
-        {
-            write!(f, " (input {id} {domain} {value})")?;
-        }
-        f.write_str(")")
     }
 
     pub(in crate::program) fn into_parts(self) -> (Vec<DeclarationId>, Vec<Term>, Vec<Term>) {
@@ -70,30 +63,19 @@ impl KnownInputs {
         &self.values
     }
 
-    /// Check the observed prefix in the current caller frame once per consumer.
-    /// A packet or a default body may use it in many separate annotations.
-    pub(in crate::program) fn with_substitution<R>(
-        &self,
-        checker: &mut Checker<'_, '_>,
-        span: Span,
-        apply: impl FnOnce(
-            &nir::DeclarationSubstitution<'_>,
-            &mut usize,
-        ) -> Result<R, nir::type_computations::Error>,
-    ) -> Result<R, Error> {
-        let frames = checker.call_input_frames();
-        let before = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let result = nir::DeclarationSubstitution::bounded(
-            &self.ids,
-            &self.domains,
-            &self.values,
-            &frames,
-            &mut fuel,
-        )
-        .and_then(|substitution| apply(&substitution, &mut fuel));
-        checker.required_steps -= (before - fuel) as u64;
-        result.map_err(|failure| error(span, failure.to_string()))
+    pub(super) fn observed(&self, id: DeclarationId) -> Option<(&Term, &Term)> {
+        let &slot = self.positions.get(&id)?;
+        Some((&self.domains[slot], &self.values[slot]))
+    }
+}
+
+impl std::fmt::Display for KnownInputs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(captured")?;
+        for ((id, domain), value) in self.ids.iter().zip(&self.domains).zip(&self.values) {
+            write!(f, " (input {id} {domain} {value})")?;
+        }
+        f.write_str(")")
     }
 }
 pub(in crate::program) struct Observations(Vec<(nir::DeclarationParameter, Option<Term>)>);

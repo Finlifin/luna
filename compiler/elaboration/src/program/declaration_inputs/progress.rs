@@ -4,7 +4,7 @@ use super::*;
 
 struct Prepared {
     producer: n::NormalFormArgument,
-    observation: Option<usize>,
+    observation: Option<Term>,
 }
 
 struct Slot {
@@ -19,8 +19,8 @@ pub(super) struct Progress {
     source_prefix: usize,
     declaration_prefix: usize,
     checked_order: Vec<usize>,
-    captured_count: usize,
-    pub(super) known: KnownInputs,
+    caller_frames: Vec<Vec<Sort>>,
+    captured: KnownInputs,
 }
 
 impl Progress {
@@ -29,6 +29,7 @@ impl Progress {
         bindings: Vec<n::LocalId>,
         mut explicit: Vec<usize>,
         known: KnownInputs,
+        caller_frames: Vec<Vec<Sort>>,
         fuel: &mut u64,
         span: Span,
     ) -> Result<Self, Error> {
@@ -53,6 +54,17 @@ impl Progress {
         // declaration telescope. Each slot is scheduled once, including empty
         // collectors and defaults, so polling cannot skip unfinished checking.
         explicit.extend((0..count).filter(|&slot| !supplied[slot]));
+        environment::charge(fuel, known.ids.len(), span)?;
+        if let Some(id) = known
+            .ids
+            .iter()
+            .find(|id| telescope.positions.contains_key(id))
+        {
+            return Err(error(
+                span,
+                nir::TypeError::DuplicateDeclarationParameter(*id).to_string(),
+            ));
+        }
         Ok(Self {
             slots: bindings
                 .into_iter()
@@ -65,8 +77,8 @@ impl Progress {
             source_prefix: 0,
             declaration_prefix: 0,
             checked_order: Vec::new(),
-            captured_count: known.values.len(),
-            known,
+            caller_frames,
+            captured: known,
             telescope,
         })
     }
@@ -95,12 +107,60 @@ impl Progress {
         span: Span,
     ) -> Result<DeclarationInputDomain, Error> {
         let pending = self.pending_inputs(slot, &mut checker.required_steps, span)?;
-        let ty = self
-            .known
-            .with_substitution(checker, span, |substitution, fuel| {
-                substitution.instantiate_bounded(&self.telescope.parameters[slot].2, fuel)
-            })?;
+        let ty = self.instantiate(
+            &self.telescope.parameters[slot].2,
+            &mut checker.required_steps,
+            span,
+        )?;
         Ok(DeclarationInputDomain { ty, pending })
+    }
+
+    pub(super) fn instantiate(
+        &self,
+        domain: &Term,
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<Term, Error> {
+        nominal_fields::metered(steps, |fuel| {
+            nir::instantiate_observed_domain(
+                domain,
+                |id| self.observed(id),
+                &self.caller_frames,
+                fuel,
+            )
+        })
+        .map_err(|reason| error(span, reason.to_string()))
+    }
+
+    fn observed(&self, id: DeclarationId) -> Option<(&Term, &Term)> {
+        if let Some(&slot) = self.telescope.positions.get(&id) {
+            return Some((&self.telescope.parameters[slot].2, self.identity(slot)?));
+        }
+        self.captured.observed(id)
+    }
+
+    /// A domain query needs just its own inputs. The handoff checks every
+    /// observed identity together, including identities unused by later domains.
+    fn check_observations(&self, steps: &mut u64, span: Span) -> Result<(), Error> {
+        environment::charge(steps, self.slots.len(), span)?;
+        let captured = self
+            .captured
+            .ids
+            .iter()
+            .copied()
+            .zip(&self.captured.domains)
+            .zip(&self.captured.values)
+            .map(|((id, domain), value)| (id, domain, value));
+        let local = self
+            .telescope
+            .parameters
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, (id, _, domain))| Some((*id, domain, self.identity(slot)?)));
+        nominal_fields::metered(steps, |fuel| {
+            nir::check_observed_inputs(captured.chain(local), &self.caller_frames, fuel)
+        })
+        .map_err(|reason| error(span, reason.to_string()))
     }
 
     fn pending_inputs(
@@ -134,7 +194,7 @@ impl Progress {
         self.slots[slot]
             .prepared
             .as_ref()
-            .and_then(|value| value.observation.map(|index| &self.known.values[index]))
+            .and_then(|value| value.observation.as_ref())
     }
 
     pub fn record(
@@ -154,10 +214,10 @@ impl Progress {
         *fuel = fuel
             .checked_sub(1)
             .ok_or_else(|| error(span, "declaration input recording budget exhausted"))?;
-        let observation = if let Some(value) = identity {
+        if let Some(value) = &identity {
             let before = usize::try_from(*fuel).unwrap_or(usize::MAX);
             let mut remaining = before;
-            let charged = nir::type_computations::charge_term(&value, &mut remaining);
+            let charged = nir::type_computations::charge_term(value, &mut remaining);
             *fuel -= (before - remaining) as u64;
             charged.map_err(|failure| {
                 error(
@@ -165,20 +225,10 @@ impl Progress {
                     format!("declaration input identity capture failed: {failure}"),
                 )
             })?;
-            self.known.domains.push(environment::copy_term(
-                &self.telescope.parameters[slot].2,
-                fuel,
-                span,
-            )?);
-            self.known.ids.push(self.telescope.parameters[slot].0);
-            self.known.values.push(value);
-            Some(self.known.values.len() - 1)
-        } else {
-            None
-        };
+        }
         self.slots[slot].prepared = Some(Prepared {
             producer,
-            observation,
+            observation: identity,
         });
         self.checked_order.push(slot);
         while self.declaration_prefix < self.slots.len()
@@ -195,22 +245,16 @@ impl Progress {
     pub fn finish(
         self,
         preparations: Vec<n::NormalFormPreparation>,
+        fuel: &mut u64,
         span: Span,
     ) -> Result<(PreparedTelescope, PreparedDeclarationInputs), Error> {
         if self.current().is_some() {
             return Err(error(span, "declaration input preparation is incomplete"));
         }
+        self.check_observations(fuel, span)?;
         let mut arguments = Vec::with_capacity(self.slots.len());
         let mut bindings = Vec::with_capacity(self.slots.len());
         let mut slots = Vec::with_capacity(self.slots.len());
-        let mut captured = self.known;
-        // The parent prefix is already in declaration order. Only observed
-        // locals need reordering from their preparation positions.
-        let mut local_values: Vec<_> = captured
-            .values
-            .drain(self.captured_count..)
-            .map(Some)
-            .collect();
         for ((declaration, sort, _), slot) in self.telescope.parameters.iter().zip(self.slots) {
             let Some(prepared) = slot.prepared else {
                 return Err(error(span, "missing prepared declaration input"));
@@ -221,19 +265,10 @@ impl Progress {
                 declaration: *declaration,
                 sort: *sort,
             };
-            slots.push((
-                binder,
-                prepared.observation.map(|index| {
-                    local_values[index - self.captured_count]
-                        .take()
-                        .expect("unique observed input")
-                }),
-            ));
+            slots.push((binder, prepared.observation));
         }
-        captured.ids.truncate(self.captured_count);
-        captured.domains.truncate(self.captured_count);
         let telescope = PreparedTelescope {
-            captured,
+            captured: self.captured,
             local: self.telescope.parameters,
         };
         Ok((
@@ -266,7 +301,16 @@ impl std::fmt::Display for Progress {
             write!(f, " {slot}")?;
         }
         f.write_str(") ")?;
-        self.known.fmt_prefix(self.captured_count, f)?;
+        write!(f, "(caller-frames")?;
+        for frame in &self.caller_frames {
+            write!(f, " (frame")?;
+            for sort in frame {
+                write!(f, " {sort}")?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(") ")?;
+        write!(f, "{}", self.captured)?;
         f.write_str(" (slots")?;
         for (index, slot) in self.slots.iter().enumerate() {
             let (declaration, sort, domain) = &self.telescope.parameters[index];
@@ -319,6 +363,60 @@ mod tests {
     }
 
     #[test]
+    fn source_domain_queries_only_pay_for_referenced_observations() {
+        let span = Span::default();
+        let cost = |count: u32| {
+            let parameters = (0..count)
+                .map(|local| (DeclarationId { package: 7, local }, Sort::Type, p(P::Type)))
+                .collect();
+            let bindings = (0..count)
+                .map(|index| n::LocalId { owner: 8, index })
+                .collect();
+            let mut fuel = 500_000;
+            let mut progress = Progress::new(
+                domain::Telescope::new(parameters, &mut fuel, span).unwrap(),
+                bindings,
+                vec![],
+                KnownInputs::default(),
+                vec![],
+                &mut fuel,
+                span,
+            )
+            .unwrap();
+            let target = Term::Rigid {
+                declaration: progress.telescope.parameters[0].0,
+                sort: Sort::Type,
+            };
+            for slot in (0..count as usize).rev() {
+                let ty = p(P::Bool);
+                let expr = n::Expr {
+                    ty: p(P::Type),
+                    kind: K::TypeValue(ty.clone()),
+                    source: source(span),
+                };
+                progress
+                    .record(
+                        slot,
+                        n::NormalFormArgument::Value(expr),
+                        Some(ty),
+                        &mut fuel,
+                        span,
+                    )
+                    .unwrap();
+            }
+            let before = fuel;
+            assert_eq!(
+                progress.instantiate(&target, &mut fuel, span).unwrap(),
+                p(P::Bool)
+            );
+            let spent = before - fuel;
+            progress.finish(vec![], &mut fuel, span).unwrap();
+            spent
+        };
+        assert_eq!(cost(1), cost(512));
+    }
+
+    #[test]
     fn dependency_checks_retain_source_producers_and_execution_order() {
         let (parameters, bindings) = inputs();
         let span = Span::default();
@@ -341,6 +439,7 @@ mod tests {
             bindings.clone(),
             vec![2, 0],
             prefix,
+            vec![],
             &mut 100,
             span,
         )
@@ -386,7 +485,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(progress.to_string(), pending);
-        assert_eq!(progress.known.ids, vec![parent]);
+        assert!(progress.observed(parameters[2].0).is_none());
         progress
             .record(
                 2,
@@ -397,7 +496,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(progress.identity(2), Some(&identity));
-        assert_eq!(progress.known.ids, vec![parent, parameters[2].0]);
+        assert_eq!(progress.observed(parameters[2].0).unwrap().1, &identity);
         assert_eq!(progress.current(), Some(1));
         progress
             .record(1, producer("default"), None, &mut 100, span)
@@ -414,7 +513,7 @@ mod tests {
             )),
             "{dump}"
         );
-        let (telescope, prepared) = progress.finish(vec![], span).unwrap();
+        let (telescope, prepared) = progress.finish(vec![], &mut 1_000, span).unwrap();
         assert_eq!(telescope.local, parameters);
         assert_eq!(
             telescope.captured.into_parts(),
@@ -461,6 +560,7 @@ mod tests {
             bindings,
             vec![1, 0],
             KnownInputs::default(),
+            vec![],
             &mut fuel,
             span,
         )
@@ -494,6 +594,7 @@ mod tests {
                     bindings.clone(),
                     order,
                     KnownInputs::default(),
+                    vec![],
                     &mut 100,
                     span
                 )
@@ -506,6 +607,7 @@ mod tests {
                 bindings.clone(),
                 vec![2, 0],
                 KnownInputs::default(),
+                vec![],
                 &mut 0,
                 span
             )
@@ -516,10 +618,11 @@ mod tests {
             bindings,
             vec![2, 0],
             KnownInputs::default(),
+            vec![],
             &mut 100,
             span,
         )
         .unwrap();
-        assert!(progress.finish(vec![], span).is_err());
+        assert!(progress.finish(vec![], &mut 1_000, span).is_err());
     }
 }

@@ -22,12 +22,12 @@ impl Checker<'_, '_> {
     pub(super) fn input_domain_in(
         &self,
         ty: &Term,
-        prior: &[nir::DeclarationParameter],
+        visible: impl FnMut(DeclarationId, Sort, &mut usize) -> Result<bool, QueryError>,
         fuel: &mut usize,
     ) -> Result<bool, QueryError> {
-        nir::normal_forms::supported_input_type_with_collections_budgeted(
+        nir::normal_forms::supported_input_type_in_scope(
             ty,
-            prior,
+            visible,
             |head| Some(head) == self.protocols.tuple,
             |head| Some(head) == self.protocols.meta_list,
             |id| {
@@ -41,34 +41,56 @@ impl Checker<'_, '_> {
         )
     }
 
+    fn visible_input_has_sort(
+        &self,
+        parameters: &[DeclarationId],
+        id: DeclarationId,
+        sort: Sort,
+        fuel: &mut usize,
+    ) -> Result<bool, QueryError> {
+        *fuel = fuel
+            .checked_sub(parameters.len())
+            .ok_or(QueryError::Budget)?;
+        if !parameters.contains(&id) {
+            return Ok(false);
+        }
+        let domain = self.observe_input_domain(id, || {
+            *fuel = fuel.checked_sub(1).ok_or(QueryError::Budget)?;
+            Ok(())
+        })?;
+        Ok(domain.map_or(Sort::Type, Sort::of_comptime_domain) == sort)
+    }
+
     pub(super) fn normal_input_domain_supported(
         &mut self,
         ty: &Term,
-        types: &[DeclarationId],
-        values: &[(DeclarationId, n::LocalId, Term)],
+        inherited: &[DeclarationId],
+        prefix: &BTreeMap<DeclarationId, Sort>,
         span: Span,
     ) -> Result<bool, Error> {
         self.with_input_domain_fuel(span, |this, fuel| {
-            *fuel = fuel.checked_sub(types.len()).ok_or(QueryError::Budget)?;
-            *fuel = fuel.checked_sub(values.len()).ok_or(QueryError::Budget)?;
-            let prior: Vec<_> = types
-                .iter()
-                .map(|id| nir::DeclarationParameter {
-                    declaration: *id,
-                    sort: Sort::Type,
-                })
-                .chain(
-                    values
-                        .iter()
-                        .filter(|(_, _, domain)| !matches!(domain, Term::Primitive(P::Type)))
-                        .map(|(id, _, _)| nir::DeclarationParameter {
-                            declaration: *id,
-                            sort: Sort::ComptimeValue,
-                        }),
-                )
-                .collect();
-            this.input_domain_in(ty, &prior, fuel)
+            this.input_domain_in(
+                ty,
+                |id, sort, fuel| match prefix.get(&id) {
+                    Some(declared) => Ok(*declared == sort),
+                    None => this.visible_input_has_sort(inherited, id, sort, fuel),
+                },
+                fuel,
+            )
         })
+    }
+
+    pub(super) fn input_domain_with_visible_ids(
+        &self,
+        ty: &Term,
+        parameters: &[DeclarationId],
+        fuel: &mut usize,
+    ) -> Result<bool, QueryError> {
+        self.input_domain_in(
+            ty,
+            |id, sort, fuel| self.visible_input_has_sort(parameters, id, sort, fuel),
+            fuel,
+        )
     }
 
     pub(super) fn generator_clause_domain(
@@ -78,8 +100,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<bool, Error> {
         self.with_input_domain_fuel(span, |this, fuel| {
-            let prior = this.input_binders_in(parameters, fuel)?;
-            this.input_domain_in(ty, &prior, fuel)
+            this.input_domain_with_visible_ids(ty, parameters, fuel)
         })
     }
 }

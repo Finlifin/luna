@@ -15,6 +15,7 @@ pub(super) enum Poll {
 /// terms. External declaration inputs remain in their enclosing telescope.
 pub(super) struct Telescope {
     pub(super) parameters: Parameters,
+    pub(super) positions: BTreeMap<DeclarationId, usize>,
     edges: Vec<Vec<usize>>,
 }
 
@@ -26,6 +27,9 @@ impl Telescope {
             .enumerate()
             .map(|(index, (id, _, _))| (*id, index))
             .collect();
+        if parameters.len() != positions.len() {
+            return Err(error(span, "duplicate declaration input identity"));
+        }
         let mut edges = Vec::with_capacity(parameters.len());
         for (_, _, domain) in parameters.iter() {
             let refs = input_observation::term_inputs(domain, fuel, span)?.declarations;
@@ -35,7 +39,11 @@ impl Telescope {
                     .collect(),
             );
         }
-        Ok(Self { parameters, edges })
+        Ok(Self {
+            parameters,
+            positions,
+            edges,
+        })
     }
 
     pub(super) fn direct(&self, slot: usize) -> &[usize] {
