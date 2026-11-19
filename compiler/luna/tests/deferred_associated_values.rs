@@ -198,3 +198,53 @@ fn inherent_methods_keep_associated_inputs_through_selection_and_instantiation()
         Value::Bool(true)
     );
 }
+
+#[test]
+fn open_associated_receivers_keep_the_known_trait_inputs() {
+    let source = r#"
+        typealias Type = .Type'builtin;
+        struct First {}
+        struct Second {}
+        trait Flag where U { assoc enabled: bool; }
+        impl Flag<bool> for First { assoc enabled: bool = true; }
+        impl Flag<First> for Second { assoc enabled: bool = VALUE; }
+        comptime fn read(comptime T: Type) -> bool
+        where requires T :- Flag<bool>
+        { T.as(Flag<bool>).enabled }
+        const VALUE: bool = read(First);
+        comptime fn run() -> bool { Second.as(Flag<First>).enabled }
+    "#;
+    let package = support::compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let cycle = source
+        .replace("Flag<First>", "Flag<bool>")
+        .replace("= read(First)", "= read(Second)");
+    let error = support::compile_with_protocols(&cycle, &Default::default()).unwrap_err();
+    assert!(error.contains("cyclic"), "{error}");
+}
+
+#[test]
+fn open_interface_inputs_keep_the_receiver_and_generic_initializer_code() {
+    let source = r#"
+        typealias Type = .Type'builtin;
+        struct Holder where flag: bool {}
+        struct Other {}
+        trait Flag where U { assoc enabled: bool; }
+        comptime fn keep(value: bool) -> bool { value }
+        impl Flag<bool> for Holder<flag> where flag: bool { assoc enabled: bool = keep(flag); }
+        impl Flag<bool> for Other { assoc enabled: bool = VALUE; }
+        comptime fn read(comptime U: Type) -> bool
+        where requires Holder<true> :- Flag<U>
+        { Holder<true>.as(Flag<U>).enabled }
+        const VALUE: bool = read(bool);
+        comptime fn run() -> bool { Other.as(Flag<bool>).enabled }
+    "#;
+    let package = support::compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}

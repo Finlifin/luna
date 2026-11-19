@@ -9,51 +9,6 @@ pub(super) struct SourceClosure {
 }
 
 impl Checker<'_, '_> {
-    pub(super) fn required_method_link(
-        &mut self,
-        id: DeclarationId,
-        span: Span,
-    ) -> Result<n::MethodLink, Error> {
-        let (source, phase, is_quote, parameters) =
-            if let Some(function) = self.generated_functions.declaration(id) {
-                (
-                    function.source,
-                    function.phase,
-                    false,
-                    &function.type_parameters,
-                )
-            } else {
-                let owner = self
-                    .source_declarations
-                    .owner(id)
-                    .ok_or_else(|| error(span, "implementation method declaration is missing"))?;
-                let item = self
-                    .package
-                    .item(owner)
-                    .expect("indexed source declaration");
-                let ItemKind::Fn(signature, _) = &item.kind else {
-                    return Err(error(span, "implementation method is not a function"));
-                };
-                (
-                    source(item.span),
-                    function_bodies::phase(&signature.modifiers),
-                    signature.modifiers.is_quote,
-                    &self.type_parameters[&owner],
-                )
-            };
-        self.required_steps = self
-            .required_steps
-            .checked_sub(1 + parameters.len() as u64)
-            .ok_or_else(|| error(span, "implementation method link budget exhausted"))?;
-        Ok(n::MethodLink {
-            source,
-            declaration: id,
-            phase,
-            is_quote,
-            type_parameters: parameters.clone(),
-        })
-    }
-
     pub(super) fn required_source_closure(
         &mut self,
         roots: BTreeSet<Dependency>,
@@ -65,66 +20,42 @@ impl Checker<'_, '_> {
         work.extend(roots, &mut self.required_steps, span)?;
         while let Some(need) = work.next() {
             let id = match need {
-                Dependency::Associated(member) => {
-                    // A generic comptime body may discover a member dependency
-                    // that the enclosing initializer has not demanded yet.
-                    let implementations: Vec<_> = self
+                // The complete associated contract is already available to the
+                // type theory. Only implementation edges demand its value.
+                Dependency::InterfaceMember(Member::Associated(_)) => continue,
+                Dependency::ImplementationMember {
+                    implementation,
+                    member: Member::Associated(member),
+                } => {
+                    if self
                         .associated_initializers
-                        .keys()
-                        .filter(|(_, id)| *id == member)
-                        .map(|(implementation, _)| *implementation)
-                        .collect();
-                    for implementation in implementations {
-                        self.selected_associated_value(implementation, member, span)?;
+                        .contains_key(&(implementation, member))
+                    {
+                        self.ensure_associated_value(implementation, member, span)?;
                     }
-                    for implementation in &self.checked_implementations {
-                        for (_, value) in implementation
+                    if let Some(&slot) = self.implementation_positions.get(&implementation) {
+                        let row = &self.checked_implementations[slot];
+                        let value = row
                             .associated
                             .iter()
-                            .filter(|(id, _)| *id == member)
-                        {
+                            .find(|(id, _)| *id == member)
+                            .map(|(_, value)| value)
+                            .or_else(|| {
+                                row.associated_initializers
+                                    .iter()
+                                    .find(|(id, _)| *id == member)
+                                    .map(|(_, initializer)| initializer.expression())
+                            });
+                        if let Some(value) = value {
                             let found = Discovery::Required(&self.implementation_index)
                                 .references(value, &mut self.required_steps)
                                 .map_err(|failure| error(span, failure.to_string()))?;
                             work.extend(found, &mut self.required_steps, span)?;
                         }
-                        for (_, initializer) in implementation
-                            .associated_initializers
-                            .iter()
-                            .filter(|(id, _)| *id == member)
-                        {
-                            let found = Discovery::Required(&self.implementation_index)
-                                .references(initializer.expression(), &mut self.required_steps)
-                                .map_err(|failure| error(span, failure.to_string()))?;
-                            work.extend(found, &mut self.required_steps, span)?;
-                        }
                     }
                     continue;
                 }
-                Dependency::Method(member) => {
-                    // A bare callable declaration carries no receiver evidence.
-                    let (interface, _) = self.checked_traits.method(member).ok_or_else(|| {
-                        error(span, "required comptime method contract is missing")
-                    })?;
-                    work.extend(
-                        [Dependency::MethodContract(member)],
-                        &mut self.required_steps,
-                        span,
-                    )?;
-                    work.extend(
-                        self.checked_implementations
-                            .iter()
-                            .filter(|i| i.interface == Some(interface.declaration))
-                            .map(|i| Dependency::MethodBody {
-                                implementation: i.declaration,
-                                member,
-                            }),
-                        &mut self.required_steps,
-                        span,
-                    )?;
-                    continue;
-                }
-                Dependency::MethodContract(member) => {
+                Dependency::InterfaceMember(Member::Method(member)) => {
                     if !self.interfaces_ready {
                         return Err(error(
                             span,
@@ -157,9 +88,9 @@ impl Checker<'_, '_> {
                     }
                     continue;
                 }
-                Dependency::MethodBody {
+                Dependency::ImplementationMember {
                     implementation,
-                    member,
+                    member: Member::Method(member),
                 } => {
                     let (interface, contract) =
                         self.checked_traits.method(member).ok_or_else(|| {
@@ -184,12 +115,24 @@ impl Checker<'_, '_> {
                 Dependency::Callable(id) => {
                     // A method value references the contract. Implementations
                     // may inherit a default whose code has that same ID.
-                    let edge = if self.checked_traits.method(id).is_some() {
-                        Dependency::Method(id)
+                    if let Some((interface, _)) = self.checked_traits.method(id) {
+                        let member = Member::Method(id);
+                        work.extend(
+                            std::iter::once(Dependency::InterfaceMember(member)).chain(
+                                self.checked_implementations
+                                    .iter()
+                                    .filter(|i| i.interface == Some(interface.declaration))
+                                    .map(|i| Dependency::ImplementationMember {
+                                        implementation: i.declaration,
+                                        member,
+                                    }),
+                            ),
+                            &mut self.required_steps,
+                            span,
+                        )?;
                     } else {
-                        Dependency::Definition(id)
-                    };
-                    work.extend([edge], &mut self.required_steps, span)?;
+                        work.extend([Dependency::Definition(id)], &mut self.required_steps, span)?;
+                    }
                     continue;
                 }
                 Dependency::Definition(id) => id,

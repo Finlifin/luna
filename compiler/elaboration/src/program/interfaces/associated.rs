@@ -2,6 +2,11 @@
 //! Only completed values enter published implementation tables.
 use super::*;
 
+enum Supply {
+    Value(n::Expr),
+    Initializer(nir::associated_initializers::AssociatedInitializer),
+}
+
 impl Checker<'_, '_> {
     pub(in crate::program) fn associated_contract(
         &mut self,
@@ -319,11 +324,43 @@ impl Checker<'_, '_> {
         member: DeclarationId,
         span: Span,
     ) -> Result<n::Expr, Error> {
-        let selected = self
-            .checked_implementations
+        let slot = self.ensure_associated_value(implementation, member, span)?;
+        let selected = &self.checked_implementations[slot];
+        if let Some((_, value)) = selected.associated.iter().find(|(id, _)| *id == member) {
+            constants::charge_copy(value, &mut self.required_steps, span)?;
+            return Ok(value.clone());
+        }
+        let (_, initializer) = selected
+            .associated_initializers
             .iter()
-            .find(|item| item.declaration == implementation)
+            .find(|(id, _)| *id == member)
+            .expect("prepared associated initializer");
+        Ok(n::Expr {
+            ty: initializer.expression().ty.clone(),
+            source: source(span),
+            kind: K::AssociatedValue {
+                interface: selected
+                    .interface_instance()
+                    .expect("associated trait implementation"),
+                subject: selected.subject.clone(),
+                member,
+            },
+        })
+    }
+
+    /// Publish the selected supply once. Definition checking and dependency
+    /// discovery only need its row; building a use-site expression is separate.
+    pub(in crate::program) fn ensure_associated_value(
+        &mut self,
+        implementation: DeclarationId,
+        member: DeclarationId,
+        span: Span,
+    ) -> Result<usize, Error> {
+        let slot = *self
+            .implementation_positions
+            .get(&implementation)
             .ok_or_else(|| error(span, "unknown associated implementation"))?;
+        let selected = &self.checked_implementations[slot];
         if !selected.phases.comptime
             && selected
                 .interface
@@ -341,13 +378,15 @@ impl Checker<'_, '_> {
                 "selected implementation lacks comptime trait phase",
             ));
         }
-        if let Some((_, value)) = selected.associated.iter().find(|(id, _)| *id == member) {
-            constants::charge_copy(value, &mut self.required_steps, span)?;
-            return Ok(value.clone());
+        if selected.associated.iter().any(|(id, _)| *id == member)
+            || selected
+                .associated_initializers
+                .iter()
+                .any(|(id, _)| *id == member)
+        {
+            return Ok(slot);
         }
-        if let Some(value) = self.associated_initializer_reference(implementation, member, span) {
-            return Ok(value);
-        }
+        let generic = !selected.type_parameters.is_empty();
         let key = (implementation, member);
         let (owner, parameters, arguments) = self
             .associated_initializers
@@ -366,13 +405,7 @@ impl Checker<'_, '_> {
             ));
         }
         let saved_selection = self.selected_associated_initializer.replace(key);
-        let mut deferred = None;
         let result = (|| {
-            let generic = self
-                .checked_implementations
-                .iter()
-                .find(|item| item.declaration == implementation)
-                .is_some_and(|item| !item.type_parameters.is_empty());
             if generic {
                 let contract = self.associated_contract(owner, false)?;
                 if contract.ty != p(P::Type) {
@@ -418,7 +451,7 @@ impl Checker<'_, '_> {
                     );
                     self.required_steps -= (before - fuel) as u64;
                     match completed {
-                        Ok(()) => return Ok(template),
+                        Ok(()) => return Ok(Supply::Value(template)),
                         Err(
                             failure @ (nir::NominalAdmissionError::Budget
                             | nir::NominalAdmissionError::Unresolved(_)),
@@ -428,17 +461,14 @@ impl Checker<'_, '_> {
                         // are checked below before publishing an initializer.
                         Err(nir::NominalAdmissionError::Invalid(_)) => {}
                     }
-                    constants::charge_copy(&template, &mut self.required_steps, span)?;
                     fuel = self.required_steps.min(100_000) as usize;
                     let before = fuel;
                     let initializer = nir::associated_initializers::AssociatedInitializer::new(
-                        template.clone(),
-                        &mut fuel,
+                        template, &mut fuel,
                     );
                     self.required_steps -= (before - fuel) as u64;
                     let initializer = initializer.map_err(|e| error(span, e))?;
-                    deferred = Some(initializer);
-                    return Ok(template);
+                    return Ok(Supply::Initializer(initializer));
                 }
             }
             let value = self
@@ -458,56 +488,19 @@ impl Checker<'_, '_> {
                     fuel,
                 )
             })
+            .map(Supply::Value)
             .map_err(|e| error(span, e.to_string()))
         })();
         self.selected_associated_initializer = saved_selection;
         self.active_associated_values.remove(&key);
-        if let Some(initializer) = deferred {
-            self.checked_implementations
-                .iter_mut()
-                .find(|item| item.declaration == implementation)
-                .unwrap()
-                .associated_initializers
-                .push((member, initializer));
-            return Ok(self
-                .associated_initializer_reference(implementation, member, span)
-                .unwrap());
+        let selected = &mut self.checked_implementations[slot];
+        match result? {
+            Supply::Value(value) => selected.associated.push((member, value)),
+            Supply::Initializer(initializer) => {
+                selected.associated_initializers.push((member, initializer))
+            }
         }
-        if let Ok(value) = &result {
-            constants::charge_copy(value, &mut self.required_steps, span)?;
-            self.checked_implementations
-                .iter_mut()
-                .find(|i| i.declaration == implementation)
-                .unwrap()
-                .associated
-                .push((member, value.clone()));
-        }
-        result
-    }
-
-    fn associated_initializer_reference(
-        &self,
-        implementation: DeclarationId,
-        member: DeclarationId,
-        span: Span,
-    ) -> Option<n::Expr> {
-        let selected = self
-            .checked_implementations
-            .iter()
-            .find(|item| item.declaration == implementation)?;
-        let initializer = selected
-            .associated_initializers
-            .iter()
-            .find(|(id, _)| *id == member)?;
-        Some(n::Expr {
-            ty: initializer.1.expression().ty.clone(),
-            source: source(span),
-            kind: K::AssociatedValue {
-                interface: selected.interface_instance()?,
-                subject: selected.subject.clone(),
-                member,
-            },
-        })
+        Ok(slot)
     }
 
     pub(in crate::program) fn complete_associated_values(&mut self) -> Result<(), Error> {
@@ -529,7 +522,7 @@ impl Checker<'_, '_> {
         pending.sort_by_key(|(_, member)| !type_members.contains(member));
         for (implementation, member) in pending {
             let owner = self.associated_initializers[&(implementation, member)].0;
-            self.selected_associated_value(
+            self.ensure_associated_value(
                 implementation,
                 member,
                 self.package.item(owner).unwrap().span,

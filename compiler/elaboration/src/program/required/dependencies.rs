@@ -7,15 +7,19 @@ use super::*;
 /// A method can also be the declaration of its inherited default body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::program) enum Dependency {
-    Associated(DeclarationId),
-    Method(DeclarationId),
-    MethodContract(DeclarationId),
-    MethodBody {
+    InterfaceMember(Member),
+    ImplementationMember {
         implementation: DeclarationId,
-        member: DeclarationId,
+        member: Member,
     },
     Callable(DeclarationId),
     Definition(DeclarationId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(in crate::program) enum Member {
+    Associated(DeclarationId),
+    Method(DeclarationId),
 }
 
 impl Dependency {
@@ -69,17 +73,17 @@ pub(in crate::program) enum Discovery<'w> {
 }
 
 impl Discovery<'_> {
-    fn method(
+    fn member(
         self,
         interface: DeclarationId,
         arguments: &[Term],
         subject: &Term,
-        member: DeclarationId,
+        member: Member,
         found: &mut BTreeSet<Dependency>,
         fuel: &mut usize,
     ) -> Result<(), nir::visit::Error> {
+        found.insert(Dependency::InterfaceMember(member));
         let Self::Required(index) = self else {
-            found.insert(Dependency::Method(member));
             return Ok(());
         };
         let mut budget = crate::ptc::Budget {
@@ -89,11 +93,10 @@ impl Discovery<'_> {
         let candidates = index.candidates_metered(Some(interface), arguments, subject, &mut budget);
         *fuel = budget.steps;
         let candidates = candidates.map_err(|_| {
-            nir::visit::Error::Budget("required method dependency search exhausted")
+            nir::visit::Error::Budget("required trait member dependency search exhausted")
         })?;
-        found.insert(Dependency::MethodContract(member));
         found.extend(candidates.declarations().iter().map(|&implementation| {
-            Dependency::MethodBody {
+            Dependency::ImplementationMember {
                 implementation,
                 member,
             }
@@ -131,11 +134,11 @@ impl Discovery<'_> {
                     interface,
                     subject,
                 } => {
-                    self.method(
+                    self.member(
                         *interface,
                         interface_arguments,
                         subject,
-                        *member,
+                        Member::Method(*member),
                         &mut found,
                         fuel,
                     )?;
@@ -146,9 +149,19 @@ impl Discovery<'_> {
                     )?;
                 }
                 K::AssociatedValue {
-                    member, interface, ..
+                    member,
+                    interface,
+                    subject,
                 } => {
-                    found.insert(Dependency::Associated(*member));
+                    self.member(
+                        interface.declaration,
+                        &interface.arguments,
+                        subject,
+                        Member::Associated(*member),
+                        &mut found,
+                        fuel,
+                    )?;
+
                     self.collect_values(&interface.arguments, &mut found, fuel)?;
                 }
                 K::ComptimeValue(value) | K::StagedValue(value) => {
@@ -233,11 +246,11 @@ impl Discovery<'_> {
             while let Some(value) = pending.pop() {
                 match value {
                     Term::MethodValue(method) => {
-                        self.method(
+                        self.member(
                             method.interface.declaration,
                             &method.interface.arguments,
                             &method.subject,
-                            method.member,
+                            Member::Method(method.member),
                             found,
                             fuel,
                         )?;
@@ -330,11 +343,11 @@ impl ObservedInputs {
                 Value::RuntimeTraitMethod(method) => {
                     let mut remaining = usize::try_from(*fuel).unwrap_or(usize::MAX);
                     let before = remaining;
-                    let result = discovery.method(
+                    let result = discovery.member(
                         method.interface.declaration,
                         &method.interface.arguments,
                         &method.subject,
-                        method.member,
+                        Member::Method(method.member),
                         &mut self.code,
                         &mut remaining,
                     );
@@ -475,8 +488,8 @@ mod tests {
                 Dependency::Callable(id(1)),
                 Dependency::Callable(id(2)),
                 Dependency::Callable(id(3)),
-                Dependency::Method(id(4)),
-                Dependency::Associated(id(5)),
+                Dependency::InterfaceMember(Member::Method(id(4))),
+                Dependency::InterfaceMember(Member::Associated(id(5))),
             ])
         );
         // Discovery of retained code must not certify unresolved evidence as

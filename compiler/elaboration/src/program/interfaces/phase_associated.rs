@@ -117,7 +117,7 @@ impl Checker<'_, '_> {
                 .insert(key, alternative)
                 .unwrap();
             let actual = self
-                .selected_associated_value(implementation, member, span)
+                .ensure_associated_value(implementation, member, span)
                 .and_then(|_| self.associated_comparison_payload(slot, member, span));
             self.associated_initializers.insert(key, saved_recipe);
             self.checked_implementations[slot]

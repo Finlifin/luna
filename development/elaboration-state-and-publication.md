@@ -419,6 +419,19 @@ LocalId（包括准备语句引入的绑定）。字节码保留这份不可变�
 已访问的依赖不必在每次迭代后重新扫描。队列使用当前 required invocation 的
 准备预算，库中可达声明的个数没有额外的 256 项门槛。
 
+关联值的依赖由接收者、完整接口实例和成员共同确定。例如，`read(comptime T: Type)`
+有约束 `T :- Flag<bool>`，在主体中读取 `T.as(Flag<bool>).enabled`。准备这次调用时
+可以排除 `Flag<u8>` 的初始化器，即使 T 仍是开放输入。反过来，如果 U 开放而
+接收者已知，`Holder<true>.as(Flag<U>).enabled` 可以排除其他接收者。候选行的
+泛型初始化器可能调用辅助函数，这些代码随初始化器进入执行闭包。完整包仍检查每项
+声明。快照保留所有实现关系和已完成的关联数据，类型理论因而仍可取得关联类型等式。
+
+如果两个接收者都实现 `Flag<bool>`，调用 `read(First)` 的准备阶段仍会观察两者。
+已复现的边界是 `Second.enabled` 引用这次调用正在形成的常量，导致伪循环。
+要消除这条依赖，需等 VM 取得具体接收者并选中实现，再向源码取得这一项供应，
+将响应交回原 activation。重跑正在形成的常量会重复其先前执行的操作。
+[关联值检查](../compiler/elaboration/src/program/interfaces/associated.rs) · [执行世界投影](../compiler/elaboration/src/program/required/trait_world.rs) · [开放输入用例](../compiler/luna/tests/deferred_associated_values.rs)
+
 例如，一个已实例化的 comptime 函数可以在子句参数中携带另一个函数。无论入口
 取得的是 NIR 函数实例、冻结的函数值还是 VM 中的活动值，准备端都应保留里面的
 可调用声明。作为参数传递的 normal-form Type 只携带身份，发现依赖不会展开它的头。

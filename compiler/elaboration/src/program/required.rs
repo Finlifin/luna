@@ -12,7 +12,8 @@ mod publication;
 mod restore;
 mod scope;
 mod source_closure;
-pub(super) use dependencies::{Dependency, Discovery};
+mod trait_world;
+pub(super) use dependencies::{Dependency, Discovery, Member};
 use prepared::PreparedRequired;
 
 /// Required expression evaluation can prepare a distinct clause packet at the
@@ -1353,7 +1354,7 @@ impl Checker<'_, '_> {
                 && self.pending_refinements.iter().any(|pending| {
                     let id = declaration(self.package, &self.package_identities, pending.owner);
                     retained.contains(&Dependency::Definition(id))
-                        || retained.contains(&Dependency::MethodContract(id))
+                        || retained.contains(&Dependency::InterfaceMember(Member::Method(id)))
                 })
             {
                 return Err(error(
@@ -1362,49 +1363,11 @@ impl Checker<'_, '_> {
                 ));
             }
             functions.push(function);
-            // Preserve the checked implementation world, projecting only its
-            // method tables to the members this invocation can reference. This
-            // avoids requiring unrelated runtime bodies in a comptime snapshot.
-            let mut traits = self.checked_traits.to_vec();
-            for interface in &mut traits {
-                interface.methods.retain(|method| {
-                    retained.contains(&Dependency::MethodContract(method.declaration))
-                });
-            }
-            let mut targets = BTreeSet::new();
-            let mut implementations = self.checked_implementations.clone();
-            for implementation in &mut implementations {
-                let interface = implementation
-                    .interface
-                    .and_then(|id| self.checked_traits.by_id(id));
-                implementation.methods.retain(|(name, body)| {
-                    let needed = interface.is_some_and(|interface| {
-                        interface.methods.iter().any(|m| {
-                            m.name == *name
-                                && retained.contains(&Dependency::MethodContract(m.declaration))
-                        })
-                    });
-                    if needed {
-                        targets.insert(*body);
-                    }
-                    needed
-                });
-            }
-            for method in traits
-                .iter_mut()
-                .flat_map(|interface| &mut interface.methods)
-            {
-                if method.default.is_some_and(|id| {
-                    !targets.contains(&id) && !retained.contains(&Dependency::Definition(id))
-                }) {
-                    method.default = None;
-                }
-            }
-            let method_links = targets
-                .into_iter()
-                .filter(|id| !retained.contains(&Dependency::Definition(*id)))
-                .map(|id| self.required_method_link(id, expr.span))
-                .collect::<Result<Vec<_>, _>>()?;
+            let trait_world::TraitWorld {
+                traits,
+                implementations,
+                method_links,
+            } = self.required_trait_world(&retained, expr.span)?;
             let mut package = n::Package {
                 builtin_implementation_packages: self
                     .protocols
