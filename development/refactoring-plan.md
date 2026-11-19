@@ -193,6 +193,13 @@ required invocation 的结果和原域模板建立一次同时替换，用它检
 可见。树解释在原栈上继续推进，字节码会话在每次交付后归还控制权。多个槽位
 同时就绪时沿用声明顺序，已经越过的槽位留到下一轮。[输入帧](../compiler/comptime_interpretor/src/input_collection.rs) · [取消与恢复用例](../compiler/comptime_interpretor/src/input_collection/tests.rs)
 
+执行侧的词法作用域随 invocation 的环境移动。树解释进入块、子句实参或候选
+pattern 时建一个空作用域，随后只登记本层新增和移除的绑定。失败、控制转移或
+正常离开时，本层引入的名字消失，外层绑定的写入和移动继续生效。成功的
+let-pattern 把新绑定交给父作用域。字节码用自己的寄存器作用域实现相同的
+可见性。在 32 层块中形成同一个函数实例，调用帧从 1 个已有绑定扩大到 4096
+个时，两种执行方式各自的步数均保持不变。[VM 环境](../compiler/comptime_interpretor/src/environment.rs) · [实例形成用例](../compiler/comptime_interpretor/src/dynamic_instances.rs)
+
 从这里接普通调用，需要在源码的两个消费位置保留不同的交付责任：
 
 - 对 `count`，声明的返回域已经是 `Integer`。待定位置是列表的元素检查。前缀

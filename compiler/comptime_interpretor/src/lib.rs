@@ -4056,9 +4056,8 @@ impl<'a> Interpreter<'a> {
         match &expr.kind {
             K::Match { value, arms } => {
                 let value = value!(self.eval(value, environment));
-                let existing = environment.snapshot();
                 for arm in arms {
-                    let flow = (|| {
+                    let flow = environment.scoped(|environment| {
                         self.tick(Some(expr.source))?;
                         let (matched, bindings) = self.match_arm_guard_with_bindings(
                             &arm.pattern,
@@ -4083,8 +4082,7 @@ impl<'a> Interpreter<'a> {
                             )?;
                         }
                         Ok(Some(result))
-                    })();
-                    environment.retain(|id, _| existing.contains(id));
+                    });
                     if let Some(flow) = flow? {
                         return Ok(flow);
                     }
@@ -4100,18 +4098,8 @@ impl<'a> Interpreter<'a> {
         let mut frames = Vec::new();
         let mut current = expr;
         let mut flow = 'evaluate: loop {
-            // Charge the saved scope as well as each expression. Deep generated
-            // wrappers use heap continuations, not unbounded uncharged storage.
-            let Some(remaining) = self.budget.steps.checked_sub(environment.len() as u64) else {
-                let failure = Err(self.failure(ErrorKind::StepsExhausted, Some(current.source)));
-                break if frames.is_empty() {
-                    failure
-                } else {
-                    self.finish_evaluation(current, environment, failure)
-                };
-            };
-            self.budget.steps = remaining;
-            frames.push((current, environment.snapshot()));
+            environment.begin_scope();
+            frames.push(current);
             let (K::Block { statements, result } | K::CallPreparation { statements, result }) =
                 &current.kind
             else {
@@ -4135,7 +4123,7 @@ impl<'a> Interpreter<'a> {
                 break self.eval(tail, environment);
             }
         };
-        while let Some((frame, existing)) = frames.pop() {
+        while let Some(frame) = frames.pop() {
             let cleanup = if matches!(&flow, Ok(Flow::Value(_))) {
                 if matches!(frame.kind, K::CallPreparation { .. }) {
                     self.cleanup_site(frame.source, iir::cleanup::Boundary::ScopeEnd, environment)
@@ -4145,9 +4133,9 @@ impl<'a> Interpreter<'a> {
             } else {
                 Ok(())
             };
-            match cleanup {
-                Ok(()) => environment.retain(|id, _| existing.contains(id)),
-                Err(failure) => flow = Err(failure),
+            environment.leave_scope();
+            if let Err(failure) = cleanup {
+                flow = Err(failure);
             }
             // The outer eval owns the root's delivery hook. Every tail block
             // still receives the same hook after its lexical cleanup.
@@ -4173,7 +4161,7 @@ impl<'a> Interpreter<'a> {
             } => {
                 let value_source = value.source;
                 let value = value!(self.eval(value, environment));
-                let existing = environment.snapshot();
+                environment.begin_scope();
                 let succeeds = self.match_arm_guard_with_bindings(
                     pattern,
                     guard.as_deref(),
@@ -4181,11 +4169,19 @@ impl<'a> Interpreter<'a> {
                     environment,
                 );
                 if let Ok((Flow::Value(Value::Bool(true)), bindings)) = &succeeds {
-                    self.retain_pattern_residual(expr.source, &value, bindings)?;
-                    return Ok(Flow::Value(Value::Unit));
+                    match self.retain_pattern_residual(expr.source, &value, bindings) {
+                        Ok(()) => {
+                            environment.commit_scope();
+                            return Ok(Flow::Value(Value::Unit));
+                        }
+                        Err(error) => {
+                            environment.leave_scope();
+                            return Err(error);
+                        }
+                    }
                 }
                 // Roll back candidate bindings, preserving writes to outer places.
-                environment.retain(|id, _| existing.contains(id));
+                environment.leave_scope();
                 match succeeds?.0 {
                     Flow::Value(Value::Bool(false)) => {
                         if let Some(otherwise) = otherwise {

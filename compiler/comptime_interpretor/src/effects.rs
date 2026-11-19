@@ -373,18 +373,15 @@ impl Interpreter<'_> {
         let result = self.with_native_depth(|vm| match &expr.kind {
             K::Call { .. } => vm.eval_call_with_effects(expr, environment, Some(selected)),
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                let existing = environment.snapshot();
-                let result = (|| {
+                environment.scoped(|environment| {
                     for statement in statements {
                         value!(vm.eval(statement, environment));
                     }
                     let result = result
                         .as_ref()
                         .ok_or_else(|| vm.failure(ErrorKind::Type, Some(expr.source)))?;
-                    vm.eval_mapped_computation(result, environment, selected)
-                })();
-                let result = match result {
-                    Ok(Flow::Value(value)) => {
+                    let flow = vm.eval_mapped_computation(result, environment, selected)?;
+                    if matches!(flow, Flow::Value(_)) {
                         if matches!(expr.kind, K::CallPreparation { .. }) {
                             vm.cleanup_site(
                                 expr.source,
@@ -394,12 +391,9 @@ impl Interpreter<'_> {
                         } else {
                             vm.cleanup_block(expr.source, environment)?;
                         }
-                        Ok(Flow::Value(value))
                     }
-                    other => other,
-                };
-                environment.retain(|id, _| existing.contains(id));
-                result
+                    Ok(flow)
+                })
             }
             K::If {
                 condition,
@@ -420,10 +414,9 @@ impl Interpreter<'_> {
             }
             K::Match { value, arms } => {
                 let value = value!(vm.eval(value, environment));
-                let existing = environment.snapshot();
-                let result = (|| {
-                    for arm in arms {
-                        environment.retain(|id, _| existing.contains(id));
+                let mut selected = Some(selected);
+                for arm in arms {
+                    let matched = environment.scoped(|environment| {
                         let (matched, bindings) = vm.match_arm_guard_with_bindings(
                             &arm.pattern,
                             arm.guard.as_ref(),
@@ -431,11 +424,14 @@ impl Interpreter<'_> {
                             environment,
                         )?;
                         match matched {
-                            Flow::Value(Value::Bool(false)) => continue,
+                            Flow::Value(Value::Bool(false)) => Ok(None),
                             Flow::Value(Value::Bool(true)) => {
                                 vm.retain_pattern_residual(arm.body.source, &value, &bindings)?;
-                                let result =
-                                    vm.eval_mapped_computation(&arm.body, environment, selected)?;
+                                let result = vm.eval_mapped_computation(
+                                    &arm.body,
+                                    environment,
+                                    selected.take().expect("selected match arm"),
+                                )?;
                                 if matches!(result, Flow::Value(_))
                                     && !matches!(
                                         arm.body.kind,
@@ -448,15 +444,16 @@ impl Interpreter<'_> {
                                         environment,
                                     )?;
                                 }
-                                return Ok(result);
+                                Ok(Some(result))
                             }
-                            flow => return Ok(flow),
+                            flow => Ok(Some(flow)),
                         }
+                    })?;
+                    if let Some(flow) = matched {
+                        return Ok(flow);
                     }
-                    Err(vm.failure(ErrorKind::NonExhaustiveMatch, Some(expr.source)))
-                })();
-                environment.retain(|id, _| existing.contains(id));
-                result
+                }
+                Err(vm.failure(ErrorKind::NonExhaustiveMatch, Some(expr.source)))
             }
             K::EffectComputation { .. } => {
                 let previous = std::mem::replace(&mut vm.effect_state.environment, selected);

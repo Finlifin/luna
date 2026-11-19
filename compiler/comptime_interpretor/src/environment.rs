@@ -5,19 +5,38 @@ use super::{LocalId, Value};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
-pub(super) enum Environment {
+enum Registers {
     Slots {
         entries: Vec<(LocalId, Option<Value>)>,
         live: usize,
     },
     Sparse(BTreeMap<LocalId, Value>),
 }
+// Each active lexical scope records net membership changes only. Values stay in
+// their registers so mutations and moves of outer bindings survive scope exit.
+#[derive(Debug)]
+pub(super) struct Environment {
+    registers: Registers,
+    scopes: Vec<BTreeMap<LocalId, Membership>>,
+}
+#[derive(Clone, Copy, Debug)]
+enum Membership {
+    Added,
+    Removed,
+}
+
+impl Clone for Environment {
+    fn clone(&self) -> Self {
+        // Captured environments start a new activation with its own scopes.
+        Self {
+            registers: self.registers.clone(),
+            scopes: Vec::new(),
+        }
+    }
+}
 impl Default for Environment {
     fn default() -> Self {
-        Self::Slots {
-            entries: Vec::new(),
-            live: 0,
-        }
+        Self::with_capacity(0)
     }
 }
 impl PartialEq for Environment {
@@ -30,32 +49,61 @@ impl Environment {
         Self::default()
     }
     pub fn with_capacity(capacity: usize) -> Self {
-        Self::Slots {
-            entries: Vec::with_capacity(capacity),
-            live: 0,
+        Self {
+            registers: Registers::Slots {
+                entries: Vec::with_capacity(capacity),
+                live: 0,
+            },
+            scopes: Vec::new(),
         }
     }
-    pub fn snapshot(&self) -> ScopeSnapshot {
-        match self {
-            Self::Slots { entries, .. } if entries.len() <= 64 => {
-                let bits = entries
-                    .iter()
-                    .enumerate()
-                    .fold(0u64, |bits, (i, (_, value))| {
-                        bits | (u64::from(value.is_some()) << i)
-                    });
-                ScopeSnapshot::Registers {
-                    base: entries.first().map(|e| e.0),
-                    bits,
+    pub fn begin_scope(&mut self) {
+        self.scopes.push(BTreeMap::new());
+    }
+    fn record(&mut self, id: LocalId, change: Membership) {
+        use std::collections::btree_map::Entry;
+        if let Some(scope) = self.scopes.last_mut() {
+            // Membership alternates on insert/remove. Opposite transitions
+            // cancel, including when a child scope commits to its parent.
+            match scope.entry(id) {
+                Entry::Vacant(entry) => {
+                    entry.insert(change);
+                }
+                Entry::Occupied(entry) => {
+                    entry.remove();
                 }
             }
-            _ => ScopeSnapshot::Sparse(self.keys().copied().collect()),
         }
     }
+    pub fn leave_scope(&mut self) {
+        for (id, change) in self.scopes.pop().expect("active lexical scope") {
+            match change {
+                Membership::Added => {
+                    self.remove_register(&id);
+                }
+                Membership::Removed => self.record(id, change),
+            }
+        }
+    }
+    // A successful let-pattern delivers its bindings into the enclosing scope.
+    pub fn commit_scope(&mut self) {
+        let changes = self.scopes.pop().expect("active lexical scope");
+        if !self.scopes.is_empty() {
+            for (id, change) in changes {
+                self.record(id, change);
+            }
+        }
+    }
+    pub fn scoped<R>(&mut self, run: impl FnOnce(&mut Self) -> R) -> R {
+        self.begin_scope();
+        let result = run(self);
+        self.leave_scope();
+        result
+    }
     pub fn len(&self) -> usize {
-        match self {
-            Self::Slots { live, .. } => *live,
-            Self::Sparse(map) => map.len(),
+        match &self.registers {
+            Registers::Slots { live, .. } => *live,
+            Registers::Sparse(map) => map.len(),
         }
     }
     pub fn is_empty(&self) -> bool {
@@ -67,25 +115,32 @@ impl Environment {
         Some(id.index.checked_sub(first.index)? as usize)
     }
     pub fn get(&self, id: &LocalId) -> Option<&Value> {
-        match self {
-            Self::Slots { entries, .. } => entries.get(Self::offset(entries, id)?)?.1.as_ref(),
-            Self::Sparse(map) => map.get(id),
+        match &self.registers {
+            Registers::Slots { entries, .. } => entries.get(Self::offset(entries, id)?)?.1.as_ref(),
+            Registers::Sparse(map) => map.get(id),
         }
     }
     pub fn get_mut(&mut self, id: &LocalId) -> Option<&mut Value> {
-        match self {
-            Self::Slots { entries, .. } => {
+        match &mut self.registers {
+            Registers::Slots { entries, .. } => {
                 let offset = Self::offset(entries, id)?;
                 entries.get_mut(offset)?.1.as_mut()
             }
-            Self::Sparse(map) => map.get_mut(id),
+            Registers::Sparse(map) => map.get_mut(id),
         }
     }
     pub fn contains_key(&self, id: &LocalId) -> bool {
         self.get(id).is_some()
     }
     pub fn insert(&mut self, id: LocalId, value: Value) -> Option<Value> {
-        if let Self::Slots { entries, live } = self {
+        let previous = self.insert_register(id, value);
+        if previous.is_none() {
+            self.record(id, Membership::Added);
+        }
+        previous
+    }
+    fn insert_register(&mut self, id: LocalId, value: Value) -> Option<Value> {
+        if let Registers::Slots { entries, live } = &mut self.registers {
             if entries.is_empty() {
                 entries.push((id, Some(value)));
                 *live = 1;
@@ -116,16 +171,23 @@ impl Environment {
                 .into_iter()
                 .filter_map(|(id, value)| value.map(|v| (id, v)))
                 .collect();
-            *self = Self::Sparse(map);
+            self.registers = Registers::Sparse(map);
         }
-        let Self::Sparse(map) = self else {
+        let Registers::Sparse(map) = &mut self.registers else {
             unreachable!()
         };
         map.insert(id, value)
     }
     pub fn remove(&mut self, id: &LocalId) -> Option<Value> {
-        let value = match self {
-            Self::Slots { entries, live } => {
+        let value = self.remove_register(id);
+        if value.is_some() {
+            self.record(*id, Membership::Removed);
+        }
+        value
+    }
+    fn remove_register(&mut self, id: &LocalId) -> Option<Value> {
+        let value = match &mut self.registers {
+            Registers::Slots { entries, live } => {
                 let offset = Self::offset(entries, id)?;
                 let value = entries.get_mut(offset)?.1.take();
                 if value.is_some() {
@@ -133,82 +195,46 @@ impl Environment {
                 }
                 value
             }
-            Self::Sparse(map) => map.remove(id),
+            Registers::Sparse(map) => map.remove(id),
         };
         self.compact();
         value
     }
-    pub fn retain(&mut self, mut keep: impl FnMut(&LocalId, &mut Value) -> bool) {
-        match self {
-            Self::Slots { entries, live } => {
-                for (id, slot) in entries {
-                    if slot.as_mut().is_some_and(|value| !keep(id, value)) {
-                        *slot = None;
-                        *live -= 1;
-                    }
-                }
-            }
-            Self::Sparse(map) => map.retain(keep),
-        }
-        self.compact();
-    }
     fn compact(&mut self) {
-        if let Self::Slots { entries, live } = self {
+        if let Registers::Slots { entries, live } = &mut self.registers {
             // Iteration must remain bounded by live bindings, not by the
-            // largest historical frame. Otherwise repeated scope snapshots
+            // largest historical frame. Otherwise iterating over locals
             // could scan arbitrarily many dead registers for a tiny budget.
             if *live == 0 {
-                *self = Self::new();
+                *entries = Vec::new();
             } else if entries.len() > live.saturating_mul(2).saturating_add(16) {
                 let map = std::mem::take(entries)
                     .into_iter()
                     .filter_map(|(id, value)| value.map(|value| (id, value)))
                     .collect();
-                *self = Self::Sparse(map);
+                self.registers = Registers::Sparse(map);
             }
         }
     }
     pub fn iter(&self) -> Iter<'_> {
-        match self {
-            Self::Slots { entries, .. } => Iter::Slots(entries.iter()),
-            Self::Sparse(map) => Iter::Sparse(map.iter()),
+        match &self.registers {
+            Registers::Slots { entries, .. } => Iter::Slots(entries.iter()),
+            Registers::Sparse(map) => Iter::Sparse(map.iter()),
         }
-    }
-    pub fn keys(&self) -> impl Iterator<Item = &LocalId> {
-        self.iter().map(|(id, _)| id)
     }
     pub fn values(&self) -> impl Iterator<Item = &Value> {
         self.iter().map(|(_, value)| value)
     }
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut Value> {
-        let (slots, sparse) = match self {
-            Self::Slots { entries, .. } => (Some(entries.iter_mut()), None),
-            Self::Sparse(map) => (None, Some(map.values_mut())),
+        let (slots, sparse) = match &mut self.registers {
+            Registers::Slots { entries, .. } => (Some(entries.iter_mut()), None),
+            Registers::Sparse(map) => (None, Some(map.values_mut())),
         };
         slots
             .into_iter()
             .flatten()
             .filter_map(|(_, value)| value.as_mut())
             .chain(sparse.into_iter().flatten())
-    }
-}
-pub(super) enum ScopeSnapshot {
-    Registers { base: Option<LocalId>, bits: u64 },
-    Sparse(Vec<LocalId>),
-}
-impl ScopeSnapshot {
-    pub fn contains(&self, id: &LocalId) -> bool {
-        match self {
-            Self::Registers {
-                base: Some(base),
-                bits,
-            } if base.owner == id.owner => id
-                .index
-                .checked_sub(base.index)
-                .is_some_and(|offset| offset < 64 && bits & (1 << offset) != 0),
-            Self::Registers { .. } => false,
-            Self::Sparse(ids) => ids.binary_search(id).is_ok(),
-        }
     }
 }
 pub(super) enum Iter<'a> {
@@ -261,19 +287,38 @@ mod tests {
     fn dead_registers_do_not_accumulate_across_scopes() {
         let id = |index| LocalId { owner: 1, index };
         let mut frame: Environment = (0..1024).map(|i| (id(i), Value::Unit)).collect();
-        frame.retain(|binding, _| binding.index == 1023);
-        assert_eq!(frame.len(), 1);
-        assert!(matches!(frame, Environment::Sparse(_)));
-        assert_eq!(frame.remove(&id(1023)), Some(Value::Unit));
-        let mut frame: Environment = (0..1024).map(|i| (id(i), Value::Unit)).collect();
         for i in 0..1023 {
             frame.remove(&id(i));
         }
-        assert!(matches!(frame, Environment::Sparse(_)));
-        assert_eq!(frame.get(&id(1023)), Some(&Value::Unit));
+        assert_eq!(frame.len(), 1);
+        assert!(matches!(frame.registers, Registers::Sparse(_)));
+        assert_eq!(frame.remove(&id(1023)), Some(Value::Unit));
     }
     #[test]
-    fn scope_snapshots_cover_empty_dense_wide_and_sparse_frames() {
+    fn nested_scopes_preserve_moves_and_commit_pattern_bindings_to_the_parent() {
+        let id = |index| LocalId { owner: 1, index };
+        let mut frame = Environment::from([(id(0), Value::Unit), (id(1), Value::Unit)]);
+        frame.begin_scope();
+        frame.insert(id(2), Value::Unit);
+        frame.scoped(|frame| {
+            frame.remove(&id(0));
+            frame.remove(&id(1));
+            frame.remove(&id(2));
+            frame.insert(id(3), Value::Unit);
+        });
+        frame.insert(id(0), Value::Bool(true));
+        frame.begin_scope();
+        frame.insert(id(4), Value::Unit);
+        frame.commit_scope();
+        assert_eq!(frame.get(&id(4)), Some(&Value::Unit));
+        let captured = frame.clone();
+        frame.leave_scope();
+        assert_eq!(frame, Environment::from([(id(0), Value::Bool(true))]));
+        assert_eq!(captured.len(), 2);
+        assert!(captured.scopes.is_empty());
+    }
+    #[test]
+    fn lexical_scopes_cover_empty_dense_wide_and_sparse_frames() {
         for size in [0, 1, 64, 65, 128] {
             for sparse in [false, true] {
                 let mut frame = Environment::new();
@@ -286,7 +331,7 @@ mod tests {
                     frame.insert(id, Value::Bool(true));
                     expected.insert(id, Value::Bool(true));
                 }
-                let snapshot = frame.snapshot();
+                frame.begin_scope();
                 // Replacing an old binding survives a scope exit; new owners,
                 // holes and sparse far-away identities must disappear.
                 for index in 0..256 {
@@ -303,7 +348,7 @@ mod tests {
                     },
                     Value::Unit,
                 );
-                frame.retain(|id, _| snapshot.contains(id));
+                frame.leave_scope();
                 assert!(frame.iter().eq(expected.iter()));
                 assert_eq!(frame.len(), expected.len());
             }
@@ -342,7 +387,7 @@ mod tests {
         frame.remove(&id(4));
         *frame.get_mut(&id(5)).unwrap() = Value::Bool(false);
         let saved = frame.clone();
-        let snapshot = frame.snapshot();
+        frame.begin_scope();
         frame.insert(
             LocalId {
                 owner: 10,
@@ -350,9 +395,11 @@ mod tests {
             },
             Value::Unit,
         );
-        frame.retain(|id, _| snapshot.contains(id));
+        frame.leave_scope();
         assert_eq!(frame, saved);
-        frame.retain(|id, _| id.index % 2 == 0);
+        for i in (1..16).step_by(2) {
+            frame.remove(&id(i));
+        }
         assert_eq!(frame.len(), 7);
         assert!(!frame.contains_key(&id(4)));
         assert_eq!(saved.len(), 15);
@@ -361,9 +408,5 @@ mod tests {
             *value = Value::Bool(false);
         }
         assert!(frame.values().all(|v| *v == Value::Bool(false)));
-        assert_eq!(
-            saved,
-            Environment::Sparse(saved.iter().map(|(id, v)| (*id, v.clone())).collect())
-        );
     }
 }

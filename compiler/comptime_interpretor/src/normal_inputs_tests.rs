@@ -116,56 +116,63 @@ fn staged_scopes_cleanup_on_errors_transfers_and_budget_exhaustion() {
         };
         let (code, _) = comptime_compiler::compile_staged_input(&input, &mut 10000).unwrap();
         let maximum = code.storage_work() as u64 + 256;
-        let mut failed_before_effect = false;
-        let mut failed_after_effect = false;
-        for steps in 0..=maximum {
-            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
-            vm.budget.steps = steps;
-            let mut env = Environment::new();
-            env.insert(outer, Value::Bool(false));
-            let result = vm.stage_normal_argument(&input, &mut env, 0);
-            assert_eq!(vm.depth, 0);
-            assert!(!env.contains_key(&inner));
-            assert_eq!(env.len(), 1);
-            if matches!(
-                &result,
-                Err(Error {
-                    kind: ErrorKind::StepsExhausted,
-                    ..
-                })
-            ) {
-                if env.get(&outer) == Some(&Value::Bool(true)) {
-                    failed_after_effect = true;
+        for compiled in [false, true] {
+            let mut failed_before_effect = false;
+            let mut failed_after_effect = false;
+            for steps in 0..=maximum {
+                let mut vm = if compiled {
+                    Interpreter::for_comptime(&package, Budget::default())
                 } else {
-                    failed_before_effect = true;
+                    Interpreter::for_comptime_tree(&package, Budget::default())
+                }
+                .unwrap();
+                vm.budget.steps = steps;
+                let mut env = Environment::new();
+                env.insert(outer, Value::Bool(false));
+                let result = vm.stage_normal_argument(&input, &mut env, 0);
+                assert_eq!(vm.depth, 0);
+                assert!(!env.contains_key(&inner));
+                assert_eq!(env.len(), 1);
+                if matches!(
+                    &result,
+                    Err(Error {
+                        kind: ErrorKind::StepsExhausted,
+                        ..
+                    })
+                ) {
+                    if env.get(&outer) == Some(&Value::Bool(true)) {
+                        failed_after_effect = true;
+                    } else {
+                        failed_before_effect = true;
+                    }
+                }
+                if steps == maximum {
+                    assert_eq!(vm.bytecode_staged_inputs(), usize::from(compiled));
+                    assert_eq!(env.get(&outer), Some(&Value::Bool(true)));
+                    match ending.kind {
+                        K::Return(_) => assert!(matches!(
+                            result,
+                            Ok(ControlFlow::Break(Flow::Return(Value::Bool(true))))
+                        )),
+                        K::Local(_) => assert!(matches!(
+                            result,
+                            Err(Error {
+                                kind: ErrorKind::MissingBinding,
+                                ..
+                            })
+                        )),
+                        _ => assert!(matches!(
+                            result,
+                            Ok(ControlFlow::Continue(StagedNormalInput::Value(
+                                Value::Bool(false)
+                            )))
+                        )),
+                    }
                 }
             }
-            if steps == maximum {
-                assert_eq!(vm.bytecode_staged_inputs(), 1);
-                assert_eq!(env.get(&outer), Some(&Value::Bool(true)));
-                match ending.kind {
-                    K::Return(_) => assert!(matches!(
-                        result,
-                        Ok(ControlFlow::Break(Flow::Return(Value::Bool(true))))
-                    )),
-                    K::Local(_) => assert!(matches!(
-                        result,
-                        Err(Error {
-                            kind: ErrorKind::MissingBinding,
-                            ..
-                        })
-                    )),
-                    _ => assert!(matches!(
-                        result,
-                        Ok(ControlFlow::Continue(StagedNormalInput::Value(
-                            Value::Bool(false)
-                        )))
-                    )),
-                }
-            }
+            assert!(failed_before_effect);
+            assert!(failed_after_effect);
         }
-        assert!(failed_before_effect);
-        assert!(failed_after_effect);
     }
 }
 

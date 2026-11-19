@@ -357,9 +357,7 @@ impl Interpreter<'_> {
         environment: &mut Environment,
         source: SourceRange,
     ) -> Result<ControlFlow<Flow, Vec<Term>>, Error> {
-        self.integer_operation(Some(source), |budget| budget.consume(environment.len()))?;
-        let existing = environment.snapshot();
-        let result: Result<_, Error> = (|| {
+        let result: Result<_, Error> = environment.scoped(|environment| {
             for statement in &inputs.statements {
                 match self.eval(statement, environment)? {
                     Flow::Value(_) => {}
@@ -383,8 +381,7 @@ impl Interpreter<'_> {
                 self.cleanup_block(source, environment)?;
             }
             Ok(result)
-        })();
-        environment.retain(|id, _| existing.contains(id));
+        });
         let values = match result? {
             ControlFlow::Continue(values) => values,
             ControlFlow::Break(flow) => return Ok(ControlFlow::Break(flow)),
@@ -576,6 +573,61 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn nested_clause_scopes_do_work_independent_of_unrelated_caller_locals() {
+        let package = package();
+        let mut body = expression(&package);
+        let K::ComptimeFunctionInstance { inputs, .. } = &mut body.kind else {
+            unreachable!()
+        };
+        let temporary = LocalId { owner: 3, index: 0 };
+        let field = &mut inputs.arguments[0];
+        inputs.statements.push(Expr {
+            source: field.source,
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::Let {
+                binding: temporary,
+                value: Box::new(field.clone()),
+            },
+        });
+        field.kind = K::Local(temporary);
+        for _ in 0..32 {
+            body = Expr {
+                source: body.source,
+                ty: body.ty.clone(),
+                kind: K::Block {
+                    statements: vec![],
+                    result: Some(Box::new(body)),
+                },
+            };
+        }
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 10000).unwrap());
+        for compiled in [false, true] {
+            let mut costs = Vec::new();
+            for width in [1, 4096] {
+                let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+                let mut env: Environment = (0..width)
+                    .map(|index| (LocalId { owner: 2, index }, Value::Bool(true)))
+                    .collect();
+                let before = vm.remaining_steps();
+                let flow = if compiled {
+                    vm.execute_code(&code, &mut env)
+                } else {
+                    vm.eval(&body, &mut env)
+                }
+                .unwrap();
+                assert!(
+                    matches!(flow, Flow::Value(Value::FunctionInstance { arguments, .. })
+                    if arguments == [Term::Bool(true)])
+                );
+                assert_eq!(env.len(), width as usize);
+                assert!(!env.contains_key(&temporary));
+                costs.push(before - vm.remaining_steps());
+            }
+            assert_eq!(costs[0], costs[1]);
+        }
+    }
+
     #[test]
     fn linear_instance_admission_precedes_effects_and_recovers() {
         let package = package();

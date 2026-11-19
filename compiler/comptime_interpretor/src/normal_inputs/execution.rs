@@ -38,7 +38,7 @@ impl Interpreter<'_> {
         initial_depth: usize,
         mut delivery: D,
     ) -> Result<ControlFlow<Flow, D::Item>, Error> {
-        let mut scopes = Vec::<environment::ScopeSnapshot>::new();
+        let mut open_scopes = 0;
         let result = self.with_depth_checkpoint(|vm| {
             let caller_depth = vm.depth;
             let mut work = vec![Work::<D>::Enter(input, InputKey::root())];
@@ -92,8 +92,8 @@ impl Interpreter<'_> {
                         }
                     }
                     Work::LeaveScope => {
-                        let existing = scopes.pop().expect("source input scope");
-                        environment.retain(|id, _| existing.contains(id));
+                        environment.leave_scope();
+                        open_scopes -= 1;
                     }
                     Work::Enter(input, key) => {
                         if initial_depth.saturating_add(vm.depth - caller_depth) >= 128 {
@@ -142,7 +142,8 @@ impl Interpreter<'_> {
                             A::Block {
                                 statements, result, ..
                             } => {
-                                scopes.push(environment.snapshot());
+                                environment.begin_scope();
+                                open_scopes += 1;
                                 work.push(Work::LeaveScope);
                                 for statement in statements {
                                     operand!(vm.eval(statement, environment));
@@ -158,7 +159,8 @@ impl Interpreter<'_> {
                                 arms,
                             } => {
                                 let value = operand!(vm.eval(value, environment));
-                                scopes.push(environment.snapshot());
+                                environment.begin_scope();
+                                open_scopes += 1;
                                 work.push(Work::LeaveScope);
                                 let mut selected = None;
                                 for (index, arm) in arms.iter().enumerate() {
@@ -169,8 +171,10 @@ impl Interpreter<'_> {
                                         &value,
                                         environment,
                                     )? {
-                                        Flow::Value(Value::Bool(false)) => environment
-                                            .retain(|id, _| scopes.last().unwrap().contains(id)),
+                                        Flow::Value(Value::Bool(false)) => {
+                                            environment.leave_scope();
+                                            environment.begin_scope();
+                                        }
                                         Flow::Value(Value::Bool(true)) => {
                                             selected = Some((index, &arm.body));
                                             break;
@@ -193,8 +197,8 @@ impl Interpreter<'_> {
         });
         // Transfers and failures discard bindings introduced in the input;
         // mutations to caller-owned bindings remain visible.
-        while let Some(existing) = scopes.pop() {
-            environment.retain(|id, _| existing.contains(id));
+        for _ in 0..open_scopes {
+            environment.leave_scope();
         }
         result
     }
