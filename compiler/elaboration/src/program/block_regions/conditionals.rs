@@ -220,7 +220,8 @@ impl<'h> Frame<'h> {
             (State::Then(condition), Some(value)) => {
                 self.leave_branch(checker);
                 let Some(no) = no else {
-                    let yes = discard_result(value.ordinary(self.source.span)?);
+                    let yes = checker
+                        .discard_result(value.ordinary(self.source.span)?, self.source.span)?;
                     return self.finish_ordinary(
                         checker,
                         condition,

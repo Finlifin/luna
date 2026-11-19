@@ -181,10 +181,18 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             }
             K::UnsafeScope(value) => self.expr(value, flow, depth + 1)?,
             K::Discard(value) => {
-                let origins = self.evaluate_value_origins(value, flow, depth + 1)?;
-                if flow.live {
-                    self.temporary(value, origins, flow)?;
-                }
+                self.in_temporary_scope(
+                    source,
+                    TemporaryBoundary::FullExpression,
+                    flow,
+                    |this, flow| {
+                        let origins = this.evaluate_value_origins(value, flow, depth + 1)?;
+                        if flow.live {
+                            this.temporary(value, origins, flow)?;
+                        }
+                        Ok(())
+                    },
+                )?;
             }
             K::EnumName(value) => {
                 if let Some(place) = expression_place(value) {

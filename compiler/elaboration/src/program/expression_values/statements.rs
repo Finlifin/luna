@@ -2,6 +2,36 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    pub(in crate::program) fn discard_generated_source(
+        &mut self,
+        original: n::SourceRange,
+        span: Span,
+    ) -> Result<n::SourceRange, Error> {
+        let index = u32::try_from(self.expansion_sources.len())
+            .map_err(|_| error(span, "discard statement source space exhausted"))?;
+        self.expansion_sources.push(n::ExpansionSource {
+            original,
+            site: source(span),
+        });
+        Ok(n::SourceRange::generated(index))
+    }
+
+    pub(in crate::program) fn discard_result(
+        &mut self,
+        value: n::Expr,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        if is_never(&value.ty) || value.ty == p(P::Void) {
+            return Ok(value);
+        }
+        let source = self.discard_generated_source(value.source, span)?;
+        Ok(n::Expr {
+            ty: p(P::Void),
+            source,
+            kind: K::Discard(Box::new(value)),
+        })
+    }
+
     #[inline(never)]
     pub(super) fn control_value_expression(
         &mut self,
@@ -17,7 +47,12 @@ impl Checker<'_, '_> {
                 } else {
                     p(P::Void)
                 };
-                (ty, K::Discard(Box::new(value)))
+                let mut discard =
+                    self.finish_value_expression(expr, expected, ty, K::Discard(Box::new(value)))?;
+                if !discard.shares_discard_temporary_boundary() {
+                    discard.source = self.discard_generated_source(discard.source, expr.span)?;
+                }
+                return Ok(discard);
             }
             H::For {..} => return self.iterator_loop(expr, expected),
             H::Loop(block) => {

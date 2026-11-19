@@ -83,7 +83,8 @@ impl Checker<'_, '_> {
                 .map(Box::new);
             // Keep the body even for statically empty ranges: ordinary phase,
             // type and resource checks cannot be skipped by an empty input.
-            let checked = discard_result(self.block(body, None)?);
+            let checked = self.block(body, None)?;
+            let checked = self.discard_result(checked, body.span)?;
             let binding = node(
                 P::Void,
                 K::LetPattern {

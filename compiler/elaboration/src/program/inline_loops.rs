@@ -288,7 +288,7 @@ impl Checker<'_, '_> {
                 let checked = self.block(body, None);
                 self.open_staged_locals = saved_staged;
                 self.open_member_locals = saved_members;
-                let checked = discard_result(checked?);
+                let checked = self.discard_result(checked?, body.span)?;
                 if count == 0 {
                     if self.checking_open_behavior {
                         // Keep the abstract iteration for definition-side P4
@@ -474,7 +474,8 @@ impl Checker<'_, '_> {
                         self.with_staged_input(true, |this| this.expr(guard, Some(&p(P::Bool))))?;
                     self.check_inline_input_availability(&checked, &BTreeSet::new(), guard.span)?;
                 }
-                let checked = discard_result(self.block(body, None)?);
+                let checked = self.block(body, None)?;
+                let checked = self.discard_result(checked, body.span)?;
                 if self.checking_open_behavior {
                     iterations.push(checked);
                 }
@@ -524,7 +525,8 @@ impl Checker<'_, '_> {
                     self.inline_selection = Some((expr.hir_id, usize::MAX));
                     self.in_unselected_inline = true;
                 }
-                let checked = discard_result(self.block(body, None)?);
+                let checked = self.block(body, None)?;
+                let checked = self.discard_result(checked, body.span)?;
                 let value = n::Expr {
                     source: source(expr.span),
                     ty: ty.clone(),

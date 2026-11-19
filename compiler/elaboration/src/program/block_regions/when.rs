@@ -227,7 +227,7 @@ impl<'h> Frame<'h> {
                         ordinary.branch_type = Some(body.ty.clone());
                     }
                     if !ordinary.fallback {
-                        body = discard_result(body);
+                        body = checker.discard_result(body, arm.body.span)?;
                     }
                     CheckedBlock::Ordinary(body)
                 } else {

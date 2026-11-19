@@ -182,7 +182,8 @@ impl Checker<'_, '_> {
                 .map(|guard| self.expr(guard, Some(&p(P::Bool))))
                 .transpose()?
                 .map(Box::new);
-            let checked = discard_result(self.block(body, None)?);
+            let checked = self.block(body, None)?;
+            let checked = self.discard_result(checked, body.span)?;
             let pattern = n::Pattern::Tuple(vec![pattern]);
             let pattern = if let Some(condition) = guard {
                 n::Pattern::Guard {

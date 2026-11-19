@@ -205,16 +205,6 @@ fn declaration(
 fn is_never(ty: &Term) -> bool {
     *ty == p(P::Never)
 }
-fn discard_result(value: n::Expr) -> n::Expr {
-    if is_never(&value.ty) || value.ty == p(P::Void) {
-        return value;
-    }
-    n::Expr {
-        ty: p(P::Void),
-        source: value.source,
-        kind: K::Discard(Box::new(value)),
-    }
-}
 
 pub fn elaborate(package: &hir::Package<'_>) -> Result<n::Package, Error> {
     elaborate_in_package(package, 0)

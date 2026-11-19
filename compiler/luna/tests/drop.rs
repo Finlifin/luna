@@ -40127,3 +40127,76 @@ fn cleanup_triviality_reuses_complete_layout_evidence_without_caching_failure() 
         }
     });
 }
+
+#[test]
+fn non_shared_discard_boundaries_drop_single_branch_and_block_temporaries_once() {
+    use comptime_interpretor::{Interpreter, Value};
+    let package = compile(
+        "trait Retire {fn drop(*self);} trait Duplicate {}
+        struct First {} struct Second {}
+        struct Pair {first:First,second:Second,}
+        impl Retire for First {fn drop(*self) {}}
+        impl Retire for Second {fn drop(*self) {}}
+        fn make()->Pair {Pair {first:First {},second:Second {}}}
+        fn if_discard(flag:bool) {if flag {make().first}}
+        fn when_discard(flag:bool) {when {flag => {make().first}}}
+        fn if_local_discard(flag:bool) {if flag {let local=Second {};First {}}}
+        fn block_discard() {do {make().first};}
+        fn field_discard() {make().first;}",
+    );
+    for (entry, args, expected) in [
+        (
+            "if_discard",
+            vec![Value::Bool(true)],
+            vec!["if_discard", "make", "drop First", "drop Second"],
+        ),
+        ("if_discard", vec![Value::Bool(false)], vec!["if_discard"]),
+        (
+            "when_discard",
+            vec![Value::Bool(true)],
+            vec!["when_discard", "make", "drop First", "drop Second"],
+        ),
+        (
+            "when_discard",
+            vec![Value::Bool(false)],
+            vec!["when_discard"],
+        ),
+        (
+            "if_local_discard",
+            vec![Value::Bool(true)],
+            vec!["if_local_discard", "drop Second", "drop First"],
+        ),
+        (
+            "if_local_discard",
+            vec![Value::Bool(false)],
+            vec!["if_local_discard"],
+        ),
+        (
+            "block_discard",
+            vec![],
+            vec!["block_discard", "make", "drop First", "drop Second"],
+        ),
+        (
+            "field_discard",
+            vec![],
+            vec!["field_discard", "make", "drop First", "drop Second"],
+        ),
+    ] {
+        let executable = source_executable(&package, entry).unwrap();
+        let mut interpreter = Interpreter::from_iir(&executable.graph, Default::default())
+            .unwrap()
+            .with_cleanup_schedule(&executable.schedule)
+            .unwrap();
+        assert_eq!(
+            interpreter
+                .invoke_instance(&executable.entry, args)
+                .unwrap(),
+            Value::Unit
+        );
+        assert_eq!(
+            executed_names(&package, &executable, interpreter.events()),
+            expected,
+            "{entry}"
+        );
+    }
+}
