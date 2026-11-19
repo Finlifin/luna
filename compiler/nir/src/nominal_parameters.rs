@@ -484,22 +484,33 @@ impl<'a> DeclarationSubstitution<'a> {
         self.parameters
             .instantiate(term, &self.arguments, &self.frames)
     }
+    /// A complete source function signature binds its own ordinary parameters.
+    pub(crate) fn instantiate_closed_signature(&self, signature: &Term) -> Result<Term, TypeError> {
+        self.parameters.instantiate(signature, &self.arguments, &[])
+    }
+
+    pub(crate) fn instantiate_requirement(
+        &self,
+        requirement: &crate::program::TraitRequirement,
+    ) -> Result<crate::program::TraitRequirement, TypeError> {
+        Ok(crate::program::TraitRequirement {
+            interface: requirement.interface,
+            subject: self.instantiate(&requirement.subject)?,
+            interface_arguments: requirement
+                .interface_arguments
+                .iter()
+                .map(|ty| self.instantiate(ty))
+                .collect::<Result<_, _>>()?,
+        })
+    }
     pub fn instantiate_predicate(
         &self,
         predicate: &crate::program::TypePredicate,
     ) -> Result<crate::program::TypePredicate, TypeError> {
-        use crate::program::{TraitRequirement, TypePredicate as P};
+        use crate::program::TypePredicate as P;
         Ok(match predicate {
             P::Bool(value) => P::Bool(*value),
-            P::Trait(requirement) => P::Trait(TraitRequirement {
-                interface: requirement.interface,
-                subject: self.instantiate(&requirement.subject)?,
-                interface_arguments: requirement
-                    .interface_arguments
-                    .iter()
-                    .map(|ty| self.instantiate(ty))
-                    .collect::<Result<_, _>>()?,
-            }),
+            P::Trait(requirement) => P::Trait(self.instantiate_requirement(requirement)?),
             P::Equal(a, b) => P::Equal(self.instantiate(a)?, self.instantiate(b)?),
             P::Not(inner) => P::Not(Box::new(self.instantiate_predicate(inner)?)),
             P::And(parts) | P::Or(parts) => {

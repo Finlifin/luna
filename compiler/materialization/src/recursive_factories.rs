@@ -186,13 +186,9 @@ impl Builder<'_> {
             if template.phase != n::FunctionPhase::Runtime {
                 return Ok(false);
             }
-            charge_function(template, &mut self.fuel)?;
-            let mut function = template
-                .instantiate_parameters(
-                    &self.input_binders(&template.type_parameters),
-                    &key.arguments,
-                )
-                .map_err(|e| e.to_string())?;
+            let mut function =
+                self.world
+                    .instantiate_function(template, &key.arguments, &mut self.fuel)?;
             let Term::Function {
                 parameters,
                 result: output,

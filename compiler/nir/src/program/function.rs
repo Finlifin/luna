@@ -187,27 +187,52 @@ impl Function {
         arguments: &[Term],
         fuel: &mut usize,
     ) -> Result<Self, crate::type_computations::Error> {
-        let closed = crate::DeclarationSubstitution::bounded(
+        let frames = [crate::function_parameters::ordinary_frame(
+            &self.signature,
+            fuel,
+        )?];
+        let substitution = crate::DeclarationSubstitution::bounded_domains(
             &self.type_parameters,
             domains,
             arguments,
-            &[],
+            crate::DeclarationInputScope::ClosedInBody(&frames),
             fuel,
         )?;
-        // Charge metadata, contracts, defaults and shared code before any
-        // template copy. The scoped rewriter below consumes this preflight.
-        closed.charge_function_substitution(self, fuel)?;
-        let frames = match self.signature.callable_signature() {
-            Term::Function { parameters, .. } => vec![parameters.iter().map(|p| p.sort).collect()],
-            _ => vec![],
-        };
-        let scoped = crate::DeclarationSubstitution::bounded(
+        self.specialize_body(&substitution, fuel)
+    }
+
+    /// Materialize a concrete function after checking its complete declaration
+    /// input telescope against the receiving world's layout and callable queries.
+    pub fn instantiate_admitted_parameters<D: std::borrow::Borrow<Term>>(
+        &self,
+        domains: &[D],
+        arguments: &[Term],
+        fuel: &mut usize,
+        queries: &mut crate::value_admission::DomainQueries<'_, '_>,
+    ) -> Result<Self, crate::NominalAdmissionError> {
+        let frames = [crate::function_parameters::ordinary_frame(
+            &self.signature,
+            fuel,
+        )?];
+        let inputs = crate::admit_declaration_inputs(
             &self.type_parameters,
             domains,
             arguments,
-            &frames,
+            crate::DeclarationInputScope::ClosedInBody(&frames),
+            0,
             fuel,
-        )?;
+            queries,
+        )
+        .map_err(|failure| failure.reason)?;
+        Ok(self.specialize_body(&inputs.into_substitution(), fuel)?)
+    }
+
+    fn specialize_body(
+        &self,
+        scoped: &crate::DeclarationSubstitution<'_>,
+        fuel: &mut usize,
+    ) -> Result<Self, crate::type_computations::Error> {
+        scoped.charge_function_substitution(self, fuel)?;
         let specialized = (|| -> Result<Self, crate::TypeError> {
             let expression = |value: &Expr| {
                 let mut value = value.clone();
@@ -227,7 +252,7 @@ impl Function {
                     declaration: self.declaration,
                     name: self.name.clone(),
                     parameters: self.parameters.clone(),
-                    signature: closed.instantiate(&self.signature)?,
+                    signature: scoped.instantiate_closed_signature(&self.signature)?,
                     requirements: self
                         .requirements
                         .iter()
@@ -236,15 +261,8 @@ impl Function {
                     capabilities: self
                         .capabilities
                         .iter()
-                        .map(|capability| {
-                            let TypePredicate::Trait(value) = scoped
-                                .instantiate_predicate(&TypePredicate::Trait(capability.clone()))?
-                            else {
-                                unreachable!()
-                            };
-                            Ok(value)
-                        })
-                        .collect::<Result<_, crate::TypeError>>()?,
+                        .map(|capability| scoped.instantiate_requirement(capability))
+                        .collect::<Result<_, _>>()?,
                     preconditions: self
                         .preconditions
                         .iter()

@@ -285,28 +285,50 @@ impl<'a> DeclarationWorld<'a> {
         frames: &[Vec<nir::Sort>],
         fuel: &mut usize,
     ) -> Result<Term, AdmissionError> {
-        construction::spend(fuel, parameters.len())?;
-        let domains: Vec<_> = parameters
-            .iter()
-            .map(|id| {
-                self.index()
-                    .parameter_domains()
-                    .get(id)
-                    .unwrap_or(&Term::Primitive(nir::Primitive::Type))
-            })
-            .collect();
+        let inputs = self.admit_inputs(
+            parameters,
+            arguments,
+            nir::DeclarationInputScope::Caller(frames),
+            fuel,
+        )?;
+        Ok(inputs.instantiate(signature, fuel)?)
+    }
+
+    /// Check declaration arguments in order. A dependent slot's domain can
+    /// become Type only after its preceding arguments have been admitted.
+    pub fn admit_inputs<'v, T: std::borrow::Borrow<Term>>(
+        &self,
+        parameters: &[Id],
+        arguments: &'v [T],
+        scope: nir::DeclarationInputScope<'v>,
+        fuel: &mut usize,
+    ) -> Result<nir::AdmittedArguments<'v, T>, AdmissionError> {
+        let domains = nir::function_parameters::ordered_domains(
+            self.index().parameter_domains(),
+            parameters,
+            fuel,
+        )?;
         self.with_admission_queries(|queries| {
-            let admitted = nir::admit_declaration_inputs(
-                parameters,
-                &domains,
-                arguments,
-                nir::DeclarationInputScope::Caller(frames),
-                0,
-                fuel,
-                queries,
-            )
-            .map_err(|failure| failure.reason)?;
-            Ok(admitted.instantiate(signature, fuel)?)
+            nir::admit_declaration_inputs(parameters, &domains, arguments, scope, 0, fuel, queries)
+                .map_err(|failure| failure.reason)
+        })
+    }
+
+    /// A concrete materialized body uses the same input domains and receiving
+    /// world as a callable signature query. Program contracts stay on the body.
+    pub fn instantiate_function(
+        &self,
+        template: &n::Function,
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<n::Function, AdmissionError> {
+        let domains = nir::function_parameters::ordered_domains(
+            self.index().parameter_domains(),
+            &template.type_parameters,
+            fuel,
+        )?;
+        self.with_admission_queries(|queries| {
+            template.instantiate_admitted_parameters(&domains, arguments, fuel, queries)
         })
     }
 

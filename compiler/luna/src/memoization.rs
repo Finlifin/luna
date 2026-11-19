@@ -171,18 +171,20 @@ impl Invocation {
             if function.phase != FunctionPhase::Comptime || !function.pure {
                 return Err("memoization requires one ordinary pure comptime function".into());
             }
-            let binders = declarations.input_binders(&function.type_parameters, &mut work.steps)?;
-            nir::copy_budget::charge_type_substitution(
-                &function.signature,
-                &binders,
+            let frames =
+                [
+                    nir::function_parameters::ordinary_frame(&function.signature, &mut work.steps)
+                        .map_err(nir::NominalAdmissionError::from)?,
+                ];
+            let inputs = declarations.world().admit_inputs(
+                &function.type_parameters,
                 &arguments,
+                nir::DeclarationInputScope::ClosedInBody(&frames),
                 &mut work.steps,
-            )
-            .map_err(|error| format!("memoized signature budget exhausted: {error:?}"))?;
-            let signature = function
-                .signature
-                .instantiate_parameters(&binders, &arguments)
-                .map_err(|e| e.to_string())?;
+            )?;
+            let signature = inputs
+                .instantiate_in_input_scope(&function.signature, &mut work.steps)
+                .map_err(nir::NominalAdmissionError::from)?;
             let Term::Function { parameters, result } = &signature else {
                 return Err("memoized function signature is invalid".into());
             };
@@ -202,87 +204,34 @@ impl Invocation {
                         .saturating_add(function.capabilities.len()),
                 )
                 .ok_or("memoized requirement collection budget exhausted")?;
-            for predicate in &function.requirements {
-                nir::copy_budget::charge_predicate_substitution(
-                    predicate,
-                    &[],
-                    &[],
-                    &mut work.steps,
-                )
-                .map_err(|error| {
-                    format!("memoized requirement copy budget exhausted: {error:?}")
-                })?;
-            }
-            for capability in &function.capabilities {
-                for term in
-                    std::iter::once(&capability.subject).chain(&capability.interface_arguments)
-                {
-                    nir::copy_budget::charge_type_substitution(term, &[], &[], &mut work.steps)
-                        .map_err(|error| {
-                            format!("memoized capability copy budget exhausted: {error:?}")
-                        })?;
-                }
-            }
-            let requirements = function.requirements.iter().cloned().chain(
-                function
-                    .capabilities
-                    .iter()
-                    .cloned()
-                    .map(TypePredicate::Trait),
-            );
             let mut deferred = Vec::new();
-            work.steps = work
-                .steps
-                .checked_sub(parameters.len())
-                .ok_or("memoized input frame budget exhausted")?;
-            let frames = vec![parameters.iter().map(|p| p.sort).collect()];
-            for predicate in requirements {
-                nir::copy_budget::charge_predicate_substitution(
-                    &predicate,
-                    &binders,
-                    &arguments,
-                    &mut work.steps,
-                )
-                .map_err(|error| {
-                    format!("memoized contract specialization budget exhausted: {error:?}")
-                })?;
-                let predicate = predicate
-                    .instantiate_parameters(&binders, &arguments)
-                    .map_err(|e| e.to_string())?;
-                nir::copy_budget::charge_predicate_substitution(
-                    &predicate,
-                    &[],
-                    &[],
-                    &mut work.steps,
-                )
-                .map_err(|error| {
-                    format!("memoized contract inspection budget exhausted: {error:?}")
-                })?;
-                let mut admission = Context::new(work.steps);
-                let mut open = false;
-                let inspected = map_requirement(
-                    &predicate,
-                    &mut |term| {
-                        term.check_scope(&frames)
-                            .map_err(|e| Error::Protocol(e.to_string()))?;
-                        open |= term.check_scope(&[]).is_err();
-                        Ok(term.clone())
-                    },
-                    &mut admission,
-                    0,
-                );
-                work.steps = admission.remaining();
-                inspected.map_err(|e| format!("memoized contract admission: {e:?}"))?;
-                if open {
+            let mut check_requirement = |predicate: TypePredicate,
+                                         work: &mut ptc::Budget|
+             -> Result<(), String> {
+                let captures =
+                    nir::copy_budget::predicate_capture_slots(&predicate, &frames, &mut work.steps)
+                        .map_err(nir::NominalAdmissionError::from)?;
+                if !captures.is_empty() {
                     deferred.push(predicate);
-                    continue;
-                }
-                if !matches!(
-                    world.check_predicate_metered(&predicate, &mut work)?,
+                } else if !matches!(
+                    world.check_predicate_metered(&predicate, work)?,
                     ptc::Outcome::Entailed(_)
                 ) {
                     return Err("memoized function type contract is not established".into());
                 }
+                Ok(())
+            };
+            for requirement in &function.requirements {
+                let bound = inputs
+                    .instantiate_predicate(requirement, &mut work.steps)
+                    .map_err(nir::NominalAdmissionError::from)?;
+                check_requirement(bound, &mut work)?;
+            }
+            for capability in &function.capabilities {
+                let bound = inputs
+                    .instantiate_requirement(capability, &mut work.steps)
+                    .map_err(nir::NominalAdmissionError::from)?;
+                check_requirement(TypePredicate::Trait(bound), &mut work)?;
             }
             let cacheable = closed && **result == Term::Primitive(nir::Primitive::Type);
             let code_session = comptime_interpretor::CodeSession::new(source.package().clone());

@@ -26,11 +26,12 @@ impl<'a> SourceInvocationQueries<'a> {
     }
 
     pub fn in_closed(declarations: &'a ClosedDeclarations) -> Self {
-        Self::in_source(
-            DeclarationSource::Snapshot(declarations.source()),
-            declarations.context(),
-            &[],
-        )
+        Self {
+            source: DeclarationSource::Snapshot(declarations.source()),
+            context: declarations.context(),
+            assumptions: &[],
+            world: RefCell::new(Some(declarations.world())),
+        }
     }
 
     pub fn in_source(

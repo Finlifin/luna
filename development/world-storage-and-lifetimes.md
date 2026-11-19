@@ -505,6 +505,21 @@ Inspection 自身只保存目录；`check_package` 每次遍历全部主体，�
 memoized invocation 的参数 Eq／Hash 协议与主体执行使用这一共享族，包括后来建立
 的输入 schema；不能把缓存键的值准入结论传给函数或另一个协议。
 
+对 `project() -> T where T, X: T`，声明端记录的 `X` 的 sort 不能决定这次
+调用接受什么。具体调用按顺序检查两个参数：`project<Type, bool>` 的第二个实参
+属于 Type 域，`project<bool, false>` 的第二个实参属于 bool 域。把数字放进后者
+必须在准备实例时拒绝，即便函数体从不读取它。缓存准入使用调用所属
+`ClosedDeclarations` 的域、布局与 callable 查询；签名、type requirements 与
+capabilities 共用本次准入所得的替换。结果为 Type 的限制在绑定结果域之后应用。
+
+函数签名自带普通参数帧。主体、默认值和契约引用的普通参数属于该帧，外部交付
+的声明实参必须在空帧中闭合。VM 与 IIR 物化都按这一区别读取同一组有序声明域。
+构造具体 IIR 的普通、分期、内联方法和递归工厂路径复用这份准入结果来复制主体，
+复制前按展开大小计费。仅收集泛型 dispatch 依赖时仍允许结构替换。准备可缓存调用时，
+含普通参数的类型命题保存到实参到达时检查。当前可复用调用在这个普通参数帧里
+只代入 Type 值，引用其他普通 comptime 数据的命题仍可能无法闭合；这与上面的声明
+实参属于不同入口。程序 pre/postcondition 仍由执行边界检查。
+
 CLI comptime 的默认总 `--fuel` 改为 2,100,000，将此前两份各百万步的独立 phase
 上限和十万步 action 默认额度显式纳入一个总额度。显式 `--fuel` 不增加任何隐含
 补贴，其他 CLI action 和低层 VM 的默认值不因此改变。这个默认策略不承诺所有

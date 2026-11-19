@@ -469,6 +469,16 @@ fn capture_slots(
     result.map(|()| slots)
 }
 
+/// Validate the type predicate in its original telescope and find the ordinary
+/// inputs it still needs. Nested callable binders retain their own slots.
+pub fn predicate_capture_slots(
+    predicate: &n::TypePredicate,
+    frames: &[Vec<crate::Sort>],
+    fuel: &mut usize,
+) -> Result<std::collections::BTreeSet<usize>, crate::type_computations::Error> {
+    capture_slots(Node::Predicate(predicate), frames, fuel)
+}
+
 pub(crate) fn expression_capture_slots(
     value: &n::Expr,
     frames: &[Vec<crate::Sort>],

@@ -45,16 +45,17 @@ impl ClosedDeclarations {
         Ok(self.metadata.function(self.source.package(), declaration))
     }
 
-    pub fn input_binders(
-        &self,
-        parameters: &[Id],
-        fuel: &mut usize,
-    ) -> Result<Vec<nir::DeclarationParameter>, AdmissionError> {
-        construction::spend(fuel, parameters.len())?;
-        Ok(nir::DeclarationParameter::from_domains(
-            parameters,
-            self.metadata.index.parameter_domains(),
-        ))
+    /// Start a query cache over the already prepared source and closed premises.
+    pub fn world(&self) -> DeclarationWorld<'_> {
+        DeclarationWorld {
+            normalized_types: HashMap::new(),
+            scope: DeclarationScope {
+                source: DeclarationSource::Snapshot(&self.source),
+                metadata: self.metadata.clone(),
+                context: self.context.clone(),
+                assumptions: Arc::from([]),
+            },
+        }
     }
 }
 

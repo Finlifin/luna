@@ -16,6 +16,42 @@ impl Declaration {
     }
 }
 
+/// The lexical frame of a source function's body, contracts and defaults.
+pub fn ordinary_frame(
+    signature: &Term,
+    fuel: &mut usize,
+) -> Result<Vec<crate::Sort>, crate::type_computations::Error> {
+    use crate::type_computations::Error;
+    let Term::Function { parameters, .. } = signature.callable_signature() else {
+        return Err(Error::Scope(TypeError::InvalidFunctionSignature));
+    };
+    if *fuel < parameters.len() {
+        *fuel = 0;
+        return Err(Error::Budget);
+    }
+    *fuel -= parameters.len();
+    Ok(parameters.iter().map(|parameter| parameter.sort).collect())
+}
+
+/// Borrow domains in declaration order. Missing entries use the compact Type domain.
+pub fn ordered_domains<'a>(
+    domains: &'a std::collections::BTreeMap<DeclarationId, Term>,
+    parameters: &[DeclarationId],
+    fuel: &mut usize,
+) -> Result<Vec<&'a Term>, crate::type_computations::Error> {
+    *fuel = fuel
+        .checked_sub(parameters.len())
+        .ok_or(crate::type_computations::Error::Budget)?;
+    Ok(parameters
+        .iter()
+        .map(|id| {
+            domains
+                .get(id)
+                .unwrap_or(&Term::Primitive(crate::Primitive::Type))
+        })
+        .collect())
+}
+
 /// Admit closed callable declaration inputs using their declared domains.
 /// Body preconditions and type requirements are separate invocation checks.
 pub fn validate_arguments(

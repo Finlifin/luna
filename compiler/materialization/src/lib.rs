@@ -902,20 +902,16 @@ impl Builder<'_> {
             {
                 return Err("staged runtime function requires a specialized direct call".into());
             }
-            let domains = self
-                .world
-                .input_domains(&f.type_parameters, &mut self.fuel)?;
             if self.instances.is_some() {
-                nir::function_parameters::validate_arguments(
-                    self.package,
-                    &f.type_parameters,
-                    &domains,
-                    &arguments,
-                    &mut self.fuel,
-                )?;
+                self.world
+                    .instantiate_function(f, &arguments, &mut self.fuel)?
+            } else {
+                let domains = self
+                    .world
+                    .input_domains(&f.type_parameters, &mut self.fuel)?;
+                f.instantiate_declaration_parameters(&domains, &arguments, &mut self.fuel)
+                    .map_err(|e| e.to_string())?
             }
-            f.instantiate_declaration_parameters(&domains, &arguments, &mut self.fuel)
-                .map_err(|e| e.to_string())?
         };
         if self.instances.is_some() {
             if function.phase == n::FunctionPhase::Comptime
@@ -1856,12 +1852,11 @@ impl Builder<'_> {
                     if !template.inline {
                         return Ok(true);
                     }
-                    let mut bound = template
-                        .instantiate_parameters(
-                            &self.input_binders(&template.type_parameters),
-                            &selected.arguments,
-                        )
-                        .map_err(|e| e.to_string())?;
+                    let mut bound = self.world.instantiate_function(
+                        template,
+                        &selected.arguments,
+                        &mut self.fuel,
+                    )?;
                     bound.type_parameters.clear();
                     // Keep the TraitMethod callee until expansion has merged its
                     // interface contract and rebound the argument/default frame.
@@ -2097,15 +2092,9 @@ impl Builder<'_> {
             if !staged_callback && (self.active_staged_inlines.is_empty() || !template.inline) {
                 return Ok(true);
             }
-            let mut bound = template
-                .instantiate_declaration_parameters(
-                    &self
-                        .world
-                        .input_domains(&template.type_parameters, &mut self.fuel)?,
-                    &arguments,
-                    &mut self.fuel,
-                )
-                .map_err(|e| e.to_string())?;
+            let mut bound =
+                self.world
+                    .instantiate_function(template, &arguments, &mut self.fuel)?;
             bound.type_parameters.clear();
             if let Some((requirements, capabilities, program)) = entry_contract {
                 Self::merge_entry_contract(&mut bound, requirements, capabilities, program);
@@ -2122,15 +2111,9 @@ impl Builder<'_> {
                 .map(|expanded| !expanded);
         }
         // Declaration substitution closes the type inputs before staged evaluation.
-        let mut template = template
-            .instantiate_declaration_parameters(
-                &self
-                    .world
-                    .input_domains(&template.type_parameters, &mut self.fuel)?,
-                &arguments,
-                &mut self.fuel,
-            )
-            .map_err(|e| e.to_string())?;
+        let mut template = self
+            .world
+            .instantiate_function(template, &arguments, &mut self.fuel)?;
         template.type_parameters.clear();
         if let Some((requirements, capabilities, program)) = entry_contract {
             Self::merge_entry_contract(&mut template, requirements, capabilities, program);

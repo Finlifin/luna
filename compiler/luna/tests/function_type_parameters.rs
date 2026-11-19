@@ -886,6 +886,21 @@ fn recursive_template_factories_keep_distinct_generic_instances() {
 }
 
 #[test]
+fn recursive_factory_specializes_a_dependent_declaration_slot() {
+    let source = "typealias Callback = fn(comptime bool, bool) -> bool;
+        fn choose(comptime flag: bool, value: bool) -> bool { flag and value }
+        fn factory(again: bool) -> Callback where T, X: T {
+            if again { factory<T, X>(false) } else { choose }
+        }
+        fn run() -> bool {
+            let first = factory<bool'type, bool>(true);
+            let second = factory<bool, false>(true);
+            first(true, true) and not second(false, true)
+        }";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
 fn recursive_factory_nontermination_is_a_runtime_budget_failure_and_recovers() {
     let package = support::compile(
         "typealias Callback=fn(comptime bool,bool)->bool;

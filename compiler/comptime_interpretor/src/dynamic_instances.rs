@@ -198,11 +198,9 @@ impl Interpreter<'_> {
         signature: &Term,
         source: SourceRange,
     ) -> Result<Vec<nir::Sort>, Error> {
-        let Term::Function { parameters, .. } = signature.callable_signature() else {
-            return Err(self.failure(ErrorKind::Type, Some(source)));
-        };
-        self.integer_operation(Some(source), |budget| budget.consume(parameters.len()))?;
-        Ok(parameters.iter().map(|p| p.sort).collect())
+        self.query_admission(Some(source), |_, fuel| {
+            Ok(nir::function_parameters::ordinary_frame(signature, fuel)?)
+        })
     }
 
     pub(super) fn evaluate_bound_default(

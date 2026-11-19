@@ -144,3 +144,88 @@ fn dependent_type_domain_values_remain_live_inputs_to_the_source_vm() {
         assert!(!result.reused);
     }
 }
+
+#[test]
+fn dependent_declaration_domains_govern_cache_preparation_and_execution() {
+    let package = support::compile("pure comptime fn project() -> T where T, X: T { X }");
+    let declaration = support::id(&package, "project");
+    let prepare = |arguments| {
+        luna::memoization::Invocation::prepare(
+            &package,
+            &Default::default(),
+            declaration,
+            arguments,
+            8,
+            Default::default(),
+        )
+    };
+    let ty = Term::Primitive(Primitive::Type);
+    let boolean = Term::Primitive(Primitive::Bool);
+
+    for arguments in [
+        vec![ty.clone(), Term::Bool(true)],
+        vec![boolean.clone(), boolean.clone()],
+        vec![
+            boolean.clone(),
+            Term::Integer(comptime_runtime::Integer::from_u128(1)),
+        ],
+    ] {
+        assert!(prepare(arguments).is_err());
+    }
+    for (arguments, expected, cacheable) in [
+        (
+            vec![ty, boolean.clone()],
+            Value::Type(boolean.clone()),
+            true,
+        ),
+        (vec![boolean, Term::Bool(false)], Value::Bool(false), false),
+    ] {
+        let mut call = prepare(arguments).unwrap();
+        let mut context = Context::new(1_000_000);
+        for reused in [false, cacheable] {
+            let result = call.invoke(vec![], &mut context).unwrap();
+            assert_eq!(*result.value, expected);
+            assert_eq!(result.reused, reused);
+        }
+        assert_eq!(call.cached_results(), usize::from(cacheable));
+    }
+}
+
+#[test]
+fn reusable_call_checks_trait_arguments_in_the_admitted_declaration_frame() {
+    let package = support::compile(
+        "trait Allows where T, X: T {}
+         impl Allows<bool'type, bool> for bool {}
+         pure comptime fn allowed() -> bool
+         where T, X: T, requires bool :- Allows<T, X>
+         {
+             true
+         }",
+    );
+    let prepare = |arguments| {
+        luna::memoization::Invocation::prepare(
+            &package,
+            &Default::default(),
+            support::id(&package, "allowed"),
+            arguments,
+            8,
+            Default::default(),
+        )
+    };
+    let boolean = Term::Primitive(Primitive::Bool);
+    let reject = prepare(vec![boolean.clone(), Term::Bool(true)])
+        .err()
+        .unwrap();
+    assert!(
+        reject.contains("type contract is not established"),
+        "{reject}"
+    );
+    let mut call = prepare(vec![Term::Primitive(Primitive::Type), boolean]).unwrap();
+    assert_eq!(
+        *call
+            .invoke(vec![], &mut Context::new(1_000_000))
+            .unwrap()
+            .value,
+        Value::Bool(true)
+    );
+}

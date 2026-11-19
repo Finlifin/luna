@@ -38,20 +38,7 @@ fn rejection(
     }))
 }
 
-/// Borrow domains in declaration order, including compact all-Type metadata.
-pub(super) fn input_domains<'a>(
-    domains: &'a BTreeMap<DeclarationId, Term>,
-    parameters: &[DeclarationId],
-    fuel: &mut usize,
-) -> Result<Vec<&'a Term>, nir::type_computations::Error> {
-    *fuel = fuel
-        .checked_sub(parameters.len())
-        .ok_or(nir::type_computations::Error::Budget)?;
-    Ok(parameters
-        .iter()
-        .map(|id| domains.get(id).unwrap_or(&Term::Primitive(Primitive::Type)))
-        .collect())
-}
+pub(super) use nir::function_parameters::ordered_domains as input_domains;
 
 impl Interpreter<'_> {
     pub(super) fn admitted_function_inputs<'v, T: Borrow<Term>>(
