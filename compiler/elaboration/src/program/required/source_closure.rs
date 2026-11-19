@@ -9,6 +9,51 @@ pub(super) struct SourceClosure {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn required_method_link(
+        &mut self,
+        id: DeclarationId,
+        span: Span,
+    ) -> Result<n::MethodLink, Error> {
+        let (source, phase, is_quote, parameters) =
+            if let Some(function) = self.generated_functions.declaration(id) {
+                (
+                    function.source,
+                    function.phase,
+                    false,
+                    &function.type_parameters,
+                )
+            } else {
+                let owner = self
+                    .source_declarations
+                    .owner(id)
+                    .ok_or_else(|| error(span, "implementation method declaration is missing"))?;
+                let item = self
+                    .package
+                    .item(owner)
+                    .expect("indexed source declaration");
+                let ItemKind::Fn(signature, _) = &item.kind else {
+                    return Err(error(span, "implementation method is not a function"));
+                };
+                (
+                    source(item.span),
+                    function_bodies::phase(&signature.modifiers),
+                    signature.modifiers.is_quote,
+                    &self.type_parameters[&owner],
+                )
+            };
+        self.required_steps = self
+            .required_steps
+            .checked_sub(1 + parameters.len() as u64)
+            .ok_or_else(|| error(span, "implementation method link budget exhausted"))?;
+        Ok(n::MethodLink {
+            source,
+            declaration: id,
+            phase,
+            is_quote,
+            type_parameters: parameters.clone(),
+        })
+    }
+
     pub(super) fn required_source_closure(
         &mut self,
         roots: BTreeSet<Dependency>,
@@ -38,7 +83,8 @@ impl Checker<'_, '_> {
                             .iter()
                             .filter(|(id, _)| *id == member)
                         {
-                            let found = references(value, &mut self.required_steps)
+                            let found = Discovery::Required(&self.implementation_index)
+                                .references(value, &mut self.required_steps)
                                 .map_err(|failure| error(span, failure.to_string()))?;
                             work.extend(found, &mut self.required_steps, span)?;
                         }
@@ -47,25 +93,47 @@ impl Checker<'_, '_> {
                             .iter()
                             .filter(|(id, _)| *id == member)
                         {
-                            let found =
-                                references(initializer.expression(), &mut self.required_steps)
-                                    .map_err(|failure| error(span, failure.to_string()))?;
+                            let found = Discovery::Required(&self.implementation_index)
+                                .references(initializer.expression(), &mut self.required_steps)
+                                .map_err(|failure| error(span, failure.to_string()))?;
                             work.extend(found, &mut self.required_steps, span)?;
                         }
                     }
                     continue;
                 }
                 Dependency::Method(member) => {
+                    // A bare callable declaration carries no receiver evidence.
+                    let (interface, _) = self.checked_traits.method(member).ok_or_else(|| {
+                        error(span, "required comptime method contract is missing")
+                    })?;
+                    work.extend(
+                        [Dependency::MethodContract(member)],
+                        &mut self.required_steps,
+                        span,
+                    )?;
+                    work.extend(
+                        self.checked_implementations
+                            .iter()
+                            .filter(|i| i.interface == Some(interface.declaration))
+                            .map(|i| Dependency::MethodBody {
+                                implementation: i.declaration,
+                                member,
+                            }),
+                        &mut self.required_steps,
+                        span,
+                    )?;
+                    continue;
+                }
+                Dependency::MethodContract(member) => {
                     if !self.interfaces_ready {
                         return Err(error(
                             span,
                             "required comptime evaluation is waiting for the trait implementation world",
                         ));
                     }
-                    let (interface, contract) =
-                        self.checked_traits.method(member).ok_or_else(|| {
-                            error(span, "required comptime method contract is missing")
-                        })?;
+                    let (_, contract) = self.checked_traits.method(member).ok_or_else(|| {
+                        error(span, "required comptime method contract is missing")
+                    })?;
                     if !contract.signature.is_comptime_callable()
                         && !contract.program.preconditions.is_empty()
                         && !matches!(contract.signature.callable_signature(), Ok(Term::Function { parameters, .. })
@@ -76,21 +144,40 @@ impl Checker<'_, '_> {
                             "trait method value would erase program preconditions; callable program contracts are not implemented",
                         ));
                     }
-                    // Checked implementation tables already contain the default
-                    // body when it is inherited. An overridden default is not an
-                    // execution dependency and may depend on this very query.
-                    for implementation in &self.checked_implementations {
-                        if implementation.interface == Some(interface.declaration) {
-                            work.extend(
-                                implementation
-                                    .methods
-                                    .iter()
-                                    .filter(|(name, _)| *name == contract.name)
-                                    .map(|(_, body)| Dependency::Definition(*body)),
-                                &mut self.required_steps,
-                                span,
-                            )?;
-                        }
+                    for expression in contract
+                        .program
+                        .preconditions
+                        .iter()
+                        .chain(&contract.program.postconditions)
+                    {
+                        let found = Discovery::Required(&self.implementation_index)
+                            .references(expression, &mut self.required_steps)
+                            .map_err(|failure| error(span, failure.to_string()))?;
+                        work.extend(found, &mut self.required_steps, span)?;
+                    }
+                    continue;
+                }
+                Dependency::MethodBody {
+                    implementation,
+                    member,
+                } => {
+                    let (interface, contract) =
+                        self.checked_traits.method(member).ok_or_else(|| {
+                            error(span, "required comptime method contract is missing")
+                        })?;
+                    let selected = self
+                        .implementation_positions
+                        .get(&implementation)
+                        .map(|&slot| &self.checked_implementations[slot])
+                        .filter(|i| i.interface == Some(interface.declaration));
+                    if let Some((_, body)) = selected
+                        .and_then(|i| i.methods.iter().find(|(name, _)| *name == contract.name))
+                    {
+                        work.extend(
+                            [Dependency::Definition(*body)],
+                            &mut self.required_steps,
+                            span,
+                        )?;
                     }
                     continue;
                 }
@@ -123,7 +210,8 @@ impl Checker<'_, '_> {
                     let function = self.generated_functions.body(id).ok_or_else(|| {
                         error(span, "required comptime code is still being checked")
                     })?;
-                    let found = function_references(function, &mut self.required_steps)
+                    let found = Discovery::Required(&self.implementation_index)
+                        .function_references(function, &mut self.required_steps)
                         .map_err(|failure| error(span, failure.to_string()))?;
                     work.extend(found, &mut self.required_steps, span)?;
                     functions.push(
@@ -170,7 +258,8 @@ impl Checker<'_, '_> {
                 continue;
             }
             let function = self.required_function(owner, span)?;
-            let found = function_references(&function, &mut self.required_steps)
+            let found = Discovery::Required(&self.implementation_index)
+                .function_references(&function, &mut self.required_steps)
                 .map_err(|failure| error(span, failure.to_string()))?;
             work.extend(found, &mut self.required_steps, span)?;
             functions.push(function);

@@ -7,6 +7,7 @@ enum Slot {
     Function(usize),
     Quote { index: usize, staged: bool },
     Runtime(usize),
+    Link(usize),
 }
 
 #[derive(Default)]
@@ -67,6 +68,7 @@ pub struct Callables<'a> {
     functions: &'a [Function],
     quotes: &'a [Function],
     runtime: &'a [RuntimeFunctionIdentity],
+    links: &'a [MethodLink],
     positions: Arc<Positions>,
 }
 
@@ -77,7 +79,8 @@ impl Positions {
             .functions
             .len()
             .saturating_add(package.quote_templates.len())
-            .saturating_add(package.runtime_function_identities.len());
+            .saturating_add(package.runtime_function_identities.len())
+            .saturating_add(package.method_links.len());
         *fuel = fuel
             .checked_sub(count)
             .ok_or_else(|| Error::budget(source, "callable directory budget exhausted"))?;
@@ -88,6 +91,19 @@ impl Positions {
             }
             Ok(())
         };
+        for (i, link) in package.method_links.iter().enumerate() {
+            if link.phase == FunctionPhase::NormalForm
+                || (link.is_quote && link.phase != FunctionPhase::Runtime)
+            {
+                return Err(Error::invalid(link.source, "invalid method link phase"));
+            }
+            insert(
+                link.declaration,
+                Slot::Link(i),
+                link.source,
+                "duplicate method link identity",
+            )?;
+        }
         for (i, f) in package.functions.iter().enumerate() {
             insert(
                 f.declaration,
@@ -169,6 +185,7 @@ impl Positions {
             functions: &package.functions,
             quotes: &package.quote_templates,
             runtime: &package.runtime_function_identities,
+            links: &package.method_links,
             positions: self.clone(),
         }
     }
@@ -216,6 +233,36 @@ impl<'a> Callables<'a> {
             self.positions.0.get(id),
             Some(Slot::Quote { staged: true, .. })
         )
+    }
+
+    /// Implementation slot validation observes only these declaration facts.
+    /// In particular, a link has neither formation nor an executable template.
+    pub fn method_slot(
+        &self,
+        id: &DeclarationId,
+    ) -> Option<(FunctionPhase, bool, &'a [DeclarationId])> {
+        Some(match *self.positions.0.get(id)? {
+            Slot::Function(i) => (
+                self.functions[i].phase,
+                false,
+                &self.functions[i].type_parameters,
+            ),
+            Slot::Quote { index, .. } => (
+                self.quotes[index].phase,
+                true,
+                &self.quotes[index].type_parameters,
+            ),
+            Slot::Runtime(i) => (
+                FunctionPhase::Runtime,
+                false,
+                &self.runtime[i].type_parameters,
+            ),
+            Slot::Link(i) => (
+                self.links[i].phase,
+                self.links[i].is_quote,
+                &self.links[i].type_parameters,
+            ),
+        })
     }
 
     pub fn method_definition(&self, id: &DeclarationId) -> Option<&'a FunctionDeclaration> {

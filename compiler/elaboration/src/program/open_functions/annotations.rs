@@ -330,12 +330,9 @@ impl Checker<'_, '_> {
         // supplied only at this call site. Rebuild its dependency closure with
         // the completed inputs, just as for an active closure environment.
         let callable_input = annotation.awaits_inputs()
-            && !required::frozen_references(
-                symbols.iter().flatten(),
-                &mut self.required_steps,
-                span,
-            )?
-            .is_empty();
+            && !required::Discovery::Declarations
+                .frozen_references(symbols.iter().flatten(), &mut self.required_steps, span)?
+                .is_empty();
         // A generated Type supplied by this caller may postdate the frozen
         // declaration snapshot. Reprepare completed source with these inputs;
         // never graft current inference state into a saved computation.

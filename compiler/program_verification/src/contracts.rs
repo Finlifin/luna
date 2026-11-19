@@ -198,7 +198,8 @@ fn prepare(
                     package
                         .runtime_function_identities
                         .len()
-                        .saturating_add(package.functions.len()),
+                        .saturating_add(package.functions.len())
+                        .saturating_add(package.method_links.len()),
                 )
                 .map_err(|_| budget(source))?;
             // A required-invocation snapshot may carry only the identity of a
@@ -220,6 +221,15 @@ fn prepare(
                 .iter()
                 .position(|f| f.declaration == *body)
             else {
+                // In a required snapshot this slot can name a declaration whose
+                // body belongs to a different receiver. Full source checks it.
+                if package
+                    .method_links
+                    .iter()
+                    .any(|link| link.declaration == *body)
+                {
+                    continue;
+                }
                 return Err(failure(
                     SourceRange { start: 0, end: 0 },
                     "implementation contract body is missing",

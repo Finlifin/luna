@@ -279,7 +279,8 @@ impl Checker<'_, '_> {
         let mut pending = Vec::new();
         for expression in std::iter::once(root).chain(contracts) {
             pending.extend(
-                required::references(expression, &mut self.required_steps)
+                required::Discovery::Declarations
+                    .references(expression, &mut self.required_steps)
                     .map_err(|failure| error(span, failure.to_string()))?
                     .into_iter()
                     .filter_map(required::Dependency::callable),
@@ -322,7 +323,8 @@ impl Checker<'_, '_> {
                 .chain(declaration.defaults.iter().map(|(_, expr)| expr))
             {
                 pending.extend(
-                    required::references(contract, &mut self.required_steps)
+                    required::Discovery::Declarations
+                        .references(contract, &mut self.required_steps)
                         .map_err(|failure| error(span, failure.to_string()))?
                         .into_iter()
                         .filter_map(required::Dependency::callable),

@@ -12,7 +12,7 @@ mod publication;
 mod restore;
 mod scope;
 mod source_closure;
-pub(super) use dependencies::{Dependency, frozen_references, function_references, references};
+pub(super) use dependencies::{Dependency, Discovery};
 use prepared::PreparedRequired;
 
 /// Required expression evaluation can prepare a distinct clause packet at the
@@ -1248,7 +1248,11 @@ impl Checker<'_, '_> {
                 }
             }
             let capture = self.capture_required_entry(root, inputs, live, expr.span)?;
-            let mut observed = capture.observe(&mut self.required_steps, expr.span)?;
+            let mut observed = capture.observe(
+                Discovery::Required(&self.implementation_index),
+                &mut self.required_steps,
+                expr.span,
+            )?;
             let source_closure::SourceClosure {
                 mut functions,
                 runtime_function_identities,
@@ -1349,7 +1353,7 @@ impl Checker<'_, '_> {
                 && self.pending_refinements.iter().any(|pending| {
                     let id = declaration(self.package, &self.package_identities, pending.owner);
                     retained.contains(&Dependency::Definition(id))
-                        || retained.contains(&Dependency::Method(id))
+                        || retained.contains(&Dependency::MethodContract(id))
                 })
             {
                 return Err(error(
@@ -1363,32 +1367,44 @@ impl Checker<'_, '_> {
             // avoids requiring unrelated runtime bodies in a comptime snapshot.
             let mut traits = self.checked_traits.to_vec();
             for interface in &mut traits {
-                interface
-                    .methods
-                    .retain(|method| retained.contains(&Dependency::Method(method.declaration)));
-                for method in &mut interface.methods {
-                    if method
-                        .default
-                        .is_some_and(|body| !retained.contains(&Dependency::Definition(body)))
-                    {
-                        // Project the unused fallback out of this execution
-                        // snapshot only. The final package still checks and
-                        // retains the original default declaration.
-                        method.default = None;
-                    }
-                }
-            }
-            let mut implementations = self.checked_implementations.clone();
-            for implementation in &mut implementations {
-                implementation.methods.retain(|(name, _)| {
-                    traits
-                        .iter()
-                        .find(|interface| Some(interface.declaration) == implementation.interface)
-                        .is_some_and(|interface| {
-                            interface.methods.iter().any(|method| method.name == *name)
-                        })
+                interface.methods.retain(|method| {
+                    retained.contains(&Dependency::MethodContract(method.declaration))
                 });
             }
+            let mut targets = BTreeSet::new();
+            let mut implementations = self.checked_implementations.clone();
+            for implementation in &mut implementations {
+                let interface = implementation
+                    .interface
+                    .and_then(|id| self.checked_traits.by_id(id));
+                implementation.methods.retain(|(name, body)| {
+                    let needed = interface.is_some_and(|interface| {
+                        interface.methods.iter().any(|m| {
+                            m.name == *name
+                                && retained.contains(&Dependency::MethodContract(m.declaration))
+                        })
+                    });
+                    if needed {
+                        targets.insert(*body);
+                    }
+                    needed
+                });
+            }
+            for method in traits
+                .iter_mut()
+                .flat_map(|interface| &mut interface.methods)
+            {
+                if method.default.is_some_and(|id| {
+                    !targets.contains(&id) && !retained.contains(&Dependency::Definition(id))
+                }) {
+                    method.default = None;
+                }
+            }
+            let method_links = targets
+                .into_iter()
+                .filter(|id| !retained.contains(&Dependency::Definition(*id)))
+                .map(|id| self.required_method_link(id, expr.span))
+                .collect::<Result<Vec<_>, _>>()?;
             let mut package = n::Package {
                 builtin_implementation_packages: self
                     .protocols
@@ -1397,6 +1413,7 @@ impl Checker<'_, '_> {
                 refinements: self.refinements.clone(),
                 definition_identity_cursor: self.next_definition_identity,
                 target: self.target,
+                method_links,
                 runtime_function_identities,
                 traits,
                 implementations,

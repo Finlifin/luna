@@ -1833,11 +1833,8 @@ impl Checker<'_, '_> {
         let Some(selected) = selected else {
             return Ok(None);
         };
-        let implementation = self
-            .checked_implementations
-            .iter()
-            .find(|i| i.declaration == selected)
-            .unwrap();
+        let implementation =
+            &self.checked_implementations[self.implementation_positions[&selected]];
         if let Some(interface) = interface.as_ref() {
             if let Some(contract) = self
                 .checked_traits

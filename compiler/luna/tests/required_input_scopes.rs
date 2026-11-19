@@ -319,3 +319,43 @@ fn erasing_an_alias_argument_cannot_expose_later_default_inputs() {
         assert!(error.contains("itself or a later parameter"), "{error}");
     }
 }
+
+#[test]
+fn required_method_calls_demand_only_receiver_compatible_bodies() {
+    let source = r#"
+        trait Source { comptime fn flag() -> bool; }
+        struct First {}
+        struct Second {}
+        impl Source for First { comptime fn flag() -> bool { true } }
+        impl Source for Second { comptime fn flag() -> bool { FLAG } }
+        const FLAG: bool = First.as(Source).flag();
+        fn run() -> bool { Second.as(Source).flag() }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let cycle = source.replace("= First.as", "= Second.as");
+    let error = sysroot::compile(&cycle).unwrap_err();
+    assert!(error.contains("cyclic"), "{error}");
+    // Finishing the source package still checks the unused implementation.
+    let invalid = source.replace("{ FLAG }", "{ First {} }").replace(
+        "fn run() -> bool { Second.as(Source).flag() }",
+        "fn run() -> bool { FLAG }",
+    );
+    let error = sysroot::compile(&invalid).unwrap_err();
+    assert!(
+        error.contains("expected") && error.contains("bool"),
+        "{error}"
+    );
+}
+
+#[test]
+fn required_method_values_keep_interface_arguments_and_inherited_defaults() {
+    let source = r#"
+        trait Source where T { comptime fn flag() -> bool { FLAG } }
+        struct Host {}
+        impl Source<bool> for Host { comptime fn flag() -> bool { true } }
+        impl Source<u8> for Host {}
+        const FLAG: bool = do { let get = Host.as(Source<bool>).flag; get() };
+        fn run() -> bool { Host.as(Source<u8>).flag() }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}

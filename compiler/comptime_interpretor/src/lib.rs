@@ -1132,6 +1132,12 @@ impl<'a> Interpreter<'a> {
         dispatch: SourceDispatch<'a>,
     ) -> Result<Self, Error> {
         let closed_dispatch = matches!(dispatch, SourceDispatch::Closed);
+        if closed_dispatch && !package.method_links.is_empty() {
+            return Err(Error {
+                kind: ErrorKind::InvalidCallPlan,
+                source: None,
+            });
+        }
         // Only sessions without caller premises publish complete world indexes.
         // A caller with extra premises still needs its own implication checks.
         let positions = positions.filter(|index| {
@@ -1261,9 +1267,9 @@ impl<'a> Interpreter<'a> {
                     return Err(invalid());
                 }
                 if member.default.is_some_and(|body| {
-                    (functions.method_definition(&body).is_none()
-                        && functions.runtime_identity(&body).is_none())
-                        || member.is_quote != functions.quote(&body).is_some()
+                    functions
+                        .method_slot(&body)
+                        .is_none_or(|(_, quote, _)| quote != member.is_quote)
                 }) {
                     return Err(invalid());
                 }
@@ -1401,10 +1407,7 @@ impl<'a> Interpreter<'a> {
             }
             let mut supplied = BTreeMap::new();
             for (name, body) in &implementation.methods {
-                if supplied.insert(name, body).is_some()
-                    || (functions.method_definition(body).is_none()
-                        && functions.runtime_identity(body).is_none())
-                {
+                if supplied.insert(name, body).is_some() || functions.method_slot(body).is_none() {
                     return Err(invalid());
                 }
             }
@@ -1416,21 +1419,11 @@ impl<'a> Interpreter<'a> {
                     continue;
                 }
                 let body = **supplied.get(&member.name).ok_or_else(invalid)?;
-                if member.is_quote != functions.quote(&body).is_some() {
+                let (phase, quote, type_parameters) =
+                    functions.method_slot(&body).ok_or_else(invalid)?;
+                if member.is_quote != quote {
                     return Err(invalid());
                 }
-                let (phase, type_parameters) =
-                    if let Some(function) = functions.method_definition(&body) {
-                        (function.phase, &function.type_parameters)
-                    } else {
-                        (
-                            nir::program::FunctionPhase::Runtime,
-                            &functions
-                                .runtime_identity(&body)
-                                .expect("checked runtime identity")
-                                .type_parameters,
-                        )
-                    };
                 if phase == nir::program::FunctionPhase::NormalForm
                     || (phase == nir::program::FunctionPhase::Comptime)
                         != member.signature.is_comptime_callable()

@@ -474,6 +474,7 @@ fn elaborate_with_attributes(
         pending_contract_projections: Vec::new(),
         checked_traits: Default::default(),
         checked_implementations: Vec::new(),
+        implementation_positions: BTreeMap::new(),
         associated_initializers: BTreeMap::new(),
         implementation_relationships: BTreeMap::new(),
         complementary_associated: Vec::new(),
@@ -891,6 +892,12 @@ fn elaborate_candidate<'a, 'h>(
         ));
     }
     checker.checked_implementations = checker.check_interfaces()?;
+    checker.implementation_positions = checker
+        .checked_implementations
+        .iter()
+        .enumerate()
+        .map(|(index, implementation)| (implementation.declaration, index))
+        .collect();
     for (&member, &parent) in &checker.self_containers {
         let inherited = checker.requirements[&parent].clone();
         checker
@@ -1571,6 +1578,7 @@ struct Checker<'a, 'h> {
     pending_contract_projections: Vec<interfaces::PendingProjection>,
     checked_traits: std::sync::Arc<interfaces::CheckedTraits>,
     checked_implementations: Vec<n::Implementation>,
+    implementation_positions: BTreeMap<DeclarationId, usize>,
     associated_initializers:
         BTreeMap<(DeclarationId, DeclarationId), (OwnerId, Vec<DeclarationId>, Vec<Term>)>,
     implementation_relationships: BTreeMap<DeclarationId, DeclarationId>,

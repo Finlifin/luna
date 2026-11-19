@@ -89,6 +89,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         internal_return_empty_replacements,
         expansion_sources,
         effects,
+        method_links,
         runtime_function_identities,
         normal_forms,
         dispatch_instances: _,
@@ -115,6 +116,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         internal_return_empty_replacements.len(),
         expansion_sources.len(),
         effects.len(),
+        method_links.len(),
         runtime_function_identities.len(),
         normal_forms.len(),
         traits.len(),
@@ -172,6 +174,9 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         meter.node(Node::Type(signature))?;
         meter.contracts(requirements, capabilities)?;
     }
+    for link in method_links {
+        meter.width(link.type_parameters.len())?;
+    }
     for identity in runtime_function_identities {
         meter.node(Node::Formation(identity.into()))?;
     }
@@ -221,6 +226,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         internal_return_empty_replacements: internal_return_empty_replacements.clone(),
         expansion_sources: expansion_sources.clone(),
         effects: effects.clone(),
+        method_links: method_links.clone(),
         runtime_function_identities: runtime_function_identities.clone(),
         normal_forms: normal_forms.clone(),
         dispatch_instances: vec![],

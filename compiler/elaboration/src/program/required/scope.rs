@@ -277,7 +277,9 @@ mod tests {
             ],
         };
         let mut observed = dependencies::ObservedInputs::default();
-        observed.live(&packet, &mut 1000, Span::default()).unwrap();
+        observed
+            .live(Discovery::Declarations, &packet, &mut 1000, Span::default())
+            .unwrap();
         assert_eq!(observed.types, BTreeSet::from([id(51), id(53)]));
         assert_eq!(observed.values, BTreeSet::from([id(4), id(99)]));
         assert_eq!(

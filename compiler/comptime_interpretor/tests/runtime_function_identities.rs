@@ -2448,3 +2448,33 @@ fn live_method_inputs_resolve_in_the_receiving_world_before_entry() {
         assert!(rejected.events().is_empty());
     }
 }
+
+#[test]
+fn a_projected_method_slot_neither_forms_a_callable_nor_supplies_closed_dispatch() {
+    let mut package = package();
+    let target = id(5);
+    package.method_links.push(nir::program::MethodLink {
+        source: SourceRange { start: 1, end: 2 },
+        declaration: target,
+        phase: FunctionPhase::Comptime,
+        is_quote: false,
+        type_parameters: vec![id(6)],
+    });
+    let directory = nir::callable_source::Callables::new(&package, &mut 1000).unwrap();
+    assert_eq!(
+        directory.method_slot(&target),
+        Some((FunctionPhase::Comptime, false, &[id(6)][..]))
+    );
+    assert!(directory.formation(&target).is_none());
+    assert!(directory.body(&target).is_none());
+    assert!(directory.quote(&target).is_none());
+    assert!(Interpreter::for_comptime(&package, Budget::default()).is_err());
+    package.functions[0].body.kind = K::Function(target);
+    assert!(
+        nir::phases::Inspection::new(&package)
+            .check_package_with_evidence(&mut 10000)
+            .is_err()
+    );
+    package.method_links[0].declaration = id(1);
+    assert!(nir::callable_source::Callables::new(&package, &mut 1000).is_err());
+}

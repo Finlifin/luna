@@ -60,24 +60,28 @@ impl<'v> Entry<'v> {
 
     pub(super) fn observe(
         &self,
+        discovery: Discovery<'_>,
         steps: &mut u64,
         span: Span,
     ) -> Result<dependencies::ObservedInputs, Error> {
-        let mut roots = function_references(&self.function, steps)
+        let mut roots = discovery
+            .function_references(&self.function, steps)
             .map_err(|failure| error(span, failure.to_string()))?;
-        roots.extend(frozen_references(
-            self.inputs
-                .iter()
-                .filter_map(|(_, _, value)| value.as_ref()),
-            steps,
-            span,
-        )?);
+        roots.extend(
+            discovery.frozen_references(
+                self.inputs
+                    .iter()
+                    .filter_map(|(_, _, value)| value.as_ref()),
+                steps,
+                span,
+            )?,
+        );
         let mut observed = dependencies::ObservedInputs {
             code: roots,
             ..Default::default()
         };
         for value in &self.live_values {
-            observed.live(value, steps, span)?;
+            observed.live(discovery, value, steps, span)?;
         }
         Ok(observed)
     }
@@ -291,7 +295,10 @@ mod tests {
                 Entry::capture(root.clone(), slots.clone(), supplies, &mut 10000).unwrap();
             assert_eq!(captured.function.parameters, [binding(1), binding(2)]);
             assert_eq!(
-                captured.observe(&mut 1000, Span::default()).unwrap().code,
+                captured
+                    .observe(Discovery::Declarations, &mut 1000, Span::default())
+                    .unwrap()
+                    .code,
                 BTreeSet::from([Dependency::Callable(id(41))])
             );
         }

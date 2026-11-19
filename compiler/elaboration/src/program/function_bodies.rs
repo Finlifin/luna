@@ -8,6 +8,16 @@ pub(super) enum SourceBody {
     Required,
 }
 
+pub(super) fn phase(modifiers: &hir::item::FnModifiers) -> n::FunctionPhase {
+    if modifiers.is_normal_form_head {
+        n::FunctionPhase::NormalForm
+    } else if modifiers.is_comptime {
+        n::FunctionPhase::Comptime
+    } else {
+        n::FunctionPhase::Runtime
+    }
+}
+
 /// Retain the fields needed to form a runtime function value in a source
 /// snapshot. Program contract admission remains the consumer's responsibility.
 pub(super) fn retain_runtime_identity(
@@ -129,13 +139,7 @@ impl Checker<'_, '_> {
             source: source(item.span),
             declaration: declaration(self.package, &self.package_identities, owner),
             name: item.ident.name.as_str().into(),
-            phase: if sig.modifiers.is_normal_form_head {
-                n::FunctionPhase::NormalForm
-            } else if sig.modifiers.is_comptime {
-                n::FunctionPhase::Comptime
-            } else {
-                n::FunctionPhase::Runtime
-            },
+            phase: phase(&sig.modifiers),
             inline: sig.modifiers.is_inline,
             pure: sig.modifiers.is_pure,
             is_unsafe: sig.modifiers.is_unsafe,
