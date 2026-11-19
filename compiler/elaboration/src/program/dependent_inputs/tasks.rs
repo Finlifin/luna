@@ -122,14 +122,10 @@ fn copy_evidence(value: &Term, steps: &mut u64, span: Span) -> Result<Term, Erro
 /// The parent owns checked inputs and default continuations across child checks.
 /// Source borrows still belong to the enclosing checking region, not a VM task.
 #[must_use = "drive the input frame to completion or discard its uncommitted results"]
-pub(in crate::program) struct Frame<'b, 'h> {
-    signature: CallSignature<'b>,
-    callee: &'b n::Expr,
-    owner: Option<OwnerId>,
-    routes: &'b [arguments::RoutedArgument<'h>],
-    source: &'b Expr<'h>,
+pub(in crate::program) struct Frame {
+    span: Span,
     prepared: InputProducers,
-    call: Option<nir::FunctionCallPreparation<'b>>,
+    call: Option<nir::FunctionCallPreparation<Term>>,
     by_slot: BTreeMap<usize, usize>,
     default_slots: Option<BTreeMap<n::LocalId, usize>>,
     progress: Progress,
@@ -158,35 +154,45 @@ pub(in crate::program) enum Poll<'b> {
 
 pub(in crate::program) struct Request<'b> {
     slot: usize,
-    pub(in crate::program) input: std::borrow::Cow<'b, Expr<'b>>,
+    pub(in crate::program) input: arguments::RoutedSource<'b>,
     pub(in crate::program) expected: Term,
 }
 
 impl std::fmt::Display for Request<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let input = self.input.view();
         write!(
             f,
             "(dependent-input-request (slot {}) (source {} {}) (expected {}))",
             self.slot,
-            self.input.hir_id,
-            source(self.input.span),
+            input.hir_id,
+            source(input.span),
             self.expected
         )
     }
 }
 
-impl<'b, 'h: 'b> Frame<'b, 'h> {
+impl Frame {
     pub(in crate::program) fn new(
         checker: &mut Checker<'_, '_>,
-        demanded: BTreeSet<usize>,
-        signature: CallSignature<'b>,
-        callee: &'b n::Expr,
-        owner: Option<OwnerId>,
-        routes: &'b [arguments::RoutedArgument<'h>],
+        signature: Term,
+        site: &CallSite<'_>,
+        assigned: &[bool],
         offset: usize,
-        source: &'b Expr<'h>,
-        prepared: InputProducers,
+        mut prepared: InputProducers,
     ) -> Result<Self, Error> {
+        let source = &site.source;
+        let routes = &site.routes;
+        let view = CallSignature::of(&signature).expect("selected callable signature");
+        let demanded = checker.call_input_demands(
+            view,
+            &site.callee,
+            site.owner,
+            assigned,
+            offset,
+            source,
+            &mut prepared.defaults,
+        )?;
         spend(&mut checker.required_steps, demanded.len(), source.span)?;
         let by_slot = if demanded.is_empty() {
             BTreeMap::new()
@@ -198,17 +204,13 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 .map(|(index, input)| (offset + input.parameter, index))
                 .collect()
         };
-        let call = nir::FunctionCallPreparation::new(signature.term, checker.call_input_frames())
+        let call = nir::FunctionCallPreparation::new(signature, checker.call_input_frames())
             .map_err(|failure| error(source.span, failure.to_string()))?;
         Ok(Self {
             call: Some(call),
             by_slot,
             default_slots: None,
-            signature,
-            callee,
-            owner,
-            routes,
-            source,
+            span: source.span,
             prepared,
             progress: Progress {
                 tasks: demanded.into_iter().rev().map(Task::Enter).collect(),
@@ -219,50 +221,53 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         })
     }
 
-    pub(in crate::program) fn poll(
+    pub(in crate::program) fn poll<'h>(
         &mut self,
         checker: &mut Checker<'_, '_>,
-    ) -> Result<Poll<'b>, Error> {
+        site: &CallSite<'h>,
+    ) -> Result<Poll<'h>, Error> {
         match self.phase {
             Phase::Ready => {}
             Phase::Child { .. } => {
-                return Err(error(
-                    self.source.span,
-                    "dependent input frame awaits its child",
-                ));
+                return Err(error(self.span, "dependent input frame awaits its child"));
             }
             Phase::Invoking { .. } | Phase::Failed | Phase::Complete => {
                 return Err(error(
-                    self.source.span,
+                    self.span,
                     "dependent input frame is no longer active",
                 ));
             }
         }
-        let result = self.step(checker);
+        let result = self.step(checker, site);
         if result.is_err() {
             self.phase = Phase::Failed;
         }
         result
     }
 
-    fn step(&mut self, checker: &mut Checker<'_, '_>) -> Result<Poll<'b>, Error> {
-        let parameters = self.signature.parameters;
-        let callee = self.callee;
-        let owner = self.owner;
-        let routes = self.routes;
-        let source = self.source;
+    fn step<'h>(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        site: &CallSite<'h>,
+    ) -> Result<Poll<'h>, Error> {
+        let callee = &site.callee;
+        let owner = site.owner;
+        let routes = &site.routes;
+        let source = &site.source;
         let prepared = &mut self.prepared;
         let progress = &mut self.progress;
         let Some(task) = progress.next(&mut checker.required_steps, source.span)? else {
             self.phase = Phase::Complete;
+            let (signature, binding) = self
+                .call
+                .take()
+                .expect("active input frame")
+                .finish_with_signature()
+                .map_err(|e| error(source.span, e.to_string()))?;
             return Ok(Poll::Complete(PreparedInputs {
                 producers: std::mem::take(prepared),
-                binding: self
-                    .call
-                    .take()
-                    .expect("active input frame")
-                    .finish()
-                    .map_err(|e| error(source.span, e.to_string()))?,
+                signature,
+                binding,
             }));
         };
         let call = self.call.as_mut().expect("active input frame");
@@ -276,7 +281,8 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 {
                     return Ok(Poll::Continue);
                 }
-                let parameter = parameters
+                let parameter = call
+                    .parameters()
                     .get(slot)
                     .ok_or_else(|| error(source.span, "invalid dependent input slot"))?;
                 if parameter.sort == Sort::Runtime {
@@ -314,7 +320,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     };
                     return Ok(Poll::Child(Request {
                         slot,
-                        input: input.expression_view(source),
+                        input: input.requested_source(source),
                         expected,
                     }));
                 } else {
@@ -425,17 +431,18 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         }
     }
 
-    pub(in crate::program) fn accept(
+    pub(in crate::program) fn accept<'h>(
         &mut self,
         checker: &mut Checker<'_, '_>,
         value: n::Expr,
-    ) -> Result<Poll<'b>, Error> {
+        site: &CallSite<'h>,
+    ) -> Result<Poll<'h>, Error> {
         let (slot, caller_staged) = self.take_child()?;
         checker.in_staged_input = caller_staged;
         let resolution = checker.resolve_type_dependency(
-            self.owner,
-            self.callee,
-            self.source,
+            site.owner,
+            &site.callee,
+            &site.source,
             true,
             value,
             BTreeMap::new(),
@@ -449,7 +456,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         self.resolved(slot, resolution)
     }
 
-    fn resolved(&mut self, slot: usize, resolution: Resolution) -> Result<Poll<'b>, Error> {
+    fn resolved<'h>(&mut self, slot: usize, resolution: Resolution) -> Result<Poll<'h>, Error> {
         match resolution {
             Resolution::Known(value, identity) => {
                 self.deliver(slot, value, identity)?;
@@ -463,7 +470,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
     }
 
     fn deliver(&mut self, slot: usize, value: n::Expr, identity: Term) -> Result<(), Error> {
-        let span = self.source.span;
+        let span = self.span;
         self.call
             .as_mut()
             .expect("active input frame")
@@ -482,12 +489,12 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
     ) -> Result<(), Error> {
         let Phase::Invoking { slot } = std::mem::replace(&mut self.phase, Phase::Failed) else {
             return Err(error(
-                self.source.span,
+                self.span,
                 "dependent input has no pending invocation",
             ));
         };
         let (value, ty) = reply.publish(checker)?;
-        let (value, identity) = checker.freeze_completed_dependency(value, ty, self.source.span)?;
+        let (value, identity) = checker.freeze_completed_dependency(value, ty, self.span)?;
         self.deliver(slot, value, identity)
     }
 
@@ -499,22 +506,19 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             caller_staged,
         } = self.phase
         else {
-            return Err(error(
-                self.source.span,
-                "dependent input has no requested child",
-            ));
+            return Err(error(self.span, "dependent input has no requested child"));
         };
         self.phase = Phase::Failed;
         Ok((slot, caller_staged))
     }
 }
 
-impl std::fmt::Display for Frame<'_, '_> {
+impl std::fmt::Display for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "(dependent-input-frame (source {}) (phase ",
-            source(self.source.span)
+            source(self.span)
         )?;
         match self.phase {
             Phase::Ready => f.write_str("ready")?,
@@ -717,7 +721,7 @@ mod tests {
             ],
             result: Box::new(p(P::Void)),
         };
-        let mut call = nir::FunctionCallPreparation::new(&signature, vec![]).unwrap();
+        let mut call = nir::FunctionCallPreparation::new(signature, vec![]).unwrap();
         call.prepare(0, |domain| Ok::<_, nir::TypeError>(domain.clone()))
             .unwrap();
         call.supply(0, Term::String("retained\"\n".into())).unwrap();
@@ -725,13 +729,9 @@ mod tests {
             .unwrap();
         let mut frame = Frame {
             call: Some(call),
-            signature: CallSignature::of(&signature).unwrap(),
-            callee: &value,
-            owner: None,
-            routes: &[],
+            span,
             by_slot: BTreeMap::new(),
             default_slots: None,
-            source: &source_expr,
             prepared,
             progress: Progress::new(1),
             phase: Phase::Child {
@@ -760,7 +760,7 @@ mod tests {
         assert!(matches!(frame.phase, Phase::Failed));
         let request = Request {
             slot: 1,
-            input: std::borrow::Cow::Borrowed(&source_expr),
+            input: arguments::RoutedSource::Expression(std::borrow::Cow::Borrowed(&source_expr)),
             expected: p(P::Str),
         }
         .to_string();

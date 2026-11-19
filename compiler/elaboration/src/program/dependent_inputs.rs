@@ -7,7 +7,6 @@ pub(super) mod tasks;
 /// same binders. Callable wrappers remain the responsibility of call delivery.
 #[derive(Clone, Copy)]
 pub(super) struct CallSignature<'a> {
-    pub(super) term: &'a Term,
     pub(super) parameters: &'a [Parameter],
     pub(super) result: &'a Term,
 }
@@ -18,11 +17,7 @@ impl<'a> CallSignature<'a> {
         let Term::Function { parameters, result } = term else {
             return None;
         };
-        Some(Self {
-            term,
-            parameters,
-            result,
-        })
+        Some(Self { parameters, result })
     }
 }
 
@@ -41,7 +36,37 @@ impl InputProducers {
     }
 }
 
+/// The source and selected callee of one call. Input continuations refer to
+/// slot numbers in these routes, independent of the Rust frame that chose them.
+pub(super) struct CallSite<'h> {
+    pub(super) callee: n::Expr,
+    pub(super) owner: Option<OwnerId>,
+    pub(super) routes: Vec<arguments::RoutedArgument<'h>>,
+    pub(super) source: Expr<'h>,
+}
+
+impl std::fmt::Display for CallSite<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(call-site (source {} {}) (callee {}) (routes",
+            self.source.hir_id,
+            source(self.source.span),
+            self.callee
+        )?;
+        for route in &self.routes {
+            write!(f, " (slot {}", route.parameter)?;
+            for (position, input) in route.source_inputs() {
+                write!(f, " (input {position} {})", input.hir_id)?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str("))")
+    }
+}
+
 pub(super) struct PreparedInputs {
+    pub signature: Term,
     pub producers: InputProducers,
     pub binding: nir::FunctionCallBinding,
 }
@@ -414,36 +439,18 @@ impl Checker<'_, '_> {
 
     pub(super) fn prepare_call_types(
         &mut self,
-        signature: CallSignature<'_>,
-        callee: &n::Expr,
-        direct: Option<OwnerId>,
-        routes: &[arguments::RoutedArgument<'_>],
+        signature: Term,
+        site: &CallSite<'_>,
         offset: usize,
         assigned: &[bool],
-        prefix: &[n::Expr],
-        expr: &Expr<'_>,
         seed: Vec<Option<n::Expr>>,
     ) -> Result<PreparedInputs, Error> {
-        let mut prepared = InputProducers::new(signature.parameters.len());
-        if !seed.is_empty() {
-            prepared.values = seed;
-        }
-        for (index, value) in prefix.iter().enumerate() {
-            prepared.values[index] = Some(value.clone());
-        }
-        let demanded = self.call_input_demands(
-            signature,
-            callee,
-            direct,
-            assigned,
-            offset,
-            expr,
-            &mut prepared.defaults,
-        )?;
-        let frame = tasks::Frame::new(
-            self, demanded, signature, callee, direct, routes, offset, expr, prepared,
-        )?;
-        self.check_call_dependencies_region(frame)
+        let prepared = InputProducers {
+            defaults: vec![None; seed.len()],
+            values: seed,
+        };
+        let frame = tasks::Frame::new(self, signature, site, assigned, offset, prepared)?;
+        self.check_call_dependencies_region(frame, site)
     }
 
     pub(super) fn call_input_demands(

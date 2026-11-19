@@ -105,9 +105,21 @@ impl BlockFrame<'_> {
 pub(super) enum Request<'h> {
     Expression(std::borrow::Cow<'h, Expr<'h>>, Destination),
     Block(&'h hir::Block<'h>, Destination),
+    Collection(arguments::RoutedCollection<'h>, Term),
 }
 
 impl<'h> Request<'h> {
+    pub(super) fn routed(input: arguments::RoutedSource<'h>, expected: Term) -> Self {
+        match input {
+            arguments::RoutedSource::Expression(input) => {
+                Self::Expression(input, Destination::from_expected(Some(expected)))
+            }
+            arguments::RoutedSource::Collection(collection) => {
+                Self::Collection(collection, expected)
+            }
+        }
+    }
+
     pub(super) fn expression(input: &'h Expr<'h>, destination: Destination) -> Self {
         Self::Expression(std::borrow::Cow::Borrowed(input), destination)
     }
@@ -149,6 +161,15 @@ impl std::fmt::Display for Request<'_> {
                 expr.hir_id,
                 source(expr.span)
             ),
+            Self::Collection(collection, expected) => {
+                let expr = collection.expression();
+                write!(
+                    f,
+                    "(check-collection {} (source {}) (expected {expected}))",
+                    expr.hir_id,
+                    source(expr.span)
+                )
+            }
             Self::Block(block, destination) => write!(
                 f,
                 "(check-block {} (source {}) {destination})",
@@ -625,15 +646,54 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         self.drive_region(region::Region::with_consumer(root))
     }
 
+    pub(in crate::program) fn check_invocation_region<'h>(
+        &mut self,
+        expr: &Expr<'h>,
+        args: &'h [Arg<'h>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        mut callee: ordinary_calls::InstanceFrame<'h>,
+    ) -> Result<n::Expr, Error>
+    where
+        'a: 'h,
+        'arena: 'h,
+    {
+        let destination = match Destination::ordinary(
+            self,
+            OrdinaryTail {
+                expected,
+                partial,
+                input: None,
+            },
+            expr.span,
+        ) {
+            Ok(destination) => destination,
+            Err(failure) => {
+                callee.leave(self);
+                return Err(failure);
+            }
+        };
+        let parent = ordinary_calls::Invocation::AwaitCallee {
+            source: expr.clone(),
+            args,
+            destination,
+        };
+        self.drive_region(region::Region::with_child(
+            parent,
+            RegionFrame::CallableApplication(callee),
+        ))
+    }
+
     pub(in crate::program) fn check_call_dependencies_region<'b>(
         &mut self,
-        frame: dependent_inputs::tasks::Frame<'b, '_>,
+        frame: dependent_inputs::tasks::Frame,
+        site: &dependent_inputs::CallSite<'b>,
     ) -> Result<dependent_inputs::PreparedInputs, Error>
     where
         'a: 'b,
         'arena: 'b,
     {
-        self.drive_region(region::Region::with_consumer(frame))
+        self.drive_input_consumer(input_roots::Dependencies { frame, site })
     }
 
     fn drive_region<'h, R: Root<'h>>(

@@ -14,6 +14,7 @@ mod logical;
 mod matches;
 mod normal_applications;
 mod ordinary_calls;
+pub(super) use ordinary_calls::{CallPlan, ExplicitInstance};
 mod tails;
 mod unary;
 mod when;

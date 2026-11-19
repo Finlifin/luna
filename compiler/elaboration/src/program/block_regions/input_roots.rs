@@ -67,7 +67,18 @@ impl<'h, C: Completion<Output = n::Expr>> preparation::Frame<'h, C> {
     }
 }
 
-impl<'b, 'h: 'b> Root<'b> for dependent_inputs::tasks::Frame<'b, 'h> {
+pub(super) struct Dependencies<'s, 'h> {
+    pub(super) site: &'s dependent_inputs::CallSite<'h>,
+    pub(super) frame: dependent_inputs::tasks::Frame,
+}
+
+impl std::fmt::Display for Dependencies<'_, '_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(call-dependencies {} {})", self.site, self.frame)
+    }
+}
+
+impl<'h> Root<'h> for Dependencies<'_, 'h> {
     type Output = dependent_inputs::PreparedInputs;
     type Invocation = required::Invocation;
     fn resume(
@@ -75,36 +86,43 @@ impl<'b, 'h: 'b> Root<'b> for dependent_inputs::tasks::Frame<'b, 'h> {
         checker: &mut Checker<'_, '_>,
         reply: required::CompletedInvocation,
     ) -> Result<(), Error> {
-        self.accept_required(checker, reply)
+        self.frame.accept_required(checker, reply)
     }
-
     fn advance(
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Poll<Request<'b>, Self::Output, Self::Invocation>, Error> {
+    ) -> Result<Poll<Request<'h>, Self::Output, Self::Invocation>, Error> {
+        self.frame.advance(checker, self.site, returned)
+    }
+    fn unwind(&mut self, checker: &mut Checker<'_, '_>) {
+        self.frame.unwind(checker)
+    }
+}
+
+impl dependent_inputs::tasks::Frame {
+    pub(super) fn advance<'h>(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        site: &dependent_inputs::CallSite<'h>,
+        returned: Option<CheckedBlock>,
+    ) -> Result<Poll<Request<'h>, dependent_inputs::PreparedInputs, required::Invocation>, Error>
+    {
         let next = if let Some(returned) = returned {
             let CheckedBlock::Ordinary(value) = returned else {
                 unreachable!("dependent input requested an ordinary expression")
             };
-            self.accept(checker, value)?
+            self.accept(checker, value, site)?
         } else {
-            self.poll(checker)?
+            self.poll(checker, site)?
         };
         use dependent_inputs::tasks::Poll as Input;
         match next {
             Input::Invoke(work) => Ok(Poll::Invoke(work)),
             Input::Continue => Ok(Poll::Continue),
-            Input::Child(child) => Ok(Poll::Child(Request::Expression(
-                child.input,
-                Destination::from_expected(Some(child.expected)),
-            ))),
+            Input::Child(child) => Ok(Poll::Child(Request::routed(child.input, child.expected))),
             Input::Complete(inputs) => Ok(Poll::Complete(inputs)),
         }
-    }
-
-    fn unwind(&mut self, checker: &mut Checker<'_, '_>) {
-        self.unwind(checker)
     }
 }
 

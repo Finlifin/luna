@@ -32,50 +32,88 @@ pub(super) fn preparation_anchor(span: Span) -> n::SourceRange {
 
 pub(super) struct RoutedArgument<'h> {
     pub parameter: usize,
-    values: Vec<Expr<'h>>,
     positions: Vec<usize>,
-    collected: bool,
-    lambda: bool,
+    supply: Supply<'h>,
+}
+
+enum Supply<'h> {
+    Single(&'h Expr<'h>),
+    Tactic(&'h Expr<'h>),
+    Collection(std::rc::Rc<[Expr<'h>]>),
+}
+
+/// A requested child can outlive routing. Only a synthetic collection needs
+/// to retain storage for a new tuple's field headers.
+pub(super) enum RoutedSource<'h> {
+    Expression(std::borrow::Cow<'h, Expr<'h>>),
+    Collection(RoutedCollection<'h>),
+}
+
+pub(super) struct RoutedCollection<'h> {
+    id: hir::HirId,
+    span: Span,
+    fields: std::rc::Rc<[Expr<'h>]>,
+}
+
+impl RoutedCollection<'_> {
+    pub(super) fn expression(&self) -> Expr<'_> {
+        Expr {
+            hir_id: self.id,
+            span: self.span,
+            kind: H::Tuple(&self.fields),
+        }
+    }
+}
+
+impl<'h> RoutedSource<'h> {
+    pub(super) fn view(&self) -> std::borrow::Cow<'_, Expr<'_>> {
+        use std::borrow::Cow;
+        match self {
+            Self::Expression(input) => Cow::Borrowed(input.as_ref()),
+            Self::Collection(collection) => Cow::Owned(collection.expression()),
+        }
+    }
 }
 
 impl<'h> RoutedArgument<'h> {
-    /// A literal whole packet has no producer around its fields. Prepare those
-    /// fields in the ordinary collection loop without constructing a second
-    /// tuple layer. Callers must first establish that this is a variadic slot.
-    pub(super) fn expand_literal_packet(&mut self, remaining: &mut u64) -> Result<(), Error> {
-        if self.collected || self.lambda || self.values.len() != 1 {
-            return Ok(());
+    fn values(&self) -> &[Expr<'h>] {
+        match &self.supply {
+            Supply::Single(value) | Supply::Tactic(value) => std::slice::from_ref(*value),
+            Supply::Collection(fields) => fields,
         }
-        let H::Tuple(fields) = self.values[0].kind else {
+    }
+
+    /// A literal whole packet has no producer around its fields. Preserve
+    /// the original position when preparing its elements individually.
+    pub(super) fn expand_literal_packet(&mut self, remaining: &mut u64) -> Result<(), Error> {
+        let Supply::Single(value) = self.supply else {
             return Ok(());
         };
-        *remaining = remaining.checked_sub(fields.len() as u64).ok_or_else(|| {
-            error(
-                self.values[0].span,
-                "literal packet preparation budget exhausted",
-            )
-        })?;
-        let position = self.positions[0];
-        self.values = fields.to_vec();
-        self.positions = vec![position; fields.len()];
-        self.collected = true;
+        let H::Tuple(fields) = value.kind else {
+            return Ok(());
+        };
+        *remaining = remaining
+            .checked_sub(fields.len() as u64)
+            .ok_or_else(|| error(value.span, "literal packet preparation budget exhausted"))?;
+        self.positions = vec![self.positions[0]; fields.len()];
+        self.supply = Supply::Collection(fields.into());
         Ok(())
     }
 
     pub(super) fn is_collected(&self) -> bool {
-        self.collected
+        matches!(self.supply, Supply::Collection(_))
     }
     pub(super) fn property_fields(&self) -> Option<&[hir::expr::FieldExpr<'h>]> {
-        if self.collected {
+        if self.is_collected() {
             return None;
         }
-        match self.values.first()?.kind {
+        match self.values().first()?.kind {
             H::CollectedProperties(fields) => Some(fields),
             _ => None,
         }
     }
     pub(super) fn has_collection_fields(&self) -> bool {
-        self.collected || self.property_fields().is_some()
+        self.is_collected() || self.property_fields().is_some()
     }
     pub(super) fn retained_collection_context(
         &self,
@@ -137,32 +175,43 @@ impl<'h> RoutedArgument<'h> {
         }
     }
     pub(super) fn source_inputs(&self) -> impl Iterator<Item = (usize, &Expr<'h>)> {
-        self.positions.iter().copied().zip(&self.values)
+        self.positions.iter().copied().zip(self.values())
     }
     pub(super) fn single_position(&self) -> Option<usize> {
-        (!self.collected).then(|| self.positions[0])
+        (!self.is_collected()).then(|| self.positions[0])
     }
-    pub(super) fn expression_view<'a>(&'a self, call: &Expr<'_>) -> std::borrow::Cow<'a, Expr<'a>> {
-        use std::borrow::Cow;
-        if self.collected {
-            Cow::Owned(Expr {
-                hir_id: call.hir_id,
-                kind: H::Tuple(&self.values),
+    pub(super) fn requested_source(&self, call: &Expr<'_>) -> RoutedSource<'h> {
+        match &self.supply {
+            Supply::Collection(fields) => RoutedSource::Collection(RoutedCollection {
+                id: call.hir_id,
                 span: call.span,
-            })
-        } else if self.lambda {
-            Cow::Owned(Expr {
-                hir_id: self.values[0].hir_id,
-                span: self.values[0].span,
-                kind: H::TacticArgument(&self.values[0]),
-            })
-        } else {
-            Cow::Borrowed(&self.values[0])
+                fields: fields.clone(),
+            }),
+            Supply::Single(value) => RoutedSource::Expression(std::borrow::Cow::Borrowed(*value)),
+            Supply::Tactic(value) => {
+                RoutedSource::Expression(std::borrow::Cow::Owned(Self::tactic_expression(value)))
+            }
         }
     }
 
-    pub fn expression<'a>(&'a self, call: &Expr<'_>) -> Expr<'a> {
-        self.expression_view(call).into_owned()
+    fn tactic_expression(value: &'h Expr<'h>) -> Expr<'h> {
+        Expr {
+            hir_id: value.hir_id,
+            span: value.span,
+            kind: H::TacticArgument(value),
+        }
+    }
+
+    pub fn expression(&self, call: &Expr<'_>) -> Expr<'_> {
+        match &self.supply {
+            Supply::Collection(fields) => Expr {
+                hir_id: call.hir_id,
+                span: call.span,
+                kind: H::Tuple(fields),
+            },
+            Supply::Single(value) => (**value).clone(),
+            Supply::Tactic(value) => Self::tactic_expression(value),
+        }
     }
 
     pub(super) fn local_collection_context(
@@ -170,7 +219,7 @@ impl<'h> RoutedArgument<'h> {
         checker: &Checker<'_, '_>,
     ) -> Option<crate::calls::InputContext> {
         use crate::calls::InputContext as C;
-        if !self.collected {
+        if !self.is_collected() {
             return None;
         }
         let fields = self
@@ -207,7 +256,7 @@ impl<'h> RoutedArgument<'h> {
     ) -> Result<(), Error> {
         // Collection constructs a tuple VALUE. In particular `...items: Type`
         // must not turn the synthetic tuple syntax into a type expression.
-        if self.collected && !matches!(checker.structural_type(ty, span)?, Term::Tuple(_)) {
+        if self.is_collected() && !matches!(checker.structural_type(ty, span)?, Term::Tuple(_)) {
             return Err(error(
                 span,
                 "default variadic collection requires a tuple type",
@@ -316,7 +365,7 @@ pub(super) fn post_lambda_target(
 
 pub(super) fn route_arguments<'h>(
     args: &[Arg<'h>],
-    declarations: Option<&[hir::common::FnParam<'h>]>,
+    declarations: Option<&[hir::common::FnParam<'_>]>,
     count: usize,
     span: Span,
 ) -> Result<(Vec<RoutedArgument<'h>>, Vec<bool>), Error> {
@@ -326,22 +375,21 @@ pub(super) fn route_arguments<'h>(
         .routes
         .into_iter()
         .map(|route| {
-            let values = route
-                .sources
-                .iter()
-                .map(|index| match &args[*index] {
-                    Arg::Positional(value) | Arg::Named(_, value) | Arg::PostLambda(value) => {
-                        (**value).clone()
-                    }
-                    _ => unreachable!("only supported supplies receive routes"),
-                })
-                .collect();
+            let source = |index: usize| match &args[index] {
+                Arg::Positional(value) | Arg::Named(_, value) | Arg::PostLambda(value) => *value,
+                _ => unreachable!("only supported supplies receive routes"),
+            };
+            let supply = if route.collected {
+                Supply::Collection(route.sources.iter().map(|&i| source(i).clone()).collect())
+            } else if route.lambda {
+                Supply::Tactic(source(route.sources[0]))
+            } else {
+                Supply::Single(source(route.sources[0]))
+            };
             RoutedArgument {
                 parameter: route.parameter,
-                values,
                 positions: route.sources,
-                collected: route.collected,
-                lambda: route.lambda,
+                supply,
             }
         })
         .collect();
@@ -555,7 +603,7 @@ impl Checker<'_, '_> {
             if arguments.iter().any(|argument| argument.parameter >= offset
                 && !argument.is_default
                 && !routes.iter().any(|route| offset + route.parameter == argument.parameter)));
-        if !routes.iter().any(|route| route.collected) && !completed_defaults {
+        if !routes.iter().any(|route| route.is_collected()) && !completed_defaults {
             return Ok(call);
         }
         let K::Call {
@@ -596,7 +644,7 @@ impl Checker<'_, '_> {
         }
         for route in routes {
             let argument = &mut arguments[argument_slots[offset + route.parameter]];
-            if route.collected {
+            if route.is_collected() {
                 argument.value.source = anchor;
                 let K::Tuple(items) = &mut argument.value.kind else {
                     return Err(error(
@@ -687,5 +735,46 @@ fn reference_base(value: &mut n::Expr) -> &mut n::Expr {
             ..
         } => reference_base(value),
         value => value,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn requested_children_keep_source_identity_after_the_routes_are_consumed() {
+        let source = |index| Expr {
+            hir_id: hir::HirId::new(
+                hir::OwnerId::new(hir::LocalDefId::new(7)),
+                hir::ItemLocalId::new(index),
+            ),
+            span: Span::default(),
+            kind: H::Unit,
+        };
+        let field = source(1);
+        let call = source(2);
+        let request = |supply| {
+            let route = RoutedArgument {
+                parameter: 0,
+                positions: vec![0],
+                supply,
+            };
+            route.requested_source(&call)
+        };
+        let scalar = request(Supply::Single(&field));
+        assert!(std::ptr::eq(scalar.view().as_ref(), &field));
+        let tactic = request(Supply::Tactic(&field));
+        assert!(
+            matches!(tactic.view().kind, H::TacticArgument(value) if std::ptr::eq(value, &field))
+        );
+        let packet = request(Supply::Collection(vec![field.clone(), source(3)].into()));
+        let view = packet.view();
+        assert_eq!(view.hir_id, call.hir_id);
+        let H::Tuple(fields) = view.kind else {
+            panic!("collected input")
+        };
+        assert_eq!(fields[0].hir_id, field.hir_id);
+        assert_eq!(fields[1].hir_id, source(3).hir_id);
     }
 }

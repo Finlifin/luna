@@ -747,6 +747,21 @@ impl Term {
             _ => self,
         }
     }
+    /// Move the parameter/result telescope out of a selected callable view.
+    /// Call formation retains the original callable separately for delivery.
+    pub fn into_callable_signature(mut self) -> Self {
+        loop {
+            self = match self {
+                Self::ComptimeFunction(signature)
+                | Self::NormalFormFunction(signature, _)
+                | Self::UnsafeFunction(signature)
+                | Self::Closure { signature, .. }
+                | Self::ContextualClosure { signature, .. } => *signature,
+                signature => return signature,
+            };
+        }
+    }
+
     pub fn is_comptime_callable(&self) -> bool {
         match self {
             Self::ComptimeFunction(_) | Self::NormalFormFunction(..) => true,

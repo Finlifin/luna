@@ -178,7 +178,7 @@ Waiting 与 Unresolved 不混用。没有就绪任务时，先区分外部请求
 | --- | --- | --- |
 | `elaboration/src/program/block_regions/driver.rs` 与 `driver/region.rs` | 普通、contextual、部分结构输入共用 Region；帧栈保留子请求；根消费者交付表达式、声明输入或普通调用的依赖证据 | 仍使用原活动 Checker，没有可移交的外部等待权限；模式／guard 子检查仍同步 |
 | `elaboration/src/program/branch_probes.rs` | 探测次序、默认类型策略和 Attempt 回退；if／when／match 帧持有搜索位置与当前事务 | 不提供执行前缀恢复或外部 Type 等待 |
-| `block_regions/ordinary_calls.rs` 与 `dependent_inputs/tasks.rs` | 签名已确定的普通调用在同一输入区域完成依赖观察、形成义务检查、显式实参和默认供应 | callee 选择仍由外层检查器完成。等待原 VM 交付 Type 的源码子检查尚未接通 |
+| `block_regions/ordinary_calls.rs` 与 `dependent_inputs/tasks.rs` | 直接显式 comptime 实例的子句检查向同一区域交付 callee。区域持有普通实参的原始 HIR，按已形成的签名完成路由、依赖观察、默认供应和 NIR 调用 | 运行中的 VM 尚不能把签名依赖的 Type 交还给此区域。一般成员选择和需要推断的候选仍由相应检查器驱动 |
 | `elaboration/src/program/declaration_inputs/progress.rs` | producer、身份、检查次序与源码 schedule 分开 | Typed 路径仍要求普通完整 Expr，Contextual 仍保留 NormalFormArgument |
 | `elaboration/src/program/dynamic_instances.rs` | callable packet 保留实际 producer、静态身份与 pending 集合 | 签名仍提及 pending 参数时直接拒绝发布 |
 | `elaboration/src/program/function_bodies.rs` | 最终函数与 required 依赖共用主体检查 | 必须检查出完整 body 才能构造 NIR Function |
@@ -459,10 +459,16 @@ Checker 在检查实现之前建立按身份查询的 trait 契约目录。同�
 
 ### 源检查与执行的交接目标
 
-以下协议尚未实现。它接管上述真实入口；不增加第二套可执行 HIR、不扩大
-NormalFormArgument，也不把只有手工构造者的 fragment API 当作源码交付。
+源码检查已能保留一部分父规则。跨 VM 的执行许可、受检片段与观察回复仍待实现，
+目标是在现有源码入口上完成这些交接。
 
 #### 父区域与待形成 callee 分开
+
+生产入口中，直接调用一个带显式子句的 comptime 函数时，父区域保留调用位置、
+普通实参和结果上下文。子帧在自己的词法作用域内检查子句，退出后才把 callee
+交还给父区域。已知签名连同这次输入观察一直保留到结果类型替换；收集实参保留
+原始位置，形成的 NIR 继续按源码位置求值。当前子帧遇到仍依赖执行结果的签名
+会返回诊断。下述执行许可与观察回复仍待接入这一位置。
 
 `identity<Byte(), true>(9)` 等待的是 callee 的签名，但执行 Byte 的 owner 是
 **调用者当前源区域**，不是尚未形成的 identity invocation。若先建立 identity 的
@@ -632,15 +638,17 @@ Closure 代码载体，与 IIR 共用已有存储，不把这个实现细节重�
 
 #### 实际调用链与替换边界
 
-`3fd323ca` 上的生产链如下。箭头表示当前同步调用／数据依赖，不表示已经存在
-挂起请求；这里的 `check_source_function` 同时服务包收集与 required 依赖收集。
+以直接调用带显式子句的 comptime 函数为例，包收集和 required 依赖收集共用
+`check_source_function`。源码检查目前沿以下路径取得受检主体。
 
 ```text
 package collection / required dependency discovery
   -> check_source_function
-     -> function_body -> expr -> comptime_function_instance
-        -> prepare_callable_clause_packet -> planned_typed_declaration_inputs
-        -> require complete callable signature or return Error
+     -> call_selection: select_explicit_instance
+        -> check_invocation_region: AwaitCallee + CallableApplication
+           -> prepare clause packet -> form callable signature
+              known: plan_prepared_call -> check ordinary inputs -> typed call
+              needs execution-time Type: instance formation returns Error
   -> completed nir::Function
 
 prepare_required_root_with_live_inputs

@@ -197,6 +197,25 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         {
             return Ok(Some(value));
         }
+        self.required_collected_callable_instance(
+            expr,
+            owner,
+            args,
+            prefix,
+            expected,
+            allow_optional,
+        )
+    }
+
+    pub(super) fn required_collected_callable_instance(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        prefix: &[Term],
+        expected: Option<&Term>,
+        allow_optional: bool,
+    ) -> Result<Option<n::Expr>, Error> {
         if !self.clause_has_collector(owner) || self.in_code_body {
             return Ok(None);
         }

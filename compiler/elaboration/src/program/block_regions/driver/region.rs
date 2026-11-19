@@ -5,17 +5,18 @@ use super::*;
 use root::ExpressionResult;
 
 pub(super) struct Child<'h> {
-    pub(super) expr: std::borrow::Cow<'h, Expr<'h>>,
+    pub(super) expr: arguments::RoutedSource<'h>,
     pub(super) destination: Destination,
 }
 
 impl std::fmt::Display for Child<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let expr = self.expr.view();
         write!(
             f,
             "(child {} (source {}) {})",
-            self.expr.hir_id,
-            source(self.expr.span),
+            expr.hir_id,
+            source(expr.span),
             self.destination
         )
     }
@@ -33,7 +34,7 @@ impl<'h, R> PendingChild<'h, R> {
         let result = self
             .child
             .destination
-            .check_expression(checker, &self.child.expr);
+            .check_expression(checker, &self.child.expr.view());
         self.deliver(result)
     }
 
@@ -104,6 +105,14 @@ impl<'h, R: Root<'h>> Region<'h, R> {
         Self {
             root,
             frames: vec![],
+            returned: Ok(None),
+        }
+    }
+
+    pub(super) fn with_child(root: R, child: RegionFrame<'h>) -> Self {
+        Self {
+            root,
+            frames: vec![child],
             returned: Ok(None),
         }
     }
@@ -269,7 +278,7 @@ mod tests {
         let pending = PendingChild {
             parent: Region::new(RegionFrame::Aggregate(frame)),
             child: Child {
-                expr: std::borrow::Cow::Borrowed(&items[0]),
+                expr: arguments::RoutedSource::Expression(std::borrow::Cow::Borrowed(&items[0])),
                 destination: Destination::ContextualInput,
             },
         };

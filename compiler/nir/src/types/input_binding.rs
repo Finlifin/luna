@@ -309,28 +309,36 @@ pub struct FunctionCallBinding {
 /// A call keeps one checked telescope while producers complete in dependency
 /// order. Only admitted observations enter substitution; a failed delivery
 /// leaves the slot open for the original consumer.
-pub struct FunctionCallPreparation<'s> {
-    parameters: &'s [Parameter],
+pub struct FunctionCallPreparation<S> {
+    signature: S,
     pending: std::collections::BTreeMap<usize, Sort>,
     binding: FunctionCallBinding,
 }
 
-impl<'s> FunctionCallPreparation<'s> {
-    pub fn new(signature: &'s Term, mut caller_frames: Vec<Vec<Sort>>) -> Result<Self, TypeError> {
-        let Term::Function { parameters, .. } = signature.callable_signature() else {
+impl<S: std::borrow::Borrow<Term>> FunctionCallPreparation<S> {
+    pub fn new(signature: S, mut caller_frames: Vec<Vec<Sort>>) -> Result<Self, TypeError> {
+        let Term::Function { parameters, .. } = signature.borrow().callable_signature() else {
             return Err(TypeError::InvalidFunctionSignature);
         };
-        signature.check_scope(&caller_frames)?;
+        signature.borrow().check_scope(&caller_frames)?;
         caller_frames.push(parameters.iter().map(|p| p.sort).collect());
+        let count = parameters.len();
         Ok(Self {
-            parameters,
+            signature,
             pending: Default::default(),
             binding: FunctionCallBinding {
                 frames: caller_frames,
-                arguments: vec![None; parameters.len()],
+                arguments: vec![None; count],
                 type_slots: BTreeSet::new(),
             },
         })
+    }
+
+    pub fn parameters(&self) -> &[Parameter] {
+        let Term::Function { parameters, .. } = self.signature.borrow().callable_signature() else {
+            unreachable!("validated callable telescope")
+        };
+        parameters
     }
 
     pub fn binding(&self) -> &FunctionCallBinding {
@@ -338,10 +346,14 @@ impl<'s> FunctionCallPreparation<'s> {
     }
 
     pub fn finish(self) -> Result<FunctionCallBinding, TypeError> {
+        self.finish_with_signature().map(|(_, binding)| binding)
+    }
+
+    pub fn finish_with_signature(self) -> Result<(S, FunctionCallBinding), TypeError> {
         if let Some((&slot, _)) = self.pending.first_key_value() {
             return Err(TypeError::MissingArgument(slot));
         }
-        Ok(self.binding)
+        Ok((self.signature, self.binding))
     }
 
     /// Return the domain to check the source in. The call retains its proven
@@ -352,7 +364,7 @@ impl<'s> FunctionCallPreparation<'s> {
         view: impl FnOnce(&Term) -> Result<Term, E>,
     ) -> Result<Term, CallError<E>> {
         let parameter = self
-            .parameters
+            .parameters()
             .get(index)
             .ok_or(CallError::Shape(TypeError::MissingArgument(index)))?;
         if self.binding.arguments[index].is_some() || self.pending.contains_key(&index) {
@@ -381,7 +393,7 @@ impl<'s> FunctionCallPreparation<'s> {
         input.check_scope(self.binding.caller_frames())?;
         require_sort(&input, sort)?;
         self.pending.remove(&index);
-        if sort != self.parameters[index].sort {
+        if sort != self.parameters()[index].sort {
             self.binding.type_slots.insert(index);
         }
         self.binding.arguments[index] = Some(input);
@@ -389,7 +401,7 @@ impl<'s> FunctionCallPreparation<'s> {
     }
 }
 
-impl fmt::Display for FunctionCallPreparation<'_> {
+impl<S> fmt::Display for FunctionCallPreparation<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(function-call-preparation {} (pending", self.binding)?;
         for (slot, sort) in &self.pending {

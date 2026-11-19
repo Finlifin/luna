@@ -9,6 +9,12 @@ pub(super) fn enter<'h, 'a: 'h, 'arena: 'h>(
     request: Request<'h>,
 ) -> Result<Option<Child<'h>>, Error> {
     let (block, destination, boundary) = match request {
+        Request::Collection(collection, expected) => {
+            return Ok(Some(Child {
+                expr: arguments::RoutedSource::Collection(collection),
+                destination: Destination::from_expected(Some(expected)),
+            }));
+        }
         Request::Block(block, destination) => (block, destination, None),
         Request::Expression(input, destination) => {
             let expr = input.as_ref();
@@ -264,7 +270,7 @@ pub(super) fn enter<'h, 'a: 'h, 'arena: 'h>(
                 (block, nested, boundary)
             } else {
                 return Ok(Some(Child {
-                    expr: input,
+                    expr: arguments::RoutedSource::Expression(input),
                     destination,
                 }));
             }
