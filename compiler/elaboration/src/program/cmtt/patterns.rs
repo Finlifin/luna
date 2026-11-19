@@ -323,19 +323,10 @@ impl Checker<'_, '_> {
                 }
                 outputs.insert(name.clone(), (id, actual.clone()));
             }
-            let arm = n::MatchArm {
-                pattern: body,
-                guard: None,
-                body: n::Expr {
-                    source: source(value.span),
-                    ty: p(P::Void),
-                    kind: K::Unit,
-                },
-            };
             let mut fuel = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
             let before = fuel;
-            let free = nir::free_bindings::collect_arm_with_dependencies(
-                &arm,
+            let free = nir::free_bindings::collect_pattern_with_dependencies(
+                &body,
                 &this.abstract_code_dependencies,
                 &mut fuel,
             );
@@ -356,7 +347,7 @@ impl Checker<'_, '_> {
             Ok(Arc::new(PatternCode {
                 subject: subject.clone(),
                 outputs,
-                body: (!pending).then_some(arm.pattern),
+                body: (!pending).then_some(body),
             }))
         });
         self.locals = saved;

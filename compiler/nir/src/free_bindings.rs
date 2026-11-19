@@ -3,6 +3,9 @@
 use crate::program::{Expr, ExprKind as K, LocalId, NormalFormArgument as A, Pattern as P};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod lexical;
+use lexical::{Alternatives, LexicalScope};
+
 /// Resource limits must not be mistaken for malformed lexical scope.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -43,33 +46,54 @@ fn charge(fuel: &mut usize, amount: usize) -> Result<(), Error> {
         .ok_or(Error::Budget("capture analysis budget exhausted"))?;
     Ok(())
 }
-fn fork(scope: &Scope, fuel: &mut usize) -> Result<Scope, Error> {
-    charge(fuel, scope.len())?;
-    Ok(scope.clone())
-}
+/// Expand one symbolic read in its use-site scope. Another use may be
+/// shadowed by a different pattern, default, or closure binder.
 fn read(
-    id: LocalId,
-    scope: &Scope,
+    mut id: LocalId,
+    scope: &LexicalScope,
     free: &mut Scope,
     dependencies: &Dependencies,
     fuel: &mut usize,
-    depth: usize,
 ) -> Result<(), Error> {
-    charge(fuel, 1)?;
-    if scope.contains(&id) {
-        return Ok(());
+    enum Visit {
+        Active,
+        Complete,
     }
-    if depth >= 128 {
-        return Err(Error::Depth("capture dependency depth exhausted"));
-    }
-    if let Some(inputs) = dependencies.get(&id) {
-        for input in inputs {
-            read(*input, scope, free, dependencies, fuel, depth + 1)?;
+    let mut visits = BTreeMap::new();
+    let mut path = Vec::new();
+    loop {
+        charge(fuel, 1)?;
+        if !scope.contains(&id) {
+            if let Some(inputs) = dependencies.get(&id) {
+                match visits.entry(id) {
+                    std::collections::btree_map::Entry::Vacant(slot) => {
+                        slot.insert(Visit::Active);
+                        path.push((id, inputs.iter()));
+                    }
+                    std::collections::btree_map::Entry::Occupied(slot) => {
+                        if matches!(slot.get(), Visit::Active) {
+                            return Err(Error::Invalid("cyclic symbolic capture dependency"));
+                        }
+                    }
+                }
+            } else {
+                free.insert(id);
+            }
         }
-    } else {
-        free.insert(id);
+        // Retain a cursor per active node. A wide dependency list need not
+        // be copied or pre-enqueued before its first edge can be charged.
+        loop {
+            let Some((parent, edges)) = path.last_mut() else {
+                return Ok(());
+            };
+            if let Some(next) = edges.next() {
+                id = *next;
+                break;
+            }
+            visits.insert(*parent, Visit::Complete);
+            path.pop();
+        }
     }
-    Ok(())
 }
 pub fn collect(expr: &Expr, fuel: &mut usize) -> Result<Scope, Error> {
     collect_with_dependencies(expr, &Dependencies::new(), fuel)
@@ -84,7 +108,7 @@ pub fn input_plan_bindings(expr: &Expr, fuel: &mut usize) -> Result<InputPlanBin
     let mut free = Scope::new();
     let locals = scan_inputs(
         expr,
-        &Scope::new(),
+        &mut LexicalScope::default(),
         &mut free,
         fuel,
         0,
@@ -98,7 +122,7 @@ pub fn input_plan_bindings(expr: &Expr, fuel: &mut usize) -> Result<InputPlanBin
 
 fn scan_inputs(
     node: &Expr,
-    scope: &Scope,
+    scope: &mut LexicalScope,
     free: &mut Scope,
     fuel: &mut usize,
     depth: usize,
@@ -112,22 +136,15 @@ fn scan_inputs(
     let schedule = schedule
         .check(arguments.len(), |n| charge(fuel, n))?
         .ok_or(Error::Invalid("invalid declaration input plan"))?;
-    let mut inner = fork(scope, fuel)?;
+    let mark = scope.mark();
     for step in schedule.steps() {
         match step {
             crate::program::InputStep::Prepare(expr) => {
-                statement(expr, &mut inner, free, fuel, depth + 1, dependencies)?;
+                statement(expr, scope, free, fuel, depth + 1, dependencies)?;
             }
             crate::program::InputStep::Supply(slot) => {
-                normal(
-                    &arguments[slot],
-                    &inner,
-                    free,
-                    fuel,
-                    depth + 1,
-                    dependencies,
-                )?;
-                inner.extend(schedule.binding(slot));
+                normal(&arguments[slot], scope, free, fuel, depth + 1, dependencies)?;
+                scope.extend(schedule.binding(slot));
             }
         }
     }
@@ -135,21 +152,32 @@ fn scan_inputs(
         body: Some(body), ..
     } = &node.kind
     {
-        scan(body, &inner, free, fuel, depth + 1, dependencies)?;
+        scan(body, scope, free, fuel, depth + 1, dependencies)?;
     }
+    scope.restore(mark);
     Ok(schedule.locals)
 }
 
 /// Runtime dependencies of pattern observations, excluding lexical binders.
 pub fn collect_pattern(pattern: &P, fuel: &mut usize) -> Result<Scope, Error> {
+    collect_pattern_with_dependencies(pattern, &Dependencies::new(), fuel)
+}
+
+/// Symbolic reads in a pattern see only the bindings introduced at their
+/// position. The resulting free set excludes the pattern's success outputs.
+pub fn collect_pattern_with_dependencies(
+    pattern: &P,
+    dependencies: &Dependencies,
+    fuel: &mut usize,
+) -> Result<Scope, Error> {
     let mut free = Scope::new();
     pattern_scan(
         pattern,
-        &mut Scope::new(),
+        &mut LexicalScope::default(),
         &mut free,
         fuel,
         0,
-        &Dependencies::new(),
+        dependencies,
     )?;
     Ok(free)
 }
@@ -160,7 +188,14 @@ pub fn collect_with_dependencies(
     fuel: &mut usize,
 ) -> Result<Scope, Error> {
     let mut free = Scope::new();
-    scan(expr, &Scope::new(), &mut free, fuel, 0, dependencies)?;
+    scan(
+        expr,
+        &mut LexicalScope::default(),
+        &mut free,
+        fuel,
+        0,
+        dependencies,
+    )?;
     Ok(free)
 }
 /// Lexical dependencies of one handler/match arm, excluding its own pattern binders.
@@ -175,12 +210,19 @@ pub fn collect_arm_with_dependencies(
     fuel: &mut usize,
 ) -> Result<Scope, Error> {
     let mut free = Scope::new();
-    arm_scan(arm, &Scope::new(), &mut free, fuel, 0, dependencies)?;
+    arm_scan(
+        arm,
+        &mut LexicalScope::default(),
+        &mut free,
+        fuel,
+        0,
+        dependencies,
+    )?;
     Ok(free)
 }
 fn scan(
     expr: &Expr,
-    scope: &Scope,
+    scope: &mut LexicalScope,
     free: &mut Scope,
     fuel: &mut usize,
     depth: usize,
@@ -191,39 +233,36 @@ fn scan(
     }
     crate::visit::expression_pruned_checked(expr, fuel, |node, fuel| {
         match &node.kind {
-            K::Local(id) => read(*id, scope, free, dependencies, fuel, depth)?,
+            K::Local(id) => read(*id, scope, free, dependencies, fuel)?,
             K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. } => {
-                read(place.root, scope, free, dependencies, fuel, depth)?
+                read(place.root, scope, free, dependencies, fuel)?
             }
             K::ComptimeFunctionInstance { inputs, .. } => {
-                let mut inner = fork(scope, fuel)?;
+                let mark = scope.mark();
                 for value in &inputs.statements {
-                    statement(value, &mut inner, free, fuel, depth + 1, dependencies)?;
+                    statement(value, scope, free, fuel, depth + 1, dependencies)?;
                 }
                 for value in &inputs.arguments {
-                    scan(value, &inner, free, fuel, depth + 1, dependencies)?;
+                    scan(value, scope, free, fuel, depth + 1, dependencies)?;
                 }
+                scope.restore(mark);
                 return Ok(false);
             }
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                let mut inner = fork(scope, fuel)?;
+                let mark = scope.mark();
                 for value in statements {
-                    statement(value, &mut inner, free, fuel, depth + 1, dependencies)?;
+                    statement(value, scope, free, fuel, depth + 1, dependencies)?;
                 }
                 if let Some(value) = result {
-                    scan(value, &inner, free, fuel, depth + 1, dependencies)?;
+                    scan(value, scope, free, fuel, depth + 1, dependencies)?;
                 }
+                scope.restore(mark);
                 return Ok(false);
             }
             K::LetPattern { .. } => {
-                statement(
-                    node,
-                    &mut fork(scope, fuel)?,
-                    free,
-                    fuel,
-                    depth + 1,
-                    dependencies,
-                )?;
+                let mark = scope.mark();
+                statement(node, scope, free, fuel, depth + 1, dependencies)?;
+                scope.restore(mark);
                 return Ok(false);
             }
             K::Match { value, arms } => {
@@ -239,17 +278,24 @@ fn scan(
                 body,
             } => {
                 charge(fuel, captures.len().saturating_add(parameters.len()))?;
-                let mut inner: Scope = parameters.iter().copied().collect();
+                let mut inner = LexicalScope::with_parameters(parameters);
                 for capture in captures {
                     if let Some(value) = &capture.value {
                         scan(value, scope, free, fuel, depth + 1, dependencies)?;
                     } else {
-                        read(capture.binding, scope, free, dependencies, fuel, depth)?;
+                        read(capture.binding, scope, free, dependencies, fuel)?;
                     }
                     inner.insert(capture.binding);
                 }
                 let mut missing = Scope::new();
-                scan(body, &inner, &mut missing, fuel, depth + 1, dependencies)?;
+                scan(
+                    body,
+                    &mut inner,
+                    &mut missing,
+                    fuel,
+                    depth + 1,
+                    dependencies,
+                )?;
                 if !missing.is_empty() {
                     return Err(Error::Invalid(
                         "closure body references an undeclared capture",
@@ -263,13 +309,13 @@ fn scan(
                 parameter_bindings,
             } => {
                 scan(callee, scope, free, fuel, depth + 1, dependencies)?;
-                let mut defaults = Scope::new();
+                let mut defaults = LexicalScope::default();
                 for argument in arguments {
                     if argument.is_default {
                         let mut missing = Scope::new();
                         scan(
                             &argument.value,
-                            &defaults,
+                            &mut defaults,
                             &mut missing,
                             fuel,
                             depth + 1,
@@ -319,7 +365,7 @@ fn scan(
 }
 fn statement(
     expr: &Expr,
-    scope: &mut Scope,
+    scope: &mut LexicalScope,
     free: &mut Scope,
     fuel: &mut usize,
     depth: usize,
@@ -338,15 +384,16 @@ fn statement(
             otherwise,
         } => {
             scan(value, scope, free, fuel, depth + 1, dependencies)?;
-            let mut success = fork(scope, fuel)?;
-            pattern_scan(pattern, &mut success, free, fuel, depth + 1, dependencies)?;
+            let mark = scope.mark();
+            pattern_scan(pattern, scope, free, fuel, depth + 1, dependencies)?;
             if let Some(guard) = guard {
-                scan(guard, &success, free, fuel, depth + 1, dependencies)?;
+                scan(guard, scope, free, fuel, depth + 1, dependencies)?;
             }
             if let Some(otherwise) = otherwise {
+                let success = scope.take_success(mark, fuel)?;
                 scan(otherwise, scope, free, fuel, depth + 1, dependencies)?;
+                scope.apply(success);
             }
-            *scope = success;
         }
         _ => scan(expr, scope, free, fuel, depth + 1, dependencies)?,
     }
@@ -354,29 +401,24 @@ fn statement(
 }
 fn arm_scan(
     arm: &crate::program::MatchArm,
-    scope: &Scope,
+    scope: &mut LexicalScope,
     free: &mut Scope,
     fuel: &mut usize,
     depth: usize,
     dependencies: &Dependencies,
 ) -> Result<(), Error> {
-    let mut inner = fork(scope, fuel)?;
-    pattern_scan(
-        &arm.pattern,
-        &mut inner,
-        free,
-        fuel,
-        depth + 1,
-        dependencies,
-    )?;
+    let mark = scope.mark();
+    pattern_scan(&arm.pattern, scope, free, fuel, depth + 1, dependencies)?;
     if let Some(guard) = &arm.guard {
-        scan(guard, &inner, free, fuel, depth + 1, dependencies)?;
+        scan(guard, scope, free, fuel, depth + 1, dependencies)?;
     }
-    scan(&arm.body, &inner, free, fuel, depth + 1, dependencies)
+    scan(&arm.body, scope, free, fuel, depth + 1, dependencies)?;
+    scope.restore(mark);
+    Ok(())
 }
 fn pattern_scan(
     pattern: &P,
-    scope: &mut Scope,
+    scope: &mut LexicalScope,
     free: &mut Scope,
     fuel: &mut usize,
     depth: usize,
@@ -417,7 +459,7 @@ fn pattern_scan(
             pattern_scan(pattern, scope, free, fuel, depth + 1, dependencies)?;
             charge(fuel, bindings.len())?;
             for (from, _) in bindings {
-                read(*from, scope, free, dependencies, fuel, depth)?;
+                read(*from, scope, free, dependencies, fuel)?;
             }
             let targets: Scope = bindings.iter().map(|(_, to)| *to).collect();
             for (from, _) in bindings {
@@ -428,21 +470,13 @@ fn pattern_scan(
             scope.extend(targets);
         }
         P::Or(patterns) => {
-            let mut common = None;
+            let mark = scope.mark();
+            let mut alternatives = Alternatives::default();
             for pattern in patterns {
-                let mut branch = fork(scope, fuel)?;
-                pattern_scan(pattern, &mut branch, free, fuel, depth + 1, dependencies)?;
-                common = Some(match common {
-                    None => branch,
-                    Some(previous) => (&previous as &Scope)
-                        .intersection(&branch)
-                        .copied()
-                        .collect(),
-                });
+                pattern_scan(pattern, scope, free, fuel, depth + 1, dependencies)?;
+                alternatives.accept(scope, mark, fuel)?;
             }
-            if let Some(common) = common {
-                *scope = common;
-            }
+            alternatives.finish(scope);
         }
         P::OptionalPresent(inner) | P::ErrorResult { inner, .. } => {
             pattern_scan(inner, scope, free, fuel, depth + 1, dependencies)?
@@ -466,7 +500,7 @@ fn pattern_scan(
 }
 fn normal(
     argument: &A,
-    scope: &Scope,
+    scope: &mut LexicalScope,
     free: &mut Scope,
     fuel: &mut usize,
     depth: usize,
@@ -488,13 +522,14 @@ fn normal(
         A::Block {
             statements, result, ..
         } => {
-            let mut inner = fork(scope, fuel)?;
+            let mark = scope.mark();
             for value in statements {
-                statement(value, &mut inner, free, fuel, depth + 1, dependencies)?;
+                statement(value, scope, free, fuel, depth + 1, dependencies)?;
             }
             if let Some(value) = result {
-                normal(value, &inner, free, fuel, depth + 1, dependencies)?;
+                normal(value, scope, free, fuel, depth + 1, dependencies)?;
             }
+            scope.restore(mark);
         }
         A::If {
             condition,
@@ -509,19 +544,13 @@ fn normal(
         A::Match { value, arms, .. } => {
             scan(value, scope, free, fuel, depth + 1, dependencies)?;
             for arm in arms {
-                let mut inner = fork(scope, fuel)?;
-                pattern_scan(
-                    &arm.pattern,
-                    &mut inner,
-                    free,
-                    fuel,
-                    depth + 1,
-                    dependencies,
-                )?;
+                let mark = scope.mark();
+                pattern_scan(&arm.pattern, scope, free, fuel, depth + 1, dependencies)?;
                 if let Some(guard) = &arm.guard {
-                    scan(guard, &inner, free, fuel, depth + 1, dependencies)?;
+                    scan(guard, scope, free, fuel, depth + 1, dependencies)?;
                 }
-                normal(&arm.body, &inner, free, fuel, depth + 1, dependencies)?;
+                normal(&arm.body, scope, free, fuel, depth + 1, dependencies)?;
+                scope.restore(mark);
             }
         }
         A::Integer { .. } | A::Unit { .. } | A::Null { .. } => {}

@@ -252,6 +252,78 @@ fn pattern_remaps_publish_common_outputs_without_leaking_arm_locals() {
 }
 
 #[test]
+fn alternatives_intersect_net_changes_to_bindings_that_were_already_in_scope() {
+    // Only one alternative translates the outer binding 2 into 3. Neither
+    // name is guaranteed on success. Both alternatives produce binding 4.
+    let bind = |index| P::Binding {
+        binding: id(index),
+        inner: Box::new(P::Wild),
+    };
+    let alternatives = P::Or(vec![
+        P::Remap {
+            pattern: Box::new(bind(4)),
+            bindings: vec![(id(2), id(3))],
+        },
+        bind(4),
+    ]);
+    let guard = expr(K::Tuple(vec![local(2), local(3), local(4)]));
+    let inner = expr(K::Match {
+        value: Box::new(local(2)),
+        arms: vec![MatchArm {
+            pattern: alternatives,
+            guard: Some(guard),
+            body: local(4),
+        }],
+    });
+    let body = expr(K::Block {
+        statements: vec![
+            expr(K::Let {
+                binding: id(2),
+                value: Box::new(local(0)),
+            }),
+            inner,
+        ],
+        result: Some(Box::new(local(2))),
+    });
+    assert_eq!(result(&body), [id(0), id(2), id(3)]);
+}
+
+#[test]
+fn nested_scope_work_tracks_its_own_edits_independently_of_the_outer_prefix() {
+    let cost = |width, levels| {
+        let mut tail = local(0);
+        for index in 0..levels {
+            tail = expr(K::Block {
+                statements: vec![expr(K::Let {
+                    binding: id(width + index),
+                    value: Box::new(local(0)),
+                })],
+                result: Some(Box::new(tail)),
+            });
+        }
+        let body = expr(K::Block {
+            statements: (0..width)
+                .map(|index| {
+                    expr(K::Let {
+                        binding: id(index),
+                        value: Box::new(expr(K::Unit)),
+                    })
+                })
+                .collect(),
+            result: Some(Box::new(tail)),
+        });
+        let mut fuel = 100_000;
+        assert!(
+            nir::free_bindings::collect(&body, &mut fuel)
+                .unwrap()
+                .is_empty()
+        );
+        100_000 - fuel
+    };
+    assert_eq!(cost(1, 32) - cost(1, 0), cost(1024, 32) - cost(1024, 0));
+}
+
+#[test]
 fn observation_aliases_bind_only_inside_the_pattern_and_visit_computations() {
     let pattern = P::Observe {
         binding: id(2),
@@ -466,7 +538,50 @@ fn symbolic_code_reads_respect_guard_scope_and_keep_external_dependencies() {
 }
 
 #[test]
-fn binding_failures_distinguish_budget_depth_and_invalid_scope() {
+fn symbolic_diamonds_expand_each_edge_once_per_read_and_stop_at_lexical_binders() {
+    use nir::free_bindings::{Error, collect_with_dependencies};
+    use std::collections::{BTreeMap, BTreeSet};
+    let levels = 1024;
+    let leaf = id(levels * 2);
+    let mut graph = BTreeMap::new();
+    for level in 0..levels {
+        let next = id(2 * level + 2);
+        let edges = if next == leaf {
+            BTreeSet::from([leaf])
+        } else {
+            BTreeSet::from([next, id(2 * level + 3)])
+        };
+        graph.insert(id(2 * level), edges.clone());
+        graph.insert(id(2 * level + 1), edges);
+    }
+    let check = |root: &Expr, graph: &BTreeMap<_, _>, fuel: &mut usize| {
+        collect_with_dependencies(root, graph, fuel)
+    };
+    assert!(matches!(
+        check(&local(0), &graph, &mut 100),
+        Err(Error::Budget(_))
+    ));
+    assert_eq!(check(&local(0), &graph, &mut 5000).unwrap(), [leaf].into());
+    graph.insert(leaf, [id(0)].into());
+    assert_eq!(
+        check(&local(0), &graph, &mut 5000),
+        Err(Error::Invalid("cyclic symbolic capture dependency"))
+    );
+    let masked = expr(K::Block {
+        statements: vec![expr(K::Let {
+            binding: leaf,
+            value: Box::new(local(9000)),
+        })],
+        result: Some(Box::new(local(0))),
+    });
+    assert_eq!(
+        check(&masked, &graph, &mut 5000).unwrap(),
+        [id(9000)].into()
+    );
+}
+
+#[test]
+fn binding_failures_distinguish_budget_cycles_and_invalid_scope() {
     use nir::free_bindings::Error;
     use std::collections::{BTreeMap, BTreeSet};
     let value = local(1);
@@ -482,7 +597,7 @@ fn binding_failures_distinguish_budget_depth_and_invalid_scope() {
     let mut fuel = 1000;
     assert!(matches!(
         nir::free_bindings::collect_with_dependencies(&value, &cycle, &mut fuel),
-        Err(Error::Depth(_))
+        Err(Error::Invalid("cyclic symbolic capture dependency"))
     ));
     assert!(fuel > 0 && fuel < 1000);
     assert_eq!(result(&value), vec![id(1)]);
