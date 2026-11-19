@@ -26,17 +26,13 @@ impl ExportScope<'_> {
         term: &Term,
         budget: &mut comptime_runtime::Budget,
     ) -> Result<(), ErrorKind> {
-        type_descriptions::inspect(
+        type_descriptions::inspect_data_term(
             term,
-            &[],
-            &BTreeMap::new(),
             self.type_parameters,
             self.value_parameters,
-            |_, _, _| Err("nominal layout unavailable during structural export".into()),
-            |_, _, _| Ok(None),
-            None,
             &mut budget.steps,
         )
+        .map(|_| ())
     }
 }
 
@@ -129,6 +125,11 @@ impl Value {
             }
         }
         result
+    }
+
+    /// Freeze borrowed immutable data under a closed export scope.
+    pub fn to_normal_term(&self, budget: &mut comptime_runtime::Budget) -> Result<Term, ErrorKind> {
+        self.to_scoped_term(budget, &BTreeSet::new(), &BTreeMap::new(), false)
     }
 
     /// Build an independent term directly from an admitted borrowed value.

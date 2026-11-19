@@ -135,7 +135,8 @@ fn nf_description_queries_preserve_typed_failures_with_positive_fuel() {
             |_, _, _| Ok(None),
             None,
             &mut fuel
-        ),
+        )
+        .map(|_| ()),
         Ok(())
     );
 }

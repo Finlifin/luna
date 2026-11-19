@@ -84,14 +84,13 @@ impl ValueReference {
     pub(crate) fn append_list_checked(
         &self,
         suffix: Value,
-        fuel: &mut u64,
-        check: impl FnOnce(&Value, usize, u64) -> Result<(), ErrorKind>,
+        fuel: &mut usize,
+        check: impl FnOnce(&Value, usize, &mut usize) -> Result<(), ErrorKind>,
     ) -> Result<(), ErrorKind> {
-        charge(&self.fields, fuel)?;
-        let remaining = *fuel;
+        super::type_descriptions::spend(fuel, path_work(&self.fields)?)?;
         self.update_unmetered(|target| {
             super::memory::append_list_checked(target, suffix, |value, moved| {
-                check(value, moved, remaining)
+                check(value, moved, fuel)
             })
         })
     }
@@ -146,13 +145,17 @@ impl ValueReference {
 }
 
 fn charge(fields: &[(FieldOwner, usize)], fuel: &mut u64) -> Result<(), ErrorKind> {
+    *fuel = fuel
+        .checked_sub(path_work(fields)? as u64)
+        .ok_or(ErrorKind::StepsExhausted)?;
+    Ok(())
+}
+
+fn path_work(fields: &[(FieldOwner, usize)]) -> Result<usize, ErrorKind> {
     if fields.len() >= 128 {
         return Err(ErrorKind::DepthExhausted);
     }
-    *fuel = fuel
-        .checked_sub(fields.len() as u64 + 1)
-        .ok_or(ErrorKind::StepsExhausted)?;
-    Ok(())
+    Ok(fields.len() + 1)
 }
 
 fn locate<'a>(

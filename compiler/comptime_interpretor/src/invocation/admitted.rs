@@ -73,10 +73,17 @@ impl<'world> AdmittedCall<'_, 'world> {
                     .map_err(|_| nir::NominalAdmissionError::Budget)
             })?;
             let value = call.execute()?;
-            if value.immutable_copy_work().is_none() {
-                return Ok((value, false));
+            let representation = call
+                .vm
+                .query_descriptions(None, |_, fuel| value.inspect_immutable(fuel));
+            // A live result may be delivered even if its representation is
+            // ineligible for caching. An exhausted inspection is incomplete.
+            match representation {
+                Ok(_) => {}
+                Err(error) if error.kind == ErrorKind::StepsExhausted => return Err(error),
+                Err(_) => return Ok((value, false)),
             }
-            let exportable = match call.vm.validate_immutable_input(&value, &domain) {
+            let exportable = match call.vm.admit_inspected_input(&value, &domain) {
                 Ok(()) => true,
                 Err(Error {
                     kind: ErrorKind::Type | ErrorKind::FunctionInputRejected(_),

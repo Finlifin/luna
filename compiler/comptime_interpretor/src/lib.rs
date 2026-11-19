@@ -15,7 +15,8 @@ mod closure_identity;
 mod code_values;
 #[cfg(test)]
 mod execution_test_support;
-mod immutable_cloning;
+mod representation;
+pub use representation::ImmutableSize;
 mod literal_values;
 mod type_descriptions;
 mod value_types;
@@ -368,285 +369,6 @@ impl Value {
             &mut BTreeSet::new(),
             visitor,
         )
-    }
-
-    /// Bound the expanded immutable representation, independently of sharing.
-    /// Full-content comparisons retain this allowance; host clones can use
-    /// `immutable_clone_work` to account for persistent payloads. Neither check
-    /// establishes nominal formation, argument membership or frozen storage.
-    pub fn immutable_copy_work(&self) -> Option<usize> {
-        self.scoped_copy_work(&BTreeSet::new())
-    }
-    fn scoped_copy_work(&self, parameters: &BTreeSet<DeclarationId>) -> Option<usize> {
-        self.scoped_copy_work_with_evidence(parameters, &BTreeMap::new())
-    }
-    fn scoped_copy_work_with_evidence(
-        &self,
-        parameters: &BTreeSet<DeclarationId>,
-        value_parameters: &BTreeMap<DeclarationId, Term>,
-    ) -> Option<usize> {
-        self.scoped_representation_work(parameters, value_parameters)
-            .map(|(copy, _)| copy)
-    }
-
-    /// Separate expanded representation size from inspection work. Sharing a
-    /// list payload does not discount its semantic size or depth limits. Copy
-    /// and comparison callers can retain the expanded allowance; cached
-    /// summaries only reduce the inspection component returned here.
-    fn scoped_representation_work(
-        &self,
-        parameters: &BTreeSet<DeclarationId>,
-        value_parameters: &BTreeMap<DeclarationId, Term>,
-    ) -> Option<(usize, usize)> {
-        // Keep only the bounded traversal depth on the call stack. The old
-        // worklist allocated one entry per sibling on every immutable scan.
-        // Count pending siblings separately to preserve its admission bound
-        // and visit in the same reverse-child order without copying references.
-        fn visit(
-            value: &Value,
-            depth: usize,
-            work: &mut usize,
-            inspected: &mut usize,
-            pending: &mut usize,
-            parameters: &BTreeSet<DeclarationId>,
-            value_parameters: &BTreeMap<DeclarationId, Term>,
-        ) -> Option<usize> {
-            *pending = pending.checked_sub(1)?;
-            if depth >= 128 {
-                return None;
-            }
-            *work = work.checked_add(1)?;
-            let extra = match value {
-                Value::Type(ty)
-                | Value::List { ty, .. }
-                | Value::Optional { ty, .. }
-                | Value::ErrorResult { ty, .. }
-                | Value::Newtype { ty, .. }
-                | Value::AbstractValue { ty, .. } => scoped_type_value_work_with_evidence(
-                    ty,
-                    &BTreeMap::new(),
-                    parameters,
-                    value_parameters,
-                )?,
-                Value::Float(value) => value
-                    .digits()
-                    .len()
-                    .saturating_add(value.exponent().bit_len().div_ceil(32)),
-                Value::Integer(value) => value.bit_len().div_ceil(32),
-                Value::BitVec(value) => value.words().len(),
-                Value::String(value) | Value::Symbol(value) => value.len(),
-                Value::Record { arguments, .. }
-                | Value::Variant { arguments, .. }
-                | Value::FunctionInstance { arguments, .. } => {
-                    if arguments.len() > 100_000 {
-                        return None;
-                    }
-                    arguments.iter().try_fold(0usize, |n, ty| {
-                        let total = n.checked_add(scoped_term_value_work_with_evidence(
-                            ty,
-                            &BTreeMap::new(),
-                            parameters,
-                            value_parameters,
-                        )?)?;
-                        (total <= 100_000).then_some(total)
-                    })?
-                }
-                Value::RuntimeTraitMethod(method) => {
-                    let mut total = 0usize;
-                    for term in std::iter::once(&method.subject)
-                        .chain(method.interface.arguments.iter())
-                        .chain(method.method_arguments.iter())
-                    {
-                        total = total.checked_add(scoped_term_value_work_with_evidence(
-                            term,
-                            &BTreeMap::new(),
-                            parameters,
-                            value_parameters,
-                        )?)?;
-                        if total > 100_000 {
-                            return None;
-                        }
-                    }
-                    total
-                }
-                Value::AnonymousRecord(fields) => {
-                    if fields.len() > 100_000 {
-                        return None;
-                    }
-                    fields.iter().try_fold(0usize, |n, (name, _)| {
-                        let total = n.checked_add(name.len())?;
-                        (total <= 100_000).then_some(total)
-                    })?
-                }
-                Value::Object(object) => {
-                    if object.entries().len() > 100_000 {
-                        return None;
-                    }
-                    object.entries().iter().try_fold(0usize, |n, entry| {
-                        let ty_work = scoped_type_value_work_with_evidence(
-                            &entry.value().ty,
-                            &BTreeMap::new(),
-                            parameters,
-                            value_parameters,
-                        )?;
-                        let total = n
-                            .checked_add(entry.key().map_or(0, str::len))?
-                            .checked_add(ty_work)?;
-                        (total <= 100_000).then_some(total)
-                    })?
-                }
-                // A closed declaration reference owns no capture or storage.
-                // Its signature and phase are checked against the current VM;
-                // it must never qualify for uniform-scalar type admission.
-                Value::Function(_) => 0,
-                Value::Closure(_) => return None,
-                Value::IirCallable(handle) => {
-                    let mut total = scoped_type_value_work_with_evidence(
-                        &handle.ty,
-                        &BTreeMap::new(),
-                        parameters,
-                        value_parameters,
-                    )?;
-                    for argument in handle.key.arguments.iter() {
-                        total = total.checked_add(scoped_term_value_work_with_evidence(
-                            argument,
-                            &BTreeMap::new(),
-                            parameters,
-                            value_parameters,
-                        )?)?;
-                        if total > 100_000 {
-                            return None;
-                        }
-                    }
-                    total
-                }
-                Value::Code(_)
-                | Value::Pointer(_)
-                | Value::Storage(_)
-                | Value::ComptimeReference(_) => return None,
-                _ => 0,
-            };
-            *work = work.checked_add(extra)?;
-            // Shared immutable text exposes its byte length in constant time;
-            // inspection does not read its bytes. Expanded-size limits below
-            // still include every byte, as do full-content comparison budgets.
-            let inspection = match value {
-                Value::String(_) | Value::Symbol(_) => 0,
-                _ => extra,
-            };
-            *inspected = inspected.checked_add(1)?.checked_add(inspection)?;
-            let children = match value {
-                Value::List { values: fields, .. } => fields.len(),
-                Value::Record { fields, .. }
-                | Value::Variant { fields, .. }
-                | Value::Tuple(fields) => fields.len(),
-                Value::AnonymousRecord(fields) => fields.len(),
-                Value::Object(object) => object.entries().len(),
-                Value::Optional { value, .. } => usize::from(value.is_some()),
-                Value::ErrorResult { .. } | Value::Newtype { .. } => 1,
-                _ => 0,
-            };
-            if work.saturating_add(*pending).saturating_add(children) > 100_000 {
-                return None;
-            }
-
-            let cache = match value {
-                // Stored summaries describe closed payloads, regardless of the
-                // surrounding invocation's unrelated abstract parameters. The
-                // list's own type has already been checked in the current scope.
-                Value::List { values, .. } => Some(values),
-                _ => None,
-            };
-            if let Some(summary) = cache.and_then(ListValues::summary) {
-                if depth.checked_add(summary.height)? >= 128 {
-                    return None;
-                }
-                *work = work.checked_add(summary.work)?;
-                if work.checked_add(*pending)? > 100_000 {
-                    return None;
-                }
-                return Some(summary.height + 1);
-            }
-            let before_children = *work;
-            let mut height = 1usize;
-            *pending = pending.checked_add(children)?;
-            let mut child = |value: &Value| {
-                let child_height = visit(
-                    value,
-                    depth + 1,
-                    work,
-                    inspected,
-                    pending,
-                    parameters,
-                    value_parameters,
-                )?;
-                height = height.max(child_height + 1);
-                Some(())
-            };
-            let mut uniform_scalar = None;
-            match value {
-                Value::Optional { value, .. } => {
-                    if let Some(value) = value {
-                        child(value)?;
-                    }
-                }
-                Value::ErrorResult { value, .. } | Value::Newtype { value, .. } => child(value)?,
-                Value::List { values: fields, .. } => {
-                    uniform_scalar = fields.first().and_then(list_values::scalar_tag);
-                    for value in fields.iter().rev() {
-                        child(value)?;
-                        if uniform_scalar != list_values::scalar_tag(value) {
-                            uniform_scalar = None;
-                        }
-                    }
-                }
-                Value::Record { fields, .. }
-                | Value::Variant { fields, .. }
-                | Value::Tuple(fields) => {
-                    for value in fields.iter().rev() {
-                        child(value)?;
-                    }
-                }
-                Value::AnonymousRecord(fields) => {
-                    for (_, value) in fields.iter().rev() {
-                        child(value)?;
-                    }
-                }
-                Value::Object(object) => {
-                    for entry in object.entries().iter().rev() {
-                        child(&entry.value().value)?;
-                    }
-                }
-                _ => {}
-            }
-            if let Some(values) = cache.filter(|values| {
-                (parameters.is_empty() && value_parameters.is_empty())
-                    || values.is_empty()
-                    || uniform_scalar.is_some()
-            }) {
-                // Scalar carriers have no embedded scoped type evidence. Other
-                // payloads observed under an abstract scope cannot publish a
-                // closed summary, even when this particular scan succeeded.
-                values.remember(list_values::Summary {
-                    work: *work - before_children,
-                    height: height - 1,
-                    uniform_scalar,
-                });
-            }
-            Some(height)
-        }
-        let mut work = 0;
-        let mut inspected = 0;
-        visit(
-            self,
-            0,
-            &mut work,
-            &mut inspected,
-            &mut 1,
-            parameters,
-            value_parameters,
-        )?;
-        Some((work, inspected))
     }
 
     /// Freeze supported immutable scalars and aggregates. Nominal values retain
@@ -5482,6 +5204,7 @@ fn scoped_type_value_work(
 ) -> Option<usize> {
     scoped_type_value_work_with_evidence(ty, heads, parameters, &BTreeMap::new())
 }
+#[cfg(test)]
 fn scoped_type_value_work_with_evidence(
     ty: &Term,
     heads: &impl declaration_index::HeadLookup,
@@ -5504,6 +5227,7 @@ fn instance_argument_work(
     scoped_term_value_work_with_evidence(argument, heads, &BTreeSet::new(), &BTreeMap::new())
 }
 
+#[cfg(test)]
 fn scoped_term_value_work_with_evidence(
     ty: &Term,
     heads: &impl declaration_index::HeadLookup,

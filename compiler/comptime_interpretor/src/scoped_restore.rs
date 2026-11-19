@@ -180,11 +180,11 @@ impl Restore<'_> {
             | Value::Storage(_)
             | Value::Closure(_) => unreachable!("graph nodes are restored by the packet traversal"),
             value => {
-                self.spend(
-                    value
-                        .immutable_copy_work()
-                        .ok_or(ErrorKind::RepresentationSizeLimit)?,
-                )?;
+                let before = usize::try_from(*self.steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let size = value.inspect_immutable(&mut fuel);
+                *self.steps -= (before - fuel) as u64;
+                self.spend(size?.owned)?;
                 value.clone()
             }
         })

@@ -87,16 +87,7 @@ impl KeyProtocol<Snapshot> for ExactInputs {
         // Source Eq remains required. This additional dependency discriminator
         // establishes compatibility for queries that can inspect every field.
         // It is intentionally not an alternative source equality definition.
-        let work = a
-            .value()
-            .immutable_copy_work()
-            .and_then(|a| {
-                b.value()
-                    .immutable_copy_work()
-                    .and_then(|b| a.checked_add(b))
-            })
-            .ok_or_else(|| Error::Protocol("unbounded cache input comparison".into()))?;
-        context.spend::<String>(work)?;
+        context.spend::<String>(a.expanded_size() + b.expanded_size())?;
         Ok(a.value() == b.value())
     }
 }

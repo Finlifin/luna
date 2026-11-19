@@ -718,18 +718,14 @@ impl Checker<'_, '_> {
         // A data argument is a completed value, not a live interpreter graph.
         // In particular, a nominal wrapper cannot smuggle mutable storage or
         // closure identities across the quote boundary.
-        let copy_work=value.immutable_copy_work()
-            .ok_or_else(||error(span,"code generator data cannot be frozen: unsupported or excessively deep immutable value"))?;
-        self.required_steps = self
-            .required_steps
-            .checked_sub(copy_work as u64)
-            .ok_or_else(|| error(span, "code generator data freezing budget exhausted"))?;
         let mut budget = comptime_runtime::Budget {
             steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
             max_limbs: 4096,
         };
         let before = budget.steps;
-        let frozen = value.clone().into_normal_term(&mut budget);
+        let frozen = value
+            .inspect_immutable(&mut budget.steps)
+            .and_then(|_| value.to_normal_term(&mut budget));
         self.required_steps -= (before - budget.steps) as u64;
         frozen.map_err(|failure| {
             error(

@@ -327,6 +327,18 @@ mod tests {
         }
     }
 
+    fn measure(
+        value: &Value,
+        parameters: &std::collections::BTreeSet<nir::DeclarationId>,
+        evidence: &std::collections::BTreeMap<nir::DeclarationId, Term>,
+    ) -> Option<(usize, usize)> {
+        let mut fuel = 1_000_000;
+        let size = value
+            .inspect_representation(parameters, evidence, &mut fuel)
+            .ok()?;
+        Some((size.expanded, 1_000_000 - fuel))
+    }
+
     #[test]
     fn closed_payload_summaries_survive_unrelated_abstract_scopes() {
         let id = nir::DeclarationId {
@@ -336,12 +348,8 @@ mod tests {
         let parameters = std::collections::BTreeSet::from([id]);
         let evidence = std::collections::BTreeMap::from([(id, Term::Primitive(Primitive::Bool))]);
         let value = test_type_list(vec![Term::Primitive(Primitive::Bool); 4096]);
-        let (copy, cold) = value
-            .scoped_representation_work(&Default::default(), &Default::default())
-            .unwrap();
-        let (scoped_copy, warm) = value
-            .scoped_representation_work(&parameters, &evidence)
-            .unwrap();
+        let (copy, cold) = measure(&value, &Default::default(), &Default::default()).unwrap();
+        let (scoped_copy, warm) = measure(&value, &parameters, &evidence).unwrap();
         assert_eq!(scoped_copy, copy);
         assert!(warm * 100 < cold, "cold={cold}, warm={warm}");
         // Mutation invalidates the closed observation. Scope admission cannot
@@ -354,11 +362,7 @@ mod tests {
             declaration: id,
             sort: nir::Sort::Type,
         });
-        assert!(
-            changed
-                .scoped_representation_work(&parameters, &Default::default())
-                .is_some()
-        );
+        assert!(measure(&changed, &parameters, &Default::default()).is_some());
         assert!(payload(&changed).summary().is_none());
         assert!(changed.immutable_copy_work().is_none());
         assert!(payload(&value).summary().is_some());
@@ -381,12 +385,8 @@ mod tests {
             },
             values: vec![Value::Bool(true); 4096].into(),
         };
-        let (copy, cold) = value
-            .scoped_representation_work(&parameters, &empty)
-            .unwrap();
-        let (warm_copy, warm) = value
-            .scoped_representation_work(&parameters, &empty)
-            .unwrap();
+        let (copy, cold) = measure(&value, &parameters, &empty).unwrap();
+        let (warm_copy, warm) = measure(&value, &parameters, &empty).unwrap();
         assert_eq!(copy, warm_copy);
         assert!(warm * 100 < cold);
         assert!(payload(&value).summary().is_some());
@@ -403,11 +403,7 @@ mod tests {
             declaration: id,
             sort: nir::Sort::Type,
         });
-        assert!(
-            value
-                .scoped_representation_work(&parameters, &empty)
-                .is_some()
-        );
+        assert!(measure(&value, &parameters, &empty).is_some());
         assert!(payload(&value).summary().is_none());
         assert!(value.immutable_copy_work().is_none());
     }
@@ -415,9 +411,7 @@ mod tests {
     #[test]
     fn cached_inspection_cost_does_not_discount_owned_copies() {
         let value = test_type_list(vec![Term::Primitive(Primitive::Bool); 512]);
-        let inspect = |value: &Value| {
-            value.scoped_representation_work(&Default::default(), &Default::default())
-        };
+        let inspect = |value: &Value| measure(value, &Default::default(), &Default::default());
         let (copy, cold) = inspect(&value).unwrap();
         let (same_copy, warm) = inspect(&value).unwrap();
         assert_eq!(same_copy, copy);

@@ -40,6 +40,7 @@ impl Interpreter<'_> {
             self.target,
             fuel,
         )
+        .map(|_| ())
     }
 
     pub(super) fn inspect_closed_term_description(
@@ -58,6 +59,7 @@ impl Interpreter<'_> {
             self.target,
             fuel,
         )
+        .map(|_| ())
     }
 
     pub(super) fn inspect_closed_type_description(
@@ -212,6 +214,26 @@ pub(super) fn declared_domain_matches(
     }
 }
 
+/// Inspect a structural term without resolving declarations or running code.
+pub(super) fn inspect_data_term(
+    term: &Term,
+    parameters: &BTreeSet<DeclarationId>,
+    value_parameters: &BTreeMap<DeclarationId, Term>,
+    fuel: &mut usize,
+) -> Result<usize, ErrorKind> {
+    inspect(
+        term,
+        &[],
+        &BTreeMap::new(),
+        parameters,
+        value_parameters,
+        |_, _, _| Err("nominal layout unavailable during structural inspection".into()),
+        |_, _, _| Ok(None),
+        None,
+        fuel,
+    )
+}
+
 pub(super) fn inspect<'signature>(
     ty: &Term,
     enclosing: &[&[nir::Parameter]],
@@ -227,7 +249,7 @@ pub(super) fn inspect<'signature>(
         -> Result<Option<std::borrow::Cow<'signature, Term>>, AdmissionError>,
     target: Option<nir::target::TargetData>,
     fuel: &mut usize,
-) -> Result<(), ErrorKind> {
+) -> Result<usize, ErrorKind> {
     enum Work<'t> {
         Visit(&'t Term, usize),
         Parameter {
@@ -529,7 +551,7 @@ pub(super) fn inspect<'signature>(
         }
     }
     ty.check_scope(&scope.sorts).map_err(|_| ErrorKind::Type)?;
-    Ok(())
+    Ok(work)
 }
 
 #[cfg(test)]

@@ -21,10 +21,14 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Snapshot {
     value: Arc<Value>,
+    expanded_size: usize,
     ty: Arc<Term>,
     owner: Arc<()>,
 }
 impl Snapshot {
+    pub(crate) fn expanded_size(&self) -> usize {
+        self.expanded_size
+    }
     pub fn value(&self) -> &Value {
         &self.value
     }
@@ -191,8 +195,9 @@ impl Protocol {
         value: &Value,
         context: &mut Context,
     ) -> Result<Snapshot, Error<String>> {
-        input_work(value, context)?;
-        self.admit(value.clone(), context)
+        let size = self.admitted_size(value, context)?;
+        context.spend::<String>(size.owned)?;
+        Ok(self.snapshot(value.clone(), size.expanded))
     }
     /// Validate fresh immutable data using this protocol's source session.
     /// Code reuse never supplies the current value's admission evidence.
@@ -201,15 +206,27 @@ impl Protocol {
         value: Value,
         context: &mut Context,
     ) -> Result<Snapshot, Error<String>> {
-        self.binding
-            .run(&mut self.execution, context, |interpreter| {
-                interpreter.validate_immutable_input(&value, &self.binding.subject)
-            })?;
-        Ok(Snapshot {
+        let size = self.admitted_size(&value, context)?;
+        Ok(self.snapshot(value, size.expanded))
+    }
+
+    fn admitted_size(
+        &mut self,
+        value: &Value,
+        context: &mut Context,
+    ) -> Result<comptime_interpretor::ImmutableSize, Error<String>> {
+        self.binding.run(&mut self.execution, context, |vm| {
+            vm.admitted_immutable_size(value, &self.binding.subject)
+        })
+    }
+
+    fn snapshot(&self, value: Value, expanded_size: usize) -> Snapshot {
+        Snapshot {
             value: Arc::new(value),
+            expanded_size,
             ty: self.binding.subject.clone(),
             owner: self.binding.owner.clone(),
-        })
+        }
     }
 }
 impl Binding {
@@ -220,14 +237,10 @@ impl Binding {
         inputs: &[&Value],
         context: &mut Context,
     ) -> Result<Value, Error<String>> {
-        // Reject mutable host identities and account for cloning before
-        // cloning inputs into the fresh invocation. This is not value freezing.
-        for value in inputs {
-            input_work(value, context)?;
-        }
         self.run(execution, context, |interpreter| {
             for value in inputs {
-                interpreter.validate_immutable_input(value, &self.subject)?;
+                let size = interpreter.admitted_immutable_size(value, &self.subject)?;
+                interpreter.charge_preparation(size.owned)?;
             }
             interpreter.invoke_instantiated(
                 method.method.body,
@@ -255,35 +268,37 @@ impl Binding {
         let associated_resolver = |access: &nir::program::Expr, remaining: &mut u64| {
             source_queries.associated(access, remaining)
         };
-        let steps = u64::try_from(context.remaining()).unwrap_or(u64::MAX);
-        let mut allowance = Budget { steps, depth: 128 };
-        execution.stats = Default::default();
-        let prepared = Interpreter::for_comptime_resolving_in_session(
-            self.declarations.source().package(),
-            &mut execution.code,
-            comptime_interpretor::SourceResolvers {
-                types: &solver,
-                methods: &method_resolver,
-                associated: &associated_resolver,
-            },
-            &mut allowance,
-        );
-        let mut interpreter = match prepared {
-            Ok(interpreter) => interpreter,
-            Err(error) => {
-                // Failed world construction retains its reservation, just as
-                // ordinary invocation does; retries cannot obtain free work.
-                context.spend::<String>((steps - allowance.steps) as usize)?;
-                return Err(Error::Protocol(error.to_string()));
-            }
-        };
-        let result = interpreter.with_code_session(&mut execution.code, action);
-        execution.stats = crate::invocation::InvocationStats {
-            bytecode_compilations: interpreter.bytecode_compilations(),
-            bytecode_invocations: interpreter.bytecode_invocations(),
-        };
-        context.spend::<String>((steps - interpreter.remaining_steps()) as usize)?;
-        result.map_err(|e| Error::Protocol(e.to_string()))
+        context.with_allowance(usize::MAX, |remaining| {
+            let steps = u64::try_from(*remaining).unwrap_or(u64::MAX);
+            let mut allowance = Budget { steps, depth: 128 };
+            execution.stats = Default::default();
+            let prepared = Interpreter::for_comptime_resolving_in_session(
+                self.declarations.source().package(),
+                &mut execution.code,
+                comptime_interpretor::SourceResolvers {
+                    types: &solver,
+                    methods: &method_resolver,
+                    associated: &associated_resolver,
+                },
+                &mut allowance,
+            );
+            let mut interpreter = match prepared {
+                Ok(interpreter) => interpreter,
+                Err(error) => {
+                    // Failed world construction retains its reservation, just as
+                    // ordinary invocation does; retries cannot obtain free work.
+                    *remaining -= (steps - allowance.steps) as usize;
+                    return Err(protocol_error(error));
+                }
+            };
+            let result = interpreter.with_code_session(&mut execution.code, action);
+            execution.stats = crate::invocation::InvocationStats {
+                bytecode_compilations: interpreter.bytecode_compilations(),
+                bytecode_invocations: interpreter.bytecode_invocations(),
+            };
+            *remaining -= (steps - interpreter.remaining_steps()) as usize;
+            result.map_err(protocol_error)
+        })
     }
 }
 impl KeyProtocol<Value> for Protocol {
@@ -360,9 +375,9 @@ impl std::fmt::Display for Protocol {
         )
     }
 }
-fn input_work(value: &Value, context: &mut Context) -> Result<(), Error<String>> {
-    let work = value
-        .immutable_clone_work()
-        .ok_or_else(|| Error::Protocol("key input is not bounded immutable data".into()))?;
-    context.spend::<String>(work)
+fn protocol_error(error: comptime_interpretor::Error) -> Error<String> {
+    match error.kind {
+        comptime_interpretor::ErrorKind::StepsExhausted => Error::BudgetExhausted,
+        _ => Error::Protocol(error.to_string()),
+    }
 }

@@ -97,7 +97,9 @@ Comptime 调用、缓存键协议和 Type 计算均无需 runtime 指针 Copy �
 
 冻结为 normal term 时，导出器在同一份预算下检查每个嵌套域及其 binder。预算在检查中途用尽会保留已花费的步数。超出表示尺寸、超过嵌套深度、引用不可见 binder 各有独立结果；增加预算只解决步数不足。捕获快照和冻结函数身份使用同一个实参检查入口，重建后的调用权限仍由接收 VM 判定。[结构导出](../compiler/comptime_interpretor/src/normal_terms.rs) · [快照边界用例](../compiler/comptime_interpretor/tests/immutable_normal_inputs.rs)
 
-接收宿主不可变值和列表拼接还会先调用 `scoped_representation_work`，取得两个数：展开后的表示大小、实际检查成本。当前它用 `Option` 表示失败，前一个入口将失败映射为类型错误，后一个映射为表示过大。后续迁移需要保留列表摘要对实际检查成本的节省，同时让尺寸、预算与证据不足分别传回调用方。[宿主输入](../compiler/comptime_interpretor/src/admission.rs) · [列表拼接](../compiler/comptime_interpretor/src/list_operations.rs)
+接收宿主不可变值和拼接列表共用一次带预算的表示检查。遍历过程中扣除实际检查成本，成功时交付两个尺寸：逐项比较所需的展开尺寸，以及宿主复制值时要复制的部分。共享文本的字节和持久列表的载荷都计入展开尺寸。已有列表摘要可直接提供载荷尺寸和高度；冷扫描中途耗尽预算时，已经检查的元素仍然计费，未扫完的载荷不会得到摘要。就地拼接与引用路径遍历使用同一余额，验证失败时撤销拼接。[表示检查](../compiler/comptime_interpretor/src/representation.rs) · [就地拼接](../compiler/comptime_interpretor/src/list_append.rs)
+
+缓存键经对应源码世界准入后，快照保存不可变值与它的展开尺寸。命中比较仍先运行源码 Eq，再用快照的展开尺寸支付逐字段依赖比较；从持久列表读取摘要不会让逐字段比较变便宜。归属、类型形成、是否允许缓存继续在各自的接收点检查。生成器实参可借用原值完成冻结，随后仍通过局部常量路径构建 NIR 表达式。[键准入](../compiler/luna/src/comptime_keys.rs) · [缓存比较](../compiler/luna/src/memoization.rs) · [生成器数据](../compiler/elaboration/src/program/constants.rs)
 
 稳定快照的设计需要表达图中的共享。相同闭包出现在两个字段里，恢复后仍是同一闭包；两个环境内容相同的独立闭包则保留各自身份。当前局部常量路径可从已求值的捕获构造恢复函数。一般跨世界恢复还需私下重绑定声明、分配节点、检查域与捕获、连接边，最后才发布根。遍历时能识别环只解决终止问题，环的归属、逃逸与回收仍须有依据。包解码也没有执行任意用户工厂的权限。[局部常量重建](../compiler/elaboration/src/program/constants.rs) · [捕获图检查](../compiler/comptime_interpretor/src/comptime_graph.rs) · [包传输格式](build-input-protocol.md)
 

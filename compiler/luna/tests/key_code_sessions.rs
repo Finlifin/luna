@@ -261,15 +261,14 @@ fn warm_protocols_charge_execution_and_recover_after_budget_exhaustion() {
     let work = 1_000_000 - warm.remaining();
     assert!(work > 1 && warm.remaining() > cold.remaining());
     assert_eq!(protocol.last_execution_stats().bytecode_compilations, 0);
-    let input_reservation = Value::Bool(true).immutable_clone_work().unwrap();
     for allowance in [0, 1, work / 2, work - 1] {
         let mut limited = Context::new(allowance);
         assert!(protocol.hash(&Value::Bool(true), &mut limited).is_err());
-        if allowance < input_reservation {
-            // An unaffordable input reservation has not entered the VM.
-            assert_eq!(limited.remaining(), allowance);
-        } else {
-            assert!(limited.remaining() < allowance);
+        if allowance > 0 {
+            assert!(
+                limited.remaining() < allowance,
+                "inspecting the key consumes live fuel"
+            );
         }
         let mut recovered = Context::new(1_000_000);
         assert_eq!(

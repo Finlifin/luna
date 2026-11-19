@@ -246,13 +246,7 @@ impl Interpreter<'_> {
         // Both inputs were admitted. A combined immutable description can
         // still exceed the shared structural work limit even below the element
         // limit; report that as a resource limit rather than a malformed type.
-        let (_, work) = value
-            .scoped_representation_work(
-                &self.abstract_type_parameters,
-                &self.abstract_value_parameters,
-            )
-            .ok_or_else(|| self.failure(ErrorKind::RepresentationSizeLimit, Some(source)))?;
-        self.integer_operation(Some(source), |budget| budget.consume(work))?;
+        self.inspect_value_representation(&value, Some(source))?;
         Ok(Flow::Value(value))
     }
 

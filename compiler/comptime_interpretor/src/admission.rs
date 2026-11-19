@@ -134,14 +134,36 @@ impl Interpreter<'_> {
     /// may mention only that scope's authorized declaration inputs. This does not
     /// authorize closed export. No source Eq/Hash or user function executes here.
     pub fn validate_immutable_input(&mut self, value: &Value, ty: &Term) -> Result<(), Error> {
+        self.admitted_immutable_size(value, ty).map(|_| ())
+    }
+    /// Return the representation measurements from this admission. A caller
+    /// retaining the immutable value can use them to budget a copy or comparison.
+    pub fn admitted_immutable_size(
+        &mut self,
+        value: &Value,
+        ty: &Term,
+    ) -> Result<ImmutableSize, Error> {
         self.tick(None)?;
-        let (_, work) = value
-            .scoped_representation_work(
-                &self.abstract_type_parameters,
-                &self.abstract_value_parameters,
+        let size = self.inspect_value_representation(value, None)?;
+        self.admit_inspected_input(value, ty)?;
+        Ok(size)
+    }
+
+    pub(super) fn inspect_value_representation(
+        &mut self,
+        value: &Value,
+        source: Option<SourceRange>,
+    ) -> Result<ImmutableSize, Error> {
+        self.query_descriptions(source, |vm, fuel| {
+            value.inspect_representation(
+                &vm.abstract_type_parameters,
+                &vm.abstract_value_parameters,
+                fuel,
             )
-            .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-        self.integer_operation(None, |budget| budget.consume(work))?;
+        })
+    }
+
+    pub(super) fn admit_inspected_input(&mut self, value: &Value, ty: &Term) -> Result<(), Error> {
         self.check_closed_type_description(ty, None)?;
         self.admit_type(ty, 0)?;
         self.check_value_type(value, ty, None)?;
