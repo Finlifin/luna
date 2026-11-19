@@ -5818,24 +5818,24 @@ fn associated_variadic_method_values_do_not_recover_collection_entries() {
 }
 
 #[test]
-fn repeated_associated_value_queries_respect_the_copy_budget() {
+fn checking_associated_reads_does_not_copy_the_selected_payload_per_use() {
+    let text = "x".repeat(32768);
     let prefix = format!(
-        "trait Source {{assoc text:\"x\"'type=\"{}\";}} struct Holder {{}} impl Source for Holder {{}}",
-        "x".repeat(32768)
+        "trait Source {{assoc text:\"x\"'type=\"{text}\";}} struct Holder {{}} impl Source for Holder {{}}"
     );
-    for count in [2, 40] {
-        let mut source = prefix.clone();
-        for index in 0..count {
-            source.push_str(&format!(
-                "comptime fn obtain{index}()->\"x\"'type {{Holder.as(Source).text}}"
-            ));
-        }
-        if count == 2 {
-            accepted(&source);
-        } else {
-            rejected(&source, "constant copy budget exhausted");
-        }
+    let declaration = accepted(&prefix);
+    let mut source = prefix;
+    for index in 0..40 {
+        source.push_str(&format!(
+            "comptime fn obtain{index}()->\"x\"'type {{Holder.as(Source).text}}"
+        ));
     }
+    let uses = accepted(&source);
+    assert_eq!(uses.matches("(associated-value ").count(), 40);
+    assert_eq!(
+        uses.matches(&text).count(),
+        declaration.matches(&text).count()
+    );
 }
 
 #[test]

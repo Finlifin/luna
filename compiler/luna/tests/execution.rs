@@ -24525,9 +24525,12 @@ fn associated_function_values_call_defaults_overrides_and_inherited_origins() {
             ("=invert", ""),
             ("=identity", "assoc action:fn(bool)->bool=invert;"),
         ] {
-            let package = compile(&format!(
+            let mut package = compile(&format!(
                 "fn invert(value:bool)->bool {{not value}} fn identity(value:bool)->bool {{value}} trait Parent {{assoc action:fn(bool)->bool{default};}} trait Child :- Parent {{}} struct Holder {{}} impl Parent for Holder {{{implementation}}} impl Child for Holder {{}} fn run()->bool {{{call}}}"
             ));
+            package.dispatch_instances =
+                elaboration::materialization::dispatch_instances(&package, Default::default())
+                    .unwrap();
             let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
             assert_eq!(
                 vm.invoke(id(&package, "run"), vec![]).unwrap(),

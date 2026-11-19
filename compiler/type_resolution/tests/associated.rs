@@ -443,6 +443,46 @@ fn selecting_a_member_does_not_require_its_supply() {
 }
 
 #[test]
+fn observations_use_completed_supply_and_leave_open_or_unprepared_reads_symbolic() {
+    let origin = contract();
+    let interface = nir::program::InterfaceInstance {
+        declaration: origin.declaration,
+        arguments: vec![],
+    };
+    let mut row = implementation(ty(P::Bool), ty(P::Char));
+    let (member, data) = row.associated.pop().unwrap();
+    let observe = |row: &nir::program::Implementation, subject, expected: Option<&Expr>| {
+        with_world(
+            std::slice::from_ref(&origin),
+            std::slice::from_ref(row),
+            |world| {
+                let result = world
+                    .known_associated_value(&interface, member, &subject, &mut Budget::default())
+                    .unwrap();
+                assert_eq!(result.as_ref().map(|value| value.expression()), expected);
+            },
+        );
+    };
+    observe(&row, ty(P::Bool), None);
+    row.associated_initializers.push((
+        member,
+        nir::associated_initializers::AssociatedInitializer::new(data.clone(), &mut 1000).unwrap(),
+    ));
+    observe(&row, ty(P::Bool), None);
+    row.associated_initializers.clear();
+    row.associated.push((member, data.clone()));
+    observe(&row, ty(P::Bool), Some(&data));
+    observe(
+        &row,
+        Term::Rigid {
+            declaration: id(46),
+            sort: nir::Sort::Type,
+        },
+        None,
+    );
+}
+
+#[test]
 fn type_and_value_queries_require_the_associated_members_phase() {
     let mut origin = contract();
     origin.associated[0].phase = nir::program::TraitPhase::Comptime;

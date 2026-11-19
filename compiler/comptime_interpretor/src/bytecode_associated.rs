@@ -61,7 +61,7 @@ fn associated_cycles_and_failed_initializers_release_every_active_key() {
         }
         let mut env = Environment::from([(caller, Value::Bool(true))]);
         for (initializer, error) in [
-            (&chain[2], ErrorKind::InvalidControlFlow),
+            (&chain[2], ErrorKind::CyclicAssociatedInitializer(id(2))),
             (&missing, ErrorKind::MissingBinding),
             (&wrong, ErrorKind::Type),
             (&returned, ErrorKind::InvalidControlFlow),
@@ -139,7 +139,7 @@ fn associated_code_reuse_does_not_cache_selection_results_or_execution() {
     vm.active_associated_initializers.insert(key(2));
     assert_eq!(
         run(&mut vm, &read(2), &mut env, true).unwrap_err().kind,
-        ErrorKind::InvalidControlFlow
+        ErrorKind::CyclicAssociatedInitializer(id(2))
     );
     vm.active_associated_initializers.clear();
     vm.associated_initializers.clear();
@@ -274,7 +274,7 @@ fn owned_associated_cycles_and_budget_failures_release_active_keys() {
         .insert_owned(key(34), Arc::new(read(2)));
     assert_eq!(
         run(&mut vm, &read(2), &mut env, true).unwrap_err().kind,
-        ErrorKind::InvalidControlFlow
+        ErrorKind::CyclicAssociatedInitializer(id(2))
     );
     assert!(vm.active_associated_initializers.is_empty());
 }

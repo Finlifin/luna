@@ -2,6 +2,7 @@
 use super::*;
 use crate::implementation::TypeAssessment;
 use nir::associated_initializers::{AssociatedInitializer, AssociatedSelection};
+use nir::completed_values::CompletedValue;
 
 /// An admitted associated value and the exact selection evidence supporting it.
 #[derive(Clone, Debug)]
@@ -71,6 +72,32 @@ impl<'world> World<'world> {
     ) -> Result<AssociatedValueResolution, QueryError> {
         self.select_associated_member(interface, member_id, subject, budget)?
             .supply(budget)
+    }
+
+    /// Read already completed data for a closed projection. A proof consumer
+    /// cannot run an initializer or use a default as evidence about an open
+    /// receiver. An absent supply leaves the observation symbolic.
+    pub fn known_associated_value(
+        &self,
+        interface: &InterfaceInstance,
+        member: nir::DeclarationId,
+        subject: &Term,
+        budget: &mut Budget,
+    ) -> Result<Option<CompletedValue>, QueryError> {
+        if !self
+            .closed_inputs_metered(std::iter::once(subject).chain(&interface.arguments), budget)?
+        {
+            return Ok(None);
+        }
+        let selected = match self.select_associated_member(interface, member, subject, budget) {
+            Ok(selected) => selected,
+            Err(QueryError::Unresolved(_)) => return Ok(None),
+            Err(failure) => return Err(failure),
+        };
+        let Some(MemberSource::Value(value)) = selected.source(&mut budget.steps)? else {
+            return Ok(None);
+        };
+        selected.complete_value(value, budget).map(Some)
     }
 
     pub fn select_associated_member<'a>(
@@ -227,20 +254,52 @@ impl SelectedAssociatedMember<'_, '_> {
         let source = self
             .source(&mut budget.steps)?
             .ok_or("selected implementation has no associated value")?;
+        let supply = match source {
+            MemberSource::Value(value) => {
+                AssociatedSelection::Completed(self.complete_value(value, budget)?)
+            }
+            MemberSource::Initializer(template) => {
+                let body = self.member_result(template.expression(), budget)?;
+                AssociatedSelection::Initializer(AssociatedInitializer::new(
+                    body,
+                    &mut budget.steps,
+                )?)
+            }
+        };
+        Ok(AssociatedValueResolution {
+            supply,
+            evidence: self.evidence,
+            qualification: self.qualification,
+        })
+    }
+
+    fn complete_value(
+        &self,
+        value: &nir::program::Expr,
+        budget: &mut Budget,
+    ) -> Result<CompletedValue, QueryError> {
         let layouts = &self.world.index.nominal_layouts;
         let lookup_head = |id| collection_head(id, layouts, self.world.context);
-        let value = match source {
-            MemberSource::Value(value) => {
-                nir::completed_values::validate_in_layouts(
-                    value,
-                    layouts,
-                    &lookup_head,
-                    &mut budget.steps,
-                )?;
-                value
-            }
-            MemberSource::Initializer(template) => template.expression(),
-        };
+        nir::completed_values::validate_in_layouts(
+            value,
+            layouts,
+            &lookup_head,
+            &mut budget.steps,
+        )?;
+        let value = self.member_result(value, budget)?;
+        Ok(CompletedValue::new(
+            value,
+            layouts,
+            &lookup_head,
+            &mut budget.steps,
+        )?)
+    }
+
+    fn member_result(
+        &self,
+        value: &nir::program::Expr,
+        budget: &mut Budget,
+    ) -> Result<nir::program::Expr, QueryError> {
         let mut value = self.instantiate(value, &mut budget.steps)?;
         // Compare completed type views without unfolding opaque normal-form heads.
         let mut cache = std::collections::HashMap::new();
@@ -258,27 +317,9 @@ impl SelectedAssociatedMember<'_, '_> {
             return Err("selected associated value disagrees with its member contract".into());
         }
         value.ty = actual.value;
-        // Only completed constant representations can be published as values.
-        // Function identities remain values; their bodies are not invoked here.
-        let supply = match source {
-            MemberSource::Initializer(_) => AssociatedSelection::Initializer(
-                AssociatedInitializer::new(value, &mut budget.steps)?,
-            ),
-            MemberSource::Value(_) => {
-                AssociatedSelection::Completed(nir::completed_values::CompletedValue::new(
-                    value,
-                    layouts,
-                    &lookup_head,
-                    &mut budget.steps,
-                )?)
-            }
-        };
-        Ok(AssociatedValueResolution {
-            supply,
-            evidence: self.evidence,
-            qualification: self.qualification,
-        })
+        Ok(value)
     }
+
     fn source(&self, fuel: &mut usize) -> Result<Option<MemberSource<'_>>, QueryError> {
         let entries = self
             .row

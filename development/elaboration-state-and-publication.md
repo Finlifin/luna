@@ -448,6 +448,20 @@ VM 选中缺失供应后向原源码区域挂起、取回并恢复的接线仍�
 调用会重做已经发生的前缀效果，也会把原来的调用预算和取消边界丢掉。
 [关联成员选择](../compiler/type_resolution/src/associated/values.rs) · [VM 接收](../compiler/comptime_interpretor/src/associated_execution.rs)
 
+源码检查具体成员读取时，先用接收者和接口实参代入成员声明域。普通数据和函数值
+在 NIR 中保留 `AssociatedValue` 及其成员身份。同一大字符串被四十个函数引用时，
+四十处只保存读取节点。Type 投影用于后续类型形成时仍需取得对应的 Type 身份。
+实现内的词法成员名与显式投影遵循同一规则。因此，若 `Holder<flag>.enabled`
+的初始化器写成 `if flag { true } else { Self.as(Flag).enabled }`，读取
+`Holder<true>` 的成员返回 true；读取 `Holder<false>` 的成员会在实际重入时
+报告循环及成员身份。循环检测使用完整的接口实例、接收者和成员。
+
+算术验证保留成员读取的稳定身份。需要建立标量事实时，验证器可以查询当前包内
+闭合投影的已完成值。例如，若选中实现将 u8 成员定义为 9，其字面量足以证明
+加一安全。开放接收者、尚未完成的值和仍需执行的初始化器只提供符号观察；
+验证器无法从这些情形取得具体数值。这项查询不执行初始化器。
+[源码读取](../compiler/elaboration/src/program/interfaces/associated.rs) · [算术观察](../compiler/program_verification/src/flow/operations.rs) · [分支与检查用例](../compiler/luna/tests/deferred_associated_values.rs)
+
 例如，一个已实例化的 comptime 函数可以在子句参数中携带另一个函数。无论入口
 取得的是 NIR 函数实例、冻结的函数值还是 VM 中的活动值，准备端都应保留里面的
 可调用声明。作为参数传递的 normal-form Type 只携带身份，发现依赖不会展开它的头。

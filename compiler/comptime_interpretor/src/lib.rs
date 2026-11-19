@@ -841,6 +841,7 @@ pub enum ErrorKind {
     Type,
     Unsupported,
     InvalidControlFlow,
+    CyclicAssociatedInitializer(DeclarationId),
     NonExhaustiveMatch,
     InvalidEffectEnvironment,
     EffectControlTransfer,
@@ -865,6 +866,9 @@ impl Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
+            ErrorKind::CyclicAssociatedInitializer(member) => {
+                write!(f, "cyclic associated initializer for member {member}")?
+            }
             ErrorKind::InvalidDefinition(reason) => write!(f, "interpretation {reason}")?,
             ErrorKind::InvalidTypeContract(reason) => write!(f, "invalid type contract: {reason}")?,
             ErrorKind::InvalidPhase(reason) => {

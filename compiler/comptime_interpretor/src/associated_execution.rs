@@ -272,7 +272,7 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
         if initializing && !self.active_associated_initializers.insert(key.clone()) {
-            return Err(self.failure(ErrorKind::InvalidControlFlow, Some(source)));
+            return Err(self.failure(ErrorKind::CyclicAssociatedInitializer(key.2), Some(source)));
         }
         Ok(Activation {
             expression,

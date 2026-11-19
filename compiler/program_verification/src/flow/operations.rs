@@ -4,6 +4,40 @@
 use super::*;
 
 impl Walker<'_> {
+    fn known_associated_value(
+        &mut self,
+        interface: &nir::program::InterfaceInstance,
+        member: nir::DeclarationId,
+        subject: &Term,
+    ) -> Result<Option<nir::completed_values::CompletedValue>, Reason> {
+        let Some(package) = self.package else {
+            return Ok(None);
+        };
+        let mut budget = crate::ptc::Budget {
+            steps: self.limits.arithmetic.steps,
+            ..Default::default()
+        };
+        let result = (|| {
+            let world = match &mut self.associated_world {
+                Some(world) => world,
+                slot => slot.insert(
+                    type_resolution::dispatch::DeclarationSource::Borrowed(package)
+                        .world(&mut budget, None)?,
+                ),
+            };
+            world
+                .capabilities()
+                .known_associated_value(interface, member, subject, &mut budget)
+        })();
+        self.limits.arithmetic.steps = budget.steps;
+        result.map_err(|failure| match failure {
+            nir::NominalAdmissionError::Budget => {
+                Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into())
+            }
+            _ => Reason::InvalidSignature,
+        })
+    }
+
     #[inline(never)]
     pub(super) fn operation_expression(
         &mut self,
@@ -595,10 +629,6 @@ impl Walker<'_> {
                 member,
                 subject,
             } => {
-                // Selection and required initialization belong to elaboration
-                // and comptime invocation. Until completed, the program layer
-                // knows only the checked value domain, not a predicate or the
-                // implementation body's result.
                 result = self.unknown_value(&expr.ty)?;
                 let view = self.scalar_type_view(&expr.ty)?;
                 self.limits.step(self.associated_scalars.len())?;
@@ -637,6 +667,19 @@ impl Walker<'_> {
                     // Associated constants retain identity across observations
                     // and call frames, without assuming an initializer result.
                     if state.facts.value(root).is_none() {
+                        // The closed declaration world can supply a checked literal.
+                        // An open receiver or an executable initializer contributes
+                        // only the stable identity of this scalar observation.
+                        let known = self.known_associated_value(interface, *member, subject)?;
+                        if let Some(known) = known {
+                            let value = known.expression();
+                            if value.ty != view {
+                                return Err(Reason::InvalidSignature);
+                            }
+                            if matches!(value.kind, K::Literal(_)) {
+                                result = self.child(value, state, depth)?;
+                            }
+                        }
                         bind_value_place(state, root, &view, result, self.limits)?;
                     }
                     // This is an immutable declaration value, not caller

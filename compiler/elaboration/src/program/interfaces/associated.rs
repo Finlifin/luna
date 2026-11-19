@@ -261,12 +261,15 @@ impl Checker<'_, '_> {
                 "associated value selection lacks implementation evidence",
             ));
         };
-        let value = self.selected_associated_value(selected, member, span)?;
-        let implementation = self
-            .checked_implementations
-            .iter()
-            .find(|i| i.declaration == selected)
-            .unwrap();
+        let (slot, contract) = self.associated_supply_contract(selected, member, span)?;
+        if let Some(value) = self.associated_data_read(interface, subject, contract, span)? {
+            return Ok(Some(value));
+        }
+
+        // A Type used as a receiver or annotation needs its selected identity.
+        // Every other member read keeps its declaration origin until observation.
+        let value = self.prepared_associated_value(selected, member, span)?;
+        let implementation = &self.checked_implementations[slot];
         let mut value = nominal_fields::metered(&mut self.required_steps, |fuel| {
             value.instantiate_declaration_parameters_bounded(
                 &implementation.type_parameters,
@@ -277,29 +280,6 @@ impl Checker<'_, '_> {
             )
         })
         .map_err(|e| error(span, e.to_string()))?;
-        if matches!(value.ty, Term::Primitive(_))
-            && value.ty != p(P::Type)
-            && self.initializer_implementation().is_none()
-        {
-            // Preserve observation identity even for a literal initializer: a
-            // caller's checked assumes must describe the same constant as a
-            // deferred method contract. Materialization evaluates the reference.
-            let (parameters, inputs) = self.interface_substitution(&interface, &subject);
-            let ty = self.instantiate_input_types(&member_type, &parameters, &inputs, span)?;
-            let reference = n::Expr {
-                ty,
-                source: source(span),
-                kind: K::AssociatedValue {
-                    interface,
-                    member,
-                    subject,
-                },
-            };
-            // As for method values, expose the proved concrete type through
-            // an outer view while retaining the declaration type on the
-            // observation node itself for phase validation.
-            return Ok(Some(self.callable_value_view(reference, None, span)?));
-        }
         value.source = source(span);
         Ok(Some(value))
     }
@@ -318,7 +298,57 @@ impl Checker<'_, '_> {
             )
     }
 
-    pub(in crate::program) fn selected_associated_value(
+    // The member contract supplies the inner node's type. Selection may also
+    // expose a concrete outer view (for example an associated callable type).
+    // Only a Type projection needs the identity stored in the implementation.
+    fn associated_data_read(
+        &self,
+        interface: n::InterfaceInstance,
+        subject: Term,
+        contract: &n::AssociatedContract,
+        span: Span,
+    ) -> Result<Option<n::Expr>, Error> {
+        let (parameters, inputs) = self.interface_substitution(&interface, &subject);
+        let ty = self.instantiate_input_types(&contract.ty, &parameters, &inputs, span)?;
+        if ty == p(P::Type) {
+            return Ok(None);
+        }
+        let reference = self.callable_value_view(
+            n::Expr {
+                ty,
+                source: source(span),
+                kind: K::AssociatedValue {
+                    interface,
+                    member: contract.declaration,
+                    subject,
+                },
+            },
+            None,
+            span,
+        )?;
+        Ok((reference.ty != p(P::Type)).then_some(reference))
+    }
+
+    fn selected_associated_value(
+        &mut self,
+        implementation: DeclarationId,
+        member: DeclarationId,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let (slot, contract) = self.associated_supply_contract(implementation, member, span)?;
+        let row = &self.checked_implementations[slot];
+        let interface = row
+            .interface_instance()
+            .expect("associated trait implementation");
+        if let Some(value) =
+            self.associated_data_read(interface, row.subject.clone(), contract, span)?
+        {
+            return Ok(value);
+        }
+        self.prepared_associated_value(implementation, member, span)
+    }
+
+    fn prepared_associated_value(
         &mut self,
         implementation: DeclarationId,
         member: DeclarationId,
@@ -348,6 +378,41 @@ impl Checker<'_, '_> {
         })
     }
 
+    fn associated_supply_contract(
+        &self,
+        implementation: DeclarationId,
+        member: DeclarationId,
+        span: Span,
+    ) -> Result<(usize, &n::AssociatedContract), Error> {
+        let slot = *self
+            .implementation_positions
+            .get(&implementation)
+            .ok_or_else(|| error(span, "unknown associated implementation"))?;
+        let selected = &self.checked_implementations[slot];
+        let contract = selected
+            .interface
+            .and_then(|id| self.checked_traits.by_id(id))
+            .and_then(|interface| {
+                interface
+                    .associated
+                    .iter()
+                    .find(|item| item.declaration == member)
+            })
+            .ok_or_else(|| {
+                error(
+                    span,
+                    "associated member does not belong to selected implementation",
+                )
+            })?;
+        if contract.phase == n::TraitPhase::Comptime && !selected.phases.comptime {
+            return Err(error(
+                span,
+                "selected implementation lacks comptime trait phase",
+            ));
+        }
+        Ok((slot, contract))
+    }
+
     /// Publish the selected supply once. Definition checking and dependency
     /// discovery only need its row; building a use-site expression is separate.
     pub(in crate::program) fn ensure_associated_value(
@@ -356,28 +421,8 @@ impl Checker<'_, '_> {
         member: DeclarationId,
         span: Span,
     ) -> Result<usize, Error> {
-        let slot = *self
-            .implementation_positions
-            .get(&implementation)
-            .ok_or_else(|| error(span, "unknown associated implementation"))?;
+        let (slot, _) = self.associated_supply_contract(implementation, member, span)?;
         let selected = &self.checked_implementations[slot];
-        if !selected.phases.comptime
-            && selected
-                .interface
-                .and_then(|id| self.checked_traits.by_id(id))
-                .and_then(|interface| {
-                    interface
-                        .associated
-                        .iter()
-                        .find(|item| item.declaration == member)
-                })
-                .is_some_and(|member| member.phase == n::TraitPhase::Comptime)
-        {
-            return Err(error(
-                span,
-                "selected implementation lacks comptime trait phase",
-            ));
-        }
         if selected.associated.iter().any(|(id, _)| *id == member)
             || selected
                 .associated_initializers

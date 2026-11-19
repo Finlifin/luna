@@ -248,3 +248,61 @@ fn open_interface_inputs_keep_the_receiver_and_generic_initializer_code() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn a_generic_initializer_only_enters_a_recursive_member_on_the_taken_branch() {
+    for access in ["Self.as(Flag).enabled", "enabled"] {
+        let source = format!(
+            "struct Holder where flag: bool {{}}
+             trait Flag {{ assoc enabled: bool; }}
+             impl Flag for Holder<flag> where flag: bool {{
+                 assoc enabled: bool = if flag {{ true }} else {{ {access} }};
+             }}
+             const value: bool = Holder<true>.as(Flag).enabled;
+             comptime fn run() -> bool {{ value }}"
+        );
+        let package = support::compile(&source);
+        assert_eq!(
+            luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+        let cycle = source.replace("Holder<true>", "Holder<false>");
+        let error = support::compile_with_protocols(&cycle, &Default::default()).unwrap_err();
+        assert!(error.contains("cyclic associated initializer"), "{error}");
+    }
+}
+
+#[test]
+fn arithmetic_evidence_comes_from_completed_closed_members() {
+    let source = r#"
+        typealias u8 = .u8'builtin;
+        trait Counter { assoc start: u8 = 255; }
+        struct Small {}
+        struct Full {}
+        impl Counter for Small { assoc start: u8 = 1; }
+        impl Counter for Full {}
+        comptime fn run() -> bool { Small.as(Counter).start + 1 == 2 }
+    "#;
+    let package = support::compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let overflow = source.replace("Small.as(Counter)", "Full.as(Counter)");
+    let open = source
+        .replace(
+            "comptime fn run() -> bool",
+            "comptime fn run() -> bool where T :- Counter",
+        )
+        .replace("Small.as(Counter)", "T.as(Counter)");
+    for invalid in [
+        overflow + " const result = run();",
+        open + " const result = run<Full>();",
+    ] {
+        let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(
+            error.contains("machine arithmetic range is not proven"),
+            "{error}"
+        );
+    }
+}
