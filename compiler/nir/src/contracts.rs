@@ -38,17 +38,18 @@ impl ProgramContract {
         parameters: &[crate::DeclarationParameter],
         arguments: &[Term],
     ) -> Result<Self, TypeError> {
-        Term::Unit.instantiate_parameters(parameters, arguments)?;
+        let substitution =
+            crate::types::ParameterSubstitution::for_fragments(parameters, arguments)?;
         Ok(Self {
             preconditions: self
                 .preconditions
                 .iter()
-                .map(|e| e.instantiate_parameters(parameters, arguments))
+                .map(|e| e.with_parameter_substitution(&substitution))
                 .collect::<Result<_, _>>()?,
             postconditions: self
                 .postconditions
                 .iter()
-                .map(|e| e.instantiate_parameters(parameters, arguments))
+                .map(|e| e.with_parameter_substitution(&substitution))
                 .collect::<Result<_, _>>()?,
             result_binding: self.result_binding,
             entry_snapshots: self.entry_snapshots.clone(),

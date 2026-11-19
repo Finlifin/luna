@@ -2,6 +2,7 @@
 //! This stage preserves evaluation order;
 //! it does not yet represent checked resource/effect obligations or executable IIR.
 use crate::display::string;
+use crate::types::ParameterSubstitution;
 use crate::{DeclarationId, Term};
 use std::fmt;
 use std::sync::Arc;
@@ -1831,21 +1832,28 @@ impl From<DeclarationId> for InterfaceInstance {
     }
 }
 impl InterfaceInstance {
+    pub(crate) fn try_map_types<E>(
+        &self,
+        transform: &mut impl FnMut(&Term) -> Result<Term, E>,
+    ) -> Result<Self, E> {
+        Ok(Self {
+            declaration: self.declaration,
+            arguments: self
+                .arguments
+                .iter()
+                .map(transform)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
     pub fn instantiate_parameters_in_scope(
         &self,
         parameters: &[crate::DeclarationParameter],
         arguments: &[Term],
         frames: &[Vec<crate::Sort>],
     ) -> Result<Self, crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_parameters_in_scope(parameters, arguments, frames)?;
-        Ok(Self {
-            declaration: self.declaration,
-            arguments: self
-                .arguments
-                .iter()
-                .map(|ty| ty.instantiate_parameters_in_scope(parameters, arguments, frames))
-                .collect::<Result<_, _>>()?,
-        })
+        let substitution = ParameterSubstitution::in_scope(parameters, arguments, frames)?;
+        self.try_map_types(&mut |ty| substitution.term(ty))
     }
 
     pub fn instantiate_types(
@@ -1868,15 +1876,8 @@ impl InterfaceInstance {
         parameters: &[crate::DeclarationParameter],
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_parameters(parameters, arguments)?;
-        Ok(Self {
-            declaration: self.declaration,
-            arguments: self
-                .arguments
-                .iter()
-                .map(|t| t.instantiate_parameters(parameters, arguments))
-                .collect::<Result<_, _>>()?,
-        })
+        let substitution = ParameterSubstitution::for_fragments(parameters, arguments)?;
+        self.try_map_types(&mut |ty| substitution.term(ty))
     }
 }
 impl fmt::Display for InterfaceInstance {
@@ -1895,6 +1896,21 @@ pub struct TraitRequirement {
     pub interface: DeclarationId,
 }
 impl TraitRequirement {
+    pub(crate) fn try_map_types<E>(
+        &self,
+        transform: &mut impl FnMut(&Term) -> Result<Term, E>,
+    ) -> Result<Self, E> {
+        Ok(Self {
+            interface: self.interface,
+            subject: transform(&self.subject)?,
+            interface_arguments: self
+                .interface_arguments
+                .iter()
+                .map(transform)
+                .collect::<Result<_, _>>()?,
+        })
+    }
+
     /// Substitute declaration inputs while retaining ordinary caller bindings.
     pub fn instantiate_parameters_in_scope(
         &self,
@@ -1902,17 +1918,8 @@ impl TraitRequirement {
         arguments: &[Term],
         frames: &[Vec<crate::Sort>],
     ) -> Result<Self, crate::TypeError> {
-        Ok(Self {
-            interface: self.interface,
-            subject: self
-                .subject
-                .instantiate_parameters_in_scope(parameters, arguments, frames)?,
-            interface_arguments: self
-                .interface_arguments
-                .iter()
-                .map(|ty| ty.instantiate_parameters_in_scope(parameters, arguments, frames))
-                .collect::<Result<_, _>>()?,
-        })
+        let substitution = ParameterSubstitution::in_scope(parameters, arguments, frames)?;
+        self.try_map_types(&mut |ty| substitution.term(ty))
     }
 
     pub fn mentions_rigid(&self, declaration: DeclarationId) -> bool {
@@ -1948,15 +1955,8 @@ impl TraitRequirement {
         parameters: &[crate::DeclarationParameter],
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_parameters(parameters, arguments)?;
-        Ok(Self {
-            interface: self.interface,
-            subject: self.subject.instantiate_parameters(parameters, arguments)?,
-            interface_arguments: self
-                .interface_instance()
-                .instantiate_parameters(parameters, arguments)?
-                .arguments,
-        })
+        let substitution = ParameterSubstitution::for_fragments(parameters, arguments)?;
+        self.try_map_types(&mut |ty| substitution.term(ty))
     }
 }
 impl fmt::Display for TraitRequirement {
@@ -3626,6 +3626,15 @@ impl Expr {
                     | ExprKind::EffectComputation {..} | ExprKind::EffectRun {..}))
     }
 
+    pub(crate) fn with_parameter_substitution(
+        &self,
+        substitution: &ParameterSubstitution<'_, '_>,
+    ) -> Result<Self, crate::TypeError> {
+        let mut value = self.clone();
+        value.rewrite_types(&mut |ty| substitution.term(ty))?;
+        Ok(value)
+    }
+
     /// Specialize type-bearing structure using explicitly sorted declaration
     /// inputs. Value locals and runtime erasure remain the instantiation pass's
     /// responsibility; this operation does not invent runtime values.
@@ -3634,10 +3643,8 @@ impl Expr {
         parameters: &[crate::DeclarationParameter],
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_parameters(parameters, arguments)?;
-        let mut value = self.clone();
-        value.rewrite_types(&mut |ty| ty.instantiate_parameters(parameters, arguments))?;
-        Ok(value)
+        let substitution = ParameterSubstitution::for_fragments(parameters, arguments)?;
+        self.with_parameter_substitution(&substitution)
     }
 
     pub fn instantiate_parameters_in_scope(
@@ -3646,12 +3653,8 @@ impl Expr {
         arguments: &[Term],
         frames: &[Vec<crate::Sort>],
     ) -> Result<Self, crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_parameters_in_scope(parameters, arguments, frames)?;
-        let mut value = self.clone();
-        value.rewrite_types(&mut |ty| {
-            ty.instantiate_parameters_in_scope(parameters, arguments, frames)
-        })?;
-        Ok(value)
+        let substitution = ParameterSubstitution::in_scope(parameters, arguments, frames)?;
+        self.with_parameter_substitution(&substitution)
     }
 
     /// Specialize a declaration-owned template using completed parameter
@@ -4488,6 +4491,30 @@ pub enum TypePredicate {
     Or(Vec<TypePredicate>),
 }
 impl TypePredicate {
+    pub(crate) fn try_map_types<E>(
+        &self,
+        transform: &mut impl FnMut(&Term) -> Result<Term, E>,
+    ) -> Result<Self, E> {
+        Ok(match self {
+            Self::Bool(value) => Self::Bool(*value),
+            Self::Trait(requirement) => Self::Trait(requirement.try_map_types(transform)?),
+            Self::Equal(left, right) => Self::Equal(transform(left)?, transform(right)?),
+            Self::Not(inner) => Self::Not(Box::new(inner.try_map_types(transform)?)),
+            Self::And(parts) => Self::And(
+                parts
+                    .iter()
+                    .map(|p| p.try_map_types(transform))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Self::Or(parts) => Self::Or(
+                parts
+                    .iter()
+                    .map(|p| p.try_map_types(transform))
+                    .collect::<Result<_, _>>()?,
+            ),
+        })
+    }
+
     /// Instantiate a type proposition inside an explicit caller telescope.
     /// Even constant propositions validate supplied arguments. This operation
     /// preserves the proposition; it neither proves it nor admits state facts.
@@ -4497,31 +4524,8 @@ impl TypePredicate {
         arguments: &[Term],
         frames: &[Vec<crate::Sort>],
     ) -> Result<Self, crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_parameters_in_scope(parameters, arguments, frames)?;
-        Ok(match self {
-            Self::Bool(value) => Self::Bool(*value),
-            Self::Trait(requirement) => Self::Trait(
-                requirement.instantiate_parameters_in_scope(parameters, arguments, frames)?,
-            ),
-            Self::Equal(left, right) => Self::Equal(
-                left.instantiate_parameters_in_scope(parameters, arguments, frames)?,
-                right.instantiate_parameters_in_scope(parameters, arguments, frames)?,
-            ),
-            Self::Not(inner) => Self::Not(Box::new(
-                inner.instantiate_parameters_in_scope(parameters, arguments, frames)?,
-            )),
-            Self::And(parts) | Self::Or(parts) => {
-                let parts = parts
-                    .iter()
-                    .map(|part| part.instantiate_parameters_in_scope(parameters, arguments, frames))
-                    .collect::<Result<_, _>>()?;
-                if matches!(self, Self::And(_)) {
-                    Self::And(parts)
-                } else {
-                    Self::Or(parts)
-                }
-            }
-        })
+        let substitution = ParameterSubstitution::in_scope(parameters, arguments, frames)?;
+        self.try_map_types(&mut |ty| substitution.term(ty))
     }
 
     /// A bounded proof shortcut, not a disequality theory. Distinct terms remain
@@ -4599,71 +4603,15 @@ impl TypePredicate {
         parameters: &[crate::DeclarationParameter],
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_parameters(parameters, arguments)?;
-        Ok(match self {
-            Self::Bool(v) => Self::Bool(*v),
-            Self::Trait(requirement) => Self::Trait(TraitRequirement {
-                interface: requirement.interface,
-                subject: requirement
-                    .subject
-                    .instantiate_parameters(parameters, arguments)?,
-                interface_arguments: requirement
-                    .interface_arguments
-                    .iter()
-                    .map(|term| term.instantiate_parameters(parameters, arguments))
-                    .collect::<Result<_, _>>()?,
-            }),
-            Self::Equal(a, b) => Self::Equal(
-                a.instantiate_parameters(parameters, arguments)?,
-                b.instantiate_parameters(parameters, arguments)?,
-            ),
-            Self::Not(p) => Self::Not(Box::new(p.instantiate_parameters(parameters, arguments)?)),
-            Self::And(ps) => Self::And(
-                ps.iter()
-                    .map(|p| p.instantiate_parameters(parameters, arguments))
-                    .collect::<Result<_, _>>()?,
-            ),
-            Self::Or(ps) => Self::Or(
-                ps.iter()
-                    .map(|p| p.instantiate_parameters(parameters, arguments))
-                    .collect::<Result<_, _>>()?,
-            ),
-        })
+        let substitution = ParameterSubstitution::for_fragments(parameters, arguments)?;
+        self.try_map_types(&mut |ty| substitution.term(ty))
     }
     pub fn instantiate_rigids(
         &self,
         parameters: &[DeclarationId],
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
-        Ok(match self {
-            Self::Bool(v) => Self::Bool(*v),
-            Self::Trait(requirement) => Self::Trait(TraitRequirement {
-                interface: requirement.interface,
-                subject: requirement
-                    .subject
-                    .instantiate_rigids(parameters, arguments)?,
-                interface_arguments: requirement
-                    .interface_arguments
-                    .iter()
-                    .map(|term| term.instantiate_rigids(parameters, arguments))
-                    .collect::<Result<_, _>>()?,
-            }),
-            Self::Equal(a, b) => Self::Equal(
-                a.instantiate_rigids(parameters, arguments)?,
-                b.instantiate_rigids(parameters, arguments)?,
-            ),
-            Self::Not(p) => Self::Not(Box::new(p.instantiate_rigids(parameters, arguments)?)),
-            Self::And(ps) => Self::And(
-                ps.iter()
-                    .map(|p| p.instantiate_rigids(parameters, arguments))
-                    .collect::<Result<_, _>>()?,
-            ),
-            Self::Or(ps) => Self::Or(
-                ps.iter()
-                    .map(|p| p.instantiate_rigids(parameters, arguments))
-                    .collect::<Result<_, _>>()?,
-            ),
-        })
+        self.try_map_types(&mut |ty| ty.instantiate_rigids(parameters, arguments))
     }
 }
 impl fmt::Display for TypePredicate {

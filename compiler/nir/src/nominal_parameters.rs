@@ -429,15 +429,14 @@ impl<'a> DeclarationSubstitution<'a> {
     }
     /// Check and take ownership of the caller's existing buffers. Unlike
     /// retaining a borrowed substitution, this does not copy any terms.
-    pub fn bounded_owned(
+    pub fn bounded_owned<D: Borrow<Term>>(
         ids: &[DeclarationId],
-        domains: &[Term],
+        domains: &[D],
         arguments: Vec<Term>,
         frames: Vec<Vec<Sort>>,
         fuel: &mut usize,
     ) -> Result<DeclarationSubstitution<'static>, crate::type_computations::Error> {
-        let parameters =
-            DeclarationSubstitution::bounded(ids, domains, &arguments, &frames, fuel)?.parameters;
+        let parameters = Binders::bounded_substitution(ids, domains, &arguments, &frames, fuel)?;
         Ok(DeclarationSubstitution {
             parameters,
             arguments: Cow::Owned(arguments),
@@ -513,38 +512,13 @@ impl<'a> DeclarationSubstitution<'a> {
         &self,
         requirement: &crate::program::TraitRequirement,
     ) -> Result<crate::program::TraitRequirement, TypeError> {
-        Ok(crate::program::TraitRequirement {
-            interface: requirement.interface,
-            subject: self.instantiate(&requirement.subject)?,
-            interface_arguments: requirement
-                .interface_arguments
-                .iter()
-                .map(|ty| self.instantiate(ty))
-                .collect::<Result<_, _>>()?,
-        })
+        requirement.try_map_types(&mut |ty| self.instantiate(ty))
     }
     pub fn instantiate_predicate(
         &self,
         predicate: &crate::program::TypePredicate,
     ) -> Result<crate::program::TypePredicate, TypeError> {
-        use crate::program::TypePredicate as P;
-        Ok(match predicate {
-            P::Bool(value) => P::Bool(*value),
-            P::Trait(requirement) => P::Trait(self.instantiate_requirement(requirement)?),
-            P::Equal(a, b) => P::Equal(self.instantiate(a)?, self.instantiate(b)?),
-            P::Not(inner) => P::Not(Box::new(self.instantiate_predicate(inner)?)),
-            P::And(parts) | P::Or(parts) => {
-                let parts = parts
-                    .iter()
-                    .map(|p| self.instantiate_predicate(p))
-                    .collect::<Result<_, _>>()?;
-                if matches!(predicate, P::And(_)) {
-                    P::And(parts)
-                } else {
-                    P::Or(parts)
-                }
-            }
-        })
+        predicate.try_map_types(&mut |ty| self.instantiate(ty))
     }
     fn charge_template(
         &self,
@@ -596,29 +570,14 @@ impl<'a> DeclarationSubstitution<'a> {
         interface: &crate::program::InterfaceInstance,
         fuel: &mut usize,
     ) -> Result<crate::program::InterfaceInstance, crate::type_computations::Error> {
-        Ok(crate::program::InterfaceInstance {
-            declaration: interface.declaration,
-            arguments: interface
-                .arguments
-                .iter()
-                .map(|ty| self.instantiate_bounded(ty, fuel))
-                .collect::<Result<_, _>>()?,
-        })
+        interface.try_map_types(&mut |ty| self.instantiate_bounded(ty, fuel))
     }
     pub fn instantiate_requirement_bounded(
         &self,
         requirement: &crate::program::TraitRequirement,
         fuel: &mut usize,
     ) -> Result<crate::program::TraitRequirement, crate::type_computations::Error> {
-        Ok(crate::program::TraitRequirement {
-            interface: requirement.interface,
-            subject: self.instantiate_bounded(&requirement.subject, fuel)?,
-            interface_arguments: requirement
-                .interface_arguments
-                .iter()
-                .map(|ty| self.instantiate_bounded(ty, fuel))
-                .collect::<Result<_, _>>()?,
-        })
+        requirement.try_map_types(&mut |ty| self.instantiate_bounded(ty, fuel))
     }
     pub fn instantiate_bounded(
         &self,
@@ -697,15 +656,7 @@ impl<T: Borrow<Term>> AdmittedArguments<'_, T> {
         requirement: &crate::program::TraitRequirement,
         fuel: &mut usize,
     ) -> Result<crate::program::TraitRequirement, crate::type_computations::Error> {
-        Ok(crate::program::TraitRequirement {
-            interface: requirement.interface,
-            subject: self.instantiate(&requirement.subject, fuel)?,
-            interface_arguments: requirement
-                .interface_arguments
-                .iter()
-                .map(|term| self.instantiate(term, fuel))
-                .collect::<Result<_, _>>()?,
-        })
+        requirement.try_map_types(&mut |ty| self.instantiate(ty, fuel))
     }
     pub fn instantiate_predicate(
         &self,

@@ -222,6 +222,17 @@ let-pattern 把新绑定交给父作用域。字节码用自己的寄存器作�
 可见性。在 32 层块中形成同一个函数实例，调用帧从 1 个已有绑定扩大到 4096
 个时，两种执行方式各自的步数均保持不变。[VM 环境](../compiler/comptime_interpretor/src/environment.rs) · [实例形成用例](../compiler/comptime_interpretor/src/dynamic_instances.rs)
 
+普通 callable 的声明输入检查借用已观察槽位的原始域，形成替换时只接管用于后续
+签名计算的值和调用者作用域。对显式给出 sort 的声明，函数主体、默认表达式和契约
+共用一次检查后的实参索引。片段保留外围绑定，由持有完整签名的一方检查。
+
+VM 从已完成的输入槽位取出声明身份、声明 sort 和借用的值，交给 NIR 计算依赖域。
+同一域多次引用一个槽位时，各处分别支付展开预算。替换值来自调用者，进入被调函数
+的嵌套绑定时只移动自由引用的深度，其中的声明引用保留原身份。显式交付的每个值
+都要通过作用域和 sort 检查。对于实参改变 binder sort 的调用，仍由实际声明域决定
+有效 sort。名义类型的准入继续要求接收世界的证据。
+[结构替换](../compiler/nir/src/type_computations.rs) · [VM 输入绑定](../compiler/comptime_interpretor/src/input_bindings.rs)
+
 从这里接普通调用，需要在源码的两个消费位置保留不同的交付责任：
 
 - 对 `count`，声明的返回域已经是 `Integer`。待定位置是列表的元素检查。前缀

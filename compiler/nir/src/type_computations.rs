@@ -510,9 +510,30 @@ pub fn instantiate_parameters_bounded(
     frames: &[Vec<Sort>],
     fuel: &mut usize,
 ) -> Result<Term, Error> {
-    charge_parameter_substitution(root, parameters, arguments, fuel)?;
-    root.instantiate_parameters_in_scope(parameters, arguments, frames)
-        .map_err(Error::Scope)
+    if parameters.len() != arguments.len() {
+        return Err(Error::Scope(TypeError::ArgumentCount {
+            expected: parameters.len(),
+            actual: arguments.len(),
+        }));
+    }
+    instantiate_bindings_bounded(
+        root,
+        parameters.iter().copied().zip(arguments),
+        frames,
+        fuel,
+    )
+}
+
+/// Instantiate a structural domain from the supplied declaration bindings.
+/// Validate even unused inputs; the expansion budget pays for each occurrence
+/// in the result. The caller retains ownership of all replacement values.
+pub fn instantiate_bindings_bounded<'a>(
+    root: &Term,
+    bindings: impl IntoIterator<Item = (crate::DeclarationParameter, &'a Term)>,
+    frames: &[Vec<Sort>],
+    fuel: &mut usize,
+) -> Result<Term, Error> {
+    crate::types::ParameterSubstitution::instantiate_bounded(root, bindings, frames, fuel)
 }
 
 /// Bound declaration substitution before allocating its result. This accepts

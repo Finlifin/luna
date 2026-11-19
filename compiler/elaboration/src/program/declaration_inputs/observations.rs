@@ -147,7 +147,7 @@ impl Observations {
                 let retained = environment::copy_term(&value, steps, span)?;
                 ids.push(binder.declaration);
                 values.push(value);
-                observed_domains.push(environment::copy_term(domain, steps, span)?);
+                observed_domains.push(domain);
                 Some(retained)
             } else {
                 None

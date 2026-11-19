@@ -52,7 +52,14 @@ impl FunctionDeclaration {
         parameters: &[crate::DeclarationParameter],
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
-        Term::Tuple(Vec::new()).instantiate_parameters(parameters, arguments)?;
+        let substitution = ParameterSubstitution::for_fragments(parameters, arguments)?;
+        self.with_parameter_substitution(&substitution)
+    }
+
+    fn with_parameter_substitution(
+        &self,
+        substitution: &ParameterSubstitution<'_, '_>,
+    ) -> Result<Self, crate::TypeError> {
         Ok(Self {
             source: self.source,
             phase: self.phase,
@@ -65,34 +72,32 @@ impl FunctionDeclaration {
             declaration: self.declaration,
             name: self.name.clone(),
             parameters: self.parameters.clone(),
-            signature: self
-                .signature
-                .instantiate_parameters(parameters, arguments)?,
+            signature: substitution.term(&self.signature)?,
             requirements: self
                 .requirements
                 .iter()
-                .map(|p| p.instantiate_parameters(parameters, arguments))
+                .map(|p| p.try_map_types(&mut |ty| substitution.term(ty)))
                 .collect::<Result<_, _>>()?,
             capabilities: self
                 .capabilities
                 .iter()
-                .map(|p| p.instantiate_parameters(parameters, arguments))
+                .map(|p| p.try_map_types(&mut |ty| substitution.term(ty)))
                 .collect::<Result<_, _>>()?,
             preconditions: self
                 .preconditions
                 .iter()
-                .map(|e| e.instantiate_parameters(parameters, arguments))
+                .map(|e| e.with_parameter_substitution(substitution))
                 .collect::<Result<_, _>>()?,
             postconditions: self
                 .postconditions
                 .iter()
-                .map(|e| e.instantiate_parameters(parameters, arguments))
+                .map(|e| e.with_parameter_substitution(substitution))
                 .collect::<Result<_, _>>()?,
             defaults: self
                 .defaults
                 .iter()
                 .map(|(index, e)| {
-                    e.instantiate_parameters(parameters, arguments)
+                    e.with_parameter_substitution(substitution)
                         .map(|e| (*index, e))
                 })
                 .collect::<Result<_, _>>()?,
@@ -169,11 +174,10 @@ impl Function {
         parameters: &[crate::DeclarationParameter],
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
+        let substitution = ParameterSubstitution::for_fragments(parameters, arguments)?;
         Ok(Self {
-            interface: self
-                .interface
-                .instantiate_parameters(parameters, arguments)?,
-            body: self.body.instantiate_parameters(parameters, arguments)?,
+            interface: self.interface.with_parameter_substitution(&substitution)?,
+            body: self.body.with_parameter_substitution(&substitution)?,
         })
     }
 

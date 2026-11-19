@@ -31,22 +31,12 @@ impl Interpreter<'_> {
     ) -> Result<Term, Error> {
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut remaining = before;
-        let result = (|| {
-            let mut selected_parameters = Vec::new();
-            let mut selected_types = Vec::new();
-            for (parameter, value) in selected {
-                nir::type_computations::charge_term(value, &mut remaining)?;
-                selected_parameters.push(parameter.clone());
-                selected_types.push(value.clone());
-            }
-            nir::type_computations::instantiate_parameters_bounded(
-                ty,
-                &selected_parameters,
-                &selected_types,
-                &[],
-                &mut remaining,
-            )
-        })();
+        let result = nir::type_computations::instantiate_bindings_bounded(
+            ty,
+            selected.map(|(parameter, value)| (*parameter, value)),
+            &[],
+            &mut remaining,
+        );
         self.budget.steps -= (before - remaining) as u64;
         result.map_err(|error| {
             self.failure(

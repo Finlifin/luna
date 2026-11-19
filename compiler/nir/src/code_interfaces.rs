@@ -634,7 +634,9 @@ impl MethodSignature {
         parameters: &[crate::DeclarationParameter],
         arguments: &[Term],
     ) -> Result<Self, crate::TypeError> {
-        self.try_map_types(|ty| ty.instantiate_parameters(parameters, arguments))
+        let substitution =
+            crate::types::ParameterSubstitution::for_fragments(parameters, arguments)?;
+        self.try_map_types(|ty| substitution.term(ty))
     }
     pub fn instantiate_parameters_in_scope(
         &self,
@@ -642,7 +644,9 @@ impl MethodSignature {
         arguments: &[Term],
         scope: &[Vec<crate::Sort>],
     ) -> Result<Self, crate::TypeError> {
-        self.try_map_types(|ty| ty.instantiate_parameters_in_scope(parameters, arguments, scope))
+        let substitution =
+            crate::types::ParameterSubstitution::in_scope(parameters, arguments, scope)?;
+        self.try_map_types(|ty| substitution.term(ty))
     }
 }
 

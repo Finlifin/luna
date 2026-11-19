@@ -9,6 +9,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
+mod parameter_substitution;
+pub(crate) use parameter_substitution::ParameterSubstitution;
 mod input_binding;
 pub use input_binding::{
     FunctionCallBinding, FunctionCallPreparation, FunctionInputBinding, FunctionInputBuilder,
@@ -1200,31 +1202,29 @@ impl Term {
         parameters: &[DeclarationParameter],
         arguments: &[Term],
     ) -> Result<Term, TypeError> {
-        if parameters.len() != arguments.len() {
-            return Err(TypeError::ArgumentCount {
-                expected: parameters.len(),
-                actual: arguments.len(),
-            });
-        }
-        let indices = declaration_parameter_indices(parameters.iter().copied())?;
-        for (parameter, argument) in parameters.iter().zip(arguments) {
-            argument.check_scope(&[])?;
-            require_sort(argument, parameter.sort)?;
-        }
-        self.rewrite(0, &mut |term, depth| match term {
-            Self::Rigid { declaration, sort } => match indices.get(declaration) {
-                Some(&(index, expected)) => {
-                    if *sort != expected {
-                        return Err(TypeError::WrongSort {
-                            expected,
-                            actual: *sort,
-                        });
-                    }
-                    arguments[index].shift(depth, 0)
+        ParameterSubstitution::for_fragments(parameters, arguments)?.term(self)
+    }
+
+    /// Rewrite declaration occurrences in their original scope. Only the
+    /// replacement crosses the intervening binders. Its own rigid references
+    /// belong to the caller and are never visited as declaration occurrences.
+    pub(crate) fn replace_declarations<'a>(
+        &self,
+        lookup: &impl Fn(DeclarationId) -> Option<(Sort, &'a Term)>,
+    ) -> Result<Term, TypeError> {
+        self.rewrite(0, &mut |term, depth| {
+            if let Self::Rigid { declaration, sort } = term
+                && let Some((expected, argument)) = lookup(*declaration)
+            {
+                if *sort != expected {
+                    return Err(TypeError::WrongSort {
+                        expected,
+                        actual: *sort,
+                    });
                 }
-                None => Ok(term.clone()),
-            },
-            _ => Ok(term.clone()),
+                return argument.shift(depth, 0);
+            }
+            Ok(term.clone())
         })
     }
 
@@ -1236,20 +1236,9 @@ impl Term {
         arguments: &[T],
         frames: &[Vec<Sort>],
     ) -> Result<Term, TypeError> {
-        let result = self.rewrite(0, &mut |term, depth| match term {
-            Self::Rigid { declaration, sort } => match indices.get(declaration) {
-                Some(&(index, expected)) => {
-                    if *sort != expected {
-                        return Err(TypeError::WrongSort {
-                            expected,
-                            actual: *sort,
-                        });
-                    }
-                    arguments[index].borrow().shift(depth, 0)
-                }
-                None => Ok(term.clone()),
-            },
-            _ => Ok(term.clone()),
+        let result = self.replace_declarations(&|id| {
+            let &(index, sort) = indices.get(&id)?;
+            Some((sort, arguments[index].borrow()))
         })?;
         result.check_scope(frames)?;
         Ok(result)
@@ -1284,8 +1273,8 @@ impl Term {
     }
 
     /// Substitute declaration Type inputs relative to an explicit caller scope.
-    /// The ordinary closed-input API remains strict. Insert/remove a declaration
-    /// frame so local binders and caller references retain distinct depths.
+    /// The ordinary closed-input API remains strict. Local binders and caller
+    /// references retain distinct depths.
     pub fn instantiate_types_in_scope(
         &self,
         parameters: &[DeclarationId],
@@ -1311,21 +1300,7 @@ impl Term {
         arguments: &[Term],
         frames: &[Vec<Sort>],
     ) -> Result<Term, TypeError> {
-        if parameters.len() != arguments.len() {
-            return Err(TypeError::ArgumentCount {
-                expected: parameters.len(),
-                actual: arguments.len(),
-            });
-        }
-        for (parameter, argument) in parameters.iter().zip(arguments) {
-            argument.check_scope(frames)?;
-            require_sort(argument, parameter.sort)?;
-        }
-        let result = self
-            .abstract_parameters(parameters)?
-            .substitute(arguments)?;
-        result.check_scope(frames)?;
-        Ok(result)
+        ParameterSubstitution::in_scope(parameters, arguments, frames)?.term(self)
     }
 
     /// Instantiate declaration inputs of any semantic sort. This substitutes

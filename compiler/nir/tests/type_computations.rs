@@ -1304,6 +1304,85 @@ fn signature_fragment_copy_budget_does_not_certify_its_enclosing_scope() {
 }
 
 #[test]
+fn borrowed_declaration_inputs_remain_simultaneous_under_a_function_binder() {
+    use nir::type_computations::instantiate_bindings_bounded;
+    use nir::{DeclarationParameter, Parameter, TypeError};
+    let first = DeclarationParameter {
+        declaration: target(),
+        sort: Sort::Type,
+    };
+    let second = DeclarationParameter {
+        declaration: DeclarationId {
+            local: 3,
+            ..target()
+        },
+        sort: Sort::Type,
+    };
+    let rigid = |parameter: DeclarationParameter| Term::Rigid {
+        declaration: parameter.declaration,
+        sort: parameter.sort,
+    };
+    let frame = [vec![Sort::Type]];
+    let caller = slot(0, Sort::Type);
+    let lifted = Term::Bound {
+        depth: 1,
+        index: 0,
+        sort: Sort::Type,
+    };
+    let replacement = Term::NormalForm {
+        head: target(),
+        sort: Sort::Type,
+        arguments: vec![caller.clone(), rigid(second)],
+    };
+    let nested = |result| Term::Function {
+        parameters: vec![Parameter {
+            sort: Sort::Type,
+            ty: Term::Primitive(Primitive::Type),
+        }],
+        result: Box::new(result),
+    };
+    let domain = nested(Term::Tuple(vec![
+        rigid(first),
+        rigid(second),
+        caller.clone(),
+        lifted.clone(),
+    ]));
+    let byte = Term::Primitive(Primitive::U8);
+    let inputs = [(second, &byte), (first, &replacement)];
+    let instantiate = |root: &Term, inputs: &[(DeclarationParameter, &Term)], mut fuel| {
+        instantiate_bindings_bounded(root, inputs.iter().copied(), &frame, &mut fuel)
+    };
+    let expected = nested(Term::Tuple(vec![
+        Term::NormalForm {
+            head: target(),
+            sort: Sort::Type,
+            arguments: vec![lifted.clone(), rigid(second)],
+        },
+        byte.clone(),
+        caller,
+        lifted,
+    ]));
+    assert!(matches!(
+        instantiate(&domain, &inputs, 4),
+        Err(Error::Budget)
+    ));
+    assert_eq!(instantiate(&domain, &inputs, 1000).unwrap(), expected);
+
+    // Even a constant output must validate every input the caller supplies.
+    let foreign = slot(1, Sort::Type);
+    assert!(matches!(
+        instantiate(&byte, &[(first, &foreign)], 1000),
+        Err(Error::Scope(_))
+    ));
+    assert!(matches!(
+        instantiate(&byte, &[(first, &Term::Bool(true))], 1000),
+        Err(Error::Scope(TypeError::WrongSort { .. }))
+    ));
+    assert!(matches!(instantiate(&byte, &[(first, &byte); 2], 1000),
+        Err(Error::Scope(TypeError::DuplicateDeclarationParameter(id))) if id == target()));
+}
+
+#[test]
 fn lexical_observation_reads_opaque_arguments_in_all_sorts_with_a_budget() {
     use nir::type_computations::rigid_declarations_bounded;
     let ty = DeclarationId {
