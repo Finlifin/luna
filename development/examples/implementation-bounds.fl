@@ -5,8 +5,11 @@ trait Read {
 }
 
 struct Leaf {}
+
 impl Read for Leaf {
-    fn read(self) -> Flag { true }
+    fn read(self) -> Flag {
+        true
+    }
 }
 
 struct Box where T {
@@ -14,11 +17,15 @@ struct Box where T {
 }
 
 impl Read for Box<T> where T :- Read {
-    fn read(self) -> Flag { self.value.read() }
+    fn read(self) -> Flag {
+        self.value.read()
+    }
 }
 
 impl Box<T> where T :- Read {
-    fn inspect(self) -> Flag { self.value.read() }
+    fn inspect(self) -> Flag {
+        self.value.read()
+    }
 }
 
 fn read(value: U) -> Flag where U :- Read {
@@ -26,5 +33,9 @@ fn read(value: U) -> Flag where U :- Read {
 }
 
 fn run() -> Flag {
-    read(Box<Box<Leaf>> { value: Box<Leaf> { value: Leaf {} } })
+    read(
+        Box<Box<Leaf>> {
+            value: Box<Leaf> { value: Leaf {} },
+        },
+    )
 }

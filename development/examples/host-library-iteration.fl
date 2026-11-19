@@ -3,21 +3,31 @@
     and the consumer's handler expands together with the producer and adapters.
     This collector needs no allocator and defines its own result representation.
 -}
-use iteration.{Iterator, FromIterator};
+use iteration.{FromIterator, Iterator}
 
-struct Count {value: .u32'builtin}
+struct Count {
+    value: .u32'builtin,
+}
 
 impl FromIterator<bool> for Count {
     inline fn from_iter(iter: I) -> Self
-        where I :- Iterator, requires I.as(Iterator).Item == bool {
-        iter.as(Iterator).fold(Count {value: 0}, |count, value| {
-            var next = count;
-            if value {
-                assumes next.value < 4294967295;
-                next.value = next.value + 1;
-            }
-            next
-        })
+    where
+        I :- Iterator,
+        requires I.as(Iterator).Item == bool,
+    {
+        iter
+            .as(Iterator)
+            .fold(
+                Count { value: 0 },
+                |count, value| {
+                    var next = count;
+                    if value {
+                        assumes next.value < 4294967295;
+                        next.value = next.value + 1;
+                    }
+                    next
+                },
+            )
     }
 }
 
@@ -27,14 +37,30 @@ fn run() -> bool {
     let missing: ?bool = null;
     let first: ?bool = false;
     let second: ?bool = true;
-    let result: Count = missing.as(Iterator).chain(first).as(Iterator)
-        .chain(second).as(Iterator).inspect(|value| {
-            assumes observed.* == if value.* {1} else {0};
-            observed.* = observed.* + 1;
-        }).as(Iterator).filter_map<bool>(|value| {
-            if not value {return true;}
-            null
-        }).as(Iterator).collect();
+    let result: Count =
+        missing
+            .as(Iterator)
+            .chain(first)
+            .as(Iterator)
+            .chain(second)
+            .as(Iterator)
+            .inspect(
+                |value| {
+                    assumes observed.* == if value.* { 1 } else { 0 }
+                    observed.* = observed.* + 1;
+                },
+            )
+            .as(Iterator)
+            .filter_map<bool>(
+                |value| {
+                    if not value {
+                        return true;
+                    }
+                    null
+                },
+            )
+            .as(Iterator)
+            .collect();
     inspected == 2 and result.value == 1
 }
 
@@ -46,26 +72,42 @@ test collected {
 test searched {
     let first: ?bool = false;
     let second: ?bool = true;
-    let found = first.as(Iterator).chain(second).as(Iterator).find(|value| value.*);
+    let found =
+        first
+            .as(Iterator)
+            .chain(second)
+            .as(Iterator)
+            .find(|value| value.*);
     let matched = found match {
         value? => value,
         null => false,
-    };
+    }
     assumes matched;
 
     let first: ?bool = false;
     let second: ?bool = true;
-    let mapped = first.as(Iterator).chain(second).as(Iterator).find_map<?bool>(|value| {
-        if value {
-            let inner: ?bool = null;
-            return inner;
-        }
-        null
-    });
+    let mapped =
+        first
+            .as(Iterator)
+            .chain(second)
+            .as(Iterator)
+            .find_map<?bool>(
+                |value| {
+                    if value {
+                        let inner: ?bool = null;
+                        return inner;
+                    }
+                    null
+                },
+            );
     let present_null = mapped match {
-        inner? => inner match {_? => false, null => true},
+        inner? =>
+            inner match {
+                _? => false,
+                null => true,
+            },
         null => false,
-    };
+    }
     assumes present_null;
 }
 
@@ -74,13 +116,23 @@ test flattened {
     let observed = seen.ref;
     let first: ?bool = false;
     let second: ?bool = true;
-    first.as(Iterator).chain(second).as(Iterator).flat_map(|value| {
-        let inner: ?bool = if value {true} else {null};
-        inner
-    }).as(Iterator).foreach(|value| {
-        assumes not observed.*;
-        observed.* = value;
-    });
+    first
+        .as(Iterator)
+        .chain(second)
+        .as(Iterator)
+        .flat_map(
+            |value| {
+                let inner: ?bool = if value { true } else { null }
+                inner
+            },
+        )
+        .as(Iterator)
+        .foreach(
+            |value| {
+                assumes not observed.*;
+                observed.* = value;
+            },
+        );
     assumes seen;
 }
 
@@ -89,11 +141,18 @@ test limited_prefix {
     let observed = seen.ref;
     let first: ?bool = false;
     let tail: ?bool = true;
-    first.as(Iterator).take_while(|value| value.*).as(Iterator)
-        .chain(tail).as(Iterator).foreach(|value| {
-            assumes not observed.*;
-            observed.* = value;
-        });
+    first
+        .as(Iterator)
+        .take_while(|value| value.*)
+        .as(Iterator)
+        .chain(tail)
+        .as(Iterator)
+        .foreach(
+            |value| {
+                assumes not observed.*;
+                observed.* = value;
+            },
+        );
     assumes seen;
 }
 
@@ -105,15 +164,26 @@ test skipped_prefix {
     let first: ?bool = true;
     let second: ?bool = false;
     let third: ?bool = true;
-    first.as(Iterator).chain(second).as(Iterator).chain(third).as(Iterator)
-        .skip_while(|value| {
-            assumes counter.* == if value.* { 0 } else { 1 };
-            counter.* = counter.* + 1;
-            value.*
-        }).as(Iterator).foreach(|value| {
-            assumes output.* == if value { 1 } else { 0 };
-            output.* = output.* + 1;
-        });
+    first
+        .as(Iterator)
+        .chain(second)
+        .as(Iterator)
+        .chain(third)
+        .as(Iterator)
+        .skip_while(
+            |value| {
+                assumes counter.* == if value.* { 0 } else { 1 }
+                counter.* = counter.* + 1;
+                value.*
+            },
+        )
+        .as(Iterator)
+        .foreach(
+            |value| {
+                assumes output.* == if value { 1 } else { 0 }
+                output.* = output.* + 1;
+            },
+        );
     assumes calls == 2 and outputs == 2;
 }
 
@@ -123,11 +193,24 @@ test counted_prefix {
     let first: ?bool = false;
     let second: ?bool = true;
     let third: ?bool = false;
-    let accepted = first.as(Iterator).chain(second).as(Iterator).chain(third)
-        .as(Iterator).inspect(|value| {
-            assumes counter.* < 2;
-            counter.* = counter.* + 1;
-        }).as(Iterator).skip(1).as(Iterator).take(1)
-        .as(Iterator).all(|value| value.*);
+    let accepted =
+        first
+            .as(Iterator)
+            .chain(second)
+            .as(Iterator)
+            .chain(third)
+            .as(Iterator)
+            .inspect(
+                |value| {
+                    assumes counter.* < 2;
+                    counter.* = counter.* + 1;
+                },
+            )
+            .as(Iterator)
+            .skip(1)
+            .as(Iterator)
+            .take(1)
+            .as(Iterator)
+            .all(|value| value.*);
     assumes accepted and calls == 2;
 }

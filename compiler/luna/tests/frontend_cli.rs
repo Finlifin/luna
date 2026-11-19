@@ -7001,8 +7001,8 @@ fn repository_language_suite_runs_as_checked_source_tests() {
     sandbox.write(
         "main.fl",
         &include_str!("../../../tests/language/main.fl").replace(
-            "template_boolean_result use typed_case { true }",
-            "template_boolean_result use typed_case { 'x' }",
+            "template_boolean_result use typed_case {\n    true\n}",
+            "template_boolean_result use typed_case {\n    'x'\n}",
         ),
     );
     let output = sandbox.run(&["main.fl", "--test", "--test-filter", "generic"]);

@@ -1,12 +1,21 @@
 trait Duplicate {}
-trait Retire { fn drop(*self); }
 
-struct Ticket { ready: bool }
+trait Retire {
+    fn drop(*self);
+}
+
+struct Ticket {
+    ready: bool,
+}
+
 impl Retire for Ticket {
-    fn drop(*self) { assumes self.ready.*; }
+    fn drop(*self) {
+        assumes self.ready.*;
+    }
 }
 
 inline effect inspect(ticket: Ticket) -> bool;
+
 inline fn inspect_ticket(ticket: Ticket) -> #inspect bool {
     inspect(ticket)#
 }
@@ -18,6 +27,6 @@ fn entry() -> bool {
             observed = ticket.ready;
             resume observed;
         },
-    };
+    }
     result and observed
 }

@@ -1,5 +1,5 @@
 use bindings;
-use builtin.{Symbol, Type};
+use builtin.{Symbol, Type}
 
 {-
     Each Build publishes a fresh nominal identity with the exact supplied
@@ -13,7 +13,10 @@ pub struct NewtypeBuilder {
 
 impl NewtypeBuilder {
     pub comptime fn new(representation: Type, .name: Symbol = .Generated) -> Self {
-        Self { name: name, representation: representation }
+        Self {
+            name: name,
+            representation: representation,
+        }
     }
 
     {- Copy the applied representation only; Build still creates a fresh identity.

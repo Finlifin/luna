@@ -10768,8 +10768,8 @@ fn contextual_type_clauses_update_multiple_inputs_in_source_order() {
 fn contextual_type_clauses_check_unused_effects_without_executing_them() {
     let base = include_str!("../../../development/repros/contextual-property-live-type-clause.fl");
     let source = base.replace(
-        "flag = not flag; Options",
-        "flag = not flag; assumes false; Options",
+        "flag = not flag;\n            Options",
+        "flag = not flag;\n            assumes false;\n            Options",
     );
     let unused = source.replace("const value = forward('(true));", "const value = true;");
     assert_eq!(run(&unused, "run", vec![]), Value::Bool(true));

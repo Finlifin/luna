@@ -18,7 +18,9 @@ fn is_ready(message: Message) -> bool {
     }
 }
 
-fn relay(message: Message) -> Message { message }
+fn relay(message: Message) -> Message {
+    message
+}
 
 test generated_symbol_enum_values {
     let ready = is_ready(relay(Message.net.ready));
@@ -30,12 +32,19 @@ test generated_symbol_enum_values {
 comptime fn inspect() -> bool {
     let paths = meta.enum_variant_paths(Message);
     let shapes = meta.enum_variant_shapes(Message);
-    paths.length() == 3 and paths[0][0] == .net and paths[0][1] == .ready
-        and paths[2][0] == .closed and shapes[0] == .unit
+    paths.length() == 3
+        and paths[0][0] == .net
+        and paths[0][1] == .ready
+        and paths[2][0] == .closed
+        and shapes[0] == .unit
 }
 
 test generated_symbol_enum_reflection {
-    inline if inspect() { assumes true; } else { assumes false; };
+    inline if inspect() {
+        assumes true;
+    } else {
+        assumes false;
+    }
 }
 
 {- Rebuild a fresh nominal identity with the explicitly reflected wire codes. -}
@@ -50,12 +59,21 @@ comptime fn inspect_mirror() -> bool {
     let original = Message.enum_symbol_values();
     let copied = Mirror.enum_symbol_values();
     original.length() == copied.length()
-        and copied[0] == .wire_ready and copied[1] == .wire_waiting
-        and copied[2] == .wire_closed and Message != Mirror
+        and copied[0] == .wire_ready
+        and copied[1] == .wire_waiting
+        and copied[2] == .wire_closed
+        and Message != Mirror
 }
 
 test reflected_symbol_encoding_rebuild {
     let ready = Mirror.net.ready;
-    let matched = ready match { .net.ready => true, _ => false };
-    inline if inspect_mirror() { assumes matched; } else { assumes false; };
+    let matched = ready match {
+        .net.ready => true,
+        _ => false,
+    }
+    inline if inspect_mirror() {
+        assumes matched;
+    } else {
+        assumes false;
+    }
 }

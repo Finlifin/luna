@@ -1,13 +1,16 @@
-use std.os.{linux, unix};
 use builtin.fmt.ByteWriter;
-use io_impl.errors.{Error, check};
+use io_impl.errors.{Error, check}
+use std.os.{linux, unix}
 
 {- File owns one descriptor. Drop closes it once; close reports errors and
    retires ownership even on failure. Borrowed operations cannot export a
    descriptor or a writer which outlives this owner. -}
 const create_flags: i32 = linux.write_only + linux.create + linux.truncate + linux.close_on_exec;
 
-pub struct File { descriptor: i32 }
+pub struct File {
+    descriptor: i32,
+}
+
 impl Drop for File {
     fn drop(*self) {
         if self.descriptor.* >= 0 {
@@ -16,28 +19,45 @@ impl Drop for File {
         }
     }
 }
+
 impl File {
     pub fn open() -> !Error Self where path: str {
         let result = check(linux.open<path>(linux.close_on_exec, 0))!;
-        File { descriptor: result'bitvec[0..32].as(i32) }
+        File {
+            descriptor: result'bitvec[0..32].as(i32),
+        }
     }
+
     pub fn create() -> !Error Self where path: str {
         let result = check(linux.open<path>(create_flags, 438))!;
-        File { descriptor: result'bitvec[0..32].as(i32) }
+        File {
+            descriptor: result'bitvec[0..32].as(i32),
+        }
     }
+
     pub fn write_all(*self) -> !Error void where text: str {
         io_impl.writer.write_all<text>(self.descriptor.*)
     }
-    pub fn read_byte(*self) -> !Error ?u8 { unix.read_byte(self.descriptor.*) }
+
+    pub fn read_byte(*self) -> !Error ?u8 {
+        unix.read_byte(self.descriptor.*)
+    }
+
     pub fn close(*self) -> !Error void {
         let fd = self.descriptor.*;
         self.descriptor.* = -1;
         unix.close(fd)
     }
 }
-pub fn remove_file(comptime path: str) -> !Error void { let result = check(linux.unlink<path>())!; }
+
+pub fn remove_file(comptime path: str) -> !Error void {
+    let result = check(linux.unlink<path>())!;
+}
 
 impl ByteWriter for File {
     assoc Error: Type = io_impl.errors.Error;
-    fn write_byte(*self, byte: u8) -> !Error void { unix.write_byte(self.descriptor.*, byte) }
+
+    fn write_byte(*self, byte: u8) -> !Error void {
+        unix.write_byte(self.descriptor.*, byte)
+    }
 }

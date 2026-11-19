@@ -1,22 +1,29 @@
 {- Snapshot the source at quote construction, but execute conversion at runtime.
    Expected: convert;(bool true), preserving byte 1 after the later assignment. -}
-struct Seed { byte: u8 }
+struct Seed {
+    byte: u8,
+}
+
 impl Splice for Seed {
     assoc RuntimeTarget: Type = Seed;
+
     fn splice(comptime data: Seed) -> Seed {
         let emitted = std.fmt.print("convert;") match {
-            _! => true, error _ => false,
-        };
+            _! => true,
+            error _ => false,
+        }
         assumes emitted;
         Seed { byte: data.byte }
     }
 }
-pure comptime fn quoted() -> <|- Seed> {
-    var data: Seed = Seed { byte: 1 };
+
+pure comptime fn quoted() -> < |- Seed > {
+    var data: Seed = Seed { byte: 1 }
     let earlier = '(data);
-    data = Seed { byte: 2 };
+    data = Seed { byte: 2 }
     earlier
 }
+
 fn run() -> bool {
     let generated: Seed = ~<quoted()>;
     generated.byte == 1

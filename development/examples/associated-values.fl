@@ -18,6 +18,5 @@ fn query(value: T) -> bool where T :- Flag {
 }
 
 fn entry() -> bool {
-    not query(true) and query('x')
-        and not true.as(Flag).flag() and 'x'.as(Flag).flag()
+    not query(true) and query('x') and not true.as(Flag).flag() and 'x'.as(Flag).flag()
 }

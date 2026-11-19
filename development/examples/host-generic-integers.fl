@@ -1,9 +1,16 @@
 -- python3 -B development/host_examples.py generic-integers --compare-optimization
 -- The same runtime algorithms are checked for every allowed integer width.
 pure fn gcd(left: T, right: T) -> T
-where T, requires T == .u8'builtin or T == .u16'builtin
-    or T == .u32'builtin or T == .u64'builtin or T == .u128'builtin
-    or T == .usize'builtin {
+where
+    T,
+    requires
+        T == .u8'builtin
+            or T == .u16'builtin
+            or T == .u32'builtin
+            or T == .u64'builtin
+            or T == .u128'builtin
+            or T == .usize'builtin,
+{
     var a = left;
     var b = right;
     while b != 0 {
@@ -15,20 +22,38 @@ where T, requires T == .u8'builtin or T == .u16'builtin
 }
 
 pure fn distance(left: T, right: T) -> T
-where T, requires T == .u8'builtin or T == .u16'builtin
-    or T == .u32'builtin or T == .u64'builtin or T == .u128'builtin
-    or T == .usize'builtin {
-    if left >= right { left - right } else { right - left }
+where
+    T,
+    requires
+        T == .u8'builtin
+            or T == .u16'builtin
+            or T == .u32'builtin
+            or T == .u64'builtin
+            or T == .u128'builtin
+            or T == .usize'builtin,
+{
+    if left >= right {
+        left - right
+    } else {
+        right - left
+    }
 }
 
 -- A portable bound excludes the minimum signed value at every allowed width.
 -- The library's Neg protocol is bound, but these remain native scalar operations.
 pure fn negate(value: T) -> result: T
-where T, requires T == .i8'builtin or T == .i16'builtin
-    or T == .i32'builtin or T == .i64'builtin or T == .i128'builtin
-    or T == .isize'builtin,
+where
+    T,
+    requires
+        T == .i8'builtin
+            or T == .i16'builtin
+            or T == .i32'builtin
+            or T == .i64'builtin
+            or T == .i128'builtin
+            or T == .isize'builtin,
     requires value >= -127,
-    ensures result == -value'old {
+    ensures result == -value'old,
+{
     -value
 }
 

@@ -4393,13 +4393,16 @@ fn required_default_projection_preserves_cycles_and_final_body_checks() {
     let source = include_str!("../../../development/examples/overridden-comptime-default.fl");
     rejected(
         &source.replace(
-            "impl Shape for Selector { comptime fn Output(self) -> Type { bool } }",
+            "impl Shape for Selector {\n    comptime fn Output(self) -> Type {\n        bool\n    }\n}",
             "impl Shape for Selector {}",
         ),
         "cyclic type alias",
     );
     rejected(
-        &source.replace("-> Type { Chosen }", "-> Type { false }"),
+        &source.replace(
+            "-> Type {\n        Chosen\n    }",
+            "-> Type {\n        false\n    }",
+        ),
         "type mismatch",
     );
 }

@@ -518,7 +518,7 @@ fn dependent_method_defaults_require_unambiguous_trait_evidence() {
     let source =
         include_str!("../../../development/repros/staged-type-input-constrained-default.fl");
     let missing = source.replace(
-        "impl Selector for char { fn select(comptime value: bool) -> bool { false } }",
+        "impl Selector for char {\n    fn select(comptime value: bool) -> bool {\n        false\n    }\n}",
         "",
     );
     let failure = support::compile_with_protocols(&missing, &Default::default()).unwrap_err();

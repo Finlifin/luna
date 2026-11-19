@@ -2,104 +2,168 @@
 -- The mixed constant/range-contract chain still exhausts analysis budgets.
 -- Bind ctpop=input.Ops.ctpop; no change to the proof obligation is intended.
 typealias U = .u16'builtin;
-^intrinsic_enum enum Ops { ctpop }
 
-fn constant0() -> result: U where ensures result == 0 {
+^intrinsic_enum
+enum Ops {
+    ctpop,
+}
+
+fn constant0() -> result: U
+where
+    ensures result == 0,
+{
     let value: U = 0;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant1() -> result: U where ensures result == 1 {
+fn constant1() -> result: U
+where
+    ensures result == 1,
+{
     let value: U = 1;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant2() -> result: U where ensures result == 1 {
+fn constant2() -> result: U
+where
+    ensures result == 1,
+{
     let value: U = 2;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant3() -> result: U where ensures result == 2 {
+fn constant3() -> result: U
+where
+    ensures result == 2,
+{
     let value: U = 3;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant4() -> result: U where ensures result == 1 {
+fn constant4() -> result: U
+where
+    ensures result == 1,
+{
     let value: U = 4;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant5() -> result: U where ensures result == 2 {
+fn constant5() -> result: U
+where
+    ensures result == 2,
+{
     let value: U = 5;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant6() -> result: U where ensures result == 2 {
+fn constant6() -> result: U
+where
+    ensures result == 2,
+{
     let value: U = 6;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant7() -> result: U where ensures result == 3 {
+fn constant7() -> result: U
+where
+    ensures result == 3,
+{
     let value: U = 7;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant8() -> result: U where ensures result == 1 {
+fn constant8() -> result: U
+where
+    ensures result == 1,
+{
     let value: U = 8;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant9() -> result: U where ensures result == 2 {
+fn constant9() -> result: U
+where
+    ensures result == 2,
+{
     let value: U = 9;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant10() -> result: U where ensures result == 2 {
+fn constant10() -> result: U
+where
+    ensures result == 2,
+{
     let value: U = 10;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant11() -> result: U where ensures result == 3 {
+fn constant11() -> result: U
+where
+    ensures result == 3,
+{
     let value: U = 11;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant12() -> result: U where ensures result == 2 {
+fn constant12() -> result: U
+where
+    ensures result == 2,
+{
     let value: U = 12;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant13() -> result: U where ensures result == 3 {
+fn constant13() -> result: U
+where
+    ensures result == 3,
+{
     let value: U = 13;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant14() -> result: U where ensures result == 3 {
+fn constant14() -> result: U
+where
+    ensures result == 3,
+{
     let value: U = 14;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant15() -> result: U where ensures result == 4 {
+fn constant15() -> result: U
+where
+    ensures result == 4,
+{
     let value: U = 15;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant16() -> result: U where ensures result == 1 {
+fn constant16() -> result: U
+where
+    ensures result == 1,
+{
     let value: U = 16;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant17() -> result: U where ensures result == 2 {
+fn constant17() -> result: U
+where
+    ensures result == 2,
+{
     let value: U = 17;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant18() -> result: U where ensures result == 2 {
+fn constant18() -> result: U
+where
+    ensures result == 2,
+{
     let value: U = 18;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }
 
-fn constant19() -> result: U where ensures result == 3 {
+fn constant19() -> result: U
+where
+    ensures result == 3,
+{
     let value: U = 19;
     unsafe { Ops.ctpop'intrinsic(value).as(U) }
 }

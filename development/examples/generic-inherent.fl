@@ -6,13 +6,23 @@ struct Box where T {
 }
 
 impl Box<T> where T {
-    fn make(value: T) -> Self { Box<T> { value: value } }
-    fn get(self) -> T { self.value }
-    fn describe(self) -> Flag { false }
+    fn make(value: T) -> Self {
+        Box<T> { value: value }
+    }
+
+    fn get(self) -> T {
+        self.value
+    }
+
+    fn describe(self) -> Flag {
+        false
+    }
 }
 
 impl Box<Flag> {
-    fn describe(self) -> Flag { self.value }
+    fn describe(self) -> Flag {
+        self.value
+    }
 }
 
 fn roundtrip(value: U) -> U where U {

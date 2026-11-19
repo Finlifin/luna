@@ -1,5 +1,4 @@
 -- Explicit conversion protocols, independent of formatting and allocation.
-
 pub trait Into where Target {
     fn into(self) -> Target;
 }

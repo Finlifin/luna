@@ -1,4 +1,4 @@
-use builtin.{str, u64, u8, bool};
+use builtin.{bool, str, u64, u8}
 use text_impl.bindings;
 
 {-
@@ -26,14 +26,18 @@ comptime impl ComptimeTextBytes for str {
 
     pure comptime fn starts_with(self, prefix: str) -> bool {
         let length = bindings.byte_length(prefix);
-        if length > bindings.byte_length(self) { return false; };
+        if length > bindings.byte_length(self) {
+            return false;
+        }
         self.matches_bytes_at(prefix, 0, length)
     }
 
     pure comptime fn ends_with(self, suffix: str) -> bool {
         let length = bindings.byte_length(self);
         let suffix_length = bindings.byte_length(suffix);
-        if suffix_length > length { return false; };
+        if suffix_length > length {
+            return false;
+        }
         self.matches_bytes_at(suffix, length - suffix_length, suffix_length)
     }
 
@@ -45,15 +49,25 @@ comptime impl ComptimeTextBytes for str {
     pure comptime fn find(self, needle: str) -> ?u64 {
         let length = bindings.byte_length(self);
         let needle_length = bindings.byte_length(needle);
-        if needle_length == 0 { return 0; };
-        if needle_length > length { return null; };
+        if needle_length == 0 {
+            return 0;
+        }
+        if needle_length > length {
+            return null;
+        }
         let last = length - needle_length;
         var start: u64 = 0;
         while start < last {
-            if self.matches_bytes_at(needle, start, needle_length) { return start; };
+            if self.matches_bytes_at(needle, start, needle_length) {
+                return start;
+            }
             start = start + 1;
-        };
-        if self.matches_bytes_at(needle, last, needle_length) { last } else { null }
+        }
+        if self.matches_bytes_at(needle, last, needle_length) {
+            last
+        } else {
+            null
+        }
     }
 
     pure comptime fn contains(self, needle: str) -> bool {
@@ -77,14 +91,16 @@ impl str {
             let actual = bindings.byte(self, start + index) match {
                 value? => value,
                 null => return false,
-            };
+            }
             let expected = bindings.byte(pattern, index) match {
                 value? => value,
                 null => return false,
-            };
-            if actual != expected { return false; };
+            }
+            if actual != expected {
+                return false;
+            }
             index = index + 1;
-        };
+        }
         true
     }
 }

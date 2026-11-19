@@ -1,18 +1,30 @@
 -- luna host-default-closure.fl --build run --copy-protocol Duplicate --drop-protocol Retire --output /tmp/flurry-default-closure
 trait Duplicate {}
-trait Retire { fn drop(*self); }
-impl Duplicate for bool {}
 
-struct Watch { target: *bool }
-impl Retire for Watch {
-    fn drop(*self) { self.target.*.* = not self.target.*.*; }
+trait Retire {
+    fn drop(*self);
 }
 
-typealias Action = %{target: *bool} fn() -> .void'builtin;
+impl Duplicate for bool {}
 
-fn invoke(target: *bool, .action: Action = || {
-    let watch = Watch {target: target};
-}) {
+struct Watch {
+    target: *bool,
+}
+
+impl Retire for Watch {
+    fn drop(*self) {
+        self.target.*.* = not self.target.*.*;
+    }
+}
+
+typealias Action = %{ target: *bool } fn() -> .void'builtin;
+
+fn invoke(
+    target: *bool,
+    .action: Action = || {
+        let watch = Watch { target: target }
+    },
+) {
     action();
 }
 
@@ -20,6 +32,7 @@ fn run() -> bool {
     let first = false;
     let second = false;
     let call = |target: *bool| invoke(target);
+
     -- Each default environment captures the argument from its own call.
     call(first.ref);
     call(second.ref);

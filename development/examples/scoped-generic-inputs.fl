@@ -1,6 +1,12 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 typealias Type = .Type'builtin;
 typealias Char = 'x''type;
 
@@ -17,7 +23,9 @@ fn repeat(comptime T: Type, value: T) -> Tuple<T, T> {
 trait Mapper {
     fn pair(self, comptime T: Type, value: T, other: G) -> Tuple<T, G> where G;
 }
+
 struct Host {}
+
 impl Mapper for Host {
     fn pair(self, comptime T: Type, value: T, other: G) -> Tuple<T, G> where G {
         (value, other)
@@ -57,20 +65,23 @@ fn apply(action: fn(G) -> G, value: G) -> G where G {
 fn forwarded_callback(comptime A: Type, value: A) -> A {
     let action: fn(A) -> A = identity;
     let higher: fn(fn(A) -> A) -> (fn(A) -> A) = identity;
+
     -- The later value also supplies the context for an uninstantiated callback.
     higher(action)(apply(identity, value))
 }
 
 fn callbacks() -> Tuple<bool, Char> {
-    (forwarded_callback(bool, true), forwarded_callback(Char, 'x'))
+    (
+        forwarded_callback(bool, true),
+        forwarded_callback(Char, 'x'),
+    )
 }
 
 comptime fn Choose(T: Type) -> Type {
     if T == bool { bool } else { Char }
 }
 
-fn configured(value: G, tag: H, result: K) -> K
-where G, H, .K: Type = Tuple<G, Choose(H)> {
+fn configured(value: G, tag: H, result: K) -> K where G, H, .K: Type = Tuple<G, Choose(H)> {
     result
 }
 

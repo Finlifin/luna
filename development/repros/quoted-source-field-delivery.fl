@@ -1,19 +1,31 @@
 {- Project the source field before converting the projected value.
    Packet itself needs no runtime representation here.
    Expected: convert;(bool true). -}
-struct Seed { byte: u8 }
+struct Seed {
+    byte: u8,
+}
+
 impl Splice for Seed {
     assoc RuntimeTarget: Type = u8;
+
     fn splice(comptime data: Seed) -> u8 {
         let emitted = std.fmt.print("convert;") match {
-            _! => true, error _ => false,
-        };
+            _! => true,
+            error _ => false,
+        }
         assumes emitted;
         data.byte
     }
 }
-struct Packet { item: Seed }
-pure comptime fn quoted(data: Packet) -> <|- u8> { '(data.item) }
+
+struct Packet {
+    item: Seed,
+}
+
+pure comptime fn quoted(data: Packet) -> < |- u8 > {
+    '(data.item)
+}
+
 fn run() -> bool {
     let generated: u8 = ~<quoted(Packet { item: Seed { byte: 42 } })>;
     generated == 42

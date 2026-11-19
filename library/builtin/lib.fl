@@ -3,22 +3,40 @@
   Public root re-exports also supply names to builtin's own child modules.
   The prelude supplies default imports to other packages.
 -}
+use numeric.{comparison, math_intrinsics}
+use protocols.formatting.{display, writer}
+use protocols.{conversion, iterator, native_resources, ops, patterns, resources, traits}
+use types.{equality, hashing, option, result, tuple}
 
-use protocols.{resources, native_resources, conversion, patterns, ops, iterator, traits};
-use protocols.formatting.{display, writer};
-use types.{tuple, option, result, equality, hashing};
-use numeric.{comparison, math_intrinsics};
-
+pub use iterator.{
+    ChainIterator,
+    FilterIterator,
+    FilterMapIterator,
+    FlatMapIterator,
+    FlattenIterator,
+    FromIterator,
+    InspectIterator,
+    IntersperseWithIterator,
+    IntoIterator,
+    Iterator,
+    MapIterator,
+    MapWhileIterator,
+    ScanIterator,
+    SkipIterator,
+    SkipWhileIterator,
+    TakeIterator,
+    TakeWhileIterator,
+    emit_item,
+}
+pub use ops.*;
+pub use option.OptionalOps;
+pub use patterns.ListPatternView;
 pub use primitives.*;
 pub use protocols.staging.Splice;
-pub use tuple.Tuple;
-pub use option.OptionalOps;
-pub use text_impl.bytes.TextBytes;
 pub use result.ErrorResultOps;
+pub use text_impl.bytes.TextBytes;
 pub use traits.*;
-pub use patterns.ListPatternView;
-pub use iterator.{Iterator, IntoIterator, FromIterator, emit_item, MapIterator, MapWhileIterator, ScanIterator, FilterIterator, FilterMapIterator, FlatMapIterator, FlattenIterator, TakeWhileIterator, SkipWhileIterator, TakeIterator, SkipIterator, ChainIterator, InspectIterator, IntersperseWithIterator};
-pub use ops.*;
+pub use tuple.Tuple;
 
 {- Shared operation identities for the other builtin packages; not a prelude. -}
 pub mod compiler {
@@ -35,21 +53,21 @@ pub mod text {
 }
 
 pub mod math {
-    pub use comparison.{Eq, Ord, Order};
+    pub use comparison.{Eq, Ord, Order}
     pub use math_intrinsics.*;
 }
 
 pub mod prelude {
-    pub use display.Display;
-    pub use protocols.staging.Splice;
     pub use .math;
-    pub use primitives.*;
-    pub use tuple.Tuple;
-    pub use option.OptionalOps;
-    pub use text_impl.bytes.TextBytes;
-    pub use result.ErrorResultOps;
-    pub use traits.*;
-    pub use patterns.ListPatternView;
-    pub use iterator.{Iterator, IntoIterator, FromIterator};
+    pub use display.Display;
+    pub use iterator.{FromIterator, IntoIterator, Iterator}
     pub use ops.*;
+    pub use option.OptionalOps;
+    pub use patterns.ListPatternView;
+    pub use primitives.*;
+    pub use protocols.staging.Splice;
+    pub use result.ErrorResultOps;
+    pub use text_impl.bytes.TextBytes;
+    pub use traits.*;
+    pub use tuple.Tuple;
 }

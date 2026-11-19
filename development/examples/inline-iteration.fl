@@ -23,7 +23,9 @@ inline fn mapped() -> #emit<Number> Unit {
 inline fn filtered() -> #emit<Number> Unit {
     mapped()# {
         emit<Number>(value) => {
-            if value > 2 { emit<Number>(value)#; }
+            if value > 2 {
+                emit<Number>(value)#;
+            }
         },
     };
 }
@@ -36,6 +38,6 @@ fn entry() -> Number {
             assumes sum <= 251;
             sum = sum + value;
         },
-    };
+    }
     sum
 }

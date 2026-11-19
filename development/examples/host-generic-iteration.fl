@@ -2,7 +2,10 @@
 -- A bounded Newton iteration, exercising generic defaults and compound writes.
 -- sqrt from the math library remains the target intrinsic wrapper.
 pure fn newton(value: T, .estimate: T = 1.0) -> T
-where T, requires T == .f32'builtin or T == .f64'builtin {
+where
+    T,
+    requires T == .f32'builtin or T == .f64'builtin,
+{
     var current = estimate;
     var steps: .u8'builtin = 0;
     while steps < 12 {
@@ -14,7 +17,10 @@ where T, requires T == .f32'builtin or T == .f64'builtin {
 }
 
 pure fn close(value: T, expected: T) -> bool
-where T, requires T == .f32'builtin or T == .f64'builtin {
+where
+    T,
+    requires T == .f32'builtin or T == .f64'builtin,
+{
     let difference = value - expected;
     difference > -0.00001 and difference < 0.00001
 }

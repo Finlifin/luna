@@ -1,19 +1,25 @@
-use primitives.{u8, u64, u128};
+use primitives.{u128, u64, u8}
 use traits.Hash;
 
 {- Qualified values use the same branch and payload encoding as meta. -}
-impl Hash for ?T where T:- Hash {
-    fn hash(self) -> u64 = self match {
-        value? => mix_digest(mix_byte(14695981039346656037, 1), value.as(Hash).hash()),
-        null => mix_byte(14695981039346656037, 0),
-    };
+impl Hash for ?T where T :- Hash {
+    fn hash(self) -> u64 =
+        self match {
+            value? => mix_digest(mix_byte(14695981039346656037, 1), value.as(Hash).hash()),
+            null => mix_byte(14695981039346656037, 0),
+        }
 }
 
-impl Hash for !E T where T:- Hash, E:- Hash {
-    fn hash(self) -> u64 = self match {
-        value! => mix_digest(mix_byte(14695981039346656037, 0), value.as(Hash).hash()),
-        error failure => mix_digest(mix_byte(14695981039346656037, 1), failure.as(Hash).hash()),
-    };
+impl Hash for !E T
+where
+    T :- Hash,
+    E :- Hash,
+{
+    fn hash(self) -> u64 =
+        self match {
+            value! => mix_digest(mix_byte(14695981039346656037, 0), value.as(Hash).hash()),
+            error failure => mix_digest(mix_byte(14695981039346656037, 1), failure.as(Hash).hash()),
+        }
 }
 
 {- FNV-1a mixing explicitly retains the low 64 product bits. -}

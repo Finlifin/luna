@@ -1,12 +1,33 @@
 {- Regression: required computations prepare associated-value selections
    after binding ordinary Type inputs in their frozen declaration world. -}
-typealias Type=.Type'builtin; typealias char=.char'builtin;
-trait Flag { assoc enabled:bool; }
-impl Flag for bool { assoc enabled:bool=true; }
-impl Flag for char { assoc enabled:bool=false; }
-comptime fn enabled(comptime T:Type)->bool
-where requires T :- Flag
-{ T.as(Flag).enabled }
-comptime fn run()->bool { enabled(bool) and not enabled(char) and enabled(bool) }
-const answer=run();
-comptime fn result()->bool { answer }
+typealias Type = .Type'builtin;
+typealias char = .char'builtin;
+
+trait Flag {
+    assoc enabled: bool;
+}
+
+impl Flag for bool {
+    assoc enabled: bool = true;
+}
+
+impl Flag for char {
+    assoc enabled: bool = false;
+}
+
+comptime fn enabled(comptime T: Type) -> bool
+where
+    requires T :- Flag,
+{
+    T.as(Flag).enabled
+}
+
+comptime fn run() -> bool {
+    enabled(bool) and not enabled(char) and enabled(bool)
+}
+
+const answer = run();
+
+comptime fn result() -> bool {
+    answer
+}

@@ -3,7 +3,9 @@
     Direct named supply and higher-order positional collection should preserve
     the selected normal-form head without invoking its body.
 -}
-pure comptime fn Bundle<...Items: meta.List<Type>> -> Type { bool }
+pure comptime fn Bundle<...Items: meta.List<Type>> -> Type {
+    bool
+}
 
 comptime fn Collect(factory: pure comptime fn<...Items: meta.List<Type>> -> Type) -> Type {
     factory<bool, u8>
@@ -21,8 +23,10 @@ const PRODUCT = Collect(Tuple);
 const FORWARDED_PRODUCT = Forward(Tuple);
 
 fn run() -> bool {
-    const same = DIRECT == COLLECTED and DIRECT == FORWARDED
-        and PRODUCT == Tuple<.Es = [bool, u8]>
-        and PRODUCT == FORWARDED_PRODUCT;
+    const same =
+        DIRECT == COLLECTED
+            and DIRECT == FORWARDED
+            and PRODUCT == Tuple<.Es = [bool, u8]>
+            and PRODUCT == FORWARDED_PRODUCT;
     same
 }

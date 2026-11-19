@@ -1,7 +1,13 @@
 {- Invoking a comptime callback consumes its callable identity as a callee.
    Expected: (bool true). -}
-pure comptime fn answer() -> u8 { 42 }
-pure comptime fn quoted(callback: comptime fn() -> u8) -> <|- u8> {
+pure comptime fn answer() -> u8 {
+    42
+}
+
+pure comptime fn quoted(callback: comptime fn() -> u8) -> < |- u8 > {
     '(callback())
 }
-fn run() -> bool { ~<quoted(answer)> == 42 }
+
+fn run() -> bool {
+    ~<quoted(answer)> == 42
+}

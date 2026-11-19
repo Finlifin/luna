@@ -1,6 +1,12 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 typealias Type = .Type'builtin;
 typealias Integer = .Integer'builtin;
 
@@ -8,7 +14,9 @@ pure comptime fn Shape<N: Integer, .storage: Integer = (N + 1)> -> Type {
     bool
 }
 
-pure comptime fn Indexed<N: Integer> -> Type { bool }
+pure comptime fn Indexed<N: Integer> -> Type {
+    bool
+}
 
 -- The normal-form head remains opaque; its body does not identify Shape<N>
 -- with bool. An ordinary comptime value can index it inside a signature.
@@ -34,7 +42,9 @@ fn run() -> Tuple<bool, bool> {
     (forward(4), forward(5))
 }
 
-pure comptime fn Tagged<T, value: T, .copy: T = value> -> Type { T }
+pure comptime fn Tagged<T, value: T, .copy: T = value> -> Type {
+    T
+}
 
 fn keep_tagged(comptime A: Type, comptime v: A, value: Tagged<A, v>) -> Tagged<A, v> {
     value

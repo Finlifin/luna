@@ -6,7 +6,21 @@
     admissible, without selecting f16 or bf16 during generic checking.
 -}
 trait Parent {}
+
 trait Child :- Parent {}
-impl Parent for T where T, requires T == f16 or T == bf16 {}
-impl Child for T where T, requires T == f16 or T == bf16 {}
-fn run() -> bool { true }
+
+impl Parent for T
+where
+    T,
+    requires T == f16 or T == bf16,
+{}
+
+impl Child for T
+where
+    T,
+    requires T == f16 or T == bf16,
+{}
+
+fn run() -> bool {
+    true
+}

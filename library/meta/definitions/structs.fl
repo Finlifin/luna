@@ -1,5 +1,5 @@
 use bindings;
-use builtin.{Integer, Symbol, Type};
+use builtin.{Integer, Symbol, Type}
 
 use List;
 use bindings.Object;
@@ -18,7 +18,11 @@ pub struct StructBuilder {
 
 impl StructBuilder {
     pub comptime fn new(.name: Symbol = .Generated) -> Self {
-        Self { name: name, field_names: [], field_types: [] }
+        Self {
+            name: name,
+            field_names: [],
+            field_types: [],
+        }
     }
 
     pub comptime fn from_type(subject: Type, .name: Symbol = .Generated) -> Self {
@@ -36,7 +40,11 @@ impl StructBuilder {
     -}
     pub comptime fn from_object(fields: Object, .name: Symbol = .Generated) -> ?Self {
         let draft = Self.new(.name = name);
-        if draft.add_fields_from_object(fields) { draft } else { null }
+        if draft.add_fields_from_object(fields) {
+            draft
+        } else {
+            null
+        }
     }
 
     pub comptime fn add_fields_from_object(self, fields: Object) -> bool {
@@ -47,17 +55,20 @@ impl StructBuilder {
     {- Parse the complete ordered description before editing either field list.
        Invalid descriptions or ranges preserve the draft and saved snapshots.
     -}
-    pub comptime fn insert_fields_from_object(self, index: Integer,
-        fields: Object) -> bool {
+    pub comptime fn insert_fields_from_object(self, index: Integer, fields: Object) -> bool {
         self.replace_fields_from_object(index, index, fields)
     }
 
-    pub comptime fn replace_fields_from_object(self, start: Integer, end: Integer,
-        fields: Object) -> bool {
+    pub comptime fn replace_fields_from_object(
+        self,
+        start: Integer,
+        end: Integer,
+        fields: Object,
+    ) -> bool {
         let description = FieldDescription.from_object(fields) match {
             value? => value,
             null => return false,
-        };
+        }
         self.replace_fields(start, end, description.names, description.types)
     }
 
@@ -76,9 +87,16 @@ impl StructBuilder {
         self.replace_fields(end, end, names, types)
     }
 
-    pub comptime fn replace_fields(self, start: Integer, end: Integer,
-        names: List<Symbol>, types: List<Type>) -> bool {
-        if names.length() != types.length() { return false; };
+    pub comptime fn replace_fields(
+        self,
+        start: Integer,
+        end: Integer,
+        names: List<Symbol>,
+        types: List<Type>,
+    ) -> bool {
+        if names.length() != types.length() {
+            return false;
+        }
         self.edit_fields(start, end, names, types)
     }
 
@@ -87,13 +105,11 @@ impl StructBuilder {
         unchanged. Names and Types are prepared together before either write;
         Build remains responsible for duplicate names and layout admission.
     -}
-    pub comptime fn insert_field(self, index: Integer,
-        name: Symbol, field_type: Type) -> bool {
+    pub comptime fn insert_field(self, index: Integer, name: Symbol, field_type: Type) -> bool {
         self.edit_fields(index, index, [name], [field_type])
     }
 
-    pub comptime fn replace_field(self, index: Integer,
-        name: Symbol, field_type: Type) -> bool {
+    pub comptime fn replace_field(self, index: Integer, name: Symbol, field_type: Type) -> bool {
         self.edit_fields(index, index + 1, [name], [field_type])
     }
 
@@ -101,16 +117,21 @@ impl StructBuilder {
         self.edit_fields(index, index + 1, [], [])
     }
 
-    comptime fn edit_fields(self, start: Integer, end: Integer,
-        names: List<Symbol>, types: List<Type>) -> bool {
+    comptime fn edit_fields(
+        self,
+        start: Integer,
+        end: Integer,
+        names: List<Symbol>,
+        types: List<Type>,
+    ) -> bool {
         let next_names = self.field_names.replace_range(start, end, names) match {
             value? => value,
             null => return false,
-        };
+        }
         let next_types = self.field_types.replace_range(start, end, types) match {
             value? => value,
             null => return false,
-        };
+        }
         self.field_names = next_names;
         self.field_types = next_types;
         true

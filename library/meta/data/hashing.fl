@@ -1,10 +1,35 @@
-use builtin.{Integer, bool, char, str, Symbol, u8, u16, u32, u64, u128,
-    i8, i16, i32, i64, i128, usize, isize};
-use text_impl.bindings.{byte_length as hash_str_byte_length, byte as hash_str_byte,
-    symbol_byte_length as hash_symbol_byte_length, symbol_byte as hash_symbol_byte};
-use numeric.bindings.{usize_representation as hash_usize_representation,
+use builtin.{
+    Integer,
+    Symbol,
+    bool,
+    char,
+    i128,
+    i16,
+    i32,
+    i64,
+    i8,
+    isize,
+    str,
+    u128,
+    u16,
+    u32,
+    u64,
+    u8,
+    usize,
+}
+use numeric.bindings.{
+    integer_byte,
+    integer_div_trunc,
+    integer_rem_trunc,
     isize_representation as hash_isize_representation,
-    integer_byte, integer_div_trunc, integer_rem_trunc};
+    usize_representation as hash_usize_representation,
+}
+use text_impl.bindings.{
+    byte as hash_str_byte,
+    byte_length as hash_str_byte_length,
+    symbol_byte as hash_symbol_byte,
+    symbol_byte_length as hash_symbol_byte_length,
+}
 
 {-
     The same representation/content hashes as builtin.Hash, with independent
@@ -103,7 +128,7 @@ comptime impl ComptimeHash for str {
             let byte = hash_str_byte(name, index) match {
                 value? => value,
                 null => return state,
-            };
+            }
             state = mix_byte(state, byte);
             index = index + 1;
         }
@@ -121,7 +146,7 @@ comptime impl ComptimeHash for Symbol {
             let byte = hash_symbol_byte(name, index) match {
                 value? => value,
                 null => return state,
-            };
+            }
             state = mix_byte(state, byte);
             index = index + 1;
         }
@@ -171,7 +196,7 @@ comptime impl ComptimeHash for Integer {
     -}
     comptime fn hash(self) -> u64 {
         let negative = self < 0;
-        var magnitude = if negative { -self } else { self };
+        var magnitude = if negative { -self } else { self }
         var state = mix_byte(14695981039346656037, if negative { 1 } else { 0 });
         while magnitude >= 256 {
             state = mix_byte(state, integer_byte(integer_rem_trunc(magnitude, 256)));

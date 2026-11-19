@@ -4,14 +4,21 @@
 -}
 typealias Factory = pure comptime fn<...Items: meta.List<Type>> -> Type;
 
-pure comptime fn First<...Left: meta.List<Type>> -> Type { bool }
-pure comptime fn Second<...Right: meta.List<Type>> -> Type { bool }
+pure comptime fn First<...Left: meta.List<Type>> -> Type {
+    bool
+}
+
+pure comptime fn Second<...Right: meta.List<Type>> -> Type {
+    bool
+}
 
 comptime fn select(flag: bool) -> Factory {
     if flag { First } else { Second }
 }
 
-comptime fn forward(factory: Factory) -> Factory { factory }
+comptime fn forward(factory: Factory) -> Factory {
+    factory
+}
 
 comptime fn Apply(factory: Factory, items: meta.List<Type>) -> Type {
     factory<.Items = items>

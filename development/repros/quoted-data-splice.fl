@@ -1,19 +1,28 @@
 {- Both data uses require runtime Splice construction. Expected output is
    convert;convert;(bool true), but the quoted data use currently skips Splice. -}
-struct Seed { byte: u8 }
+struct Seed {
+    byte: u8,
+}
+
 impl Splice for Seed {
     assoc RuntimeTarget: Type = Seed;
+
     fn splice(comptime data: Seed) -> Seed {
         let emitted = std.fmt.print("convert;") match {
             _! => true,
             error _ => false,
-        };
+        }
         assumes emitted;
         Seed { byte: data.byte }
     }
 }
-pure comptime fn quoted(data: Seed) -> < |- Seed > { '(data) }
-const CONFIG: Seed = Seed { byte: 42 };
+
+pure comptime fn quoted(data: Seed) -> < |- Seed > {
+    '(data)
+}
+
+const CONFIG: Seed = Seed { byte: 42 }
+
 fn run() -> bool {
     let direct: Seed = CONFIG;
     let generated: Seed = ~<quoted(Seed { byte: 42 })>;

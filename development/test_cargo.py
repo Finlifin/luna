@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import errno
+import os
 from pathlib import Path
 import tempfile
 import sys
@@ -69,6 +70,21 @@ class CargoCacheTests(unittest.TestCase):
         self.assertIn("--locked", args)
         with self.assertRaises(ValueError):
             cargo.cargo_arguments(["test", "--target-dir", "/source"], Path("/tmp/test-target"))
+
+    def test_cargo_arguments_allow_parallel_builds_and_runner_sets_default_jobs(self):
+        args = cargo.cargo_arguments(["test", "-p", "luna"], Path("/tmp/test-target"))
+        self.assertNotIn("-j", args)
+        self.assertNotIn("1", args)
+        self.assertIn("--locked", args)
+        self.assertIn("--offline", args)
+        explicit = cargo.cargo_arguments(["test", "-j", "4", "-p", "luna"], Path("/tmp/test-target"))
+        self.assertEqual(explicit[1:4], ["test", "-j", "4"])
+        with patch.dict(os.environ, {}, clear=True):
+            runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))
+            self.assertEqual(runner.env["CARGO_BUILD_JOBS"], str(cargo.default_build_jobs()))
+        with patch.dict(os.environ, {"CARGO_BUILD_JOBS": "3"}, clear=True):
+            runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))
+            self.assertEqual(runner.env["CARGO_BUILD_JOBS"], "3")
 
     def test_cleanup_is_scoped_to_managed_target(self):
         runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))

@@ -2,7 +2,6 @@
     Exercise builtin.math through the real sysroot and its default prelude.
     Consumers use public types and rely on the sysroot intrinsic bindings.
 -}
-
 test single_precision {
     let checked_math_1 = math.bit_reverse<u8>(1);
     assumes checked_math_1 == 128;
@@ -16,16 +15,35 @@ test single_precision {
     assumes minimum_number == -2.0;
     var min_seen = false;
     var max_seen = false;
-    let numeric = math.maximumnum<f32>(
-        do { assumes not min_seen; min_seen = true; let value: f32 = 3.0; value },
-        do { assumes min_seen and not max_seen; max_seen = true; let value: f32 = -2.0; value });
+    let numeric =
+        math
+            .maximumnum<f32>(
+                do {
+                    assumes not min_seen;
+                    min_seen = true;
+                    let value: f32 = 3.0;
+                    value
+                },
+                do {
+                    assumes min_seen and not max_seen;
+                    max_seen = true;
+                    let value: f32 = -2.0;
+                    value
+                },
+            );
     assumes numeric == 3.0 and min_seen and max_seen;
 
     var abs_seen = false;
-    let magnitude = math.abs<f32>(do {
-        assumes not abs_seen; abs_seen = true;
-        let input: f32 = -3.5; input
-    });
+    let magnitude =
+        math
+            .abs<f32>(
+                do {
+                    assumes not abs_seen;
+                    abs_seen = true;
+                    let input: f32 = -3.5;
+                    input
+                },
+            );
     assumes abs_seen and magnitude == 3.5;
     let zero = math.abs<f32>(-0.0);
     assumes zero'bitvec == 0;
@@ -33,113 +51,200 @@ test single_precision {
     let result = math.fma<f32>(3.0, 4.0, 5.0);
     assumes result == 17.0;
     var evaluated = false;
-    let root = math.sqrt<f32>(do {
-        assumes not evaluated;
-        evaluated = true;
-        let value: f32 = 81.0;
-        value
-    });
+    let root =
+        math
+            .sqrt<f32>(
+                do {
+                    assumes not evaluated;
+                    evaluated = true;
+                    let value: f32 = 81.0;
+                    value
+                },
+            );
     assumes evaluated;
     assumes root == 9.0;
     var first = false;
     var second = false;
-    let signed = math.copysign<f32>(
-        do { assumes not first; first = true; let value: f32 = 3.5; value },
-        do { assumes first and not second; second = true; let value: f32 = -0.0; value });
+    let signed =
+        math
+            .copysign<f32>(
+                do {
+                    assumes not first;
+                    first = true;
+                    let value: f32 = 3.5;
+                    value
+                },
+                do {
+                    assumes first and not second;
+                    second = true;
+                    let value: f32 = -0.0;
+                    value
+                },
+            );
     assumes first and second;
     assumes signed == -3.5;
 
     var floor_seen = false;
-    let floor_result = math.floor<f32>(do {
-        assumes not floor_seen;
-        floor_seen = true;
-        let input: f32 = -2.5;
-        input
-    });
+    let floor_result =
+        math
+            .floor<f32>(
+                do {
+                    assumes not floor_seen;
+                    floor_seen = true;
+                    let input: f32 = -2.5;
+                    input
+                },
+            );
     assumes floor_seen and floor_result == -3.0;
 
     var ceil_seen = false;
-    let ceil_result = math.ceil<f32>(do {
-        assumes not ceil_seen;
-        ceil_seen = true;
-        let input: f32 = -2.5;
-        input
-    });
+    let ceil_result =
+        math
+            .ceil<f32>(
+                do {
+                    assumes not ceil_seen;
+                    ceil_seen = true;
+                    let input: f32 = -2.5;
+                    input
+                },
+            );
     assumes ceil_seen and ceil_result == -2.0;
 
     var trunc_seen = false;
-    let trunc_result = math.trunc<f32>(do {
-        assumes not trunc_seen;
-        trunc_seen = true;
-        let input: f32 = -2.5;
-        input
-    });
+    let trunc_result =
+        math
+            .trunc<f32>(
+                do {
+                    assumes not trunc_seen;
+                    trunc_seen = true;
+                    let input: f32 = -2.5;
+                    input
+                },
+            );
     assumes trunc_seen and trunc_result == -2.0;
 
     var roundeven_seen = false;
-    let roundeven_result = math.roundeven<f32>(do {
-        assumes not roundeven_seen;
-        roundeven_seen = true;
-        let input: f32 = -2.5;
-        input
-    });
+    let roundeven_result =
+        math
+            .roundeven<f32>(
+                do {
+                    assumes not roundeven_seen;
+                    roundeven_seen = true;
+                    let input: f32 = -2.5;
+                    input
+                },
+            );
     assumes roundeven_seen and roundeven_result == -2.0;
 
-
     var sin_seen = false;
-    let sin_result = math.sin<f32>(do {
-        assumes not sin_seen; sin_seen = true;
-        let input: f32 = 0.5; input
-    });
+    let sin_result =
+        math
+            .sin<f32>(
+                do {
+                    assumes not sin_seen;
+                    sin_seen = true;
+                    let input: f32 = 0.5;
+                    input
+                },
+            );
     assumes sin_seen and sin_result > 0.479425 and sin_result < 0.479426;
 
     var cos_seen = false;
-    let cos_result = math.cos<f32>(do {
-        assumes not cos_seen; cos_seen = true;
-        let input: f32 = 0.5; input
-    });
+    let cos_result =
+        math
+            .cos<f32>(
+                do {
+                    assumes not cos_seen;
+                    cos_seen = true;
+                    let input: f32 = 0.5;
+                    input
+                },
+            );
     assumes cos_seen and cos_result > 0.877582 and cos_result < 0.877583;
 
     var exp_seen = false;
-    let exp_result = math.exp<f32>(do {
-        assumes not exp_seen; exp_seen = true;
-        let input: f32 = 1.0; input
-    });
+    let exp_result =
+        math
+            .exp<f32>(
+                do {
+                    assumes not exp_seen;
+                    exp_seen = true;
+                    let input: f32 = 1.0;
+                    input
+                },
+            );
     assumes exp_seen and exp_result > 2.718281 and exp_result < 2.718283;
 
     var exp2_seen = false;
-    let exp2_result = math.exp2<f32>(do {
-        assumes not exp2_seen; exp2_seen = true;
-        let input: f32 = 3.0; input
-    });
+    let exp2_result =
+        math
+            .exp2<f32>(
+                do {
+                    assumes not exp2_seen;
+                    exp2_seen = true;
+                    let input: f32 = 3.0;
+                    input
+                },
+            );
     assumes exp2_seen and exp2_result > 7.999999 and exp2_result < 8.000001;
 
     var log_seen = false;
-    let log_result = math.log<f32>(do {
-        assumes not log_seen; log_seen = true;
-        let input: f32 = 2.0; input
-    });
+    let log_result =
+        math
+            .log<f32>(
+                do {
+                    assumes not log_seen;
+                    log_seen = true;
+                    let input: f32 = 2.0;
+                    input
+                },
+            );
     assumes log_seen and log_result > 0.693146 and log_result < 0.693148;
 
     var log2_seen = false;
-    let log2_result = math.log2<f32>(do {
-        assumes not log2_seen; log2_seen = true;
-        let input: f32 = 8.0; input
-    });
+    let log2_result =
+        math
+            .log2<f32>(
+                do {
+                    assumes not log2_seen;
+                    log2_seen = true;
+                    let input: f32 = 8.0;
+                    input
+                },
+            );
     assumes log2_seen and log2_result > 2.999999 and log2_result < 3.000001;
 
     var log10_seen = false;
-    let log10_result = math.log10<f32>(do {
-        assumes not log10_seen; log10_seen = true;
-        let input: f32 = 1000.0; input
-    });
+    let log10_result =
+        math
+            .log10<f32>(
+                do {
+                    assumes not log10_seen;
+                    log10_seen = true;
+                    let input: f32 = 1000.0;
+                    input
+                },
+            );
     assumes log10_seen and log10_result > 2.999999 and log10_result < 3.000001;
 
     var base_seen = false;
     var exponent_seen = false;
-    let power = math.pow<f32>(
-        do { assumes not base_seen; base_seen = true; let value: f32 = 2.0; value },
-        do { assumes base_seen and not exponent_seen; exponent_seen = true; let value: f32 = -3.0; value });
+    let power =
+        math
+            .pow<f32>(
+                do {
+                    assumes not base_seen;
+                    base_seen = true;
+                    let value: f32 = 2.0;
+                    value
+                },
+                do {
+                    assumes base_seen and not exponent_seen;
+                    exponent_seen = true;
+                    let value: f32 = -3.0;
+                    value
+                },
+            );
     assumes base_seen and exponent_seen and power == 0.125;
     let invalid_log = math.log<f32>(-1.0);
     assumes invalid_log != invalid_log;
@@ -156,16 +261,35 @@ test double_precision {
     assumes minimum_number == -2.0;
     var min_seen = false;
     var max_seen = false;
-    let numeric = math.maximumnum<f64>(
-        do { assumes not min_seen; min_seen = true; let value: f64 = 3.0; value },
-        do { assumes min_seen and not max_seen; max_seen = true; let value: f64 = -2.0; value });
+    let numeric =
+        math
+            .maximumnum<f64>(
+                do {
+                    assumes not min_seen;
+                    min_seen = true;
+                    let value: f64 = 3.0;
+                    value
+                },
+                do {
+                    assumes min_seen and not max_seen;
+                    max_seen = true;
+                    let value: f64 = -2.0;
+                    value
+                },
+            );
     assumes numeric == 3.0 and min_seen and max_seen;
 
     var abs_seen = false;
-    let magnitude = math.abs<f64>(do {
-        assumes not abs_seen; abs_seen = true;
-        let input: f64 = -3.5; input
-    });
+    let magnitude =
+        math
+            .abs<f64>(
+                do {
+                    assumes not abs_seen;
+                    abs_seen = true;
+                    let input: f64 = -3.5;
+                    input
+                },
+            );
     assumes abs_seen and magnitude == 3.5;
     let zero = math.abs<f64>(-0.0);
     assumes zero'bitvec == 0;
@@ -173,113 +297,200 @@ test double_precision {
     let result = math.fma<f64>(3.0, 4.0, 5.0);
     assumes result == 17.0;
     var evaluated = false;
-    let root = math.sqrt<f64>(do {
-        assumes not evaluated;
-        evaluated = true;
-        let value: f64 = 81.0;
-        value
-    });
+    let root =
+        math
+            .sqrt<f64>(
+                do {
+                    assumes not evaluated;
+                    evaluated = true;
+                    let value: f64 = 81.0;
+                    value
+                },
+            );
     assumes evaluated;
     assumes root == 9.0;
     var first = false;
     var second = false;
-    let signed = math.copysign<f64>(
-        do { assumes not first; first = true; let value: f64 = 3.5; value },
-        do { assumes first and not second; second = true; let value: f64 = -0.0; value });
+    let signed =
+        math
+            .copysign<f64>(
+                do {
+                    assumes not first;
+                    first = true;
+                    let value: f64 = 3.5;
+                    value
+                },
+                do {
+                    assumes first and not second;
+                    second = true;
+                    let value: f64 = -0.0;
+                    value
+                },
+            );
     assumes first and second;
     assumes signed == -3.5;
 
     var floor_seen = false;
-    let floor_result = math.floor<f64>(do {
-        assumes not floor_seen;
-        floor_seen = true;
-        let input: f64 = -2.5;
-        input
-    });
+    let floor_result =
+        math
+            .floor<f64>(
+                do {
+                    assumes not floor_seen;
+                    floor_seen = true;
+                    let input: f64 = -2.5;
+                    input
+                },
+            );
     assumes floor_seen and floor_result == -3.0;
 
     var ceil_seen = false;
-    let ceil_result = math.ceil<f64>(do {
-        assumes not ceil_seen;
-        ceil_seen = true;
-        let input: f64 = -2.5;
-        input
-    });
+    let ceil_result =
+        math
+            .ceil<f64>(
+                do {
+                    assumes not ceil_seen;
+                    ceil_seen = true;
+                    let input: f64 = -2.5;
+                    input
+                },
+            );
     assumes ceil_seen and ceil_result == -2.0;
 
     var trunc_seen = false;
-    let trunc_result = math.trunc<f64>(do {
-        assumes not trunc_seen;
-        trunc_seen = true;
-        let input: f64 = -2.5;
-        input
-    });
+    let trunc_result =
+        math
+            .trunc<f64>(
+                do {
+                    assumes not trunc_seen;
+                    trunc_seen = true;
+                    let input: f64 = -2.5;
+                    input
+                },
+            );
     assumes trunc_seen and trunc_result == -2.0;
 
     var roundeven_seen = false;
-    let roundeven_result = math.roundeven<f64>(do {
-        assumes not roundeven_seen;
-        roundeven_seen = true;
-        let input: f64 = -2.5;
-        input
-    });
+    let roundeven_result =
+        math
+            .roundeven<f64>(
+                do {
+                    assumes not roundeven_seen;
+                    roundeven_seen = true;
+                    let input: f64 = -2.5;
+                    input
+                },
+            );
     assumes roundeven_seen and roundeven_result == -2.0;
 
-
     var sin_seen = false;
-    let sin_result = math.sin<f64>(do {
-        assumes not sin_seen; sin_seen = true;
-        let input: f64 = 0.5; input
-    });
+    let sin_result =
+        math
+            .sin<f64>(
+                do {
+                    assumes not sin_seen;
+                    sin_seen = true;
+                    let input: f64 = 0.5;
+                    input
+                },
+            );
     assumes sin_seen and sin_result > 0.479425 and sin_result < 0.479426;
 
     var cos_seen = false;
-    let cos_result = math.cos<f64>(do {
-        assumes not cos_seen; cos_seen = true;
-        let input: f64 = 0.5; input
-    });
+    let cos_result =
+        math
+            .cos<f64>(
+                do {
+                    assumes not cos_seen;
+                    cos_seen = true;
+                    let input: f64 = 0.5;
+                    input
+                },
+            );
     assumes cos_seen and cos_result > 0.877582 and cos_result < 0.877583;
 
     var exp_seen = false;
-    let exp_result = math.exp<f64>(do {
-        assumes not exp_seen; exp_seen = true;
-        let input: f64 = 1.0; input
-    });
+    let exp_result =
+        math
+            .exp<f64>(
+                do {
+                    assumes not exp_seen;
+                    exp_seen = true;
+                    let input: f64 = 1.0;
+                    input
+                },
+            );
     assumes exp_seen and exp_result > 2.718281 and exp_result < 2.718283;
 
     var exp2_seen = false;
-    let exp2_result = math.exp2<f64>(do {
-        assumes not exp2_seen; exp2_seen = true;
-        let input: f64 = 3.0; input
-    });
+    let exp2_result =
+        math
+            .exp2<f64>(
+                do {
+                    assumes not exp2_seen;
+                    exp2_seen = true;
+                    let input: f64 = 3.0;
+                    input
+                },
+            );
     assumes exp2_seen and exp2_result > 7.999999 and exp2_result < 8.000001;
 
     var log_seen = false;
-    let log_result = math.log<f64>(do {
-        assumes not log_seen; log_seen = true;
-        let input: f64 = 2.0; input
-    });
+    let log_result =
+        math
+            .log<f64>(
+                do {
+                    assumes not log_seen;
+                    log_seen = true;
+                    let input: f64 = 2.0;
+                    input
+                },
+            );
     assumes log_seen and log_result > 0.693146 and log_result < 0.693148;
 
     var log2_seen = false;
-    let log2_result = math.log2<f64>(do {
-        assumes not log2_seen; log2_seen = true;
-        let input: f64 = 8.0; input
-    });
+    let log2_result =
+        math
+            .log2<f64>(
+                do {
+                    assumes not log2_seen;
+                    log2_seen = true;
+                    let input: f64 = 8.0;
+                    input
+                },
+            );
     assumes log2_seen and log2_result > 2.999999 and log2_result < 3.000001;
 
     var log10_seen = false;
-    let log10_result = math.log10<f64>(do {
-        assumes not log10_seen; log10_seen = true;
-        let input: f64 = 1000.0; input
-    });
+    let log10_result =
+        math
+            .log10<f64>(
+                do {
+                    assumes not log10_seen;
+                    log10_seen = true;
+                    let input: f64 = 1000.0;
+                    input
+                },
+            );
     assumes log10_seen and log10_result > 2.999999 and log10_result < 3.000001;
 
     var base_seen = false;
     var exponent_seen = false;
-    let power = math.pow<f64>(
-        do { assumes not base_seen; base_seen = true; let value: f64 = 2.0; value },
-        do { assumes base_seen and not exponent_seen; exponent_seen = true; let value: f64 = -3.0; value });
+    let power =
+        math
+            .pow<f64>(
+                do {
+                    assumes not base_seen;
+                    base_seen = true;
+                    let value: f64 = 2.0;
+                    value
+                },
+                do {
+                    assumes base_seen and not exponent_seen;
+                    exponent_seen = true;
+                    let value: f64 = -3.0;
+                    value
+                },
+            );
     assumes base_seen and exponent_seen and power == 0.125;
     let invalid_log = math.log<f64>(-1.0);
     assumes invalid_log != invalid_log;
@@ -289,16 +500,25 @@ test double_precision {
 
 -- Library consumers can now form constants at the selected generic float width.
 pure fn positive_magnitude(value: T) -> T
-where T, requires T == f32 or T == f64 {
+where
+    T,
+    requires T == f32 or T == f64,
+{
     math.copysign<T>(value, 0.0)
 }
 
 test rounding_f32 {
     var seen = false;
-    let rounded = math.round<f32>(do {
-        assumes not seen; seen = true;
-        let value: f32 = -2.5; value
-    });
+    let rounded =
+        math
+            .round<f32>(
+                do {
+                    assumes not seen;
+                    seen = true;
+                    let value: f32 = -2.5;
+                    value
+                },
+            );
     assumes seen and rounded == -3.0;
     let even = math.roundeven<f32>(-2.5);
     assumes even == -2.0;
@@ -318,10 +538,16 @@ test rounding_f32 {
 
 test rounding_f64 {
     var seen = false;
-    let rounded = math.round<f64>(do {
-        assumes not seen; seen = true;
-        let value: f64 = -2.5; value
-    });
+    let rounded =
+        math
+            .round<f64>(
+                do {
+                    assumes not seen;
+                    seen = true;
+                    let value: f64 = -2.5;
+                    value
+                },
+            );
     assumes seen and rounded == -3.0;
     let even = math.roundeven<f64>(-2.5);
     assumes even == -2.0;
@@ -338,7 +564,6 @@ test rounding_f64 {
     let zero = positive_magnitude<f64>(-0.0);
     assumes zero'bitvec == 0;
 }
-
 
 test number_extrema_32 {
     var quiet: f32 = 0.0;
@@ -357,7 +582,6 @@ test number_extrema_32 {
     assumes high'bitvec == 0;
 }
 
-
 test number_extrema_64 {
     var quiet: f64 = 0.0;
     quiet'bitvec[0..64] = 9221140253039434428;
@@ -375,7 +599,6 @@ test number_extrema_64 {
     assumes high'bitvec == 0;
 }
 
-
 test integer_power {
     let inverse = math.powi<f32>(2.0, -3);
     let odd = math.powi<f64>(-2.0, 3);
@@ -384,18 +607,19 @@ test integer_power {
     assumes inverse == 0.125 and odd == -8.0 and minimum_exponent == 1.0 and zero_exponent == 1.0;
 }
 
-
 test binary_scaling {
     let subnormal32 = math.ldexp<f32>(1.0, -149);
     let subnormal64 = math.ldexp<f64>(1.0, -1074);
     let finite32 = math.ldexp<f32>(0.5, 128);
     let finite64 = math.ldexp<f64>(0.5, 1024);
     let signed_zero = math.ldexp<f64>(-1.0, -2147483648);
-    assumes subnormal32'bitvec == 1 and subnormal64'bitvec == 1
-        and finite32'bitvec == 2130706432 and finite64'bitvec == 9214364837600034816
-        and signed_zero'bitvec == 9223372036854775808;
+    assumes
+        subnormal32'bitvec == 1
+            and subnormal64'bitvec == 1
+            and finite32'bitvec == 2130706432
+            and finite64'bitvec == 9214364837600034816
+            and signed_zero'bitvec == 9223372036854775808;
 }
-
 
 test integer_bit_queries {
     let empty = math.count_ones<u128>(0);
@@ -406,26 +630,52 @@ test integer_bit_queries {
     let masked = math.bit_and<i8>(-1, 15);
     let combined = math.bit_or<u8>(128, 3);
     let toggled = math.bit_xor<u8>(255, 15);
-    assumes empty == 0 and leading == 8 and trailing == 128
-        and reverse == 32768 and swapped == 2018915346
-        and masked == 15 and combined == 131 and toggled == 240;
+    assumes
+        empty == 0
+            and leading == 8
+            and trailing == 128
+            and reverse == 32768
+            and swapped == 2018915346
+            and masked == 15
+            and combined == 131
+            and toggled == 240;
 }
 
 test rotations_and_funnels {
     var value_seen = false;
     var amount_seen = false;
-    let rotated = math.rotate_left<u8>(
-        do { assumes not value_seen; value_seen = true; let value: u8 = 129; value },
-        do { assumes value_seen and not amount_seen; amount_seen = true; let amount: u8 = 9; amount });
+    let rotated =
+        math
+            .rotate_left<u8>(
+                do {
+                    assumes not value_seen;
+                    value_seen = true;
+                    let value: u8 = 129;
+                    value
+                },
+                do {
+                    assumes value_seen and not amount_seen;
+                    amount_seen = true;
+                    let amount: u8 = 9;
+                    amount
+                },
+            );
     let restored = math.rotate_right<u8>(rotated, 17);
     let full_width = math.rotate_left<u128>(1, 128);
     let left = math.funnel_shift_left<u8>(18, 171, 4);
     let right = math.funnel_shift_right<u8>(18, 171, 4);
     let zero_left = math.funnel_shift_left<u8>(18, 171, 8);
     let zero_right = math.funnel_shift_right<u8>(18, 171, 0);
-    assumes value_seen and amount_seen and rotated == 3 and restored == 129
-        and full_width == 1 and left == 42 and right == 42
-        and zero_left == 18 and zero_right == 171;
+    assumes
+        value_seen
+            and amount_seen
+            and rotated == 3
+            and restored == 129
+            and full_width == 1
+            and left == 42
+            and right == 42
+            and zero_left == 18
+            and zero_right == 171;
 }
 
 test saturating_integer_boundaries {
@@ -437,9 +687,15 @@ test saturating_integer_boundaries {
     let minimum = math.min<i8>(-128, 127);
     let maximum = math.max<i8>(-128, 127);
     let wrapped = math.wrapping_abs<i8>(-128);
-    assumes high == 127 and low == -128 and unsigned_high == 255
-        and unsigned_low == 0 and exact == -100 and minimum == -128
-        and maximum == 127 and wrapped == -128;
+    assumes
+        high == 127
+            and low == -128
+            and unsigned_high == 255
+            and unsigned_low == 0
+            and exact == -100
+            and minimum == -128
+            and maximum == 127
+            and wrapped == -128;
 }
 
 {- Exercise the public half-format wrappers through LLVM native execution. -}

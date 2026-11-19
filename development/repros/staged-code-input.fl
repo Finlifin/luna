@@ -4,5 +4,11 @@
 pure comptime fn flag_code(enabled: bool) -> < |- bool > {
     if enabled { '(true) } else { '(false) }
 }
-fn from_parameter(comptime enabled: bool) -> bool { ~<flag_code(enabled)> }
-fn run() -> bool { from_parameter(true) and not from_parameter(false) }
+
+fn from_parameter(comptime enabled: bool) -> bool {
+    ~<flag_code(enabled)>
+}
+
+fn run() -> bool {
+    from_parameter(true) and not from_parameter(false)
+}

@@ -5,10 +5,12 @@ trait Read {
 struct Box where T :- Read {
     value: T,
 }
+
 enum Maybe where T :- Read {
     none,
     some(T),
 }
+
 struct Flag {}
 
 fn unwrap(value: Maybe<T>) -> bool where T :- Read {
@@ -19,11 +21,13 @@ fn unwrap(value: Maybe<T>) -> bool where T :- Read {
 }
 
 fn run() -> bool {
-    let boxed = Box<Flag> { value: Flag {} };
+    let boxed = Box<Flag> { value: Flag {} }
     unwrap(Maybe<Flag>.some(boxed.value))
 }
 
 -- Formation checks use the whole implementation world, not source order.
 impl Read for Flag {
-    fn read(self) -> bool { true }
+    fn read(self) -> bool {
+        true
+    }
 }

@@ -1,6 +1,5 @@
 -- Primitive names are ordinary public aliases. Importing this module or
 -- reexporting it through builtin.prelude supplies these names.
-
 pub typealias bool = .bool'builtin;
 pub typealias Type = .Type'builtin;
 pub const Any: Type = .Any'builtin;

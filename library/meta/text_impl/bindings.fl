@@ -1,4 +1,4 @@
-use builtin.{str, Symbol, u64, u8};
+use builtin.{Symbol, str, u64, u8}
 
 -- Each binding has an explicit comptime phase; aliases preserve its identity.
 pub const byte_length: comptime fn(str) -> u64 = .str_byte_length'builtin;

@@ -6,19 +6,25 @@ use tuples.Tuple;
 -- local trait implementation for the external Tuple is legal; claiming an
 -- implementation of resources.Copy in this package would violate ownership.
 trait Duplicate {}
+
 impl Duplicate for Tuple<bool, bool> {}
 
 trait Checked {
     quote fn keep(self, pair: Tuple<bool, bool>) -> bool
-    where requires do {
-        let (first, second) and (first, second) is (left, right) = pair;
-        first and second
-    };
+    where
+        requires
+            do {
+                let (first, second) and (first, second) is (left, right) = pair;
+                first and second
+            };
 }
 
 struct Holder {}
+
 impl Checked for Holder {
-    quote fn keep(self, values: Tuple<bool, bool>) -> bool { true }
+    quote fn keep(self, values: Tuple<bool, bool>) -> bool {
+        true
+    }
 }
 
 fn invoke(flag: bool) -> bool {
@@ -26,4 +32,6 @@ fn invoke(flag: bool) -> bool {
     Holder {}.as(Checked).keep((flag, true))
 }
 
-fn run() -> bool { invoke(true) }
+fn run() -> bool {
+    invoke(true)
+}

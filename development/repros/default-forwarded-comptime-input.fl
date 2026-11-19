@@ -5,9 +5,11 @@
 fn invert(comptime mode: bool, value: bool) -> bool {
     inline if mode { not value } else { value }
 }
+
 fn take(comptime mode: bool, value: bool, .next: bool = invert(mode, value)) -> bool {
     next
 }
+
 fn run() -> bool {
     take(true, false) and not take(false, false)
 }

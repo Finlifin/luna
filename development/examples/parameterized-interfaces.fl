@@ -12,7 +12,9 @@ trait Child :- Echo<T> where T {}
 struct Identity {}
 
 impl Echo<T> for Identity where T {
-    fn echo(self, value: T) -> T { value }
+    fn echo(self, value: T) -> T {
+        value
+    }
 }
 
 impl Child<T> for Identity where T {}

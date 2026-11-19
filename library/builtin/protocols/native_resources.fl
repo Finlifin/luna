@@ -1,10 +1,21 @@
-use resources.{Clone, Copy};
+use resources.{Clone, Copy}
 
 -- Native half precision scalars copy their representation unchanged.
-impl Clone for T where T, requires T == f16 or T == bf16 {
-    fn clone(*self) -> Self { self.* }
+impl Clone for T
+where
+    T,
+    requires T == f16 or T == bf16,
+{
+    fn clone(*self) -> Self {
+        self.*
+    }
 }
-impl Copy for T where T, requires T == f16 or T == bf16 {}
+
+impl Copy for T
+where
+    T,
+    requires T == f16 or T == bf16,
+{}
 
 {-
     Copyable payloads allow copying the complete native wrapper. All possible
@@ -13,11 +24,25 @@ impl Copy for T where T, requires T == f16 or T == bf16 {}
     Clone-only payloads need a separate borrowed reconstruction implementation.
 -}
 impl Clone for ?T where T :- Copy {
-    fn clone(*self) -> Self { self.* }
+    fn clone(*self) -> Self {
+        self.*
+    }
 }
+
 impl Copy for ?T where T :- Copy {}
 
-impl Clone for !E T where E :- Copy, T :- Copy {
-    fn clone(*self) -> Self { self.* }
+impl Clone for !E T
+where
+    E :- Copy,
+    T :- Copy,
+{
+    fn clone(*self) -> Self {
+        self.*
+    }
 }
-impl Copy for !E T where E :- Copy, T :- Copy {}
+
+impl Copy for !E T
+where
+    E :- Copy,
+    T :- Copy,
+{}

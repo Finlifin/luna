@@ -174,8 +174,8 @@ fn conditional_constants_in_defaults_wait_for_guard_inputs() {
         source.replace("found if mode = true", "'mode as found = true"),
         source.replace("if mode", "if found and mode"),
         source.replace(
-            "const found if mode = true else { break; };",
-            "const T if mode = bool else { break; }; let found:T = true;",
+            "const found if mode = true else { break; }",
+            "const T if mode = bool else { break; }\n            let found: T = true;",
         ),
         format!(
             "comptime fn enabled(flag:bool)->bool {{flag}} {}",

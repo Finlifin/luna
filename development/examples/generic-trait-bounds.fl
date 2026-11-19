@@ -1,17 +1,38 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 trait Read {
     fn read(self) -> bool;
 }
+
 trait Child :- Read {}
+
 trait Marker {}
 
 struct Yes {}
+
 struct No {}
-impl Read for Yes { fn read(self) -> bool { true } }
-impl Read for No { fn read(self) -> bool { false } }
+
+impl Read for Yes {
+    fn read(self) -> bool {
+        true
+    }
+}
+
+impl Read for No {
+    fn read(self) -> bool {
+        false
+    }
+}
+
 impl Child for Yes {}
+
 impl Marker for Yes {}
 
 fn read(value: T) -> bool where T :- Read {

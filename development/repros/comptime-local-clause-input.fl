@@ -4,7 +4,10 @@
   Previously rejected as unavailable during definition checking.
   Command: luna comptime-local-clause-input.fl --emit nir
 -}
-comptime fn first() -> bool where flag:bool { flag }
+comptime fn first() -> bool where flag: bool {
+    flag
+}
+
 comptime fn run() -> bool {
     let flag = true;
     first<flag>()

@@ -10,18 +10,27 @@ pure comptime fn byte_code(data: u8) -> < |- u8 > {
         const previous = code;
         if remaining >= mask {
             remaining = remaining - mask;
-            code = '(do {
-                let low: u8 = 1;
-                ((~<previous>)'bitvec[0..7] ++ low'bitvec[0..1]).as(u8)
-            });
+            code =
+                '(
+                    do {
+                        let low: u8 = 1;
+                        ((~<previous>)'bitvec[0..7] ++ low'bitvec[0..1]).as(u8)
+                    }
+                );
         } else {
-            code = '(do {
-                let low: u8 = 0;
-                ((~<previous>)'bitvec[0..7] ++ low'bitvec[0..1]).as(u8)
-            });
+            code =
+                '(
+                    do {
+                        let low: u8 = 0;
+                        ((~<previous>)'bitvec[0..7] ++ low'bitvec[0..1]).as(u8)
+                    }
+                );
         }
         mask = mask / 2;
     }
     code
 }
-fn run() -> u8 { ~<byte_code(255)> }
+
+fn run() -> u8 {
+    ~<byte_code(255)>
+}

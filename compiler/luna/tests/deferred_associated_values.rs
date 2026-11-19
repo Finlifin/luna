@@ -107,9 +107,11 @@ fn required_computations_select_associated_values_after_type_binding() {
 
 #[test]
 fn demanded_associated_initializers_execute_in_the_required_world() {
-    let source = include_str!("../../../development/repros/deferred-associated-required.fl")
-        .replace("assoc enabled:bool=true;", "assoc enabled:bool=initial();")
-        + "pure comptime fn initial()->bool { true }";
+    let source =
+        include_str!("../../../development/repros/deferred-associated-required.fl").replace(
+            "assoc enabled: bool = true;",
+            "assoc enabled: bool = initial();",
+        ) + "pure comptime fn initial()->bool { true }";
     let package = support::compile_with_protocols(&source, &Default::default()).unwrap();
     assert_eq!(
         luna::invocation::invoke(&package, "result", 100_000).unwrap(),

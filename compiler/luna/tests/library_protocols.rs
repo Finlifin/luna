@@ -833,8 +833,8 @@ fn repository_conversion_protocols_select_full_interfaces_and_transfer_ownership
     );
     // Sharing the same subject and trait head does not grant another interface.
     let wrong_target = source.replace(
-        "convert<Flag, u8>(Flag {value: false})",
-        "convert<Flag, builtin.u16>(Flag {value: false})",
+        "convert<Flag, u8>(Flag { value: false })",
+        "convert<Flag, builtin.u16>(Flag { value: false })",
     );
     assert_ne!(
         wrong_target, source,

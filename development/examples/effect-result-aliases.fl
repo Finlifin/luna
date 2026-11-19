@@ -3,15 +3,21 @@ effect read() -> bool;
 effect write() -> bool;
 
 fn require_layout() -> bool
-where T, requires (#write T) == (#[read, write] bool) {
+where
+    T,
+    requires (#write T) == (#[read, write] bool),
+{
     true
 }
 
 -- T contributes read; write and read can commute because they are distinct.
 fn forward() -> bool
-where T, U,
-      requires T == (#read U),
-      requires U == bool {
+where
+    T,
+    U,
+    requires T == (#read U),
+    requires U == bool,
+{
     require_layout<T>()
 }
 

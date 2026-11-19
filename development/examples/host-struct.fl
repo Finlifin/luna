@@ -1,22 +1,31 @@
 -- Build with --copy-protocol Duplicate --drop-protocol Retire.
 trait Duplicate {}
-trait Retire { fn drop(*self); }
+
+trait Retire {
+    fn drop(*self);
+}
+
 impl Duplicate for bool {}
 
-struct Cell where T { value: T }
+struct Cell where T {
+    value: T,
+}
+
 impl Duplicate for Cell<bool> {}
 
 impl Cell<bool> {
-    fn enable(*self) { self.value.* = true; }
+    fn enable(*self) {
+        self.value.* = true;
+    }
 }
 
 fn make(value: T) -> Cell<T> where T {
-    Cell<T> {value: value}
+    Cell<T> { value: value }
 }
 
 fn run() -> bool {
     var cell = make(false);
     cell.enable();
-    let {value: enabled} = cell;
+    let { value: enabled } = cell;
     enabled
 }

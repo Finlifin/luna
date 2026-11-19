@@ -3,12 +3,16 @@ typealias Type = .Type'builtin;
 
 fn preserve(value: T) -> T where T {
     -- T comes from the enclosing instance, not from a new inference slot.
-    inline fn local(inner: T) -> T { inner }
+    inline fn local(inner: T) -> T {
+        inner
+    }
     local(value)
 }
 
 fn factory() -> fn(T) -> T where T {
-    fn local(value: T) -> T { value }
+    fn local(value: T) -> T {
+        value
+    }
     local
 }
 

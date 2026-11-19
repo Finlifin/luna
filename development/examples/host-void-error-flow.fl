@@ -2,14 +2,27 @@
 -- stop selects an early exit: 0 = none, 1 = before, 2 = ordinary arm, 3 = after.
 typealias Void = .void'builtin;
 typealias Byte = .u8'builtin;
+
 trait Duplicate {}
-trait Retire { fn drop(*self); }
+
+trait Retire {
+    fn drop(*self);
+}
+
 impl Duplicate for bool {}
+
 impl Duplicate for Byte {}
-enum InputErr { Rejected }
+
+enum InputErr {
+    Rejected,
+}
+
 impl Duplicate for InputErr {}
 
-struct Lease { released: *bool }
+struct Lease {
+    released: *bool,
+}
+
 impl Retire for Lease {
     fn drop(*self) {
         let previous = self.released.*.*;
@@ -19,35 +32,54 @@ impl Retire for Lease {
 }
 
 fn validate(failed: bool) -> !InputErr Void {
-    if failed { return error InputErr.Rejected; }
+    if failed {
+        return error InputErr.Rejected;
+    }
 }
+
 fn forward(failed: bool, continued: *bool) -> !InputErr Void {
     validate(failed)!;
     continued.* = true;
 }
-fn handle(failed: bool, stop: Byte, continued: *bool, released: *bool,
-          before: *bool, arm: *bool, after: *bool, finished: *bool) {
-    let lease = Lease { released: released };
+
+fn handle(
+    failed: bool,
+    stop: Byte,
+    continued: *bool,
+    released: *bool,
+    before: *bool,
+    arm: *bool,
+    after: *bool,
+    finished: *bool,
+) {
+    let lease = Lease { released: released }
     forward(failed, continued)! {
         catch original => {
             before.* = true;
-            if stop == 1 { return; }
+            if stop == 1 {
+                return;
+            }
         },
         .Rejected => {
             let started = before.*;
             assumes started;
             arm.* = true;
-            if stop == 2 { return; }
+            if stop == 2 {
+                return;
+            }
         },
         catch original => {
             let selected = arm.*;
             assumes selected;
             after.* = true;
-            if stop == 3 { return; }
+            if stop == 3 {
+                return;
+            }
         },
-    };
+    }
     finished.* = true;
 }
+
 fn scenario(failed: bool, stop: Byte) -> bool {
     var continued = false;
     var released = false;
@@ -55,16 +87,31 @@ fn scenario(failed: bool, stop: Byte) -> bool {
     var arm = false;
     var after = false;
     var finished = false;
-    handle(failed, stop, continued.ref, released.ref, before.ref, arm.ref, after.ref, finished.ref);
-    released and continued == not failed
+    handle(
+        failed,
+        stop,
+        continued.ref,
+        released.ref,
+        before.ref,
+        arm.ref,
+        after.ref,
+        finished.ref,
+    );
+    released
+        and continued == not failed
         and finished == (not failed or stop == 0)
         and before == failed
         and arm == (failed and stop != 1)
         and after == (failed and stop != 1 and stop != 2)
 }
+
 fn run() -> bool {
-    scenario(false, 0) and scenario(true, 0)
-        and scenario(false, 1) and scenario(true, 1)
-        and scenario(false, 2) and scenario(true, 2)
-        and scenario(false, 3) and scenario(true, 3)
+    scenario(false, 0)
+        and scenario(true, 0)
+        and scenario(false, 1)
+        and scenario(true, 1)
+        and scenario(false, 2)
+        and scenario(true, 2)
+        and scenario(false, 3)
+        and scenario(true, 3)
 }

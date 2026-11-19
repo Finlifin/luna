@@ -1,6 +1,12 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 -- This fixture uses an explicit type alias until builtin.prelude is wired in.
 typealias Flag = bool;
 typealias Unary = fn(Flag) -> Flag;
@@ -59,9 +65,7 @@ fn classify(value: Flag) -> Flag {
 }
 
 fn require_enabled(value: Flag) -> Flag {
-    let true as enabled = value else {
-        return false;
-    }
+    let true as enabled = value else { return false; }
     let read = || enabled;
     read()
 }

@@ -1,14 +1,25 @@
 {- Intended positive: checking the quote must retain the pending source input.
    The current checker requests data before this generator is invoked. -}
-struct Callback { apply: comptime fn(bool) -> bool }
-struct Nested { callback: Callback }
+struct Callback {
+    apply: comptime fn(bool) -> bool,
+}
 
-comptime fn invert(value: bool) -> bool { not value }
+struct Nested {
+    callback: Callback,
+}
 
-comptime fn wrapper(data: Nested) -> <|- bool> {
+comptime fn invert(value: bool) -> bool {
+    not value
+}
+
+comptime fn wrapper(data: Nested) -> < |- bool > {
     '(data.callback.apply(false))
 }
 
 fn run() -> bool {
-    ~<wrapper(Nested { callback: Callback { apply: invert } })>
+    ~<wrapper(
+        Nested {
+            callback: Callback { apply: invert },
+        },
+    )>
 }

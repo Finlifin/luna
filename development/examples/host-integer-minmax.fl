@@ -2,7 +2,9 @@
 typealias Signed = .i32'builtin;
 
 fn clamp(value: Signed, lower: Signed, upper: Signed) -> Signed
-where requires lower <= upper {
+where
+    requires lower <= upper,
+{
     math.min(math.max(value, lower), upper)
 }
 

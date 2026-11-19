@@ -1,6 +1,12 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin {T}
-pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 -- Derived defaults use the selected implementation's seed, including overrides.
 trait WireFormat {
     assoc big_endian: bool = true;
@@ -9,9 +15,11 @@ trait WireFormat {
 }
 
 struct Network {}
+
 struct LittleEndian {}
 
 impl WireFormat for Network {}
+
 impl WireFormat for LittleEndian {
     assoc big_endian: bool = false;
 }

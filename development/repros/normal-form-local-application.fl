@@ -5,8 +5,13 @@
 typealias Type = .Type'builtin;
 typealias bool = .bool'builtin;
 
-pure comptime fn Identity<T> -> Type { T }
-pure comptime fn Alternate<T> -> Type { T }
+pure comptime fn Identity<T> -> Type {
+    T
+}
+
+pure comptime fn Alternate<T> -> Type {
+    T
+}
 
 comptime fn select(flag: bool) -> pure comptime fn<Type> -> Type {
     if flag { Identity } else { Alternate }
@@ -17,4 +22,6 @@ comptime fn Apply(flag: bool) -> Type {
     factory<bool>
 }
 
-comptime fn Run() -> Type { Apply(true) }
+comptime fn Run() -> Type {
+    Apply(true)
+}

@@ -1,7 +1,7 @@
-use builtin.{Symbol, str};
+use builtin.{Symbol, str}
 pub use meta.Object;
-use info.target.Target;
 use info.package.PackageMetadata;
+use info.target.Target;
 
 {-
     Compiler-facing build inputs. Public info modules
@@ -10,5 +10,4 @@ use info.package.PackageMetadata;
 -}
 pub const mode: Symbol = .build_mode'builtin;
 pub const target: Target = .build_target'builtin;
-pub const package_metadata: comptime fn(str) -> PackageMetadata =
-    .build_package_metadata'builtin;
+pub const package_metadata: comptime fn(str) -> PackageMetadata = .build_package_metadata'builtin;

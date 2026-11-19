@@ -3,10 +3,16 @@
     any invocation. This regression now reaches the full annotation arithmetic
     checker; a missing-capture error must not replace the range obligation.
 -}
-pure comptime fn Index<n: u8> -> Type { bool }
+pure comptime fn Index<n: u8> -> Type {
+    bool
+}
 
-comptime fn accept(n: u8,
-    callback: defer do { let choose = || n + 1; fn(Index<choose()>) -> bool }) -> bool
-{
+comptime fn accept(
+    n: u8,
+    callback: defer do {
+        let choose = || n + 1;
+        fn(Index<choose()>) -> bool
+    },
+) -> bool {
     true
 }

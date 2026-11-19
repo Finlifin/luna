@@ -3,11 +3,17 @@
     Run with --sysroot library --test-native to retain resource checking.
 -}
 fn optional(value: ?bool) -> bool {
-    value match { item? => item, null => false }
+    value match {
+        item? => item,
+        null => false,
+    }
 }
 
 fn result(value: !bool bool) -> bool {
-    value match { item! => item, error failure => not failure }
+    value match {
+        item! => item,
+        error failure => not failure,
+    }
 }
 
 test copy_native_wrappers {
@@ -26,7 +32,14 @@ test copy_native_wrappers {
 }
 
 fn nested(value: ??bool) -> bool {
-    value match { item? => item match { null => true, _? => false }, null => false }
+    value match {
+        item? =>
+            item match {
+                null => true,
+                _? => false,
+            },
+        null => false,
+    }
 }
 
 test copy_keeps_optional_layers {
@@ -37,7 +50,12 @@ test copy_keeps_optional_layers {
 }
 
 fn write(value: ?*bool) {
-    value match { pointer? => { pointer.* = true; }, null => {} };
+    value match {
+        pointer? => {
+            pointer.* = true;
+        },
+        null => {},
+    };
 }
 
 test copy_preserves_pointer_target {

@@ -1,5 +1,5 @@
 use bindings;
-use builtin.{Integer, Type, void};
+use builtin.{Integer, Type, void}
 
 use List;
 use integer.div_trunc;
@@ -19,7 +19,9 @@ impl List<T> where T {
         bounds are checked before indexing; no target-sized conversion is needed.
     -}
     pub pure comptime fn get(self, index: Integer) -> ?T {
-        if index < 0 or index >= self.length() { return null; }
+        if index < 0 or index >= self.length() {
+            return null;
+        }
         self[index]
     }
 
@@ -57,9 +59,7 @@ impl List<T> where T {
       comptime closure environment between calls; an empty input never calls it.
       Cache the length once, independently of callback effects.
     -}
-    pub comptime fn foreach(self, visit: %c comptime fn(T))
-    where c: Type.vars.Closure
-    {
+    pub comptime fn foreach(self, visit: %c comptime fn(T)) where c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         inline for index in 0..count {
@@ -72,53 +72,64 @@ impl List<T> where T {
         Partial output stays local; callback effects already performed are not
         rolled back. Empty input succeeds without invoking the callback.
     -}
-    pub comptime fn try_foreach(self, visit: %c comptime fn(T) -> !E void) -> !E void
-    where E, c: Type.vars.Closure
-    {
+    pub comptime fn try_foreach(
+        self,
+        visit: %c comptime fn(T) -> !E void,
+    ) -> !E void where E, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         inline for index in 0..count {
             visit(input[index]) match {
                 _! => {},
-                error failure => { return error failure; },
+                error failure => {
+                    return error failure;
+                },
             };
         }
     }
 
-    pub comptime fn try_map(self, transform: %c comptime fn(T) -> !E U) -> !E List<U>
-    where E, U, c: Type.vars.Closure
-    {
+    pub comptime fn try_map(
+        self,
+        transform: %c comptime fn(T) -> !E U,
+    ) -> !E List<U> where E, U, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var output: List<U> = [];
         inline for index in 0..count {
             transform(input[index]) match {
                 value! => output.append(value),
-                error failure => { return error failure; },
+                error failure => {
+                    return error failure;
+                },
             };
         }
         output
     }
 
-    pub comptime fn try_fold(self, initial: A,
-        combine: %c comptime fn(A, T) -> !E A) -> !E A
-    where A, E, c: Type.vars.Closure
-    {
+    pub comptime fn try_fold(
+        self,
+        initial: A,
+        combine: %c comptime fn(A, T) -> !E A,
+    ) -> !E A where A, E, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var accumulator = initial;
         inline for index in 0..count {
             accumulator = combine(accumulator, input[index]) match {
                 value! => value,
-                error failure => { return error failure; },
-            };
+                error failure => {
+                    return error failure;
+                },
+            }
         }
         accumulator
     }
 
-    pub comptime fn fold(self, initial: A, combine: %c comptime fn(A, T) -> A) -> A
-    where A, c: Type.vars.Closure
-    {
+    pub comptime fn fold(
+        self,
+        initial: A,
+        combine: %c comptime fn(A, T) -> A,
+    ) -> A where A, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var accumulator = initial;
@@ -135,10 +146,11 @@ impl List<T> where T {
       including the final element of scan_exclusive. Empty input calls nothing.
       Stored states are independent value snapshots, not aliases of accumulator.
     -}
-    pub comptime fn scan(self, initial: A, combine: %c comptime fn(A, T) -> A)
-        -> List<A>
-    where A, c: Type.vars.Closure
-    {
+    pub comptime fn scan(
+        self,
+        initial: A,
+        combine: %c comptime fn(A, T) -> A,
+    ) -> List<A> where A, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var accumulator = initial;
@@ -150,10 +162,11 @@ impl List<T> where T {
         output
     }
 
-    pub comptime fn scan_exclusive(self, initial: A,
-        combine: %c comptime fn(A, T) -> A) -> List<A>
-    where A, c: Type.vars.Closure
-    {
+    pub comptime fn scan_exclusive(
+        self,
+        initial: A,
+        combine: %c comptime fn(A, T) -> A,
+    ) -> List<A> where A, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var accumulator = initial;
@@ -170,12 +183,15 @@ impl List<T> where T {
       the callback once in order; empty input has no accumulator. An optional
       element remains present even when its payload is null.
     -}
-    pub comptime fn reduce(self, combine: %c comptime fn(T, T) -> T) -> ?T
-    where c: Type.vars.Closure
-    {
+    pub comptime fn reduce(
+        self,
+        combine: %c comptime fn(T, T) -> T,
+    ) -> ?T where c: Type.vars.Closure {
         let input = self;
         let count = input.length();
-        if count == 0 { return null; }
+        if count == 0 {
+            return null;
+        }
         var accumulator = input[0];
         inline for index in 1..count {
             accumulator = combine(accumulator, input[index]);
@@ -189,18 +205,23 @@ impl List<T> where T {
         Later elements stop at the first error, without exposing a partial
         accumulator as success. Optional elements keep their own presence layer.
     -}
-    pub comptime fn try_reduce(self, combine: %c comptime fn(T, T) -> !E T) -> !E ?T
-    where E, c: Type.vars.Closure
-    {
+    pub comptime fn try_reduce(
+        self,
+        combine: %c comptime fn(T, T) -> !E T,
+    ) -> !E ?T where E, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
-        if count == 0 { return null; }
+        if count == 0 {
+            return null;
+        }
         var accumulator = input[0];
         inline for index in 1..count {
             accumulator = combine(accumulator, input[index]) match {
                 value! => value,
-                error failure => { return error failure; },
-            };
+                error failure => {
+                    return error failure;
+                },
+            }
         }
         accumulator
     }
@@ -210,9 +231,10 @@ impl List<T> where T {
       Append through the output slot without source pointers. Full immutable data
       validation is still required; this is not yet a linear-time builder.
     -}
-    pub comptime fn map(self, transform: %c comptime fn(T) -> U) -> List<U>
-    where U, c: Type.vars.Closure
-    {
+    pub comptime fn map(
+        self,
+        transform: %c comptime fn(T) -> U,
+    ) -> List<U> where U, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var output: List<U> = [];
@@ -223,10 +245,10 @@ impl List<T> where T {
     }
 
     {- Indices belong to the fixed input snapshot and start at zero. -}
-    pub comptime fn map_indexed(self,
-        transform: %c comptime fn(Integer, T) -> U) -> List<U>
-    where U, c: Type.vars.Closure
-    {
+    pub comptime fn map_indexed(
+        self,
+        transform: %c comptime fn(Integer, T) -> U,
+    ) -> List<U> where U, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var output: List<U> = [];
@@ -241,15 +263,20 @@ impl List<T> where T {
         The unmatched suffix is not visited. Ordinary call evaluation still
         evaluates both input expressions and the callback before this body.
     -}
-    pub comptime fn zip_with(self, other: List<U>,
-        combine: %c comptime fn(T, U) -> V) -> List<V>
-    where U, V, c: Type.vars.Closure
-    {
+    pub comptime fn zip_with(
+        self,
+        other: List<U>,
+        combine: %c comptime fn(T, U) -> V,
+    ) -> List<V> where U, V, c: Type.vars.Closure {
         let left = self;
         let right = other;
         let left_count = left.length();
         let right_count = right.length();
-        let count = if left_count < right_count {left_count} else {right_count};
+        let count = if left_count < right_count {
+            left_count
+        } else {
+            right_count
+        }
         var output: List<V> = [];
         inline for index in 0..count {
             output.append(combine(left[index], right[index]));
@@ -258,13 +285,16 @@ impl List<T> where T {
     }
 
     {- Return the first matching index, including a present zero. -}
-    pub comptime fn position(self, pred: %c comptime fn(T) -> bool) -> ?Integer
-    where c: Type.vars.Closure
-    {
+    pub comptime fn position(
+        self,
+        pred: %c comptime fn(T) -> bool,
+    ) -> ?Integer where c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         inline for index in 0..count {
-            if pred(input[index]) { return index; }
+            if pred(input[index]) {
+                return index;
+            }
         }
         null
     }
@@ -274,9 +304,10 @@ impl List<T> where T {
       flat_map appends every inner list in order, including empty inner results.
       Both retain the input snapshot when callbacks replace the caller's list.
     -}
-    pub comptime fn filter_map(self, transform: %c comptime fn(T) -> ?U) -> List<U>
-    where U, c: Type.vars.Closure
-    {
+    pub comptime fn filter_map(
+        self,
+        transform: %c comptime fn(T) -> ?U,
+    ) -> List<U> where U, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var output: List<U> = [];
@@ -289,9 +320,10 @@ impl List<T> where T {
         output
     }
 
-    pub comptime fn flat_map(self, transform: %c comptime fn(T) -> List<U>) -> List<U>
-    where U, c: Type.vars.Closure
-    {
+    pub comptime fn flat_map(
+        self,
+        transform: %c comptime fn(T) -> List<U>,
+    ) -> List<U> where U, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var output: List<U> = [];
@@ -307,49 +339,52 @@ impl List<T> where T {
       known. Empty inputs satisfy all and fail any; find returns an absent outer
       optional. A matching optional element retains its own presence layer.
     -}
-    pub comptime fn any(self, pred: %c comptime fn(T) -> bool) -> bool
-    where c: Type.vars.Closure
-    {
+    pub comptime fn any(self, pred: %c comptime fn(T) -> bool) -> bool where c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         inline for index in 0..count {
-            if pred(input[index]) { return true; }
+            if pred(input[index]) {
+                return true;
+            }
         }
         false
     }
 
-    pub comptime fn all(self, pred: %c comptime fn(T) -> bool) -> bool
-    where c: Type.vars.Closure
-    {
+    pub comptime fn all(self, pred: %c comptime fn(T) -> bool) -> bool where c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         inline for index in 0..count {
-            if not pred(input[index]) { return false; }
+            if not pred(input[index]) {
+                return false;
+            }
         }
         true
     }
 
-    pub comptime fn find(self, pred: %c comptime fn(T) -> bool) -> ?T
-    where c: Type.vars.Closure
-    {
+    pub comptime fn find(self, pred: %c comptime fn(T) -> bool) -> ?T where c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         inline for index in 0..count {
             let value = input[index];
-            if pred(value) { return value; }
+            if pred(value) {
+                return value;
+            }
         }
         null
     }
 
     {- Stop at the first present transformed result, preserving inner nulls. -}
-    pub comptime fn find_map(self, transform: %c comptime fn(T) -> ?U) -> ?U
-    where U, c: Type.vars.Closure
-    {
+    pub comptime fn find_map(
+        self,
+        transform: %c comptime fn(T) -> ?U,
+    ) -> ?U where U, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         inline for index in 0..count {
             transform(input[index]) match {
-                value? => { return value; },
+                value? => {
+                    return value;
+                },
                 null => {},
             };
         }
@@ -360,9 +395,10 @@ impl List<T> where T {
       Filtering preserves retained elements and their order. Like map, it reuses
       the output slot while retaining the full immutable validation checks.
     -}
-    pub comptime fn filter(self, pred: %c comptime fn(T) -> bool) -> List<T>
-    where c: Type.vars.Closure
-    {
+    pub comptime fn filter(
+        self,
+        pred: %c comptime fn(T) -> bool,
+    ) -> List<T> where c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var output: List<T> = [];
@@ -380,10 +416,11 @@ impl List<T> where T {
       invalid bounds return null, while a valid empty interval returns a present
       empty list. Elements retain their domains and the input remains unchanged.
     -}
-    pub comptime fn slice(self, start: Integer, end: Integer)
-        -> ?List<T> {
+    pub comptime fn slice(self, start: Integer, end: Integer) -> ?List<T> {
         let count = self.length();
-        if start < 0 or end < start or end > count { return null; }
+        if start < 0 or end < start or end > count {
+            return null;
+        }
         var output: List<T> = [];
         output.append_range(self, start, end);
         output
@@ -394,10 +431,16 @@ impl List<T> where T {
       insert; empty replacements remove. All inputs are ordinary once-evaluated
       arguments. Invalid bounds return null without constructing an output list.
     -}
-    pub comptime fn replace_range(self, start: Integer,
-        end: Integer, replacement: List<T>) -> ?List<T> {
+    pub comptime fn replace_range(
+        self,
+        start: Integer,
+        end: Integer,
+        replacement: List<T>,
+    ) -> ?List<T> {
         let count = self.length();
-        if start < 0 or end < start or end > count { return null; }
+        if start < 0 or end < start or end > count {
+            return null;
+        }
         var output: List<T> = [];
         output.append_range(self, 0, start);
         output.append_range(replacement, 0, replacement.length());
@@ -411,12 +454,15 @@ impl List<T> where T {
         It need not be a global equality relation; separated groups stay separate.
         Both traversal and retained representatives use fixed value snapshots.
     -}
-    pub comptime fn dedup_by(self, equivalent: %c comptime fn(T, T) -> bool) -> List<T>
-    where c: Type.vars.Closure
-    {
+    pub comptime fn dedup_by(
+        self,
+        equivalent: %c comptime fn(T, T) -> bool,
+    ) -> List<T> where c: Type.vars.Closure {
         let input = self;
         let count = input.length();
-        if count == 0 { return input; }
+        if count == 0 {
+            return input;
+        }
         var previous = input[0];
         var output: List<T> = [previous];
         inline for index in 1..count {
@@ -434,14 +480,19 @@ impl List<T> where T {
         A right-before-left pair rejects immediately; equivalent items are valid.
         Empty and singleton lists are sorted without invoking less.
     -}
-    pub comptime fn is_sorted_by(self, less: %c comptime fn(T, T) -> bool) -> bool
-    where c: Type.vars.Closure
-    {
+    pub comptime fn is_sorted_by(
+        self,
+        less: %c comptime fn(T, T) -> bool,
+    ) -> bool where c: Type.vars.Closure {
         let input = self;
         let count = input.length();
-        if count < 2 { return true; }
+        if count < 2 {
+            return true;
+        }
         inline for index in 1..count {
-            if less(input[index], input[index - 1]) { return false; }
+            if less(input[index], input[index - 1]) {
+                return false;
+            }
         }
         true
     }
@@ -452,9 +503,10 @@ impl List<T> where T {
         first: only a strict right-before-left result displaces the left item.
         Input snapshots remain unchanged, including when a callback fails.
     -}
-    pub comptime fn sort_by(self, less: %c comptime fn(T, T) -> bool) -> List<T>
-        where c: Type.vars.Closure
-    {
+    pub comptime fn sort_by(
+        self,
+        less: %c comptime fn(T, T) -> bool,
+    ) -> List<T> where c: Type.vars.Closure {
         let count = self.length();
         var ordered = self;
         var width: Integer = 1;
@@ -462,8 +514,16 @@ impl List<T> where T {
             var output: List<T> = [];
             var start: Integer = 0;
             while start < count {
-                let middle = if start + width < count {start + width} else {count};
-                let end = if middle + width < count {middle + width} else {count};
+                let middle = if start + width < count {
+                    start + width
+                } else {
+                    count
+                }
+                let end = if middle + width < count {
+                    middle + width
+                } else {
+                    count
+                }
                 var left = start;
                 var right = middle;
                 while left < middle and right < end {
@@ -491,9 +551,10 @@ impl List<T> where T {
         scan the list to verify it. Empty input returns zero without invoking pred.
         Bounds and the result are exact Integers, independent of target width.
     -}
-    pub comptime fn partition_point(self, pred: %c comptime fn(T) -> bool)
-        -> Integer where c: Type.vars.Closure
-    {
+    pub comptime fn partition_point(
+        self,
+        pred: %c comptime fn(T) -> bool,
+    ) -> Integer where c: Type.vars.Closure {
         let input = self;
         var first: Integer = 0;
         var last = input.length();
@@ -514,17 +575,19 @@ impl List<T> where T {
         Equal items occupy [lower_bound, upper_bound). Missing items yield an
         insertion position, including self.length() after the final item.
     -}
-    pub comptime fn lower_bound(self, needle: T,
-        less: %c comptime fn(T, T) -> bool) -> Integer
-        where c: Type.vars.Closure
-    {
+    pub comptime fn lower_bound(
+        self,
+        needle: T,
+        less: %c comptime fn(T, T) -> bool,
+    ) -> Integer where c: Type.vars.Closure {
         self.partition_point(|value| less(value, needle))
     }
 
-    pub comptime fn upper_bound(self, needle: T,
-        less: %c comptime fn(T, T) -> bool) -> Integer
-        where c: Type.vars.Closure
-    {
+    pub comptime fn upper_bound(
+        self,
+        needle: T,
+        less: %c comptime fn(T, T) -> bool,
+    ) -> Integer where c: Type.vars.Closure {
         self.partition_point(|value| not less(needle, value))
     }
 

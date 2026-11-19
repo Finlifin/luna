@@ -6,11 +6,13 @@
 -}
 use primitives.Type;
 
-comptime fn generate() -> <|-bool> {
+comptime fn generate() -> < |- bool > {
     var builder = meta.StructBuilder.new(.name = .QuoteLocal);
     builder.add_field(.flag, bool);
     let T = builder.Build();
-    '(T {flag:true}.flag)
+    '(T { flag: true }.flag)
 }
 
-fn run() -> bool { ~<generate()> }
+fn run() -> bool {
+    ~<generate()>
+}

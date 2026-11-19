@@ -12,13 +12,14 @@ comptime fn next(values: meta.List<u8>) -> u8 {
 
 comptime fn count(flags: meta.List<bool>) -> u8 {
     var result: u8 = 0;
-    if flags[0] { result = result + 1; }
+    if flags[0] {
+        result = result + 1;
+    }
     result
 }
 
 comptime fn Domain() -> Type {
-    if next([254]) == 255 and next([255]) == 0 and
-        count([true]) == 1 and count([false]) == 0 {
+    if next([254]) == 255 and next([255]) == 0 and count([true]) == 1 and count([false]) == 0 {
         bool
     } else {
         u8
@@ -26,4 +27,7 @@ comptime fn Domain() -> Type {
 }
 
 typealias Flag = Domain();
-fn run() -> Flag { true }
+
+fn run() -> Flag {
+    true
+}

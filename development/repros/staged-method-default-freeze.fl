@@ -1,9 +1,25 @@
 {- Regression: a method-valued staged default retains its interface origin
    through invocation freezing and concrete IIR materialization. -}
 typealias Type = .Type'builtin;
-trait Selector { fn select(comptime value: bool) -> bool; }
-impl Selector for bool { fn select(comptime value: bool) -> bool { true } }
-comptime fn callback() -> fn(comptime bool) -> bool where T { bool.select }
-fn dispatch(comptime T: Type,
-    comptime .action: fn(comptime bool) -> bool = callback<T>()) -> bool { action(true) }
-fn run() -> bool { dispatch(bool) }
+
+trait Selector {
+    fn select(comptime value: bool) -> bool;
+}
+
+impl Selector for bool {
+    fn select(comptime value: bool) -> bool {
+        true
+    }
+}
+
+comptime fn callback() -> fn(comptime bool) -> bool where T {
+    bool.select
+}
+
+fn dispatch(comptime T: Type, comptime .action: fn(comptime bool) -> bool = callback<T>()) -> bool {
+    action(true)
+}
+
+fn run() -> bool {
+    dispatch(bool)
+}

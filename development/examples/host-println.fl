@@ -1,7 +1,11 @@
 use std.prelude.*;
 
 pure comptime fn status_format(verbose: bool) -> str {
-    if verbose { "answer = {}, ready = {}" } else { "answer = {}" }
+    if verbose {
+        "answer = {}, ready = {}"
+    } else {
+        "answer = {}"
+    }
 }
 
 fn demo() -> !std.io.Error void {
@@ -21,6 +25,6 @@ fn main() {
     let succeeded = demo() match {
         _! => true,
         error _ => false,
-    };
+    }
     assumes succeeded;
 }

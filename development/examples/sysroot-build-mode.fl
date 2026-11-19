@@ -3,6 +3,7 @@
     declaration, and the ordinary constant stores this definition's selection.
 -}
 use build.mode as selected;
+
 const debugging = selected matches .debug;
 
 test selected_build_mode {
@@ -10,5 +11,5 @@ test selected_build_mode {
         assumes true;
     } else {
         assumes false;
-    };
+    }
 }

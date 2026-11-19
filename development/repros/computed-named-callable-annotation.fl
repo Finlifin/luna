@@ -3,12 +3,20 @@
     computed by a local closure. The parameter name is not referenced by later
     types, so construction uses ordinary Type values without early invocation.
 -}
-fn identity(value: bool) -> bool { value }
+fn identity(value: bool) -> bool {
+    value
+}
 
-comptime fn accept(T: Type,
-    callback: defer do { let choose = || T; fn(value: choose()) -> choose() }) -> bool
-{
+comptime fn accept(
+    T: Type,
+    callback: defer do {
+        let choose = || T;
+        fn(value: choose()) -> choose()
+    },
+) -> bool {
     true
 }
 
-comptime fn run() -> bool { accept(bool, identity) }
+comptime fn run() -> bool {
+    accept(bool, identity)
+}

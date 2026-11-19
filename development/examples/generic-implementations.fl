@@ -12,12 +12,24 @@ struct Box where T {
     value: T,
 }
 
-impl Read for Box<T> where T, requires T == Flag {
-    fn read(self) -> Flag { self.value }
+impl Read for Box<T>
+where
+    T,
+    requires T == Flag,
+{
+    fn read(self) -> Flag {
+        self.value
+    }
 }
 
-impl Read for Box<U> where U, requires U == Letter {
-    fn read(self) -> Flag { false }
+impl Read for Box<U>
+where
+    U,
+    requires U == Letter,
+{
+    fn read(self) -> Flag {
+        false
+    }
 }
 
 fn read(value: V) -> Flag where V :- Read {

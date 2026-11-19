@@ -15,15 +15,11 @@ const isize_representation_operation: fn(isize) -> u128 = .integer_representatio
     wrappers receive runtime data; no callable constant is implicitly delivered
     across stages at their call sites.
 -}
-fn invoke_one(comptime operation: fn(T) -> U, value: T) -> U
-where T, U
-{
+fn invoke_one(comptime operation: fn(T) -> U, value: T) -> U where T, U {
     operation(value)
 }
 
-fn invoke_two(comptime operation: fn(T, U) -> V, first: T, second: U) -> V
-where T, U, V
-{
+fn invoke_two(comptime operation: fn(T, U) -> V, first: T, second: U) -> V where T, U, V {
     operation(first, second)
 }
 

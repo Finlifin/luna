@@ -1,21 +1,25 @@
 {- Regression: repeated pattern generator invocations must fit the default
    frontend preparation budget with the full sysroot and return true. -}
-comptime fn parity(count: u8) -> <bool -| value: bool> {
+comptime fn parity(count: u8) -> < bool -| value: bool > {
     var remaining = count;
     var expected = true;
     while remaining > 0 {
         remaining -= 1;
         expected = not expected;
-        if remaining > 0 { continue; }
+        if remaining > 0 {
+            continue;
+        }
         break;
     }
     '<value if value == expected>
 }
 
-comptime fn choose(flag: bool) -> <bool -| value: bool> {
+comptime fn choose(flag: bool) -> < bool -| value: bool > {
     while:outer true {
         while true {
-            if flag { break outer; }
+            if flag {
+                break outer;
+            }
             return '<false as value>;
         }
     }
@@ -28,10 +32,25 @@ fn run() -> bool {
     const even = parity(4);
     const yes = choose(true);
     const no = choose(false);
-    let a = true match { ~<zero> => value, _ => false };
-    let b = false match { ~<odd> => not value, _ => false };
-    let c = true match { ~<even> => value, _ => false };
-    let d = true match { ~<yes> => value, _ => false };
-    let e = false match { ~<no> => not value, _ => false };
+    let a = true match {
+        ~<zero> => value,
+        _ => false,
+    }
+    let b = false match {
+        ~<odd> => not value,
+        _ => false,
+    }
+    let c = true match {
+        ~<even> => value,
+        _ => false,
+    }
+    let d = true match {
+        ~<yes> => value,
+        _ => false,
+    }
+    let e = false match {
+        ~<no> => not value,
+        _ => false,
+    }
     a and b and c and d and e
 }

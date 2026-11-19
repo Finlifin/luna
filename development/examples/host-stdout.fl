@@ -19,6 +19,6 @@ fn main() {
     let succeeded = demo() match {
         _! => true,
         error _ => false,
-    };
+    }
     assumes succeeded;
 }

@@ -1,6 +1,12 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin {T}
-pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 typealias Byte = .u8'builtin;
 typealias F32 = .f32'builtin;
 
@@ -9,10 +15,17 @@ fn keep(comptime value: T) -> T where T {
 }
 
 -- The default observes this call's tuple, using the declared type equality.
-fn enabled(options: Tuple<T, bool>, .value: bool = do {
-    let (primary, fallback) = options;
-    primary or fallback
-}) -> bool where T, requires T == bool {
+fn enabled(
+    options: Tuple<T, bool>,
+    .value: bool = do {
+        let (primary, fallback) = options;
+        primary or fallback
+    },
+) -> bool
+where
+    T,
+    requires T == bool,
+{
     value
 }
 
@@ -24,12 +37,15 @@ fn configure(comptime input: Byte, comptime scale: F32) -> Tuple<Byte, F32, bool
     let weight = do {
         let doubled = scale * 2.0;
         doubled + 1.0
-    };
+    }
     let changed = encoded != input;
-    let ready = keep(do {
-        let read: %{changed: bool} comptime fn() -> bool = || changed;
-        read()
-    });
+    let ready =
+        keep(
+            do {
+                let read: %{ changed: bool } comptime fn() -> bool = || changed;
+                read()
+            },
+        );
     (keep(encoded), keep(weight), enabled((ready, false)))
 }
 

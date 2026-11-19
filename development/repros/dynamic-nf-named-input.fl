@@ -2,7 +2,9 @@
     The declared Items entry accepts a complete collection. The user-defined
     constructor retains its opaque identity.
 -}
-pure comptime fn Bundle<...Items: meta.List<Type>> -> Type { bool }
+pure comptime fn Bundle<...Items: meta.List<Type>> -> Type {
+    bool
+}
 
 comptime fn Apply(factory: pure comptime fn<...Items: meta.List<Type>> -> Type) -> Type {
     let items: meta.List<Type> = [bool, u8];

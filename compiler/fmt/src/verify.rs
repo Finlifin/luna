@@ -163,6 +163,17 @@ fn canonical_core_fingerprint(parsed: &ParsedSource, node: NodeIndex) -> String 
             subs.sort();
             return format!("(ProjectionMultiPath {base} [{}])", subs.join(","));
         }
+        NodeKind::CaseArm | NodeKind::ConditionArm | NodeKind::CatchArm => {
+            let head = canonical_node_fingerprint(parsed, slots[0]);
+            let mut body = slots[1];
+            if parsed.ast.get_node_kind(body) == Some(NodeKind::ExprStatement)
+                && let Some(&inner) = parsed.ast.get_children(body).first()
+            {
+                body = inner;
+            }
+            let body_fp = canonical_node_fingerprint(parsed, body);
+            return format!("({kind:?} {head} {body_fp})");
+        }
         _ => {}
     }
 

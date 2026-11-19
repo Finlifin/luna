@@ -1,8 +1,16 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 -- Type-parameter definitions are checked before any concrete call.
-fn keep(value: T) -> T where T { value }
+fn keep(value: T) -> T where T {
+    value
+}
 
 fn apply(value: T, transform: fn(T) -> T) -> T where T {
     transform(value)
@@ -17,7 +25,9 @@ fn recur(value: T, again: bool) -> T where T {
     }
 }
 
-fn negate(value: bool) -> bool { not value }
+fn negate(value: bool) -> bool {
+    not value
+}
 
 fn run() -> Tuple<bool, 'x''type> {
     (apply(keep(false), negate), recur('x', true))
@@ -33,8 +43,7 @@ fn inferred_callbacks() -> bool {
     apply(true, |value| value) and apply(true, keep)
 }
 
-fn configured(value: T, .first: bool = false, .second: bool = first)
-    -> Tuple<T, bool> where T {
+fn configured(value: T, .first: bool = false, .second: bool = first) -> Tuple<T, bool> where T {
     (value, second)
 }
 

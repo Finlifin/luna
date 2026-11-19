@@ -1,10 +1,11 @@
 -- Each counter owns its capture; calls update that stored value.
 trait Duplicate {}
+
 trait Retire {
     fn drop(*self);
 }
 
-typealias Counter = %{value: .u32'builtin} fn() -> .u32'builtin;
+typealias Counter = %{ value: .u32'builtin } fn() -> .u32'builtin;
 
 fn counter() -> Counter {
     var value: .u32'builtin = 0;

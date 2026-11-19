@@ -1,5 +1,5 @@
-use builtin.{bool, Symbol, Integer};
 use bindings.Object;
+use builtin.{Integer, Symbol, bool}
 
 {-
     An immutable snapshot of the source package's host pipeline target. These

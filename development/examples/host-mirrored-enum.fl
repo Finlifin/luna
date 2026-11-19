@@ -5,7 +5,13 @@
 use primitives.Type;
 
 enum Source where T {
-    net.{ idle, nested.{ data(T), record { value: T } } },
+    net.{
+        idle,
+        nested.{
+            data(T),
+            record { value: T },
+        },
+    },
     stopped,
 }
 
@@ -30,5 +36,6 @@ fn read(value: Mirrored) -> bool {
 fn run() -> bool {
     read(Mirrored.net.nested.data(true))
         and read(Mirrored.net.nested.record { value: true })
-        and read(.extra) and not read(.stopped)
+        and read(.extra)
+        and not read(.stopped)
 }

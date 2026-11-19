@@ -32,4 +32,4 @@ concat!(
     "mod newtypes {\n", include_str!("../../../../library/meta/definitions/newtypes.fl"), "\n}\n",
     "}\n",
     include_str!("../../../../library/meta/lib.fl"),
-).replace("use numeric.{scalar_math, equality, ordering};\n", "use numeric.{equality, ordering};\n").replace("pub mod math {\n    pub use scalar_math.*;\n}\n\n", "")
+).replace("use numeric.{equality, ordering, scalar_math}\n", "use numeric.{equality, ordering}\n").replace("pub mod math {\n    pub use scalar_math.*;\n}\n\n", "")

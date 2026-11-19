@@ -1,13 +1,16 @@
 -- Guard-only staged dependency: selection waits for the caller's mode.
-fn take(comptime mode: bool, .next: bool = do {
-    var selected = false;
-    while true {
-        const found if mode = true else { break; };
-        selected = found;
-        break;
-    }
-    selected
-}) -> bool {
+fn take(
+    comptime mode: bool,
+    .next: bool = do {
+        var selected = false;
+        while true {
+            const found if mode = true else { break; }
+            selected = found;
+            break;
+        }
+        selected
+    },
+) -> bool {
     next
 }
 

@@ -1,9 +1,13 @@
 trait Compute {
     comptime fn capacity() -> .u8'builtin;
 }
+
 struct Provider {}
+
 impl Compute for Provider {
-    comptime fn capacity() -> .u8'builtin { 9 }
+    comptime fn capacity() -> .u8'builtin {
+        9
+    }
 }
 
 trait Source {
@@ -13,7 +17,9 @@ trait Source {
     assoc base: .u8'builtin = 1;
     assoc Element: .Type'builtin = bool;
 }
+
 struct Holder {}
+
 impl Source for Holder {
     -- Default capacity uses this selected override, producing 10.
     assoc base: .u8'builtin = Provider.as(Compute).capacity();

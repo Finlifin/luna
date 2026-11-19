@@ -739,3 +739,29 @@ fn formats_sysroot_library_files_idempotently_and_verifies_ast() {
         "expected at least 10 parseable sysroot files, got {formatted_count}"
     );
 }
+
+#[test]
+fn formats_lambda_param_angles_guarded_effect_arms_and_final_case_arm() {
+    let src = "\
+fn apply(lambda f: fn(bool) -> bool, value: Tuple<Tuple<bool, Tuple<bool, bool>>, Tuple<bool, Tuple<bool, bool>>, Tuple<bool, Tuple<bool, bool>>>) -> bool {
+    let x = subject()# {
+        select(v) if value == (true, false) => do { v },
+        other(v) => v,
+    };
+    value match {
+        (true, _) => true,
+        _ => false
+    }
+}
+
+fn make() -> Tuple<Tuple<Tuple<bool, bool>, bool>, Tuple<bool, Tuple<Tuple<bool, bool>, Tuple<bool, bool>>>> {
+    Pair<do { var count = 0; count = count + 1; count }, do { var flag = true; flag = false; flag }>
+}
+";
+    let got = fmt_ok(src);
+    assert!(got.contains("lambda f: fn(bool) -> bool"), "{got}");
+    assert!(!got.contains(",\n>"), "{got}");
+    assert!(!got.contains("\n>"), "{got}");
+    assert!(got.contains("select(v) if"), "{got}");
+    assert!(got.contains("_ => false,"), "{got}");
+}

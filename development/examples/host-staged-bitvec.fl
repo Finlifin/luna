@@ -7,12 +7,18 @@ fn ordinary(comptime width: .Integer'builtin) -> defer .BitVec'builtin<width> {
     0
 }
 
-fn ones() -> defer .BitVec'builtin<N> where N: .Integer'builtin { not 0 }
-fn twice() -> defer .BitVec'builtin<N> where N: .Integer'builtin { not not 1 }
+fn ones() -> defer .BitVec'builtin<N> where N: .Integer'builtin {
+    not 0
+}
 
-fn relay(comptime width: .Integer'builtin,
-         callback: defer (fn() -> .BitVec'builtin<width>))
-    -> defer (fn() -> .BitVec'builtin<width>) {
+fn twice() -> defer .BitVec'builtin<N> where N: .Integer'builtin {
+    not not 1
+}
+
+fn relay(
+    comptime width: .Integer'builtin,
+    callback: defer (fn() -> .BitVec'builtin<width>),
+) -> defer (fn() -> .BitVec'builtin<width>) {
     callback
 }
 
@@ -35,11 +41,15 @@ fn factories() -> bool {
     empty() == 0 and small() == 255 and captured() == not 0
 }
 
-fn ordinary_factory(comptime width: .Integer'builtin)
-    -> defer (fn() -> .BitVec'builtin<width>) { ones<width> }
+fn ordinary_factory(comptime width: .Integer'builtin) -> defer (fn() -> .BitVec'builtin<width>) {
+    ones<width>
+}
 
-fn defaulted_factory(comptime .width: .Integer'builtin = 8)
-    -> defer (fn() -> .BitVec'builtin<width>) { ones<width> }
+fn defaulted_factory(
+    comptime .width: .Integer'builtin = 8,
+) -> defer (fn() -> .BitVec'builtin<width>) {
+    ones<width>
+}
 
 fn ordinary_factories() -> bool {
     let empty = ordinary_factory(0);
@@ -50,10 +60,15 @@ fn ordinary_factories() -> bool {
     empty() == 0 and captured() == not 0 and fallback() == 255 and explicit() == not 0
 }
 
-comptime fn increment(width: .Integer'builtin) -> .Integer'builtin { width + 1 }
+comptime fn increment(width: .Integer'builtin) -> .Integer'builtin {
+    width + 1
+}
 
-fn computed_factory(comptime width: .Integer'builtin)
-    -> defer (fn() -> .BitVec'builtin<width + 1>) { ones<increment(width)> }
+fn computed_factory(
+    comptime width: .Integer'builtin,
+) -> defer (fn() -> .BitVec'builtin<width + 1>) {
+    ones<increment(width)>
+}
 
 fn computed_factories() -> bool {
     let bit = computed_factory(0);
@@ -66,11 +81,17 @@ fn run() -> bool {
     let bit = zeros<1>();
     let pair = zeros<2>();
     let wide = zeros<1024>();
-    empty == 0 and bit == 0 and pair == 0
-        and wide[0..512] == 0 and wide[512..1024] == 0
+    empty == 0
+        and bit == 0
+        and pair == 0
+        and wide[0..512] == 0
+        and wide[512..1024] == 0
         and ordinary(65) == 0
-        and ones<0>() == 0 and ones<1>() == 1 and ones<65>() == not 0
-        and ones<1024>() == not 0 and twice<8>() == 1
+        and ones<0>() == 0
+        and ones<1>() == 1
+        and ones<65>() == not 0
+        and ones<1024>() == not 0
+        and twice<8>() == 1
         and callbacks()
         and factories()
         and ordinary_factories()

@@ -216,13 +216,13 @@ fn contextual_runtime_method_transport_preserves_the_public_contract() {
         Value::Bool(true)
     );
     sysroot::compile(&source.replace(
-        "fn make() -> bool { true }",
-        "fn make() -> bool { while true {} false }",
+        "fn make() -> bool {\n        true\n    }",
+        "fn make() -> bool {\n        while true {}\n        false\n    }",
     ))
     .unwrap();
     let wrong = source
         .replace("callback: fn() -> bool", "callback: fn() -> char")
-        .replace("<|- bool>", "<|- char>")
+        .replace("< |- bool >", "< |- char >")
         .replace("fn run() -> bool", "fn run() -> char");
     assert!(sysroot::compile(&wrong).is_err());
 }

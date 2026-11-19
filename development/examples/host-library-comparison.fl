@@ -1,6 +1,6 @@
 -- Load comparison.fl and resources.fl as explicit dependencies.
-use builtin.{Symbol, bool, i128, isize, u32, usize};
-use comparison.{Eq, Ord};
+use builtin.{Symbol, bool, i128, isize, u32, usize}
+use comparison.{Eq, Ord}
 
 fn lower(a: T, b: T) -> T where T :- Ord + resources.Copy {
     if a.as(Ord).lt(b) { a } else { b }

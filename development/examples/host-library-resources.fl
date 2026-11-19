@@ -1,7 +1,7 @@
 -- Supply library/builtin/protocols/resources.fl as package resources.
 -- Use luna packages test with resources.Copy and resources.Drop protocol bindings.
-use builtin.{Symbol, bool, u32};
-use resources.{Once, Clone, Copy, Drop};
+use builtin.{Symbol, bool, u32}
+use resources.{Clone, Copy, Drop, Once}
 
 test clone_scalar {
     let tag: Symbol = .ready;
@@ -22,30 +22,42 @@ test clone_pointer {
     assumes not cloned.*;
 }
 
-struct Watch { seen: *bool }
+struct Watch {
+    seen: *bool,
+}
+
 impl Drop for Watch {
-    fn drop(*self) { self.seen.*.* = true; }
+    fn drop(*self) {
+        self.seen.*.* = true;
+    }
 }
 
 test scope_cleanup {
     var seen = false;
-    do { let watch = Watch { seen: seen.ref }; };
+    do {
+        let watch = Watch { seen: seen.ref }
+    }
     assumes seen;
 }
 
-struct CounterView { counter: *bool }
+struct CounterView {
+    counter: *bool,
+}
+
 impl Once for CounterView {}
+
 impl Clone for CounterView {
     fn clone(*self) -> Self {
         self.counter.*.* = not self.counter.*.*;
         self.*
     }
 }
+
 impl Copy for CounterView {}
 
 test copy_does_not_call_clone {
     var count = false;
-    let original = CounterView { counter: count.ref };
+    let original = CounterView { counter: count.ref }
     let copied = original;
     assumes not count;
     let cloned = original.as(Clone).clone();

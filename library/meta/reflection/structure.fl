@@ -1,26 +1,26 @@
-use bindings;
-use builtin.{Integer, Symbol, Type};
 use List;
+use bindings;
 use bindings.Object;
+use builtin.{Integer, Symbol, Type}
 
 {-
     Observe declaration order through the checked Type value. Reflection grants
     neither field access nor layout permission and does not unfold opaque heads.
     Enum paths consist of Symbol segments, not encoded discriminants.
 -}
-pub use bindings.struct_field_names;
-pub use bindings.struct_field_types;
-pub use bindings.enum_group_paths;
-pub use bindings.enum_variant_paths;
-pub use bindings.enum_variant_shapes;
-pub use bindings.enum_variant_field_names;
-pub use bindings.enum_variant_field_types;
-pub use bindings.enum_symbol_values;
-pub use bindings.enum_bit_width;
 pub use bindings.enum_bit_base_type;
 pub use bindings.enum_bit_masks;
-pub use bindings.enum_bit_values;
 pub use bindings.enum_bit_offsets;
+pub use bindings.enum_bit_values;
+pub use bindings.enum_bit_width;
+pub use bindings.enum_group_paths;
+pub use bindings.enum_symbol_values;
+pub use bindings.enum_variant_field_names;
+pub use bindings.enum_variant_field_types;
+pub use bindings.enum_variant_paths;
+pub use bindings.enum_variant_shapes;
+pub use bindings.struct_field_names;
+pub use bindings.struct_field_types;
 
 {-
     Compose the checked parallel reflection lists into ordered field entries.
@@ -28,7 +28,7 @@ pub use bindings.enum_bit_offsets;
     Object stores each field's Type value, without erasing it to Any.
 -}
 pure comptime fn field_object(names: List<Symbol>, types: List<Type>) -> Object {
-    var fields: Object = {};
+    var fields: Object = {}
     let count = types.length();
     inline for index in 0..count {
         fields = fields.append(types[index], .key = names.get(index));

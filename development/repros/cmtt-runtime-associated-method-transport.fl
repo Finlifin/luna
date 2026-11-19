@@ -12,17 +12,24 @@
         while true {} false
     Compiling that variant must terminate; do not execute run in that case.
 -}
-
 trait Factory {
     assoc Item: Type;
+
     fn make() -> Item;
 }
 
 impl Factory for bool {
     assoc Item: Type = bool;
-    fn make() -> bool { true }
+
+    fn make() -> bool {
+        true
+    }
 }
 
-comptime fn wrapper(callback: fn() -> bool) -> <|- bool> { '(callback()) }
+comptime fn wrapper(callback: fn() -> bool) -> < |- bool > {
+    '(callback())
+}
 
-fn run() -> bool { ~<wrapper(bool.as(Factory).make)> }
+fn run() -> bool {
+    ~<wrapper(bool.as(Factory).make)>
+}

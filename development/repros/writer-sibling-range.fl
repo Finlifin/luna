@@ -1,15 +1,20 @@
 {- Positive range-proof precision case. A store to a disjoint sibling must
    preserve the earlier count observation. Both additions are safe under the
    checked assumes, without repeating them after the sibling store. -}
-struct Sink { count: u64, bytes: u64 }
+struct Sink {
+    count: u64,
+    bytes: u64,
+}
+
 fn update(sink: *Sink, byte: u8) {
     assumes sink.count.* < 8;
     assumes sink.bytes.* <= 72057594037927935;
     sink.bytes.* = sink.bytes.* * 256 + byte'bitvec.as(u64);
     sink.count.* = sink.count.* + 1;
 }
+
 fn run() -> bool {
-    var sink = Sink { count: 0, bytes: 0 };
+    var sink = Sink { count: 0, bytes: 0 }
     update(sink.ref, 65);
     sink.count == 1 and sink.bytes == 65
 }

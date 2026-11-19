@@ -1,9 +1,25 @@
 {- Regression: ordinary Type-input bodies defer dispatch preparation;
    invocation selects demanded methods after binding those inputs. -}
 typealias Type = .Type'builtin;
-trait Selector { fn select(comptime value: bool) -> bool; }
-impl Selector for bool { fn select(comptime value: bool) -> bool { true } }
-comptime fn callback(comptime T: Type) -> fn(comptime bool) -> bool { bool.select }
-fn dispatch(comptime T: Type,
-    comptime .action: fn(comptime bool) -> bool = callback(T)) -> bool { action(true) }
-fn run() -> bool { dispatch(bool) }
+
+trait Selector {
+    fn select(comptime value: bool) -> bool;
+}
+
+impl Selector for bool {
+    fn select(comptime value: bool) -> bool {
+        true
+    }
+}
+
+comptime fn callback(comptime T: Type) -> fn(comptime bool) -> bool {
+    bool.select
+}
+
+fn dispatch(comptime T: Type, comptime .action: fn(comptime bool) -> bool = callback(T)) -> bool {
+    action(true)
+}
+
+fn run() -> bool {
+    dispatch(bool)
+}

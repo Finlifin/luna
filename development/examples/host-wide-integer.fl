@@ -2,7 +2,9 @@
 typealias Wide = .u128'builtin;
 
 fn double(value: Wide) -> Wide
-where requires value <= 18446744073709551616 {
+where
+    requires value <= 18446744073709551616,
+{
     value * 2
 }
 

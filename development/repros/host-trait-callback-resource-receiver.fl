@@ -1,18 +1,39 @@
 trait Duplicate {}
-trait Retire {fn drop(*self);}
+
+trait Retire {
+    fn drop(*self);
+}
+
 impl Duplicate for bool {}
-trait Select {fn select(self,comptime flag:bool,value:bool)->bool;}
-struct Host {enabled:bool}
+
+trait Select {
+    fn select(self, comptime flag: bool, value: bool) -> bool;
+}
+
+struct Host {
+    enabled: bool,
+}
+
 impl Duplicate for Host {}
+
 impl Select for Host {
-    fn select(self,comptime flag:bool,value:bool)->bool {
-        if flag {value == self.enabled} else {value != self.enabled}
+    fn select(self, comptime flag: bool, value: bool) -> bool {
+        if flag {
+            value == self.enabled
+        } else {
+            value != self.enabled
+        }
     }
 }
-fn apply(callback:fn(Host,comptime bool,bool)->bool,host:Host)->bool {
-    callback(host,true,true)
+
+fn apply(callback: fn(Host, comptime bool, bool) -> bool, host: Host) -> bool {
+    callback(host, true, true)
 }
-fn trial(start:bool)->bool {
-    apply(Host.as(Select).select,Host {enabled:start}) == start
+
+fn trial(start: bool) -> bool {
+    apply(Host.as(Select).select, Host { enabled: start }) == start
 }
-fn run()->bool {trial(true) and trial(false)}
+
+fn run() -> bool {
+    trial(true) and trial(false)
+}

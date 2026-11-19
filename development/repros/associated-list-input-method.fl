@@ -4,12 +4,16 @@
 trait Source {
     assoc Item: Type;
 }
+
 impl Source for bool {
     assoc Item: Type = bool;
 }
+
 comptime fn count(comptime T: Type, values: meta.List<T.as(Source).Item>) -> Integer
-where requires T :- Source
+where
+    requires T :- Source,
 {
     values.length()
 }
+
 const count_result = count(bool, [true, false]);

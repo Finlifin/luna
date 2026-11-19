@@ -1,3 +1,4 @@
 pub typealias Flag = bool;
+
 private use predicates.choose as implementation;
 pub use implementation as choose;

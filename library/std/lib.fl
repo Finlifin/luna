@@ -1,31 +1,45 @@
 {- Runtime host facilities. std.prelude is imported explicitly. -}
 pub use builtin.*;
-use platform.{linux as linux_impl, unix as unix_impl};
-use io_impl.{errors, writer};
-use fs_impl.file;
-use mem_impl.layout;
 use fmt_impl.arguments;
 use fmt_impl.parse;
+use fs_impl.file;
+use io_impl.{errors, writer}
+use mem_impl.layout;
+use platform.{linux as linux_impl, unix as unix_impl}
 
 pub mod os {
-    pub mod linux { pub use linux_impl.*; }
-    pub mod unix { pub use unix_impl.*; }
+    pub mod linux {
+        pub use linux_impl.*;
+    }
+
+    pub mod unix {
+        pub use unix_impl.*;
+    }
 }
+
 pub mod io {
     pub use builtin.fmt.ByteWriter;
     pub use errors.Error;
-    pub use writer.{Writer, stdout, stderr, write_all};
     pub use unix_impl.read_byte;
+    pub use writer.{Writer, stderr, stdout, write_all}
 }
-pub mod fs { pub use file.{File, remove_file}; }
-pub mod mem { pub use layout.Layout; }
+
+pub mod fs {
+    pub use file.{File, remove_file}
+}
+
+pub mod mem {
+    pub use layout.Layout;
+}
+
 pub mod fmt {
+    pub use arguments.{eprint, eprintln, print, print_value, println, println_value}
     pub use builtin.fmt.Display;
-    pub use parse.{Parse, FormatPlan, FormatPiece, FormatError};
-    pub use arguments.{print, println, eprint, eprintln, print_value, println_value};
+    pub use parse.{FormatError, FormatPiece, FormatPlan, Parse}
 }
+
 pub mod prelude {
-    pub use builtin.prelude.*;
-    pub use arguments.{print, println, eprint, eprintln, print_value, println_value};
+    pub use arguments.{eprint, eprintln, print, print_value, println, println_value}
     pub use builtin.fmt.Display;
+    pub use builtin.prelude.*;
 }

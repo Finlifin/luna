@@ -1,10 +1,16 @@
 -- These computations choose code identities; they never execute runtime bodies.
-fn identity(value: T) -> T where T { value }
-fn invert(value: bool) -> bool { not value }
+fn identity(value: T) -> T where T {
+    value
+}
+
+fn invert(value: bool) -> bool {
+    not value
+}
 
 comptime fn choose(flag: bool) -> fn(bool) -> bool {
     if flag { invert } else { identity<bool> }
 }
+
 comptime fn forward(callback: fn(bool) -> bool) -> fn(bool) -> bool {
     callback
 }
@@ -12,9 +18,13 @@ comptime fn forward(callback: fn(bool) -> bool) -> fn(bool) -> bool {
 trait Action {
     assoc apply: fn(bool) -> bool = forward(choose(true));
 }
+
 struct Inverted {}
+
 struct Unchanged {}
+
 impl Action for Inverted {}
+
 impl Action for Unchanged {
     assoc apply: fn(bool) -> bool = choose(false);
 }

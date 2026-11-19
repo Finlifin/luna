@@ -1,6 +1,6 @@
-use builtin.{Integer, Symbol, Type};
 use List;
 use bindings.Object;
+use builtin.{Integer, Symbol, Type}
 
 {- Shared, unpublished field descriptions. Parsing preserves entry order and
    duplicate names; checked definition publication validates storage and names.
@@ -20,15 +20,15 @@ impl FieldDescription {
             let name = fields.key(index) match {
                 name? => name,
                 null => return null,
-            };
+            }
             let field_type = fields.value<Type>(index) match {
                 T? => T,
                 null => return null,
-            };
+            }
             names.append(name);
             types.append(field_type);
             index += 1;
-        };
+        }
         Self { names: names, types: types }
     }
 }

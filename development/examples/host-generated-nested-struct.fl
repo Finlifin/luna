@@ -4,8 +4,13 @@
 -}
 use primitives.Type;
 
-struct Payload { enabled: bool }
-struct Source where T, value: T { payload: Payload }
+struct Payload {
+    enabled: bool,
+}
+
+struct Source where T, value: T {
+    payload: Payload,
+}
 
 comptime fn Wrapped() -> Type {
     let selected = bool;
@@ -18,9 +23,14 @@ comptime fn Wrapped() -> Type {
 typealias Generated = Wrapped();
 
 impl Generated {
-    fn enabled(self) -> bool { self.payload.enabled }
+    fn enabled(self) -> bool {
+        self.payload.enabled
+    }
 }
 
 fn run() -> bool {
-    Generated { payload: Payload { enabled: true } }.enabled()
+    Generated {
+        payload: Payload { enabled: true },
+    }
+        .enabled()
 }

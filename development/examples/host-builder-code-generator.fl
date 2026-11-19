@@ -4,7 +4,7 @@
 -}
 use primitives.Type;
 
-comptime fn generate() -> <|-bool> {
+comptime fn generate() -> < |- bool > {
     var builder = meta.StructBuilder.new(.name = .QuoteLocal);
     builder.add_field(.flag, bool);
     let T = builder.Build();
@@ -15,4 +15,6 @@ comptime fn generate() -> <|-bool> {
     '(false)
 }
 
-fn run() -> bool { ~<generate()> }
+fn run() -> bool {
+    ~<generate()>
+}

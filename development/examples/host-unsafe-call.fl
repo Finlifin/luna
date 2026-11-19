@@ -14,7 +14,5 @@ unsafe fn apply(callback: Unary, value: bool) -> bool {
 
 fn run() -> bool {
     let callback: Unary = invert;
-    unsafe {
-        apply(callback, false)
-    }
+    unsafe { apply(callback, false) }
 }

@@ -3,4 +3,7 @@
 pure comptime fn flag_code(enabled: bool) -> < |- bool > {
     if enabled { '(true) } else { '(false) }
 }
-fn run() -> bool { ~<flag_code(true)> and not ~<flag_code(false)> }
+
+fn run() -> bool {
+    ~<flag_code(true)> and not ~<flag_code(false)>
+}

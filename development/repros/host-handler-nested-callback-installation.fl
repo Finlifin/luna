@@ -1,22 +1,43 @@
 -- Nested installations borrow the current candidate; an outer installation
 -- remains live across both inner requests.
 trait Duplicate {}
-trait Retire {fn drop(*self);}
+
+trait Retire {
+    fn drop(*self);
+}
+
 impl Duplicate for bool {}
-fn identity(value: bool) -> bool {value}
-fn invert(value: bool) -> bool {not value}
+
+fn identity(value: bool) -> bool {
+    value
+}
+
+fn invert(value: bool) -> bool {
+    not value
+}
+
 effect step() -> bool;
 effect nested() -> bool;
-fn subject() -> #step bool {step()# and step()#}
+
+fn subject() -> #step bool {
+    step()# and step()#
+}
+
 fn run() -> bool {
     var callback = identity;
     callback = invert;
     let first = subject()# {
-        step() => nested()# {nested() => callback(false),},
-    };
+        step() =>
+            nested()# {
+                nested() => callback(false),
+            },
+    }
     callback = identity;
     let second = subject()# {
-        step() => nested()# {nested() => callback(false),},
-    };
+        step() =>
+            nested()# {
+                nested() => callback(false),
+            },
+    }
     first and not second
 }

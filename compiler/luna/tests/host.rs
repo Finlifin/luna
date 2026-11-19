@@ -17727,7 +17727,7 @@ fn staged_type_members_compose_in_local_type_constructors() {
 fn staged_pointer_annotations_recheck_copy_and_domains() {
     let base = include_str!("../../../development/repros/staged-type-factory-pointer.fl");
     let end = base.find("fn run()").unwrap();
-    let body = base[..end].replace(" where requires T:-Duplicate", "");
+    let body = base[..end].replace("\nwhere\n    requires T :- Duplicate,", "");
     for copy in [true, false] {
         let implementation = if copy {
             "impl Duplicate for Owner {}"
@@ -17884,7 +17884,7 @@ fn staged_generic_type_members_recheck_routing_formation_and_visibility() {
         .replace("struct Outer {", "mod hidden {pub struct Outer {")
         .replace("pub struct Inner", "private struct Inner")
         .replace("comptime fn Make()", "} comptime fn Make()")
-        .replace("{Outer}", "{hidden.Outer}");
+        .replace("{\n    Outer\n}", "{\n    hidden.Outer\n}");
     for source in [
         base.replace("Inner<bool>", "Inner<bool,bool>"),
         base.replace("Inner<bool>", "Inner<.Missing=bool>"),
@@ -17922,8 +17922,11 @@ fn inferred_generic_member_aliases_keep_pending_provenance() {
         base.to_owned(),
         base.replace("const Selected = Container.Inner<bool>;", "const First = Container.Inner<bool>; const Selected=First;"),
         base.replace("const Selected = Container.Inner<bool>;", "const First = Container.Inner<bool>; const Selected=First; do {const Selected=false; Selected;};"),
-        base.replace("Inner where T {pub typealias Payload = T;}", "Inner where T {pub struct Next where U {pub typealias Payload=U;}}")
-            .replace("Selected.Payload", "Selected.Next<bool>.Payload"),
+        base.replace(
+            "Inner where T {\n        pub typealias Payload = T;\n    }",
+            "Inner where T {pub struct Next where U {pub typealias Payload=U;}}",
+        )
+        .replace("Selected.Payload", "Selected.Next<bool>.Payload"),
     ] {
         let work = Work::new(&source);
         for level in ["0", "3"] {
@@ -17943,12 +17946,15 @@ fn inferred_member_provenance_does_not_grant_types_or_access() {
         .replace("struct Outer {", "mod hidden {pub struct Outer {")
         .replace("pub struct Inner", "private struct Inner")
         .replace("comptime fn Make()", "} comptime fn Make()")
-        .replace("{Outer}", "{hidden.Outer}");
+        .replace("{\n    Outer\n}", "{\n    hidden.Outer\n}");
     for source in [
         base.replace("Payload = T", "Payload = .u32'builtin"),
         private,
-        base.replace("pub struct Inner where T {pub typealias Payload = T;}", "pub fn inner()->bool where T {true}")
-            .replace("Container.Inner<bool>", "Container.inner<bool>"),
+        base.replace(
+            "pub struct Inner where T {\n        pub typealias Payload = T;\n    }",
+            "pub fn inner()->bool where T {true}",
+        )
+        .replace("Container.Inner<bool>", "Container.inner<bool>"),
         base.replace("let value: Selected.Payload = flag;", "do {const Selected=true;let bad:Selected.Payload=flag;};let value:Selected.Payload=flag;"),
         base.replace("const Selected = Container.Inner<bool>;", "const Selected = true;"),
     ] {
@@ -17991,8 +17997,10 @@ fn deeply_nested_open_unary_operators_compile_and_run_natively() {
 #[test]
 fn conditional_member_aliases_resume_every_selected_branch() {
     let base = include_str!("../../../development/repros/staged-generic-member-inferred-alias.fl")
-        .replace("pub struct Inner where T {pub typealias Payload = T;}",
-            "pub struct Inner where T {pub typealias Payload=T;} pub struct Other where T {pub typealias Payload=T;}");
+        .replace(
+            "pub struct Inner where T {\n        pub typealias Payload = T;\n    }",
+            "pub struct Inner where T {pub typealias Payload=T;} pub struct Other where T {pub typealias Payload=T;}",
+        );
     // Shared alias branches form a DAG, not an exponentially expanded tree.
     let mut shared = String::from("do {const A0=Container.Inner<bool>;");
     for index in 1..=24 {
@@ -18144,17 +18152,23 @@ fn staged_tuple_aliases_keep_member_sources_across_branch_scopes() {
 fn staged_tuple_aliases_preserve_shape_domains_and_constructor_admission() {
     let base = include_str!("../../../development/repros/staged-member-branch-tuple-alias.fl");
     for source in [
-        base.replace("(Container, flag); Local", "(flag, Container); Local"),
+        base.replace(
+            "(Container, flag);\n        Local",
+            "(flag, Container);\n        Local",
+        ),
         base.replace("(Local, unused)", "(Local, unused, extra)"),
-        base.replace("(Container, flag); Local", "(true, false); Local"),
+        base.replace(
+            "(Container, flag);\n        Local",
+            "(true, false);\n        Local",
+        ),
         base.replace(
             "const (Local, unused) = (Container, flag);",
             "do {const (Local, unused)=(Container, flag);};",
         ),
         base.replace("Payload = T", "Payload = .u32'builtin"),
         base.replace(
-            "<...Es:Elements<.Type'builtin>>",
-            "<Es:Elements<.Type'builtin>>",
+            "<...Es: Elements<.Type'builtin>>",
+            "<Es: Elements<.Type'builtin>>",
         ),
     ] {
         let work = Work::new(&source);
@@ -18213,12 +18227,18 @@ fn guarded_tuple_member_aliases_keep_guard_and_failure_checks() {
     let base = include_str!("../../../development/repros/staged-member-guarded-tuple-alias.fl");
     for (source, exhausted) in [
         (base.replace("if unused =", "if not unused ="), true),
-        (base.replace("else {while true {}}", "else {false}"), false),
+        (
+            base.replace(
+                "else {\n            while true {}\n        }",
+                "else {\n            false\n        }",
+            ),
+            false,
+        ),
         (base.replace("if unused =", "if Container ="), false),
         (
             base.replace(
-                "else {while true {}}",
-                "else {let forbidden=Local;while true {}}",
+                "else {\n            while true {}\n        }",
+                "else {\n            let forbidden = Local;\n            while true {}\n        }",
             ),
             false,
         ),
@@ -18423,21 +18443,33 @@ fn partial_comptime_record_and_variant_fields_keep_type_identity() {
     let variant = include_str!("../../../development/repros/comptime-partial-variant-packet.fl");
     for source in [
         record.to_owned(),
-        record.replace("struct Packet {selected: .Type'builtin, value: bool}", "struct Packet where T {selected: .Type'builtin = T, value: bool}")
-            .replace("Packet {selected: Outer, value: flag}", "Packet<Outer> {value: flag}"),
-        record.replace("{selected: Selected, value} =", "{value, selected: Selected} ="),
-        record.replace("Packet {selected: Outer, value: flag}", "Packet {value: flag, selected: Outer}"),
+        record.replace(
+            "struct Packet {\n    selected: .Type'builtin,\n    value: bool,\n}",
+            "struct Packet where T {\n    selected: .Type'builtin = T,\n    value: bool,\n}",
+        )
+        .replace("Packet { selected: Outer, value: flag }", "Packet<Outer> { value: flag }"),
+        record.replace("{ selected: Selected, value } =", "{ value, selected: Selected } ="),
+        record.replace("Packet { selected: Outer, value: flag }", "Packet { value: flag, selected: Outer }"),
         variant.to_owned(),
-        variant.replace("empty, pair", "other(bool, .Type'builtin), pair")
+        variant.replace("    empty,\n    pair", "    other(bool, .Type'builtin),\n    pair")
             .replace("const .pair(Selected, value)", "const .other(value, Selected) or .pair(Selected, value)"),
         variant.replace("comptime fn configured", "struct Envelope {body: Packet} comptime fn configured")
             .replace("const .pair(Selected, value) = Packet.pair(Outer, flag)", "const {body: .pair(Selected, value)} = Envelope {body: Packet.pair(Outer, flag)}"),
-        record.replace("struct Packet {selected: .Type'builtin, value: bool}", "struct Packet {first: bool, selected: .Type'builtin, last: bool}")
-            .replace("const {selected: Selected, value} = Packet {selected: Outer, value: flag};", "const action=do {var ready=false;|| {ready=not ready;ready}};const {selected: Selected, first, last} = Packet {last: action(), selected: Outer, first: action()};")
-            .replace("= value;", "= first and not last and flag;"),
-        record.replace("struct Packet {selected: .Type'builtin, value: bool}", "struct Packet {tag: bool, selected: .Type'builtin, other: .Type'builtin, value: bool}")
-            .replace("const {selected: Selected, value}", "const {tag: false, other: Selected, value} or {tag: true, selected: Selected, value}")
-            .replace("Packet {selected: Outer, value: flag}", "Packet {tag: true, selected: Outer, other: bool, value: flag}"),
+        record.replace(
+            "struct Packet {\n    selected: .Type'builtin,\n    value: bool,\n}",
+            "struct Packet {\n    first: bool,\n    selected: .Type'builtin,\n    last: bool,\n}",
+        )
+        .replace(
+            "const { selected: Selected, value } = Packet { selected: Outer, value: flag }",
+            "const action=do {var ready=false;|| {ready=not ready;ready}};const {selected: Selected, first, last} = Packet {last: action(), selected: Outer, first: action()};",
+        )
+        .replace("= value;", "= first and not last and flag;"),
+        record.replace(
+            "struct Packet {\n    selected: .Type'builtin,\n    value: bool,\n}",
+            "struct Packet {\n    tag: bool,\n    selected: .Type'builtin,\n    other: .Type'builtin,\n    value: bool,\n}",
+        )
+        .replace("const { selected: Selected, value }", "const {tag: false, other: Selected, value} or {tag: true, selected: Selected, value}")
+        .replace("Packet { selected: Outer, value: flag }", "Packet { tag: true, selected: Outer, other: bool, value: flag }"),
         variant.replace("const .pair(Selected, value)", "const .pair(Selected, value) if value"),
     ] {
         let work = Work::new(&source);
@@ -18461,13 +18493,25 @@ fn partial_comptime_records_preserve_candidate_and_field_checks() {
     for source in [
         record.replace("Payload = T", "Payload = .u32'builtin"),
         record.replace("selected: Outer, value: flag", "selected: flag, value: flag"),
-        record.replace("{selected: Selected, value} =", "{missing: Selected, value} ="),
-        record.replace("struct Packet {selected: .Type'builtin, value: bool}", "struct Packet {selected: .Type'builtin, other: .Type'builtin, value: bool}")
-            .replace("const {selected: Selected, value}", "const {selected: Selected, value: true as value} or {other: Selected, value: false as value}")
-            .replace("Packet {selected: Outer, value: flag}", "Packet {selected: Outer, other: bool, value: flag}"),
+        record.replace("{ selected: Selected, value } =", "{ missing: Selected, value } ="),
+        record.replace(
+            "struct Packet {\n    selected: .Type'builtin,\n    value: bool,\n}",
+            "struct Packet {\n    selected: .Type'builtin,\n    other: .Type'builtin,\n    value: bool,\n}",
+        )
+        .replace(
+            "const { selected: Selected, value }",
+            "const {selected: Selected, value: true as value} or {other: Selected, value: false as value}",
+        )
+        .replace(
+            "Packet { selected: Outer, value: flag }",
+            "Packet { selected: Outer, other: bool, value: flag }",
+        ),
         variant.replace("const .pair(Selected, value)", "const .pair(Selected, value) if Selected"),
-        variant.replace("else {return false;}", "else {false}"),
-        variant.replace("else {return false;}", "else {let forbidden=Selected;return false;}"),
+        variant.replace("else {\n        return false;\n    }", "else {\n        false\n    }"),
+        variant.replace(
+            "else {\n        return false;\n    }",
+            "else {\n        let forbidden=Selected;\n        return false;\n    }",
+        ),
         variant.replace("comptime fn configured", "enum Other {pair(.Type'builtin, bool)} comptime fn configured")
             .replace("const .pair(Selected, value)", "const Other.pair(Selected, value)"),
     ] {
@@ -18502,7 +18546,7 @@ fn partial_comptime_packet_aliases_preserve_binding_snapshots() {
         tuple.replace("const packet = ((Outer, flag), flag);\n    const saved = packet;\n    const (inner, unused) = saved;", "const (inner, _) or (_, inner) = ((Outer, flag), (Outer, not flag));"),
         tuple.replace("const saved = packet;", "do {const packet=(bool, not flag);const (Selected, value)=packet;let checked:Selected=value;checked;};const saved = packet;"),
         tuple.replace("const saved = packet;", "const ((_, _) as saved_inner, _) as saved = packet;").replace("const (Selected, value) = inner;", "const (Selected, value) = saved_inner;"),
-        record.replace("const {selected: Selected, value} = Packet {selected: Outer, value: flag};", "const packet=Packet {selected: Outer, value: flag};const saved=packet;const {selected: Selected, value}=saved;"),
+        record.replace("const { selected: Selected, value } = Packet { selected: Outer, value: flag }", "const packet=Packet {selected: Outer, value: flag};const saved=packet;const {selected: Selected, value}=saved;"),
         variant.replace("const .pair(Selected, value) = Packet.pair(Outer, flag)", "const packet=Packet.pair(Outer, flag);const saved=packet;const .pair(Selected, value) = saved"),
         tuple.replace("const packet = ((Outer, flag), flag);", "const action=do {var ready=false;|| {ready=not ready;ready}};const packet = ((Outer, action()), flag);")
             .replace("    checked\n", "    checked and not action() and flag\n"),
@@ -18579,10 +18623,16 @@ fn tuple_enumeration_preserves_observed_type_fields() {
     let base = include_str!("../../../development/repros/comptime-type-packet-enumeration.fl");
     for source in [
         base.to_owned(),
-        base.replace("let checked:Selected=value", "let checked:T=seed"),
-        base.replace("inline for (index, (T, seed)) in ((bool,true),(.str'builtin,\"value\"))'tuple_enumerate", "const input=((bool,flag),(.str'builtin,\"value\"));const saved_input=input;inline for (index,(T,seed)) in saved_input'tuple_enumerate"),
-        base.replace("inline for (index, (T, seed)) in ((bool,true),(.str'builtin,\"value\"))'tuple_enumerate", "const action=do {var ready=false;|| {ready=not ready;ready}};const input=((bool,action()),(.str'builtin,\"value\"));const saved_input=input;inline for (index,(T,seed)) in saved_input'tuple_enumerate")
-            .replace("    checked\n", "    checked and not action()\n"),
+        base.replace("let checked: Selected = value", "let checked: T = seed"),
+        base.replace(
+            "inline for (index, (T, seed)) in ((bool, true), (.str'builtin, \"value\"))'tuple_enumerate",
+            "const input=((bool,flag),(.str'builtin,\"value\"));const saved_input=input;inline for (index,(T,seed)) in saved_input'tuple_enumerate",
+        ),
+        base.replace(
+            "inline for (index, (T, seed)) in ((bool, true), (.str'builtin, \"value\"))'tuple_enumerate",
+            "const action=do {var ready=false;|| {ready=not ready;ready}};const input=((bool,action()),(.str'builtin,\"value\"));const saved_input=input;inline for (index,(T,seed)) in saved_input'tuple_enumerate",
+        )
+        .replace("    checked\n", "    checked and not action()\n"),
     ] {
         let work = Work::new(&source);
         let options = ["--meta-list-type", "input.Elements", "--tuple-type", "input.Tuple"];
@@ -18607,7 +18657,7 @@ fn tuple_type_observations_preserve_storage_and_expire_on_escape() {
     );
     let source = format!("{header}{}", base
         .replace("comptime fn configured(flag: bool) -> bool {", "comptime fn configured(flag: bool) -> bool {var intact=true;")
-        .replace("let checked:Selected=value;checked;", "let checked:Selected=value;let pointer=T.ref;let old=pointer.*;pointer.* = .u32'builtin;intact=intact and old==Selected and T==.u32'builtin and old!=T;checked;")
+        .replace("let checked: Selected = value;\n        checked;", "let checked:Selected=value;let pointer=T.ref;let old=pointer.*;pointer.* = .u32'builtin;intact=intact and old==Selected and T==.u32'builtin and old!=T;checked;")
         .replace("    checked\n", "    checked and intact\n"));
     let options = [
         "--meta-list-type",
@@ -18670,8 +18720,8 @@ fn tuple_type_observations_preserve_storage_and_expire_on_escape() {
     let bad = format!(
         "{header}{}",
         base.replace(
-            "{const packet=((T,seed),flag);",
-            "{let pointer=T.ref;pointer.* = .u32'builtin;const packet=((T,seed),flag);"
+            "'tuple_enumerate {\n        const packet = ((T, seed), flag);",
+            "'tuple_enumerate {\n        let pointer = T.ref;\n        pointer.* = .u32'builtin;\n        const packet = ((T, seed), flag);",
         )
     );
     assert_ne!(bad, format!("{header}{base}"));
@@ -18759,17 +18809,17 @@ fn partial_field_projections_keep_known_types_and_runtime_siblings() {
             "const inner=saved.packet;const alias=inner;const Selected=alias.selected;",
         ),
         base.replace(
-            "packet: Packet {selected: Outer, value: flag}, untouched: flag",
-            "untouched: flag, packet: Packet {value: flag, selected: Outer}",
+            "packet: Packet { selected: Outer, value: flag },\n        untouched: flag,",
+            "untouched: flag,\n        packet: Packet { value: flag, selected: Outer },",
         ),
         base.replace(
-            "struct Packet {selected: .Type'builtin, value: bool}",
-            "struct Packet where T {selected: .Type'builtin = T, value: bool}",
+            "struct Packet {\n    selected: .Type'builtin,\n    value: bool,\n}",
+            "struct Packet where T {\n    selected: .Type'builtin = T,\n    value: bool,\n}",
         )
         .replace("packet: Packet,", "packet: Packet<Outer>,")
         .replace(
-            "Packet {selected: Outer, value: flag}",
-            "Packet<Outer> {value: flag}",
+            "Packet { selected: Outer, value: flag }",
+            "Packet<Outer> { value: flag }",
         ),
         base.replace(
             "const packet = Envelope",
@@ -19073,17 +19123,17 @@ fn returned_type_fields_select_nested_generic_members() {
                 "struct Envelope {packet:Packet} struct Packet",
             )
             .replace(
-                "comptime fn packet() -> Packet {Packet {selected: Outer}}",
+                "comptime fn packet() -> Packet {\n    Packet { selected: Outer }\n}",
                 "comptime fn packet() -> Envelope {Envelope {packet:Packet {selected:Outer}}}",
             )
             .replace("packet().selected", "packet().packet.selected"),
         source
             .replace(
-                "struct Packet {selected: .Type'builtin}",
+                "struct Packet {\n    selected: .Type'builtin,\n}",
                 "struct Packet where T {selected: T}",
             )
             .replace(
-                "-> Packet {Packet",
+                "-> Packet {\n    Packet",
                 "-> Packet<.Type'builtin> {Packet<.Type'builtin>",
             ),
         source
@@ -19139,7 +19189,7 @@ fn returned_type_member_selection_preserves_domains_and_visibility() {
             .replace("struct Packet", "} struct Packet")
             .replace("pub typealias Payload", "private typealias Payload")
             .replace("selected: Outer", "selected: hidden.Outer"),
-        base.replace("Payload=T", "Payload=.u32'builtin"),
+        base.replace("Payload = T", "Payload = .u32'builtin"),
         base.replace("selected: Outer", "selected: bool"),
         base.replace("comptime fn packet", "fn packet"),
         base.replace(".Inner<bool>", ".Missing<bool>"),
@@ -19180,8 +19230,10 @@ fn generic_call_results_instantiate_type_field_domains() {
         source.to_owned(),
         source.replace("packet(Outer)", "packet<.Type'builtin>(Outer)"),
         source.replace("packet(Outer)", "packet {Outer}"),
-        source.replace("packet(value:T)", "packet(seed:T,.value:T=seed)"),
-        source.replace("packet(value:T)", "packet(seed:T,.value:T=seed)").replace("packet(Outer)", "packet(Outer,.value=Outer)"),
+        source.replace("packet(value: T)", "packet(seed: T, .value: T = seed)"),
+        source
+            .replace("packet(value: T)", "packet(seed: T, .value: T = seed)")
+            .replace("packet(Outer)", "packet(Outer, .value = Outer)"),
         source.replace("let checked:", "const make=packet<.Type'builtin>;let checked:").replace("packet(Outer)", "make(Outer)"),
         source.replace("struct Packet", "struct Other {pub struct Inner where T {pub typealias Payload=.str'builtin;}} struct Packet")
             .replace("    checked\n", "    let alternate:packet(Other).selected.Inner<bool>.Payload=\"other\";checked and alternate==\"other\"\n"),
@@ -19205,7 +19257,7 @@ fn generic_returned_type_fields_reject_invalid_call_inputs_and_identities() {
         base.replace("packet(Outer)", "packet(true)"),
         base.replace("packet(Outer)", "packet<bool>(Outer)"),
         base.replace("packet(Outer)", "packet {missing:Outer}"),
-        base.replace("Payload=T", "Payload=.u32'builtin"),
+        base.replace("Payload = T", "Payload = .u32'builtin"),
         base.replace("comptime fn packet", "fn packet"),
         base.replace("fn run()", "fn run(input:.Type'builtin)")
             .replace("packet(Outer)", "packet(input)"),
@@ -19242,10 +19294,10 @@ fn composite_receivers_preserve_type_field_member_selection() {
     let base = include_str!("../../../development/repros/comptime-block-type-member.fl");
     for source in [
         base.to_owned(),
-        base.replace("do {packet()}", "do {const saved=packet();saved}"),
-        base.replace("do {packet()}", "(if true {packet()} else {packet()})"),
-        base.replace("do {packet()}", "when {true=>packet(),else=>packet()}"),
-        base.replace("do {packet()}", "(true match {true=>packet(),false=>packet()})"),
+        base.replace("do { packet() }", "do {const saved=packet();saved}"),
+        base.replace("do { packet() }", "(if true {packet()} else {packet()})"),
+        base.replace("do { packet() }", "when {true=>packet(),else=>packet()}"),
+        base.replace("do { packet() }", "(true match {true=>packet(),false=>packet()})"),
         "struct Data {value:bool} fn get(flag:bool)->Data {Data {value:flag}} fn run()->bool {var flag=false;let first=do {flag=not flag;get(flag)}.value;let second=do {flag=not flag;get(flag)}.value;first and not second and not flag}".into(),
     ] {
         let work=Work::new(&format!("{RESOURCE_HEADER}{source}"));
@@ -19264,12 +19316,12 @@ fn composite_receivers_preserve_type_field_member_selection() {
 fn composite_type_field_probes_do_not_relax_stage_or_member_checks() {
     let base = include_str!("../../../development/repros/comptime-block-type-member.fl");
     for source in [
-        base.replace("Payload=T", "Payload=.u32'builtin"),
+        base.replace("Payload = T", "Payload = .u32'builtin"),
         base.replace("selected: Outer", "selected: bool"),
         base.replace("comptime fn packet", "fn packet"),
         base.replace(".Inner<bool>", ".Inner<true>"),
         base.replace("fn run()", "fn run(flag:bool)")
-            .replace("do {packet()}", "(if flag {packet()} else {packet()})"),
+            .replace("do { packet() }", "(if flag {packet()} else {packet()})"),
         base.replace("struct Outer", "mod hidden {pub struct Outer")
             .replace("struct Packet", "} struct Packet")
             .replace("pub struct Inner", "private struct Inner")
@@ -19312,15 +19364,15 @@ fn composite_type_values_select_nested_generic_members() {
         base.replace("pub struct Inner", "pub const FLAG=true;pub struct Inner")
             .replace("struct Outer", "struct Other {pub const FLAG=false;} struct Outer")
             .replace("    checked\n", "    checked and do {var flag=false;flag=not flag;if flag {Outer} else {Other}}.FLAG\n"),
-        base.replace("do {Outer}", "do {const saved=Outer;saved}"),
-        base.replace("do {Outer}", "(if true {Outer} else {Outer})"),
-        base.replace("do {Outer}", "when {false=>Outer,else=>Outer}"),
-        base.replace("do {Outer}", "(true match {true=>Outer,false=>Outer})"),
+        base.replace("do { Outer }", "do {const saved=Outer;saved}"),
+        base.replace("do { Outer }", "(if true {Outer} else {Outer})"),
+        base.replace("do { Outer }", "when {false=>Outer,else=>Outer}"),
+        base.replace("do { Outer }", "(true match {true=>Outer,false=>Outer})"),
         base.replace(
             "struct Outer",
             "comptime fn Make()->.Type'builtin {Outer} struct Outer",
         )
-        .replace("do {Outer}", "do {Make()}"),
+        .replace("do { Outer }", "do {Make()}"),
     ] {
         let work = Work::new(&format!("{RESOURCE_HEADER} trait Splice {{assoc RuntimeTarget:.Type'builtin;fn splice(comptime data:Self)->RuntimeTarget;}} impl Splice for bool {{assoc RuntimeTarget:.Type'builtin=bool;fn splice(comptime data:bool)->bool {{data}}}} {source}"));
         let output = work
@@ -19369,25 +19421,25 @@ fn composite_type_receivers_preserve_stage_visibility_and_normal_form_heads() {
                 "    checked\n",
                 "    let member=do {flag=not flag;Outer}.FLAG;checked and member and flag\n",
             ),
-        base.replace("Payload=T", "Payload=.u32'builtin"),
-        base.replace("do {Outer}", "do {true}"),
+        base.replace("Payload = T", "Payload = .u32'builtin"),
+        base.replace("do { Outer }", "do {true}"),
         base.replace(".Inner<bool>", ".Inner<true>"),
         base.replace("fn run()", "fn run(flag:bool)")
-            .replace("do {Outer}", "(if flag {Outer} else {Outer})"),
+            .replace("do { Outer }", "(if flag {Outer} else {Outer})"),
         base.replace(
             "struct Outer",
             "fn Make()->.Type'builtin {Outer} struct Outer",
         )
-        .replace("do {Outer}", "do {Make()}"),
+        .replace("do { Outer }", "do {Make()}"),
         base.replace("struct Outer", "mod hidden {pub struct Outer")
             .replace("fn run()", "} fn run()")
             .replace("pub struct Inner", "private struct Inner")
-            .replace("do {Outer}", "do {hidden.Outer}"),
+            .replace("do { Outer }", "do {hidden.Outer}"),
         base.replace(
             "struct Outer",
             "pure comptime fn Identity<T> -> .Type'builtin {T} struct Outer",
         )
-        .replace("do {Outer}", "do {Identity<Outer>}"),
+        .replace("do { Outer }", "do {Identity<Outer>}"),
     ] {
         let work = Work::new(&format!(
             "{RESOURCE_HEADER} trait Splice {{assoc RuntimeTarget:.Type'builtin;fn splice(comptime data:Self)->RuntimeTarget;}} impl Splice for bool {{assoc RuntimeTarget:.Type'builtin=bool;fn splice(comptime data:bool)->bool {{data}}}} {source}"
@@ -19426,18 +19478,35 @@ fn computed_type_receivers_call_static_functions() {
     let base = include_str!("../../../development/repros/comptime-computed-static-method.fl");
     for source in [
         base.to_owned(),
-        base.replace("pub fn invert(value:bool)->bool {not value}", "pub fn identity(value:T)->T where T {value}").replace(".invert(false)", ".identity(true)"),
-        base.replace("pub fn invert(value:bool)->bool {not value}", "pub fn identity(value:T)->T where T {value}").replace(".invert(false)", ".identity<bool>(true)"),
-        base.replace("fn run()->bool {do {Ops}.invert(false)}", "fn run()->bool {let action=do {Ops}.invert;action(false)}"),
-        base.replace("fn run()->bool {do {Ops}.invert(false)}", "fn run()->bool {var flag=false;let answer=do {Ops}.invert(do {flag=not flag;not flag});answer and flag}"),
-        base.replace("pub fn invert", "pub comptime fn invert").replace("fn run()->bool {do {Ops}.invert(false)}", "fn run()->bool {const answer=do {Ops}.invert(false);answer}"),
+        base.replace(
+            "pub fn invert(value: bool) -> bool {\n        not value\n    }",
+            "pub fn identity(value:T)->T where T {value}",
+        )
+        .replace(".invert(false)", ".identity(true)"),
+        base.replace(
+            "pub fn invert(value: bool) -> bool {\n        not value\n    }",
+            "pub fn identity(value:T)->T where T {value}",
+        )
+        .replace(".invert(false)", ".identity<bool>(true)"),
+        base.replace(
+            "fn run() -> bool {\n    do { Ops }.invert(false)\n}",
+            "fn run()->bool {let action=do {Ops}.invert;action(false)}",
+        ),
+        base.replace(
+            "fn run() -> bool {\n    do { Ops }.invert(false)\n}",
+            "fn run()->bool {var flag=false;let answer=do {Ops}.invert(do {flag=not flag;not flag});answer and flag}",
+        ),
+        base.replace("pub fn invert", "pub comptime fn invert").replace(
+            "fn run() -> bool {\n    do { Ops }.invert(false)\n}",
+            "fn run()->bool {const answer=do {Ops}.invert(false);answer}",
+        ),
         base.replace("struct Ops", "struct Other {pub fn invert(value:bool)->bool {value}} comptime fn Make(comptime flag:bool)->.Type'builtin {if flag {Ops} else {Other}} struct Ops")
-            .replace("do {Ops}.invert(false)", "Make(true).invert(false) and not Make(false).invert(false)"),
-        base.replace("do {Ops}", "(if true {Ops} else {Ops})"),
-        base.replace("do {Ops}", "(when {false=>Ops,else=>Ops})"),
-        base.replace("do {Ops}", "(true match {true=>Ops,false=>Ops})"),
-        base.replace("struct Ops", "comptime fn Make()->.Type'builtin {Ops} struct Ops").replace("do {Ops}", "Make()"),
-        base.replace("struct Ops", "struct Packet {selected:.Type'builtin} comptime fn packet()->Packet {Packet {selected:Ops}} struct Ops").replace("do {Ops}", "packet().selected"),
+            .replace("do { Ops }.invert(false)", "Make(true).invert(false) and not Make(false).invert(false)"),
+        base.replace("do { Ops }", "(if true {Ops} else {Ops})"),
+        base.replace("do { Ops }", "(when {false=>Ops,else=>Ops})"),
+        base.replace("do { Ops }", "(true match {true=>Ops,false=>Ops})"),
+        base.replace("struct Ops", "comptime fn Make()->.Type'builtin {Ops} struct Ops").replace("do { Ops }", "Make()"),
+        base.replace("struct Ops", "struct Packet {selected:.Type'builtin} comptime fn packet()->Packet {Packet {selected:Ops}} struct Ops").replace("do { Ops }", "packet().selected"),
     ] {
         let work=Work::new(&source);
         let output=work.command().args(["--interpret","run"]).output().unwrap();
@@ -19456,21 +19525,21 @@ fn computed_static_method_selection_checks_stage_access_and_arguments() {
     let base = include_str!("../../../development/repros/comptime-computed-static-method.fl");
     for source in [
         base.replace(".invert(false)", ".invert(\"wrong\")"),
-        base.replace("do {Ops}", "do {true}"),
+        base.replace("do { Ops }", "do {true}"),
         base.replace(".invert(false)", ".missing(false)"),
         base.replace("fn run()", "fn run(flag:bool)")
-            .replace("do {Ops}", "(if flag {Ops} else {Ops})"),
+            .replace("do { Ops }", "(if flag {Ops} else {Ops})"),
         base.replace("struct Ops", "fn Make()->.Type'builtin {Ops} struct Ops")
-            .replace("do {Ops}", "Make()"),
+            .replace("do { Ops }", "Make()"),
         base.replace("struct Ops", "mod hidden {pub struct Ops")
             .replace("pub fn invert", "private fn invert")
             .replace("fn run()", "} fn run()")
-            .replace("do {Ops}", "do {hidden.Ops}"),
+            .replace("do { Ops }", "do {hidden.Ops}"),
         base.replace(
             "struct Ops",
             "pure comptime fn Identity<T> -> .Type'builtin {T} struct Ops",
         )
-        .replace("do {Ops}", "do {Identity<Ops>}"),
+        .replace("do { Ops }", "do {Identity<Ops>}"),
     ] {
         let work = Work::new(&source);
         primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
@@ -19499,15 +19568,15 @@ fn computed_type_receivers_invoke_contextual_code_methods() {
     let base = include_str!("../../../development/repros/comptime-computed-code-method.fl");
     for source in [
         base.to_owned(),
-        base.replace("do {Ops}", "(if true {Ops} else {Ops})"),
-        base.replace("do {Ops}", "(when {false=>Ops,else=>Ops})"),
-        base.replace("do {Ops}", "(true match {true=>Ops,false=>Ops})"),
-        base.replace("struct Ops", "comptime fn Make()->.Type'builtin {Ops} struct Ops").replace("do {Ops}", "Make()"),
-        base.replace("struct Ops", "struct Packet {selected:.Type'builtin} comptime fn packet()->Packet {Packet {selected:Ops}} struct Ops").replace("do {Ops}", "packet().selected"),
+        base.replace("do { Ops }", "(if true {Ops} else {Ops})"),
+        base.replace("do { Ops }", "(when {false=>Ops,else=>Ops})"),
+        base.replace("do { Ops }", "(true match {true=>Ops,false=>Ops})"),
+        base.replace("struct Ops", "comptime fn Make()->.Type'builtin {Ops} struct Ops").replace("do { Ops }", "Make()"),
+        base.replace("struct Ops", "struct Packet {selected:.Type'builtin} comptime fn packet()->Packet {Packet {selected:Ops}} struct Ops").replace("do { Ops }", "packet().selected"),
         "trait Builder {comptime fn build()-><|-bool>;} struct Ops {} impl Builder for Ops {comptime fn build()-><|-bool> {'(true)}} fn run()->bool {~<do {Ops}.as(Builder).build()>}".into(),
         "struct Ops {pub comptime fn pattern()-><bool -| value:bool> {'<value>}} fn run()->bool {const pat:<bool -| value:bool> = do {Ops}.pattern();let ~<pat> = true;value}".into(),
         include_str!("../../../development/repros/comptime-computed-quote-method.fl").to_owned(),
-        include_str!("../../../development/repros/comptime-computed-quote-method.fl").replace("fn run()->bool {do {Ops}.invert(false)}", "fn run()->bool {var flag=false;let answer=do {Ops}.invert(do {flag=not flag;not flag});answer and flag}"),
+        include_str!("../../../development/repros/comptime-computed-quote-method.fl").replace("fn run() -> bool {\n    do { Ops }.invert(false)\n}", "fn run()->bool {var flag=false;let answer=do {Ops}.invert(do {flag=not flag;not flag});answer and flag}"),
     ] {
         let work=Work::new(&source);
         let output=work.command().args(["--interpret","run"]).output().unwrap();
@@ -19526,12 +19595,12 @@ fn computed_code_methods_preserve_access_stage_and_code_contracts() {
     let base = include_str!("../../../development/repros/comptime-computed-code-method.fl");
     for source in [
         base.replace("'(true)", "'(\"wrong\")"),
-        base.replace("do {Ops}", "do {true}"),
+        base.replace("do { Ops }", "do {true}"),
         base.replace(".build()", ".missing()"),
-        base.replace("fn run()", "fn run(flag:bool)").replace("do {Ops}", "(if flag {Ops} else {Ops})"),
-        base.replace("struct Ops", "fn Make()->.Type'builtin {Ops} struct Ops").replace("do {Ops}", "Make()"),
-        base.replace("struct Ops", "mod hidden {pub struct Ops").replace("pub comptime fn build", "private comptime fn build").replace("fn run()", "} fn run()").replace("do {Ops}", "do {hidden.Ops}"),
-        base.replace("struct Ops", "pure comptime fn Identity<T> -> .Type'builtin {T} struct Ops").replace("do {Ops}", "do {Identity<Ops>}"),
+        base.replace("fn run()", "fn run(flag:bool)").replace("do { Ops }", "(if flag {Ops} else {Ops})"),
+        base.replace("struct Ops", "fn Make()->.Type'builtin {Ops} struct Ops").replace("do { Ops }", "Make()"),
+        base.replace("struct Ops", "mod hidden {pub struct Ops").replace("pub comptime fn build", "private comptime fn build").replace("fn run()", "} fn run()").replace("do { Ops }", "do {hidden.Ops}"),
+        base.replace("struct Ops", "pure comptime fn Identity<T> -> .Type'builtin {T} struct Ops").replace("do { Ops }", "do {Identity<Ops>}"),
         "trait Builder {comptime fn build()-><|-bool>;} struct Ops {} fn run()->bool {~<do {Ops}.as(Builder).build()>}".into(),
         "struct Ops {pub comptime fn pattern()-><bool -| value:bool> {'<value>}} fn run()->bool {const pat:<bool -| value:.str'builtin> = do {Ops}.pattern();let ~<pat> = true;true}".into(),
     ] {
@@ -19551,17 +19620,17 @@ fn computed_pattern_methods_export_unannotated_output_names() {
     let base = include_str!("../../../development/repros/comptime-computed-pattern-binding.fl");
     for source in [
         base.to_owned(),
-        base.replace("do {Ops}", "(if true {Ops} else {Ops})"),
-        base.replace("do {Ops}", "(when {false=>Ops,else=>Ops})"),
-        base.replace("do {Ops}", "(true match {true=>Ops,false=>Ops})"),
+        base.replace("do { Ops }", "(if true {Ops} else {Ops})"),
+        base.replace("do { Ops }", "(when {false=>Ops,else=>Ops})"),
+        base.replace("do { Ops }", "(true match {true=>Ops,false=>Ops})"),
         base.replace("struct Ops {", "struct Ops where T {")
-            .replace("<bool -| value:bool>", "<T -| value:T>")
-            .replace("do {Ops}", "do {Ops<bool>}"),
+            .replace("< bool -| value: bool >", "<T -| value:T>")
+            .replace("do { Ops }", "do {Ops<bool>}"),
         base.replace(
             "struct Ops",
             "struct Other {pub comptime fn pattern()-><bool -| value:bool> {'<value>}} struct Ops",
         )
-        .replace("do {Ops}", "(if true {Ops} else {Other})"),
+        .replace("do { Ops }", "(if true {Ops} else {Other})"),
     ] {
         let work = Work::new(&source);
         let output = work
@@ -19604,29 +19673,29 @@ fn computed_pattern_methods_export_unannotated_output_names() {
 fn computed_pattern_output_names_do_not_grant_unrelated_contracts() {
     let base = include_str!("../../../development/repros/comptime-computed-pattern-binding.fl");
     for source in [
-        base.replace("struct Ops", "struct Other {pub comptime fn pattern()-><.str'builtin -| value:.str'builtin> {'<value>}} struct Ops").replace("do {Ops}", "(if false {Ops} else {Other})"),
+        base.replace("struct Ops", "struct Other {pub comptime fn pattern()-><.str'builtin -| value:.str'builtin> {'<value>}} struct Ops").replace("do { Ops }", "(if false {Ops} else {Other})"),
         base.replace("pub comptime fn pattern", "private comptime fn pattern")
             .replace("struct Ops", "mod hidden {pub struct Ops")
             .replace("fn run()", "} fn run()")
-            .replace("do {Ops}", "do {hidden.Ops}"),
+            .replace("do { Ops }", "do {hidden.Ops}"),
         base.replace(
             "struct Ops",
             "struct Other {pub comptime fn pattern()-><bool -| other:bool> {'<other>}} struct Ops",
         )
-        .replace("do {Ops}", "(if false {Ops} else {Other})"),
+        .replace("do { Ops }", "(if false {Ops} else {Other})"),
         base.replace("struct Ops", "struct Other {} struct Ops")
-            .replace("do {Ops}", "do {Other}"),
+            .replace("do { Ops }", "do {Other}"),
         base.replace(
-            "<bool -| value:bool>",
+            "< bool -| value: bool >",
             "<.str'builtin -| value:.str'builtin>",
         ),
         base.replace("fn run()", "fn run(flag:bool)")
-            .replace("do {Ops}", "(if flag {Ops} else {Ops})"),
+            .replace("do { Ops }", "(if flag {Ops} else {Ops})"),
         base.replace(
             "struct Ops",
             "pure comptime fn Identity<T> -> .Type'builtin {T} struct Ops",
         )
-        .replace("do {Ops}", "do {Identity<Ops>}"),
+        .replace("do { Ops }", "do {Identity<Ops>}"),
     ] {
         let work = Work::new(&source);
         primitive_bindings::write_fixture(work.0.join("native program"), b"previous output").unwrap();
@@ -21546,7 +21615,7 @@ fn native_handler_parameter_access_preserves_closure_return_scope() {
                 source = source.replace("subject(pointer)# {", "inspect(pointer)# {");
             }
             if !captured {
-                source = source.replace("%{previous: bool} fn()", "fn()");
+                source = source.replace("%{ previous: bool } fn()", "fn()");
                 source = source.replace("return previous;", "return true;");
                 source = source.replace("|| previous", "|| false");
             }
@@ -22085,7 +22154,7 @@ fn native_handler_borrowed_owned_environment_keeps_state_and_final_cleanup() {
             }
             let source = source.replace("resume value.*;", completion);
             let source = match failure {
-                Some("dead") => source.replace("live:true", "live:false"),
+                Some("dead") => source.replace("live: true", "live: false"),
                 Some("unfinished") => source.replace("    callback(seen.ref);", ""),
                 _ => source,
             };
@@ -22366,14 +22435,20 @@ fn checked_noncopy_field_callee_does_not_restore_a_moved_field() {
 fn native_field_closure_keeps_state_and_owned_cleanup() {
     let source = include_str!("../../../development/repros/host-field-closure-state.fl");
     let owned = source.replace("fn pack", "struct State {bit:bool,live:bool}\nimpl Retire for State {fn drop(*self){assumes self.live.*;assumes not self.bit.*;self.live.* = false;}}\nfn pack")
-        .replace("var bit=false;", "var state=State {bit:false,live:true};")
-        .replace("bit=not bit;bit", "state.bit=not state.bit;state.bit");
+        .replace("var bit = false;", "var state = State { bit: false, live: true };")
+        .replace("bit = not bit;\n            bit", "state.bit = not state.bit;\n            state.bit");
     for source in [source.to_owned(), owned] {
         for nested in [false, true] {
             let source = if nested {
                 source
-                    .replace("pack {call:||", "pack {inner:pack {call:||")
-                    .replace("}};", "}}};")
+                    .replace(
+                        "pack {\n        call: ||",
+                        "pack { inner: pack {\n        call: ||",
+                    )
+                    .replace(
+                        "        },\n    }\n    let first =",
+                        "        },\n    } }\n    let first =",
+                    )
                     .replace("actions.call()", "actions.inner.call()")
             } else {
                 source.clone()
@@ -22741,7 +22816,7 @@ fn native_handler_borrows_record_callback_fields() {
     for (nominal, nested) in [(false, false), (true, false), (false, true)] {
         let source = if nominal {
             original.replace("fn pack", "struct Actions {call:%{state:State} fn(*bool)}\nstruct Outer {inner:Actions}\nimpl Retire for Actions {fn drop(*self){}}\nimpl Retire for Outer {fn drop(*self){}}\nfn pack")
-            .replace("pack {inner:pack {call:callback}}", "Outer {inner:Actions {call:callback}}")
+            .replace("pack { inner: pack { call: callback } }", "Outer {inner:Actions {call:callback}}")
         } else {
             original.to_owned()
         };
@@ -22803,7 +22878,7 @@ fn checked_handler_record_callback_cannot_be_delivered_on_any_exit() {
     let original = include_str!("../../../development/repros/host-handler-record-callback.fl")
         .replace("fn run()", "fn discard(value:T) where T {}\nfn run()")
         .replace("fn pack", "struct Token {live:bool}impl Retire for Token {fn drop(*self){assumes self.live.*;self.live.* = false;}}\nfn pack")
-        .replace("pack {inner:pack {call:callback}}", "pack {inner:pack {call:callback},token:Token {live:true}}");
+        .replace("pack { inner: pack { call: callback } }", "pack {inner:pack {call:callback},token:Token {live:true}}");
     for delivered in ["actions.inner.call", "actions.token"] {
         for completion in [
             "resume value.*;",
@@ -22889,7 +22964,7 @@ fn native_handler_record_data_writes_preserve_disjoint_code_fields() {
     for nested in [false, true] {
         let source = if nested {
             original.replace("fn identity", "struct Outer {inner:Actions}\nimpl Retire for Outer {fn drop(*self){}}\nfn identity")
-                .replace("var actions = Actions {call: identity, flag: false};", "var actions = Outer {inner:Actions {call: identity, flag: false}};")
+                .replace("var actions = Actions { call: identity, flag: false }", "var actions = Outer {inner:Actions {call: identity, flag: false}}")
                 .replace("actions.flag", "actions.inner.flag").replace("actions.call", "actions.inner.call")
         } else {
             original.to_owned()
@@ -22908,7 +22983,7 @@ fn native_handler_record_data_writes_preserve_disjoint_code_fields() {
                 source
             };
             let source = source.replace(
-                "impl Retire for Actions { fn drop(*self) {} }",
+                "impl Retire for Actions {\n    fn drop(*self) {}\n}",
                 if completion == "return " {
                     "impl Retire for Actions { fn drop(*self) {assumes self.flag.*;} }"
                 } else {
@@ -23024,7 +23099,7 @@ fn native_handler_borrows_owned_data_and_preserves_final_cleanup() {
     for nested in [false, true] {
         let source = if nested {
             original.replace("effect step", "struct Outer {inner:Actions}\nimpl Retire for Outer {fn drop(*self){}}\neffect step")
-            .replace("var actions = Actions {flag: false, live: true};", "var actions = Outer {inner:Actions {flag: false, live: true}};")
+            .replace("var actions = Actions { flag: false, live: true }", "var actions = Outer {inner:Actions {flag: false, live: true}}")
             .replace("actions.flag", "actions.inner.flag").replace("actions.live", "actions.inner.live")
         } else {
             original.to_owned()
@@ -23223,7 +23298,7 @@ fn native_handler_enum_callbacks_preserve_tags_and_mutable_data() {
         Some("Choice.second(other)"),
     ] {
         let source = if let Some(value) = known {
-            original.replace("if empty {Choice.none} else if tag {Choice.first(identity)} else {Choice.second(other)}",value)
+            original.replace("if empty {\n            Choice.none\n        } else if tag {\n            Choice.first(identity)\n        } else {\n            Choice.second(other)\n        }",value)
         } else {
             original.to_owned()
         };
@@ -23270,7 +23345,7 @@ fn native_handler_enum_callbacks_preserve_tags_and_mutable_data() {
 #[test]
 fn checked_handler_enum_code_cannot_rebind_a_previously_absent_variant() {
     let original=include_str!("../../../development/repros/host-handler-enum-callback.fl")
-        .replace("if empty {Choice.none} else if tag {Choice.first(identity)} else {Choice.second(other)}", "Choice.none");
+        .replace("if empty {\n            Choice.none\n        } else if tag {\n            Choice.first(identity)\n        } else {\n            Choice.second(other)\n        }", "Choice.none");
     for mutation in [
         "actions.selected = Choice.first(identity);",
         "let exposed=actions.selected.ref;",
@@ -23333,9 +23408,9 @@ fn native_handler_nested_enum_callbacks_keep_conditional_paths() {
     let selection = "if empty {Envelope.empty} else {Envelope.wrapped(if tag {Choice.first(identity)} else {Choice.second(other)})}";
     let source=original.replace("struct Actions", "enum Envelope {empty,wrapped(Choice)}\nimpl Duplicate for Envelope {}\nstruct Actions")
         .replace("selected: Choice", "selected: Envelope")
-        .replace("if empty {Choice.none} else if tag {Choice.first(identity)} else {Choice.second(other)}",selection)
+        .replace("if empty {\n            Choice.none\n        } else if tag {\n            Choice.first(identity)\n        } else {\n            Choice.second(other)\n        }",selection)
         .replace("actions.selected match {", "actions.selected match {.empty=>actions.flag,.wrapped(choice)=>choice match {")
-        .replace("            }\n        },", "            },}\n        },");
+        .replace("                }\n            },", "                },}\n            },");
     for known_absent in [false, true] {
         let source = if known_absent {
             source.replace(selection, "Envelope.wrapped(Choice.none)")

@@ -25,5 +25,7 @@ fn read(value: Event) -> bool {
 }
 
 fn run() -> bool {
-    read(Event.net.data(true)) and read(Event.net.nested.record { flag: true }) and not read(Event.idle)
+    read(Event.net.data(true))
+        and read(Event.net.nested.record { flag: true })
+        and not read(Event.idle)
 }

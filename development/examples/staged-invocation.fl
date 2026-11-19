@@ -1,6 +1,12 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 -- This helper executes only after a concrete instance supplies flag.
 comptime fn invert(flag: bool) -> bool {
     not flag
@@ -11,15 +17,11 @@ fn choose(
     comptime .second_selected: bool = not first_selected,
     first: T,
     second: T,
-) -> T
-where T
-{
+) -> T where T {
     if second_selected { second } else { first }
 }
 
-fn opposite(comptime flag: bool, first: T, second: T) -> T
-where T
-{
+fn opposite(comptime flag: bool, first: T, second: T) -> T where T {
     -- The default reads the completed result of invert(flag); it does not repeat it.
     choose(first, second, .first_selected = invert(flag))
 }

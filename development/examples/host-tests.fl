@@ -1,4 +1,6 @@
-fn negate(value: bool) -> bool { not value }
+fn negate(value: bool) -> bool {
+    not value
+}
 
 test boolean_call {
     let result = negate(false);

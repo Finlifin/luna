@@ -5,7 +5,7 @@ comptime fn identity(value: T) -> T where T {
     value
 }
 
-comptime fn build_tuple() -> <|- bool> {
+comptime fn build_tuple() -> < |- bool > {
     let fields: meta.List<Type> = [bool, u8];
     let Product = Tuple<.Es = fields>;
     let pair: Product = (true, 17);
@@ -23,11 +23,11 @@ pure comptime fn Marker<description: Description> -> Type {
 }
 
 comptime fn inspect() -> bool where T {
-    T == Marker<Description {enabled: true, kind: bool}>
+    T == Marker<Description { enabled: true, kind: bool }>
 }
 
-comptime fn build_record() -> <|- bool> {
-    let description = Description {enabled: true, kind: bool};
+comptime fn build_record() -> < |- bool > {
+    let description = Description { enabled: true, kind: bool }
     let result = inspect<Marker<description>>();
     '(result)
 }
@@ -51,15 +51,19 @@ comptime fn inspect_holder(value: Holder<T>) -> Holder<T> where T {
     value
 }
 
-comptime fn apply(lambda action: comptime fn(T) -> bool, value: T) -> <|- bool> where T {
+comptime fn apply(lambda action: comptime fn(T) -> bool, value: T) -> < |- bool > where T {
     let result = action(value);
     '(result)
 }
 
-comptime fn build_indexed() -> <|- bool> {
+comptime fn build_indexed() -> < |- bool > {
     let bits: meta.List<bool> = [true, false];
-    apply(_0.flag, inspect_holder<Indexed<bool, .items = bits>>(
-        Holder<Indexed<bool, .items = [true, false]>> {flag: true}))
+    apply(
+        _0.flag,
+        inspect_holder<Indexed<bool, .items = bits>>(
+            Holder<Indexed<bool, .items = [true, false]>> { flag: true },
+        ),
+    )
 }
 
 test {
@@ -72,15 +76,27 @@ pure comptime fn Collection<.T: Type = bool, ...items: meta.List<T>> -> Type {
 }
 
 fn empty_collection() -> Holder<Collection<>> {
-    Holder<Collection<.items = []>> {flag: true}
+    Holder<Collection<.items = []>> { flag: true }
 }
 
 comptime fn collection_identity() -> bool {
     var trace: Integer = 0;
-    let actual = Collection<
-        do {trace = trace * 10 + 1; true},
-        ...[do {trace = trace * 10 + 2; false}],
-        .T = do {trace = trace * 10 + 3; bool}>;
+    let actual =
+        Collection<
+            do {
+                trace = trace * 10 + 1;
+                true
+            },
+            ...[
+                do {
+                    trace = trace * 10 + 2;
+                    false
+                },
+            ],
+            .T = do {
+                trace = trace * 10 + 3;
+                bool
+            }>;
     trace == 123 and actual == Collection<.items = [true, false]>
 }
 
@@ -98,34 +114,35 @@ test {
 typealias Surround<T, values: meta.List<T>, prefix: T, suffix: T> =
     Indexed<T, prefix, ...values, suffix>;
 
-fn keep_surrounded(value: Holder<Surround<bool, [false], true, true>>)
-    -> Holder<Indexed<bool, .items = [true, false, true]>>
-{
+fn keep_surrounded(
+    value: Holder<Surround<bool, [false], true, true>>,
+) -> Holder<Indexed<bool, .items = [true, false, true]>> {
     value
 }
 
-fn keep_type_list(value: Holder<Surround<Type, [u8], bool, bool>>)
-    -> Holder<Indexed<Type, .items = [bool, u8, bool]>>
-{
+fn keep_type_list(
+    value: Holder<Surround<Type, [u8], bool, bool>>,
+) -> Holder<Indexed<Type, .items = [bool, u8, bool]>> {
     value
 }
 
 test {
-    let flags = keep_surrounded(Holder<Surround<bool, [false], true, true>> {flag: true});
-    let types = keep_type_list(Holder<Surround<Type, [u8], bool, bool>> {flag: true});
+    let flags = keep_surrounded(Holder<Surround<bool, [false], true, true>> { flag: true });
+    let types = keep_type_list(Holder<Surround<Type, [u8], bool, bool>> { flag: true });
     assumes flags.flag and types.flag;
 }
 
-fn recover_description(value: Holder<Marker<Description {enabled: true, kind: T}>>)
-    -> Holder<T>
-where T
-{
-    Holder<T> {flag: value.flag}
+fn recover_description(
+    value: Holder<Marker<Description { enabled: true, kind: T }>>,
+) -> Holder<T> where T {
+    Holder<T> { flag: value.flag }
 }
 
 test {
-    let recovered = recover_description(
-        Holder<Marker<Description {enabled: true, kind: bool}>> {flag: true});
+    let recovered =
+        recover_description(
+            Holder<Marker<Description { enabled: true, kind: bool }>> { flag: true },
+        );
     assumes recovered.flag;
 }
 
@@ -138,9 +155,7 @@ trait FirstItem where T {
     comptime fn first() -> T;
 }
 
-impl FirstItem<T> for Catalog<T, items>
-where T, items: meta.List<T>
-{
+impl FirstItem<T> for Catalog<T, items> where T, items: meta.List<T> {
     comptime fn first() -> T {
         items[0]
     }
@@ -149,14 +164,14 @@ where T, items: meta.List<T>
 test {
     const flag = Catalog<bool, [true, false]>.as(FirstItem<bool>).first();
     const type_ok = Catalog<Type, [bool, u8]>.as(FirstItem<Type>).first() == bool;
-    const nested = Catalog<meta.List<bool>, [[true], [false]]>
-        .as(FirstItem<meta.List<bool>>).first()[0];
+    const nested =
+        Catalog<meta.List<bool>, [[true], [false]]>
+            .as(FirstItem<meta.List<bool>>)
+            .first()[0];
     assumes flag and type_ok and nested;
 }
 
-fn selected_flag(value: bool) -> bool
-where flags: meta.List<bool>
-{
+fn selected_flag(value: bool) -> bool where flags: meta.List<bool> {
     value
 }
 
@@ -168,10 +183,7 @@ test {
     assumes first_value and not second_value;
 }
 
-
-fn selected_constant() -> bool
-where flags: meta.List<bool>
-{
+fn selected_constant() -> bool where flags: meta.List<bool> {
     const flag = flags[0];
     flag
 }
@@ -193,27 +205,28 @@ comptime fn inspect_flags(value: Flags<[true, false]>) -> bool {
 }
 
 test {
-    const enabled = inspect_flags(Flags<[true, false]> {enabled: true});
+    const enabled = inspect_flags(Flags<[true, false]> { enabled: true });
     assumes enabled;
 }
 
 impl Clone for Flags<[true, false]> {
     fn clone(*self) -> Self {
-        Flags<[true, false]> {enabled: self.enabled.*}
+        Flags<[true, false]> { enabled: self.enabled.* }
     }
 }
+
 impl Copy for Flags<[true, false]> {}
 
 fn inspect_flag_pattern(value: Flags<[true, false]>) -> bool {
     value match {
-        not {enabled: true} => true,
-        {enabled: true} => false,
+        not { enabled: true } => true,
+        { enabled: true } => false,
     }
 }
 
 test {
-    let clear = inspect_flag_pattern(Flags<[true, false]> {enabled: false});
-    let set = inspect_flag_pattern(Flags<[true, false]> {enabled: true});
+    let clear = inspect_flag_pattern(Flags<[true, false]> { enabled: false });
+    let set = inspect_flag_pattern(Flags<[true, false]> { enabled: true });
     assumes clear and not set;
 }
 
@@ -231,7 +244,7 @@ test {
     assumes result;
 }
 
-comptime fn tuple_data_code(value: Tuple<.Es = [bool, bool]>) -> <|- bool> {
+comptime fn tuple_data_code(value: Tuple<.Es = [bool, bool]>) -> < |- bool > {
     let (left, right) = value;
     let result = left and right;
     '(result)
@@ -257,15 +270,23 @@ test {
 trait TupleReady {
     fn ready(self) -> bool;
 }
+
 impl TupleReady for bool {
-    fn ready(self) -> bool { self }
+    fn ready(self) -> bool {
+        self
+    }
 }
+
 impl TupleReady for u8 {
-    fn ready(self) -> bool { self == 7 }
+    fn ready(self) -> bool {
+        self == 7
+    }
 }
 
 fn tuple_ready(values: Tuple<.Es = [A, B]>) -> bool
-where A :- TupleReady, B :- TupleReady
+where
+    A :- TupleReady,
+    B :- TupleReady,
 {
     var result = false;
     inline for (index, element) in values'tuple_enumerate {
@@ -275,7 +296,11 @@ where A :- TupleReady, B :- TupleReady
 }
 
 fn tuple_shape(value: T)
-where T, A, B, requires T == Tuple<.Es = [A, B]>
+where
+    T,
+    A,
+    B,
+    requires T == Tuple<.Es = [A, B]>,
 {
     inline for (index, element) in value'tuple_enumerate {
         let held = element;
@@ -293,11 +318,13 @@ test {
 comptime fn packet_fields() -> meta.List<Type> {
     [bool, u8]
 }
+
 const PacketFields = packet_fields();
 
 fn typed_packet() -> Tuple<.Es = PacketFields> {
     (true, 7)
 }
+
 fn consume_packet(flag: bool, number: u8) -> bool {
     flag and number == 7
 }

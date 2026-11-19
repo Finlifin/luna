@@ -1,6 +1,6 @@
 -- luna host-closure.fl --build run --output /tmp/flurry-closure
 -- The native entry reports (bool true).
-typealias Toggle = %{state: bool} fn() -> bool;
+typealias Toggle = %{ state: bool } fn() -> bool;
 
 fn toggle(initial: bool) -> Toggle {
     var state = initial;

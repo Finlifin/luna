@@ -2,17 +2,30 @@
 -- The handler returns the operation's pointer argument to the lexical installer.
 -- Its target belongs to run, so neither subject nor forward retires it.
 trait Duplicate {}
-trait Retire { fn drop(*self); }
+
+trait Retire {
+    fn drop(*self);
+}
+
 impl Duplicate for bool {}
+
 impl Duplicate for *T where T {}
 
 effect lend(pointer: *bool) -> bool;
-fn subject(pointer: *bool) -> #lend bool { lend(pointer)# }
+
+fn subject(pointer: *bool) -> #lend bool {
+    lend(pointer)#
+}
 
 fn forward(pointer: *bool) -> *bool {
     subject(pointer)# {
-        lend(value) => do { return value; },
-    };
+        lend(
+            value,
+        ) =>
+            do {
+                return value;
+            },
+    }
     pointer
 }
 

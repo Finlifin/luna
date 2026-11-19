@@ -1,12 +1,21 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 -- Property collection produces a named structural value at comptime.
 comptime fn schema(...properties: T) -> T where T {
     properties
 }
 
-const DEFAULT = schema {enabled: true, nested: schema {disabled: false}};
+const DEFAULT = schema {
+    enabled: true,
+    nested: schema { disabled: false },
+}
 typealias Options = DEFAULT'type;
 
 fn enabled(comptime options: Options) -> bool {
@@ -14,7 +23,12 @@ fn enabled(comptime options: Options) -> bool {
 }
 
 fn configure(comptime flag: bool) -> bool {
-    enabled(schema {enabled: flag, nested: schema {disabled: false}})
+    enabled(
+        schema {
+            enabled: flag,
+            nested: schema { disabled: false },
+        },
+    )
 }
 
 fn run() -> Tuple<bool, bool> {

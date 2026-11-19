@@ -1,16 +1,30 @@
 {- A comptime argument keeps the source domain inside quoted runtime code.
    Expected: (bool true), with no Seed conversion. -}
-struct Seed { byte: u8 }
+struct Seed {
+    byte: u8,
+}
+
 impl Splice for Seed {
     assoc RuntimeTarget: Type = u8;
+
     fn splice(comptime data: Seed) -> u8 {
         let emitted = std.fmt.print("convert;") match {
-            _! => true, error _ => false,
-        };
+            _! => true,
+            error _ => false,
+        }
         assumes emitted;
         data.byte
     }
 }
-fn read(comptime data: Seed) -> u8 { data.byte }
-pure comptime fn quoted(data: Seed) -> <|- u8> { '(read(data)) }
-fn run() -> bool { ~<quoted(Seed { byte: 42 })> == 42 }
+
+fn read(comptime data: Seed) -> u8 {
+    data.byte
+}
+
+pure comptime fn quoted(data: Seed) -> < |- u8 > {
+    '(read(data))
+}
+
+fn run() -> bool {
+    ~<quoted(Seed { byte: 42 })> == 42
+}

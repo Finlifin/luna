@@ -34,7 +34,7 @@ test wide_values_and_comptime_phase {
         assumes actual == 1;
     } else {
         assumes false;
-    };
+    }
     assumes signed_hash == 9223372036854775808;
 }
 
@@ -52,7 +52,7 @@ test symbol_runtime_and_comptime_phases {
         assumes first_hash == 9625390261332436968;
     } else {
         assumes false;
-    };
+    }
 }
 
 comptime fn exact_integer_keys() -> bool {
@@ -63,15 +63,22 @@ comptime fn exact_integer_keys() -> bool {
         and huge.hash() == 8424690812682328228
         and (-huge).hash() == 18410723617023889215
         and (huge + 1).hash() == 6053771721358495617
-        and huge.eq(same) and huge.ne(-huge)
+        and huge.eq(same)
+        and huge.ne(-huge)
         and huge.hash() == same.hash()
 }
 
 test arbitrary_precision_comptime_keys {
-    inline if exact_integer_keys() {assumes true;} else {assumes false;}
+    inline if exact_integer_keys() {
+        assumes true;
+    } else {
+        assumes false;
+    }
 }
 
-struct FoldedKey { value: Integer }
+struct FoldedKey {
+    value: Integer,
+}
 
 comptime impl ComptimeEq for FoldedKey {
     comptime fn eq(self, other: Self) -> bool {
@@ -85,17 +92,25 @@ comptime fn list_protocol_equality() -> bool {
     let same: List<Integer> = [1, 2];
     let different: List<Integer> = [1, 3];
     let short: List<Integer> = [1];
-    let left: List<FoldedKey> = [FoldedKey {value: 12}];
-    let right: List<FoldedKey> = [FoldedKey {value: 22}];
+    let left: List<FoldedKey> = [FoldedKey { value: 12 }];
+    let right: List<FoldedKey> = [FoldedKey { value: 22 }];
     let nested: List<List<Integer>> = [empty, first];
     let nested_same: List<List<Integer>> = [empty, same];
-    empty.eq(empty) and first.eq(same) and first.ne(different)
-        and first.ne(short) and empty.ne(first) and left.eq(right)
+    empty.eq(empty)
+        and first.eq(same)
+        and first.ne(different)
+        and first.ne(short)
+        and empty.ne(first)
+        and left.eq(right)
         and nested.eq(nested_same)
 }
 
 test list_element_equality_protocol {
-    inline if list_protocol_equality() {assumes true;} else {assumes false;}
+    inline if list_protocol_equality() {
+        assumes true;
+    } else {
+        assumes false;
+    }
 }
 
 comptime impl ComptimeHash for FoldedKey {
@@ -105,56 +120,80 @@ comptime impl ComptimeHash for FoldedKey {
 }
 
 comptime fn list_protocol_hashing() -> bool {
-    let left: List<FoldedKey> = [FoldedKey {value: 12}, FoldedKey {value: 23}];
-    let right: List<FoldedKey> = [FoldedKey {value: 22}, FoldedKey {value: 13}];
+    let left: List<FoldedKey> = [FoldedKey { value: 12 }, FoldedKey { value: 23 }];
+    let right: List<FoldedKey> = [FoldedKey { value: 22 }, FoldedKey { value: 13 }];
     let empty: List<FoldedKey> = [];
     let nested_left: List<List<FoldedKey>> = [empty, left];
     let nested_right: List<List<FoldedKey>> = [empty, right];
-    left.eq(right) and left.hash() == right.hash()
-        and nested_left.eq(nested_right) and nested_left.hash() == nested_right.hash()
+    left.eq(right)
+        and left.hash() == right.hash()
+        and nested_left.eq(nested_right)
+        and nested_left.hash() == nested_right.hash()
         and empty.hash() == 12638227882485885803
 }
 
 test list_element_hash_protocol {
-    inline if list_protocol_hashing() {assumes true;} else {assumes false;}
+    inline if list_protocol_hashing() {
+        assumes true;
+    } else {
+        assumes false;
+    }
 }
 
 comptime fn optional_protocol_equality() -> bool {
     let empty: ?FoldedKey = null;
-    let left: ?FoldedKey = FoldedKey {value: 12};
-    let right: ?FoldedKey = FoldedKey {value: 22};
-    let different: ?FoldedKey = FoldedKey {value: 23};
+    let left: ?FoldedKey = FoldedKey { value: 12 }
+    let right: ?FoldedKey = FoldedKey { value: 22 }
+    let different: ?FoldedKey = FoldedKey { value: 23 }
     let nested: ??FoldedKey = left;
     let nested_same: ??FoldedKey = right;
-    empty.eq(empty) and empty.ne(left) and left.ne(empty)
-        and left.eq(right) and left.ne(different) and nested.eq(nested_same)
+    empty.eq(empty)
+        and empty.ne(left)
+        and left.ne(empty)
+        and left.eq(right)
+        and left.ne(different)
+        and nested.eq(nested_same)
 }
 
 test optional_payload_equality_protocol {
-    inline if optional_protocol_equality() {assumes true;} else {assumes false;}
+    inline if optional_protocol_equality() {
+        assumes true;
+    } else {
+        assumes false;
+    }
 }
 
 comptime fn optional_protocol_hashing() -> bool {
-    let left: ?FoldedKey = FoldedKey {value: 12};
-    let right: ?FoldedKey = FoldedKey {value: 22};
+    let left: ?FoldedKey = FoldedKey { value: 12 }
+    let right: ?FoldedKey = FoldedKey { value: 22 }
     let empty: ?FoldedKey = null;
-    left.eq(right) and left.hash() == right.hash()
-        and empty.hash() == 12638153115695167455
+    left.eq(right) and left.hash() == right.hash() and empty.hash() == 12638153115695167455
 }
 
 test optional_payload_hash_protocol {
-    inline if optional_protocol_hashing() {assumes true;} else {assumes false;}
+    inline if optional_protocol_hashing() {
+        assumes true;
+    } else {
+        assumes false;
+    }
 }
 
 comptime fn error_protocols() -> bool {
-    let left: !FoldedKey FoldedKey = FoldedKey {value: 12};
-    let right: !FoldedKey FoldedKey = FoldedKey {value: 22};
-    let failure: !FoldedKey FoldedKey = error FoldedKey {value: 12};
-    let same: !FoldedKey FoldedKey = error FoldedKey {value: 22};
-    left.eq(right) and failure.eq(same) and left.ne(failure)
-        and left.hash() == right.hash() and failure.hash() == same.hash()
+    let left: !FoldedKey FoldedKey = FoldedKey { value: 12 }
+    let right: !FoldedKey FoldedKey = FoldedKey { value: 22 }
+    let failure: !FoldedKey FoldedKey = error FoldedKey { value: 12 }
+    let same: !FoldedKey FoldedKey = error FoldedKey { value: 22 }
+    left.eq(right)
+        and failure.eq(same)
+        and left.ne(failure)
+        and left.hash() == right.hash()
+        and failure.hash() == same.hash()
 }
 
 test error_payload_protocols {
-    inline if error_protocols() {assumes true;} else {assumes false;}
+    inline if error_protocols() {
+        assumes true;
+    } else {
+        assumes false;
+    }
 }

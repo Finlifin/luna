@@ -13,9 +13,11 @@ trait Source {
 }
 
 struct Flags {}
+
 struct Letters {}
 
 impl Source for Flags {}
+
 impl Source for Letters {
     assoc Element: .Type'builtin = 'x''type;
 
@@ -24,15 +26,15 @@ impl Source for Letters {
     }
 }
 
-fn forward(owner: T, value: T.as(Source).Element) -> T.as(Source).Element
-where T :- Source {
+fn forward(owner: T, value: T.as(Source).Element) -> T.as(Source).Element where T :- Source {
     T.as(Source).keep(value)
 }
 
-fn apply_for(owner: T,
-             action: fn(T.as(Source).Element) -> T.as(Source).Element,
-             value: T.as(Source).Element) -> T.as(Source).Element
-where T :- Source {
+fn apply_for(
+    owner: T,
+    action: fn(T.as(Source).Element) -> T.as(Source).Element,
+    value: T.as(Source).Element,
+) -> T.as(Source).Element where T :- Source {
     action(value)
 }
 

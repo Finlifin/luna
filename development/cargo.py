@@ -11,7 +11,7 @@ one lock; use this entrypoint instead of concurrent direct Cargo commands.
 
 After an observed storage failure, retain a soft cache cap at 75% of the
 pre-cleanup target footprint (64 MiB minimum, never above the current cap).
-The default is 2 GiB. The cap lives in /tmp/luna-dev-002/target-cache-limit,
+The default is 4 GiB. The cap lives in /tmp/luna-dev-002/target-cache-limit,
 outside Cargo's cleanup scope. Remove that local file after increasing the
 environment's quota to return to the default. It is a headroom heuristic, not
 a measurement or guarantee of available quota; unrelated disk usage can still
@@ -30,7 +30,7 @@ import threading
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = Path("/tmp/luna-dev-002/target")
-MAX_CACHE = 2 * 1024**3
+MAX_CACHE = 4 * 1024**3
 MIN_CACHE = 64 * 1024**2
 MIN_FREE = 2 * 1024**3
 REBUILDABLE_PACKAGES = ("elaboration", "luna")
@@ -56,8 +56,12 @@ def cargo_arguments(arguments: list[str], target: Path) -> list[str]:
     # Keep caller-selected tests/packages/features; always use the shared cache.
     common = ["--target-dir", str(target)]
     if options[0] != "clean":
-        common += ["-j", "1", "--locked", "--offline"]
+        common += ["--locked", "--offline"]
     return ["cargo", *options, *common, *tail]
+
+
+def default_build_jobs() -> int:
+    return max(1, min(os.cpu_count() or 1, 12))
 
 
 class Runner:
@@ -66,6 +70,7 @@ class Runner:
             raise ValueError("managed target must not redirect through a symlink")
         self.root, self.target = root, target
         self.env = dict(os.environ)
+        self.env.setdefault("CARGO_BUILD_JOBS", str(default_build_jobs()))
         self.env.update(CARGO_INCREMENTAL="0", CARGO_PROFILE_DEV_DEBUG="0", CARGO_PROFILE_TEST_DEBUG="0")
         wrappers = ('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER',
                     'CARGO_BUILD_RUSTC_WRAPPER', 'CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER')

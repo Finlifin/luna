@@ -7,10 +7,13 @@ comptime fn Flag() -> Type {
 typealias Enabled = Flag();
 typealias Visible = Flag();
 newtype Wrapper<T> = T;
-newtype Checked<T:-Representation> = T;
+newtype Checked<T :- Representation> = T;
 
 comptime fn ReflectedFlag() -> Type {
-    let draft = meta.NewtypeBuilder.from_type(Wrapper<bool>, .name = .ReflectedFlag);
+    let draft =
+        meta
+            .NewtypeBuilder
+            .from_type(Wrapper<bool>, .name = .ReflectedFlag);
     draft.Build()
 }
 
@@ -19,8 +22,10 @@ typealias Reflected = ReflectedFlag();
 fn run() -> bool {
     let enabled = true.as(Enabled);
     let visible = false.as(Visible);
-    enabled.as(bool) and not visible.as(bool)
-        and true.as(Reflected).as(bool) and true.as(Checked<bool>).as(bool)
+    enabled.as(bool)
+        and not visible.as(bool)
+        and true.as(Reflected).as(bool)
+        and true.as(Checked<bool>).as(bool)
 }
 
 test {
@@ -29,7 +34,7 @@ test {
         assumes result;
     } else {
         assumes false;
-    };
+    }
 }
 
 trait Representation {
@@ -40,8 +45,12 @@ impl Representation for bool {
     assoc Item: Type = bool;
 }
 
-comptime fn associated_round_trip(comptime T: Type, value: T.as(Representation).Item) -> T.as(Representation).Item
-where requires T :- Representation
+comptime fn associated_round_trip(
+    comptime T: Type,
+    value: T.as(Representation).Item,
+) -> T.as(Representation).Item
+where
+    requires T :- Representation,
 {
     let wrapped = value.as(Wrapper<T.as(Representation).Item>);
     wrapped.as(T.as(Representation).Item)

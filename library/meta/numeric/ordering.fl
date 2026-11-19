@@ -1,5 +1,23 @@
-use builtin.{Order, Integer, bool, char, str, Symbol, u8, u16, u32, u64, u128,
-    i8, i16, i32, i64, i128, usize, isize};
+use builtin.{
+    Integer,
+    Order,
+    Symbol,
+    bool,
+    char,
+    i128,
+    i16,
+    i32,
+    i64,
+    i8,
+    isize,
+    str,
+    u128,
+    u16,
+    u32,
+    u64,
+    u8,
+    usize,
+}
 use equality.ComptimeEq;
 use text_impl.bindings;
 
@@ -11,111 +29,205 @@ use text_impl.bindings;
 -}
 pub pure comptime trait ComptimeOrd :- ComptimeEq {
     comptime fn cmp(self, other: Self) -> Order;
-    comptime fn lt(self, other: Self) -> bool = self.cmp(other) match {
-        .less => true,
-        _ => false,
-    };
-    comptime fn le(self, other: Self) -> bool = self.cmp(other) match {
-        .greater => false,
-        _ => true,
-    };
-    comptime fn gt(self, other: Self) -> bool = self.cmp(other) match {
-        .greater => true,
-        _ => false,
-    };
-    comptime fn ge(self, other: Self) -> bool = self.cmp(other) match {
-        .less => false,
-        _ => true,
-    };
+    comptime fn lt(self, other: Self) -> bool =
+        self.cmp(other) match {
+            .less => true,
+            _ => false,
+        }
+    comptime fn le(self, other: Self) -> bool =
+        self.cmp(other) match {
+            .greater => false,
+            _ => true,
+        }
+    comptime fn gt(self, other: Self) -> bool =
+        self.cmp(other) match {
+            .greater => true,
+            _ => false,
+        }
+    comptime fn ge(self, other: Self) -> bool =
+        self.cmp(other) match {
+            .less => false,
+            _ => true,
+        }
 }
 
 comptime impl ComptimeOrd for u8 {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for u16 {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for u32 {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for u64 {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for u128 {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for i8 {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for i16 {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for i32 {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for i64 {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for i128 {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for usize {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for isize {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for Integer {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for char {
     comptime fn cmp(self, other: Self) -> Order {
-        if self < other { .less } else if self == other { .equal } else { .greater }
+        if self < other {
+            .less
+        } else if self == other {
+            .equal
+        } else {
+            .greater
+        }
     }
 }
 
 comptime impl ComptimeOrd for bool {
     comptime fn cmp(self, other: Self) -> Order {
-        if self == other { .equal } else if self { .greater } else { .less }
+        if self == other {
+            .equal
+        } else if self {
+            .greater
+        } else {
+            .less
+        }
     }
 }
 
@@ -123,33 +235,51 @@ comptime impl ComptimeOrd for bool {
     Text and symbols share lexicographic UTF-8 byte order. The callbacks retain
     their ordinary comptime identities; no host string ordering is substituted.
 -}
-comptime fn compare_bytes(left: T, right: T,
+comptime fn compare_bytes(
+    left: T,
+    right: T,
     length: comptime fn(T) -> u64,
-    byte: comptime fn(T, u64) -> ?u8) -> Order
-where T
-{
+    byte: comptime fn(T, u64) -> ?u8,
+) -> Order where T {
     let left_length = length(left);
     let right_length = length(right);
-    let count = if left_length < right_length { left_length } else { right_length };
+    let count = if left_length < right_length {
+        left_length
+    } else {
+        right_length
+    }
     var index: u64 = 0;
     while index < count {
         let left_byte = byte(left, index);
         let right_byte = byte(right, index);
         left_byte match {
-            a? => right_byte match {
-                b? => {
-                    if a < b { return .less; };
-                    if a > b { return .greater; };
+            a? =>
+                right_byte match {
+                    b? => {
+                        if a < b {
+                            return .less;
+                        }
+                        if a > b {
+                            return .greater;
+                        }
+                    },
+                    null => {
+                        assumes false;
+                    },
                 },
-                null => { assumes false; },
+            null => {
+                assumes false;
             },
-            null => { assumes false; },
-        };
+        }
         index = index + 1;
-    };
-    if left_length < right_length { .less }
-    else if left_length == right_length { .equal }
-    else { .greater }
+    }
+    if left_length < right_length {
+        .less
+    } else if left_length == right_length {
+        .equal
+    } else {
+        .greater
+    }
 }
 
 comptime impl ComptimeOrd for str {
@@ -160,6 +290,11 @@ comptime impl ComptimeOrd for str {
 
 comptime impl ComptimeOrd for Symbol {
     comptime fn cmp(self, other: Self) -> Order {
-        compare_bytes(self, other, bindings.symbol_byte_length, bindings.symbol_byte)
+        compare_bytes(
+            self,
+            other,
+            bindings.symbol_byte_length,
+            bindings.symbol_byte,
+        )
     }
 }

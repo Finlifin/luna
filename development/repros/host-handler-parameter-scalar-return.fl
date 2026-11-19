@@ -1,18 +1,29 @@
 trait Duplicate {}
-trait Retire { fn drop(*self); }
+
+trait Retire {
+    fn drop(*self);
+}
+
 impl Duplicate for bool {}
+
 impl Duplicate for *T where T {}
 
 effect inspect(pointer: *bool) -> bool;
-fn subject(pointer: *bool) -> #inspect bool { inspect(pointer)# }
+
+fn subject(pointer: *bool) -> #inspect bool {
+    inspect(pointer)#
+}
 
 fn update(pointer: *bool) -> bool {
     subject(pointer)# {
-        inspect(value) => do {
-            value.* = true;
-            return value.*;
-        },
-    };
+        inspect(
+            value,
+        ) =>
+            do {
+                value.* = true;
+                return value.*;
+            },
+    }
     false
 }
 

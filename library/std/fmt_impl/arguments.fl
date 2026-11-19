@@ -1,8 +1,11 @@
-use io_impl.writer.{stdout, stderr, write_all};
+use builtin.fmt.{ByteWriter, Display}
 use io_impl.errors.Error;
-use builtin.fmt.{Display, ByteWriter};
+use io_impl.writer.{stderr, stdout, write_all}
 
-pub fn print(comptime text: str) -> !Error void { write_all<text>(1) }
+pub fn print(comptime text: str) -> !Error void {
+    write_all<text>(1)
+}
+
 {- Parse has checked the syntax. Stream literal bytes up to the next field.
    A doubled brace writes one byte and {} leaves the cursor after the field. -}
 fn write_literal(output: *std.io.Writer, cursor: *u64) -> !Error void where format: str {
@@ -12,15 +15,19 @@ fn write_literal(output: *std.io.Writer, cursor: *u64) -> !Error void where form
         let byte = builtin.compiler.str_byte(format, offset) match {
             value? => value,
             null => break,
-        };
+        }
         cursor.* = offset + 1;
         if byte == 123 or byte == 125 {
             let next = cursor.*;
-            if next >= length { break; };
+            if next >= length {
+                break;
+            }
             let following = builtin.compiler.str_byte(format, next);
             cursor.* = next + 1;
-            if byte == 123 and following matches 125? { break; };
-        };
+            if byte == 123 and following matches 125? {
+                break;
+            }
+        }
         output.write_byte(byte)!;
     }
 }
@@ -30,30 +37,34 @@ pub fn println(comptime format: str, ...varargs: defer std.fmt.Parse(format)) ->
     inline if not format.contains("{") and not format.contains("}") {
         write_all<format>(1)!;
         return output.write_byte(10);
-    };
+    }
     var cursor: u64 = 0;
     inline for (_, value) in varargs'tuple_enumerate {
         write_literal<format>(output.ref, cursor.ref)!;
-        inline if value'type :- Display { value.write(output.ref)!; };
-    };
+        inline if value'type :- Display {
+            value.write(output.ref)!;
+        }
+    }
     write_literal<format>(output.ref, cursor.ref)!;
     output.write_byte(10)
 }
-pub fn eprint(comptime text: str) -> !Error void { write_all<text>(2) }
+
+pub fn eprint(comptime text: str) -> !Error void {
+    write_all<text>(2)
+}
+
 pub fn eprintln(comptime text: str) -> !Error void {
     write_all<text>(2)!;
     var output = stderr();
     output.write_byte(10)
 }
-pub fn print_value(value: T) -> !Error void
-where T :- Display
-{
+
+pub fn print_value(value: T) -> !Error void where T :- Display {
     var output = stdout();
     value.write(output.ref)
 }
-pub fn println_value(value: T) -> !Error void
-where T :- Display
-{
+
+pub fn println_value(value: T) -> !Error void where T :- Display {
     var output = stdout();
     value.write(output.ref)!;
     output.write_byte(10)

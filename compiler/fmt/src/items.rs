@@ -1687,7 +1687,7 @@ impl<'a> Formatter<'a> {
             NodeKind::LambdaParam => {
                 let sub =
                     self.format_clause_or_param(ch[0], TokenSlot::new(slot.first + 1, slot.last));
-                Doc::concat([Doc::str("do "), sub])
+                Doc::concat([Doc::str("lambda "), sub])
             }
             NodeKind::ImplicitParam => {
                 let sub =

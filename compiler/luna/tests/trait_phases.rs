@@ -842,7 +842,7 @@ fn invocation_checks_unused_generic_capabilities_in_the_source_world() {
         "{failure}"
     );
     let dynamic = source.replace(
-        "comptime fn run() -> bool { choose<true,false,Subject>() }",
+        "comptime fn run() -> bool {\n    choose<true, false, Subject>()\n}",
         "comptime fn flag(value: bool) -> bool { value }
         comptime fn run() -> bool { choose<flag(true),flag(false),Subject>() }",
     );

@@ -1,19 +1,26 @@
 {- Construct only at the executed runtime branch.
    Expected: convert;(bool true), exactly one conversion. -}
-struct Seed { byte: u8 }
+struct Seed {
+    byte: u8,
+}
+
 impl Splice for Seed {
     assoc RuntimeTarget: Type = Seed;
+
     fn splice(comptime data: Seed) -> Seed {
         let emitted = std.fmt.print("convert;") match {
-            _! => true, error _ => false,
-        };
+            _! => true,
+            error _ => false,
+        }
         assumes emitted;
         Seed { byte: data.byte }
     }
 }
-pure comptime fn quoted(data: Seed) -> <|- Seed> {
+
+pure comptime fn quoted(data: Seed) -> < |- Seed > {
     '(if std.os.unix.getpid() > 0 { data } else { data })
 }
+
 fn run() -> bool {
     let generated: Seed = ~<quoted(Seed { byte: 42 })>;
     generated.byte == 42

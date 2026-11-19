@@ -8,4 +8,7 @@ fn observations(comptime text: str, index: u64) -> bool {
     let byte = builtin.compiler.str_byte(text, index);
     length == 2 and (byte matches 66?)
 }
-fn run() -> bool { observations("AB", 1) }
+
+fn run() -> bool {
+    observations("AB", 1)
+}

@@ -129,6 +129,7 @@ impl<'a> Formatter<'a> {
         let mut item_docs: Vec<Doc> = Vec::with_capacity(elems.len() * 2);
         let mut prev_end = open_end_byte;
         let mut forced_multiline = false;
+        let mut last_has_trailing = false;
 
         for (i, &(elem, elem_slot, lo, hi, sep_end, end_line)) in slots.iter().enumerate() {
             let (lead, _, dir_flags) = self.comments.take_leading_before(
@@ -168,6 +169,8 @@ impl<'a> Formatter<'a> {
             let is_last = i + 1 == slots.len();
             let comma_doc = if !is_last || style == DelimStyle::SingleTupleParens {
                 Doc::str(",")
+            } else if style == DelimStyle::Angles {
+                Doc::Nil
             } else {
                 Doc::trailing_comma()
             };
@@ -182,6 +185,9 @@ impl<'a> Formatter<'a> {
             );
             if !matches!(trailing, Doc::Nil) {
                 forced_multiline = true;
+                if is_last {
+                    last_has_trailing = true;
+                }
             }
 
             item_docs.push(rendered);
@@ -200,7 +206,8 @@ impl<'a> Formatter<'a> {
             true,
             &mut self.cfg_stack,
         );
-        if !matches!(tail_comments, Doc::Nil) {
+        let has_tail_comments = !matches!(tail_comments, Doc::Nil);
+        if has_tail_comments {
             forced_multiline = true;
             item_docs.push(Doc::HardLine);
             // Strip final `HardLine` from `tail_comments` because outer break adds `SoftLine`/`Line`.
@@ -213,12 +220,16 @@ impl<'a> Formatter<'a> {
         }
         self.indent_spaces = saved_indent;
 
+        let angles_no_close_break =
+            style == DelimStyle::Angles && !has_tail_comments && !last_has_trailing;
         let open_break = if style == DelimStyle::SpacedBraces {
             Doc::Line
         } else {
             Doc::SoftLine
         };
-        let close_break = if style == DelimStyle::SpacedBraces {
+        let close_break = if angles_no_close_break {
+            Doc::Nil
+        } else if style == DelimStyle::SpacedBraces {
             Doc::Line
         } else {
             Doc::SoftLine
@@ -228,7 +239,11 @@ impl<'a> Formatter<'a> {
             Doc::concat([
                 Doc::str(style.open_str()),
                 Doc::indent(tab, Doc::concat([Doc::HardLine, Doc::concat(item_docs)])),
-                Doc::HardLine,
+                if angles_no_close_break {
+                    Doc::Nil
+                } else {
+                    Doc::HardLine
+                },
                 Doc::str(style.close_str()),
             ])
         } else {
@@ -454,10 +469,10 @@ impl<'a> Formatter<'a> {
                 let sub = self.format_pattern(ch[0], sub_slot);
                 Doc::concat([sub, Doc::str("!")])
             }
-            NodeKind::OrPattern => self.format_or_pattern(node, slot),
+            NodeKind::OrPattern => self.format_or_pattern(node, slot, mode),
             NodeKind::AsBindPattern => {
                 let lhs_slot = slot.child_slot_from(self.parsed, slot.first, ch[0]);
-                let lhs_doc = self.format_pattern(ch[0], lhs_slot);
+                let lhs_doc = self.format_pattern_with_mode(ch[0], lhs_slot, mode);
                 let id_str = self.decode_id(ch[1], lhs_slot.last + 1);
                 Doc::concat([lhs_doc, Doc::str(" as "), Doc::text(id_str)])
             }
@@ -473,7 +488,7 @@ impl<'a> Formatter<'a> {
                     )
                     .unwrap_or(pat_slot.last + 1);
                 let guard_slot = slot.child_slot_from(self.parsed, if_tok + 1, ch[1]);
-                let pat_doc = self.format_pattern(ch[0], pat_slot);
+                let pat_doc = self.format_pattern_with_mode(ch[0], pat_slot, mode);
                 let guard_doc = self.format_expr(ch[1], guard_slot);
                 let tab = self.tab_spaces();
                 Doc::group(Doc::concat([
@@ -503,7 +518,7 @@ impl<'a> Formatter<'a> {
                     )
                     .unwrap_or(expr_slot.last + 1);
                 let right_slot = slot.child_slot_from(self.parsed, is_tok + 1, ch[2]);
-                let left_doc = self.format_pattern(ch[0], left_slot);
+                let left_doc = self.format_pattern_with_mode(ch[0], left_slot, mode);
                 let expr_doc = self.format_expr(ch[1], expr_slot);
                 let right_doc = self.format_pattern(ch[2], right_slot);
                 let tab = self.tab_spaces();
@@ -780,7 +795,12 @@ impl<'a> Formatter<'a> {
         self.collect_or_pattern_arms(rhs, rhs_slot, false, out);
     }
 
-    fn format_or_pattern(&mut self, node: NodeIndex, slot: TokenSlot) -> Doc {
+    fn format_or_pattern(
+        &mut self,
+        node: NodeIndex,
+        slot: TokenSlot,
+        mode: ExprPatternMode,
+    ) -> Doc {
         // Flatten `OrPattern` tree across both left and right spines (unless explicitly parenthesized).
         let mut arms: Vec<(NodeIndex, TokenSlot)> = Vec::new();
         self.collect_or_pattern_arms(node, slot, true, &mut arms);
@@ -791,7 +811,7 @@ impl<'a> Formatter<'a> {
                 docs.push(Doc::Line);
                 docs.push(Doc::str("or "));
             }
-            docs.push(self.format_pattern(arm_node, arm_slot));
+            docs.push(self.format_pattern_with_mode(arm_node, arm_slot, mode));
         }
         Doc::group(Doc::concat(docs))
     }

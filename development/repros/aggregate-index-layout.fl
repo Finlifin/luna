@@ -5,9 +5,12 @@
     The original 3298e6b5 probe failed with "layout requires a nominal type".
 -}
 struct Packet where state: Tuple<bool, bool> {}
-struct Holder where flag: bool { value: Packet<(flag, false)> }
+
+struct Holder where flag: bool {
+    value: Packet<(flag, false)>,
+}
 
 fn run() -> bool {
-    let holder = Holder<true> { value: Packet<(true, false)> {} };
+    let holder = Holder<true> { value: Packet<(true, false)> {} }
     true
 }

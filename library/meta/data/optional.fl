@@ -1,8 +1,7 @@
 {- Comptime operations on native optional/error values use value references
    for self and value parameters for callbacks; no comptime pointers. -}
-
-use builtin.{Type, bool, u64, Order};
-use hashing.{ComptimeHash, mix_byte, mix_digest};
+use builtin.{Order, Type, bool, u64}
+use hashing.{ComptimeHash, mix_byte, mix_digest}
 use numeric.equality.ComptimeEq;
 use numeric.ordering.ComptimeOrd;
 
@@ -10,80 +9,110 @@ pub pure comptime trait ComptimeOptionalOps where T {
     comptime fn is_some(self) -> bool;
     comptime fn is_none(self) -> bool;
     comptime fn unwrap_or(self, fallback: T) -> T;
-    comptime fn unwrap_or_else(self, fallback: %c comptime fn() -> T) -> T where c: Type.vars.Closure;
+    comptime fn unwrap_or_else(
+        self,
+        fallback: %c comptime fn() -> T,
+    ) -> T where c: Type.vars.Closure;
     comptime fn map(self, f: %c comptime fn(T) -> U) -> ?U where U, c: Type.vars.Closure;
     comptime fn and_then(self, f: %c comptime fn(T) -> ?U) -> ?U where U, c: Type.vars.Closure;
     comptime fn filter(self, pred: %c comptime fn(T) -> bool) -> ?T where c: Type.vars.Closure;
     comptime fn inspect(self, observer: %c comptime fn(T)) -> ?T where c: Type.vars.Closure;
     comptime fn or_else(self, fallback: %c comptime fn() -> ?T) -> ?T where c: Type.vars.Closure;
-    comptime fn zip_with(self, other: ?U, combine: %c comptime fn(T, U) -> V) -> ?V where U, V, c: Type.vars.Closure;
+    comptime fn zip_with(
+        self,
+        other: ?U,
+        combine: %c comptime fn(T, U) -> V,
+    ) -> ?V where U, V, c: Type.vars.Closure;
 }
 
 comptime impl ComptimeOptionalOps<T> for ?T where T {
-    comptime fn is_some(self) -> bool = self match {
-        _? => true,
-        null => false,
-    };
+    comptime fn is_some(self) -> bool =
+        self match {
+            _? => true,
+            null => false,
+        }
 
     comptime fn is_none(self) -> bool = not self.as(ComptimeOptionalOps<T>).is_some();
 
-    comptime fn unwrap_or(self, fallback: T) -> T = self match {
-        value? => value,
-        null => fallback,
-    };
+    comptime fn unwrap_or(self, fallback: T) -> T =
+        self match {
+            value? => value,
+            null => fallback,
+        }
 
     -- Construct a fallback only when this layer is absent.
-    comptime fn unwrap_or_else(self, fallback: %c comptime fn() -> T) -> T where c: Type.vars.Closure = self match {
-        value? => value,
-        null => fallback(),
-    };
+    comptime fn unwrap_or_else(
+        self,
+        fallback: %c comptime fn() -> T,
+    ) -> T where c: Type.vars.Closure =
+        self match {
+            value? => value,
+            null => fallback(),
+        }
 
-    comptime fn map(self, f: %c comptime fn(T) -> U) -> ?U where U, c: Type.vars.Closure = self match {
-        value? => f(value),
-        null => null,
-    };
+    comptime fn map(self, f: %c comptime fn(T) -> U) -> ?U where U, c: Type.vars.Closure =
+        self match {
+            value? => f(value),
+            null => null,
+        }
 
-    comptime fn and_then(self, f: %c comptime fn(T) -> ?U) -> ?U where U, c: Type.vars.Closure = self match {
-        value? => f(value),
-        null => null,
-    };
+    comptime fn and_then(self, f: %c comptime fn(T) -> ?U) -> ?U where U, c: Type.vars.Closure =
+        self match {
+            value? => f(value),
+            null => null,
+        }
 
     -- Retain the payload only when the comptime predicate accepts it.
-    comptime fn filter(self, pred: %c comptime fn(T) -> bool) -> ?T where c: Type.vars.Closure = self match {
-        value? => if pred(value) {value} else {null},
-        null => null,
-    };
+    comptime fn filter(self, pred: %c comptime fn(T) -> bool) -> ?T where c: Type.vars.Closure =
+        self match {
+            value? => if pred(value) { value } else { null },
+            null => null,
+        }
 
-    comptime fn inspect(self, observer: %c comptime fn(T)) -> ?T where c: Type.vars.Closure = self match {
-        value? => do {observer(value); value},
-        null => null,
-    };
+    comptime fn inspect(self, observer: %c comptime fn(T)) -> ?T where c: Type.vars.Closure =
+        self match {
+            value? =>
+                do {
+                    observer(value);
+                    value
+                },
+            null => null,
+        }
 
     -- Invoke the alternative only when this outer optional layer is absent.
-    comptime fn or_else(self, fallback: %c comptime fn() -> ?T) -> ?T where c: Type.vars.Closure = self match {
-        value? => value,
-        null => fallback(),
-    };
+    comptime fn or_else(self, fallback: %c comptime fn() -> ?T) -> ?T where c: Type.vars.Closure =
+        self match {
+            value? => value,
+            null => fallback(),
+        }
 
     -- Both inputs are evaluated eagerly; invoke combine only when both exist.
-    comptime fn zip_with(self, other: ?U, combine: %c comptime fn(T, U) -> V) -> ?V where U, V, c: Type.vars.Closure = self match {
-        left? => other match {
-            right? => combine(left, right),
+    comptime fn zip_with(
+        self,
+        other: ?U,
+        combine: %c comptime fn(T, U) -> V,
+    ) -> ?V where U, V, c: Type.vars.Closure =
+        self match {
+            left? =>
+                other match {
+                    right? => combine(left, right),
+                    null => null,
+                },
             null => null,
-        },
-        null => null,
-    };
+        }
 }
 
 {- Compare only matching present layers, using the payload's own protocol. -}
-comptime impl ComptimeEq for ?T where T:- ComptimeEq {
-    comptime fn eq(self, other: Self) -> bool = self match {
-        left? => other match {
-            right? => left.as(ComptimeEq).eq(right),
-            null => false,
-        },
-        null => other matches null,
-    };
+comptime impl ComptimeEq for ?T where T :- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool =
+        self match {
+            left? =>
+                other match {
+                    right? => left.as(ComptimeEq).eq(right),
+                    null => false,
+                },
+            null => other matches null,
+        }
 }
 
 {-
@@ -91,23 +120,31 @@ comptime impl ComptimeEq for ?T where T:- ComptimeEq {
     present, retaining nested optional layers and the payload's own ordering.
     This is library ordering, independent of representation tags or addresses.
 -}
-comptime impl ComptimeOrd for ?T where T:- ComptimeOrd {
-    comptime fn cmp(self, other: Self) -> Order = self match {
-        left? => other match {
-            right? => left.as(ComptimeOrd).cmp(right),
-            null => .greater,
-        },
-        null => other match {
-            _? => .less,
-            null => .equal,
-        },
-    };
+comptime impl ComptimeOrd for ?T where T :- ComptimeOrd {
+    comptime fn cmp(self, other: Self) -> Order =
+        self match {
+            left? =>
+                other match {
+                    right? => left.as(ComptimeOrd).cmp(right),
+                    null => .greater,
+                },
+            null =>
+                other match {
+                    _? => .less,
+                    null => .equal,
+                },
+        }
 }
 
 {- Presence is encoded before the payload digest; absent values never call it. -}
-comptime impl ComptimeHash for ?T where T:- ComptimeHash {
-    comptime fn hash(self) -> u64 = self match {
-        value? => mix_digest(mix_byte(14695981039346656037, 1), value.as(ComptimeHash).hash()),
-        null => mix_byte(14695981039346656037, 0),
-    };
+comptime impl ComptimeHash for ?T where T :- ComptimeHash {
+    comptime fn hash(self) -> u64 =
+        self match {
+            value? =>
+                mix_digest(
+                    mix_byte(14695981039346656037, 1),
+                    value.as(ComptimeHash).hash(),
+                ),
+            null => mix_byte(14695981039346656037, 0),
+        }
 }

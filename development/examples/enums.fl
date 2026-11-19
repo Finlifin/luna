@@ -18,7 +18,7 @@ fn ready(state: State) -> Flag {
 }
 
 fn run() -> Flag {
-    let job = Job {};
+    let job = Job {}
     job.state = State.ready;
     ready(job.state)
 }
@@ -40,20 +40,28 @@ fn accepted(event: Event) -> Flag {
 
 fn payload_example() -> Flag {
     let event: Event = .state(State.ready, true);
-    let .state(state, enabled) = event else { return false; };
+    let .state(state, enabled) = event else {
+        return false;
+    }
     enabled and ready(state) and accepted(event)
 }
 
 enum NamedEvent {
-    update { state: State = .ready, enabled: Flag = true },
+    update {
+        state: State = .ready,
+        enabled: Flag = true,
+    },
 }
 
 fn named_payload_example() -> Flag {
-    let event = NamedEvent.update {};
+    let event = NamedEvent.update {}
     event match {
         .update { enabled: false } => false,
         .update { state: .waiting } => false,
-        .update { state: .ready or .done, enabled: true } => true,
+        .update {
+            state: .ready or .done,
+            enabled: true,
+        } => true,
     }
 }
 

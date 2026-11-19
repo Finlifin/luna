@@ -9,9 +9,11 @@ fn in_range(value: Int) -> bool {
 }
 
 fn run() -> bool {
-    let true as accepted = in_range(-3) else { return false; };
+    let true as accepted = in_range(-3) else {
+        return false;
+    }
     let recovered = false match {
         (true as flag) or (false as flag) => not flag,
-    };
+    }
     accepted and recovered and not in_range(11)
 }

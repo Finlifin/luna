@@ -2178,8 +2178,8 @@ fn property_pipeline_composes_tuple_contexts_patterns_and_ordered_effects() {
     );
     let rejected = include_str!("../../../development/examples/contextual-property-pipeline.fl")
         .replace(
-            "value match { not 0 => true, _ => false }",
-            "do {assumes value == 0;false}",
+            "value match {\n                                not 0 => true,\n                                _ => false,\n                            }",
+            "do { assumes value == 0; false }",
         );
     let rejected = compile_bound_tuple_fixture(&rejected);
     let mut interpreter = Interpreter::new(&rejected, Budget::default()).unwrap();
@@ -20589,10 +20589,9 @@ fn program_entry_snapshots_freeze_inputs_and_export_bounds() {
         &mut elaboration::verification::Limits::default(),
     )
     .unwrap();
-    std::fs::write("/tmp/luna-entry-snapshots-flow.lisp", report.to_string()).unwrap();
+    assert!(!report.to_string().is_empty());
     let dump = package.to_string();
     assert!(dump.contains("(entry-snapshot (parameter"));
-    std::fs::write("/tmp/luna-entry-snapshots.lisp", dump).unwrap();
 }
 
 #[test]
@@ -20747,12 +20746,8 @@ fn trait_program_contracts_compose_declarations_defaults_and_implementations() {
         &mut elaboration::verification::Limits::default(),
     )
     .unwrap();
-    std::fs::write("/tmp/luna-trait-program-flow.lisp", report.to_string()).unwrap();
-    std::fs::write(
-        "/tmp/luna-trait-program-contracts.lisp",
-        package.to_string(),
-    )
-    .unwrap();
+    assert!(!report.to_string().is_empty());
+    assert!(!package.to_string().is_empty());
 }
 
 #[test]

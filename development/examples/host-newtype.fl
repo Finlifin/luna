@@ -1,11 +1,18 @@
 -- Build with --copy-protocol Duplicate --drop-protocol Retire.
 trait Duplicate {}
-trait Retire { fn drop(*self); }
+
+trait Retire {
+    fn drop(*self);
+}
+
 impl Duplicate for bool {}
 
 newtype Enabled = bool;
+
 impl Duplicate for Enabled {}
+
 newtype Handle = *bool;
+
 impl Duplicate for Handle {}
 
 fn enable(handle: Handle) {

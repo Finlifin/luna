@@ -2,9 +2,11 @@
     Compiled with the real meta package and builtin primitive declarations.
     Lists retain their type identity and remain in comptime invocation.
 -}
-use builtin.{Integer, bool};
+use builtin.{Integer, bool}
 
-comptime fn flags() -> meta.List<bool> { [true, false] }
+comptime fn flags() -> meta.List<bool> {
+    [true, false]
+}
 
 comptime fn choose(values: meta.List<bool>, index: Integer) -> bool {
     values[index]
@@ -30,10 +32,15 @@ const saved = flags();
 
 comptime fn run() -> bool {
     let groups = nested();
-    choose(saved, 0) and not choose(saved, 1) and groups[1][1]
-        and selected<saved>() and not selected<[false, true]>()
-        and first<bool, saved>() and not first<bool, [false, true]>()
-        and defaulted<>() and not defaulted<.values = [false]>()
+    choose(saved, 0)
+        and not choose(saved, 1)
+        and groups[1][1]
+        and selected<saved>()
+        and not selected<[false, true]>()
+        and first<bool, saved>()
+        and not first<bool, [false, true]>()
+        and defaulted<>()
+        and not defaulted<.values = [false]>()
 }
 
 {-

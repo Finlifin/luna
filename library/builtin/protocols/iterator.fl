@@ -3,7 +3,6 @@
     an item does not allocate a resumable iterator state. Implementations and
     adapters expose their bodies for joint expansion with the consumer.
 -}
-
 use primitives.Type as IterationType;
 use primitives.usize as IterationIndex;
 use primitives.void as IterationUnit;
@@ -21,121 +20,155 @@ pub trait Iterator {
         }
     }
 
-    inline fn map(self, f: %c fn(Item) -> U) -> MapIterator<Self, U, c>
-        where U, c: IterationType.vars.Closure
-    {
-        MapIterator<Self, U, c> {iter: self, f: f}
+    inline fn map(
+        self,
+        f: %c fn(Item) -> U,
+    ) -> MapIterator<Self, U, c> where U, c: IterationType.vars.Closure {
+        MapIterator<Self, U, c> { iter: self, f: f }
     }
 
-    inline fn intersperse_with(self, make: %c fn() -> Item) -> IntersperseWithIterator<Self, c>
-        where c: IterationType.vars.Closure
-    {
-        IntersperseWithIterator<Self, c> {iter: self, make: make}
+    inline fn intersperse_with(
+        self,
+        make: %c fn() -> Item,
+    ) -> IntersperseWithIterator<Self, c> where c: IterationType.vars.Closure {
+        IntersperseWithIterator<Self, c> { iter: self, make: make }
     }
 
-    inline fn filter(self, pred: %c fn(*Item) -> bool) -> FilterIterator<Self, c>
-        where c: IterationType.vars.Closure
-    {
-        FilterIterator<Self, c> {iter: self, pred: pred}
+    inline fn filter(
+        self,
+        pred: %c fn(*Item) -> bool,
+    ) -> FilterIterator<Self, c> where c: IterationType.vars.Closure {
+        FilterIterator<Self, c> { iter: self, pred: pred }
     }
 
-    inline fn filter_map(self, f: %c fn(Item) -> ?U) -> FilterMapIterator<Self, U, c>
-        where U, c: IterationType.vars.Closure
-    {
-        FilterMapIterator<Self, U, c> {iter: self, f: f}
+    inline fn filter_map(
+        self,
+        f: %c fn(Item) -> ?U,
+    ) -> FilterMapIterator<Self, U, c> where U, c: IterationType.vars.Closure {
+        FilterMapIterator<Self, U, c> { iter: self, f: f }
     }
 
-    inline fn map_while(self, f: %c fn(Item) -> ?U) -> MapWhileIterator<Self, U, c>
-        where U, c: IterationType.vars.Closure
-    {
-        MapWhileIterator<Self, U, c> {iter: self, f: f}
+    inline fn map_while(
+        self,
+        f: %c fn(Item) -> ?U,
+    ) -> MapWhileIterator<Self, U, c> where U, c: IterationType.vars.Closure {
+        MapWhileIterator<Self, U, c> { iter: self, f: f }
     }
 
-    inline fn scan(self, initial: A, f: %c fn(*A, Item) -> ?U) -> ScanIterator<Self, A, U, c>
-        where A, U, c: IterationType.vars.Closure
-    {
-        ScanIterator<Self, A, U, c> {iter: self, state: initial, f: f}
+    inline fn scan(
+        self,
+        initial: A,
+        f: %c fn(*A, Item) -> ?U,
+    ) -> ScanIterator<Self, A, U, c> where A, U, c: IterationType.vars.Closure {
+        ScanIterator<Self, A, U, c> {
+            iter: self,
+            state: initial,
+            f: f,
+        }
     }
 
-    inline fn inspect(self, f: %c fn(*Item)) -> InspectIterator<Self, c>
-        where c: IterationType.vars.Closure
-    {
-        InspectIterator<Self, c> {iter: self, f: f}
+    inline fn inspect(
+        self,
+        f: %c fn(*Item),
+    ) -> InspectIterator<Self, c> where c: IterationType.vars.Closure {
+        InspectIterator<Self, c> { iter: self, f: f }
     }
 
-    inline fn take_while(self, pred: %c fn(*Item) -> bool) -> TakeWhileIterator<Self, c>
-        where c: IterationType.vars.Closure
-    {
-        TakeWhileIterator<Self, c> {iter: self, pred: pred}
+    inline fn take_while(
+        self,
+        pred: %c fn(*Item) -> bool,
+    ) -> TakeWhileIterator<Self, c> where c: IterationType.vars.Closure {
+        TakeWhileIterator<Self, c> { iter: self, pred: pred }
     }
 
-    inline fn skip_while(self, pred: %c fn(*Item) -> bool) -> SkipWhileIterator<Self, c>
-        where c: IterationType.vars.Closure
-    {
-        SkipWhileIterator<Self, c> {iter: self, pred: pred}
+    inline fn skip_while(
+        self,
+        pred: %c fn(*Item) -> bool,
+    ) -> SkipWhileIterator<Self, c> where c: IterationType.vars.Closure {
+        SkipWhileIterator<Self, c> { iter: self, pred: pred }
     }
 
     inline fn take(self, count: IterationIndex) -> TakeIterator<Self> {
-        TakeIterator<Self> {iter: self, count: count}
+        TakeIterator<Self> { iter: self, count: count }
     }
 
     inline fn skip(self, count: IterationIndex) -> SkipIterator<Self> {
-        SkipIterator<Self> {iter: self, count: count}
+        SkipIterator<Self> { iter: self, count: count }
     }
 
-    inline fn flat_map(self, f: %c fn(Item) -> J) -> FlatMapIterator<Self, J, c>
-        where J :- Iterator, c: IterationType.vars.Closure
-    {
-        FlatMapIterator<Self, J, c> {iter: self, f: f}
+    inline fn flat_map(
+        self,
+        f: %c fn(Item) -> J,
+    ) -> FlatMapIterator<Self, J, c> where J :- Iterator, c: IterationType.vars.Closure {
+        FlatMapIterator<Self, J, c> { iter: self, f: f }
     }
 
     inline fn flatten(self) -> FlattenIterator<Self>
-        where requires Item :- Iterator
+    where
+        requires Item :- Iterator,
     {
-        FlattenIterator<Self> {iter: self}
+        FlattenIterator<Self> { iter: self }
     }
 
     inline fn chain(self, next: J) -> ChainIterator<Self, J>
-        where J :- Iterator, requires J.as(Iterator).Item == Item
+    where
+        J :- Iterator,
+        requires J.as(Iterator).Item == Item,
     {
-        ChainIterator<Self, J> {first: self, second: next}
+        ChainIterator<Self, J> { first: self, second: next }
     }
 
-    inline fn any(self, pred: %c fn(*Item) -> bool) -> bool
-        where c: IterationType.vars.Closure
-    {
+    inline fn any(self, pred: %c fn(*Item) -> bool) -> bool where c: IterationType.vars.Closure {
         self.iterate()# {
-            emit_item<Item>(value) => if pred(value.ref) {return true;},
+            emit_item<
+                Item>(
+                value,
+            ) =>
+                if pred(value.ref) {
+                    return true;
+                },
         }
         false
     }
 
-    inline fn all(self, pred: %c fn(*Item) -> bool) -> bool
-        where c: IterationType.vars.Closure
-    {
+    inline fn all(self, pred: %c fn(*Item) -> bool) -> bool where c: IterationType.vars.Closure {
         self.iterate()# {
-            emit_item<Item>(value) => if not pred(value.ref) {return false;},
+            emit_item<
+                Item>(
+                value,
+            ) =>
+                if not pred(value.ref) {
+                    return false;
+                },
         }
         true
     }
 
-    inline fn find(self, pred: %c fn(*Item) -> bool) -> ?Item
-        where c: IterationType.vars.Closure
-    {
+    inline fn find(self, pred: %c fn(*Item) -> bool) -> ?Item where c: IterationType.vars.Closure {
         self.iterate()# {
-            emit_item<Item>(value) => if pred(value.ref) {return value;},
+            emit_item<
+                Item>(
+                value,
+            ) =>
+                if pred(value.ref) {
+                    return value;
+                },
         }
         null
     }
 
-    inline fn find_map(self, f: %c fn(Item) -> ?U) -> ?U
-        where U, c: IterationType.vars.Closure
-    {
+    inline fn find_map(self, f: %c fn(Item) -> ?U) -> ?U where U, c: IterationType.vars.Closure {
         self.iterate()# {
-            emit_item<Item>(value) => f(value) match {
-                mapped? => {return mapped;},
-                null => {},
-            },
+            emit_item<
+                Item>(
+                value,
+            ) =>
+                f(value) match {
+                    mapped? => {
+                        return mapped;
+                    },
+                    null => {},
+                },
         }
         null
     }
@@ -150,16 +183,20 @@ pub trait Iterator {
         the remaining source. Error results retain their ordinary ABI; they
         are not another effect handled by the iteration handler.
     -}
-    inline fn try_fold(self, initial: A, f: %c fn(A, Item) -> !E A) -> !E A
-        where A, E, c: IterationType.vars.Closure
-    {
+    inline fn try_fold(
+        self,
+        initial: A,
+        f: %c fn(A, Item) -> !E A,
+    ) -> !E A where A, E, c: IterationType.vars.Closure {
         var accumulator = initial;
         self.iterate()# {
             emit_item<Item>(value) => {
                 accumulator = f(accumulator, value) match {
                     next! => next,
-                    error failure => {return error failure;},
-                };
+                    error failure => {
+                        return error failure;
+                    },
+                }
             },
         }
         accumulator
@@ -171,33 +208,44 @@ pub trait Iterator {
         empty stream from a present item; the first error stops production and
         transfers its payload while retiring the pending source normally.
     -}
-    inline fn try_reduce(self, f: %c fn(Item, Item) -> !E Item) -> !E ?Item
-        where E, c: IterationType.vars.Closure
-    {
+    inline fn try_reduce(
+        self,
+        f: %c fn(Item, Item) -> !E Item,
+    ) -> !E ?Item where E, c: IterationType.vars.Closure {
         var accumulator: ?Item = null;
         self.iterate()# {
             emit_item<Item>(value) => {
                 accumulator = accumulator match {
-                    previous? => f(previous, value) match {
-                        next! => next,
-                        error failure => {return error failure;},
-                    },
+                    previous? =>
+                        f(previous, value) match {
+                            next! => next,
+                            error failure => {
+                                return error failure;
+                            },
+                        },
                     null => value,
-                };
+                }
             },
         }
         accumulator
     }
 
     -- Stop at the first error; empty input succeeds without calling f.
-    inline fn try_foreach(self, f: %c fn(Item) -> !E IterationUnit) -> !E IterationUnit
-        where E, c: IterationType.vars.Closure
-    {
+    inline fn try_foreach(
+        self,
+        f: %c fn(Item) -> !E IterationUnit,
+    ) -> !E IterationUnit where E, c: IterationType.vars.Closure {
         self.iterate()# {
-            emit_item<Item>(value) => f(value) match {
-                _! => {},
-                error failure => {return error failure;},
-            },
+            emit_item<
+                Item>(
+                value,
+            ) =>
+                f(value) match {
+                    _! => {},
+                    error failure => {
+                        return error failure;
+                    },
+                },
         }
     }
 
@@ -210,7 +258,9 @@ pub trait Iterator {
         var remaining = index;
         self.iterate()# {
             emit_item<Item>(value) => {
-                if remaining == 0 {return value;}
+                if remaining == 0 {
+                    return value;
+                }
                 remaining = remaining - 1;
             },
         }
@@ -224,7 +274,9 @@ pub trait Iterator {
     inline fn last(self) -> ?Item {
         var result: ?Item = null;
         self.iterate()# {
-            emit_item<Item>(value) => {result = value;},
+            emit_item<Item>(value) => {
+                result = value;
+            },
         }
         result
     }
@@ -235,24 +287,27 @@ pub trait Iterator {
         input returns null; a null item inside an optional item type remains
         a present result. No identity value or Copy implementation is required.
     -}
-    inline fn reduce(self, f: %c fn(Item, Item) -> Item) -> ?Item
-        where c: IterationType.vars.Closure
-    {
+    inline fn reduce(
+        self,
+        f: %c fn(Item, Item) -> Item,
+    ) -> ?Item where c: IterationType.vars.Closure {
         var accumulator: ?Item = null;
         self.iterate()# {
             emit_item<Item>(value) => {
                 accumulator = accumulator match {
                     previous? => f(previous, value),
                     null => value,
-                };
+                }
             },
         }
         accumulator
     }
 
-    inline fn fold(self, initial: A, f: %c fn(A, Item) -> A) -> A
-        where A, c: IterationType.vars.Closure
-    {
+    inline fn fold(
+        self,
+        initial: A,
+        f: %c fn(A, Item) -> A,
+    ) -> A where A, c: IterationType.vars.Closure {
         var accumulator = initial;
         self.iterate()# {
             emit_item<Item>(value) => {
@@ -278,16 +333,21 @@ impl Iterator for ?T where T {
     }
 }
 
-pub struct ChainIterator where I :- Iterator, J :- Iterator,
-    requires I.as(Iterator).Item == J.as(Iterator).Item
+pub struct ChainIterator
+where
+    I :- Iterator,
+    J :- Iterator,
+    requires I.as(Iterator).Item == J.as(Iterator).Item,
 {
     first: I,
     second: J,
 }
 
 impl Iterator for ChainIterator<I, J>
-    where I :- Iterator, J :- Iterator,
-    requires I.as(Iterator).Item == J.as(Iterator).Item
+where
+    I :- Iterator,
+    J :- Iterator,
+    requires I.as(Iterator).Item == J.as(Iterator).Item,
 {
     assoc Item: IterationType = I.as(Iterator).Item;
 
@@ -298,7 +358,10 @@ impl Iterator for ChainIterator<I, J>
 }
 
 pub trait FromIterator where T {
-    fn from_iter(iter: I) -> Self where I :- Iterator, requires I.as(Iterator).Item == T;
+    fn from_iter(iter: I) -> Self
+    where
+        I :- Iterator,
+        requires I.as(Iterator).Item == T;
 }
 
 {-
@@ -311,16 +374,16 @@ pub struct TakeWhileIterator where I :- Iterator, c: IterationType.vars.Closure 
     pred: %c fn(*I.as(Iterator).Item) -> bool,
 }
 
-impl Iterator for TakeWhileIterator<I, c>
-    where I :- Iterator, c: IterationType.vars.Closure
-{
+impl Iterator for TakeWhileIterator<I, c> where I :- Iterator, c: IterationType.vars.Closure {
     assoc Item: IterationType = I.as(Iterator).Item;
 
     inline fn iterate(self) -> #emit_item<Item> IterationUnit {
         let pred = self.pred;
         self.iter.as(Iterator).iterate()# {
             emit_item<Item>(value) => {
-                if not pred(value.ref) {return;}
+                if not pred(value.ref) {
+                    return;
+                }
                 emit_item<Item>(value)#;
             },
         }
@@ -332,13 +395,21 @@ impl Iterator for TakeWhileIterator<I, c>
     iterate call propagates its effect to the enclosing consumer; it does not
     request the outer source's emit operation again.
 -}
-pub struct FlatMapIterator where I :- Iterator, J :- Iterator, c: IterationType.vars.Closure {
+pub struct FlatMapIterator
+where
+    I :- Iterator,
+    J :- Iterator,
+    c: IterationType.vars.Closure,
+{
     iter: I,
     f: %c fn(I.as(Iterator).Item) -> J,
 }
 
 impl Iterator for FlatMapIterator<I, J, c>
-    where I :- Iterator, J :- Iterator, c: IterationType.vars.Closure
+where
+    I :- Iterator,
+    J :- Iterator,
+    c: IterationType.vars.Closure,
 {
     assoc Item: IterationType = J.as(Iterator).Item;
 
@@ -355,14 +426,18 @@ impl Iterator for FlatMapIterator<I, J, c>
     the outer source for another item. A downstream exit retires both pending
     inner items and the outer remainder through ordinary resource cleanup.
 -}
-pub struct FlattenIterator where I :- Iterator,
-    requires I.as(Iterator).Item :- Iterator
+pub struct FlattenIterator
+where
+    I :- Iterator,
+    requires I.as(Iterator).Item :- Iterator,
 {
     iter: I,
 }
 
-impl Iterator for FlattenIterator<I> where I :- Iterator,
-    requires I.as(Iterator).Item :- Iterator
+impl Iterator for FlattenIterator<I>
+where
+    I :- Iterator,
+    requires I.as(Iterator).Item :- Iterator,
 {
     assoc Item: IterationType = I.as(Iterator).Item.as(Iterator).Item;
 
@@ -378,9 +453,7 @@ pub struct MapIterator where I :- Iterator, U, c: IterationType.vars.Closure {
     f: %c fn(I.as(Iterator).Item) -> U,
 }
 
-impl Iterator for MapIterator<I, U, c>
-    where I :- Iterator, U, c: IterationType.vars.Closure
-{
+impl Iterator for MapIterator<I, U, c> where I :- Iterator, U, c: IterationType.vars.Closure {
     assoc Item: IterationType = U;
 
     inline fn iterate(self) -> #emit_item<U> IterationUnit {
@@ -405,18 +478,22 @@ pub struct FilterMapIterator where I :- Iterator, U, c: IterationType.vars.Closu
     f: %c fn(I.as(Iterator).Item) -> ?U,
 }
 
-impl Iterator for FilterMapIterator<I, U, c>
-    where I :- Iterator, U, c: IterationType.vars.Closure
-{
+impl Iterator for FilterMapIterator<I, U, c> where I :- Iterator, U, c: IterationType.vars.Closure {
     assoc Item: IterationType = U;
 
     inline fn iterate(self) -> #emit_item<U> IterationUnit {
         let f = self.f;
         self.iter.as(Iterator).iterate()# {
-            emit_item<I.as(Iterator).Item>(value) => f(value) match {
-                mapped? => emit_item<U>(mapped)#,
-                null => {},
-            },
+            emit_item<
+                I
+                    .as(Iterator)
+                    .Item>(
+                value,
+            ) =>
+                f(value) match {
+                    mapped? => emit_item<U>(mapped)#,
+                    null => {},
+                },
         }
     }
 }
@@ -430,9 +507,7 @@ pub struct InspectIterator where I :- Iterator, c: IterationType.vars.Closure {
     f: %c fn(*I.as(Iterator).Item),
 }
 
-impl Iterator for InspectIterator<I, c>
-    where I :- Iterator, c: IterationType.vars.Closure
-{
+impl Iterator for InspectIterator<I, c> where I :- Iterator, c: IterationType.vars.Closure {
     assoc Item: IterationType = I.as(Iterator).Item;
 
     inline fn iterate(self) -> #emit_item<Item> IterationUnit {
@@ -446,15 +521,19 @@ impl Iterator for InspectIterator<I, c>
     }
 }
 
-impl Iterator for FilterIterator<I, c>
-    where I :- Iterator, c: IterationType.vars.Closure
-{
+impl Iterator for FilterIterator<I, c> where I :- Iterator, c: IterationType.vars.Closure {
     assoc Item: IterationType = I.as(Iterator).Item;
 
     inline fn iterate(self) -> #emit_item<Item> IterationUnit {
         let pred = self.pred;
         self.iter.as(Iterator).iterate()# {
-            emit_item<Item>(value) => if pred(value.ref) {emit_item<Item>(value)#;},
+            emit_item<
+                Item>(
+                value,
+            ) =>
+                if pred(value.ref) {
+                    emit_item<Item>(value)#;
+                },
         }
     }
 }
@@ -469,9 +548,7 @@ pub struct SkipWhileIterator where I :- Iterator, c: IterationType.vars.Closure 
     pred: %c fn(*I.as(Iterator).Item) -> bool,
 }
 
-impl Iterator for SkipWhileIterator<I, c>
-    where I :- Iterator, c: IterationType.vars.Closure
-{
+impl Iterator for SkipWhileIterator<I, c> where I :- Iterator, c: IterationType.vars.Closure {
     assoc Item: IterationType = I.as(Iterator).Item;
 
     inline fn iterate(self) -> #emit_item<Item> IterationUnit {
@@ -479,8 +556,12 @@ impl Iterator for SkipWhileIterator<I, c>
         var skipping = true;
         self.iter.as(Iterator).iterate()# {
             emit_item<Item>(value) => {
-                if skipping {skipping = pred(value.ref);}
-                if not skipping {emit_item<Item>(value)#;}
+                if skipping {
+                    skipping = pred(value.ref);
+                }
+                if not skipping {
+                    emit_item<Item>(value)#;
+                }
             },
         }
     }
@@ -501,13 +582,17 @@ impl Iterator for TakeIterator<I> where I :- Iterator {
 
     inline fn iterate(self) -> #emit_item<Item> IterationUnit {
         var remaining = self.count;
-        if remaining == 0 {return;}
+        if remaining == 0 {
+            return;
+        }
         self.iter.as(Iterator).iterate()# {
             emit_item<Item>(value) => {
                 assumes remaining > 0;
                 remaining = remaining - 1;
                 emit_item<Item>(value)#;
-                if remaining == 0 {return;}
+                if remaining == 0 {
+                    return;
+                }
             },
         }
     }
@@ -538,9 +623,9 @@ impl Iterator for SkipIterator<I> where I :- Iterator {
 {- Container conversion transfers ownership to the returned iterator. -}
 pub trait IntoIterator {
     assoc Iter: IterationType;
+
     fn into_iter(self) -> Iter;
 }
-
 
 {-
     Produce separators only between items. The next source item is already
@@ -553,9 +638,7 @@ pub struct IntersperseWithIterator where I :- Iterator, c: IterationType.vars.Cl
     make: %c fn() -> I.as(Iterator).Item,
 }
 
-impl Iterator for IntersperseWithIterator<I, c>
-    where I :- Iterator, c: IterationType.vars.Closure
-{
+impl Iterator for IntersperseWithIterator<I, c> where I :- Iterator, c: IterationType.vars.Closure {
     assoc Item: IterationType = I.as(Iterator).Item;
 
     inline fn iterate(self) -> #emit_item<Item> IterationUnit {
@@ -563,13 +646,16 @@ impl Iterator for IntersperseWithIterator<I, c>
         var first = true;
         self.iter.as(Iterator).iterate()# {
             emit_item<Item>(value) => {
-                if first {first = false;} else {emit_item<Item>(make())#;}
+                if first {
+                    first = false;
+                } else {
+                    emit_item<Item>(make())#;
+                }
                 emit_item<Item>(value)#;
             },
         }
     }
 }
-
 
 {-
     Transfer each item into the mapper once. The first absent result ends this
@@ -581,18 +667,24 @@ pub struct MapWhileIterator where I :- Iterator, U, c: IterationType.vars.Closur
     f: %c fn(I.as(Iterator).Item) -> ?U,
 }
 
-impl Iterator for MapWhileIterator<I, U, c>
-    where I :- Iterator, U, c: IterationType.vars.Closure
-{
+impl Iterator for MapWhileIterator<I, U, c> where I :- Iterator, U, c: IterationType.vars.Closure {
     assoc Item: IterationType = U;
 
     inline fn iterate(self) -> #emit_item<U> IterationUnit {
         let f = self.f;
         self.iter.as(Iterator).iterate()# {
-            emit_item<I.as(Iterator).Item>(value) => f(value) match {
-                mapped? => emit_item<U>(mapped)#,
-                null => {return;},
-            },
+            emit_item<
+                I
+                    .as(Iterator)
+                    .Item>(
+                value,
+            ) =>
+                f(value) match {
+                    mapped? => emit_item<U>(mapped)#,
+                    null => {
+                        return;
+                    },
+                },
         }
     }
 }
@@ -608,9 +700,8 @@ pub struct ScanIterator where I :- Iterator, A, U, c: IterationType.vars.Closure
     f: %c fn(*A, I.as(Iterator).Item) -> ?U,
 }
 
-impl Iterator for ScanIterator<I, A, U, c>
-    where I :- Iterator, A, U, c: IterationType.vars.Closure
-{
+impl Iterator
+    for ScanIterator<I, A, U, c> where I :- Iterator, A, U, c: IterationType.vars.Closure {
     assoc Item: IterationType = U;
 
     inline fn iterate(self) -> #emit_item<U> IterationUnit {
@@ -618,10 +709,18 @@ impl Iterator for ScanIterator<I, A, U, c>
         let state_ref = state.ref;
         let f = self.f;
         self.iter.as(Iterator).iterate()# {
-            emit_item<I.as(Iterator).Item>(value) => f(state_ref, value) match {
-                mapped? => emit_item<U>(mapped)#,
-                null => {return;},
-            },
+            emit_item<
+                I
+                    .as(Iterator)
+                    .Item>(
+                value,
+            ) =>
+                f(state_ref, value) match {
+                    mapped? => emit_item<U>(mapped)#,
+                    null => {
+                        return;
+                    },
+                },
         }
     }
 }

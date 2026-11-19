@@ -207,7 +207,6 @@ fn instances_close_recursive_generic_closure_and_dispatch_dependencies() {
     let again = luna::instantiation::instantiate(&source, "entry", 100_000).unwrap();
     assert_eq!(output.to_string(), again.to_string());
     assert!(output.to_string().contains("(closure"));
-    std::fs::write("/tmp/luna-instantiated-functions.lisp", output.to_string()).unwrap();
     let mut damaged = output.clone();
     let dependency = damaged
         .functions

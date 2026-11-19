@@ -1,9 +1,18 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin {T}
-pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 typealias Int = .Integer'builtin;
 
-fn dependent() -> bool { true }
+fn dependent() -> bool {
+    true
+}
+
 fn checked(flag: bool) -> bool {
     assumes flag;
     dependent()
@@ -24,7 +33,10 @@ comptime fn count_checks() -> Int {
 }
 
 comptime fn captured(accepted: bool) -> bool {
-    let check = || { assumes accepted; true };
+    let check = || {
+        assumes accepted;
+        true
+    }
     check()
 }
 
@@ -32,9 +44,14 @@ comptime fn Select(accepted: bool) -> .Type'builtin {
     assumes accepted;
     bool
 }
+
 typealias Selected = Select(true);
 
 comptime fn run() -> Tuple<Selected, bool, bool> {
     assumes true or false;
-    (checked_value(true, true), count_checks() == 0, captured(true))
+    (
+        checked_value(true, true),
+        count_checks() == 0,
+        captured(true),
+    )
 }

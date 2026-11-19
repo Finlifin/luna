@@ -3,11 +3,26 @@ typealias RegisterBits = BitVec<5>;
 
 comptime fn ArithmeticInstruction() -> Type {
     var builder = meta.EnumBuilder.new(.name = .ArithmeticInstruction);
-    builder.add_named(.add, [.rs2, .rs1, .rd], [RegisterBits, RegisterBits, RegisterBits]);
-    builder.add_named(.sub, [.rs2, .rs1, .rd], [RegisterBits, RegisterBits, RegisterBits]);
-    builder.BuildBits(32,
-        [0xfe00707f, 0xfe00707f], [0x00000033, 0x40000033],
-        [[20, 15, 7], [20, 15, 7]], .base_type = u32)
+    builder
+        .add_named(
+            .add,
+            [.rs2, .rs1, .rd],
+            [RegisterBits, RegisterBits, RegisterBits],
+        );
+    builder
+        .add_named(
+            .sub,
+            [.rs2, .rs1, .rd],
+            [RegisterBits, RegisterBits, RegisterBits],
+        );
+    builder
+        .BuildBits(
+            32,
+            [0xfe00707f, 0xfe00707f],
+            [0x00000033, 0x40000033],
+            [[20, 15, 7], [20, 15, 7]],
+            .base_type = u32,
+        )
 }
 
 typealias Instruction = ArithmeticInstruction();
@@ -19,11 +34,13 @@ fn destination(instruction: Instruction) -> RegisterBits {
     }
 }
 
-fn relay(instruction: Instruction) -> Instruction { instruction }
+fn relay(instruction: Instruction) -> Instruction {
+    instruction
+}
 
 test generated_instruction_bits {
-    let add = Instruction.add { rd: 1, rs1: 2, rs2: 3 };
-    let sub = Instruction.sub { rs2: 3, rd: 1, rs1: 2 };
+    let add = Instruction.add { rd: 1, rs1: 2, rs2: 3 }
+    let sub = Instruction.sub { rs2: 3, rd: 1, rs1: 2 }
     let add_word = (add'bitvec).as(u32);
     let sub_word = (sub'bitvec).as(u32);
     assumes add_word == 0x003100b3 and sub_word == 0x403100b3;
@@ -36,10 +53,18 @@ test generated_instruction_payload {
 }
 
 comptime fn MirroredInstruction() -> Type {
-    let draft = meta.EnumBuilder.from_type(Instruction, .name = .MirroredInstruction);
-    draft.BuildBits(Instruction.enum_bit_width(),
-        Instruction.enum_bit_masks(), Instruction.enum_bit_values(),
-        Instruction.enum_bit_offsets(), .base_type = Instruction.enum_bit_base_type())
+    let draft =
+        meta
+            .EnumBuilder
+            .from_type(Instruction, .name = .MirroredInstruction);
+    draft
+        .BuildBits(
+            Instruction.enum_bit_width(),
+            Instruction.enum_bit_masks(),
+            Instruction.enum_bit_values(),
+            Instruction.enum_bit_offsets(),
+            .base_type = Instruction.enum_bit_base_type(),
+        )
 }
 
 typealias Mirror = MirroredInstruction();
@@ -48,15 +73,26 @@ comptime fn inspect_encoding() -> bool {
     let masks = Instruction.enum_bit_masks();
     let values = Instruction.enum_bit_values();
     let offsets = Instruction.enum_bit_offsets();
-    let base = Instruction.enum_bit_base_type() match { value? => value, null => bool };
-    Instruction.enum_bit_width() == 32 and base == u32
-        and masks[0] == 0xfe00707f and values[1] == 0x40000033
-        and offsets[0][0] == 20 and offsets[0][1] == 15 and offsets[0][2] == 7
+    let base = Instruction.enum_bit_base_type() match {
+        value? => value,
+        null => bool,
+    }
+    Instruction.enum_bit_width() == 32
+        and base == u32
+        and masks[0] == 0xfe00707f
+        and values[1] == 0x40000033
+        and offsets[0][0] == 20
+        and offsets[0][1] == 15
+        and offsets[0][2] == 7
         and Mirror != Instruction
 }
 
 test reflected_bit_encoding_rebuild {
-    let value = Mirror.sub { rs2: 3, rd: 1, rs1: 2 };
+    let value = Mirror.sub { rs2: 3, rd: 1, rs1: 2 }
     let word = (value'bitvec).as(u32);
-    inline if inspect_encoding() { assumes word == 0x403100b3; } else { assumes false; };
+    inline if inspect_encoding() {
+        assumes word == 0x403100b3;
+    } else {
+        assumes false;
+    }
 }

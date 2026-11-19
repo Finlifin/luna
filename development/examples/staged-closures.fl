@@ -1,18 +1,28 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
-fn selected(comptime value: bool) -> bool { value }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
+fn selected(comptime value: bool) -> bool {
+    value
+}
 
 fn round_trip(comptime initial: bool) -> bool {
-    selected(do {
-        var value = initial;
-        let toggle: %{value: bool} comptime fn() -> bool = || {
-            value = not value;
-            value
-        };
-        toggle();
-        toggle()
-    })
+    selected(
+        do {
+            var value = initial;
+            let toggle: %{ value: bool } comptime fn() -> bool = || {
+                value = not value;
+                value
+            }
+            toggle();
+            toggle()
+        },
+    )
 }
 
 fn run() -> Tuple<bool, bool> {

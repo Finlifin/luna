@@ -3,7 +3,10 @@
 typealias UInt = .u32'builtin;
 
 fn quotient(numerator: UInt, denominator: UInt) -> result: UInt
-where requires denominator != 0, ensures result <= numerator {
+where
+    requires denominator != 0,
+    ensures result <= numerator,
+{
     numerator / denominator
 }
 

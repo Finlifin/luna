@@ -5,7 +5,7 @@
 -}
 pub trait ListPatternView {
     assoc Element: Type;
+
     fn list_pattern_view_get_len(*self) -> usize;
     fn list_pattern_view_get_element(*self, comptime index: usize) -> Element;
-
 }

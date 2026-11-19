@@ -1,2 +1,11 @@
-struct Ops {pub comptime fn pattern()-><bool -| value:bool> {'<value>}}
-fn run()->bool {const pat=do {Ops}.pattern();let ~<pat> = true;value}
+struct Ops {
+    pub comptime fn pattern() -> < bool -| value: bool > {
+        '<value>
+    }
+}
+
+fn run() -> bool {
+    const pat = do { Ops }.pattern();
+    let ~<pat> = true;
+    value
+}

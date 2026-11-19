@@ -1,6 +1,12 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 typealias Type = .Type'builtin;
 typealias Char = 'x''type;
 
@@ -18,7 +24,9 @@ fn run() -> Tuple<Tuple<bool, bool>, Tuple<Char, .u8'builtin>> {
     (pair(true, false), pair('x', 9))
 }
 
-fn identity(value: G) -> G where G { value }
+fn identity(value: G) -> G where G {
+    value
+}
 
 fn inferred() -> bool {
     -- No result annotation supplies the integer type here. Numeric defaulting

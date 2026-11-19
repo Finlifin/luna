@@ -1,9 +1,17 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 typealias Type = .Type'builtin;
 
-fn identity(comptime T: Type, value: T) -> T { value }
+fn identity(comptime T: Type, value: T) -> T {
+    value
+}
 
 fn apply(comptime T: Type, value: T) -> T {
     -- T is supplied at staging; the runtime lambda needs no Type capture cell.
@@ -16,7 +24,7 @@ fn captured(comptime T: Type, value: T) -> T {
     let outer = || {
         let inner = || identity(T, value);
         inner()
-    };
+    }
     outer()
 }
 
@@ -27,6 +35,7 @@ comptime fn Choose(comptime T: Type) -> Type {
 }
 
 typealias Flag = Choose(bool);
+
 fn run() -> Tuple<Flag, 'x''type> {
     (apply(bool, true), captured('x''type, 'x'))
 }

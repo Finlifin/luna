@@ -9,9 +9,14 @@ comptime fn run() -> bool {
     let count = meta.math.leading_zeros<usize>(0);
     let saturated = meta.math.saturating_add<i8>(120, 30);
     let negative_zero = meta.math.minimum<f32>(0.0, -0.0);
-    root == 9.0 and scale == 36.0 and reverse == 192 and count == 64
-        and saturated == 127 and meta.math.signbit(negative_zero)
-        and half_f16() and half_bf16()
+    root == 9.0
+        and scale == 36.0
+        and reverse == 192
+        and count == 64
+        and saturated == 127
+        and meta.math.signbit(negative_zero)
+        and half_f16()
+        and half_bf16()
 }
 
 comptime fn half_f16() -> bool {
@@ -43,7 +48,10 @@ comptime fn half_f16() -> bool {
     let nan = meta.math.isnan(root);
     let infinite = meta.math.isinf(root);
     let subnormal = meta.math.issubnormal(root);
-    (recovered == 256.0 and tiny_class and overflow_class and invalid_class)
+    recovered == 256.0
+        and tiny_class
+        and overflow_class
+        and invalid_class
         and (fused == 7.0 and root == 2.0 and signed == -2.0)
         and (floor == -2.0 and ceil == -1.0 and truncated == -1.0)
         and (even == 2.0 and away == -3.0 and magnitude == 2.0)
@@ -81,7 +89,10 @@ comptime fn half_bf16() -> bool {
     let nan = meta.math.isnan(root);
     let infinite = meta.math.isinf(root);
     let subnormal = meta.math.issubnormal(root);
-    (recovered == 256.0 and tiny_class and overflow_class and invalid_class)
+    recovered == 256.0
+        and tiny_class
+        and overflow_class
+        and invalid_class
         and (fused == 7.0 and root == 2.0 and signed == -2.0)
         and (floor == -2.0 and ceil == -1.0 and truncated == -1.0)
         and (even == 2.0 and away == -3.0 and magnitude == 2.0)

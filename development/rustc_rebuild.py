@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Release only exact outputs of a managed rustc job that Cargo will rebuild.
 
-Called by cargo.py under its maintenance lock and -j 1. Compiler queries,
+Called by cargo.py under its maintenance lock; each rustc unit targets disjoint
+outputs keyed by crate name and extra-filename. Compiler queries,
 metadata-only jobs, dependencies, cross targets and unsupported output modes are
 forwarded without pruning. This is not a general cache deletion entrypoint.
 """
@@ -81,8 +82,11 @@ def candidates(arguments, env, *, root=ROOT, target=TARGET, cwd=None):
 def prune(arguments, env, **paths):
     removed = 0
     for path in candidates(arguments, env, **paths):
-        size = path.stat().st_size
-        path.unlink()
+        try:
+            size = path.stat().st_size
+            path.unlink()
+        except FileNotFoundError:
+            continue
         removed += size
     return removed
 

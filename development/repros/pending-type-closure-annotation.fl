@@ -8,12 +8,21 @@ comptime fn Domain(flag: bool) -> Type {
     if flag { Type } else { bool }
 }
 
-fn identity(value: bool) -> bool { value }
+fn identity(value: bool) -> bool {
+    value
+}
 
-fn accept(comptime flag: bool, comptime T: defer Domain(flag),
-    callback: defer do { let choose = || T; fn(choose()) -> choose() }) -> bool
-{
+fn accept(
+    comptime flag: bool,
+    comptime T: defer Domain(flag),
+    callback: defer do {
+        let choose = || T;
+        fn(choose()) -> choose()
+    },
+) -> bool {
     true
 }
 
-fn run() -> bool { accept(true, bool, identity) }
+fn run() -> bool {
+    accept(true, bool, identity)
+}

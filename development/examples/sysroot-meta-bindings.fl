@@ -4,9 +4,14 @@ struct Source {
 }
 
 newtype Inputs = meta.List<Integer>;
-comptime fn preserve(input: Inputs) -> Inputs { input }
 
-comptime fn double(value: Integer) -> Integer { value * 2 }
+comptime fn preserve(input: Inputs) -> Inputs {
+    input
+}
+
+comptime fn double(value: Integer) -> Integer {
+    value * 2
+}
 
 comptime fn run() -> bool {
     let input: meta.List<Integer> = [1, 2, 3];

@@ -1,5 +1,5 @@
 use bindings;
-use builtin.{Integer, usize};
+use builtin.{Integer, usize}
 
 {-
   Exact host-pipeline size conversion during comptime invocation. to_usize
@@ -49,13 +49,23 @@ impl Integer {
         let quotient = self.div_trunc(divisor);
         let remainder = self.rem_trunc(divisor);
         if remainder < 0 {
-            if divisor < 0 { quotient + 1 } else { quotient - 1 }
-        } else { quotient }
+            if divisor < 0 {
+                quotient + 1
+            } else {
+                quotient - 1
+            }
+        } else {
+            quotient
+        }
     }
 
     pub pure comptime fn rem_euclid(self, divisor: Integer) -> Integer {
         let remainder = self.rem_trunc(divisor);
-        if remainder < 0 { remainder + divisor.abs() } else { remainder }
+        if remainder < 0 {
+            remainder + divisor.abs()
+        } else {
+            remainder
+        }
     }
 
     {-
@@ -70,13 +80,15 @@ impl Integer {
             let remainder = a.rem_trunc(b);
             a = b;
             b = remainder;
-        };
+        }
         a
     }
 
     -- Nonnegative least common multiple; either zero operand yields zero.
     pub pure comptime fn lcm(self, other: Integer) -> Integer {
-        if self == 0 or other == 0 { return 0; };
+        if self == 0 or other == 0 {
+            return 0;
+        }
         (self.div_trunc(self.gcd(other)) * other).abs()
     }
 }

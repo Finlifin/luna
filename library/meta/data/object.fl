@@ -1,5 +1,5 @@
-use builtin.{Integer, Symbol, Type, void};
 use bindings;
+use builtin.{Integer, Symbol, Type, void}
 
 pub use bindings.Object;
 
@@ -10,22 +10,21 @@ impl Object {
         This does not erase heterogeneous entries to Any or merge duplicate keys.
         Empty input never invokes the callback; errors propagate normally.
     -}
-    pub comptime fn foreach(self, visit: %c comptime fn(Object))
-    where c: Type.vars.Closure
-    {
+    pub comptime fn foreach(self, visit: %c comptime fn(Object)) where c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var index: Integer = 0;
         while index < count {
             visit(input.slice(index, index + 1));
             index += 1;
-        };
+        }
     }
 
-    pub comptime fn fold(self, initial: A,
-        combine: %c comptime fn(A, Object) -> A) -> A
-    where A, c: Type.vars.Closure
-    {
+    pub comptime fn fold(
+        self,
+        initial: A,
+        combine: %c comptime fn(A, Object) -> A,
+    ) -> A where A, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var accumulator = initial;
@@ -33,7 +32,7 @@ impl Object {
         while index < count {
             accumulator = combine(accumulator, input.slice(index, index + 1));
             index += 1;
-        };
+        }
         accumulator
     }
 
@@ -43,25 +42,29 @@ impl Object {
         Empty input succeeds without invoking the callback. Each one-entry Object
         keeps its optional key, exact domain and value, including duplicate keys.
     -}
-    pub comptime fn try_foreach(self, visit: %c comptime fn(Object) -> !E void) -> !E void
-    where E, c: Type.vars.Closure
-    {
+    pub comptime fn try_foreach(
+        self,
+        visit: %c comptime fn(Object) -> !E void,
+    ) -> !E void where E, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var index: Integer = 0;
         while index < count {
             visit(input.slice(index, index + 1)) match {
                 _! => {},
-                error failure => { return error failure; },
-            };
+                error failure => {
+                    return error failure;
+                },
+            }
             index += 1;
-        };
+        }
     }
 
-    pub comptime fn try_fold(self, initial: A,
-        combine: %c comptime fn(A, Object) -> !E A) -> !E A
-    where A, E, c: Type.vars.Closure
-    {
+    pub comptime fn try_fold(
+        self,
+        initial: A,
+        combine: %c comptime fn(A, Object) -> !E A,
+    ) -> !E A where A, E, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
         var accumulator = initial;
@@ -69,44 +72,53 @@ impl Object {
         while index < count {
             accumulator = combine(accumulator, input.slice(index, index + 1)) match {
                 value! => value,
-                error failure => { return error failure; },
-            };
+                error failure => {
+                    return error failure;
+                },
+            }
             index += 1;
-        };
+        }
         accumulator
     }
 
-    pub comptime fn try_flat_map(self,
-        transform: %c comptime fn(Object) -> !E Object) -> !E Object
-    where E, c: Type.vars.Closure
-    {
+    pub comptime fn try_flat_map(
+        self,
+        transform: %c comptime fn(Object) -> !E Object,
+    ) -> !E Object where E, c: Type.vars.Closure {
         let input = self;
         let count = input.length();
-        var output: Object = {};
+        var output: Object = {}
         var index: Integer = 0;
         while index < count {
             transform(input.slice(index, index + 1)) match {
-                entries! => { output = output.concat(entries); },
-                error failure => { return error failure; },
-            };
+                entries! => {
+                    output = output.concat(entries);
+                },
+                error failure => {
+                    return error failure;
+                },
+            }
             index += 1;
-        };
+        }
         output
     }
 
     {- Retain complete entries, in order, without reinterpreting their values. -}
-    pub comptime fn filter(self, pred: %c comptime fn(Object) -> bool) -> Object
-    where c: Type.vars.Closure
-    {
+    pub comptime fn filter(
+        self,
+        pred: %c comptime fn(Object) -> bool,
+    ) -> Object where c: Type.vars.Closure {
         let input = self;
         let count = input.length();
-        var output: Object = {};
+        var output: Object = {}
         var index: Integer = 0;
         while index < count {
             let entry = input.slice(index, index + 1);
-            if pred(entry) { output = output.concat(entry); };
+            if pred(entry) {
+                output = output.concat(entry);
+            }
             index += 1;
-        };
+        }
         output
     }
 
@@ -116,18 +128,19 @@ impl Object {
         Input and returned snapshots remain ordinary Object values. Construction
         uses checked concat and does not promise linear-time accumulation.
     -}
-    pub comptime fn flat_map(self, transform: %c comptime fn(Object) -> Object) -> Object
-    where c: Type.vars.Closure
-    {
+    pub comptime fn flat_map(
+        self,
+        transform: %c comptime fn(Object) -> Object,
+    ) -> Object where c: Type.vars.Closure {
         let input = self;
         let count = input.length();
-        var output: Object = {};
+        var output: Object = {}
         var index: Integer = 0;
         while index < count {
             let entries = transform(input.slice(index, index + 1));
             output = output.concat(entries);
             index += 1;
-        };
+        }
         output
     }
 
@@ -203,11 +216,17 @@ impl Object {
         supports insertion at an empty interval and removal with an empty Object.
         Both input snapshots remain unchanged; duplicate names are not merged.
     -}
-    pub pure comptime fn replace_range(self, start: Integer, end: Integer,
-        replacement: Object) -> Object {
+    pub pure comptime fn replace_range(
+        self,
+        start: Integer,
+        end: Integer,
+        replacement: Object,
+    ) -> Object {
         -- Validate the entire interval before constructing the result.
         self.slice(start, end);
-        self.slice(0, start).concat(replacement).concat(self.slice(end, self.length()))
+        self
+            .slice(0, start)
+            .concat(replacement)
+            .concat(self.slice(end, self.length()))
     }
-
 }

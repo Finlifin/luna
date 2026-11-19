@@ -1,10 +1,13 @@
 -- Native optional operations, with resources supplied by a separate package.
-use builtin.{bool};
+use builtin.{bool}
 use optional.OptionalOps;
 
-fn invert(value: bool) -> bool {not value}
+fn invert(value: bool) -> bool {
+    not value
+}
+
 fn choose(value: bool) -> ?bool {
-    if value {true} else {null}
+    if value { true } else { null }
 }
 
 fn run() -> bool {

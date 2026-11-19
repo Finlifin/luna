@@ -1,17 +1,26 @@
-struct Payload { flag: bool }
-trait Ready {
-    fn ready() -> bool { true }
+struct Payload {
+    flag: bool,
 }
+
+trait Ready {
+    fn ready() -> bool {
+        true
+    }
+}
+
 impl Ready for Payload {}
 
 trait Source {
     assoc Element: .Type'builtin;
     assoc first: bool;
     assoc second: bool;
+
     fn build() -> Payload;
     fn check() -> bool;
 }
+
 struct Holder {}
+
 impl Source for Holder {
     assoc Element: .Type'builtin = Payload;
     assoc first: bool = second;
@@ -20,6 +29,7 @@ impl Source for Holder {
     fn build() -> Payload {
         Element { flag: first }
     }
+
     fn check() -> bool {
         Element.as(Ready).ready()
     }

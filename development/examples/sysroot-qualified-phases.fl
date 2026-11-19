@@ -1,33 +1,39 @@
 {- Optional and error-qualified values expose the same method names through
    the protocols for their respective execution phases. -}
+comptime fn invert(value: bool) -> bool {
+    not value
+}
 
-comptime fn invert(value: bool) -> bool { not value }
-comptime fn forbidden() -> bool { assumes false; false }
-comptime fn recover(failure: u8) -> bool { failure == 7 }
+comptime fn forbidden() -> bool {
+    assumes false;
+    false
+}
+
+comptime fn recover(failure: u8) -> bool {
+    failure == 7
+}
 
 {- Both protocols are available in these generic definitions. The expression
    stage selects the interface; instantiation keeps that selected identity. -}
-comptime fn staged_presence(value: T) -> bool
-where T :- OptionalOps<bool> + ComptimeOptionalOps<bool>
-{
+comptime fn staged_presence(
+    value: T,
+) -> bool where T :- OptionalOps<bool> + ComptimeOptionalOps<bool> {
     value.is_some()
 }
 
-fn runtime_presence(value: T) -> bool
-where T :- OptionalOps<bool> + ComptimeOptionalOps<bool>
-{
+fn runtime_presence(value: T) -> bool where T :- OptionalOps<bool> + ComptimeOptionalOps<bool> {
     value.is_some()
 }
 
-comptime fn staged_success(value: T) -> bool
-where T :- ErrorResultOps<bool, u8> + ComptimeErrorResultOps<bool, u8>
-{
+comptime fn staged_success(
+    value: T,
+) -> bool where T :- ErrorResultOps<bool, u8> + ComptimeErrorResultOps<bool, u8> {
     value.is_ok()
 }
 
-fn runtime_success(value: T) -> bool
-where T :- ErrorResultOps<bool, u8> + ComptimeErrorResultOps<bool, u8>
-{
+fn runtime_success(
+    value: T,
+) -> bool where T :- ErrorResultOps<bool, u8> + ComptimeErrorResultOps<bool, u8> {
     value.is_ok()
 }
 
@@ -38,7 +44,8 @@ comptime fn inspect() -> bool {
     let failure: !u8 bool = error 7;
     let mapped = present.map(invert);
     let flipped = success.map(invert);
-    staged_presence(present) and staged_success(success)
+    staged_presence(present)
+        and staged_success(success)
         and present.unwrap_or_else(forbidden)
         and absent.is_none()
         and not mapped.unwrap_or(true)

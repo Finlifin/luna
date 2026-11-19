@@ -1,8 +1,16 @@
 -- python3 -B development/host_examples.py bitwise --release-driver --compare-optimization
 -- Replace only selected bits. Platform integers use the selected target width.
 pure fn replace_bits(original: T, mask: T, replacement: T) -> T
-where T, requires T == .u8'builtin or T == .u16'builtin or T == .u32'builtin
-    or T == .u64'builtin or T == .u128'builtin or T == .usize'builtin {
+where
+    T,
+    requires
+        T == .u8'builtin
+            or T == .u16'builtin
+            or T == .u32'builtin
+            or T == .u64'builtin
+            or T == .u128'builtin
+            or T == .usize'builtin,
+{
     let selected = math.bit_and(original, mask);
     let preserved = math.bit_xor(original, selected);
     math.bit_or(preserved, math.bit_and(replacement, mask))

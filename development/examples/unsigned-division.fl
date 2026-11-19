@@ -1,10 +1,18 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 typealias UInt = .u32'builtin;
 
 fn quotient(numerator: UInt, denominator: UInt) -> result: UInt
-where requires denominator != 0, ensures result <= numerator
+where
+    requires denominator != 0,
+    ensures result <= numerator,
 {
     numerator / denominator
 }
@@ -14,8 +22,7 @@ fn checked_quotient(numerator: UInt, denominator: UInt) -> UInt {
     quotient(numerator, denominator)
 }
 
-fn configured(comptime numerator: UInt,
-    comptime .value: UInt = numerator / 3) -> UInt {
+fn configured(comptime numerator: UInt, comptime .value: UInt = numerator / 3) -> UInt {
     value
 }
 

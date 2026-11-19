@@ -1,5 +1,5 @@
-use builtin.{Symbol, Type};
 use bindings.Object;
+use builtin.{Symbol, Type}
 
 pub struct PackageMetadata {
     features: MetadataFeatures,

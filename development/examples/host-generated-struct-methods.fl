@@ -18,16 +18,24 @@ comptime fn Mirrored() -> Type {
 typealias Flags = Mirrored();
 
 impl resources.Once for Flags {}
+
 impl resources.Clone for Flags {
     fn clone(*self) -> Self {
-        Self { ready: self.ready.*, enabled: self.enabled.* }
+        Self {
+            ready: self.ready.*,
+            enabled: self.enabled.*,
+        }
     }
 }
+
 impl resources.Copy for Flags {}
 
 impl Flags {
     fn toggled(self) -> Self {
-        Self { ready: not self.ready, enabled: self.enabled }
+        Self {
+            ready: not self.ready,
+            enabled: self.enabled,
+        }
     }
 }
 
@@ -36,11 +44,14 @@ fn relay(value: T) -> T where T {
 }
 
 fn run() -> bool {
-    var original = Flags { ready: false, enabled: true };
+    var original = Flags { ready: false, enabled: true }
     let changed = relay(original.toggled());
     let cloned = original.as(resources.Clone).clone();
     original.enabled = false;
-    changed.ready and changed.enabled and
-        not original.ready and not original.enabled and
-        not cloned.ready and cloned.enabled
+    changed.ready
+        and changed.enabled
+        and not original.ready
+        and not original.enabled
+        and not cloned.ready
+        and cloned.enabled
 }

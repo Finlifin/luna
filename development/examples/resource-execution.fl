@@ -2,6 +2,7 @@
 --          --drop-protocol DropForExecution.
 -- The driver binds these declarations explicitly as the resource protocols.
 trait CopyForExecution {}
+
 trait DropForExecution {
     fn drop(*self);
 }
@@ -17,7 +18,7 @@ impl DropForExecution for Ticket {
     }
 }
 
-typealias Callback = %{ticket: Ticket} fn() -> bool;
+typealias Callback = %{ ticket: Ticket } fn() -> bool;
 
 fn make() -> Callback {
     let ticket = Ticket { accepted: true };

@@ -1,5 +1,10 @@
-struct Outer {pub struct Inner where T {pub typealias Payload=T;}}
+struct Outer {
+    pub struct Inner where T {
+        pub typealias Payload = T;
+    }
+}
+
 fn run() -> bool {
-    let checked: do {Outer}.Inner<bool>.Payload = true;
+    let checked: do { Outer }.Inner<bool>.Payload = true;
     checked
 }

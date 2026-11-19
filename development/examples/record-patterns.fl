@@ -1,6 +1,12 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin {T}
-pure comptime fn Tuple<...Es:TupleElements<.Type'builtin>> -> .Type'builtin {bool}
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 typealias Flag = bool;
 typealias Letter = 'x''type;
 
@@ -16,13 +22,18 @@ enum Message where T {
 
 fn read(message: Message<T>, fallback: T) -> T where T {
     message match {
-        .packet({ payload: (value, true), ready: true }) => value,
+        .packet(
+            {
+                payload: (value, true),
+                ready: true,
+            },
+        ) => value,
         _ => fallback,
     }
 }
 
 fn run() -> Letter {
-    let packet = Packet<Tuple<Letter, Flag>> { payload: ('y', true) };
+    let packet = Packet<Tuple<Letter, Flag>> { payload: ('y', true) }
     let { ready } = packet;
     if ready {
         read(Message<Letter>.packet(packet), 'n')

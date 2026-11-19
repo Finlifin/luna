@@ -3,5 +3,9 @@
    Admission must use the completed domain rather than the original sort.
 -}
 struct Key where T, value: T {}
+
 typealias Alias<T, value: T> = Key<T, value>;
-comptime fn Build() -> Type { Alias<Type, bool> }
+
+comptime fn Build() -> Type {
+    Alias<Type, bool>
+}

@@ -5,12 +5,18 @@
 fn invert(comptime mode: bool, value: bool) -> bool {
     inline if mode { not value } else { value }
 }
-fn take(comptime mode: bool, value: bool, .next: bool = do {
-    const selected = not mode;
-    invert(selected, value)
-}) -> bool {
+
+fn take(
+    comptime mode: bool,
+    value: bool,
+    .next: bool = do {
+        const selected = not mode;
+        invert(selected, value)
+    },
+) -> bool {
     next
 }
+
 fn run() -> bool {
     take(false, false) and not take(true, false)
 }

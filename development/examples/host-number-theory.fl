@@ -14,11 +14,17 @@ fn gcd(left: UInt, right: UInt) -> UInt {
 }
 
 fn is_prime(value: UInt) -> bool {
-    if value < 2 { return false; }
+    if value < 2 {
+        return false;
+    }
     var divisor: UInt = 2;
+
     -- Division avoids overflowing the square of the trial divisor.
     while divisor != 0 and divisor <= value / divisor {
-        if value % divisor == 0 { return false; }
+        if value % divisor == 0 {
+            return false;
+        }
+
         -- The verifier does not yet derive this bound from divisor <= value / divisor.
         assumes divisor < 4294967295;
         divisor = divisor + 1;
@@ -27,21 +33,31 @@ fn is_prime(value: UInt) -> bool {
 }
 
 fn sum_primes(limit: UInt) -> UInt
-where requires limit <= 100 {
+where
+    requires limit <= 100,
+{
     var candidate: UInt = 0;
     var sum: UInt = 0;
     while candidate < limit {
         assumes sum <= 10000;
-        if is_prime(candidate) { sum = sum + candidate; }
+        if is_prime(candidate) {
+            sum = sum + candidate;
+        }
         candidate = candidate + 1;
     }
     sum
 }
 
 fn fibonacci(index: UInt) -> result: UInt
-where requires index <= 10, ensures result <= 55 {
-    let value = if index < 2 { index }
-    else { fibonacci(index - 1) + fibonacci(index - 2) };
+where
+    requires index <= 10,
+    ensures result <= 55,
+{
+    let value = if index < 2 {
+        index
+    } else {
+        fibonacci(index - 1) + fibonacci(index - 2)
+    }
     assumes value <= 55;
     value
 }

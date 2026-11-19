@@ -1,11 +1,19 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 typealias Type = .Type'builtin;
 typealias Char = 'x''type;
 
 -- T is an ordinary comptime input. Later inputs and the result depend on it.
-fn identity(comptime T: Type, value: T) -> T { value }
+fn identity(comptime T: Type, value: T) -> T {
+    value
+}
 
 -- The callback's binder is nested inside the caller's type-input frame.
 fn forward(comptime T: Type, value: T) -> T {
@@ -27,5 +35,9 @@ comptime fn Select(flag: bool) -> Type {
 }
 
 fn run() -> Tuple<bool, Char, bool> {
-    (forward(bool, true), identity(Select(false), 'x'), reordered(true, bool, false))
+    (
+        forward(bool, true),
+        identity(Select(false), 'x'),
+        reordered(true, bool, false),
+    )
 }

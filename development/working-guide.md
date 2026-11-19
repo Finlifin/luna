@@ -13,7 +13,7 @@ python3 -B development/check.py --timeout 900 -- test -p ptc
 python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
 ```
 
-Cargo 经 `development/cargo.py` 固定复用 `/tmp/luna-dev-002/target`，串行、locked、offline，
+Cargo 经 `development/cargo.py` 固定复用 `/tmp/luna-dev-002/target`，并行、locked、offline，
 关闭 incremental 和 dev/test debuginfo。入口管理共享维护锁、预算空间及可重建缓存清理，
 不能同时再启动直接 Cargo。编辑编译中的源码会使结果对应旧输入，不应当作当前验证。
 开发通常用 dev/test；release 用于性能或确需优化的验收，同一阶段不要来回重建 profile。

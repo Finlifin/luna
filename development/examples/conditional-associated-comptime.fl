@@ -1,4 +1,5 @@
 trait Allowed {}
+
 impl Allowed for bool {}
 
 trait Parent {
@@ -16,6 +17,7 @@ trait Child :- Parent {
 struct Host where X {}
 
 impl Parent for Host<X> where X :- Allowed {}
+
 impl Child for Host<X> where X :- Allowed {}
 
 fn entry() -> bool {

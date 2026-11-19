@@ -4,25 +4,48 @@
 -}
 use primitives.Type;
 
-pure comptime fn Tagged<metadata: meta.Object> -> Type { bool }
-
-comptime fn enabled() -> bool where metadata: meta.Object {
-    meta.Object.value<bool>(metadata, 0) match { value? => value, null => false }
+pure comptime fn Tagged<metadata: meta.Object> -> Type {
+    bool
 }
 
-const METADATA = {flag:true, kind:bool, flag:false};
+comptime fn enabled() -> bool where metadata: meta.Object {
+    meta.Object.value<bool>(metadata, 0) match {
+        value? => value,
+        null => false,
+    }
+}
+
+const METADATA = {
+    flag: true,
+    kind: bool,
+    flag: false,
+}
 const ENABLED = enabled<METADATA>();
 
-comptime fn configured() -> <|-bool> {
-    let original = {flag:true, kind:bool, flag:false};
-    let same = {flag:true, kind:bool, flag:false};
+comptime fn configured() -> < |- bool > {
+    let original = {
+        flag: true,
+        kind: bool,
+        flag: false,
+    }
+    let same = {
+        flag: true,
+        kind: bool,
+        flag: false,
+    }
     let Original = Tagged<original>;
     let Same = Tagged<same>;
     let changed = meta.Object.replace(original, 0, false);
-    let result = Original == Same
-        and (meta.Object.value<bool>(changed, 0) match {v? => not v, null => false})
-        and ENABLED;
+    let result =
+        Original == Same
+            and (meta.Object.value<bool>(changed, 0) match {
+                v? => not v,
+                null => false,
+            })
+            and ENABLED;
     '(result)
 }
 
-fn run() -> bool { ~<configured()> }
+fn run() -> bool {
+    ~<configured()>
+}

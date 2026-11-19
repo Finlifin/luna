@@ -19,7 +19,7 @@ fn keep(value: T) -> T where .T: Type = bool {
 }
 
 comptime fn Selected(value: Type) -> Type {
-    if value == bool {bool} else {char}
+    if value == bool { bool } else { char }
 }
 
 fn second(first: A, second: B) -> B where A, .B: Type = Selected(A) {
@@ -27,8 +27,8 @@ fn second(first: A, second: B) -> B where A, .B: Type = Selected(A) {
 }
 
 fn run() -> bool {
-    let same = Homogeneous {first: true, second: true};
-    let mixed = Pair<bool, .U = char> {first: true, second: 'x'};
+    let same = Homogeneous { first: true, second: true }
+    let mixed = Pair<bool, .U = char> { first: true, second: 'x' }
     let reply = Reply.value(keep(same.first) and second(same.first, same.second));
     if reply is .value(ready) do {
         ready and mixed.first and mixed.second == keep<.T = char>('x')

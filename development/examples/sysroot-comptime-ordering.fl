@@ -31,18 +31,25 @@ comptime fn ordered_text() -> bool {
         and ("ab".cmp("ac") matches .less)
         and ("same".cmp("same") matches .equal)
         and ("ab".cmp("a") matches .greater)
-        and "a".le("a") and "b".gt("a") and "b".ge("b")
-        and false.lt(true) and true.gt(false)
+        and "a".le("a")
+        and "b".gt("a")
+        and "b".ge("b")
+        and false.lt(true)
+        and true.gt(false)
         and (small.cmp(larger) matches .less)
         and negative.lt(positive)
-        and pointer_width.gt(1) and signed_pointer_width.lt(0)
+        and pointer_width.gt(1)
+        and signed_pointer_width.lt(0)
         and character.gt('a')
         and (10000000000000000000000000000000000000000).gt(1)
 }
+
 const checked_ordering = ordered_text();
 
 test comptime_ordering {
-    inline if checked_ordering {} else { assumes false; };
+    inline if checked_ordering {} else {
+        assumes false;
+    }
     let runtime_value: u8 = 1;
     let runtime_less = runtime_value.lt(2);
     assumes runtime_less;

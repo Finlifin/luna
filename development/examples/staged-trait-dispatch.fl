@@ -1,20 +1,31 @@
 -- Bind --meta-list-type input.TupleElements --tuple-type input.Tuple.
-pure comptime fn TupleElements<T> -> .Type'builtin { T }
-pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin { bool }
+pure comptime fn TupleElements<T> -> .Type'builtin {
+    T
+}
+
+pure comptime fn Tuple<...Es: TupleElements<.Type'builtin>> -> .Type'builtin {
+    bool
+}
+
 -- Compile-time policy selection uses ordinary trait constraints.
 trait Selection {
     comptime fn select(flag: bool) -> bool;
 }
 
 struct Direct {}
+
 struct Inverted {}
 
 impl Selection for Direct {
-    comptime fn select(flag: bool) -> bool { flag }
+    comptime fn select(flag: bool) -> bool {
+        flag
+    }
 }
 
 impl Selection for Inverted {
-    comptime fn select(flag: bool) -> bool { not flag }
+    comptime fn select(flag: bool) -> bool {
+        not flag
+    }
 }
 
 fn materialize(comptime flag: bool) -> bool {
@@ -22,9 +33,7 @@ fn materialize(comptime flag: bool) -> bool {
 }
 
 -- Neither Policy nor flag needs a concrete value during definition checking.
-fn configured(comptime flag: bool) -> bool
-where Policy :- Selection
-{
+fn configured(comptime flag: bool) -> bool where Policy :- Selection {
     materialize(Policy.as(Selection).select(flag))
 }
 

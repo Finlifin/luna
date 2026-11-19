@@ -1,6 +1,6 @@
-use builtin.{Integer, u64};
 use List;
-use hashing.{ComptimeHash, mix_byte, mix_digest};
+use builtin.{Integer, u64}
+use hashing.{ComptimeHash, mix_byte, mix_digest}
 
 {-
     Hash a fixed snapshot in index order. Each element contributes its protocol
@@ -8,7 +8,7 @@ use hashing.{ComptimeHash, mix_byte, mix_digest};
     and fixed-width encoding do not depend on target size or element storage.
     Hash collisions still require the element-based ComptimeEq implementation.
 -}
-comptime impl ComptimeHash for List<T> where T:- ComptimeHash {
+comptime impl ComptimeHash for List<T> where T :- ComptimeHash {
     comptime fn hash(self) -> u64 {
         let input = self;
         let count = input.length();

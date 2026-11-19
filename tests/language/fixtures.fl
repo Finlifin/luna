@@ -2,16 +2,16 @@
 typealias V = .void'builtin;
 
 pub template test flag_case
-where body: < flag: bool |- V >, .initial: bool = false,
-    ensures initial == initial'old
+where
+    body: < flag: bool |- V >,
+    .initial: bool = false,
+    ensures initial == initial'old,
 {
     let flag = initial;
     ~<body>;
 }
 
 -- The result type of the test body follows its explicit Type input.
-pub template test typed_case
-where body: < |- T >, .T: .Type'builtin = bool
-{
+pub template test typed_case where body: < |- T >, .T: .Type'builtin = bool {
     let result: T = ~<body>;
 }

@@ -5,8 +5,22 @@
 -}
 use builtin.prelude.*;
 
-comptime fn selected() -> bool where flag: bool { flag }
-comptime fn make() -> comptime fn() -> bool where flag: bool { selected<flag> }
-fn apply(comptime action: comptime fn() -> bool) -> bool { action() }
-fn forward() -> bool where flag: bool { apply(make<flag>()) }
-fn run() -> bool { forward<true>() and not forward<false>() }
+comptime fn selected() -> bool where flag: bool {
+    flag
+}
+
+comptime fn make() -> comptime fn() -> bool where flag: bool {
+    selected<flag>
+}
+
+fn apply(comptime action: comptime fn() -> bool) -> bool {
+    action()
+}
+
+fn forward() -> bool where flag: bool {
+    apply(make<flag>())
+}
+
+fn run() -> bool {
+    forward<true>() and not forward<false>()
+}

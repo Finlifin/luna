@@ -34,7 +34,7 @@ impl FormatPlan {
             let byte = format.byte(cursor) match {
                 value? => value,
                 null => return error FormatError.unclosed_field(cursor),
-            };
+            }
             if byte == 123 or byte == 125 {
                 if start < cursor {
                     pieces = pieces.concat([FormatPiece.text(start, cursor)]);
@@ -61,6 +61,7 @@ impl FormatPlan {
                         _ => return error FormatError.unmatched_close(cursor),
                     };
                 }
+
                 {- Every successful brace branch consumed a second byte. -}
                 assumes next < length;
                 cursor = next + 1;
@@ -72,7 +73,10 @@ impl FormatPlan {
         if start < length {
             pieces = pieces.concat([FormatPiece.text(start, length)]);
         }
-        Self { pieces: pieces, argument_count: arguments }
+        Self {
+            pieces: pieces,
+            argument_count: arguments,
+        }
     }
 
     {- Each field admits its own concrete runtime type at the call site. -}
@@ -92,7 +96,10 @@ pub pure comptime fn Parse(format: str) -> Type {
     let parsed = FormatPlan.parse(format);
     let domains: meta.List<Type> = parsed match {
         plan! => plan.argument_domains(),
-        error _ => { assumes false; [] },
-    };
+        error _ => {
+            assumes false;
+            []
+        },
+    }
     Tuple<.Es = domains>
 }

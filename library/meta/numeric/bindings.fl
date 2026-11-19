@@ -1,4 +1,4 @@
-use builtin.{Integer, usize, isize, u8, u128};
+use builtin.{Integer, isize, u128, u8, usize}
 
 -- Bind target-sized representation observations to the comptime phase.
 pub const usize_representation: comptime fn(usize) -> u128 = .integer_representation'builtin;
@@ -6,5 +6,7 @@ pub const isize_representation: comptime fn(isize) -> u128 = .integer_representa
 
 {- Exact numeric operations shared by Integer methods and comptime hashing. -}
 pub const integer_byte: comptime fn(Integer) -> u8 = .comptime_integer_convert'builtin;
-pub const integer_div_trunc: comptime fn(Integer, Integer) -> Integer = .comptime_integer_div_trunc'builtin;
-pub const integer_rem_trunc: comptime fn(Integer, Integer) -> Integer = .comptime_integer_rem_trunc'builtin;
+pub const integer_div_trunc: comptime fn(Integer, Integer) -> Integer =
+    .comptime_integer_div_trunc'builtin;
+pub const integer_rem_trunc: comptime fn(Integer, Integer) -> Integer =
+    .comptime_integer_rem_trunc'builtin;
