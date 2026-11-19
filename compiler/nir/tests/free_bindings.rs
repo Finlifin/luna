@@ -616,60 +616,86 @@ fn binding_failures_distinguish_budget_cycles_and_invalid_scope() {
 }
 
 #[test]
-fn lexical_depth_limits_remain_diagnostics_on_a_two_megabyte_stack() {
-    std::thread::Builder::new()
-        .stack_size(2 * 1024 * 1024)
-        .spawn(|| {
-            use nir::free_bindings::{Error, collect};
-            let mut too_deep = local(1);
-            for _ in 0..130 {
-                too_deep = expr(K::Block {
-                    statements: vec![],
-                    result: Some(Box::new(too_deep)),
-                });
-            }
-            assert_eq!(
-                collect(&too_deep, &mut 100_000),
-                Err(Error::Depth("capture analysis depth exhausted"))
-            );
+fn lexical_work_uses_one_budget_across_deep_expressions_patterns_and_operands() {
+    use nir::free_bindings::{Error, collect};
+    use nir::program::NormalFormArgument as A;
 
-            let wrap = |mut body| {
-                for _ in 0..96 {
-                    body = expr(K::Block {
-                        statements: vec![expr(K::Let {
-                            binding: id(2),
-                            value: Box::new(local(1)),
-                        })],
-                        result: Some(Box::new(body)),
-                    });
-                }
-                body
-            };
-            let valid = wrap(local(2));
-            assert!(matches!(collect(&valid, &mut 20), Err(Error::Budget(_))));
-            assert_eq!(
-                collect(&valid, &mut 100_000).unwrap(),
-                [id(1)].into_iter().collect()
-            );
-            let invalid = wrap(expr(K::Closure {
-                captures: vec![],
-                parameters: vec![],
-                body: std::sync::Arc::new(local(99)),
-            }));
-            assert_eq!(
-                collect(&invalid, &mut 100_000),
-                Err(Error::Invalid(
-                    "closure body references an undeclared capture"
-                ))
-            );
-            assert_eq!(
-                collect(&valid, &mut 100_000).unwrap(),
-                [id(1)].into_iter().collect()
-            );
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    // The worker only borrows the trees. Their construction and Rust drop glue
+    // have a different stack contract from the lexical analysis under test.
+    let source = local(0).source;
+    let mut condition = local(1);
+    let mut operand = A::Value(local(4));
+    let mut pattern = P::Binding {
+        binding: id(2),
+        inner: Box::new(P::Binding {
+            binding: id(4),
+            inner: Box::new(P::Wild),
+        }),
+    };
+    for _ in 0..384 {
+        condition = expr(K::Block {
+            statements: vec![],
+            result: Some(Box::new(condition)),
+        });
+        pattern = P::OptionalPresent(Box::new(pattern));
+        operand = A::Block {
+            source,
+            statements: vec![],
+            result: Some(Box::new(operand)),
+        };
+    }
+    // The condition reads an outer local. Its pattern binding is visible
+    // through the entire contextual operand, but is gone in the sibling arm.
+    let head = nir::DeclarationId {
+        package: 1,
+        local: 8,
+    };
+    let value = expr(K::Match {
+        value: Box::new(local(3)),
+        arms: vec![
+            MatchArm {
+                pattern,
+                guard: Some(condition),
+                body: expr(K::NormalFormType {
+                    head,
+                    arguments: vec![operand],
+                    plan: None,
+                }),
+            },
+            MatchArm {
+                pattern: P::Wild,
+                guard: None,
+                body: local(2),
+            },
+        ],
+    });
+    let invalid = expr(K::Closure {
+        captures: vec![],
+        parameters: vec![],
+        body: std::sync::Arc::new(value),
+    });
+    let K::Closure { body, .. } = &invalid.kind else {
+        unreachable!()
+    };
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(256 * 1024)
+            .spawn_scoped(scope, || {
+                let expected = [id(1), id(2), id(3)].into_iter().collect();
+                assert!(matches!(collect(body, &mut 300), Err(Error::Budget(_))));
+                assert_eq!(collect(body, &mut 100_000).unwrap(), expected);
+                assert_eq!(
+                    collect(&invalid, &mut 100_000),
+                    Err(Error::Invalid(
+                        "closure body references an undeclared capture"
+                    ))
+                );
+                assert_eq!(collect(body, &mut 100_000).unwrap(), expected);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    });
 }
 
 #[test]

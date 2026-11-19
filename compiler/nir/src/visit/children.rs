@@ -5,9 +5,9 @@ use super::*;
 
 // Keep this stack boundary when callers instantiate the small callback driver.
 #[inline(never)]
-pub(super) fn expand<'a>(
+pub(super) fn expand<'a, T: From<Node<'a>>>(
     node: Node<'a>,
-    work: &mut Work<Node<'a>>,
+    work: &mut Work<'_, T>,
     fuel: &mut usize,
     include_defaults: bool,
     include_closure_bodies: bool,

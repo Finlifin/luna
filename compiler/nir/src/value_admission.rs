@@ -49,16 +49,6 @@ impl From<crate::visit::Error> for Error {
         }
     }
 }
-impl From<crate::free_bindings::Error> for Error {
-    fn from(error: crate::free_bindings::Error) -> Self {
-        match error {
-            crate::free_bindings::Error::Budget(_) | crate::free_bindings::Error::Depth(_) => {
-                Self::Budget
-            }
-            crate::free_bindings::Error::Invalid(message) => message.into(),
-        }
-    }
-}
 impl From<crate::comptime_values::Error> for Error {
     fn from(error: crate::comptime_values::Error) -> Self {
         match error {

@@ -114,8 +114,7 @@ impl<'a> CallableProgram<'a> {
                 crate::free_bindings::collect(value, fuel).map_err(|reason| InputFrameError {
                     source: value.source,
                     kind: match reason {
-                        crate::free_bindings::Error::Budget(_)
-                        | crate::free_bindings::Error::Depth(_) => K::DefaultBudget,
+                        crate::free_bindings::Error::Budget(_) => K::DefaultBudget,
                         crate::free_bindings::Error::Invalid(_) => K::DefaultScope,
                     },
                 })?;

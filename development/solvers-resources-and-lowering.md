@@ -973,40 +973,30 @@ mapper 次数、展开／未展开参考执行及 LLVM O0/O3。此阶段属于�
 `/tmp/luna-tools-17ztwbja/result.json` 为相同 UnvalidatedModel。二者尚未修复；
 没有删除用例或改变语义预期，也不将本节交付称为所有宿主栈问题已经解决。
 
-### 8.3 词法分析回调与通用遍历器的栈边界
+### 8.3 词法捕获、默认实参与阶段检查
 
-阶段检查的 `runtime_default_analysis_distinguishes_resource_limits_and_invalid_scope`
-在 130 层 block 上栈溢出，而未返回原有的默认参数绑定分析深度诊断。
-`abb4588d` 之前的 NIR 对照同样失败，见
-[telescope 验证记录](callable-input-interfaces.md#已接通共同的声明-telescope-构造)。
-新加的固定 2 MiB 栈回归直接调用 free_bindings，也在修改前复现 SIGABRT：
-`/tmp/luna-tools-g37zif7x/result.json` 退出 101。
+同一段已检查的代码可以作为闭包体、quote 的模式或声明实参进入后续阶段。
+自由绑定取决于读取位置。例如闭包的捕获初始化器读取外层绑定，进入主体后只能读取
+参数和显式捕获。普通调用的显式实参读取调用者环境，默认实参只读取已供应的参数。
+对声明实参，准备语句和供应步骤按同一张已检查的顺序表执行，供应完成才公开该槽绑定。
+这些边界由 [NIR 捕获分析](../compiler/nir/src/free_bindings/walk.rs) 统一处理。
 
-问题发生在 `free_bindings::scan → visit::walk_nodes → visitor → scan` 的调用环。
-遍历器虽然使用显式 work stack，但调用词法回调时仍保留整个结构分派的临时栈槽。
-无优化构建的 `walk_nodes` 栈帧为 `0x2c08`（11272）字节，加上词法回调，尚未
-到达 128 层分析上限就已耗尽默认线程栈。因此“内部使用 Vec work stack”也不能
-单独证明回调重入路径的宿主空间上界。
+分析把表达式、模式、上下文实参和退出作用域的动作放在同一个显式栈上。块结束时撤销
+该块引入的绑定，分支汇合时只留下每条成功路径都可见的绑定。切入闭包体或默认实参
+时连同自由变量集合一起切换环境，因此内层缺失的捕获保留其错误位置所属的作用域。
+普通结构操作复用 [NIR 子节点枚举](../compiler/nir/src/visit/children.rs)，直接向当前栈追加子项。
+扩展前按剩余预算限制枚举宽度，词法遍历为已排入栈的兄弟节点记账。符号捕获的依赖图
+在每个读取位置展开，遇到当前路径上的活动节点报告循环。
 
-现将结构分派移到 `visit/children.rs::expand`，回调先返回，再展开未剪枝节点。
-该函数不接收回调，并明确禁止内联回驱动；不再将大型分派栈帧保留在回调重入链上。
-所有结构分支、入队次序、模式证据检查、默认值／闭包开关和额度扣除保持原规则；
-本次构建的回调驱动栈帧为 456 字节，独立展开函数为 8872 字节，测量见
-`/tmp/luna-visitor-stack-after.txt`。这些数值是本次构建证据，不是跨平台 ABI 保证。
+原回调在表达式、模式和声明实参之间递归重入。早先分离结构分派的栈帧后，仍会因
+128 层阈值拒绝合法代码。现在这条路径的限制是调用者提供的工作预算。阶段检查分别保留
+预算不足和非法作用域两种失败，补足预算后可重新检查同一个不可变输入。NIR 复制、
+类型准入和 VM 执行各自的深度或预算契约仍须独立验证。
 
-固定 2 MiB 回归还检查 96 层绑定的真实自由变量、预算失败后的重试、未声明闭包
-捕获的 Invalid，以及后续成功分析；没有扩大线程栈、增加默认额度或改低深度上限。
-原阶段检查用例恢复原诊断并通过，当前不再需要过滤它。其它递归分析器仍须分别核验。
-
-工作目录 `/home/fin/luna`，最终执行
-`python3 -B development/check.py --timeout 900 -- test -p nir -p program_verification
--p luna --lib --test free_bindings --test phases --test default_calls
---test comptime_bytecode_defaults --test comptime_bytecode_closures
---test closure_environment_parameters --test sysroot_preludes --no-fail-fast`，
-`/tmp/luna-tools-o_npuj8i/result.json` 退出 0，447 项通过，无过滤或 ignored。
-包含真实 sysroot 的公开接口验收；工作区已有的作者资源分析改动保持原样，未计入
-本次提交。所改 Rust 文件格式检查退出 0，`/tmp/luna-tools-9mbkf1lu/result.json`。
-未执行全 workspace 或另行性能测量。
+[词法回归](../compiler/nir/tests/free_bindings.rs) 在 256 KiB 线程栈上，检查含 384 层
+模式、块与上下文实参的输入、跨分支的可见性、漏报捕获及失败后重试。
+[阶段回归](../compiler/nir/tests/phases.rs) 通过真实包检查默认实参，分别检验合法深层输入、
+预算不足和不合法的闭包环境。
 
 ## 9. BitVec 与目标能力
 

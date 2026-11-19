@@ -2,30 +2,40 @@
 //! node costs at least one visit even if its own descendants will be pruned.
 use super::Error;
 
-pub(super) struct Work<T> {
-    nodes: Vec<T>,
+/// Budget the suffix appended to a caller-owned stack. A lexical caller may
+/// already have paid for outer continuations below this boundary.
+pub(super) struct Work<'s, T> {
+    nodes: &'s mut Vec<T>,
+    start: usize,
 }
 
-impl<T> Work<T> {
-    pub(super) fn new() -> Self {
-        Self { nodes: Vec::new() }
+impl<'s, T> Work<'s, T> {
+    pub(super) fn new(nodes: &'s mut Vec<T>) -> Self {
+        Self {
+            start: nodes.len(),
+            nodes,
+        }
     }
 
-    pub(super) fn push(&mut self, node: T, remaining: usize) -> Result<(), Error> {
-        if self.nodes.len() >= remaining {
+    pub(super) fn len(&self) -> usize {
+        self.nodes.len() - self.start
+    }
+
+    pub(super) fn push(&mut self, node: impl Into<T>, remaining: usize) -> Result<(), Error> {
+        if self.len() >= remaining {
             return Err(Error::Budget("IR traversal work-stack budget exhausted"));
         }
-        self.nodes.push(node);
+        self.nodes.push(node.into());
         Ok(())
     }
 
-    pub(super) fn extend(
+    pub(super) fn extend<N: Into<T>>(
         &mut self,
-        nodes: impl IntoIterator<Item = T>,
+        nodes: impl IntoIterator<Item = N>,
         remaining: usize,
     ) -> Result<(), Error> {
         let nodes = nodes.into_iter();
-        if nodes.size_hint().0 > remaining.saturating_sub(self.nodes.len()) {
+        if nodes.size_hint().0 > remaining.saturating_sub(self.len()) {
             return Err(Error::Budget("IR traversal work-stack budget exhausted"));
         }
         // Do not hand an unchecked stream to Vec::extend. Push individually
@@ -38,7 +48,7 @@ impl<T> Work<T> {
     }
 
     pub(super) fn pop(&mut self) -> Option<T> {
-        self.nodes.pop()
+        (self.len() > 0).then(|| self.nodes.pop().unwrap())
     }
 }
 
@@ -58,7 +68,8 @@ mod tests {
     fn wide_streams_stop_before_unbounded_enumeration() {
         let reads = Cell::new(0);
         let stream = (0..usize::MAX).inspect(|_| reads.set(reads.get() + 1));
-        let mut work = Work::new();
+        let mut nodes = Vec::<usize>::new();
+        let mut work = Work::new(&mut nodes);
         assert!(matches!(work.extend(stream, 4), Err(Error::Budget(_))));
         assert_eq!(reads.get(), 0, "known width must fail before enumeration");
 
@@ -79,7 +90,8 @@ mod tests {
 
     #[test]
     fn pending_siblings_share_the_remaining_allowance() {
-        let mut work = Work::new();
+        let mut nodes = Vec::<i32>::new();
+        let mut work = Work::new(&mut nodes);
         work.extend(0..3, 4).unwrap();
         let reads = Cell::new(0);
         let stream = (3..5).inspect(|_| reads.set(reads.get() + 1));

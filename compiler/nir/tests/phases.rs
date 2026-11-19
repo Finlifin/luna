@@ -1934,12 +1934,16 @@ fn runtime_default_analysis_distinguishes_resource_limits_and_invalid_scope() {
         functions: vec![target, caller],
         ..Default::default()
     };
-    let error = nir::phases::validate(&package).unwrap_err();
+    let inspection = nir::phases::Inspection::new(&package);
+    let error = inspection.check_package(&mut 128).unwrap_err();
+    assert_eq!(error.kind, nir::phases::ErrorKind::Budget);
     assert_eq!(error.source, source);
     assert_eq!(
         error.message,
         "call default binding analysis budget exhausted"
     );
+
+    inspection.check_package(&mut 10_000).unwrap();
 
     let K::Call { arguments, .. } = &mut package.functions[1].body.kind else {
         unreachable!()
@@ -1954,6 +1958,7 @@ fn runtime_default_analysis_distinguishes_resource_limits_and_invalid_scope() {
     });
     let error = nir::phases::validate(&package).unwrap_err();
     assert_eq!(error.source, source);
+    assert_eq!(error.kind, nir::phases::ErrorKind::Invalid);
     assert_eq!(error.message, "invalid call default binding scope");
 
     let K::Call { arguments, .. } = &mut package.functions[1].body.kind else {

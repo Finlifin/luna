@@ -58,7 +58,6 @@ impl From<nir::free_bindings::Error> for Failure {
     fn from(error: nir::free_bindings::Error) -> Self {
         match error {
             nir::free_bindings::Error::Budget(_) => Self::Steps,
-            nir::free_bindings::Error::Depth(_) => Self::Depth,
             nir::free_bindings::Error::Invalid(message) => Self::Invalid(message.into()),
         }
     }

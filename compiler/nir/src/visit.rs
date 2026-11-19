@@ -298,10 +298,23 @@ fn walk<'a, E: From<Error>>(
         include_defaults,
     )
 }
-enum Node<'a> {
+pub(crate) enum Node<'a> {
     Expr(&'a Expr),
     Pattern(&'a P),
     Argument(&'a crate::program::NormalFormArgument),
+}
+
+/// A scope-aware analysis owns the order of its binding operations. For all
+/// other nodes it can append the same structural children as the full visitor,
+/// in stack insertion order, without retaining a recursive visitor callback.
+pub(crate) fn append_expression_children<'a, T: From<Node<'a>>>(
+    expr: &'a Expr,
+    steps: &mut Vec<T>,
+    fuel: &mut usize,
+) -> Result<(), Error> {
+    let mut children = Work::new(steps);
+    children::expand(Node::Expr(expr), &mut children, fuel, true, true, false)?;
+    work::charge_entries(fuel, children.len())
 }
 
 /// Inspect a pending input with the ordinary expression/pattern visitor.
@@ -368,7 +381,8 @@ fn walk_nodes<'a, E: From<Error>>(
     // Keep root order without allocating one slot per contract/default. The
     // same lazy root stream serves ordinary functions and borrowed summaries.
     let mut roots = roots.rev();
-    let mut work = Work::new();
+    let mut nodes = Vec::new();
+    let mut work = Work::new(&mut nodes);
     while let Some(node) = work.pop().or_else(|| roots.next()) {
         if *fuel == 0 {
             return Err(Error::Budget("IIR traversal budget exhausted").into());
@@ -462,7 +476,8 @@ fn walk_mut(
         Pattern(&'a mut P),
         Argument(&'a mut crate::program::NormalFormArgument),
     }
-    let mut work = Work::new();
+    let mut nodes = Vec::new();
+    let mut work = Work::new(&mut nodes);
     push!(work, fuel, Node::Expr(expression));
     while let Some(node) = work.pop() {
         if *fuel == 0 {

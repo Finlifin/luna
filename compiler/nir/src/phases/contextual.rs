@@ -104,7 +104,7 @@ pub(super) fn inspect_contract<O: SignatureOutput>(
             let free = crate::free_bindings::collect(condition, fuel).map_err(|failure| {
                 use crate::free_bindings::Error::*;
                 match failure {
-                    Budget(message) | Depth(message) => Error::budget(condition.source, message),
+                    Budget(message) => Error::budget(condition.source, message),
                     Invalid(message) => Error::invalid(condition.source, message),
                 }
             })?;

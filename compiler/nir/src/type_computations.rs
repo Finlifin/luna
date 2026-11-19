@@ -45,16 +45,6 @@ impl From<crate::copy_budget::CopyBudgetExhausted> for Error {
     }
 }
 
-impl From<crate::free_bindings::Error> for Error {
-    fn from(error: crate::free_bindings::Error) -> Self {
-        match error {
-            crate::free_bindings::Error::Budget(_) | crate::free_bindings::Error::Depth(_) => {
-                Self::Budget
-            }
-            crate::free_bindings::Error::Invalid(message) => Self::Structure(message.into()),
-        }
-    }
-}
 impl From<crate::visit::Error> for Error {
     fn from(error: crate::visit::Error) -> Self {
         match error {

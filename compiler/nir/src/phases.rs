@@ -996,8 +996,7 @@ impl<'a> PhaseContext<'a> {
                                         )
                                         .map_err(|reason| {
                                             match reason {
-                                                crate::free_bindings::Error::Budget(_)
-                                                | crate::free_bindings::Error::Depth(_) => {
+                                                crate::free_bindings::Error::Budget(_) => {
                                                     Error::budget(
                                                         expr.source,
                                                         "call default binding analysis budget exhausted",
