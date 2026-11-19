@@ -1139,8 +1139,8 @@ fn associated_list_domains_are_prepared_before_elements_and_retained_at_completi
     };
     let resolver = |_: &Expr, fuel: &mut u64| {
         *fuel -= 1;
-        Ok(AssociatedSelection {
-            initializer: nir::associated_initializers::AssociatedInitializer::new(
+        Ok(AssociatedSelection::Initializer(
+            nir::associated_initializers::AssociatedInitializer::new(
                 expr(
                     Term::Primitive(Primitive::Type),
                     K::TypeValue(Term::Primitive(Primitive::Bool)),
@@ -1148,8 +1148,7 @@ fn associated_list_domains_are_prepared_before_elements_and_retained_at_completi
                 &mut 1000,
             )
             .unwrap(),
-            requires_invocation: true,
-        })
+        ))
     };
     let input = LocalId {
         owner: 82,
@@ -1238,8 +1237,8 @@ fn associated_list_operations_retain_domains_across_reads_and_writes() {
     };
     let resolver = |_: &Expr, fuel: &mut u64| {
         *fuel -= 1;
-        Ok(AssociatedSelection {
-            initializer: nir::associated_initializers::AssociatedInitializer::new(
+        Ok(AssociatedSelection::Initializer(
+            nir::associated_initializers::AssociatedInitializer::new(
                 expr(
                     Term::Primitive(Primitive::Type),
                     K::TypeValue(Term::Primitive(Primitive::Bool)),
@@ -1247,8 +1246,7 @@ fn associated_list_operations_retain_domains_across_reads_and_writes() {
                 &mut 1000,
             )
             .unwrap(),
-            requires_invocation: true,
-        })
+        ))
     };
 
     let input = LocalId {

@@ -432,6 +432,22 @@ LocalId（包括准备语句引入的绑定）。字节码保留这份不可变�
 将响应交回原 activation。重跑正在形成的常量会重复其先前执行的操作。
 [关联值检查](../compiler/elaboration/src/program/interfaces/associated.rs) · [执行世界投影](../compiler/elaboration/src/program/required/trait_world.rs) · [开放输入用例](../compiler/luna/tests/deferred_associated_values.rs)
 
+关联项现在有两个可观察的步骤。`select_associated_member` 在原声明世界中检查成员域、
+接口成立条件和实现阶段，返回实现身份、成员身份与代入后的结果域。即使被选行尚未
+持有值，也可以取得这个选择结果。随后取供应时才读取该行，检查代入后的表达式。
+Type 投影和普通值读取共用同一选择过程；Type 投影只接受完成的 Type 模板。
+
+求解器返回的 `AssociatedSelection` 直接交给 materialization 或 VM。`Completed`
+携带可以在空词法环境里还原的值，`Initializer` 携带需执行的 comptime 程序。
+普通函数调用只能走后者。VM 恢复时仍检查这次访问的结果域；初始化器进入循环检测，
+完成值进入数据目录。关联元组的字段布局由接收世界登记的 Tuple 头及其参数的
+List 头共同确认。当前 required 源码准备仍预先取得结构相容的候选供应；
+VM 选中缺失供应后向原源码区域挂起、取回并恢复的接线仍待实现。届时源码请求要带上
+选中实现的声明身份、实现实参和成员身份。选择凭据借用本次调用的世界；在源码区域
+检查出初始化器之后，原请求仍须在自己的结果域中接收它。让源码检查重新发起顶层
+调用会重做已经发生的前缀效果，也会把原来的调用预算和取消边界丢掉。
+[关联成员选择](../compiler/type_resolution/src/associated/values.rs) · [VM 接收](../compiler/comptime_interpretor/src/associated_execution.rs)
+
 例如，一个已实例化的 comptime 函数可以在子句参数中携带另一个函数。无论入口
 取得的是 NIR 函数实例、冻结的函数值还是 VM 中的活动值，准备端都应保留里面的
 可调用声明。作为参数传递的 normal-form Type 只携带身份，发现依赖不会展开它的头。

@@ -60,6 +60,7 @@ mod tests {
             types: HashSet::new(),
             staging_views: HashMap::new(),
             interfaces: HashMap::new(),
+            associated_demands: HashSet::new(),
             output: vec![],
             fuel,
             budget,

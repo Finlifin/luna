@@ -105,8 +105,8 @@ mod tests {
         let observed = Term::Optional(Box::new(boolean.clone()));
         let resolver = |_: &Expr, fuel: &mut u64| {
             *fuel -= 1;
-            Ok(AssociatedSelection {
-                initializer: nir::associated_initializers::AssociatedInitializer::new(
+            Ok(AssociatedSelection::Initializer(
+                nir::associated_initializers::AssociatedInitializer::new(
                     expr(
                         Term::Primitive(Primitive::Type),
                         K::TypeValue(boolean.clone()),
@@ -114,8 +114,7 @@ mod tests {
                     &mut 1000,
                 )
                 .unwrap(),
-                requires_invocation: true,
-            })
+            ))
         };
         let binding = LocalId {
             owner: 82,

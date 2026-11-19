@@ -32,12 +32,5 @@ pub(super) fn select(
     };
     let selected =
         world.resolve_associated_value_plan_metered(interface, *member, subject, budget)?;
-    let initializer = nir::associated_initializers::AssociatedInitializer::new(
-        selected.value,
-        &mut budget.steps,
-    )?;
-    Ok(comptime_interpretor::AssociatedSelection {
-        initializer,
-        requires_invocation: selected.requires_invocation,
-    })
+    Ok(selected.supply)
 }

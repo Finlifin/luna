@@ -7,6 +7,7 @@ pub(super) struct InvocationScope<'a> {
 }
 
 pub(super) struct Prepared<'a> {
+    pub(super) normal_forms: declaration_index::NormalForms<'a>,
     pub(super) trait_declarations: declaration_index::Traits<'a>,
     pub(super) effect_declarations: declaration_index::Effects<'a>,
     pub(super) method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
@@ -81,6 +82,12 @@ impl<'a> Interpreter<'a> {
             source: None,
         })?;
         let prepared = Prepared {
+            normal_forms: declaration_index::NormalForms::new(
+                &package.normal_forms,
+                Some(index.normal_forms.clone()),
+                |head| head.declaration,
+            )?,
+
             trait_declarations: declaration_index::Traits::new(
                 &package.traits,
                 Some(index.traits.clone()),
@@ -127,6 +134,7 @@ impl<'a> Interpreter<'a> {
         prepared: Prepared<'a>,
     ) -> Result<Self, Error> {
         let Prepared {
+            normal_forms,
             trait_declarations,
             effect_declarations,
             method_parameters,
@@ -215,11 +223,7 @@ impl<'a> Interpreter<'a> {
             iir_callables: Default::default(),
             functions,
             graph_indexes: None,
-            normal_forms: declaration_index::NormalForms::new(
-                &package.normal_forms,
-                positions.as_ref().map(|index| index.normal_forms.clone()),
-                |head| head.declaration,
-            )?,
+            normal_forms,
             structs,
             alias_contracts: declaration_index::Aliases::new(
                 &package.alias_contracts,

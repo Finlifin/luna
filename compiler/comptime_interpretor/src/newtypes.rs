@@ -491,8 +491,8 @@ mod tests {
         let observed = applied(boolean.clone());
         let resolver = |_: &Expr, fuel: &mut u64| {
             *fuel -= 1;
-            Ok(AssociatedSelection {
-                initializer: nir::associated_initializers::AssociatedInitializer::new(
+            Ok(AssociatedSelection::Initializer(
+                nir::associated_initializers::AssociatedInitializer::new(
                     expr(
                         Term::Primitive(Primitive::Type),
                         K::TypeValue(boolean.clone()),
@@ -500,8 +500,7 @@ mod tests {
                     &mut 1000,
                 )
                 .unwrap(),
-                requires_invocation: true,
-            })
+            ))
         };
         for compiled in [false, true] {
             let mut vm = Interpreter::for_comptime(&package, Budget::default())

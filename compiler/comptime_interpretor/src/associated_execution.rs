@@ -235,7 +235,10 @@ impl<'a> Interpreter<'a> {
         } = request;
         let source = access.source;
         let selected = selection?;
-        let expression = selected.initializer.into_expression();
+        let (expression, initializing) = match selected {
+            AssociatedSelection::Completed(value) => (value.into_expression(), false),
+            AssociatedSelection::Initializer(initializer) => (initializer.into_expression(), true),
+        };
         nir::copy_budget::charge_expression(&expression, &mut self.budget.steps)
             .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
         let expression = Arc::new(expression);
@@ -244,11 +247,11 @@ impl<'a> Interpreter<'a> {
         let active = self.admit_associated_body(
             invocation::Body::Owned(expression.clone()),
             key.clone(),
-            selected.requires_invocation,
+            initializing,
             result_type,
             source,
         )?;
-        let catalog = if selected.requires_invocation {
+        let catalog = if initializing {
             &mut self.associated_initializers
         } else {
             &mut self.associated_values

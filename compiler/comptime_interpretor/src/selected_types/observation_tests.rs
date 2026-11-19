@@ -138,10 +138,7 @@ fn select(access: &Expr, fuel: &mut u64) -> Result<AssociatedSelection, Error> {
     let initializer =
         nir::associated_initializers::AssociatedInitializer::new(body, &mut allowance).unwrap();
     *fuel = allowance as u64;
-    Ok(AssociatedSelection {
-        initializer,
-        requires_invocation: true,
-    })
+    Ok(AssociatedSelection::Initializer(initializer))
 }
 fn entries(vm: &Interpreter<'_>, start: usize) -> Vec<DeclarationId> {
     vm.events[start..]
@@ -239,10 +236,7 @@ fn type_observation_runs_deep_initializers_on_the_driver_stack() {
         let initializer =
             nir::associated_initializers::AssociatedInitializer::new(body, &mut allowance).unwrap();
         *fuel = allowance as u64;
-        Ok(AssociatedSelection {
-            initializer,
-            requires_invocation: true,
-        })
+        Ok(AssociatedSelection::Initializer(initializer))
     };
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()

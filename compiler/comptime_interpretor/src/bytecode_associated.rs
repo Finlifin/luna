@@ -182,13 +182,9 @@ fn owned_associated_selection_checks_type_phase_and_budget_before_publication() 
             if calls.get() == 1 {
                 value.ty = Term::Primitive(Primitive::Char);
             }
-            Ok(AssociatedSelection {
-                initializer: nir::associated_initializers::AssociatedInitializer::new(
-                    value, &mut 1000,
-                )
-                .unwrap(),
-                requires_invocation: true,
-            })
+            Ok(AssociatedSelection::Initializer(
+                nir::associated_initializers::AssociatedInitializer::new(value, &mut 1000).unwrap(),
+            ))
         };
         let mut vm = Interpreter::for_comptime(&package, Budget::default())
             .unwrap()
@@ -250,11 +246,9 @@ fn owned_associated_cycles_and_budget_failures_release_active_keys() {
         } else {
             expr(K::Literal(Literal::Bool(true)))
         };
-        Ok(AssociatedSelection {
-            initializer: nir::associated_initializers::AssociatedInitializer::new(value, &mut 1000)
-                .unwrap(),
-            requires_invocation: true,
-        })
+        Ok(AssociatedSelection::Initializer(
+            nir::associated_initializers::AssociatedInitializer::new(value, &mut 1000).unwrap(),
+        ))
     };
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
@@ -298,14 +292,13 @@ fn associated_host_unwind_exhausts_allowance_without_publishing_a_selection() {
                 panic!("associated host interrupted");
             }
             *fuel -= 1;
-            Ok(AssociatedSelection {
-                initializer: nir::associated_initializers::AssociatedInitializer::new(
+            Ok(AssociatedSelection::Initializer(
+                nir::associated_initializers::AssociatedInitializer::new(
                     expr(K::Literal(Literal::Bool(true))),
                     &mut 1000,
                 )
                 .unwrap(),
-                requires_invocation: true,
-            })
+            ))
         };
         let mut vm = Interpreter::for_comptime(&package, Budget::default())
             .unwrap()
@@ -338,8 +331,8 @@ fn initialized_type_views_are_query_local_and_preserve_nested_projection_structu
     let package = Package::default();
     let resolver = |_: &Expr, fuel: &mut u64| {
         *fuel -= 1;
-        Ok(AssociatedSelection {
-            initializer: nir::associated_initializers::AssociatedInitializer::new(
+        Ok(AssociatedSelection::Initializer(
+            nir::associated_initializers::AssociatedInitializer::new(
                 Expr {
                     source: SOURCE,
                     ty: Term::Primitive(Primitive::Type),
@@ -348,8 +341,7 @@ fn initialized_type_views_are_query_local_and_preserve_nested_projection_structu
                 &mut 1000,
             )
             .unwrap(),
-            requires_invocation: true,
-        })
+        ))
     };
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
@@ -401,11 +393,9 @@ fn associated_result_domains_survive_query_local_type_observations() {
         } else {
             expr(K::Literal(Literal::Bool(true)))
         };
-        Ok(AssociatedSelection {
-            initializer: nir::associated_initializers::AssociatedInitializer::new(value, &mut 1000)
-                .unwrap(),
-            requires_invocation: true,
-        })
+        Ok(AssociatedSelection::Initializer(
+            nir::associated_initializers::AssociatedInitializer::new(value, &mut 1000).unwrap(),
+        ))
     };
     for compiled in [false, true] {
         let mut vm = Interpreter::for_comptime(&package, Budget::default())
@@ -453,8 +443,8 @@ fn invocation_type_comparison_preserves_query_failures_and_opaque_identity() {
                 source: Some(SOURCE),
             });
         }
-        Ok(AssociatedSelection {
-            initializer: nir::associated_initializers::AssociatedInitializer::new(
+        Ok(AssociatedSelection::Initializer(
+            nir::associated_initializers::AssociatedInitializer::new(
                 Expr {
                     source: SOURCE,
                     ty: Term::Primitive(Primitive::Type),
@@ -463,8 +453,7 @@ fn invocation_type_comparison_preserves_query_failures_and_opaque_identity() {
                 &mut 1000,
             )
             .unwrap(),
-            requires_invocation: true,
-        })
+        ))
     };
     let projection = Term::AssociatedType {
         origin: Box::new(nir::AssociatedTypeOrigin {
@@ -575,8 +564,8 @@ fn runtime_identity_observes_associated_output_without_an_executable_body() {
                 source: Some(SOURCE),
             });
         }
-        Ok(AssociatedSelection {
-            initializer: nir::associated_initializers::AssociatedInitializer::new(
+        Ok(AssociatedSelection::Initializer(
+            nir::associated_initializers::AssociatedInitializer::new(
                 Expr {
                     source: SOURCE,
                     ty: Term::Primitive(Primitive::Type),
@@ -585,8 +574,7 @@ fn runtime_identity_observes_associated_output_without_an_executable_body() {
                 &mut 1000,
             )
             .unwrap(),
-            requires_invocation: true,
-        })
+        ))
     };
     let mut vm = Interpreter::for_comptime(&package, Budget::default())
         .unwrap()
@@ -631,8 +619,8 @@ fn associated_input_domains_admit_values_and_reject_mismatches() {
             reference.borrow(fuel).unwrap().value(),
             Value::Bool(true)
         ));
-        Ok(AssociatedSelection {
-            initializer: nir::associated_initializers::AssociatedInitializer::new(
+        Ok(AssociatedSelection::Initializer(
+            nir::associated_initializers::AssociatedInitializer::new(
                 Expr {
                     source: SOURCE,
                     ty: Term::Primitive(Primitive::Type),
@@ -641,8 +629,7 @@ fn associated_input_domains_admit_values_and_reject_mismatches() {
                 &mut 1000,
             )
             .unwrap(),
-            requires_invocation: true,
-        })
+        ))
     };
     for sort in [nir::Sort::Runtime, nir::Sort::ComptimeValue] {
         let signature = Term::ComptimeFunction(Box::new(Term::Function {
@@ -792,19 +779,16 @@ fn selected_associated_body_observes_its_domain_once_before_execution() {
                 },
             }
         };
-        Ok(AssociatedSelection {
-            initializer: {
-                let mut construction_fuel = usize::try_from(*fuel).unwrap();
-                let initializer = nir::associated_initializers::AssociatedInitializer::new(
-                    value,
-                    &mut construction_fuel,
-                )
-                .unwrap();
-                *fuel = construction_fuel as u64;
-                initializer
-            },
-            requires_invocation: true,
-        })
+        Ok(AssociatedSelection::Initializer({
+            let mut construction_fuel = usize::try_from(*fuel).unwrap();
+            let initializer = nir::associated_initializers::AssociatedInitializer::new(
+                value,
+                &mut construction_fuel,
+            )
+            .unwrap();
+            *fuel = construction_fuel as u64;
+            initializer
+        }))
     };
     for compiled in [false, true] {
         let mut vm = Interpreter::for_comptime(&package, Budget::default())

@@ -574,12 +574,7 @@ fn associated_selection_returns_actual_fuel_and_typed_failures_in_the_sysroot_wo
         };
         let expected = world
             .resolve_associated_value_plan_metered(&interface, member, &subject, &mut budget)
-            .and_then(|selected| {
-                nir::associated_initializers::AssociatedInitializer::new(
-                    selected.value,
-                    &mut budget.steps,
-                )
-            });
+            .map(|selection| selection.supply);
         let mut remaining = steps as u64;
         let actual = elaboration::materialization::resolve_associated_value_for_invocation(
             &world,
@@ -590,8 +585,11 @@ fn associated_selection_returns_actual_fuel_and_typed_failures_in_the_sysroot_wo
         match (expected, actual) {
             (Ok(expected), Ok(actual)) => {
                 successes += 1;
-                assert_eq!(actual.initializer, expected);
-                assert!(!actual.requires_invocation);
+                assert_eq!(actual, expected);
+                assert!(matches!(
+                    actual,
+                    nir::associated_initializers::AssociatedSelection::Completed(_)
+                ));
             }
             (Err(Failure::Budget), Err(error)) => {
                 exhausted += 1;

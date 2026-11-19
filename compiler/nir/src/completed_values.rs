@@ -173,6 +173,51 @@ fn literal_payload(literal: &Literal, fuel: &mut usize) -> Result<(), Error> {
     })
 }
 
+/// Closed reconstruction code validated against the selected declaration layouts.
+/// Its expression can be consumed, but cannot be edited while retaining this evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompletedValue(Expr);
+
+impl CompletedValue {
+    pub fn new<'w>(
+        value: Expr,
+        layouts: &crate::program::Package,
+        lookup_head: &impl Fn(crate::DeclarationId) -> Option<&'w crate::normal_forms::Head>,
+        fuel: &mut usize,
+    ) -> Result<Self, Error> {
+        validate_in_layouts(&value, layouts, lookup_head, fuel)?;
+        if !crate::free_bindings::collect(&value, fuel)?.is_empty() {
+            return Err("completed value cannot capture caller locals".into());
+        }
+        Ok(Self(value))
+    }
+
+    pub fn expression(&self) -> &Expr {
+        &self.0
+    }
+
+    pub fn into_expression(self) -> Expr {
+        self.0
+    }
+}
+
+pub fn validate_in_layouts<'w>(
+    value: &Expr,
+    layouts: &crate::program::Package,
+    lookup_head: &impl Fn(crate::DeclarationId) -> Option<&'w crate::normal_forms::Head>,
+    fuel: &mut usize,
+) -> Result<(), Error> {
+    validate_with_collection_evidence_in(
+        value,
+        layouts.newtypes.iter(),
+        &|ty| crate::normal_forms::registered_tuple_fields(ty, lookup_head),
+        &|ty, fuel| crate::normal_forms::list_element_budgeted(layouts, ty, fuel),
+        &|id, fuel| lookup_nominal(layouts, id, fuel),
+        layouts.target,
+        fuel,
+    )
+}
+
 /// Validate and bound the serialized value graph before copying/substitution.
 /// The only permitted call reconstructs a private graph through a zero-input,
 /// captureless comptime closure. Its body must itself be a completed value graph.

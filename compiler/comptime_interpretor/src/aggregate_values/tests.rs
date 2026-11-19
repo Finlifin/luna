@@ -129,8 +129,8 @@ fn aggregates_observe_domains_before_fields_and_retain_completed_arguments() {
     for selected in [boolean.clone(), Term::Pointer(Box::new(boolean.clone()))] {
         let resolver = |_: &Expr, fuel: &mut u64| {
             *fuel -= 1;
-            Ok(AssociatedSelection {
-                initializer: nir::associated_initializers::AssociatedInitializer::new(
+            Ok(AssociatedSelection::Initializer(
+                nir::associated_initializers::AssociatedInitializer::new(
                     expr(
                         Term::Primitive(Primitive::Type),
                         K::TypeValue(selected.clone()),
@@ -138,8 +138,7 @@ fn aggregates_observe_domains_before_fields_and_retain_completed_arguments() {
                     &mut 1000,
                 )
                 .unwrap(),
-                requires_invocation: true,
-            })
+            ))
         };
         for compiled in [false, true] {
             let mut vm = Interpreter::for_comptime(&package, Budget::default())

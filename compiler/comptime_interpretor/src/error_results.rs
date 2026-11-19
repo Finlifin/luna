@@ -488,8 +488,8 @@ mod tests {
         for (selected, conversion, input, output, value, expected) in cases {
             let resolver = |_: &Expr, fuel: &mut u64| {
                 *fuel -= 1;
-                Ok(AssociatedSelection {
-                    initializer: nir::associated_initializers::AssociatedInitializer::new(
+                Ok(AssociatedSelection::Initializer(
+                    nir::associated_initializers::AssociatedInitializer::new(
                         expr(
                             Term::Primitive(Primitive::Type),
                             K::TypeValue(selected.clone()),
@@ -497,8 +497,7 @@ mod tests {
                         &mut 1000,
                     )
                     .unwrap(),
-                    requires_invocation: true,
-                })
+                ))
             };
             let body = expr(
                 output,

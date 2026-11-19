@@ -411,6 +411,105 @@ fn with_world<R>(
     })
 }
 
+#[test]
+fn selecting_a_member_does_not_require_its_supply() {
+    let mut row = implementation(ty(P::Bool), ty(P::Char));
+    row.associated.clear();
+    let interface = nir::program::InterfaceInstance {
+        declaration: id(1),
+        arguments: vec![],
+    };
+    with_world(&[contract()], &[row], |world| {
+        let mut budget = Budget::default();
+        let selected = world
+            .select_associated_member(&interface, id(2), &ty(P::Bool), &mut budget)
+            .unwrap();
+        assert_eq!(selected.implementation(), id(4));
+        assert_eq!(selected.member(), id(2));
+        assert_eq!(selected.result_domain(), &ty(P::Type));
+        assert!(
+            selected
+                .supply(&mut budget)
+                .unwrap_err()
+                .to_string()
+                .contains("no associated value")
+        );
+        assert!(
+            world
+                .select_associated_member(&interface, id(99), &ty(P::Bool), &mut budget)
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn type_and_value_queries_require_the_associated_members_phase() {
+    let mut origin = contract();
+    origin.associated[0].phase = nir::program::TraitPhase::Comptime;
+    let mut row = implementation(ty(P::Bool), ty(P::Char));
+    let interface = nir::program::InterfaceInstance {
+        declaration: origin.declaration,
+        arguments: vec![],
+    };
+    let projection = projection(ty(P::Bool), vec![]);
+    for admitted in [false, true] {
+        row.phases.comptime = admitted;
+        with_world(
+            std::slice::from_ref(&origin),
+            std::slice::from_ref(&row),
+            |world| {
+                let projected = world.resolve_associated_type(&projection, Budget::default());
+                let selected = world.resolve_associated_value_plan_metered(
+                    &interface,
+                    id(2),
+                    &ty(P::Bool),
+                    &mut Budget::default(),
+                );
+                if admitted {
+                    assert_eq!(projected.unwrap().value, ty(P::Char));
+                    assert_eq!(selected.unwrap().supply.expression(), &value(ty(P::Char)));
+                } else {
+                    for error in [projected.unwrap_err(), selected.unwrap_err()] {
+                        assert!(
+                            error.to_string().contains("lacks comptime trait phase"),
+                            "{error}"
+                        );
+                    }
+                }
+            },
+        );
+    }
+}
+
+#[test]
+fn a_completed_type_and_an_initializer_cannot_supply_the_same_member() {
+    let mut row = implementation(ty(P::Bool), ty(P::Char));
+    let initializer =
+        nir::associated_initializers::AssociatedInitializer::new(value(ty(P::Char)), &mut 1000)
+            .unwrap();
+    row.associated_initializers.push((id(2), initializer));
+    let interface = nir::program::InterfaceInstance {
+        declaration: id(1),
+        arguments: vec![],
+    };
+    with_world(&[contract()], &[row], |world| {
+        let mut budget = Budget::default();
+        let selected = world
+            .select_associated_member(&interface, id(2), &ty(P::Bool), &mut budget)
+            .unwrap();
+        let value_error = selected.supply(&mut budget).unwrap_err();
+        let type_error = world
+            .resolve_associated_type(&projection(ty(P::Bool), vec![]), budget)
+            .unwrap_err();
+        for error in [value_error, type_error] {
+            assert!(
+                error.to_string().contains("duplicate associated values"),
+                "{error}"
+            );
+        }
+    });
+}
+
 fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
     nir::Term::NominalValue {
         ty: Box::new(nir::Term::NormalForm {
@@ -1391,19 +1490,21 @@ fn associated_queries_complete_dependent_type_value_domains() {
             .unwrap();
         assert_eq!(resolved.value, holder(ty(P::Bool)));
         assert_eq!(resolved.evidence.type_arguments, inputs);
-        let value = world
-            .resolve_associated_value_plan_metered(
+        let selected = world
+            .select_associated_member(
                 &nir::program::InterfaceInstance {
                     declaration: id(1),
-                    arguments: inputs,
+                    arguments: inputs.clone(),
                 },
                 id(2),
                 &ty(P::Bool),
                 &mut Budget::default(),
             )
             .unwrap();
+        assert_eq!(selected.implementation_arguments(), inputs);
+        let value = selected.supply(&mut Budget::default()).unwrap();
         assert!(
-            matches!(value.value.kind, ExprKind::TypeValue(ref result) if *result == holder(ty(P::Bool)))
+            matches!(value.supply.expression().kind, ExprKind::TypeValue(ref result) if *result == holder(ty(P::Bool)))
         );
         let invalid = projection(ty(P::Bool), vec![ty(P::Bool), ty(P::Bool)]);
         assert!(
@@ -1443,6 +1544,21 @@ fn completed_associated_tuples_follow_current_declaration_layout_evidence() {
             },
             kind: Kind::Value,
             ty: list.clone(),
+        }],
+    };
+    let list_head = Head {
+        declaration: id(50),
+        role: Role::TypeList,
+        collector: None,
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: id(53),
+            binding: LocalId {
+                owner: 50,
+                index: 0,
+            },
+            kind: Kind::Type,
+            ty: ty(P::Type),
         }],
     };
     let tuple = Term::NormalForm {
@@ -1505,9 +1621,21 @@ fn completed_associated_tuples_follow_current_declaration_layout_evidence() {
     };
     assert!(resolve(&index).is_err());
     index.set_normal_form_metadata(vec![head.clone()]);
-    assert_eq!(resolve(&index).unwrap().value, payload);
+    assert!(resolve(&index).is_err());
+    index.set_normal_form_metadata(vec![
+        head.clone(),
+        Head {
+            role: Role::Opaque,
+            ..list_head.clone()
+        },
+    ]);
+    assert!(resolve(&index).is_err());
+    index.set_normal_form_metadata(vec![head.clone(), list_head.clone(), list_head.clone()]);
+    assert!(resolve(&index).is_err());
+    index.set_normal_form_metadata(vec![head.clone(), list_head.clone()]);
+    assert_eq!(resolve(&index).unwrap().supply.expression(), &payload);
     let revision = index.revision();
-    index.set_normal_form_metadata(vec![head.clone()]);
+    index.set_normal_form_metadata(vec![head.clone(), list_head.clone()]);
     assert_eq!(index.revision(), revision);
     for invalid in [
         Head {
@@ -1526,16 +1654,16 @@ fn completed_associated_tuples_follow_current_declaration_layout_evidence() {
             ..head.clone()
         },
     ] {
-        index.set_normal_form_metadata(vec![invalid]);
+        index.set_normal_form_metadata(vec![invalid, list_head.clone()]);
         assert!(index.revision() > revision);
         assert!(resolve(&index).is_err());
-        index.set_normal_form_metadata(vec![head.clone()]);
-        assert_eq!(resolve(&index).unwrap().value, payload);
+        index.set_normal_form_metadata(vec![head.clone(), list_head.clone()]);
+        assert_eq!(resolve(&index).unwrap().supply.expression(), &payload);
     }
-    index.set_normal_form_metadata(vec![head.clone(), head.clone()]);
+    index.set_normal_form_metadata(vec![head.clone(), head.clone(), list_head.clone()]);
     assert!(resolve(&index).is_err());
-    index.set_normal_form_metadata(vec![head]);
-    assert_eq!(resolve(&index).unwrap().value, payload);
+    index.set_normal_form_metadata(vec![head, list_head]);
+    assert_eq!(resolve(&index).unwrap().supply.expression(), &payload);
 }
 
 #[test]

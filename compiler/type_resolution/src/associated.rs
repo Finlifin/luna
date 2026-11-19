@@ -3,7 +3,7 @@
 //! transactionally with cycle detection and a query-local completed cache.
 //! Substitution never invokes normal-form heads or substitutes trait defaults.
 use crate::capabilities::{Qualification, World};
-use crate::implementation::{Selection, TypeAssessment, TypeEvidence};
+use crate::implementation::{Selection, TypeEvidence};
 use crate::ptc::{Budget, Formula, Outcome};
 use nir::program::{ExprKind, InterfaceInstance};
 use nir::{NominalAdmissionError as QueryError, Primitive, Term};
@@ -132,149 +132,30 @@ impl World<'_> {
             &mut Budget,
         ) -> Result<crate::capabilities::Resolution, QueryError>,
     ) -> Result<(AssociatedTypeResolution, usize), QueryError> {
-        let mut fuel = budget.steps;
-        let result = (|| {
-            charge_projection_copy(projection, &mut fuel)?;
-            projection.check_scope(&[]).map_err(|e| e.to_string())?;
-            let Term::AssociatedType {
-                origin,
-                subject,
-                arguments,
-            } = projection
-            else {
-                return Err("associated Type query requires a projection".into());
-            };
-            let contract = self
-                .traits
-                .iter()
-                .find(|t| t.declaration == origin.interface)
-                .ok_or("associated Type query has no originating interface")?;
-            if arguments.len() != contract.type_parameters.len() {
-                return Err("associated Type query interface argument count mismatch".into());
-            }
-            let member = contract
-                .associated
-                .iter()
-                .find(|m| m.declaration == origin.member)
-                .ok_or("associated Type query member does not belong to its interface")?;
-            let parameters = contract.binders_with_self_checked(&mut fuel)?;
-            let inputs: Vec<_> = std::iter::once(subject.as_ref().clone())
-                .chain(arguments.iter().cloned())
-                .collect();
-            charge_projection_substitution(&member.ty, &parameters, &inputs, &mut fuel)?;
-            let substitution = contract.input_substitution(&inputs, &[], &mut fuel)?;
-            let member_type = substitution.instantiate_bounded(&member.ty, &mut fuel)?;
-            if member_type != Term::Primitive(Primitive::Type) {
-                return Err("associated projection member is not Type-valued".into());
-            }
-            let mut formation_budget = Budget {
-                steps: fuel,
-                ..*budget
-            };
-            let formed = self.check_associated_formation(
-                contract,
-                &substitution,
-                &mut formation_budget,
-                resolve,
-            );
-            fuel = formation_budget.steps;
-            formed?;
-            let interface = InterfaceInstance {
-                declaration: origin.interface,
-                arguments: arguments.clone(),
-            };
-            // Formation is complete. The final selection can use the remaining
-            // work, then return its unused allowance for evidence validation and
-            // later projections. Repeatedly halving here starves nested adapters
-            // even when the preceding formation checks are inexpensive.
-            let mut allowance = Budget {
-                steps: fuel,
-                ..*budget
-            };
-            let resolution = resolve(&interface, subject, &mut allowance);
-            fuel = allowance.steps;
-            let resolution = resolution?;
-            let Selection::Selected(selected) = resolution.types.selection else {
-                let pending = resolution
-                    .qualifications
-                    .iter()
-                    .filter_map(|(id, qualification)| {
-                        matches!(qualification, Qualification::Pending(_))
-                            .then(|| format!("(candidate {id} {qualification})"))
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                return Err(QueryError::Unresolved(format!(
-                    "associated Type implementation selection is unresolved: {} (remaining-steps {fuel}) (pending {pending})",
-                    resolution.types.selection
-                )));
-            };
-            let Some(TypeAssessment::Applicable(evidence)) =
-                resolution.types.assessments.get(&selected)
-            else {
-                return Err("associated Type selection lacks type evidence".into());
-            };
-            let Some(qualification @ Qualification::Proved(_)) =
-                resolution.qualifications.get(&selected)
-            else {
-                return Err("associated Type selection lacks capability evidence".into());
-            };
-            let implementation = self
-                .implementations
-                .iter()
-                .find(|i| i.declaration == selected)
-                .ok_or("associated Type selection has no implementation contract")?;
-            let mut values = implementation
-                .associated
-                .iter()
-                .filter(|(id, _)| *id == origin.member);
-            let (_, value) = values
-                .next()
-                .ok_or("selected implementation has no associated Type value")?;
-            if values.next().is_some() {
-                return Err("selected implementation has duplicate associated Type values".into());
-            }
-            let binders = implementation
-                .parameter_binders()
-                .map_err(|e| e.to_string())?;
-            nir::copy_budget::charge_substitution(
-                value,
-                &binders,
-                &evidence.type_arguments,
-                &mut fuel,
-            )
-            .map_err(|_| QueryError::Budget)?;
-            let substitution = nir::DeclarationSubstitution::bounded(
-                &implementation.type_parameters,
-                &implementation.parameter_types,
-                &evidence.type_arguments,
-                &[],
-                &mut fuel,
-            )?;
-            let mut completed = value.clone();
-            completed.rewrite_types(&mut |ty| substitution.instantiate_bounded(ty, &mut fuel))?;
-            if completed.ty != Term::Primitive(Primitive::Type) {
-                return Err("selected associated value has a non-Type contract".into());
-            }
-            let ExprKind::TypeValue(value) = completed.kind else {
-                return Err("selected associated value is not a completed Type template".into());
-            };
-            charge_projection_copy(&value, &mut fuel)?;
-            value.check_scope(&[]).map_err(|e| e.to_string())?;
-            if value.sort() != nir::Sort::Type {
-                return Err("selected associated Type template has the wrong sort".into());
-            }
-            Ok((
-                AssociatedTypeResolution {
-                    value,
-                    evidence: evidence.clone(),
-                    qualification: qualification.clone(),
-                },
-                fuel,
-            ))
-        })();
-        budget.steps = fuel;
-        result
+        charge_projection_copy(projection, &mut budget.steps)?;
+        projection.check_scope(&[]).map_err(|e| e.to_string())?;
+        let Term::AssociatedType {
+            origin,
+            subject,
+            arguments,
+        } = projection
+        else {
+            return Err("associated Type query requires a projection".into());
+        };
+        let interface = InterfaceInstance {
+            declaration: origin.interface,
+            arguments: arguments.clone(),
+        };
+        let selected = self.select_scoped_member(
+            &interface,
+            origin.member,
+            subject,
+            values::Access::TypeProjection,
+            budget,
+            resolve,
+        )?;
+        let result = selected.complete_type(&mut budget.steps)?;
+        Ok((result, budget.steps))
     }
 }
 
@@ -1356,254 +1237,5 @@ mod shared_cache_tests {
     }
 }
 
-/// An admitted associated value and the exact selection evidence supporting it.
-#[derive(Clone, Debug)]
-pub struct AssociatedValueResolution {
-    /// True only for the explicit staging query; ordinary value queries reject it.
-    pub requires_invocation: bool,
-    pub value: nir::program::Expr,
-    pub evidence: TypeEvidence,
-    pub qualification: Qualification,
-}
-impl fmt::Display for AssociatedValueResolution {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "(associated-value-resolution (requires-invocation {}) (value {}) (implementation {}) (arguments",
-            self.requires_invocation, self.value, self.evidence.implementation
-        )?;
-        for argument in &self.evidence.type_arguments {
-            write!(f, " {argument}")?;
-        }
-        write!(f, ") {})", self.qualification)
-    }
-}
-impl World<'_> {
-    pub fn resolve_associated_value(
-        &self,
-        interface: &InterfaceInstance,
-        member_id: nir::DeclarationId,
-        subject: &Term,
-        budget: Budget,
-    ) -> Result<AssociatedValueResolution, QueryError> {
-        let value =
-            self.resolve_associated_value_plan_metered(interface, member_id, subject, &mut {
-                budget
-            })?;
-        if value.requires_invocation {
-            return Err(QueryError::Unresolved(
-                "associated initializer requires comptime invocation".into(),
-            ));
-        }
-        Ok(value)
-    }
-
-    /// Select a completed value or initialization plan without executing it.
-    /// All outcomes return the actual remaining allowance to the caller.
-    pub fn resolve_associated_value_plan_metered(
-        &self,
-        interface: &InterfaceInstance,
-        member_id: nir::DeclarationId,
-        subject: &Term,
-        budget: &mut Budget,
-    ) -> Result<AssociatedValueResolution, QueryError> {
-        let mut fuel = budget.steps;
-        let result = (|| {
-            charge_projection_copy(subject, &mut fuel)?;
-            subject.check_scope(&[]).map_err(|e| e.to_string())?;
-            for argument in &interface.arguments {
-                charge_projection_copy(argument, &mut fuel)?;
-                argument.check_scope(&[]).map_err(|e| e.to_string())?;
-            }
-            let contract = self
-                .traits
-                .iter()
-                .find(|contract| contract.declaration == interface.declaration)
-                .ok_or("associated value query has no originating interface")?;
-            if interface.arguments.len() != contract.type_parameters.len() {
-                return Err("associated value interface argument count mismatch".into());
-            }
-            let member = contract
-                .associated
-                .iter()
-                .find(|member| member.declaration == member_id)
-                .ok_or("associated value member does not belong to its interface")?;
-            let parameters = contract.binders_with_self_checked(&mut fuel)?;
-            let inputs: Vec<_> = std::iter::once(subject.clone())
-                .chain(interface.arguments.iter().cloned())
-                .collect();
-            charge_projection_substitution(&member.ty, &parameters, &inputs, &mut fuel)?;
-            let substitution = contract.input_substitution(&inputs, &[], &mut fuel)?;
-            let member_type = substitution.instantiate_bounded(&member.ty, &mut fuel)?;
-            let mut selection_budget = Budget {
-                steps: fuel,
-                ..*budget
-            };
-            let formed = self.check_associated_formation(
-                contract,
-                &substitution,
-                &mut selection_budget,
-                &mut |interface, subject, allowance| {
-                    self.resolve_projected_instance_metered(interface, subject, allowance)
-                },
-            );
-            fuel = selection_budget.steps;
-            formed?;
-            let resolution =
-                self.resolve_projected_instance_metered(interface, subject, &mut selection_budget);
-            fuel = selection_budget.steps;
-            let resolution = resolution?;
-            let Selection::Selected(selected) = resolution.types.selection else {
-                return Err(QueryError::Unresolved(format!(
-                    "associated value implementation selection is unresolved: {}",
-                    resolution.types
-                )));
-            };
-            let Some(TypeAssessment::Applicable(evidence)) =
-                resolution.types.assessments.get(&selected)
-            else {
-                return Err("associated value selection lacks type evidence".into());
-            };
-            let Some(qualification @ Qualification::Proved(_)) =
-                resolution.qualifications.get(&selected)
-            else {
-                return Err("associated value selection lacks capability evidence".into());
-            };
-            let implementation = self
-                .implementations
-                .iter()
-                .find(|i| i.declaration == selected)
-                .ok_or("associated value selection has no implementation contract")?;
-            let mut values = implementation
-                .associated
-                .iter()
-                .map(|(id, value)| (*id, value, false))
-                .chain(
-                    implementation
-                        .associated_initializers
-                        .iter()
-                        .map(|(id, value)| (*id, value.expression(), true)),
-                )
-                .filter(|(id, _, _)| *id == member_id);
-            let (_, value, requires_invocation) = values
-                .next()
-                .ok_or("selected implementation has no associated value")?;
-            if values.next().is_some() {
-                return Err("selected implementation has duplicate associated values".into());
-            }
-            if !requires_invocation {
-                charge_completed_value(
-                    value,
-                    &self.index.nominal_layouts,
-                    self.context,
-                    &mut fuel,
-                )?;
-            }
-            let binders = implementation
-                .parameter_binders()
-                .map_err(|e| e.to_string())?;
-            nir::copy_budget::charge_substitution(
-                value,
-                &binders,
-                &evidence.type_arguments,
-                &mut fuel,
-            )
-            .map_err(|_| QueryError::Budget)?;
-            let substitution = nir::DeclarationSubstitution::bounded(
-                &implementation.type_parameters,
-                &implementation.parameter_types,
-                &evidence.type_arguments,
-                &[],
-                &mut fuel,
-            )?;
-            let mut value = value.clone();
-            value.rewrite_types(&mut |ty| substitution.instantiate_bounded(ty, &mut fuel))?;
-            // Compare completed type views without unfolding opaque normal-form heads.
-            let mut cache = std::collections::HashMap::new();
-            let mut normalize = |ty: &Term| {
-                let mut allowance = Budget {
-                    steps: fuel,
-                    ..*budget
-                };
-                let result = self.normalize_associated_types_mode(
-                    ty,
-                    &mut allowance,
-                    false,
-                    Some(&cache),
-                    None,
-                );
-                fuel = allowance.steps;
-                let (normalized, _, completed) = result?;
-                cache.extend(completed);
-                Ok::<_, QueryError>(normalized)
-            };
-            let expected = normalize(&member_type)?;
-            let actual = normalize(&value.ty)?;
-            if actual.value != expected.value {
-                return Err("selected associated value disagrees with its member contract".into());
-            }
-            value.ty = actual.value;
-            // Only completed constant representations can be published as values.
-            // Function identities remain values; their bodies are not invoked here.
-            if requires_invocation {
-                value = nir::associated_initializers::AssociatedInitializer::new(value, &mut fuel)?
-                    .into_expression();
-            } else {
-                charge_completed_value(
-                    &value,
-                    &self.index.nominal_layouts,
-                    self.context,
-                    &mut fuel,
-                )?;
-            }
-            Ok(AssociatedValueResolution {
-                requires_invocation,
-                value,
-                evidence: evidence.clone(),
-                qualification: qualification.clone(),
-            })
-        })();
-        budget.steps = fuel;
-        result
-    }
-}
-
-/// Bound both payload copying and structural depth before recursive substitution.
-fn charge_completed_value(
-    value: &nir::program::Expr,
-    layouts: &nir::program::Package,
-    context: &crate::ptc::Context,
-    fuel: &mut usize,
-) -> Result<(), QueryError> {
-    nir::completed_values::validate_with_collection_evidence_in(
-        value,
-        layouts.newtypes.iter(),
-        &|ty| {
-            let nir::Term::NormalForm { head, .. } = ty else {
-                return None;
-            };
-            if !context.is_tuple_head(*head) {
-                return None;
-            }
-            let heads = &layouts.normal_forms;
-            let slot = heads
-                .binary_search_by_key(head, |metadata| metadata.declaration)
-                .ok()?;
-            // Duplicate declarations cannot provide unique layout authority.
-            if slot
-                .checked_sub(1)
-                .is_some_and(|prior| heads[prior].declaration == *head)
-                || heads
-                    .get(slot + 1)
-                    .is_some_and(|next| next.declaration == *head)
-            {
-                return None;
-            }
-            heads[slot].tuple_elements(ty)
-        },
-        &|ty, fuel| nir::normal_forms::list_element_budgeted(layouts, ty, fuel),
-        &|id, fuel| nir::completed_values::lookup_nominal(layouts, id, fuel),
-        layouts.target,
-        fuel,
-    )
-}
+mod values;
+pub use values::{AssociatedValueResolution, SelectedAssociatedMember};

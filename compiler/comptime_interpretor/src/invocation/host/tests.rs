@@ -150,10 +150,7 @@ fn selected(value: Expr, fuel: &mut u64) -> Result<AssociatedSelection, Error> {
     let initializer =
         nir::associated_initializers::AssociatedInitializer::new(value, &mut allowance).unwrap();
     *fuel = allowance as u64;
-    Ok(AssociatedSelection {
-        initializer,
-        requires_invocation: true,
-    })
+    Ok(AssociatedSelection::Initializer(initializer))
 }
 fn answer(request: AssociatedHostRequest<'_>) -> AssociatedHostResponse<'_> {
     request.resolve(|_, fuel| {

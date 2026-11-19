@@ -7,6 +7,35 @@ use crate::{
 };
 use std::fmt;
 
+/// What selecting an associated member supplies after substitution.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AssociatedSelection {
+    Completed(crate::completed_values::CompletedValue),
+    Initializer(AssociatedInitializer),
+}
+
+impl AssociatedSelection {
+    pub fn expression(&self) -> &Expr {
+        match self {
+            Self::Completed(value) => value.expression(),
+            Self::Initializer(initializer) => initializer.expression(),
+        }
+    }
+}
+
+impl fmt::Display for AssociatedSelection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Completed(value) => write!(
+                f,
+                "(associated-selection (completed {}))",
+                value.expression()
+            ),
+            Self::Initializer(initializer) => write!(f, "(associated-selection {initializer})"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct AssociatedInitializer {
     expression: Expr,

@@ -978,21 +978,8 @@ pub type ContractQueryResult = Result<ContractOutcome, ErrorKind>;
 pub type MethodResolver<'a> =
     dyn Fn(&Expr, &mut u64) -> Result<nir::program::MethodInstance, Error> + 'a;
 
-/// A compiler-selected associated program, distinct from its evaluated result.
-pub struct AssociatedSelection {
-    pub initializer: nir::associated_initializers::AssociatedInitializer,
-    /// False requires compiler evidence that the program is a completed value.
-    pub requires_invocation: bool,
-}
-impl std::fmt::Display for AssociatedSelection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "(associated-selection (requires-invocation {}) {})",
-            self.requires_invocation, self.initializer
-        )
-    }
-}
+pub use nir::associated_initializers::AssociatedSelection;
+
 /// Resolve against the same frozen declaration world; never execute the program.
 pub type AssociatedResolver<'a> =
     dyn Fn(&Expr, &mut u64) -> Result<AssociatedSelection, Error> + 'a;
@@ -1242,12 +1229,11 @@ impl<'a> Interpreter<'a> {
         if positions.is_none() && admitted_domains.is_none() {
             invocation_budget::validate_opaque_metadata(package, &mut budget)?;
         }
-        let completed_tuple_heads = package
-            .normal_forms
-            .iter()
-            .filter(|metadata| metadata.role == nir::normal_forms::Role::Tuple)
-            .map(|metadata| (metadata.declaration, metadata))
-            .collect::<BTreeMap<_, _>>();
+        let normal_forms = declaration_index::NormalForms::new(
+            &package.normal_forms,
+            positions.as_ref().map(|index| index.normal_forms.clone()),
+            |head| head.declaration,
+        )?;
         let traits = declaration_index::Traits::new(
             &package.traits,
             positions.as_ref().map(|index| index.traits.clone()),
@@ -1662,36 +1648,15 @@ impl<'a> Interpreter<'a> {
                 // Payloads are completed values or closed snapshot graphs.
                 // Reconstruction cannot invoke arbitrary code or capture the
                 // invoking function's lexical environment.
-                nir::completed_values::validate_with_collection_evidence_in(
-                    value,
-                    package.newtypes.iter(),
-                    &|ty| {
-                        let Term::NormalForm { head, .. } = ty else {
-                            return None;
-                        };
-                        completed_tuple_heads.get(head)?.tuple_elements(ty)
-                    },
-                    &|ty, fuel| nir::normal_forms::list_element_budgeted(package, ty, fuel),
-                    &|id, fuel| nir::completed_values::lookup_nominal(package, id, fuel),
-                    package.target,
-                    &mut trait_parameter_fuel,
-                )
-                .map_err(|failure| associated_failure(failure, value.source))?;
-                nir::completed_values::validate_with_collection_evidence_in(
-                    original,
-                    package.newtypes.iter(),
-                    &|ty| {
-                        let Term::NormalForm { head, .. } = ty else {
-                            return None;
-                        };
-                        completed_tuple_heads.get(head)?.tuple_elements(ty)
-                    },
-                    &|ty, fuel| nir::normal_forms::list_element_budgeted(package, ty, fuel),
-                    &|id, fuel| nir::completed_values::lookup_nominal(package, id, fuel),
-                    package.target,
-                    &mut trait_parameter_fuel,
-                )
-                .map_err(|failure| associated_failure(failure, value.source))?;
+                for expression in [value, original] {
+                    nir::completed_values::validate_in_layouts(
+                        expression,
+                        package,
+                        &|id| normal_forms.get(&id),
+                        &mut trait_parameter_fuel,
+                    )
+                    .map_err(|failure| associated_failure(failure, value.source))?;
+                }
                 nir::copy_budget::charge_substitution(
                     original,
                     &input_binders(&implementation.type_parameters),
@@ -1962,6 +1927,7 @@ impl<'a> Interpreter<'a> {
             },
             positions,
             source_state::Prepared {
+                normal_forms,
                 trait_declarations: traits,
                 effect_declarations,
                 method_parameters,

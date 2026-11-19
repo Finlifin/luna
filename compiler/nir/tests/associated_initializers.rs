@@ -42,7 +42,26 @@ fn call(comptime: bool) -> Expr {
 #[test]
 fn programs_are_not_completed_values_and_cannot_capture_callers() {
     let template = AssociatedInitializer::new(call(true), &mut 1000).unwrap();
-    assert!(nir::completed_values::validate(template.expression(), &mut 1000).is_err());
+    let layouts = nir::program::Package::default();
+    assert!(
+        nir::completed_values::CompletedValue::new(
+            template.expression().clone(),
+            &layouts,
+            &|_| None,
+            &mut 1000
+        )
+        .is_err()
+    );
+    let literal = expr(boolean(), K::Literal(nir::program::Literal::Bool(true)));
+    let completed =
+        nir::completed_values::CompletedValue::new(literal.clone(), &layouts, &|_| None, &mut 1000)
+            .unwrap();
+    assert_eq!(completed.expression(), &literal);
+    assert!(
+        nir::associated_initializers::AssociatedSelection::Completed(completed)
+            .to_string()
+            .starts_with("(associated-selection (completed ")
+    );
     assert!(AssociatedInitializer::new(call(false), &mut 1000).is_err());
     assert!(
         AssociatedInitializer::new(

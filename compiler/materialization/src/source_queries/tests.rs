@@ -328,10 +328,13 @@ fn all_three_services_share_one_construction_regardless_of_first_demand() {
         2 => {
             let selected = queries.associated(&access, fuel).unwrap();
             assert!(matches!(
-                selected.initializer.expression().kind,
+                selected.expression().kind,
                 K::Literal(n::Literal::Bool(true))
             ));
-            assert!(!selected.requires_invocation);
+            assert!(matches!(
+                selected,
+                comptime_interpretor::AssociatedSelection::Completed(_)
+            ));
         }
         _ => unreachable!(),
     };
@@ -387,7 +390,6 @@ fn exhausted_and_rejected_demands_do_not_poison_other_query_services() {
         queries
             .associated(&access, &mut fuel)
             .unwrap()
-            .initializer
             .expression()
             .kind,
         K::Literal(n::Literal::Bool(true))

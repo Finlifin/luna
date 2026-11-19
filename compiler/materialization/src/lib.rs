@@ -113,6 +113,7 @@ struct Builder<'a> {
     // cache into strict normalization or publish it as completed IIR evidence.
     staging_views: HashMap<Term, Term>,
     interfaces: HashMap<(n::InterfaceInstance, Term), usize>,
+    associated_demands: HashSet<(usize, Id)>,
     output: Vec<n::DispatchInstance>,
     fuel: usize,
     budget: Budget,
@@ -646,6 +647,7 @@ fn build(
         types: HashSet::new(),
         staging_views: HashMap::new(),
         interfaces: HashMap::new(),
+        associated_demands: HashSet::new(),
         output: vec![],
         fuel: input_fuel,
         budget,
@@ -1556,14 +1558,17 @@ impl Builder<'_> {
                 let subject = self.normalized_type(subject)?;
                 let expected = self.normalized_type(&expr.ty)?;
                 let selected = self.associated_value_plan(&interface, *member, &subject)?;
-                if selected.value.ty != expected {
+                if selected.supply.expression().ty != expected {
                     return Err("associated expression type disagrees with selected member".into());
                 }
                 let source = expr.source;
-                *expr = if selected.requires_invocation {
-                    self.invoke_staged_input(&selected.value)?
-                } else {
-                    selected.value
+                *expr = match selected.supply {
+                    nir::associated_initializers::AssociatedSelection::Initializer(template) => {
+                        self.invoke_staged_input(template.expression())?
+                    }
+                    nir::associated_initializers::AssociatedSelection::Completed(value) => {
+                        value.into_expression()
+                    }
                 };
                 expr.source = source;
                 // Selection can expose a completed captured input after the
@@ -2335,6 +2340,38 @@ impl Builder<'_> {
             "interface value input normalization requires domain evidence: {input}"
         ))
     }
+    fn retain_associated_supply(
+        &mut self,
+        slot: usize,
+        member: Id,
+        depth: usize,
+        comptime: bool,
+    ) -> Result<(), String> {
+        use nir::associated_initializers::AssociatedSelection;
+        // Mark the demand before following code that can read the same member.
+        // The builder owns this set and drops it with all output on failure.
+        if !self.associated_demands.insert((slot, member)) {
+            return Ok(());
+        }
+        let row = &self.output[slot];
+        let interface = row.interface_instance();
+        let subject = row.subject.clone();
+        let supply = self
+            .associated_value_plan(&interface, member, &subject)?
+            .supply;
+        self.expr(supply.expression(), depth, comptime)?;
+        let output = &mut self.output[slot];
+        match supply {
+            AssociatedSelection::Completed(value) => {
+                output.associated.push((member, value.into_expression()))
+            }
+            AssociatedSelection::Initializer(template) => {
+                output.associated_initializers.push((member, template))
+            }
+        }
+        Ok(())
+    }
+
     fn associated_value_plan(
         &mut self,
         interface: &n::InterfaceInstance,
@@ -2807,23 +2844,7 @@ impl Builder<'_> {
                     arguments: arguments.clone(),
                 };
                 let slot = self.interface(interface.clone(), (**subject).clone())?;
-                let selected_interface = self.output[slot].interface_instance();
-                let selected_subject = self.output[slot].subject.clone();
-                if !self.output[slot]
-                    .associated
-                    .iter()
-                    .any(|(member, _)| *member == origin.member)
-                {
-                    let selected = self.associated_value_plan(
-                        &selected_interface,
-                        origin.member,
-                        &selected_subject,
-                    )?;
-                    self.output[slot]
-                        .associated
-                        .push((origin.member, selected.value.clone()));
-                    self.expr(&selected.value, 0, true)?;
-                }
+                self.retain_associated_supply(slot, origin.member, 0, true)?;
                 children.push(normalized);
                 children.extend(arguments.iter().cloned());
                 children.push((**subject).clone());
@@ -3108,39 +3129,7 @@ impl Builder<'_> {
                     return Err("unresolved associated value in IIR".into());
                 }
                 let slot = self.interface(interface.clone(), subject.clone())?;
-                let interface = self.output[slot].interface_instance();
-                let subject = self.output[slot].subject.clone();
-                if !self.output[slot]
-                    .associated
-                    .iter()
-                    .any(|(id, _)| id == member)
-                    && !self.output[slot]
-                        .associated_initializers
-                        .iter()
-                        .any(|(id, _)| id == member)
-                {
-                    let selected = self.associated_value_plan(&interface, *member, &subject)?;
-                    // Publish the demand before traversing dependencies; recursive
-                    // initialization is bounded by the comptime interpreter.
-                    if selected.requires_invocation {
-                        let mut copy_fuel = self.fuel as u64;
-                        let copied =
-                            nir::copy_budget::charge_expression(&selected.value, &mut copy_fuel);
-                        self.fuel = copy_fuel as usize;
-                        copied.map_err(|_| "associated initializer copy budget exhausted")?;
-                        let template = nir::associated_initializers::AssociatedInitializer::new(
-                            selected.value.clone(),
-                            &mut self.fuel,
-                        )?;
-                        self.output[slot]
-                            .associated_initializers
-                            .push((*member, template));
-                        self.expr(&selected.value, depth + 1, comptime)?;
-                    } else {
-                        self.expr(&selected.value, depth + 1, comptime)?;
-                        self.output[slot].associated.push((*member, selected.value));
-                    }
-                }
+                self.retain_associated_supply(slot, *member, depth + 1, comptime)?;
             }
             K::Function(id) if expr.ty.is_normal_form_callable() => {
                 if self.instances.is_some() {

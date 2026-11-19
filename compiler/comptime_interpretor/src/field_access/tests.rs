@@ -264,8 +264,8 @@ fn associated_field_domains_are_observed_before_borrowing_and_checked_for_all_re
                 .0
                 .try_lock()
                 .expect("Type observation borrowed its receiver");
-            Ok(AssociatedSelection {
-                initializer: nir::associated_initializers::AssociatedInitializer::new(
+            Ok(AssociatedSelection::Initializer(
+                nir::associated_initializers::AssociatedInitializer::new(
                     Expr {
                         source: source(),
                         ty: Term::Primitive(Primitive::Type),
@@ -274,8 +274,7 @@ fn associated_field_domains_are_observed_before_borrowing_and_checked_for_all_re
                     &mut 1000,
                 )
                 .unwrap(),
-                requires_invocation: true,
-            })
+            ))
         };
         for computed in [false, true] {
             for compiled in [false, true] {

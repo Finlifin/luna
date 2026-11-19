@@ -148,7 +148,15 @@ fn source_selection(deferred: bool, contracts: bool) {
                                 active = Box::new(*active);
                                 let response = request.resolve(|access, fuel| {
                                     let selection = queries.associated(access, fuel)?;
-                                    assert_eq!(selection.requires_invocation, deferred);
+                                    assert_eq!(
+                                        matches!(
+                                            selection,
+                                            comptime_interpretor::AssociatedSelection::Initializer(
+                                                _
+                                            )
+                                        ),
+                                        deferred
+                                    );
                                     Ok(selection)
                                 });
                                 active.resume(response).unwrap();

@@ -69,11 +69,25 @@ fn returned_answers_wait_for_admission_and_cancel_without_publication() {
                         expr(ty(Primitive::Bool), K::Literal(Literal::Bool(true)))
                     };
                     let mut allowance = *fuel as usize;
-                    let initializer = nir::associated_initializers::AssociatedInitializer::new(
-                        body,
-                        &mut allowance,
-                    )
-                    .unwrap();
+                    let selection = if requires_invocation {
+                        AssociatedSelection::Initializer(
+                            nir::associated_initializers::AssociatedInitializer::new(
+                                body,
+                                &mut allowance,
+                            )
+                            .unwrap(),
+                        )
+                    } else {
+                        AssociatedSelection::Completed(
+                            nir::completed_values::CompletedValue::new(
+                                body,
+                                &package,
+                                &|_| None,
+                                &mut allowance,
+                            )
+                            .unwrap(),
+                        )
+                    };
                     *fuel = allowance as u64;
                     if mode.get() == "refill" {
                         *fuel = u64::MAX;
@@ -88,10 +102,7 @@ fn returned_answers_wait_for_admission_and_cancel_without_publication() {
                             source: Some(SOURCE),
                         })
                     } else {
-                        Ok(AssociatedSelection {
-                            initializer,
-                            requires_invocation,
-                        })
+                        Ok(selection)
                     }
                 };
                 let mut vm = Interpreter::for_comptime(&package, Budget::default())

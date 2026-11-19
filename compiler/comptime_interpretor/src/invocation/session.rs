@@ -883,19 +883,16 @@ mod tests {
                 } else {
                     expr(ty(Primitive::Bool), K::Literal(Literal::Bool(true)))
                 };
-                Ok(AssociatedSelection {
-                    initializer: {
-                        let mut construction_fuel = usize::try_from(*fuel).unwrap();
-                        let initializer = nir::associated_initializers::AssociatedInitializer::new(
-                            value,
-                            &mut construction_fuel,
-                        )
-                        .unwrap();
-                        *fuel = construction_fuel as u64;
-                        initializer
-                    },
-                    requires_invocation: true,
-                })
+                Ok(AssociatedSelection::Initializer({
+                    let mut construction_fuel = usize::try_from(*fuel).unwrap();
+                    let initializer = nir::associated_initializers::AssociatedInitializer::new(
+                        value,
+                        &mut construction_fuel,
+                    )
+                    .unwrap();
+                    *fuel = construction_fuel as u64;
+                    initializer
+                }))
             };
             let mut vm = Interpreter::for_comptime(&package, Budget::default())
                 .unwrap()
@@ -1027,10 +1024,7 @@ mod tests {
                     )
                     .unwrap();
                     *fuel = allowance as u64;
-                    Ok(AssociatedSelection {
-                        initializer,
-                        requires_invocation: true,
-                    })
+                    Ok(AssociatedSelection::Initializer(initializer))
                 };
                 let mut vm = Interpreter::for_comptime(&package, Budget::default())
                     .unwrap()
