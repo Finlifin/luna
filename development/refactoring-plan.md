@@ -233,6 +233,18 @@ VM 从已完成的输入槽位取出声明身份、声明 sort 和借用的值�
 有效 sort。名义类型的准入继续要求接收世界的证据。
 [结构替换](../compiler/nir/src/type_computations.rs) · [VM 输入绑定](../compiler/comptime_interpretor/src/input_bindings.rs)
 
+对于源码端已能检查的 callable 子句，VM 在执行第一个生产者前先确认目标和元数。
+源码准备语句按供应顺序运行，具名参数可以在这一步保存到局部绑定。读取每个受检
+操作数时，字节码把值从临时寄存器移入当前输入作用域，随后可以复用这个寄存器。
+这样，较晚操作数改写同一个绑定时，先前读出的值仍然可用。输入作用域正常结束后，
+VM 按声明槽位顺序检查各自的域，把值冻结为实例实参。此时 VM 可在两个
+槽位之间交还控制权。若较晚的生产者直接跳出外层循环，作用域同时释放目标和先前
+保存的值。若槽位检查失败，错误指向出错的实参，调用者已执行的改写仍然可见。
+字节码 dump 中的 `retain-instance-argument` 和 `freeze-instance-argument` 分别
+标出这两个时刻。用常量布尔操作数编译宽度为 1、16、1024 的输入包时，三者都使用
+两个寄存器，保存的实参数量仍随包宽增长。[宽度回归](../compiler/comptime_compiler/tests/control.rs) · [编译入口](../compiler/comptime_compiler/src/lib.rs) ·
+[作用域与实例形成回归](../compiler/comptime_interpretor/src/dynamic_instances.rs)
+
 从这里接普通调用，需要在源码的两个消费位置保留不同的交付责任：
 
 - 对 `count`，声明的返回域已经是 `Integer`。待定位置是列表的元素检查。前缀

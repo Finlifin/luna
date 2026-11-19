@@ -24,7 +24,7 @@ pub(super) struct Frame {
     newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
     error_conversions: BTreeMap<usize, comptime_compiler::ErrorConversion>,
     list_operations: BTreeMap<usize, (Term, Option<Term>)>,
-    instance_origins: BTreeMap<usize, InstanceOrigin>,
+    finishing_instance: Option<Box<InstanceConstruction>>,
     instance_methods: BTreeMap<usize, comptime_compiler::methods::Method>,
     closures: BTreeMap<usize, PendingClosure>,
     bit_updates: BTreeMap<usize, (Arc<comptime_compiler::bit_updates::Plan>, usize, usize)>,
@@ -33,13 +33,14 @@ pub(super) struct Frame {
     pc: usize,
     slots: Vec<Option<Value>>,
     prepared_types: Vec<Option<Term>>,
-    scopes: Vec<PatternScope>,
+    scopes: Vec<LocalScope>,
     pattern_inputs: BTreeMap<usize, (usize, usize)>,
     type_patterns: BTreeMap<usize, super::type_patterns::TypePattern>,
 }
 
 #[derive(Default)]
-struct PatternScope {
+struct LocalScope {
+    instance: Option<Box<InstanceConstruction>>,
     locals: Vec<usize>,
     previous: BTreeMap<usize, Option<Value>>,
     exports: BTreeSet<usize>,
@@ -92,7 +93,7 @@ impl Frame {
         Ok(())
     }
 
-    fn leave_scope(&mut self) -> Result<(), Error> {
+    fn leave_scope(&mut self) -> Result<Option<Box<InstanceConstruction>>, Error> {
         let scope = self.scopes.pop().ok_or(Error {
             kind: ErrorKind::InvalidControlFlow,
             source: None,
@@ -106,7 +107,7 @@ impl Frame {
         for (slot, previous) in scope.previous {
             self.slots[slot] = previous;
         }
-        Ok(())
+        Ok(scope.instance)
     }
 
     fn unwind_to(&mut self, depth: usize, source: SourceRange) -> Result<(), Error> {
@@ -207,6 +208,30 @@ enum InstanceOrigin {
     Method(DeclarationId, usize),
 }
 
+struct InstanceConstruction {
+    origin: InstanceOrigin,
+    constructor: Arc<comptime_compiler::instances::Constructor>,
+    arguments: dynamic_instances::ClauseArguments,
+}
+
+impl fmt::Display for InstanceConstruction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(instance-construction {}", self.constructor)?;
+        match &self.origin {
+            InstanceOrigin::Function(dynamic_instances::FunctionTarget::Declaration(id)) => {
+                write!(f, " (declaration {id})")?
+            }
+            InstanceOrigin::Function(dynamic_instances::FunctionTarget::Concrete(handle)) => {
+                write!(f, " {}", handle.key())?
+            }
+            InstanceOrigin::Method(interface, count) => {
+                write!(f, " (interface {interface} {count})")?
+            }
+        }
+        write!(f, " {})", self.arguments)
+    }
+}
+
 impl fmt::Display for Frame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -286,21 +311,16 @@ impl fmt::Display for Frame {
         if let Some(staged) = &self.staged {
             write!(f, " {staged}")?;
         }
-        write!(f, " (instance-origins")?;
-        for (slot, origin) in &self.instance_origins {
-            write!(f, " (%{slot}")?;
-            match origin {
-                InstanceOrigin::Function(dynamic_instances::FunctionTarget::Declaration(id)) => {
-                    write!(f, " (declaration {id})")?
-                }
-                InstanceOrigin::Function(dynamic_instances::FunctionTarget::Concrete(handle)) => {
-                    write!(f, " {}", handle.key())?
-                }
-                InstanceOrigin::Method(interface, count) => {
-                    write!(f, " (interface {interface} {count})")?
-                }
-            }
-            write!(f, ")")?;
+        write!(f, " (instance-inputs")?;
+        for instance in self
+            .scopes
+            .iter()
+            .filter_map(|scope| scope.instance.as_deref())
+        {
+            write!(f, " (evaluating {instance})")?;
+        }
+        if let Some(instance) = &self.finishing_instance {
+            write!(f, " (freezing {instance})")?;
         }
         write!(f, ") (instance-methods")?;
         for (slot, method) in &self.instance_methods {
@@ -1026,7 +1046,7 @@ impl<'a> Interpreter<'a> {
             newtype_conversions: BTreeMap::new(),
             error_conversions: BTreeMap::new(),
             list_operations: BTreeMap::new(),
-            instance_origins: BTreeMap::new(),
+            finishing_instance: None,
             instance_methods: BTreeMap::new(),
             prepared_inputs: BTreeMap::new(),
             closures: BTreeMap::new(),
@@ -1097,13 +1117,10 @@ impl<'a> Interpreter<'a> {
                 source: Some(source),
             };
             match &instruction.op {
-                Op::BeginInstance {
-                    destination,
-                    constructor,
-                } => {
+                Op::BeginInstance { constructor } => {
                     let origin = self.admit_dynamic_trait_instance(
                         constructor.declaration,
-                        constructor.operands.len(),
+                        constructor.arity,
                         &constructor.output,
                         source,
                     )?;
@@ -1111,28 +1128,48 @@ impl<'a> Interpreter<'a> {
                         Some((interface, count)) => InstanceOrigin::Method(interface, count),
                         None => InstanceOrigin::Function(self.admit_dynamic_function_instance(
                             constructor.declaration,
-                            constructor.operands.len(),
+                            constructor.arity,
                             constructor.link.clone(),
                             &constructor.output,
                             source,
                         )?),
                     };
-                    frame.instance_origins.insert(*destination, origin);
+                    let scope = frame.scopes.last_mut().expect("instance input scope");
+                    scope.instance = Some(Box::new(InstanceConstruction {
+                        origin,
+                        constructor: constructor.clone(),
+                        arguments: Default::default(),
+                    }));
+                }
+                Op::RetainInstanceArgument { value } => {
+                    let value = frame.slots[*value].take().ok_or_else(missing)?;
+                    let instance = frame
+                        .scopes
+                        .last_mut()
+                        .and_then(|scope| scope.instance.as_mut())
+                        .expect("instance input scope");
+                    instance.arguments.retain(value);
+                }
+                Op::FreezeInstanceArgument { domain } => {
+                    let instance = frame
+                        .finishing_instance
+                        .as_mut()
+                        .expect("completed instance input scope");
+                    instance.arguments.freeze_next(self, domain, source)?;
                 }
                 Op::FinishInstance {
                     destination,
-                    constructor,
                     direct,
                 } => {
-                    let origin = frame
-                        .instance_origins
-                        .remove(destination)
-                        .ok_or_else(missing)?;
-                    let mut arguments = Vec::new();
-                    for (register, domain) in &constructor.operands {
-                        let value = frame.slots[*register].take().ok_or_else(missing)?;
-                        arguments.push(self.freeze_instance_argument(value, domain, source)?);
-                    }
+                    let InstanceConstruction {
+                        origin,
+                        constructor,
+                        arguments,
+                    } = *frame
+                        .finishing_instance
+                        .take()
+                        .expect("completed instance input scope");
+                    let arguments = arguments.into_terms();
                     let origin = match origin {
                         InstanceOrigin::Method(interface, count) => (interface, count),
                         InstanceOrigin::Function(target) => {
@@ -2435,8 +2472,12 @@ impl<'a> Interpreter<'a> {
                         method: method.clone(),
                     });
                 }
-                Op::EnterScope => frame.scopes.push(PatternScope::default()),
-                Op::LeaveScope => frame.leave_scope()?,
+                Op::EnterScope => frame.scopes.push(LocalScope::default()),
+                Op::LeaveScope => {
+                    // Normal completion transfers the admitted target. A nonlocal
+                    // jump drops it with the scopes unwound by unwind_to.
+                    frame.finishing_instance = frame.leave_scope()?;
+                }
                 Op::Unwind(depth) => frame.unwind_to(*depth, source)?,
                 Op::BreakEnclosing(id) => return Ok(Progress::Complete(Flow::Break(*id))),
                 Op::ContinueEnclosing(id) => return Ok(Progress::Complete(Flow::Continue(*id))),

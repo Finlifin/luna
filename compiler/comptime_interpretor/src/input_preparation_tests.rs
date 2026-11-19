@@ -450,7 +450,7 @@ fn fragment_exports_publish_atomically_only_at_closed_completion() {
                 ErrorKind::MissingBinding
             }
             1 => {
-                code.scopes.push(PatternScope::default());
+                code.scopes.push(LocalScope::default());
                 ErrorKind::InvalidControlFlow
             }
             2 => {

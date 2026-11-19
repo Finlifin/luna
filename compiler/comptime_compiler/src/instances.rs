@@ -8,16 +8,16 @@ pub struct Constructor {
     /// previously unseen instances in their declaration world.
     pub link: Option<std::sync::Arc<[Term]>>,
     pub declaration: DeclarationId,
-    pub operands: Vec<(crate::Register, Term)>,
+    pub arity: usize,
     pub output: Term,
 }
 impl fmt::Display for Constructor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(instance-constructor {} (operands", self.declaration)?;
-        for (register, domain) in &self.operands {
-            write!(f, " (%{register} {domain})")?;
-        }
-        write!(f, ")")?;
+        write!(
+            f,
+            "(instance-constructor {} (arity {})",
+            self.declaration, self.arity
+        )?;
         if let Some(inputs) = &self.link {
             write!(f, " (graph-link")?;
             for term in inputs.iter() {

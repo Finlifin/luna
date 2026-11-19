@@ -90,12 +90,16 @@ pub enum Op {
     CheckPatternRemap(Arc<Vec<(Register, Register)>>),
     RemapPattern(Arc<Vec<(Register, Register)>>),
     BeginInstance {
-        destination: Register,
         constructor: Arc<instances::Constructor>,
+    },
+    RetainInstanceArgument {
+        value: Register,
+    },
+    FreezeInstanceArgument {
+        domain: Box<Term>,
     },
     FinishInstance {
         destination: Register,
-        constructor: Arc<instances::Constructor>,
         direct: bool,
     },
     PreparePredicate {
@@ -669,18 +673,17 @@ impl fmt::Display for Program {
                     }
                     write!(f, ")")?;
                 }
-                Op::BeginInstance {
-                    destination,
-                    constructor,
-                } => write!(f, "(begin-instance %{destination} {constructor})")?,
+                Op::BeginInstance { constructor } => write!(f, "(begin-instance {constructor})")?,
+                Op::RetainInstanceArgument { value } => {
+                    write!(f, "(retain-instance-argument %{value})")?
+                }
+                Op::FreezeInstanceArgument { domain } => {
+                    write!(f, "(freeze-instance-argument {domain})")?
+                }
                 Op::FinishInstance {
                     destination,
-                    constructor,
                     direct,
-                } => write!(
-                    f,
-                    "(finish-instance %{destination} (direct {direct}) {constructor})"
-                )?,
+                } => write!(f, "(finish-instance %{destination} (direct {direct}))")?,
                 Op::PreparePredicate { valid } => write!(f, "(prepare-predicate {valid})")?,
                 Op::CheckPredicate {
                     value,
@@ -1573,11 +1576,6 @@ fn compile_root<'a>(
                             .checked_sub(inputs.statements.len())
                             .and_then(|remaining| remaining.checked_sub(inputs.arguments.len()))
                             .ok_or(Error::Budget(source))?;
-                        let operands = inputs
-                            .arguments
-                            .iter()
-                            .map(|arg| Ok((fresh(), copy_term(&arg.ty, fuel, source)?)))
-                            .collect::<Result<Vec<_>, Error>>()?;
                         let link = if session.concrete_instances {
                             Some(
                                 inputs
@@ -1592,35 +1590,41 @@ fn compile_root<'a>(
                         let constructor = Arc::new(instances::Constructor {
                             link,
                             declaration: *declaration,
-                            operands,
+                            arity: inputs.arguments.len(),
                             output: copy_term(&expr.ty, fuel, source)?,
                         });
                         emit(
                             &mut work,
                             Op::FinishInstance {
                                 destination: dst,
-                                constructor: constructor.clone(),
                                 direct: direct_callee,
                             },
                         );
-                        work.push(Work::EndScope(source));
-                        for (operand, (register, _)) in
-                            inputs.arguments.iter().zip(&constructor.operands).rev()
-                        {
-                            work.push(Work::Expression(operand, *register));
+                        // Execute all producers and close their lexical scope before
+                        // freezing any returned value. Each admission can yield at
+                        // its own source position without replaying a producer.
+                        for operand in inputs.arguments.iter().rev() {
+                            work.push(Work::Emit(
+                                operand.source,
+                                Op::FreezeInstanceArgument {
+                                    domain: Box::new(copy_term(&operand.ty, fuel, operand.source)?),
+                                },
+                            ));
                         }
+                        work.push(Work::EndScope(source));
                         let scratch = fresh();
+                        for operand in inputs.arguments.iter().rev() {
+                            work.push(Work::Emit(
+                                operand.source,
+                                Op::RetainInstanceArgument { value: scratch },
+                            ));
+                            work.push(Work::Expression(operand, scratch));
+                        }
                         for statement in inputs.statements.iter().rev() {
                             work.push(Work::Expression(statement, scratch));
                         }
+                        emit(&mut work, Op::BeginInstance { constructor });
                         work.push(Work::BeginScope(source));
-                        emit(
-                            &mut work,
-                            Op::BeginInstance {
-                                destination: dst,
-                                constructor,
-                            },
-                        );
                     }
                     K::BuildMetadata {
                         owner,

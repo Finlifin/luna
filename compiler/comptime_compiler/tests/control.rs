@@ -21,6 +21,36 @@ fn linear_compilation_has_bounded_work_and_deterministic_dump() {
     assert!(matches!(compile(&body, &mut 1), Err(Error::Budget(_))));
 }
 #[test]
+fn widening_a_clause_packet_does_not_allocate_registers_for_retained_values() {
+    let flag = Term::Primitive(Primitive::Bool);
+    let operand = Expr {
+        ty: flag.clone(),
+        ..expr(K::Literal(nir::program::Literal::Bool(true)))
+    };
+    let signature = Term::ComptimeFunction(Box::new(Term::Function {
+        parameters: vec![],
+        result: Box::new(flag),
+    }));
+    let registers = |width| {
+        let instance = Expr {
+            ty: signature.clone(),
+            ..expr(K::ComptimeFunctionInstance {
+                declaration: nir::DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                inputs: nir::program::ClauseOperands {
+                    arguments: vec![operand.clone(); width],
+                    ..Default::default()
+                },
+            })
+        };
+        compile(&instance, &mut 100_000).unwrap().registers()
+    };
+    assert_eq!(registers(1), registers(1024));
+}
+
+#[test]
 fn definition_evidence_and_invalid_transfers_never_publish_partial_code() {
     let body = expr(K::If {
         condition: Box::new(expr(K::Unit)),

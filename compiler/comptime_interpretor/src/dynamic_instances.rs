@@ -8,6 +8,53 @@ pub(super) enum FunctionTarget {
     Concrete(Arc<IirCallable>),
 }
 
+/// A lexical input produces a value before the declaration consumes it.
+/// On control transfer the caller drops the whole partial packet.
+#[derive(Default)]
+pub(super) struct ClauseArguments {
+    produced: std::collections::VecDeque<Value>,
+    frozen: Vec<Term>,
+}
+
+impl ClauseArguments {
+    pub(super) fn retain(&mut self, value: Value) {
+        self.produced.push_back(value);
+    }
+
+    pub(super) fn freeze_next(
+        &mut self,
+        vm: &mut Interpreter<'_>,
+        domain: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let value = self
+            .produced
+            .pop_front()
+            .expect("evaluated instance operand");
+        self.frozen
+            .push(vm.freeze_instance_argument(value, domain, source)?);
+        Ok(())
+    }
+
+    pub(super) fn into_terms(self) -> Vec<Term> {
+        self.frozen
+    }
+}
+
+impl fmt::Display for ClauseArguments {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(clause-arguments (produced")?;
+        for value in &self.produced {
+            write!(f, " {value}")?;
+        }
+        f.write_str(") (frozen")?;
+        for term in &self.frozen {
+            write!(f, " {term}")?;
+        }
+        f.write_str("))")
+    }
+}
+
 pub(super) enum PreparedTraitInstance {
     Unrelated,
     Ready(Expr),
@@ -341,12 +388,12 @@ impl Interpreter<'_> {
                 }
             }
             let result = self.with_prepared_frame(source, |vm| {
-                let mut values = Vec::new();
+                let mut values = ClauseArguments::default();
                 for (slot, operand) in inputs.arguments.iter().enumerate() {
                     match vm.eval(operand, environment)? {
                         Flow::Value(value) => {
                             vm.retain_prepared(slot, operand.source, &value)?;
-                            values.push(value);
+                            values.retain(value);
                         }
                         flow => return Ok(ControlFlow::Break(flow)),
                     }
@@ -358,16 +405,14 @@ impl Interpreter<'_> {
             }
             Ok(result)
         });
-        let values = match result? {
+        let mut values = match result? {
             ControlFlow::Continue(values) => values,
             ControlFlow::Break(flow) => return Ok(ControlFlow::Break(flow)),
         };
-        let arguments = values
-            .into_iter()
-            .zip(&inputs.arguments)
-            .map(|(value, operand)| self.freeze_instance_argument(value, &operand.ty, source))
-            .collect::<Result<_, _>>()?;
-        Ok(ControlFlow::Continue(arguments))
+        for operand in &inputs.arguments {
+            values.freeze_next(self, &operand.ty, operand.source)?;
+        }
+        Ok(ControlFlow::Continue(values.into_terms()))
     }
 
     pub(super) fn dynamic_trait_method(
@@ -661,6 +706,160 @@ mod tests {
                 );
             }
         }
+    }
+
+    // The second producer writes the binding already read by the first.
+    fn two_clause_inputs() -> (Package, Expr, LocalId) {
+        let mut package = package();
+        let id = DeclarationId {
+            package: 1,
+            local: 3,
+        };
+        package.function_parameters[0].parameters.push(id);
+        let boolean = Term::Primitive(Primitive::Bool);
+        package.function_parameters[0].domains.push(boolean.clone());
+        package.functions[0].type_parameters.push(id);
+        let mut body = expression(&package);
+        let K::ComptimeFunctionInstance { inputs, .. } = &mut body.kind else {
+            unreachable!()
+        };
+        let binding = LocalId { owner: 2, index: 0 };
+        inputs.arguments[0].source = SourceRange { start: 10, end: 13 };
+        let source = SourceRange { start: 20, end: 30 };
+        inputs.arguments.push(Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Block {
+                statements: vec![Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Void),
+                    kind: K::Assign {
+                        place: nir::program::Place {
+                            root: binding,
+                            fields: vec![],
+                        },
+                        value: Box::new(Expr {
+                            source,
+                            ty: boolean.clone(),
+                            kind: K::Literal(Literal::Bool(false)),
+                        }),
+                    },
+                }],
+                result: Some(Box::new(Expr {
+                    source,
+                    ty: boolean,
+                    kind: K::Local(binding),
+                })),
+            },
+        });
+        (package, body, binding)
+    }
+
+    #[test]
+    fn instance_inputs_keep_completed_writes_on_operand_failure() {
+        let (package, body, binding) = two_clause_inputs();
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 10_000).unwrap());
+        for compiled in [false, true] {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            for first in [Value::Char('x'), Value::Bool(true)] {
+                let mut env = Environment::from([(binding, first.clone())]);
+                let result = if compiled {
+                    vm.execute_code(&code, &mut env)
+                } else {
+                    vm.eval(&body, &mut env)
+                };
+                assert_eq!(
+                    vm.local_value(&env, binding, None).unwrap(),
+                    Value::Bool(false)
+                );
+                if first == Value::Bool(true) {
+                    assert!(
+                        matches!(result.unwrap(), Flow::Value(Value::FunctionInstance { arguments, .. })
+                        if arguments == [Term::Bool(true), Term::Bool(false)])
+                    );
+                } else {
+                    let error = result.unwrap_err();
+                    assert_eq!(error.kind, ErrorKind::Type);
+                    assert_eq!(error.source, Some(SourceRange { start: 10, end: 13 }));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clause_input_freezing_can_stop_between_slots_without_publishing() {
+        let (package, body, binding) = two_clause_inputs();
+        let code = Arc::new(comptime_compiler::compile(&body, &mut 10_000).unwrap());
+        let first = code
+            .instructions()
+            .iter()
+            .position(|instruction| {
+                matches!(
+                    instruction.op,
+                    comptime_compiler::Op::FreezeInstanceArgument { .. }
+                )
+            })
+            .unwrap();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        for cancel in [true, false] {
+            let mut env = Environment::from([(binding, Value::Bool(true))]);
+            let mut frame = vm.start_frame(&code, &mut env).unwrap();
+            assert!(matches!(
+                vm.resume_frame(&mut frame, first + 1).unwrap(),
+                bytecode::Progress::Suspended
+            ));
+            assert!(vm.instances.is_empty());
+            if cancel {
+                frame.cancel();
+                assert_eq!(
+                    vm.resume_frame(&mut frame, 1).unwrap_err().kind,
+                    ErrorKind::InvalidControlFlow
+                );
+            } else {
+                assert!(matches!(vm.resume_frame(&mut frame, 128).unwrap(),
+                    bytecode::Progress::Complete(Flow::Value(Value::FunctionInstance { arguments, .. }))
+                    if arguments == [Term::Bool(true), Term::Bool(false)]));
+            }
+            let env = frame.restore_environment();
+            assert_eq!(
+                vm.local_value(&env, binding, None).unwrap(),
+                Value::Bool(false)
+            );
+        }
+    }
+
+    #[test]
+    fn exit_from_clause_production_retires_the_partial_instance() {
+        let (package, mut body, binding) = two_clause_inputs();
+        let identity = LocalId { owner: 3, index: 0 };
+        let K::ComptimeFunctionInstance { inputs, .. } = &mut body.kind else {
+            unreachable!()
+        };
+        inputs.arguments[1] = Expr {
+            source: inputs.arguments[1].source,
+            ty: Term::Primitive(Primitive::Never),
+            kind: K::Break(identity),
+        };
+        let loop_expr = Expr {
+            source: body.source,
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::Loop {
+                identity,
+                body: Box::new(body),
+            },
+        };
+        let code = Arc::new(comptime_compiler::compile(&loop_expr, &mut 10_000).unwrap());
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        // The first field has a value that would fail admission if the
+        // second producer did not transfer control out of the whole packet.
+        let mut env = Environment::from([(binding, Value::Char('x'))]);
+        let mut frame = vm.start_frame(&code, &mut env).unwrap();
+        assert!(matches!(
+            vm.resume_frame(&mut frame, 128).unwrap(),
+            bytecode::Progress::Complete(Flow::Value(Value::Unit))
+        ));
+        assert!(frame.to_string().contains("(instance-inputs)"));
+        assert!(vm.instances.is_empty());
     }
 
     #[test]
