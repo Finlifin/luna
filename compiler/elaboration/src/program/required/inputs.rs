@@ -3,13 +3,78 @@
 use super::*;
 use std::{fmt, sync::Arc};
 
+/// All visible observations, indexed independently of the depth of the caller.
+/// Saved versions own their old root. A declaration and a mask both count as
+/// a supply in the region that introduced them.
 #[derive(Clone, Default)]
-pub(in crate::program) struct Scope(Option<Arc<Frame>>);
+pub(in crate::program) struct Scope(Option<Region>);
 
 #[derive(Clone)]
-struct Frame {
-    parent: Scope,
-    values: BTreeMap<n::LocalId, (Arc<Term>, Option<Arc<Term>>)>,
+struct Region {
+    owner: Arc<Owner>,
+    visible: LocalBindings<Observation>,
+}
+
+struct Owner;
+
+struct Observation {
+    owner: Arc<Owner>,
+    domain: Arc<Term>,
+    value: Option<Arc<Term>>,
+}
+
+impl Region {
+    fn supply(
+        &mut self,
+        binding: n::LocalId,
+        domain: &Term,
+        value: Option<&Term>,
+        fuel: &mut u64,
+        span: Span,
+    ) -> Result<(), Error> {
+        charge_index(fuel, span)?;
+        if self
+            .visible
+            .get(&binding)
+            .is_some_and(|entry| Arc::ptr_eq(&self.owner, &entry.owner))
+        {
+            return Err(error(span, "duplicate required comptime input"));
+        }
+        let domain = Arc::new(copy(domain, fuel, span)?);
+        let value = value
+            .map(|value| copy(value, fuel, span).map(Arc::new))
+            .transpose()?;
+        self.insert(binding, domain, value, fuel, span)
+    }
+
+    fn insert(
+        &mut self,
+        binding: n::LocalId,
+        domain: Arc<Term>,
+        value: Option<Arc<Term>>,
+        fuel: &mut u64,
+        span: Span,
+    ) -> Result<(), Error> {
+        // LocalId has a fixed width. One index operation visits at most one
+        // branch per bit, regardless of the number of saved caller scopes.
+        charge_index(fuel, span)?;
+        self.visible.insert(
+            binding,
+            Observation {
+                owner: self.owner.clone(),
+                domain,
+                value,
+            },
+        );
+        Ok(())
+    }
+}
+
+fn charge_index(fuel: &mut u64, span: Span) -> Result<(), Error> {
+    *fuel = fuel
+        .checked_sub(1)
+        .ok_or_else(|| error(span, "required input observation budget exhausted"))?;
+    Ok(())
 }
 
 impl Scope {
@@ -20,26 +85,21 @@ impl Scope {
         fuel: &mut u64,
         span: Span,
     ) -> Result<Self, Error> {
-        let mut values = BTreeMap::new();
+        let mut region = Region {
+            owner: Arc::new(Owner),
+            visible: self
+                .0
+                .as_ref()
+                .map(|parent| parent.visible.clone())
+                .unwrap_or_default(),
+        };
         for (binding, domain, value) in inputs {
-            let domain = Arc::new(copy(domain, fuel, span)?);
-            let value = Arc::new(copy(value, fuel, span)?);
-            if values.insert(*binding, (domain, Some(value))).is_some() {
-                return Err(error(span, "duplicate required comptime input"));
-            }
+            region.supply(*binding, domain, Some(value), fuel, span)?;
         }
-        // A live cell shadows any outer snapshot with the same binding. Its
-        // current contents are supplied by the invocation, not by observation.
         for (binding, domain, _) in live {
-            let domain = Arc::new(copy(domain, fuel, span)?);
-            if values.insert(*binding, (domain, None)).is_some() {
-                return Err(error(span, "duplicate required comptime input"));
-            }
+            region.supply(*binding, domain, None, fuel, span)?;
         }
-        Ok(Self(Some(Arc::new(Frame {
-            parent: self.clone(),
-            values,
-        }))))
+        Ok(Self(Some(region)))
     }
 
     pub(in crate::program) fn supply(
@@ -50,18 +110,10 @@ impl Scope {
         fuel: &mut u64,
         span: Span,
     ) -> Result<(), Error> {
-        let entry = (
-            Arc::new(copy(domain, fuel, span)?),
-            Some(Arc::new(copy(value, fuel, span)?)),
-        );
-        let current = self.0.as_mut().expect("active required input region");
-        if current.values.contains_key(&binding) {
-            return Err(error(span, "duplicate required comptime input"));
-        }
-        Self::writable(current, fuel, span)?
-            .values
-            .insert(binding, entry);
-        Ok(())
+        self.0
+            .as_mut()
+            .expect("active required input region")
+            .supply(binding, domain, Some(value), fuel, span)
     }
 
     pub(in crate::program) fn is_empty(&self) -> bool {
@@ -74,19 +126,20 @@ impl Scope {
         fuel: &mut u64,
         span: Span,
     ) -> Result<(), Error> {
-        let mut masked = Vec::new();
+        let Some(mut region) = self.0.clone() else {
+            return Ok(());
+        };
+        // Publish a new root only after all affected bindings have been masked.
+        // Failure spends the lookup/update work but preserves the prior version.
         for binding in bindings {
-            if let Some((domain, Some(_))) = self.shared(*binding, fuel, span)? {
-                masked.push((*binding, domain.clone()));
+            charge_index(fuel, span)?;
+            if let Some(entry) = region.visible.get(binding)
+                && entry.value.is_some()
+            {
+                region.insert(*binding, entry.domain.clone(), None, fuel, span)?;
             }
         }
-        if !masked.is_empty() {
-            let current = self.0.as_mut().expect("invalidated supplied inputs");
-            let frame = Self::writable(current, fuel, span)?;
-            for (binding, domain) in masked {
-                frame.values.insert(binding, (domain, None));
-            }
-        }
+        self.0 = Some(region);
         Ok(())
     }
 
@@ -101,38 +154,20 @@ impl Scope {
             .map(|(domain, value)| (domain.as_ref(), value.map(Arc::as_ref))))
     }
 
-    // A fork retains immutable payloads. Charge for the copied index once,
-    // before publishing any changes, irrespective of the size of those terms.
-    fn writable<'a>(
-        frame: &'a mut Arc<Frame>,
-        fuel: &mut u64,
-        span: Span,
-    ) -> Result<&'a mut Frame, Error> {
-        if Arc::strong_count(frame) > 1 {
-            *fuel = fuel
-                .checked_sub(frame.values.len() as u64)
-                .ok_or_else(|| error(span, "required input frame copy budget exhausted"))?;
-        }
-        Ok(Arc::make_mut(frame))
-    }
-
     pub(in crate::program) fn shared(
         &self,
         binding: n::LocalId,
         fuel: &mut u64,
         span: Span,
     ) -> Result<Option<(&Arc<Term>, Option<&Arc<Term>>)>, Error> {
-        let mut scope = self;
-        while let Some(frame) = &scope.0 {
-            *fuel = fuel
-                .checked_sub(1)
-                .ok_or_else(|| error(span, "required input observation budget exhausted"))?;
-            if let Some((domain, value)) = frame.values.get(&binding) {
-                return Ok(Some((domain, value.as_ref())));
-            }
-            scope = &frame.parent;
-        }
-        Ok(None)
+        let Some(region) = &self.0 else {
+            return Ok(None);
+        };
+        charge_index(fuel, span)?;
+        Ok(region
+            .visible
+            .get(&binding)
+            .map(|entry| (&entry.domain, entry.value.as_ref())))
     }
 }
 
@@ -147,19 +182,20 @@ pub(super) fn copy(value: &Term, fuel: &mut u64, span: Span) -> Result<Term, Err
 impl fmt::Display for Scope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(required-input-scope")?;
-        let mut scope = self;
-        while let Some(frame) = &scope.0 {
+        if let Some(region) = &self.0 {
             f.write_str(" (frame")?;
-            for (binding, (domain, value)) in &frame.values {
-                write!(f, " (input {binding} (domain {domain}) ")?;
-                match value {
+            for (binding, entry) in &region.visible {
+                write!(f, " (input {binding} (domain {}) ", entry.domain)?;
+                match &entry.value {
                     Some(value) => write!(f, "(supplied {value})")?,
                     None => f.write_str("(unavailable)")?,
+                }
+                if !Arc::ptr_eq(&region.owner, &entry.owner) {
+                    f.write_str(" (inherited)")?;
                 }
                 f.write_str(")")?;
             }
             f.write_str(")")?;
-            scope = &frame.parent;
         }
         f.write_str(")")
     }
@@ -320,6 +356,78 @@ mod invalidation_tests {
             branch.lookup(mutable, &mut 1, span).unwrap().unwrap().1,
             Some(&Term::Bool(true))
         );
+    }
+
+    #[test]
+    fn nested_prefix_lookup_and_branch_updates_are_independent_of_scope_depth_and_width() {
+        let span = Span::default();
+        let id = |index| n::LocalId { owner: 4, index };
+        let lookup_and_supply = |width: u32, depth: usize| {
+            let mut scope = Scope::default().child(&[], &[], &mut 1, span).unwrap();
+            for index in 0..width {
+                scope
+                    .supply(id(index), &p(P::Bool), &Term::Bool(true), &mut 100, span)
+                    .unwrap();
+            }
+            let parent = scope.clone();
+            for _ in 0..depth {
+                scope = scope.child(&[], &[], &mut 1, span).unwrap();
+            }
+            let mut fuel = 100;
+            assert_eq!(
+                scope.lookup(id(0), &mut fuel, span).unwrap().unwrap().1,
+                Some(&Term::Bool(true))
+            );
+            assert!(scope.lookup(id(width), &mut fuel, span).unwrap().is_none());
+            let sibling = scope.clone();
+            scope
+                .supply(id(width), &p(P::Bool), &Term::Bool(false), &mut fuel, span)
+                .unwrap();
+            scope.invalidate(&[id(0)].into(), &mut fuel, span).unwrap();
+            assert_eq!(
+                scope.lookup(id(0), &mut fuel, span).unwrap().unwrap().1,
+                None
+            );
+            // The mask reserves this name locally. An independent child can
+            // shadow the inherited binding with exactly the same domain/value.
+            assert!(
+                scope
+                    .supply(id(0), &p(P::Bool), &Term::Bool(true), &mut 100, span)
+                    .is_err()
+            );
+            for saved in [parent, sibling] {
+                assert!(saved.lookup(id(width), &mut 1, span).unwrap().is_none());
+                assert_eq!(
+                    saved.lookup(id(0), &mut 1, span).unwrap().unwrap().1,
+                    Some(&Term::Bool(true))
+                );
+            }
+            fuel
+        };
+        assert_eq!(lookup_and_supply(1, 1), lookup_and_supply(1024, 512));
+    }
+
+    #[test]
+    fn a_late_budget_failure_discards_masks_already_prepared_in_this_batch() {
+        let span = Span::default();
+        let keys = [0, 1].map(|index| n::LocalId { owner: 5, index });
+        let mut scope = Scope::default()
+            .child(
+                &keys.map(|id| (id, p(P::Bool), Term::Bool(true))),
+                &[],
+                &mut 100,
+                span,
+            )
+            .unwrap();
+        let before = scope.to_string();
+        let mut fuel = 3;
+        assert!(scope.invalidate(&keys.into(), &mut fuel, span).is_err());
+        assert_eq!(fuel, 0);
+        assert_eq!(scope.to_string(), before);
+        scope.invalidate(&keys.into(), &mut 4, span).unwrap();
+        for key in keys {
+            assert_eq!(scope.lookup(key, &mut 1, span).unwrap().unwrap().1, None);
+        }
     }
 
     #[test]

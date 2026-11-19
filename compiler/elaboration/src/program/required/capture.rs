@@ -1,6 +1,7 @@
 //! Capture the source telescope before looking up executable dependencies.
 //! Bound types and parameter domains may select slots without a local read.
 use super::*;
+use nir::type_computations::CaptureBody;
 use std::borrow::Cow;
 
 pub(super) struct Entry<'v> {
@@ -16,18 +17,17 @@ enum Supply<'v> {
 
 impl<'v> Entry<'v> {
     fn capture(
-        root: n::Expr,
+        root: CaptureBody,
         mut slots: Vec<(n::LocalId, Sort, Option<Cow<'_, Term>>)>,
         mut supplies: BTreeMap<n::LocalId, Supply<'v>>,
         fuel: &mut usize,
     ) -> Result<Self, nir::type_computations::Error> {
-        let captured = nir::type_computations::capture_entry_domains(
+        let captured = root.capture(
             DeclarationId {
                 package: u64::MAX,
                 local: u32::MAX,
             },
             "<required-comptime>".into(),
-            root,
             slots
                 .iter()
                 .map(|(id, sort, domain)| (*id, *sort, domain.as_deref())),
@@ -98,7 +98,7 @@ fn staged_sort(domain: &Term) -> Sort {
 impl Checker<'_, '_> {
     pub(super) fn capture_required_entry<'v>(
         &mut self,
-        root: n::Expr,
+        root: CaptureBody,
         inputs: Vec<(n::LocalId, Term, Term)>,
         live: &'v [(n::LocalId, Term, Value)],
         span: Span,
@@ -189,7 +189,7 @@ mod tests {
         };
         let capture = |root, domain, fuel: &mut usize| {
             Entry::capture(
-                root,
+                CaptureBody::analyze(root, fuel)?,
                 vec![(id, Sort::ComptimeValue, Some(Cow::Borrowed(domain)))],
                 BTreeMap::new(),
                 fuel,
@@ -291,8 +291,13 @@ mod tests {
                 (binding(1), callback),
                 (binding(3), Supply::Frozen(frozen(id(42)))),
             ]);
-            let captured =
-                Entry::capture(root.clone(), slots.clone(), supplies, &mut 10000).unwrap();
+            let captured = Entry::capture(
+                CaptureBody::analyze(root.clone(), &mut 1000).unwrap(),
+                slots.clone(),
+                supplies,
+                &mut 10000,
+            )
+            .unwrap();
             assert_eq!(captured.function.parameters, [binding(1), binding(2)]);
             assert_eq!(
                 captured

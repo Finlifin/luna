@@ -506,6 +506,60 @@ fn expression_entries_validate_captures_annotations_and_preserve_owned_code() {
 }
 
 #[test]
+fn capture_body_keeps_lexical_reads_but_selects_slots_after_rebinding() {
+    use nir::program::{Expr, ExprKind as K, LocalId, SourceRange};
+    use nir::type_computations::CaptureBody;
+    let binding = |index| LocalId { owner: 6, index };
+    let ty = Term::Primitive(Primitive::Type);
+    let source = SourceRange { start: 1, end: 2 };
+    let body = Expr {
+        source,
+        ty: ty.clone(),
+        kind: K::Block {
+            statements: vec![Expr {
+                source,
+                ty: ty.clone(),
+                kind: K::Local(binding(2)),
+            }],
+            result: Some(Box::new(Expr {
+                source,
+                ty: ty.clone(),
+                kind: K::TypeValue(slot(0, Sort::Type)),
+            })),
+        },
+    };
+    let checked = CaptureBody::analyze(body, &mut 1000).unwrap();
+    assert_eq!(checked.reads(), &[binding(2)].into());
+    let checked = checked
+        .rewrite_types(&mut |term| {
+            Ok::<_, Error>(if *term == slot(0, Sort::Type) {
+                slot(1, Sort::Type)
+            } else {
+                term.clone()
+            })
+        })
+        .unwrap();
+    assert!(checked.to_string().contains("(reads (local 6 2))"));
+    let captured = checked
+        .capture(
+            target(),
+            "rebound".into(),
+            (0..3).map(|i| (binding(i), Sort::Type, Some(&ty))),
+            &mut 1000,
+        )
+        .unwrap();
+    assert_eq!(captured.slots, [1, 2]);
+    let K::Block {
+        result: Some(result),
+        ..
+    } = &captured.function.body.kind
+    else {
+        panic!("block")
+    };
+    assert_eq!(result.kind, K::TypeValue(slot(0, Sort::Type)));
+}
+
+#[test]
 fn compact_entries_keep_transitive_domains_and_nested_binder_identity() {
     use nir::program::{Expr, ExprKind as K, LocalId, SourceRange};
     use nir::type_computations::capture_entry;

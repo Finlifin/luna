@@ -1254,19 +1254,27 @@ required preparation 时，只继承了 binding/domain，没有继承值。于�
 已有身份观察变成另一次没有输入的 invocation。修复点在准备区域的输入交付，
 不在 generator、Flag、List 或某个源码形状上。
 
-`required::inputs::Scope` 现在按活动准备区域持有只读输入证据。每个 frame 保留
-`LocalId → (domain, supplied value / unavailable)`，父 frame 用 Arc 保活；没有
-pending producer、VM 可变存储或候选等待者，也不进入 RequiredWorld 或代码缓存。
-子区域在形成后续参数域之前逐项登记已完成前缀，优先观察自己的输入；live 输入显式
-遮蔽同号外层快照。退出准备区域（成功或
-错误）恢复原 scope 和本区域引入的 immutable 标记。Display 使用 S-expression，
-同时显示局部身份、域及可用性，不把 unavailable 当作已完成值。
+`required::inputs::Scope` 按 `LocalId` 索引本区域可见的输入观察。进入子区域时共享
+当前索引根，为新区域建立独立身份。每条观察保存供应它的区域、域和可选的冻结值。
+同一区域第二次供应同一绑定会报错；内层可以用自己的输入遮蔽同号绑定。live 输入
+保留域，值由原 invocation 持有。源码检查与候选回退可以各自保留一个版本。
+
+查找外层绑定只需沿该绑定的键查一次索引。供应前缀或使观察失效时仅更新对应键路径，
+继续共享其他输入的域与值。批量失效在私有根上完成，全部成功才发布；中途耗尽预算
+会保留调用者原有的全部观察。退出准备区域后恢复它保存的根和 immutable 标记。
+S-expression dump 按绑定顺序显示本区域可见的域、值或 `unavailable`，并标出继承项。
 
 普通 `preserved_input_identity` 的已有结构观察可读取仍在词法作用域的 immutable
 输入证据；若需要真实执行 helper，nested required 捕获只复制实际引用的外层输入，
 并继续走既有 domain/phase/capture 准入。读取、复制和遍历都消耗 required 预算；
 失败不发布部分 snapshot。赋值、取址及捕获的既有失效入口同步遮蔽该证据，失败分支
-恢复规则也保存 scope；多次失效替换当前 frame，不为每次写入增加一层 lexical 链。
+恢复规则也保存 scope。
+
+入口捕获分两步。`CaptureBody` 在 initializer 替换完成后同时持有受检 NIR 和其中
+自由读取的 `LocalId`。源码服务先据此取得外层供应；若需把调用者的类型槽重绑定为
+rigid，只能改写这段代码中的类型。最后从改写后的标注及形参域计算传递依赖，压紧
+入口参数并重定位槽号。源码供应与 NIR 捕获共用同一次词法读取分析。
+[入口捕获实现](../compiler/nir/src/type_computations/capture.rs)
 
 普通函数的定义期默认值检查也建立独立输入区域：前序子句参数供应自己的 rigid 身份
 和声明域，不把未知参数当作具体值。普通调用计划则继续区分「观察出的身份」与

@@ -1115,9 +1115,11 @@ impl Checker<'_, '_> {
             // telescope below additionally closes over their dependent domains.
             let mut capture_fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
             let before = capture_fuel;
-            let free = nir::free_bindings::collect(&root, &mut capture_fuel);
+            let capture_body =
+                nir::type_computations::CaptureBody::analyze(root, &mut capture_fuel);
             self.required_steps -= (before - capture_fuel) as u64;
-            let free = free.map_err(|message| error(expr.span, message))?;
+            let mut root = capture_body.map_err(|message| error(expr.span, message))?;
+            let free = root.reads();
             for input in &self.input_facts.specialized {
                 if supplied.insert(input.0) {
                     inputs.push(input.clone());
@@ -1271,7 +1273,7 @@ impl Checker<'_, '_> {
                     let mut rebind = |ty: &Term| {
                         scope::rebind_input(ty, &mapping, &mut self.required_steps, expr.span)
                     };
-                    root.rewrite_types(&mut rebind)?;
+                    root = root.rewrite_types(&mut rebind)?;
                     for (_, ty, value) in &mut inputs {
                         *ty = rebind(ty)?;
                         *value = rebind(value)?;
