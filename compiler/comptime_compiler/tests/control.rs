@@ -1186,15 +1186,15 @@ fn constant_pool_preserves_domains_kinds_and_float_bits() {
 }
 
 #[test]
-fn template_dependency_depth_is_a_resource_error_and_compilation_can_retry() {
-    let mut nested = expr(K::Unit);
-    for _ in 0..130 {
-        nested = expr(K::Block {
-            statements: vec![],
-            result: Some(Box::new(nested)),
-        });
-    }
-    let template = |value| {
+fn retained_templates_distinguish_copy_depth_from_capture_work_and_can_retry() {
+    let template = |depth| {
+        let mut nested = expr(K::Unit);
+        for _ in 0..depth {
+            nested = expr(K::Block {
+                statements: vec![],
+                result: Some(Box::new(nested)),
+            });
+        }
         expr(K::CheckTypeAlias {
             declaration: nir::DeclarationId {
                 package: 1,
@@ -1204,18 +1204,23 @@ fn template_dependency_depth_is_a_resource_error_and_compilation_can_retry() {
             arguments: vec![],
             bindings: None,
             order: None,
-            body: Some(Box::new(value)),
+            body: Some(Box::new(nested)),
         })
     };
-    let value = template(nested);
     let mut compiler = comptime_compiler::CompilationSession::default();
+    let too_deep = template(nir::copy_budget::MAX_COPY_DEPTH);
     let mut fuel = 100_000;
     assert!(
-        matches!(compiler.compile(&value, &mut fuel), Err(Error::Depth(source)) if source == value.source)
+        matches!(compiler.compile(&too_deep, &mut fuel), Err(Error::Depth(at)) if at == too_deep.source)
     );
     assert!(fuel > 0 && fuel < 100_000);
-    let small = template(expr(K::Unit));
-    compiler.compile(&small, &mut 100_000).unwrap();
+    // The lexical walk can cross its former recursive ceiling inside
+    // a template which still fits the independent owned-copy limit.
+    let value = template(130);
+    assert!(
+        matches!(compiler.compile(&value, &mut 50), Err(Error::Budget(at)) if at == value.source)
+    );
+    compiler.compile(&value, &mut 100_000).unwrap();
 }
 
 #[test]
