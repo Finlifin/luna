@@ -242,6 +242,27 @@ fn pending_type_inputs_do_not_hide_known_domain_conflicts_in_unused_code() {
 }
 
 #[test]
+fn pending_domains_share_one_substitution_across_the_entire_call() {
+    // Domain would fail at execution. Definition checking can already decide
+    // whether both operands could have the same type without running it.
+    let source = "
+        comptime fn Domain() -> Type { assumes false; u8 }
+        comptime fn consume() -> bool where T, first: T, second: T { true }
+        comptime fn unused(byte: u8) -> bool { consume<Domain(), true, byte>() }
+    ";
+    let failure = sysroot::compile(source).unwrap_err();
+    assert!(failure.contains("no common substitution"), "{failure}");
+    sysroot::compile(&source.replace("true, byte>", "byte, byte>")).unwrap();
+
+    // A second declaration slot gets its own identity, even for two uses of
+    // the same Type-producing function.
+    let independent = source
+        .replace("T, first: T, second: T", "T, U, first: T, second: U")
+        .replace("consume<Domain(),", "consume<Domain(), Domain(),");
+    sysroot::compile(&independent).unwrap();
+}
+
+#[test]
 fn known_value_indices_can_contradict_a_later_domain_before_type_delivery() {
     let source = "
         struct Ticket where T, flag: T {}

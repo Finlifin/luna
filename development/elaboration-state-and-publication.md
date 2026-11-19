@@ -609,7 +609,7 @@ PTC／candidate 记录所属前提；generator cell 与 VM slot 的实际内容�
 
 普通 callable 的形成有三个检查点。
 
-1. **定义检查。** 在本次证明内为待定输入分配符号。一个输入在不同位置共享同一个符号，多个符号与已有实参同时代入声明域。这样，即使主体从未执行，若已知 `A != B`，仍可拒绝向 `Pair<T, T>` 供应 `Pair<A, B>`。证明使用调用者的前提，查询结束后释放私有符号。预算耗尽或命题无效时，保留对应失败。[域检查](../compiler/elaboration/src/program/dynamic_instances/domain_checks.rs)
+1. **定义检查。** 在本次证明内为待定输入分配符号。一个输入在不同位置共享同一个符号，多个符号与已有实参同时代入声明域。待定域的类型等式在同一次查询中取合取。若两个实参分别为 `bool` 和 `u8`，而两个槽的域都是 `T`，单独看每个等式都有解，但两者没有共同解。即使函数从未调用，检查器也会拒绝该调用，并给出各相关实参的位置。把第二个槽的域改为独立的 `U` 后，同一对实参可以通过定义检查，实际域仍在执行时确认。证明使用调用者的前提，查询结束后释放私有符号。预算耗尽或命题无效时，保留对应失败。[域检查](../compiler/elaboration/src/program/dynamic_instances/domain_checks.rs)
 2. **输入执行。** 原调用负责取得每个值。先读可变局部再执行会写该局部的 Type 生产者，须保留读到的旧值。已定型的子句参数包能做到这一点。普通 callable 中，需要等待计算域才能定型的源码子表达式仍缺少交接；[顺序、快照和早退用例](../compiler/luna/tests/type_input_execution_order.rs)保留了这条路径的成功预期。
 3. **实例形成。** 输入齐备后检查实际域与形成条件。comptime callable 在 VM 中形成函数值；runtime callable 的 required 路径取得已执行参数包的值和受检类型，再完成代入与比较。若 callee 签名本身依赖尚在执行的 Type，仍需要将结果交还原检查帧。例如 `identity<Byte()>(9)` 应在 `Byte()` 完成后以实际类型检查 9，并让同一次执行取得的实参形成 callable。[实例形成](../compiler/elaboration/src/program/dynamic_instances.rs)
 

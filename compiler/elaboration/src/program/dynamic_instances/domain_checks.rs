@@ -86,28 +86,47 @@ impl Declaration {
         steps: &mut u64,
         span: Span,
     ) -> Result<(), Error> {
-        let mut proof = None;
+        let mut pending = Vec::new();
         for (operand, template) in operands.iter().zip(&self.domains) {
             if !bindings.awaits_input(template, steps, span)? {
                 let domain = bindings.instantiate(template, steps, span)?;
                 checker.require(&operand.ty, &domain, span)?;
-                continue;
+            } else if !is_never(&operand.ty) {
+                pending.push((operand, template));
             }
-            let proof = match &proof {
-                Some(proof) => proof,
-                None => proof
-                    .insert(self.proof_substitution(checker, bindings, formation, steps, span)?),
-            };
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        // A single execution supplies one substitution for the whole packet.
+        // Two individually possible domains can still require incompatible
+        // identities for the same input.
+        let proof = self.proof_substitution(checker, bindings, formation, steps, span)?;
+        let mut equalities = Vec::with_capacity(pending.len());
+        for (operand, template) in &pending {
             let expected =
                 nominal_fields::metered(steps, |fuel| proof.instantiate_bounded(template, fuel))
                     .map_err(|reason| error(span, reason.to_string()))?;
-            if disproves_equality(checker, &operand.ty, &expected, steps, span)? {
-                let domain = bindings.instantiate(template, steps, span)?;
-                return Err(error(
-                    span,
-                    format!("type mismatch: expected {domain}, found {}", operand.ty),
-                ));
+            let (actual, expected) =
+                checker.scoped_equality_operands(&operand.ty, &expected, span)?;
+            equalities.push(crate::ptc::Formula::equal(actual, expected));
+        }
+        if disproves_domains(checker, equalities, steps, span)? {
+            let mut failure = error(
+                span,
+                "type mismatch: no common substitution satisfies the clause input domains",
+            );
+            for (operand, template) in pending {
+                failure.notes.push(DiagnosticNote {
+                    source: operand.source,
+                    message: format!(
+                        "operand of type {} supplied for domain {template}",
+                        operand.ty
+                    ),
+                });
             }
+            return Err(failure);
         }
         Ok(())
     }
@@ -165,26 +184,21 @@ impl Declaration {
 
 /// A negative proof can reject a contradiction in an unused definition.
 /// All other admissible cases still need the completed VM domain check.
-fn disproves_equality(
+fn disproves_domains(
     checker: &Checker<'_, '_>,
-    actual: &Term,
-    expected: &Term,
+    equalities: Vec<crate::ptc::Formula>,
     steps: &mut u64,
     span: Span,
 ) -> Result<bool, Error> {
     use crate::ptc::{Budget, Formula, Outcome, UnknownReason};
-    if is_never(actual) {
-        return Ok(false);
-    }
-    let (actual, expected) = checker.scoped_equality_operands(actual, expected, span)?;
-    let mut budget = Budget::default();
-    let before = budget
-        .steps
-        .min(usize::try_from(*steps).unwrap_or(usize::MAX));
-    budget.steps = before;
+    let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+    let mut budget = Budget {
+        steps: before,
+        ..Budget::default()
+    };
     let outcome = checker
         .context
-        .prove_metered(Formula::equal(actual, expected).negate(), &mut budget);
+        .prove_metered(Formula::And(equalities).negate(), &mut budget);
     *steps -= (before - budget.steps) as u64;
     match outcome {
         Outcome::Entailed(_) => Ok(true),
