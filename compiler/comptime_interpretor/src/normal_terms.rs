@@ -2,6 +2,60 @@
 //! Contextual code and stateful representations never become ordinary terms.
 use super::*;
 
+/// Binder evidence available while converting live data to an immutable term.
+struct ExportScope<'a> {
+    type_parameters: &'a BTreeSet<DeclarationId>,
+    value_parameters: &'a BTreeMap<DeclarationId, Term>,
+    invocation: bool,
+}
+
+impl ExportScope<'_> {
+    fn inspect_type(
+        &self,
+        ty: &Term,
+        budget: &mut comptime_runtime::Budget,
+    ) -> Result<(), ErrorKind> {
+        if ty.sort() != nir::Sort::Type {
+            return Err(ErrorKind::Type);
+        }
+        self.inspect_term(ty, budget)
+    }
+
+    fn inspect_term(
+        &self,
+        term: &Term,
+        budget: &mut comptime_runtime::Budget,
+    ) -> Result<(), ErrorKind> {
+        type_descriptions::inspect(
+            term,
+            &[],
+            &BTreeMap::new(),
+            self.type_parameters,
+            self.value_parameters,
+            |_, _, _| Err("nominal layout unavailable during structural export".into()),
+            |_, _, _| Ok(None),
+            None,
+            &mut budget.steps,
+        )
+    }
+}
+
+/// Check completion and scope of an already domain-admitted immutable input.
+/// Type and value inputs retain their semantic sort. This checks representation,
+/// not the declaration's parameter domains or permission to invoke a callable.
+pub fn validate_snapshot_term(
+    term: &Term,
+    budget: &mut comptime_runtime::Budget,
+    parameters: &BTreeSet<DeclarationId>,
+) -> Result<(), ErrorKind> {
+    ExportScope {
+        type_parameters: parameters,
+        value_parameters: &BTreeMap::new(),
+        invocation: false,
+    }
+    .inspect_term(term, budget)
+}
+
 impl Value {
     pub(super) fn into_scoped_term(
         self,
@@ -113,15 +167,13 @@ impl Value {
         }
         // Keep unrelated scalar temporaries out of recursive aggregate frames.
         // The dispatch retains one shared depth boundary; each selected path
-        // charges exactly the same node and payload work as before.
+        // charges its node and payload work to the export budget.
         #[inline(never)]
         fn visit(
             value: &Value,
             depth: usize,
             budget: &mut comptime_runtime::Budget,
-            parameters: &BTreeSet<DeclarationId>,
-            value_parameters: &BTreeMap<DeclarationId, Term>,
-            invocation: bool,
+            scope: &ExportScope<'_>,
             holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             if depth > 128 {
@@ -139,86 +191,17 @@ impl Value {
                 });
             }
             match value {
-                Value::Object(_) => freeze_object(
-                    value,
-                    depth,
-                    budget,
-                    parameters,
-                    value_parameters,
-                    invocation,
-                    holes,
-                ),
-                Value::List { .. } => freeze_list(
-                    value,
-                    depth,
-                    budget,
-                    parameters,
-                    value_parameters,
-                    invocation,
-                    holes,
-                ),
-                Value::Optional { .. } => freeze_optional(
-                    value,
-                    depth,
-                    budget,
-                    parameters,
-                    value_parameters,
-                    invocation,
-                    holes,
-                ),
-                Value::ErrorResult { .. } => freeze_error(
-                    value,
-                    depth,
-                    budget,
-                    parameters,
-                    value_parameters,
-                    invocation,
-                    holes,
-                ),
-                Value::Newtype { .. } => freeze_newtype(
-                    value,
-                    depth,
-                    budget,
-                    parameters,
-                    value_parameters,
-                    invocation,
-                    holes,
-                ),
-                Value::Record { .. } | Value::Variant { .. } => freeze_nominal(
-                    value,
-                    depth,
-                    budget,
-                    parameters,
-                    value_parameters,
-                    invocation,
-                    holes,
-                ),
-                Value::AnonymousRecord(_) => freeze_record(
-                    value,
-                    depth,
-                    budget,
-                    parameters,
-                    value_parameters,
-                    invocation,
-                    holes,
-                ),
-                Value::Tuple(_) => freeze_tuple(
-                    value,
-                    depth,
-                    budget,
-                    parameters,
-                    value_parameters,
-                    invocation,
-                    holes,
-                ),
-                _ => visit_scalar(
-                    value,
-                    depth,
-                    budget,
-                    parameters,
-                    value_parameters,
-                    invocation,
-                ),
+                Value::Object(_) => freeze_object(value, depth, budget, scope, holes),
+                Value::List { .. } => freeze_list(value, depth, budget, scope, holes),
+                Value::Optional { .. } => freeze_optional(value, depth, budget, scope, holes),
+                Value::ErrorResult { .. } => freeze_error(value, depth, budget, scope, holes),
+                Value::Newtype { .. } => freeze_newtype(value, depth, budget, scope, holes),
+                Value::Record { .. } | Value::Variant { .. } => {
+                    freeze_nominal(value, depth, budget, scope, holes)
+                }
+                Value::AnonymousRecord(_) => freeze_record(value, depth, budget, scope, holes),
+                Value::Tuple(_) => freeze_tuple(value, depth, budget, scope, holes),
+                _ => visit_scalar(value, depth, budget, scope),
             }
         }
         #[inline(never)]
@@ -226,9 +209,7 @@ impl Value {
             value: &Value,
             depth: usize,
             budget: &mut comptime_runtime::Budget,
-            parameters: &BTreeSet<DeclarationId>,
-            value_parameters: &BTreeMap<DeclarationId, Term>,
-            invocation: bool,
+            scope: &ExportScope<'_>,
             holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
@@ -241,29 +222,9 @@ impl Value {
                             charge(budget, key.len())?;
                         }
                         let ObjectValue { ty, value } = entry.value();
-                        let work = if invocation {
-                            scoped_type_value_work_with_evidence(
-                                ty,
-                                &BTreeMap::new(),
-                                parameters,
-                                value_parameters,
-                                |_, _, _| None,
-                            )
-                        } else {
-                            scoped_type_value_work(ty, &BTreeMap::new(), parameters)
-                        }
-                        .ok_or(ErrorKind::Type)?;
-                        charge(budget, work)?;
+                        scope.inspect_type(ty, budget)?;
                         let domain = ty.clone();
-                        let value = visit(
-                            value,
-                            depth + 1,
-                            budget,
-                            parameters,
-                            value_parameters,
-                            invocation,
-                            holes,
-                        )?;
+                        let value = visit(value, depth + 1, budget, scope, holes)?;
                         entries.push(nir::objects::entry(entry.key(), domain, value));
                     }
                     nir::objects::value(entries)
@@ -277,9 +238,7 @@ impl Value {
             value: &Value,
             depth: usize,
             budget: &mut comptime_runtime::Budget,
-            parameters: &BTreeSet<DeclarationId>,
-            value_parameters: &BTreeMap<DeclarationId, Term>,
-            invocation: bool,
+            scope: &ExportScope<'_>,
             holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
@@ -298,34 +257,11 @@ impl Value {
                     {
                         return Err(ErrorKind::Type);
                     }
-                    let work = if invocation {
-                        scoped_type_value_work_with_evidence(
-                            ty,
-                            &BTreeMap::new(),
-                            parameters,
-                            value_parameters,
-                            |_, _, _| None,
-                        )
-                    } else {
-                        scoped_type_value_work(ty, &BTreeMap::new(), parameters)
-                    }
-                    .ok_or(ErrorKind::Type)?;
-                    charge(budget, work)?;
+                    scope.inspect_type(ty, budget)?;
                     charge(budget, values.len())?;
-                    ty.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
                     let fields = values
                         .iter()
-                        .map(|value| {
-                            visit(
-                                value,
-                                depth + 1,
-                                budget,
-                                parameters,
-                                value_parameters,
-                                invocation,
-                                holes,
-                            )
-                        })
+                        .map(|value| visit(value, depth + 1, budget, scope, holes))
                         .collect::<Result<Vec<_>, _>>()?;
                     nir::comptime_values::freeze_admitted_list(ty, fields, &mut budget.steps)
                         .map_err(|error| match error {
@@ -342,9 +278,7 @@ impl Value {
             value: &Value,
             depth: usize,
             budget: &mut comptime_runtime::Budget,
-            parameters: &BTreeSet<DeclarationId>,
-            value_parameters: &BTreeMap<DeclarationId, Term>,
-            invocation: bool,
+            scope: &ExportScope<'_>,
             holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
@@ -353,30 +287,13 @@ impl Value {
                     if !matches!(ty, Term::Optional(_)) {
                         return Err(ErrorKind::Type);
                     }
-                    let work = scoped_type_value_work_with_evidence(
-                        ty,
-                        &BTreeMap::new(),
-                        parameters,
-                        value_parameters,
-                        |_, _, _| None,
-                    )
-                    .ok_or(ErrorKind::Type)?;
-                    charge(budget, work)?;
+                    scope.inspect_type(ty, budget)?;
                     Term::OptionalValue {
                         ty: Box::new(ty.clone()),
                         value: value
                             .as_ref()
                             .map(|value| {
-                                visit(
-                                    value,
-                                    depth + 1,
-                                    budget,
-                                    parameters,
-                                    value_parameters,
-                                    invocation,
-                                    holes,
-                                )
-                                .map(Box::new)
+                                visit(value, depth + 1, budget, scope, holes).map(Box::new)
                             })
                             .transpose()?,
                     }
@@ -390,9 +307,7 @@ impl Value {
             value: &Value,
             depth: usize,
             budget: &mut comptime_runtime::Budget,
-            parameters: &BTreeSet<DeclarationId>,
-            value_parameters: &BTreeMap<DeclarationId, Term>,
-            invocation: bool,
+            scope: &ExportScope<'_>,
             holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
@@ -401,23 +316,10 @@ impl Value {
                     let Term::ErrorResult { errors, result: _ } = ty else {
                         return Err(ErrorKind::Type);
                     };
-                    let work = if invocation {
-                        scoped_type_value_work_with_evidence(
-                            ty,
-                            &BTreeMap::new(),
-                            parameters,
-                            value_parameters,
-                            |_, _, _| None,
-                        )
-                    } else {
-                        scoped_type_value_work(ty, &BTreeMap::new(), parameters)
-                    }
-                    .ok_or(ErrorKind::Type)?;
-                    charge(budget, work)?;
+                    scope.inspect_type(ty, budget)?;
                     if errors.is_empty() {
                         return Err(ErrorKind::Type);
                     }
-                    ty.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
                     let label = error
                         .map(|index| {
                             errors
@@ -430,25 +332,9 @@ impl Value {
                     let frozen = Term::ErrorValue {
                         ty: Box::new(ty.clone()),
                         label,
-                        value: Box::new(visit(
-                            value,
-                            depth + 1,
-                            budget,
-                            parameters,
-                            value_parameters,
-                            invocation,
-                            holes,
-                        )?),
+                        value: Box::new(visit(value, depth + 1, budget, scope, holes)?),
                     };
-                    let work = scoped_term_value_work_with_evidence(
-                        &frozen,
-                        &BTreeMap::new(),
-                        parameters,
-                        value_parameters,
-                        |_, _, _| None,
-                    )
-                    .ok_or(ErrorKind::Type)?;
-                    charge(budget, work)?;
+                    scope.inspect_term(&frozen, budget)?;
                     frozen
                 }
                 _ => unreachable!(),
@@ -460,9 +346,7 @@ impl Value {
             value: &Value,
             depth: usize,
             budget: &mut comptime_runtime::Budget,
-            parameters: &BTreeSet<DeclarationId>,
-            value_parameters: &BTreeMap<DeclarationId, Term>,
-            invocation: bool,
+            scope: &ExportScope<'_>,
             holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
@@ -471,31 +355,12 @@ impl Value {
                     if !matches!(ty, Term::Nominal { .. }) {
                         return Err(ErrorKind::Type);
                     }
-                    let work = if invocation {
-                        scoped_type_value_work_with_evidence(
-                            ty,
-                            &BTreeMap::new(),
-                            parameters,
-                            value_parameters,
-                            |_, _, _| None,
-                        )
-                    } else {
-                        scoped_type_value_work(ty, &BTreeMap::new(), parameters)
-                    }
-                    .ok_or(ErrorKind::Type)?;
-                    charge(budget, work.saturating_add(1))?;
+                    scope.inspect_type(ty, budget)?;
+                    charge(budget, 1)?;
                     Term::NominalValue {
                         ty: Box::new(ty.clone()),
                         variant: None,
-                        fields: vec![visit(
-                            value,
-                            depth + 1,
-                            budget,
-                            parameters,
-                            value_parameters,
-                            invocation,
-                            holes,
-                        )?],
+                        fields: vec![visit(value, depth + 1, budget, scope, holes)?],
                     }
                 }
                 _ => unreachable!(),
@@ -507,9 +372,7 @@ impl Value {
             value: &Value,
             depth: usize,
             budget: &mut comptime_runtime::Budget,
-            parameters: &BTreeSet<DeclarationId>,
-            value_parameters: &BTreeMap<DeclarationId, Term>,
-            invocation: bool,
+            scope: &ExportScope<'_>,
             holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
@@ -527,24 +390,7 @@ impl Value {
                 } => {
                     charge(budget, arguments.len().saturating_add(fields.len()))?;
                     for argument in arguments {
-                        let work = if invocation {
-                            scoped_term_value_work_with_evidence(
-                                argument,
-                                &BTreeMap::new(),
-                                parameters,
-                                value_parameters,
-                                |_, _, _| None,
-                            )
-                        } else {
-                            scoped_term_value_work_with_layouts(
-                                argument,
-                                &BTreeMap::new(),
-                                parameters,
-                                |_, _, _| None,
-                            )
-                        }
-                        .ok_or(ErrorKind::Type)?;
-                        charge(budget, work)?;
+                        scope.inspect_term(argument, budget)?;
                     }
                     let ty = Term::Nominal {
                         declaration: *declaration,
@@ -561,17 +407,7 @@ impl Value {
                         },
                         fields: fields
                             .iter()
-                            .map(|field| {
-                                visit(
-                                    field,
-                                    depth + 1,
-                                    budget,
-                                    parameters,
-                                    value_parameters,
-                                    invocation,
-                                    holes,
-                                )
-                            })
+                            .map(|field| visit(field, depth + 1, budget, scope, holes))
                             .collect::<Result<_, _>>()?,
                     }
                 }
@@ -584,9 +420,7 @@ impl Value {
             value: &Value,
             depth: usize,
             budget: &mut comptime_runtime::Budget,
-            parameters: &BTreeSet<DeclarationId>,
-            value_parameters: &BTreeMap<DeclarationId, Term>,
-            invocation: bool,
+            scope: &ExportScope<'_>,
             holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
@@ -601,18 +435,7 @@ impl Value {
                                 if !names.insert(name.clone()) {
                                     return Err(ErrorKind::Type);
                                 }
-                                Ok((
-                                    name.clone(),
-                                    visit(
-                                        value,
-                                        depth + 1,
-                                        budget,
-                                        parameters,
-                                        value_parameters,
-                                        invocation,
-                                        holes,
-                                    )?,
-                                ))
+                                Ok((name.clone(), visit(value, depth + 1, budget, scope, holes)?))
                             })
                             .collect::<Result<_, _>>()?,
                     )
@@ -626,9 +449,7 @@ impl Value {
             value: &Value,
             depth: usize,
             budget: &mut comptime_runtime::Budget,
-            parameters: &BTreeSet<DeclarationId>,
-            value_parameters: &BTreeMap<DeclarationId, Term>,
-            invocation: bool,
+            scope: &ExportScope<'_>,
             holes: &mut Option<&mut Vec<nir::program::DescriptionLiteral>>,
         ) -> Result<Term, ErrorKind> {
             charge(budget, 1)?;
@@ -636,17 +457,7 @@ impl Value {
                 Value::Tuple(values) => Term::TupleValue(
                     values
                         .iter()
-                        .map(|value| {
-                            visit(
-                                value,
-                                depth + 1,
-                                budget,
-                                parameters,
-                                value_parameters,
-                                invocation,
-                                holes,
-                            )
-                        })
+                        .map(|value| visit(value, depth + 1, budget, scope, holes))
                         .collect::<Result<_, _>>()?,
                 ),
                 _ => unreachable!(),
@@ -657,59 +468,25 @@ impl Value {
             value: &Value,
             depth: usize,
             budget: &mut comptime_runtime::Budget,
-            parameters: &BTreeSet<DeclarationId>,
-            value_parameters: &BTreeMap<DeclarationId, Term>,
-            invocation: bool,
+            scope: &ExportScope<'_>,
         ) -> Result<Term, ErrorKind> {
             if depth > 128 {
                 return Err(ErrorKind::DepthExhausted);
             }
-            let instance = match value {
-                Value::Function(declaration) => Some((*declaration, &[][..])),
-                _ => value.declaration_instance(),
-            };
-            {
-                if let Value::RuntimeTraitMethod(method) = value {
-                    budget.consume(1).map_err(|_| ErrorKind::StepsExhausted)?;
-                    for argument in method.terms() {
-                        nir::type_computations::charge_term(argument, &mut budget.steps)
-                            .map_err(|_| ErrorKind::StepsExhausted)?;
-                        argument.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
-                        let work = scoped_term_value_work_with_layouts(
-                            argument,
-                            &BTreeMap::new(),
-                            parameters,
-                            |_, _, _| None,
-                        )
-                        .ok_or(ErrorKind::Type)?;
-                        budget
-                            .consume(work)
-                            .map_err(|_| ErrorKind::StepsExhausted)?;
-                    }
-                    return Ok(Term::MethodValue(method.clone()));
+            if let Value::RuntimeTraitMethod(method) = value {
+                value.validate_callable_identity_snapshot(budget, scope.type_parameters)?;
+                return Ok(Term::MethodValue(method.clone()));
+            }
+            if scope.invocation {
+                if let Value::Function(declaration) = value {
+                    charge(budget, 1)?;
+                    return Ok(Term::FunctionValue {
+                        declaration: *declaration,
+                        arguments: vec![],
+                    });
                 }
-
-                if let Some((declaration, arguments)) = instance.filter(|_| invocation) {
-                    budget.consume(1).map_err(|_| ErrorKind::StepsExhausted)?;
-                    for argument in arguments {
-                        nir::type_computations::charge_term(argument, &mut budget.steps)
-                            .map_err(|_| ErrorKind::StepsExhausted)?;
-                        argument.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
-                        // A well-scoped value argument may still contain an
-                        // unresolved rigid/hole or pending list operation.
-                        // Frozen invocation identities must contain completed
-                        // arguments, regardless of their semantic sort.
-                        let work = scoped_term_value_work_with_layouts(
-                            argument,
-                            &BTreeMap::new(),
-                            parameters,
-                            |_, _, _| None,
-                        )
-                        .ok_or(ErrorKind::Type)?;
-                        budget
-                            .consume(work)
-                            .map_err(|_| ErrorKind::StepsExhausted)?;
-                    }
+                if let Some((declaration, arguments)) = value.declaration_instance() {
+                    value.validate_callable_identity_snapshot(budget, scope.type_parameters)?;
                     return Ok(Term::FunctionValue {
                         declaration,
                         arguments: arguments.to_vec(),
@@ -719,53 +496,30 @@ impl Value {
             charge(budget, 1)?;
             Ok(match value {
                 Value::AbstractValue { declaration, ty } => {
-                    if parameters.contains(declaration)
+                    if scope.type_parameters.contains(declaration)
                         || *ty == Term::Primitive(Primitive::Type)
-                        || value_parameters.get(declaration) != Some(ty)
+                        || scope.value_parameters.get(declaration) != Some(ty)
                     {
                         return Err(ErrorKind::AbstractValueUnresolved);
                     }
                     // The binder's domain can depend on earlier opaque
                     // values. Check its structural scope in the same prefix.
-                    if ty.sort() != nir::Sort::Type {
-                        return Err(ErrorKind::Type);
-                    }
-                    type_descriptions::inspect(
-                        ty,
-                        &[],
-                        &BTreeMap::new(),
-                        parameters,
-                        value_parameters,
-                        |_, _, _| Err("nominal layout unavailable during structural export".into()),
-                        |_, _, _| Ok(None),
-                        None,
-                        &mut budget.steps,
-                    )?;
+                    scope.inspect_type(ty, budget)?;
                     Term::Rigid {
                         declaration: *declaration,
                         sort: nir::Sort::ComptimeValue,
                     }
                 }
-                Value::TypeParameter(declaration) if parameters.contains(declaration) => {
+                Value::TypeParameter(declaration)
+                    if scope.type_parameters.contains(declaration) =>
+                {
                     Term::Rigid {
                         declaration: *declaration,
                         sort: nir::Sort::Type,
                     }
                 }
                 Value::Type(ty) => {
-                    let work = if invocation {
-                        scoped_type_value_work_with_evidence(
-                            ty,
-                            &BTreeMap::new(),
-                            parameters,
-                            value_parameters,
-                            |_, _, _| None,
-                        )
-                    } else {
-                        scoped_type_value_work(ty, &BTreeMap::new(), parameters)
-                    }
-                    .ok_or(ErrorKind::Type)?;
-                    charge(budget, work)?;
+                    scope.inspect_type(ty, budget)?;
                     ty.clone()
                 }
 
@@ -819,13 +573,20 @@ impl Value {
                 _ => return Err(ErrorKind::Unsupported),
             })
         }
+        let closed_values = BTreeMap::new();
         visit(
             self,
             0,
             budget,
-            parameters,
-            value_parameters,
-            invocation,
+            &ExportScope {
+                type_parameters: parameters,
+                value_parameters: if invocation {
+                    value_parameters
+                } else {
+                    &closed_values
+                },
+                invocation,
+            },
             &mut holes,
         )
     }

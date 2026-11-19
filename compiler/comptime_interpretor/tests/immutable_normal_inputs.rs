@@ -722,3 +722,65 @@ fn immutable_function_handles_recheck_formation_contracts() {
         assert!(vm.events().is_empty());
     }
 }
+
+#[test]
+fn snapshot_validation_and_callable_export_preserve_observation_failures() {
+    use std::collections::BTreeSet;
+    let types = BTreeSet::new();
+    let nested = |depth| (0..depth).fold(boolean(), |ty, _| Term::Optional(Box::new(ty)));
+    let check = |argument: &Term, steps| {
+        let mut budget = comptime_runtime::Budget {
+            steps,
+            ..Default::default()
+        };
+        let result = comptime_interpretor::validate_snapshot_term(argument, &mut budget, &types);
+        (result, budget.steps)
+    };
+    let freeze = |argument: Term, steps| {
+        let value = Value::FunctionInstance {
+            declaration: id(8),
+            arguments: vec![argument],
+        };
+        let mut budget = comptime_runtime::Budget {
+            steps,
+            ..Default::default()
+        };
+        let result = value.into_scoped_invocation_term(&mut budget, &types);
+        (result, budget.steps)
+    };
+    let valid = nested(8);
+    assert_eq!(check(&valid, 3), (Err(ErrorKind::StepsExhausted), 0));
+    assert_eq!(
+        freeze(valid.clone(), 4),
+        (Err(ErrorKind::StepsExhausted), 0)
+    );
+    let (checked, remaining) = check(&valid, 100);
+    checked.unwrap();
+    let (term, exported_remaining) = freeze(valid.clone(), 101);
+    assert_eq!(
+        term.unwrap(),
+        Term::FunctionValue {
+            declaration: id(8),
+            arguments: vec![valid]
+        }
+    );
+    assert_eq!(exported_remaining, remaining);
+    for (term, expected) in [
+        (nested(129), ErrorKind::DepthExhausted),
+        (
+            Term::String("x".repeat(100_001).into()),
+            ErrorKind::RepresentationSizeLimit,
+        ),
+        (
+            Term::Bound {
+                depth: 0,
+                index: 0,
+                sort: nir::Sort::Type,
+            },
+            ErrorKind::Type,
+        ),
+    ] {
+        assert_eq!(check(&term, 1_000_000).0.unwrap_err(), expected);
+        assert_eq!(freeze(term, 1_000_000).0.unwrap_err(), expected);
+    }
+}

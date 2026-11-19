@@ -140,22 +140,7 @@ pub enum InvocationValue {
     Live(Value),
 }
 
-/// Check completion and scope of an already domain-admitted immutable input.
-/// Type and value inputs retain their semantic sort. This checks representation,
-/// not the declaration's parameter domains or permission to invoke a callable.
-pub fn validate_snapshot_term(
-    term: &Term,
-    budget: &mut comptime_runtime::Budget,
-    parameters: &BTreeSet<DeclarationId>,
-) -> Result<(), ErrorKind> {
-    nir::type_computations::charge_term(term, &mut budget.steps)
-        .map_err(|_| ErrorKind::StepsExhausted)?;
-    term.check_scope(&[]).map_err(|_| ErrorKind::Type)?;
-    let work =
-        scoped_term_value_work_with_layouts(term, &BTreeMap::new(), parameters, |_, _, _| None)
-            .ok_or(ErrorKind::Type)?;
-    budget.consume(work).map_err(|_| ErrorKind::StepsExhausted)
-}
+pub use normal_terms::validate_snapshot_term;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -442,7 +427,6 @@ impl Value {
                     &BTreeMap::new(),
                     parameters,
                     value_parameters,
-                    |_, _, _| None,
                 )?,
                 Value::Float(value) => value
                     .digits()
@@ -463,7 +447,6 @@ impl Value {
                             &BTreeMap::new(),
                             parameters,
                             value_parameters,
-                            |_, _, _| None,
                         )?)?;
                         (total <= 100_000).then_some(total)
                     })?
@@ -479,7 +462,6 @@ impl Value {
                             &BTreeMap::new(),
                             parameters,
                             value_parameters,
-                            |_, _, _| None,
                         )?)?;
                         if total > 100_000 {
                             return None;
@@ -506,7 +488,6 @@ impl Value {
                             &BTreeMap::new(),
                             parameters,
                             value_parameters,
-                            |_, _, _| None,
                         )?;
                         let total = n
                             .checked_add(entry.key().map_or(0, str::len))?
@@ -525,7 +506,6 @@ impl Value {
                         &BTreeMap::new(),
                         parameters,
                         value_parameters,
-                        |_, _, _| None,
                     )?;
                     for argument in handle.key.arguments.iter() {
                         total = total.checked_add(scoped_term_value_work_with_evidence(
@@ -533,7 +513,6 @@ impl Value {
                             &BTreeMap::new(),
                             parameters,
                             value_parameters,
-                            |_, _, _| None,
                         )?)?;
                         if total > 100_000 {
                             return None;
@@ -696,34 +675,20 @@ impl Value {
         budget: &mut comptime_runtime::Budget,
         parameters: &BTreeSet<DeclarationId>,
     ) -> Result<(), ErrorKind> {
-        let terms: Vec<&Term> = match self {
-            Self::IirCallable(_) | Self::FunctionInstance { .. } => {
-                let (_, arguments) = self.declaration_instance().unwrap();
-                budget
-                    .consume(arguments.len().saturating_add(1))
-                    .map_err(|_| ErrorKind::StepsExhausted)?;
-                arguments.iter().collect()
-            }
+        match self {
             Self::RuntimeTraitMethod(identity) => {
-                budget
-                    .consume(
-                        identity
-                            .interface
-                            .arguments
-                            .len()
-                            .saturating_add(identity.method_arguments.len())
-                            .saturating_add(2),
-                    )
-                    .map_err(|_| ErrorKind::StepsExhausted)?;
-                std::iter::once(&identity.subject)
-                    .chain(identity.interface.arguments.iter())
-                    .chain(identity.method_arguments.iter())
-                    .collect()
+                budget.consume(1).map_err(|_| ErrorKind::StepsExhausted)?;
+                for term in identity.terms() {
+                    validate_snapshot_term(term, budget, parameters)?;
+                }
             }
-            _ => return Err(ErrorKind::Type),
-        };
-        for term in terms {
-            validate_snapshot_term(term, budget, parameters)?;
+            _ => {
+                let (_, arguments) = self.declaration_instance().ok_or(ErrorKind::Type)?;
+                budget.consume(1).map_err(|_| ErrorKind::StepsExhausted)?;
+                for term in arguments {
+                    validate_snapshot_term(term, budget, parameters)?;
+                }
+            }
         }
         Ok(())
     }
@@ -5509,58 +5474,24 @@ fn type_value_work(ty: &Term, heads: &impl declaration_index::HeadLookup) -> Opt
 }
 
 // Rigid Type inputs are descriptions, never permission to inspect their layout.
+#[cfg(test)]
 fn scoped_type_value_work(
     ty: &Term,
     heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
 ) -> Option<usize> {
-    scoped_type_value_work_with_layouts(ty, heads, parameters, |_, _, _| None)
+    scoped_type_value_work_with_evidence(ty, heads, parameters, &BTreeMap::new())
 }
-fn scoped_type_value_work_with_layouts(
-    ty: &Term,
-    heads: &impl declaration_index::HeadLookup,
-    parameters: &BTreeSet<DeclarationId>,
-    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
-) -> Option<usize> {
-    scoped_type_value_work_with_evidence(ty, heads, parameters, &BTreeMap::new(), nominal_fields)
-}
-
 fn scoped_type_value_work_with_evidence(
     ty: &Term,
     heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
-    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
-) -> Option<usize> {
-    scoped_type_value_work_with_evidence_in(
-        ty,
-        heads,
-        parameters,
-        value_parameters,
-        nominal_fields,
-        None,
-    )
-}
-
-fn scoped_type_value_work_with_evidence_in(
-    ty: &Term,
-    heads: &impl declaration_index::HeadLookup,
-    parameters: &BTreeSet<DeclarationId>,
-    value_parameters: &BTreeMap<DeclarationId, Term>,
-    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
-    target: Option<nir::target::TargetData>,
 ) -> Option<usize> {
     if ty.sort() != nir::Sort::Type {
         return None;
     }
-    scoped_term_value_work_with_evidence_in(
-        ty,
-        heads,
-        parameters,
-        value_parameters,
-        nominal_fields,
-        target,
-    )
+    scoped_term_value_work_with_evidence(ty, heads, parameters, value_parameters)
 }
 
 // Instance identities contain completed value arguments as well as types.
@@ -5570,16 +5501,7 @@ fn instance_argument_work(
     argument: &Term,
     heads: &impl declaration_index::HeadLookup,
 ) -> Option<usize> {
-    scoped_term_value_work_with_layouts(argument, heads, &BTreeSet::new(), |_, _, _| None)
-}
-
-fn scoped_term_value_work_with_layouts(
-    ty: &Term,
-    heads: &impl declaration_index::HeadLookup,
-    parameters: &BTreeSet<DeclarationId>,
-    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
-) -> Option<usize> {
-    scoped_term_value_work_with_evidence(ty, heads, parameters, &BTreeMap::new(), nominal_fields)
+    scoped_term_value_work_with_evidence(argument, heads, &BTreeSet::new(), &BTreeMap::new())
 }
 
 fn scoped_term_value_work_with_evidence(
@@ -5587,28 +5509,8 @@ fn scoped_term_value_work_with_evidence(
     heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
-    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
 ) -> Option<usize> {
-    scoped_term_value_work_with_evidence_in(
-        ty,
-        heads,
-        parameters,
-        value_parameters,
-        nominal_fields,
-        None,
-    )
-}
-
-fn scoped_term_value_work_with_evidence_in(
-    ty: &Term,
-    heads: &impl declaration_index::HeadLookup,
-    parameters: &BTreeSet<DeclarationId>,
-    value_parameters: &BTreeMap<DeclarationId, Term>,
-    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
-    target: Option<nir::target::TargetData>,
-) -> Option<usize> {
-    // Compatibility for callers that still request an optional work estimate.
-    // Only this adapter interprets the legacy optional-query fuel sentinel.
+    // Representation estimates count expanded work within the value-size limit.
     let mut fuel = 100_000;
     type_descriptions::inspect(
         ty,
@@ -5616,19 +5518,9 @@ fn scoped_term_value_work_with_evidence_in(
         heads,
         parameters,
         value_parameters,
-        |ty, variant, fuel| {
-            nominal_fields(ty, variant, fuel).ok_or_else(|| {
-                if *fuel == 0 {
-                    nir::NominalAdmissionError::Budget
-                } else {
-                    nir::NominalAdmissionError::Invalid(
-                        "nominal representation evidence unavailable".into(),
-                    )
-                }
-            })
-        },
+        |_, _, _| Err("nominal layout unavailable during structural inspection".into()),
         |_, _, _| Ok(None),
-        target,
+        None,
         &mut fuel,
     )
     .ok()?;

@@ -95,6 +95,10 @@ comptime 方法的 `self` 使用值引用。VM 在当前会话内保存 owner、
 
 Comptime 调用、缓存键协议和 Type 计算均无需 runtime 指针 Copy 或 Drop 授权。runtime 参考执行仍负责指针权限。一个 comptime Type 可描述 runtime 指针，quoted code 也可包含合法的 runtime 指针操作。[阶段与资源权限的公开用例](../compiler/luna/tests/comptime_resource_independence.rs)
 
+冻结为 normal term 时，导出器在同一份预算下检查每个嵌套域及其 binder。预算在检查中途用尽会保留已花费的步数。超出表示尺寸、超过嵌套深度、引用不可见 binder 各有独立结果；增加预算只解决步数不足。捕获快照和冻结函数身份使用同一个实参检查入口，重建后的调用权限仍由接收 VM 判定。[结构导出](../compiler/comptime_interpretor/src/normal_terms.rs) · [快照边界用例](../compiler/comptime_interpretor/tests/immutable_normal_inputs.rs)
+
+接收宿主不可变值和列表拼接还会先调用 `scoped_representation_work`，取得两个数：展开后的表示大小、实际检查成本。当前它用 `Option` 表示失败，前一个入口将失败映射为类型错误，后一个映射为表示过大。后续迁移需要保留列表摘要对实际检查成本的节省，同时让尺寸、预算与证据不足分别传回调用方。[宿主输入](../compiler/comptime_interpretor/src/admission.rs) · [列表拼接](../compiler/comptime_interpretor/src/list_operations.rs)
+
 稳定快照的设计需要表达图中的共享。相同闭包出现在两个字段里，恢复后仍是同一闭包；两个环境内容相同的独立闭包则保留各自身份。当前局部常量路径可从已求值的捕获构造恢复函数。一般跨世界恢复还需私下重绑定声明、分配节点、检查域与捕获、连接边，最后才发布根。遍历时能识别环只解决终止问题，环的归属、逃逸与回收仍须有依据。包解码也没有执行任意用户工厂的权限。[局部常量重建](../compiler/elaboration/src/program/constants.rs) · [捕获图检查](../compiler/comptime_interpretor/src/comptime_graph.rs) · [包传输格式](build-input-protocol.md)
 
 公开库的可观察行为也约束快照实现。向同一列表追加自身时，追加的输入应来自该次操作取得的序列。遍历过程中回调更新原容器，后续遍历仍须遵守本次取得的遍历范围。元素 Eq 的短路和 Hash 的调用次数也不能因更换内部存储而改变。[List](../library/meta/data/list.fl) · [列表 Eq](../library/meta/data/list_equality.fl) · [列表 Hash](../library/meta/data/list_hashing.fl)

@@ -48,7 +48,7 @@ fn unresolved_associated_types_are_not_completed_comptime_type_values() {
     for ty in [projection.clone(), Term::Pointer(Box::new(projection))] {
         assert_eq!(
             Value::Type(ty).into_normal_term(&mut Budget::default()),
-            Err(ErrorKind::Type)
+            Err(ErrorKind::UnmaterializedDispatch)
         );
     }
 }
@@ -506,7 +506,7 @@ fn rejected_embedded_types_are_released_on_a_two_mebibyte_stack() {
                 };
                 assert_eq!(
                     value.into_normal_term(&mut Budget::default()),
-                    Err(ErrorKind::Type)
+                    Err(ErrorKind::DepthExhausted)
                 );
                 assert_eq!(
                     Value::Bool(true).into_normal_term(&mut Budget::default()),
