@@ -23,7 +23,6 @@ pub(super) struct Frame<'b, 'h> {
     defaults: Option<environment::Environment>,
     checking: InputChecking,
     routed: Vec<Option<RoutedDeclarationInput<'b, 'h>>>,
-    bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
     progress: progress::Progress,
     preparations: Vec<n::NormalFormPreparation>,
     collection: Option<collections::Frame<'b, 'h>>,
@@ -42,7 +41,6 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         defaults: Option<environment::Environment>,
         checking: InputChecking,
         routed: Vec<Option<RoutedDeclarationInput<'b, 'h>>>,
-        bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
         progress: progress::Progress,
         collection: collections::Frame<'b, 'h>,
     ) -> Self {
@@ -52,7 +50,6 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             defaults,
             checking,
             routed,
-            bindings,
             progress,
             preparations: Vec::new(),
             collection: Some(collection),
@@ -155,24 +152,27 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                     "normal-form variadic collector requires meta.List<T>",
                 ));
             }
-            let identity =
-                checker.checked_collected_list_in(&[], &ty, &self.bindings, self.span)?;
-            checker
-                .locals
-                .insert(self.progress.binding(slot), ty.clone());
+            let identity = checker.checked_collected_list_in(
+                &[],
+                &ty,
+                &self.progress.known_bindings,
+                self.span,
+            )?;
             self.progress.record(
                 slot,
                 n::NormalFormArgument::Value(n::Expr {
                     source: source(self.span),
-                    ty,
+                    ty: ty.clone(),
                     kind: K::TypeList(Vec::new()),
                 }),
+                ty,
                 identity,
                 &mut checker.required_steps,
                 self.span,
             )?;
             return Ok(Poll::Continue);
         }
+        let contextual = !domain.pending.is_empty() && self.checking == InputChecking::Contextual;
         let explicit = self.routed[slot].take();
         let provider = self.interface.default(slot);
         let declaration_default = explicit.is_none()
@@ -187,7 +187,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 let provider = provider
                     .ok_or_else(|| error(self.span, "normal-form argument count mismatch"))?;
                 self.default_scope = Some(scope::Scope::enter(checker, self.span)?);
-                Some(self.enter_default(checker, slot, provider)?)
+                Some(self.enter_default(checker, slot, provider, !contextual)?)
             }
         };
         if explicit.is_none() {
@@ -239,17 +239,9 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             self.accept(checker, value)?;
             return Ok(Poll::Continue);
         }
-        let contextual = !domain.pending.is_empty() && self.checking == InputChecking::Contextual;
         let expected = (domain.pending.is_empty())
             .then(|| checker.copy_alias_type(&domain.ty, self.span))
             .transpose()?;
-        if !contextual {
-            self.observations = Some(constants::PreparedObservations::enter(
-                checker,
-                &self.bindings,
-                self.span,
-            )?);
-        }
         let input = input.expect("source or declaration default");
         Ok(Poll::Child(if contextual {
             Request::contextual(input)
@@ -292,49 +284,56 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
     }
 
     fn enter_default(
-        &self,
+        &mut self,
         checker: &mut Checker<'_, '_>,
         slot: usize,
         provider: interface::DefaultSource<'h>,
+        observe: bool,
     ) -> Result<&'h Expr<'h>, Error> {
         self.progress.require_default_prefix(slot, self.span)?;
         if let Some(defaults) = &self.defaults {
             defaults.install(checker);
         }
-        // Only preceding declaration inputs enter a default. Their observations
-        // never replace the executable producers retained in source order.
+        // The provider can name preceding slots. Explicit source operands live
+        // in the caller and receive only their instantiated expected domain.
+        let mut observations = BTreeMap::new();
+        environment::charge(&mut checker.required_steps, slot, self.span)?;
         for previous in 0..slot {
             let parameter = self.progress.telescope.parameters[previous].0;
+            let binding = self.progress.binding(previous);
+            let domain = self.progress.prepared_domain(previous);
+            let known = self.progress.known_bindings.get(&binding);
             checker.alias_substitution.remove(&parameter);
             checker.alias_value_bindings.remove(&parameter);
             checker.normal_default_bindings.remove(&parameter);
-            if checker.locals[&self.progress.binding(previous)] == p(P::Type) {
-                if let Some(ty) = self.progress.identity(previous) {
-                    let ty = checker.copy_alias_type(ty, self.span)?;
-                    checker
-                        .alias_substitution
-                        .insert(parameter, std::sync::Arc::new(ty));
-                } else {
-                    checker
-                        .alias_value_bindings
-                        .insert(parameter, self.progress.binding(previous));
+            if let Some(value) = known {
+                checker.alias_substitution.insert(parameter, value.clone());
+            }
+            checker.locals.insert(
+                binding,
+                environment::copy_term(domain, &mut checker.required_steps, self.span)?,
+            );
+            if *domain == p(P::Type) {
+                if known.is_none() {
+                    checker.alias_value_bindings.insert(parameter, binding);
                 }
             } else {
-                if let Some(value) = self.progress.identity(previous) {
-                    let value = checker.copy_alias_type(value, self.span)?;
-                    checker
-                        .alias_substitution
-                        .insert(parameter, std::sync::Arc::new(value));
-                }
-                let domain = environment::copy_term(
-                    &checker.locals[&self.progress.binding(previous)],
-                    &mut checker.required_steps,
-                    self.span,
-                )?;
+                let domain =
+                    environment::copy_term(domain, &mut checker.required_steps, self.span)?;
                 checker
                     .normal_default_bindings
-                    .insert(parameter, (self.progress.binding(previous), domain));
+                    .insert(parameter, (binding, domain));
+                if observe && let Some(value) = known {
+                    observations.insert(binding, value.clone());
+                }
             }
+        }
+        if !observations.is_empty() {
+            self.observations = Some(constants::PreparedObservations::enter(
+                checker,
+                &observations,
+                self.span,
+            )?);
         }
         checker.signature_owner = Some(provider.owner);
         checker.context = checker.binder_context(provider.owner);
@@ -369,14 +368,14 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                 checker.checked_collected_list_in(
                     items,
                     &pending.domain.ty,
-                    &self.bindings,
+                    &self.progress.known_bindings,
                     self.span,
                 )?
             }
             _ => match value.expression() {
                 Some(value) => checker.preserved_input_identity(
                     value,
-                    |id, _| Ok(self.bindings.get(&id).cloned()),
+                    |id, _| Ok(self.progress.known_bindings.get(&id).cloned()),
                     self.span,
                 )?,
                 None => None,
@@ -389,17 +388,12 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             pending.domain.pending.is_empty()
                 || observed.sort() == Sort::of_comptime_domain(&pending.domain.ty)
         });
-        let ty = value
-            .expression()
-            .map(|expr| expr.ty.clone())
-            .unwrap_or(pending.domain.ty);
-        checker.record_declaration_input(
-            &mut self.progress,
+        self.progress.record(
             slot,
             value,
+            pending.domain.ty,
             identity,
-            ty,
-            &mut self.bindings,
+            &mut checker.required_steps,
             self.span,
         )
     }
@@ -424,7 +418,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         if self.pending.is_some() {
             self.accept(checker, result)
         } else if let Some(collection) = &mut self.collection {
-            collection.accept(checker, &mut self.bindings, result)
+            collection.accept(checker, &mut self.progress.known_bindings, result)
         } else {
             self.accept(checker, result)
         }
@@ -497,7 +491,7 @@ impl std::fmt::Display for Frame<'_, '_> {
             }
         }
         f.write_str(") (bindings")?;
-        for (binding, value) in &self.bindings {
+        for (binding, value) in &self.progress.known_bindings {
             write!(f, " (binding {binding} {value})")?;
         }
         f.write_str(") (preparations")?;
@@ -539,6 +533,7 @@ mod tests {
         let progress = progress::Progress::new(
             domain::Telescope::new(parameters.into(), &mut 100, span).unwrap(),
             vec![binding],
+            BTreeMap::new(),
             vec![0],
             KnownInputs::default(),
             vec![],
@@ -552,7 +547,6 @@ mod tests {
             None,
             InputChecking::Typed,
             vec![None],
-            BTreeMap::new(),
             progress,
             collections::Frame::new(span, InputChecking::Typed, None, 0, vec![], vec![]),
         );

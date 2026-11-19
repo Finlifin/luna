@@ -142,13 +142,17 @@ fn repeated_fixed_spreads_compile_once_but_read_the_current_iteration() {
     );
 }
 
+fn bool_clauses(width: usize) -> String {
+    (0..width)
+        .map(|index| format!("v{index}: bool"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[test]
 fn a_wide_callable_checks_independent_clause_domains_in_the_real_sysroot() {
     const WIDTH: usize = 720;
-    let parameters = (0..WIDTH)
-        .map(|index| format!("v{index}: bool"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let parameters = bool_clauses(WIDTH);
     let arguments = (0..WIDTH)
         .map(|index| if index + 1 == WIDTH { "false" } else { "true" })
         .collect::<Vec<_>>()
@@ -157,6 +161,28 @@ fn a_wide_callable_checks_independent_clause_domains_in_the_real_sysroot() {
     let source = format!(
         "comptime fn pick() -> bool where {parameters} {{ v0 and not v{last} }}
          comptime fn check() -> bool {{ pick<{arguments}>() }}"
+    );
+    assert_eq!(
+        sysroot::invoke(&source, "check").unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn wide_call_operands_keep_the_caller_and_default_provider_scopes() {
+    const WIDTH: usize = 1000;
+    let parameters = bool_clauses(WIDTH);
+    let arguments = std::iter::once("flag")
+        .chain(std::iter::repeat_n("true", WIDTH - 2))
+        .chain(std::iter::once("false"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let last = WIDTH - 1;
+    let source = format!(
+        "comptime fn pick() -> bool where {parameters}, .mirror: bool = v0
+         {{ mirror and not v{last} }}
+         comptime fn forward() -> bool where flag: bool {{ pick<{arguments}>() }}
+         comptime fn check() -> bool {{ forward<true>() and not forward<false>() }}"
     );
     assert_eq!(
         sysroot::invoke(&source, "check").unwrap(),

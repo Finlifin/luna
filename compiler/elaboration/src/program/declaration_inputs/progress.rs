@@ -4,7 +4,7 @@ use super::*;
 
 struct Prepared {
     producer: n::NormalFormArgument,
-    observation: Option<Term>,
+    expected_domain: Term,
 }
 
 struct Slot {
@@ -15,6 +15,7 @@ struct Slot {
 pub(super) struct Progress {
     pub(super) telescope: domain::Telescope,
     slots: Vec<Slot>,
+    pub(super) known_bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
     schedule: Vec<usize>,
     source_prefix: usize,
     declaration_prefix: usize,
@@ -27,6 +28,7 @@ impl Progress {
     pub fn new(
         telescope: domain::Telescope,
         bindings: Vec<n::LocalId>,
+        known_bindings: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
         mut explicit: Vec<usize>,
         known: KnownInputs,
         caller_frames: Vec<Vec<Sort>>,
@@ -73,6 +75,7 @@ impl Progress {
                     prepared: None,
                 })
                 .collect(),
+            known_bindings,
             schedule: explicit,
             source_prefix: 0,
             declaration_prefix: 0,
@@ -191,16 +194,27 @@ impl Progress {
         self.slots[slot].prepared.is_some()
     }
     pub fn identity(&self, slot: usize) -> Option<&Term> {
-        self.slots[slot]
+        self.known_bindings
+            .get(&self.binding(slot))
+            .map(AsRef::as_ref)
+    }
+
+    pub(super) fn prepared_domain(&self, slot: usize) -> &Term {
+        let input = self.slots[slot]
             .prepared
             .as_ref()
-            .and_then(|value| value.observation.as_ref())
+            .expect("checked default prefix");
+        input
+            .producer
+            .expression()
+            .map_or(&input.expected_domain, |value| &value.ty)
     }
 
     pub fn record(
         &mut self,
         slot: usize,
         producer: n::NormalFormArgument,
+        expected_domain: Term,
         identity: Option<Term>,
         fuel: &mut u64,
         span: Span,
@@ -226,9 +240,13 @@ impl Progress {
                 )
             })?;
         }
+        if let Some(identity) = identity {
+            self.known_bindings
+                .insert(input.binding, std::sync::Arc::new(identity));
+        }
         self.slots[slot].prepared = Some(Prepared {
             producer,
-            observation: identity,
+            expected_domain,
         });
         self.checked_order.push(slot);
         while self.declaration_prefix < self.slots.len()
@@ -243,7 +261,7 @@ impl Progress {
     }
 
     pub fn finish(
-        self,
+        mut self,
         preparations: Vec<n::NormalFormPreparation>,
         fuel: &mut u64,
         span: Span,
@@ -265,7 +283,15 @@ impl Progress {
                 declaration: *declaration,
                 sort: *sort,
             };
-            slots.push((binder, prepared.observation));
+            let identity = self
+                .known_bindings
+                .remove(&slot.binding)
+                .map(|known| {
+                    std::sync::Arc::try_unwrap(known)
+                        .or_else(|shared| environment::copy_term(&shared, fuel, span))
+                })
+                .transpose()?;
+            slots.push((binder, identity));
         }
         let telescope = PreparedTelescope {
             captured: self.captured,
@@ -320,7 +346,11 @@ impl std::fmt::Display for Progress {
                 slot.binding
             )?;
             if let Some(prepared) = &slot.prepared {
-                write!(f, " (producer {}) (identity", prepared.producer)?;
+                write!(
+                    f,
+                    " (producer {}) (expected {}) (identity",
+                    prepared.producer, prepared.expected_domain
+                )?;
                 match self.identity(index) {
                     Some(value) => write!(f, " {value}")?,
                     None => f.write_str(" pending")?,
@@ -376,6 +406,7 @@ mod tests {
             let mut progress = Progress::new(
                 domain::Telescope::new(parameters, &mut fuel, span).unwrap(),
                 bindings,
+                BTreeMap::new(),
                 vec![],
                 KnownInputs::default(),
                 vec![],
@@ -398,6 +429,7 @@ mod tests {
                     .record(
                         slot,
                         n::NormalFormArgument::Value(expr),
+                        p(P::Type),
                         Some(ty),
                         &mut fuel,
                         span,
@@ -437,6 +469,7 @@ mod tests {
         let mut progress = Progress::new(
             domain::Telescope::new(parameters.to_vec(), &mut 100, span).unwrap(),
             bindings.clone(),
+            BTreeMap::new(),
             vec![2, 0],
             prefix,
             vec![],
@@ -448,7 +481,7 @@ mod tests {
         let pending = progress.to_string();
         assert!(
             progress
-                .record(3, producer("wrong"), None, &mut 100, span)
+                .record(3, producer("wrong"), p(P::Str), None, &mut 100, span)
                 .is_err()
         );
         assert_eq!(progress.to_string(), pending);
@@ -459,6 +492,7 @@ mod tests {
             .record(
                 0,
                 producer("producer-needs-invocation"),
+                p(P::Str),
                 None,
                 &mut 100,
                 span,
@@ -468,7 +502,7 @@ mod tests {
         let pending = progress.to_string();
         assert!(
             progress
-                .record(0, producer("duplicate"), None, &mut 100, span)
+                .record(0, producer("duplicate"), p(P::Str), None, &mut 100, span)
                 .is_err()
         );
         assert_eq!(progress.to_string(), pending);
@@ -478,6 +512,7 @@ mod tests {
                 .record(
                     2,
                     producer("interrupted"),
+                    p(P::Str),
                     Some(identity.clone()),
                     &mut 1,
                     span
@@ -490,6 +525,7 @@ mod tests {
             .record(
                 2,
                 producer("quote\"\n"),
+                p(P::Str),
                 Some(identity.clone()),
                 &mut 100,
                 span,
@@ -499,7 +535,7 @@ mod tests {
         assert_eq!(progress.observed(parameters[2].0).unwrap().1, &identity);
         assert_eq!(progress.current(), Some(1));
         progress
-            .record(1, producer("default"), None, &mut 100, span)
+            .record(1, producer("default"), p(P::Str), None, &mut 100, span)
             .unwrap();
         assert_eq!(progress.current(), None);
         let dump = progress.to_string();
@@ -558,6 +594,7 @@ mod tests {
         let mut progress = Progress::new(
             domain::Telescope::new(parameters, &mut fuel, span).unwrap(),
             bindings,
+            BTreeMap::new(),
             vec![1, 0],
             KnownInputs::default(),
             vec![],
@@ -573,7 +610,14 @@ mod tests {
             kind: K::Local(n::LocalId { owner: 9, index: 0 }),
         };
         progress
-            .record(0, n::NormalFormArgument::Value(read), None, &mut fuel, span)
+            .record(
+                0,
+                n::NormalFormArgument::Value(read),
+                p(P::Type),
+                None,
+                &mut fuel,
+                span,
+            )
             .unwrap();
         assert!(!progress.may_need_preparation(1));
         assert_eq!(
@@ -592,6 +636,7 @@ mod tests {
                 Progress::new(
                     domain::Telescope::new(parameters.to_vec(), &mut 100, span).unwrap(),
                     bindings.clone(),
+                    BTreeMap::new(),
                     order,
                     KnownInputs::default(),
                     vec![],
@@ -605,6 +650,7 @@ mod tests {
             Progress::new(
                 domain::Telescope::new(parameters.to_vec(), &mut 100, span).unwrap(),
                 bindings.clone(),
+                BTreeMap::new(),
                 vec![2, 0],
                 KnownInputs::default(),
                 vec![],
@@ -616,6 +662,7 @@ mod tests {
         let progress = Progress::new(
             domain::Telescope::new(parameters.to_vec(), &mut 100, span).unwrap(),
             bindings,
+            BTreeMap::new(),
             vec![2, 0],
             KnownInputs::default(),
             vec![],

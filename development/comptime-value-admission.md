@@ -55,6 +55,13 @@ comptime fn check() -> bool {
 
 执行计划里，`order[position]` 指向声明槽位，展开生产者的 `before` 指向源码求值位置。两个生产者可以位于同一位置；即使最后一次展开贡献零个值，它也可能产生副作用。普通 callable 的子句降码、NIR 捕获分析和程序验证按这个次序交替处理生产者和槽位。对外部 NIR 的检查还要确认每个槽恰好出现一次、局部绑定互异、展开位置单调且没有越界。在 VM 中，这批局部变量必须与调用者的活动变量分开。调用取得绑定清单后一直持有到完成或取消，执行别名主体时也保留它。字节码的环境捕获包括可能与计划绑定发生冲突的调用者位置。[输入顺序](../compiler/nir/src/program/input_schedule.rs) · [调用内的作用域](../compiler/comptime_interpretor/src/input_collection.rs) · [含空展开和默认值的调用用例](../compiler/luna/tests/clause_packet_preparation.rs)
 
+显式实参的源码在调用者词法环境中检查。例如 `forward` 声明了子句参数 `flag: bool`，
+在主体里调用 `pick<flag, true, false>()`，首个实参读的是本次 `forward` 的 `flag`。
+检查后续两个字面量时，只需给它们各自的期望域。子句准备帧按临时绑定身份保存已观察的值，
+供依赖域、展开和已连接的默认代码读取。若 `pick` 另有默认子句 `.mirror: bool = v0`，
+检查默认源码才进入提供者的环境，绑定声明中排在它前面的槽位。运行时序始终由原有生产者
+和执行计划决定。[槽位检查](../compiler/elaboration/src/program/declaration_inputs/slots.rs) · [调用者与默认值回归](../compiler/luna/tests/contextual_input_costs.rs)
+
 递归调用还要区分同一声明的两次绑定。设内层调用传入 `A = 外层 B`、`B = bool`、`T = u8`。一个域为 `Tuple<A, T>` 的槽只等本次调用的 A 和 T。若它们已经交付，该槽可以立即供后续实参读取，即使内层 B 尚未求值。若 T 较晚才到，VM 保存已读字段和所选分支；A、T 都就绪后，从原始标注同时代入，得到 `Tuple<外层 B, u8>`。在先前代入过的标注上再做一遍替换，会错误地把首字段改成 bool。NF 与名义构造、别名检查共用这套等待和恢复规则，各自执行声明的最终准入检查。[VM 输入帧](../compiler/comptime_interpretor/src/input_collection.rs) · [同编号绑定回归用例](../compiler/comptime_interpretor/src/input_collection/tests.rs)
 
 收到完整参数包后，NIR 用声明身份建立槽位索引。每个原始域只登记一次它引用的本次调用槽位。某个值通过接收检查后，只更新依赖这个槽位的消费者。就绪槽沿声明顺序检查，本轮已越过的位置留给下一轮。newtype 从尾部的第一个捕获槽开始，检查完成后仍按原声明顺序解释类型身份。若就绪槽耗尽而仍有未完成的依赖，才报告域依赖成环。[参数准入与调度](../compiler/nir/src/nominal_parameters/telescope.rs) · [前向依赖和捕获顺序](../compiler/nir/tests/dependent_admission.rs)

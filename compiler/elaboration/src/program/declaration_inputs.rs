@@ -281,10 +281,6 @@ impl Checker<'_, '_> {
         }
 
         let ty = copy_input_domain(&value.ty, &mut self.required_steps, span)?;
-        self.locals.insert(
-            binding,
-            copy_input_domain(&ty, &mut self.required_steps, span)?,
-        );
         let location = value.source;
         let diverges = is_never(&ty);
         preparations.push(n::NormalFormPreparation {
@@ -303,28 +299,6 @@ impl Checker<'_, '_> {
             ty,
             kind: K::Local(binding),
         })
-    }
-
-    fn record_declaration_input(
-        &mut self,
-        progress: &mut progress::Progress,
-        slot: usize,
-        value: n::NormalFormArgument,
-        identity: Option<Term>,
-        ty: Term,
-        bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-        span: Span,
-    ) -> Result<(), Error> {
-        let known = identity
-            .as_ref()
-            .map(|known| self.copy_alias_type(known, span).map(std::sync::Arc::new))
-            .transpose()?;
-        progress.record(slot, value, identity, &mut self.required_steps, span)?;
-        if let Some(known) = known {
-            bindings.insert(progress.binding(slot), known);
-        }
-        self.locals.insert(progress.binding(slot), ty);
-        Ok(())
     }
 
     /// Retain declaration-checked code until the VM has admitted the actual

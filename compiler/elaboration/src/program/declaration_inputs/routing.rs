@@ -394,10 +394,6 @@ impl<'h> Frame<'h> {
                 self.prepared_bindings
                     .insert(binding, std::sync::Arc::new(known));
             }
-            checker.locals.insert(
-                binding,
-                copy_input_domain(&ty, &mut checker.required_steps, packet.span)?,
-            );
             pattern.push(n::Pattern::Binding {
                 binding,
                 inner: Box::new(n::Pattern::Wild),
@@ -459,6 +455,7 @@ impl<'h> Frame<'h> {
         let progress = progress::Progress::new(
             self.telescope,
             bindings,
+            self.prepared_bindings,
             self.order,
             self.prefix,
             self.caller_frames,
@@ -479,7 +476,6 @@ impl<'h> Frame<'h> {
             defaults,
             checking,
             self.routed,
-            self.prepared_bindings,
             progress,
             collection,
         ))
