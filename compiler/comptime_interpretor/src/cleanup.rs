@@ -2525,6 +2525,7 @@ mod borrowed_checkpoint_tests {
                     &signature,
                     &mut Environment::new(),
                     source,
+                    None,
                 );
                 if valid {
                     assert!(result.is_ok());
@@ -2583,6 +2584,7 @@ mod borrowed_checkpoint_tests {
                         &signature,
                         &mut environment,
                         source,
+                        None,
                     );
                     if valid {
                         assert!(result.unwrap().is_some());
@@ -2629,6 +2631,7 @@ mod borrowed_checkpoint_tests {
                     &signature,
                     &mut Environment::new(),
                     source,
+                    None,
                 );
                 if valid {
                     assert!(result.is_ok());

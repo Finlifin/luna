@@ -497,3 +497,180 @@ fn generic_code_session_eviction_recompiles_without_changing_results() {
         assert_eq!(vm.bytecode_compilations() > 0, fresh);
     }
 }
+
+#[test]
+fn source_calls_prove_closed_and_ordinary_input_requirements_once_per_frame() {
+    use comptime_interpretor::ContractOutcome;
+    use nir::program::{LocalId, TraitRequirement, TypePredicate};
+    use std::cell::RefCell;
+
+    let mut world = package(expression(
+        Term::Primitive(P::Bool),
+        K::Literal(Literal::Bool(true)),
+    ));
+    let function = &mut world.functions[0];
+    function.parameters.push(LocalId { owner: 1, index: 0 });
+    function.signature = Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: Sort::Type,
+            ty: Term::Primitive(P::Type),
+        }],
+        result: Box::new(Term::Primitive(P::Bool)),
+    };
+    let obligation = |interface, subject| TraitRequirement {
+        interface: id(interface),
+        subject,
+        interface_arguments: vec![],
+    };
+    function.requirements.push(TypePredicate::Trait(obligation(
+        30,
+        Term::Rigid {
+            declaration: id(2),
+            sort: Sort::Type,
+        },
+    )));
+    function.capabilities.push(obligation(
+        31,
+        Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        },
+    ));
+    let seen = RefCell::new(Vec::new());
+    let solver = |predicate: &TypePredicate| {
+        let TypePredicate::Trait(requirement) = predicate else {
+            panic!("{predicate}")
+        };
+        seen.borrow_mut()
+            .push((requirement.interface, requirement.subject.clone()));
+        if requirement.subject == Term::Primitive(P::Char) {
+            ContractOutcome::Rejected
+        } else {
+            ContractOutcome::Satisfied
+        }
+    };
+    for reference in [false, true] {
+        let mut vm = Interpreter::for_comptime(&world, Budget::default())
+            .unwrap()
+            .with_type_solver(&solver);
+        if reference {
+            vm = vm.with_reference_execution();
+        }
+        for ordinary in [P::Char, P::U8, P::U8] {
+            let inputs = vec![Term::Primitive(P::Bool)];
+            let values = vec![Value::Type(Term::Primitive(ordinary))];
+            for inspect in [false, true] {
+                let mut fuel = vm.remaining_steps() as usize;
+                let result = if inspect {
+                    vm.admit_source_call(id(1), inputs.clone(), values.clone(), &mut fuel)
+                        .and_then(|call| call.resume(&mut fuel))
+                } else {
+                    vm.invoke_instantiated(id(1), inputs.clone(), values.clone())
+                };
+                if ordinary == P::Char {
+                    assert_eq!(result.unwrap_err().kind, ErrorKind::TypeContractRejected);
+                    assert!(
+                        !vm.events()
+                            .iter()
+                            .any(|e| matches!(e, Event::EnterFunction(_)))
+                    );
+                } else {
+                    assert_eq!(result.unwrap(), Value::Bool(true));
+                }
+                assert_eq!(
+                    seen.take(),
+                    [
+                        (id(30), Term::Primitive(P::Bool)),
+                        (id(31), Term::Primitive(ordinary))
+                    ]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn explicit_entry_reports_input_representation_limits_and_rejects_foreign_binders() {
+    let world = package(expression(
+        Term::Primitive(P::Bool),
+        K::Literal(Literal::Bool(true)),
+    ));
+    let mut vm = Interpreter::for_comptime(&world, Budget::default()).unwrap();
+    let oversized = Term::Tuple(vec![Term::Primitive(P::Bool); 100_001]);
+    let error = vm
+        .invoke_instantiated(id(1), vec![oversized], vec![])
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::RepresentationSizeLimit);
+    let binder = Term::Rigid {
+        declaration: id(99),
+        sort: Sort::Type,
+    };
+    let value = Value::FunctionInstance {
+        declaration: id(1),
+        arguments: vec![binder.clone()],
+    };
+    assert_eq!(
+        vm.start_invocation(value, vec![]).err().unwrap().kind,
+        ErrorKind::Type
+    );
+    assert!(vm.events().is_empty());
+    vm.authorize_abstract_type_parameters(&[id(99)]).unwrap();
+    assert_eq!(
+        vm.invoke_instantiated(id(1), vec![binder], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn named_admission_spends_the_invokers_budget_on_nested_head_queries() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    let mut world = package(expression(
+        Term::Primitive(P::Bool),
+        K::Literal(Literal::Bool(true)),
+    ));
+    world.normal_forms.push(Head {
+        declaration: id(20),
+        role: Role::Opaque,
+        collector: None,
+        requirements: vec![],
+        parameters: vec![Parameter {
+            declaration: id(21),
+            binding: nir::program::LocalId {
+                owner: 20,
+                index: 0,
+            },
+            kind: Kind::Type,
+            ty: Term::Primitive(P::Type),
+        }],
+    });
+
+    // The representation fits the per-term size limit. Each application also
+    // needs domain evidence from its registered head in this source world.
+    let argument = Term::Tuple(vec![
+        Term::NormalForm {
+            head: id(20),
+            sort: Sort::Type,
+            arguments: vec![Term::Primitive(P::Bool)],
+        };
+        20_000
+    ]);
+    for steps in [100_000, 5_000_000] {
+        let mut vm = Interpreter::for_comptime(
+            &world,
+            Budget {
+                steps,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let result = vm.invoke_instantiated(id(1), vec![argument.clone()], vec![]);
+        if steps == 100_000 {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::StepsExhausted);
+            assert!(vm.events().is_empty());
+        } else {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+            assert!(steps - vm.remaining_steps() > 100_000);
+        }
+    }
+}

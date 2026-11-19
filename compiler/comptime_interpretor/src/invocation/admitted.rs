@@ -24,8 +24,7 @@ impl<'world> Interpreter<'world> {
             if self.graph.is_some() || !self.comptime_only {
                 return Err(self.failure(ErrorKind::PhaseMismatch, None));
             }
-            let target = self.named_invocation_value(declaration, arguments)?;
-            self.begin_invocation_observing(target, values, None, Some(&mut domains))
+            self.begin_named_invocation(declaration, arguments, values, Some(&mut domains))
         })();
         *remaining -= (before - self.budget.steps) as usize;
         Ok(AdmittedCall {

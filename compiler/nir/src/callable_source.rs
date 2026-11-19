@@ -200,6 +200,10 @@ impl<'a> Callables<'a> {
         Arc::ptr_eq(&self.positions, &other.positions)
     }
 
+    pub fn contains(&self, id: &DeclarationId) -> bool {
+        self.positions.0.contains_key(id)
+    }
+
     /// Pin the executable definition and its interface to the same source slot.
     pub fn definition(&self, id: &DeclarationId) -> Option<&'a Function> {
         let Slot::Function(i) = *self.positions.0.get(id)? else {

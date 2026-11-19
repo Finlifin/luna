@@ -2049,25 +2049,6 @@ impl<'a> Interpreter<'a> {
         }
         result
     }
-    // Optional observers retain their historical exhausted-fuel convention.
-    // Admission consumes the typed query directly and never infers its error.
-    fn normal_value_fields(
-        &self,
-        ty: &Term,
-        variant: Option<u32>,
-        fuel: &mut usize,
-    ) -> Option<Vec<Term>> {
-        match self.query_normal_value_fields(ty, variant, fuel) {
-            Ok(fields) => Some(fields),
-            Err(nir::NominalAdmissionError::Budget) => {
-                *fuel = 0;
-                None
-            }
-            Err(
-                nir::NominalAdmissionError::Invalid(_) | nir::NominalAdmissionError::Unresolved(_),
-            ) => None,
-        }
-    }
     fn query_normal_value_fields(
         &self,
         ty: &Term,
@@ -2271,77 +2252,6 @@ impl<'a> Interpreter<'a> {
         }
         self.invoke_value(Value::Function(function), arguments)
     }
-    /// Invoke explicit declaration inputs through the same specialization and
-    /// contract path used by source FunctionInstance expressions. No binder or
-    /// obligation is erased to make a template look monomorphic.
-    pub fn invoke_instantiated(
-        &mut self,
-        function: DeclarationId,
-        types: Vec<Term>,
-        arguments: Vec<Value>,
-    ) -> Result<Value, Error> {
-        if self.graph.is_some() {
-            return self.invoke_instance(
-                &iir::InstanceKey {
-                    declaration: function,
-                    arguments: (types).into(),
-                },
-                arguments,
-            );
-        }
-        let target = self.named_invocation_value(function, types)?;
-        self.invoke_value(target, arguments)
-    }
-
-    fn named_invocation_value(
-        &mut self,
-        function: DeclarationId,
-        types: Vec<Term>,
-    ) -> Result<Value, Error> {
-        self.tick(None)?;
-        for ty in &types {
-            let work = scoped_term_value_work_with_callables_in(
-                ty,
-                &self.normal_forms,
-                &self.abstract_type_parameters,
-                &self.abstract_value_parameters,
-                |ty, variant, fuel| self.normal_value_fields(ty, variant, fuel),
-                |value, frames, fuel| {
-                    self.normal_value_callable_signature_view(value, frames, fuel)
-                },
-                self.target,
-            )
-            .ok_or_else(|| self.failure(ErrorKind::Type, None))? as u64;
-            self.budget.steps = self
-                .budget
-                .steps
-                .checked_sub(work)
-                .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, None))?;
-        }
-
-        let definition = self
-            .functions
-            .declaration(&function)
-            .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, None))?;
-        if definition.type_parameters.is_empty() && types.is_empty() {
-            return Ok(Value::Function(function));
-        }
-        let signature =
-            self.specialize_function_signature(definition, &types, definition.source)?;
-        let expression = Expr {
-            source: definition.source,
-            ty: signature,
-            kind: K::FunctionInstance {
-                declaration: function,
-                arguments: types,
-            },
-        };
-        match self.eval_function_instance(&expression, &mut Environment::new())? {
-            Flow::Value(value) => Ok(value),
-            _ => Err(self.failure(ErrorKind::InvalidControlFlow, Some(expression.source))),
-        }
-    }
-
     fn concrete_value<V: std::borrow::Borrow<Value>>(
         value: V,
         source: SourceRange,
@@ -5701,30 +5611,6 @@ fn scoped_term_value_work_with_evidence_in(
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
     target: Option<nir::target::TargetData>,
 ) -> Option<usize> {
-    scoped_term_value_work_with_callables_in(
-        ty,
-        heads,
-        parameters,
-        value_parameters,
-        nominal_fields,
-        |_, _, _| None,
-        target,
-    )
-}
-
-fn scoped_term_value_work_with_callables_in<'signature>(
-    ty: &Term,
-    heads: &impl declaration_index::HeadLookup,
-    parameters: &BTreeSet<DeclarationId>,
-    value_parameters: &BTreeMap<DeclarationId, Term>,
-    nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Option<Vec<Term>>,
-    callable_signature: impl Fn(
-        nir::CallableValueRef<'_>,
-        &[Vec<nir::Sort>],
-        &mut usize,
-    ) -> Option<std::borrow::Cow<'signature, Term>>,
-    target: Option<nir::target::TargetData>,
-) -> Option<usize> {
     // Compatibility for callers that still request an optional work estimate.
     // Only this adapter interprets the legacy optional-query fuel sentinel.
     let mut fuel = 100_000;
@@ -5745,11 +5631,7 @@ fn scoped_term_value_work_with_callables_in<'signature>(
                 }
             })
         },
-        |value, frames, fuel| match callable_signature(value, frames, fuel) {
-            Some(signature) => Ok(Some(signature)),
-            None if *fuel == 0 => Err(nir::NominalAdmissionError::Budget),
-            None => Ok(None),
-        },
+        |_, _, _| Ok(None),
         target,
         &mut fuel,
     )
@@ -6229,12 +6111,6 @@ mod normal_input_data_tests {
             vm.admitted_nominal_layout(&ty, None, &mut 1000).unwrap(),
             vec![Term::Primitive(Primitive::Bool); 3]
         );
-        let mut legacy_fuel = 2;
-        assert!(
-            vm.normal_value_fields(&ty, None, &mut legacy_fuel)
-                .is_none()
-        );
-        assert_eq!(legacy_fuel, 0);
     }
 
     #[test]

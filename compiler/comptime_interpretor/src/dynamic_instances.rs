@@ -79,39 +79,7 @@ impl Interpreter<'_> {
             nir::DeclarationInputScope::ClosedInBody(&frames),
             source,
         )?;
-        self.check_callable_requirements(formation, &inputs, source)
-    }
-
-    pub(super) fn check_callable_requirements(
-        &mut self,
-        formation: nir::callable_source::Formation<'_>,
-        inputs: &nir::AdmittedArguments<'_>,
-        source: SourceRange,
-    ) -> Result<(), Error> {
-        for requirement in formation.requirements {
-            let requirement = self.query_admission(Some(source), |_, fuel| {
-                Ok(inputs.instantiate_predicate(requirement, fuel)?)
-            })?;
-            if let Some(requirement) =
-                self.bind_invocation_contract(&requirement, None, source, 0)?
-            {
-                self.check_type_contract(&requirement, source)?;
-            }
-        }
-        for capability in formation.capabilities {
-            let bound = self.query_admission(Some(source), |_, fuel| {
-                Ok(inputs.instantiate_requirement(capability, fuel)?)
-            })?;
-            let open = bound.subject.check_scope(&[]).is_err()
-                || bound
-                    .interface_arguments
-                    .iter()
-                    .any(|ty| ty.check_scope(&[]).is_err());
-            if self.comptime_only && open {
-                continue;
-            }
-            self.check_capability_contract(&bound, source)?;
-        }
+        self.pending_callable_requirements(formation, &inputs.into_substitution(), source)?;
         Ok(())
     }
 
@@ -869,34 +837,36 @@ mod retained_signature_tests {
         let vm = Interpreter::from_iir(&graph, Budget::default()).unwrap();
         let identity = &graph.callable_identities[1];
         let view = vm
-            .normal_callable_signature_view(
+            .admitted_function_signature(
                 identity.key.declaration,
                 &identity.key.arguments,
                 &[],
                 &mut 100,
             )
             .unwrap();
+        let view = view.unwrap();
         assert!(matches!(view, std::borrow::Cow::Borrowed(_)));
         assert!(std::ptr::eq(
             view.as_ref(),
             identity.signature.core().body()
         ));
-        assert!(
-            vm.normal_callable_signature_view(
+        assert_eq!(
+            vm.admitted_function_signature(
                 identity.key.declaration,
                 &identity.key.arguments,
                 &[],
                 &mut 1,
-            )
-            .is_none()
+            ),
+            Err(nir::NominalAdmissionError::Budget)
         );
         assert!(
-            vm.normal_callable_signature_view(
+            vm.admitted_function_signature(
                 identity.key.declaration,
                 &identity.key.arguments,
                 &[],
                 &mut 100,
             )
+            .unwrap()
             .is_some()
         );
     }
@@ -920,8 +890,8 @@ mod retained_signature_tests {
             .unwrap();
             let mut fuel = 100;
             assert_eq!(
-                vm.normal_callable_signature(declaration, &[argument(1)], &[], &mut fuel),
-                Some(signature())
+                vm.admitted_function_signature(declaration, &[argument(1)], &[], &mut fuel),
+                Ok(Some(std::borrow::Cow::Owned(signature())))
             );
             let used = 100 - fuel;
             if let Some(baseline) = baseline {
@@ -931,19 +901,22 @@ mod retained_signature_tests {
             }
             // Different instances of the same declaration must not alias.
             assert!(
-                vm.normal_callable_signature(declaration, &[argument(count)], &[], &mut 100)
+                vm.admitted_function_signature(declaration, &[argument(count)], &[], &mut 100)
+                    .unwrap()
                     .is_none()
             );
             assert!(
-                vm.normal_callable_signature(declaration, &[], &[], &mut 100)
+                vm.admitted_function_signature(declaration, &[], &[], &mut 100)
+                    .unwrap()
                     .is_none()
             );
-            assert!(
-                vm.normal_callable_signature(declaration, &[argument(1)], &[], &mut 1)
-                    .is_none()
+            assert_eq!(
+                vm.admitted_function_signature(declaration, &[argument(1)], &[], &mut 1),
+                Err(nir::NominalAdmissionError::Budget)
             );
             assert!(
-                vm.normal_callable_signature(declaration, &[argument(1)], &[], &mut 100)
+                vm.admitted_function_signature(declaration, &[argument(1)], &[], &mut 100)
+                    .unwrap()
                     .is_some()
             );
             assert!(vm.events().is_empty());
@@ -965,26 +938,29 @@ mod retained_signature_tests {
         let b = Interpreter::from_iir(&second, Budget::default()).unwrap();
         let declaration = first.callable_identities[1].key.declaration;
         assert!(
-            !a.normal_callable_signature(declaration, &[argument(1)], &[], &mut 100)
+            !a.admitted_function_signature(declaration, &[argument(1)], &[], &mut 100)
+                .unwrap()
                 .unwrap()
                 .is_unsafe_callable()
         );
         assert!(
-            b.normal_callable_signature(declaration, &[argument(1)], &[], &mut 100)
+            b.admitted_function_signature(declaration, &[argument(1)], &[], &mut 100)
+                .unwrap()
                 .unwrap()
                 .is_unsafe_callable()
         );
-        assert!(
-            a.normal_callable_signature(
+        assert_eq!(
+            a.admitted_function_signature(
                 declaration,
                 &[Term::String("x".repeat(4096).into())],
                 &[],
                 &mut 100
-            )
-            .is_none()
+            ),
+            Err(nir::NominalAdmissionError::Budget)
         );
         assert!(
-            a.normal_callable_signature(declaration, &[argument(1)], &[], &mut 100)
+            a.admitted_function_signature(declaration, &[argument(1)], &[], &mut 100)
+                .unwrap()
                 .is_some()
         );
     }

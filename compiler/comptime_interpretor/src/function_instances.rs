@@ -141,23 +141,8 @@ impl Interpreter<'_> {
             source,
         )?;
         let signature = self.signature_from_admission(formation, &inputs, source)?;
-        self.check_callable_requirements(formation, &inputs, source)?;
+        self.pending_callable_requirements(formation, &inputs.into_substitution(), source)?;
         Ok(signature)
-    }
-
-    pub(super) fn specialize_function_signature(
-        &mut self,
-        declaration: &nir::program::FunctionDeclaration,
-        arguments: &[Term],
-        source: SourceRange,
-    ) -> Result<Term, Error> {
-        let inputs = self.admit_function_inputs(
-            &declaration.type_parameters,
-            arguments,
-            nir::DeclarationInputScope::Caller(&[]),
-            source,
-        )?;
-        self.signature_from_admission(declaration.into(), &inputs, source)
     }
 
     pub(super) fn signature_from_admission(

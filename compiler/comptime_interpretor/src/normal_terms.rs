@@ -925,6 +925,7 @@ mod borrowed_input_tests {
                     &signature,
                     &mut env,
                     SOURCE,
+                    None,
                 );
                 if !valid {
                     assert!(result.is_err());
@@ -1044,7 +1045,14 @@ mod borrowed_input_tests {
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
             let mut env = Environment::new();
             let scope = vm
-                .bind_invocation_inputs(&[binding], vec![argument], &signature, &mut env, SOURCE)
+                .bind_invocation_inputs(
+                    &[binding],
+                    vec![argument],
+                    &signature,
+                    &mut env,
+                    SOURCE,
+                    None,
+                )
                 .unwrap()
                 .unwrap();
             vm.write_comptime_place(env.get_mut(&binding).unwrap(), &[], new.clone(), SOURCE)

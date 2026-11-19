@@ -673,6 +673,7 @@ fn associated_input_domains_admit_values_and_reject_mismatches() {
             &signature,
             &mut environment,
             SOURCE,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -691,6 +692,7 @@ fn associated_input_domains_admit_values_and_reject_mismatches() {
                 &signature,
                 &mut environment,
                 SOURCE,
+                None,
             );
             if valid {
                 result.unwrap();

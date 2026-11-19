@@ -40,6 +40,20 @@ fn rejection(
 
 pub(super) use nir::function_parameters::ordered_domains as input_domains;
 
+pub(super) fn input_failure(
+    parameters: &[DeclarationId],
+    failure: nir::DeclarationAdmissionFailure,
+) -> ErrorKind {
+    match (failure.reason, failure.slot) {
+        (nir::NominalAdmissionError::Budget, _) => ErrorKind::StepsExhausted,
+        (nir::NominalAdmissionError::Unresolved(_), _) => ErrorKind::TypeContractUnresolved,
+        (nir::NominalAdmissionError::Invalid(reason), Some((slot, stage))) => {
+            rejection(slot, parameters[slot], stage, reason)
+        }
+        (nir::NominalAdmissionError::Invalid(_), None) => ErrorKind::Type,
+    }
+}
+
 impl Interpreter<'_> {
     pub(super) fn admitted_function_inputs<'v, T: Borrow<Term>>(
         &self,
@@ -53,14 +67,7 @@ impl Interpreter<'_> {
         self.with_admission_queries(|queries| {
             nir::admit_declaration_inputs(parameters, &domains, arguments, scope, 0, fuel, queries)
         })
-        .map_err(|failure| match (failure.reason, failure.slot) {
-            (nir::NominalAdmissionError::Budget, _) => ErrorKind::StepsExhausted,
-            (nir::NominalAdmissionError::Unresolved(_), _) => ErrorKind::TypeContractUnresolved,
-            (nir::NominalAdmissionError::Invalid(reason), Some((slot, stage))) => {
-                rejection(slot, parameters[slot], stage, reason)
-            }
-            (nir::NominalAdmissionError::Invalid(_), None) => ErrorKind::Type,
-        })
+        .map_err(|failure| input_failure(parameters, failure))
     }
 
     /// The receiving world reads the signature using the same checked inputs.

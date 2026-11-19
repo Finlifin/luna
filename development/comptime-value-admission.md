@@ -21,6 +21,10 @@ VM 向调用者恢复带作用域的值时，先按源码字段顺序检查并�
 
 调用方授权的抽象值只能在对应 binder 和域中使用。私有 VM 在校验 dispatch 前安装这次调用的作用域，完成整份校验后才可执行。共享代码目录不会把该权限传给下一个闭合 VM。检查普通实参的 trait 义务时，调用者给定的前提和已存在的具体 impl 都可以提供证据；是否执行哪个方法体由方法选择另行决定。程序状态和内存规格归程序验证层。[作用域中的 dispatch 准入](../compiler/materialization/src/input_admission.rs) · [开放与闭合构造用例](../compiler/materialization/tests/scoped_dispatch_inputs.rs)
 
+宿主按声明调用时，VM 直接在接收世界定位可执行定义，检查子句实参，再用同一份实参特化签名和建立调用帧中的替换。普通形参构成自己的 binder 层。签名在外层作用域特化，主体、默认值和契约在普通形参层中使用这份替换。检查与内部查询都使用调用剩余的预算；一个大小合法的类型可能需要大量 NF 参数域查询。增加预算可以让这些查询完成，超过表示大小限制的载荷仍会单独报错。[调用目标](../compiler/comptime_interpretor/src/invocation/target.rs) · [声明实参准入](../compiler/nir/src/nominal_parameters.rs)
+
+例如，函数同时要求子句实参 `T` 满足一个 trait，普通 comptime 实参 `U: Type` 满足另一个 trait。进入调用时先检查已经闭合的 `T` 条件，只将仍引用 `U` 的条件保留到参数绑定后。调用方查看已准入的返回类型、随后恢复同一帧，两项条件仍各检查一次。第二次调用即使复用已编译的函数体，也会在当次作用域重新检查。程序前置条件和后置条件保留各自的执行次序。[调用条件](../compiler/comptime_interpretor/src/invocation_contracts.rs) · [预算与查询轨迹用例](../compiler/comptime_interpretor/tests/instance_budget.rs)
+
 从源码交给 VM 的权限范围也决定证明的有效期。定义侧可以保留显式 binder 和合法 residual；当接收点要求一个已经完成的普通值时，每个必需槽位都要有实际载荷。通用传送接口的设计应将下列信息随工作传递。
 
 | 工作 | 由谁提供 | 何时可以发布 |

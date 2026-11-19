@@ -70,119 +70,95 @@ impl Interpreter<'_> {
         self.check_type_contract(&P::Trait(requirement.clone()), source)
     }
 
+    /// Discharge closed obligations once in the receiving world. Only the
+    /// specialized predicates that read ordinary binders travel to binding.
     #[inline(never)]
-    pub(super) fn check_invocation_contracts(
+    pub(super) fn pending_callable_requirements(
         &mut self,
-        definition: &nir::program::FunctionDeclaration,
+        formation: nir::callable_source::Formation<'_>,
         inputs: &nir::DeclarationSubstitution<'_>,
-        scope: Option<&nir::FunctionInputBinding>,
         source: SourceRange,
-    ) -> Result<(), Error> {
-        for requirement in &definition.requirements {
+    ) -> Result<Vec<P>, Error> {
+        let mut pending = Vec::new();
+        for requirement in formation.requirements {
             let predicate = self.query_admission(Some(source), |_, fuel| {
                 Ok(inputs.instantiate_predicate_bounded(requirement, fuel)?)
             })?;
-            let bound = self
-                .bind_invocation_contract(&predicate, scope, source, 0)?
-                .ok_or_else(|| self.failure(ErrorKind::TypeContractUnresolved, Some(source)))?;
-            self.check_type_contract(&bound, source)?;
-        }
-        for capability in &definition.capabilities {
-            let predicate = P::Trait(self.query_admission(Some(source), |_, fuel| {
-                Ok(inputs.instantiate_requirement_bounded(capability, fuel)?)
-            })?);
-            match self.bind_invocation_contract(&predicate, None, source, 0)? {
-                Some(P::Trait(bound)) if self.comptime_only && self.graph.is_none() => {
-                    // Direct source entry has no prior formation receipt, and
-                    // shared code grants no evidence in this invocation scope.
-                    self.check_capability_contract(&bound, source)?;
-                }
-                Some(_) => {
-                    // Concrete IIR carries producer-side formation evidence;
-                    // runtime source admission checks its closed formation.
-                }
-                None => {
-                    let bound = self
-                        .bind_invocation_contract(&predicate, scope, source, 0)?
-                        .ok_or_else(|| {
-                            self.failure(ErrorKind::TypeContractUnresolved, Some(source))
-                        })?;
-                    self.check_type_contract(&bound, source)?;
-                }
+            if formation_predicate_is_closed(&predicate) {
+                self.check_type_contract(&predicate, source)?;
+            } else {
+                pending.push(predicate);
             }
         }
-        Ok(())
+        for capability in formation.capabilities {
+            let requirement = self.query_admission(Some(source), |_, fuel| {
+                Ok(inputs.instantiate_requirement_bounded(capability, fuel)?)
+            })?;
+            if !formation_capability_is_closed(&requirement) {
+                pending.push(P::Trait(requirement));
+            } else if self.graph.is_none() {
+                // Concrete IIR already carries the producer's closed evidence.
+                self.check_capability_contract(&requirement, source)?;
+            }
+        }
+        Ok(pending)
     }
 
-    // None means this predicate still reads an ordinary input telescope. Such
-    // a predicate waits at function formation and must be closed at invocation.
+    /// Fill only obligations retained by this activation, using its original
+    /// ordinary binding. Keep the predicate tree and its argument buffers.
     pub(super) fn bind_invocation_contract(
         &mut self,
-        predicate: &P,
-        scope: Option<&nir::FunctionInputBinding>,
+        predicate: &mut P,
+        scope: &nir::FunctionInputBinding,
         source: SourceRange,
         depth: usize,
-    ) -> Result<Option<P>, Error> {
+    ) -> Result<(), Error> {
         self.tick(Some(source))?;
         if depth >= 128 {
             return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
         }
-        let mut term = |value: &Term| -> Result<Option<Term>, Error> {
-            let value = self.query_admission(Some(source), |_, fuel| match scope {
-                Some(scope) => Ok(scope.rebind_bounded(value, fuel)?),
-                None => nir::copy_budget::clone_term(value, fuel)
-                    .map_err(|_| nir::NominalAdmissionError::Budget),
-            })?;
-            Ok(value.check_scope(&[]).is_ok().then_some(value))
-        };
-        Ok(Some(match predicate {
-            P::Bool(value) => P::Bool(*value),
+        let mut rebind =
+            |term: &mut Term| {
+                *term = self.query_admission(Some(source), |_, fuel| {
+                    Ok(scope.rebind_bounded(term, fuel)?)
+                })?;
+                term.check_scope(&[])
+                    .map_err(|_| self.failure(ErrorKind::TypeContractUnresolved, Some(source)))
+            };
+        match predicate {
+            P::Bool(_) => Ok(()),
             P::Equal(a, b) => {
-                let (Some(a), Some(b)) = (term(a)?, term(b)?) else {
-                    return Ok(None);
-                };
-                P::Equal(a, b)
+                rebind(a)?;
+                rebind(b)
             }
             P::Trait(requirement) => {
-                let Some(subject) = term(&requirement.subject)? else {
-                    return Ok(None);
-                };
-                let mut arguments = Vec::new();
-                for argument in &requirement.interface_arguments {
-                    let Some(argument) = term(argument)? else {
-                        return Ok(None);
-                    };
-                    arguments.push(argument);
-                }
-                P::Trait(nir::program::TraitRequirement {
-                    subject,
-                    interface: requirement.interface,
-                    interface_arguments: arguments,
-                })
+                rebind(&mut requirement.subject)?;
+                requirement
+                    .interface_arguments
+                    .iter_mut()
+                    .try_for_each(rebind)
             }
-            P::Not(inner) => {
-                let Some(inner) = self.bind_invocation_contract(inner, scope, source, depth + 1)?
-                else {
-                    return Ok(None);
-                };
-                P::Not(Box::new(inner))
-            }
-            P::And(parts) | P::Or(parts) => {
-                let mut bound = Vec::new();
-                for part in parts {
-                    let Some(part) =
-                        self.bind_invocation_contract(part, scope, source, depth + 1)?
-                    else {
-                        return Ok(None);
-                    };
-                    bound.push(part);
-                }
-                if matches!(predicate, P::And(_)) {
-                    P::And(bound)
-                } else {
-                    P::Or(bound)
-                }
-            }
-        }))
+            P::Not(inner) => self.bind_invocation_contract(inner, scope, source, depth + 1),
+            P::And(items) | P::Or(items) => items
+                .iter_mut()
+                .try_for_each(|item| self.bind_invocation_contract(item, scope, source, depth + 1)),
+        }
+    }
+}
+
+pub(super) fn formation_capability_is_closed(requirement: &nir::program::TraitRequirement) -> bool {
+    std::iter::once(&requirement.subject)
+        .chain(&requirement.interface_arguments)
+        .all(|term| term.check_scope(&[]).is_ok())
+}
+
+pub(super) fn formation_predicate_is_closed(predicate: &nir::program::TypePredicate) -> bool {
+    use nir::program::TypePredicate as P;
+    match predicate {
+        P::Bool(_) => true,
+        P::Trait(requirement) => formation_capability_is_closed(requirement),
+        P::Equal(left, right) => left.check_scope(&[]).is_ok() && right.check_scope(&[]).is_ok(),
+        P::Not(inner) => formation_predicate_is_closed(inner),
+        P::And(parts) | P::Or(parts) => parts.iter().all(formation_predicate_is_closed),
     }
 }

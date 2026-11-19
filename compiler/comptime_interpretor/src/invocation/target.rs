@@ -84,58 +84,89 @@ impl fmt::Display for Target<'_> {
 }
 
 impl<'a> Interpreter<'a> {
-    pub(super) fn admit_invocation(
+    /// Resolve the explicit source entry without manufacturing a function-value expression.
+    pub(super) fn named_entry_target(
         &mut self,
-        value: Value,
-        has_cleanup_context: bool,
+        declaration: DeclarationId,
+        arguments: Vec<Term>,
     ) -> Result<Target<'a>, Error> {
-        let target = match value {
+        self.tick(None)?;
+        let function = self.named_target(declaration)?;
+        if arguments.len() != function.type_parameters.len() {
+            return Err(self.failure(ErrorKind::Type, Some(function.source)));
+        }
+        if arguments.is_empty() {
+            return Ok(Target::Named(function));
+        }
+        self.instance_target(function, arguments)
+    }
+
+    fn instance_target(
+        &mut self,
+        function: &'a Function,
+        mut arguments: Vec<Term>,
+    ) -> Result<Target<'a>, Error> {
+        let source = function.source;
+        // Both a direct call and a transported identity supply completed
+        // terms. Describe them in the receiving VM before specializing code.
+        let formation = nir::callable_source::Formation::from(&function.interface);
+        let (signature, substitution) = self.query_descriptions(Some(source), |vm, fuel| {
+            for term in &mut arguments {
+                vm.inspect_term_description(term, fuel)?;
+                *term = selected_types::view(term, &vm.associated_values, fuel)?;
+            }
+            let domains = function_inputs::input_domains(
+                &vm.declaration_parameter_domains,
+                formation.parameters,
+                fuel,
+            )
+            .map_err(|_| ErrorKind::StepsExhausted)?;
+            vm.with_admission_queries(|queries| {
+                formation.admit_instance(&domains, arguments, fuel, queries)
+            })
+            .map_err(|failure| function_inputs::input_failure(formation.parameters, failure))
+        })?;
+        Ok(Target::Instance {
+            function,
+            signature,
+            substitution,
+        })
+    }
+
+    pub(super) fn invocation_target(&mut self, value: Value) -> Result<Target<'a>, Error> {
+        Ok(match value {
             Value::Function(id) => Target::Named(self.named_target(id)?),
             Value::FunctionInstance {
                 declaration,
                 arguments,
             } => {
-                let definition = self.named_target(declaration)?;
-                self.check_instance_phase(definition)?;
-                let source = definition.source;
-                let frames = [self.ordinary_input_frame(&definition.signature, source)?];
-                let inputs = self.admit_function_inputs(
-                    &definition.type_parameters,
-                    &arguments,
-                    nir::DeclarationInputScope::ClosedInBody(&frames),
-                    source,
-                )?;
-                let formation = (&definition.interface).into();
-                self.check_callable_requirements(formation, &inputs, source)?;
-                let signature = self.signature_from_admission(formation, &inputs, source)?;
-                let substitution = self.query_admission(Some(source), |_, fuel| {
-                    Ok(inputs.into_substitution().into_owned(fuel)?)
-                })?;
-                Target::Instance {
-                    function: definition,
-                    signature,
-                    substitution,
-                }
+                let function = self.named_target(declaration)?;
+                self.instance_target(function, arguments)?
             }
-            Value::IirCallable(handle) => Target::Graph(self.iir_target(&handle)?, handle),
-            Value::Closure(closure) => Target::Closure(closure),
+            Value::IirCallable(handle) => {
+                let function = self.iir_target(&handle)?;
+                self.check_instance_phase(function)?;
+                Target::Graph(function, handle)
+            }
+            Value::Closure(closure) => {
+                if self.comptime_only && !closure.ty.is_comptime_callable() {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, None));
+                }
+                Target::Closure(closure)
+            }
             Value::RuntimeTraitMethod(_) => {
                 return Err(self.failure(ErrorKind::PhaseMismatch, None));
             }
             _ if self.comptime_only => return Err(self.failure(ErrorKind::PhaseMismatch, None)),
             _ => return Err(self.failure(ErrorKind::Type, None)),
-        };
-        if self.comptime_only {
-            let allowed = match &target {
-                Target::Closure(c) => c.ty.is_comptime_callable(),
-                Target::Named(f) | Target::Graph(f, _) | Target::Instance { function: f, .. } => {
-                    f.phase == nir::program::FunctionPhase::Comptime
-                }
-            };
-            if !allowed {
-                return Err(self.failure(ErrorKind::PhaseMismatch, None));
-            }
-        }
+        })
+    }
+
+    pub(super) fn check_invocation_cleanup(
+        &mut self,
+        target: &Target<'a>,
+        has_cleanup_context: bool,
+    ) -> Result<(), Error> {
         if let Some(schedule) = self.cleanup_schedule
             && !has_cleanup_context
             && let Some((declaration, arguments)) = target.identity()
@@ -152,23 +183,23 @@ impl<'a> Interpreter<'a> {
                 return Err(self.failure(ErrorKind::InvalidCallPlan, None));
             }
         }
-        Ok(target)
+        Ok(())
     }
 
     fn named_target(&self, id: DeclarationId) -> Result<&'a Function, Error> {
         if self.normal_forms.contains_key(&id) {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
-        self.functions.definition(&id).ok_or_else(|| {
-            self.failure(
-                if self.comptime_only {
-                    ErrorKind::PhaseMismatch
-                } else {
-                    ErrorKind::UnknownFunction
-                },
-                None,
-            )
-        })
+        let function = self.functions.definition(&id).ok_or_else(|| {
+            let kind = if self.functions.contains(&id) {
+                ErrorKind::PhaseMismatch
+            } else {
+                ErrorKind::UnknownFunction
+            };
+            self.failure(kind, None)
+        })?;
+        self.check_instance_phase(function)?;
+        Ok(function)
     }
 
     pub(super) fn check_instance_phase(

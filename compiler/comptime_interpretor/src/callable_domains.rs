@@ -15,55 +15,7 @@ fn input_failure(error: ErrorKind) -> AdmissionError {
     }
 }
 
-// Older observation consumers use an optional view and the exhausted-budget
-// sentinel. Keep that boundary explicit while admission consumes typed results.
-fn optional_view<T>(result: Result<Option<T>, AdmissionError>, fuel: &mut usize) -> Option<T> {
-    match result {
-        Ok(value) => value,
-        Err(AdmissionError::Budget) => {
-            *fuel = 0;
-            None
-        }
-        Err(AdmissionError::Invalid(_) | AdmissionError::Unresolved(_)) => None,
-    }
-}
-
 impl Interpreter<'_> {
-    #[cfg(test)]
-    pub(super) fn normal_callable_signature(
-        &self,
-        declaration: DeclarationId,
-        arguments: &[Term],
-        frames: &[Vec<nir::Sort>],
-        fuel: &mut usize,
-    ) -> Option<Term> {
-        self.normal_callable_signature_view(declaration, arguments, frames, fuel)
-            .map(Cow::into_owned)
-    }
-
-    #[cfg(test)]
-    pub(super) fn normal_callable_signature_view(
-        &self,
-        declaration: DeclarationId,
-        arguments: &[Term],
-        frames: &[Vec<nir::Sort>],
-        fuel: &mut usize,
-    ) -> Option<Cow<'_, Term>> {
-        optional_view(
-            self.admitted_function_signature(declaration, arguments, frames, fuel),
-            fuel,
-        )
-    }
-
-    pub(super) fn normal_value_callable_signature_view(
-        &self,
-        value: nir::CallableValueRef<'_>,
-        frames: &[Vec<nir::Sort>],
-        fuel: &mut usize,
-    ) -> Option<Cow<'_, Term>> {
-        optional_view(self.admitted_callable_signature(value, frames, fuel), fuel)
-    }
-
     pub(super) fn admitted_callable_signature(
         &self,
         value: nir::CallableValueRef<'_>,
@@ -214,12 +166,6 @@ mod tests {
             fuel > 0,
             "insufficient work allowance need not be exactly zero"
         );
-        let mut fuel = 3;
-        assert!(
-            vm.normal_callable_signature_view(id(1), &[], &[], &mut fuel)
-                .is_none()
-        );
-        assert_eq!(fuel, 0, "legacy optional consumers need the limit sentinel");
         let mut ready = false;
         for allowance in 0..1000 {
             match vm.admitted_function_signature(id(1), &[], &[], &mut { allowance }) {

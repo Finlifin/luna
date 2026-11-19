@@ -1,5 +1,6 @@
 //! Formation of immutable types within the receiving callable telescope.
 use super::*;
+use crate::invocation_contracts::{formation_capability_is_closed, formation_predicate_is_closed};
 use crate::type_descriptions::Telescope;
 
 impl Interpreter<'_> {
@@ -368,22 +369,5 @@ impl FormationContracts {
                 .map(|c| inputs.instantiate_requirement(c, fuel))
                 .collect::<Result<_, _>>()?,
         })
-    }
-}
-
-fn formation_capability_is_closed(requirement: &nir::program::TraitRequirement) -> bool {
-    std::iter::once(&requirement.subject)
-        .chain(&requirement.interface_arguments)
-        .all(|term| term.check_scope(&[]).is_ok())
-}
-
-fn formation_predicate_is_closed(predicate: &nir::program::TypePredicate) -> bool {
-    use nir::program::TypePredicate as P;
-    match predicate {
-        P::Bool(_) => true,
-        P::Trait(requirement) => formation_capability_is_closed(requirement),
-        P::Equal(left, right) => left.check_scope(&[]).is_ok() && right.check_scope(&[]).is_ok(),
-        P::Not(inner) => formation_predicate_is_closed(inner),
-        P::And(parts) | P::Or(parts) => parts.iter().all(formation_predicate_is_closed),
     }
 }

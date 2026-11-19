@@ -312,23 +312,57 @@ impl<'a> Interpreter<'a> {
         }
     }
 
+    /// Invoke explicit declaration inputs through the same specialization and
+    /// contract path used by source FunctionInstance expressions. No binder or
+    /// obligation is erased to make a template look monomorphic.
+    pub fn invoke_instantiated(
+        &mut self,
+        function: DeclarationId,
+        types: Vec<Term>,
+        arguments: Vec<Value>,
+    ) -> Result<Value, Error> {
+        if self.graph.is_some() {
+            return self.invoke_instance(
+                &iir::InstanceKey {
+                    declaration: function,
+                    arguments: (types).into(),
+                },
+                arguments,
+            );
+        }
+        let activation = self.begin_named_invocation(function, types, arguments, None)?;
+        self.run_activation(activation)
+    }
+
     fn begin_invocation(
         &mut self,
         function: Value,
         arguments: Vec<Value>,
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
     ) -> Result<Box<Activation<'a>>, Error> {
-        self.begin_invocation_observing(function, arguments, context, None)
+        let target = self.invocation_target(function)?;
+        self.begin_target_invocation(target, arguments, context, None)
     }
 
-    fn begin_invocation_observing(
+    fn begin_named_invocation(
         &mut self,
-        function: Value,
+        declaration: DeclarationId,
+        inputs: Vec<Term>,
+        arguments: Vec<Value>,
+        domains: Option<&mut Vec<Term>>,
+    ) -> Result<Box<Activation<'a>>, Error> {
+        let target = self.named_entry_target(declaration, inputs)?;
+        self.begin_target_invocation(target, arguments, None, domains)
+    }
+
+    fn begin_target_invocation(
+        &mut self,
+        target: Target<'a>,
         arguments: Vec<Value>,
         context: Option<(iir::InstanceKey, Vec<iir::cleanup::ContextKey>)>,
         domains: Option<&mut Vec<Term>>,
     ) -> Result<Box<Activation<'a>>, Error> {
-        let target = self.admit_invocation(function, context.is_some())?;
+        self.check_invocation_cleanup(&target, context.is_some())?;
         let cleanup_frame = if self.cleanup_schedule.is_some() && context.is_none() {
             target.cleanup_key()
         } else {
@@ -497,18 +531,6 @@ impl<'a> Interpreter<'a> {
                 if !definition.type_parameters.is_empty() {
                     return Err(self.failure(ErrorKind::Type, None));
                 }
-                // A residual runtime body can retain closed formation clauses.
-                // Prove them against this VM's dispatch world rather than
-                // rejecting every constrained direct function or erasing them.
-                if !self.comptime_only
-                    && (!definition.requirements.is_empty() || !definition.capabilities.is_empty())
-                {
-                    self.check_source_formation(
-                        (&definition.interface).into(),
-                        &[],
-                        definition.source,
-                    )?;
-                }
                 (
                     definition.parameters.as_slice(),
                     Environment::with_capacity(definition.parameters.len()),
@@ -548,15 +570,7 @@ impl<'a> Interpreter<'a> {
         self.charge_copy_work(Some(source), |fuel| {
             nir::copy_budget::charge_term_copy(signature, fuel, 128)
         })?;
-        let type_scope = self.bind_invocation_inputs(
-            parameters,
-            arguments,
-            signature,
-            &mut environment,
-            source,
-            domains,
-        )?;
-        if let Some(definition) = declaration
+        let pending = if let Some(definition) = declaration
             && (self.comptime_only || matches!(target, Target::Named(_) | Target::Instance { .. }))
             && (!definition.requirements.is_empty() || !definition.capabilities.is_empty())
         {
@@ -577,7 +591,24 @@ impl<'a> Interpreter<'a> {
                     &empty
                 }
             };
-            self.check_invocation_contracts(definition, substitution, type_scope.as_ref(), source)?;
+            self.pending_callable_requirements(definition.into(), substitution, source)?
+        } else {
+            Vec::new()
+        };
+        let type_scope = self.bind_invocation_inputs(
+            parameters,
+            arguments,
+            signature,
+            &mut environment,
+            source,
+            domains,
+        )?;
+        for mut predicate in pending {
+            let scope = type_scope
+                .as_ref()
+                .ok_or_else(|| self.failure(ErrorKind::TypeContractUnresolved, Some(source)))?;
+            self.bind_invocation_contract(&mut predicate, scope, source, 0)?;
+            self.check_type_contract(&predicate, source)?;
         }
         let bound_signature = type_scope
             .as_ref()

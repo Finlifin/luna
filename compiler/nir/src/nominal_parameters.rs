@@ -898,6 +898,41 @@ pub fn admit_in_order<'a, D: Borrow<Term>, T: Borrow<Term>>(
     })
 }
 
+impl crate::callable_source::Formation<'_> {
+    /// Admit a call's owned declaration arguments once. Its signature introduces
+    /// the ordinary binder frame; body and contract templates inherit that frame.
+    pub fn admit_instance<D: Borrow<Term>>(
+        self,
+        domains: &[D],
+        arguments: Vec<Term>,
+        fuel: &mut usize,
+        queries: &mut crate::value_admission::DomainQueries<'_, '_>,
+    ) -> Result<(Term, DeclarationSubstitution<'static>), DeclarationAdmissionFailure> {
+        let frames = vec![
+            crate::function_parameters::ordinary_frame(self.signature, fuel)
+                .map_err(AdmissionError::from)?,
+        ];
+        let admitted = admit_in_order(
+            self.parameters,
+            domains,
+            &arguments,
+            DeclarationInputScope::ClosedInBody(&frames),
+            0,
+            fuel,
+            queries,
+        )?;
+        let signature = admitted
+            .instantiate_in_input_scope(self.signature, fuel)
+            .map_err(AdmissionError::from)?;
+        let substitution = DeclarationSubstitution {
+            parameters: admitted.parameters,
+            arguments: Cow::Owned(arguments),
+            frames: Cow::Owned(frames),
+        };
+        Ok((self.qualify(signature), substitution))
+    }
+}
+
 /// The caller has already checked scope and charged the input tree. Symbolic
 /// leaves require independent declaration-domain evidence supplied by `declared`.
 pub(crate) fn validate_symbolic_value_in(
