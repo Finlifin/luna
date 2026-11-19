@@ -1,0 +1,18 @@
+struct First {}
+struct Second {}
+
+trait Flag where U {
+    assoc enabled: bool;
+}
+
+impl Flag<bool> for First { assoc enabled: bool = true; }
+impl Flag<bool> for Second { assoc enabled: bool = saved; }
+
+comptime fn read(comptime T: Type) -> bool
+where requires T :- Flag<bool>
+{
+    T.as(Flag<bool>).enabled
+}
+
+const saved: bool = read(First);
+comptime fn result() -> bool { saved and Second.as(Flag<bool>).enabled }

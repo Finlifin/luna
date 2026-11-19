@@ -60,9 +60,9 @@ impl Checker<'_, '_> {
             .required_steps
             .checked_sub(1)
             .ok_or_else(|| error(span, "Type binder budget exhausted"))?;
-        let index = self.next_definition_identity;
-        self.next_definition_identity = index
-            .checked_add(1)
+        let index = self
+            .definition_identities
+            .reserve()
             .ok_or_else(|| error(span, "Type binder identity space exhausted"))?;
         Ok(nir::DeclarationParameter {
             declaration: DeclarationId {

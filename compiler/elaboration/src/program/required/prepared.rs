@@ -303,7 +303,7 @@ impl PreparedRequired {
         steps: &mut u64,
         span: Span,
         package_identity: u64,
-        next_identity: &mut u32,
+        identities: crate::definitions::DefinitionIdentities,
     ) -> Result<((Value, Term), crate::definitions::PublishedDefinitions), Error> {
         let world = Arc::clone(&self.world);
         // The receiver installs concrete descriptors into the package. Only the
@@ -320,7 +320,7 @@ impl PreparedRequired {
         let publisher = crate::definitions::AllocatedDefinitionPublisher::new_with_type_solver(
             world.package(),
             package_identity,
-            *next_identity,
+            identities,
             usize::MAX,
             &solver,
         );
@@ -334,8 +334,7 @@ impl PreparedRequired {
             Some(&publisher),
         );
         let diagnostic = publisher.last_diagnostic();
-        let (definitions, next) = publisher.finish();
-        *next_identity = next;
+        let (definitions, _) = publisher.finish();
         let result = result.map_err(|failure| match diagnostic {
             Some(message) => error(span, format!("{failure}; {message}")),
             None => failure,
@@ -816,10 +815,15 @@ mod tests {
                 .edit_scope()
                 .context
                 .assume(crate::ptc::Formula::equal(p(actual), p(P::Bool)));
-            let mut next = 60;
-            let result =
-                prepared.invoke_publishing(vec![], &mut 100_000, Span::default(), 7, &mut next);
-            assert_eq!(next, 61, "the request reached the publisher");
+            let identities = crate::definitions::DefinitionIdentities::from(60);
+            let result = prepared.invoke_publishing(
+                vec![],
+                &mut 100_000,
+                Span::default(),
+                7,
+                identities.clone(),
+            );
+            assert_eq!(identities.next(), 61, "the request reached the publisher");
             match (actual, result) {
                 (P::Bool, Ok((_, additions))) => assert_eq!(additions.newtypes.len(), 1),
                 (P::U8, Err(failure)) => assert!(

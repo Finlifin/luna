@@ -421,9 +421,10 @@ fn elaborate_with_attributes(
     )?;
     let mut checker = Checker {
         source_declarations,
-        next_definition_identity: package
+        definition_identities: package
             .next_definition_index()
-            .max(u32::try_from(package.num_defs()).unwrap_or(u32::MAX)),
+            .max(u32::try_from(package.num_defs()).unwrap_or(u32::MAX))
+            .into(),
         delivered_types: BTreeMap::new(),
         target,
         protocols: protocols.clone(),
@@ -1423,7 +1424,7 @@ fn elaborate_candidate<'a, 'h>(
         &mut checker.required_steps,
     )?;
     output.quote_identity_cursor = checker.next_temporary_binding;
-    output.definition_identity_cursor = checker.next_definition_identity;
+    output.definition_identity_cursor = checker.definition_identities.next();
     if output
         .implementations
         .iter()
@@ -1534,7 +1535,7 @@ enum CallUse {
 
 struct Checker<'a, 'h> {
     source_declarations: source_declarations::SourceDeclarations<'a, 'h>,
-    next_definition_identity: u32,
+    definition_identities: crate::definitions::DefinitionIdentities,
     delivered_types: BTreeMap<n::LocalId, (std::sync::Arc<Term>, Span)>,
     target: Option<nir::target::TargetData>,
     protocols: Protocols,

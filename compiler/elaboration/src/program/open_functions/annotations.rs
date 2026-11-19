@@ -337,7 +337,7 @@ impl Checker<'_, '_> {
         // declaration snapshot. Reprepare completed source with these inputs;
         // never graft current inference state into a saved computation.
         let late_definitions = matches!(annotation, Annotation::Pending(computation)
-            if computation.definition_identity_cursor() != self.next_definition_identity);
+            if computation.definition_identity_cursor() != self.definition_identities.next());
         if !annotation.awaits_inputs()
             || (live.iter().all(Option::is_none) && !callable_input && !late_definitions)
         {

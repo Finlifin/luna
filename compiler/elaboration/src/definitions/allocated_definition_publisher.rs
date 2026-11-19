@@ -6,22 +6,51 @@ use comptime_interpretor::{
 };
 use nir::{DeclarationId, program as n};
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+/// Fresh local declaration IDs owned by one source elaboration. Nested source
+/// checks and VM publishers reserve immediately; descriptors publish separately.
+#[derive(Clone)]
+pub struct DefinitionIdentities(Rc<Cell<u32>>);
+
+impl From<u32> for DefinitionIdentities {
+    fn from(next: u32) -> Self {
+        Self(Rc::new(Cell::new(next)))
+    }
+}
+
+impl DefinitionIdentities {
+    pub fn next(&self) -> u32 {
+        self.0.get()
+    }
+
+    pub(crate) fn reserve(&self) -> Option<u32> {
+        let local = self.next();
+        self.0.set(local.checked_add(1)?);
+        Some(local)
+    }
+}
 
 pub struct AllocatedDefinitionPublisher<'a> {
     checked: CheckedDefinitionPublisher<'a>,
     package: u64,
-    next: Cell<u32>,
+    identities: DefinitionIdentities,
     fuel: Cell<usize>,
     diagnostic: RefCell<Option<String>>,
 }
 impl<'a> AllocatedDefinitionPublisher<'a> {
     /// The frontier covers all source declarations, including those absent from
     /// the invocation snapshot. Rejected or abandoned reserved IDs are not reused.
-    pub fn new(baseline: &'a n::Package, package: u64, next: u32, fuel: usize) -> Self {
+    pub fn new(
+        baseline: &'a n::Package,
+        package: u64,
+        identities: impl Into<DefinitionIdentities>,
+        fuel: usize,
+    ) -> Self {
         Self {
             checked: CheckedDefinitionPublisher::new(baseline),
             package,
-            next: Cell::new(next),
+            identities: identities.into(),
             fuel: Cell::new(fuel),
             diagnostic: RefCell::new(None),
         }
@@ -29,20 +58,23 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
     pub fn new_with_type_solver(
         baseline: &'a n::Package,
         package: u64,
-        next: u32,
+        identities: impl Into<DefinitionIdentities>,
         fuel: usize,
         solver: &'a comptime_interpretor::BudgetedTypeSolver<'a>,
     ) -> Self {
         Self {
             checked: CheckedDefinitionPublisher::new_with_type_solver(baseline, solver),
-            ..Self::new(baseline, package, next, fuel)
+            package,
+            identities: identities.into(),
+            fuel: Cell::new(fuel),
+            diagnostic: RefCell::new(None),
         }
     }
     pub fn remaining_structural_fuel(&self) -> usize {
         self.fuel.get()
     }
     pub fn finish(self) -> (PublishedDefinitions, u32) {
-        (self.checked.into_definitions(), self.next.get())
+        (self.checked.into_definitions(), self.identities.next())
     }
     pub fn last_diagnostic(&self) -> Option<String> {
         self.diagnostic
@@ -95,8 +127,7 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
                 source: Some(source),
             });
         }
-        let local = self.next.get();
-        let next = local.checked_add(1).ok_or_else(|| {
+        let local = self.identities.reserve().ok_or_else(|| {
             *self.diagnostic.borrow_mut() =
                 Some("builder declaration identity space exhausted".into());
             Error {
@@ -104,7 +135,6 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
                 source: Some(source),
             }
         })?;
-        self.next.set(next);
         Ok(DeclarationId {
             package: self.package,
             local,
@@ -143,7 +173,7 @@ impl std::fmt::Display for AllocatedDefinitionPublisher<'_> {
             f,
             "(allocated-definition-publisher (package {}) (next {}) (structural-fuel {}) {})",
             self.package,
-            self.next.get(),
+            self.identities.next(),
             self.fuel.get(),
             self.checked
         )

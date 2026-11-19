@@ -96,7 +96,7 @@ WorldRevision 描述物理数据版本；visibility_frontier 描述当前语义�
 | context、pending_type_uses、pending_refinements、候选替换 | CandidateTrial / Region obligations | 前提、赋值、term result 与诊断决定一起提交 |
 | code_values、pattern_codes、generator_cells、code_method_captures | 当前代码构造/执行 owner | 声明模板可共享，实例捕获、可变 cell 和实际 CodeValue 不能共享误用 |
 | completed_aliases、open_instances、implementation_index | 带完整语义依赖的缓存/索引 | key 包含相应视图与输入；完成结果和 in-flight task 分开 |
-| next_definition_identity、generated_functions、expansion_sources | DefinitionTransaction / 来源 owner | 成功发布才交付新定义；来源在失败诊断需要时仍由 owner 保活 |
+| definition_identities、generated_functions、expansion_sources | 源码身份分配与定义发布 | 预留立即消耗编号，描述经检查后才可见。来源在失败诊断需要时仍由 owner 保活 |
 | required_steps、alias_expression_budget 等 | WorkBudget 的具名子额度 | 消耗跨重试累积；失败不退款已做工作，回收另有保留容量 |
 
 某字段同时放了稳定和活动数据时应拆其语义，不是简单包进一个更大的 Context。
@@ -114,6 +114,13 @@ PTC 构造器权限；后一个描述超预算时，早先条目已可见，impl
 状态，已经消耗的工作不退款；builder 已保留的身份编号也不回退。生成描述仍先由
 原 builder admission 校验，接收器不重复求值、不重新分配身份，也不创建第二套
 形成规则。这里保证可返回错误的接收失败原子性，不回滚此前用户执行的外部行为。
+
+源码检查器创建 required invocation 时将自己的身份分配器交给该操作。源码中的
+Type binder 和 builder 共用此分配器，已准备的源码快照只保存创建时的数值游标。
+例如外层 builder 预留 100 后暂停，内层依次放弃 101、拒绝 102、发布 103。
+外层恢复后仍可提交 100，下一次预留得到 104。每个发布器只交付自己生成的描述。
+内层的返回、提前退出和外层完成均不能覆盖期间已经消耗的编号。
+[分配与发布](../compiler/elaboration/src/definitions/allocated_definition_publisher.rs) · [交错预留用例](../compiler/elaboration/tests/allocated_definition_publisher.rs)
 
 具体描述发布后，包内其他调用者可以使用其字段、变体载荷及 newtype 表示。
 这些类型的形成条件必须能从包级声明证明。显式 `luna comptime` 的执行 VM
@@ -319,7 +326,7 @@ Commit、Probe、RetainCode 分别遵守各自对构造副作用的交付规则�
 
 普通参数的默认值可引用较早完成的输入。检查器保留原 Local 读取，只有再次进入本次活动路径才报告依赖环。对于 `do { mark(); U }`，即使最后的 U 能提供类型信息，也必须在调用时执行前面的 `mark()`。如果依赖检查不能静态观察其身份，普通 comptime callable 仍需原调用授予执行许可。提前执行默认值会改变副作用次序。[普通调用域依赖](../compiler/elaboration/src/program/dependent_inputs/tasks.rs) · [默认值用例](../compiler/luna/tests/ordinary_input_identity.rs)
 
-对于 runtime 函数的 comptime 参数，依赖帧可以请求必需计算。例如 `fn choose(comptime .flag: bool = true, comptime .T: Type = Select(flag), value: T) -> T` 需要先知道 `T` 才能检查 `value`。检查器收集默认值实际读取的绑定，准备执行世界，然后在 `T` 槽位挂起。驱动将剩余预算和定义编号分配权交给 VM。VM 返回值、类型和新生成的定义，由原帧在调用者作用域登记这些定义，再冻结值并填入该槽位。这样当默认值用 builder 产生枚举类型时，下一个实参可以用 `.data(true)` 构造它。执行或冻结失败沿原区域退出，后继输入不会收到部分结果。显式供应 `.T` 时直接使用显式实参。[区域驱动](../compiler/elaboration/src/program/block_regions/driver/region.rs) · [必需计算与默认值](../compiler/luna/tests/ordinary_input_identity.rs)
+对于 runtime 函数的 comptime 参数，依赖帧可以请求必需计算。例如 `fn choose(comptime .flag: bool = true, comptime .T: Type = Select(flag), value: T) -> T` 需要先知道 `T` 才能检查 `value`。检查器收集默认值实际读取的绑定，准备执行世界，然后在 `T` 槽位挂起。驱动把剩余预算交给已持有源码身份分配器的 invocation。VM 返回值、类型和新生成的定义，由原帧在调用者作用域登记这些定义，再冻结值并填入该槽位。这样当默认值用 builder 产生枚举类型时，下一个实参可以用 `.data(true)` 构造它。执行或冻结失败沿原区域退出，后继输入不会收到部分结果。显式供应 `.T` 时直接使用显式实参。[区域驱动](../compiler/elaboration/src/program/block_regions/driver/region.rs) · [必需计算与默认值](../compiler/luna/tests/ordinary_input_identity.rs)
 
 `count<.values = [byte], do { byte = 9; Byte() }>()` 还需要另一种交接。当前函数实例的子句消费者只接收已完成类型检查的表达式，检查 `[byte]` 时就失去了等待元素域的位置。这里须由原 invocation 保留读取到的 `byte`，执行后一项后交付实际 Type，再继续检查并准入先前的值。若结果签名也依赖该 Type，调用结果的消费者必须一同保留。独立的必需计算只拥有显式捕获，无法提供这个执行现场。[子句消费者](../compiler/elaboration/src/program/dynamic_instances.rs) · [原调用用例](../compiler/luna/tests/type_input_execution_order.rs)
 
@@ -430,7 +437,10 @@ LocalId（包括准备语句引入的绑定）。字节码保留这份不可变�
 已复现的边界是 `Second.enabled` 引用这次调用正在形成的常量，导致伪循环。
 要消除这条依赖，需等 VM 取得具体接收者并选中实现，再向源码取得这一项供应，
 将响应交回原 activation。重跑正在形成的常量会重复其先前执行的操作。
-[关联值检查](../compiler/elaboration/src/program/interfaces/associated.rs) · [执行世界投影](../compiler/elaboration/src/program/required/trait_world.rs) · [开放输入用例](../compiler/luna/tests/deferred_associated_values.rs)
+[源码复现](repros/required-selected-member.fl) 可用真实 sysroot 执行 `luna check`。
+其中 `result()` 应得到 true。若把 `read(First)` 改成 `read(Second)`，
+选中的成员与 `saved` 确实相互依赖，必须在读取时拒绝。
+[关联值检查](../compiler/elaboration/src/program/interfaces/associated.rs) · [执行世界投影](../compiler/elaboration/src/program/required/trait_world.rs)
 
 关联项现在有两个可观察的步骤。`select_associated_member` 在原声明世界中检查成员域、
 接口成立条件和实现阶段，返回实现身份、成员身份与代入后的结果域。即使被选行尚未
@@ -446,6 +456,14 @@ VM 选中缺失供应后向原源码区域挂起、取回并恢复的接线仍�
 选中实现的声明身份、实现实参和成员身份。选择凭据借用本次调用的世界；在源码区域
 检查出初始化器之后，原请求仍须在自己的结果域中接收它。让源码检查重新发起顶层
 调用会重做已经发生的前缀效果，也会把原来的调用预算和取消边界丢掉。
+
+这处挂起还涉及两种不同的所有权。选择证据归原来的声明世界；选中项尚缺的定义体
+归正在检查源码的 owner。供应用到其他 comptime 函数时，原 VM 还需要这些声明的
+阶段检查和算术安全证据。仅把选中项的表达式塞回冻结包，会漏掉辅助函数以及
+完成值携带的函数身份。来源检查也可能嵌套发起声明查询，所以在进入来源之前必须
+释放 `SourceInvocationQueries` 对可变查询目录的借用。VM 的线性请求保留接收者、
+接口实参、结果域和剩余额度。定义编号从同一个分配器预留，生成的描述仍由各自的
+调用接收和发布。[源码查询](../compiler/materialization/src/source_queries.rs) · [宿主请求与恢复](../compiler/comptime_interpretor/src/invocation/host.rs)
 [关联成员选择](../compiler/type_resolution/src/associated/values.rs) · [VM 接收](../compiler/comptime_interpretor/src/associated_execution.rs)
 
 源码检查具体成员读取时，先用接收者和接口实参代入成员声明域。普通数据和函数值

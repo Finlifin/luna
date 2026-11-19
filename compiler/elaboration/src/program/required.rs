@@ -30,6 +30,7 @@ pub(super) struct Invocation {
     prepared: PreparedRequired,
     values: Vec<(n::LocalId, Value)>,
     package: u64,
+    identities: crate::definitions::DefinitionIdentities,
     span: Span,
 }
 
@@ -40,17 +41,13 @@ pub(super) struct CompletedInvocation {
 }
 
 impl Invocation {
-    pub(super) fn execute(
-        self,
-        steps: &mut u64,
-        next_identity: &mut u32,
-    ) -> Result<CompletedInvocation, Error> {
+    pub(super) fn execute(self, steps: &mut u64) -> Result<CompletedInvocation, Error> {
         let (result, definitions) = self.prepared.invoke_publishing(
             self.values,
             steps,
             self.span,
             self.package,
-            next_identity,
+            self.identities,
         )?;
         Ok(CompletedInvocation {
             result,
@@ -796,7 +793,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<(Value, Term), Error> {
         self.required_invocation(prepared, values, owner, span)
-            .execute(&mut self.required_steps, &mut self.next_definition_identity)?
+            .execute(&mut self.required_steps)?
             .publish(self)
     }
 
@@ -811,6 +808,7 @@ impl Checker<'_, '_> {
             prepared,
             values,
             package: declaration(self.package, &self.package_identities, owner).package,
+            identities: self.definition_identities.clone(),
             span,
         }
     }
@@ -1374,7 +1372,7 @@ impl Checker<'_, '_> {
                     .builtin_implementation_packages
                     .clone(),
                 refinements: self.refinements.clone(),
-                definition_identity_cursor: self.next_definition_identity,
+                definition_identity_cursor: self.definition_identities.next(),
                 target: self.target,
                 method_links,
                 runtime_function_identities,

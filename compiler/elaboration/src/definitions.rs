@@ -13,7 +13,7 @@ mod checked_struct_publisher;
 mod concrete_requests;
 mod deferred_struct_publisher;
 mod struct_publisher;
-pub use allocated_definition_publisher::AllocatedDefinitionPublisher;
+pub use allocated_definition_publisher::{AllocatedDefinitionPublisher, DefinitionIdentities};
 pub use allocated_struct_publisher::AllocatedStructPublisher;
 pub use checked_definition_publisher::{
     CheckedDefinitionPublisher, PreparedDefinitions, PublishedDefinitions,

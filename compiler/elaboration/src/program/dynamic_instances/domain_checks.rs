@@ -120,11 +120,10 @@ impl Declaration {
         steps: &mut u64,
         span: Span,
     ) -> Result<nir::DeclarationSubstitution<'static>, Error> {
-        // The shared checker borrow excludes definition allocation throughout
-        // this proof. Its first unused identity starts a private range; querying
-        // an operand cannot advance the cursor or invalidate prepared code.
+        // This synchronous proof neither publishes definitions nor calls the VM.
+        // Its temporary rigids expire before the source allocator runs again.
         let package = declaration(checker.package, &checker.package_identities, self.owner).package;
-        let mut next = checker.next_definition_identity;
+        let mut next = checker.definition_identities.next();
         let mut subjects = Vec::new();
         for ((id, domain), value) in self
             .parameters

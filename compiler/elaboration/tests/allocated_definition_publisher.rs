@@ -59,6 +59,54 @@ fn enumeration(field: Term) -> EnumBuildRequest {
 }
 
 #[test]
+fn nested_publications_share_reservations_while_each_world_owns_its_descriptors() {
+    use elaboration::definitions::DefinitionIdentities;
+    let baseline = Package::default();
+    let identities = DefinitionIdentities::from(100);
+    let publisher =
+        || AllocatedDefinitionPublisher::new(&baseline, 75, identities.clone(), 100_000);
+    let mut steps = 1_000_000;
+    let outer = publisher();
+    {
+        let pending = outer
+            .prepare_struct(&structure(boolean()), &mut steps)
+            .unwrap();
+        assert_eq!(pending.result, id(100));
+        let inner = publisher();
+        // Both abandoned and rejected descriptors consume their reservations.
+        let unused = inner
+            .prepare_enum(&enumeration(boolean()), &mut steps)
+            .unwrap();
+        assert_eq!(unused.result, id(101));
+        drop(unused);
+        assert!(
+            inner
+                .prepare_enum(&enumeration(ty(999)), &mut steps)
+                .is_err()
+        );
+        {
+            let admitted = inner
+                .prepare_enum(&enumeration(boolean()), &mut steps)
+                .unwrap();
+            assert_eq!(admitted.result, id(103));
+            (admitted.commit)().unwrap();
+        }
+        let (nested, _) = inner.finish();
+        assert_eq!(nested.enums.len(), 1);
+        (pending.commit)().unwrap();
+        let last = outer
+            .prepare_struct(&structure(boolean()), &mut steps)
+            .unwrap();
+        assert_eq!(last.result, id(104));
+        drop(last);
+    }
+    let (published, next) = outer.finish();
+    assert!(published.enums.is_empty());
+    assert_eq!(published.structs.len(), 1);
+    assert_eq!((next, identities.next()), (105, 105));
+}
+
+#[test]
 fn alternating_requests_allocate_once_and_retain_shapes_and_payload_identities() {
     let baseline = Package::default();
     let publisher = AllocatedDefinitionPublisher::new(&baseline, 75, 100, 100_000);
