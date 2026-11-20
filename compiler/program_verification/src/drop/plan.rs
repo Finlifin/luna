@@ -8,6 +8,7 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 
 mod reads;
+
 pub use reads::{CleanupReadFootprint, CleanupReader};
 
 #[derive(Clone, Debug)]
@@ -16,6 +17,7 @@ enum Layout<T> {
     Fields(Vec<T>),
     Variants(Vec<Vec<T>>),
 }
+
 #[derive(Clone, Debug)]
 pub struct AcquiredCleanup {
     ty: Term,
@@ -23,10 +25,12 @@ pub struct AcquiredCleanup {
     layout: Layout<AcquiredCleanup>,
     assumptions: Vec<TraitRequirement>,
 }
+
 impl AcquiredCleanup {
     pub fn ty(&self) -> &Term {
         &self.ty
     }
+
     /// Visit every represented component, requiring no custom destructor.
     /// Callers can additionally require Copy capability for each component.
     /// A pointer is atomic: ownership of its target is not implied.
@@ -161,6 +165,7 @@ impl AcquiredCleanup {
         Ok(())
     }
 }
+
 impl fmt::Display for AcquiredCleanup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -196,11 +201,13 @@ impl fmt::Display for AcquiredCleanup {
         f.write_str("))")
     }
 }
+
 #[derive(Clone, Debug)]
 pub struct VariantCleanup {
     pub index: usize,
     pub steps: Vec<CleanupStep>,
 }
+
 impl fmt::Display for VariantCleanup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(variant-cleanup (index {}) (steps", self.index)?;
@@ -210,6 +217,7 @@ impl fmt::Display for VariantCleanup {
         f.write_str("))")
     }
 }
+
 #[derive(Clone, Debug)]
 pub enum CleanupStep {
     /// Mutually exclusive residual layouts, each verified with its own exact
@@ -234,6 +242,7 @@ pub enum CleanupStep {
     /// Complete ownership responsibility; this does not free backing allocation.
     Release { place: Place, ty: Term },
 }
+
 impl fmt::Display for CleanupStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -277,6 +286,7 @@ impl fmt::Display for CleanupStep {
         }
     }
 }
+
 #[derive(Clone, Debug)]
 pub struct CleanupPlan {
     pub receiver: Place,
@@ -284,6 +294,7 @@ pub struct CleanupPlan {
     pub variants: Vec<VariantSelection>,
     pub steps: Vec<CleanupStep>,
 }
+
 impl fmt::Display for CleanupPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(cleanup-plan (receiver {}) (initial", self.receiver)?;
@@ -301,6 +312,7 @@ impl fmt::Display for CleanupPlan {
         f.write_str("))")
     }
 }
+
 fn step(fuel: &mut usize, depth: usize) -> Result<(), String> {
     if depth > 128 {
         return Err("cleanup layout depth exhausted".into());
@@ -310,6 +322,7 @@ fn step(fuel: &mut usize, depth: usize) -> Result<(), String> {
         .ok_or("cleanup planning budget exhausted")?;
     Ok(())
 }
+
 fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>, String> {
     crate::memory::bound_type(ty, fuel)?;
     if let Some(fields) = nir::normal_forms::tuple_fields(Some(package), ty) {
@@ -381,6 +394,7 @@ fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>
         _ => Err("cleanup layout is not established; opaque heads are not unfolded".into()),
     }
 }
+
 fn map_layout<T, U>(
     layout: Layout<T>,
     mut f: impl FnMut(T) -> Result<U, String>,
@@ -398,6 +412,7 @@ fn map_layout<T, U>(
         ),
     })
 }
+
 fn same_layout(actual: &Layout<Term>, bound: &Layout<AcquiredCleanup>) -> bool {
     let fields = |a: &[Term], b: &[AcquiredCleanup]| {
         a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a == &b.ty)
@@ -411,6 +426,7 @@ fn same_layout(actual: &Layout<Term>, bound: &Layout<AcquiredCleanup>) -> bool {
         _ => false,
     }
 }
+
 /// Capture before destruction. Moves retain this artifact. Runtime environment
 /// acquisition is not implemented and environment-bearing selections fail.
 pub fn acquire_cleanup(
@@ -481,12 +497,14 @@ pub fn acquire_cleanup(
     }
     acquire(package, world, protocol, ty, budget, fuel, 0)
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RequiredDropInstance {
     pub declaration: DeclarationId,
     pub arguments: Vec<Term>,
     pub subject: Term,
 }
+
 impl fmt::Display for RequiredDropInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -500,6 +518,7 @@ impl fmt::Display for RequiredDropInstance {
         write!(f, ") (subject {}))", self.subject)
     }
 }
+
 pub(super) fn record_missing_runtime_instance(
     missing: &mut Vec<RequiredDropInstance>,
     declaration: DeclarationId,
@@ -530,6 +549,7 @@ pub(super) fn record_missing_runtime_instance(
     });
     Ok(())
 }
+
 struct Planner<'a, 'w> {
     package: &'a Package,
     world: &'a World<'w>,
@@ -544,6 +564,7 @@ struct Planner<'a, 'w> {
     missing_runtime_instances: Option<&'a mut Vec<RequiredDropInstance>>,
     access_context: Option<super::access::AccessContext<'a>>,
 }
+
 impl Planner<'_, '_> {
     fn shape(&mut self, binding: &AcquiredCleanup, depth: usize) -> Result<Shape, String> {
         step(self.fuel, depth)?;
@@ -557,6 +578,7 @@ impl Planner<'_, '_> {
             _ => Ok(Shape::Value),
         }
     }
+
     fn children(
         &mut self,
         fields: &[AcquiredCleanup],
@@ -597,6 +619,7 @@ impl Planner<'_, '_> {
         }
         Ok(())
     }
+
     fn variant_children(
         &mut self,
         index: usize,
@@ -629,6 +652,7 @@ impl Planner<'_, '_> {
         }
         result
     }
+
     fn variant_children_with_layout(
         &mut self,
         fields: &[AcquiredCleanup],
@@ -661,6 +685,7 @@ impl Planner<'_, '_> {
             .ok_or("missing variant payload")?;
         self.children(fields, &refined, &payload, depth, steps)
     }
+
     fn variant_payload(
         &mut self,
         variants: &[Vec<AcquiredCleanup>],
@@ -713,6 +738,7 @@ impl Planner<'_, '_> {
         }
         Ok(())
     }
+
     fn visit(
         &mut self,
         binding: &AcquiredCleanup,
@@ -878,6 +904,7 @@ impl Planner<'_, '_> {
         Ok(())
     }
 }
+
 pub fn plan_cleanup(
     package: &Package,
     world: &World<'_>,
@@ -888,6 +915,7 @@ pub fn plan_cleanup(
 ) -> Result<CleanupPlan, String> {
     plan_cleanup_with_variants(package, world, acquired, state, receiver, &[], fuel)
 }
+
 /// Variant selections are relative to receiver and must be supplied by the
 /// runtime tag branch or checked pattern decomposition, never guessed from types.
 pub fn plan_cleanup_with_variants(
@@ -1123,9 +1151,11 @@ pub struct CleanupSession<'a, 'w> {
     read_footprints: std::collections::HashMap<Term, CleanupReadFootprint>,
     memory_inert_types: std::collections::HashSet<Term>,
     nonrejecting_types: std::collections::HashSet<Term>,
+    verified_drops: std::collections::HashSet<(Term, DeclarationId, DeclarationId)>,
     require_runtime_instances: bool,
     missing_runtime_instances: Vec<RequiredDropInstance>,
 }
+
 impl<'a, 'w> CleanupSession<'a, 'w> {
     pub fn new(
         package: &'a Package,
@@ -1140,6 +1170,7 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
             budget,
         )
     }
+
     pub(crate) fn with_declarations(
         declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
         world: &'a World<'w>,
@@ -1155,6 +1186,7 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
             budget,
         )
     }
+
     pub(crate) fn with_context(
         declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
         source: Option<::materialization::DeclarationSource<'a>>,
@@ -1185,27 +1217,34 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
             read_footprints: Default::default(),
             memory_inert_types: Default::default(),
             nonrejecting_types: Default::default(),
+            verified_drops: Default::default(),
             require_runtime_instances: false,
             missing_runtime_instances: vec![],
         }
     }
+
     pub fn require_runtime_instances(mut self) -> Self {
         self.require_runtime_instances = true;
         self
     }
+
     pub fn with_text_provenance(mut self, text_provenance: crate::memory::TextProvenance) -> Self {
         self.text_provenance = text_provenance;
         self
     }
+
     pub fn missing_runtime_instances(&self) -> &[RequiredDropInstance] {
         &self.missing_runtime_instances
     }
+
     pub fn into_missing_runtime_instances(self) -> Vec<RequiredDropInstance> {
         self.missing_runtime_instances
     }
+
     pub fn take_missing_runtime_instances(&mut self) -> Vec<RequiredDropInstance> {
         std::mem::take(&mut self.missing_runtime_instances)
     }
+
     fn find<'b>(
         &'b self,
         ty: &Term,
@@ -1213,6 +1252,7 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
     ) -> Result<Option<&'b AcquiredCleanup>, String> {
         Self::find_in_bindings(&self.bindings, &self.binding_paths, ty, fuel)
     }
+
     fn find_in_bindings<'b>(
         bindings: &'b [AcquiredCleanup],
         binding_paths: &std::collections::HashMap<Term, (usize, Vec<usize>)>,
@@ -1242,6 +1282,7 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
         Ok(Some(binding))
     }
 }
+
 impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
     fn is_trivial(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
         crate::memory::bound_type(ty, fuel)?;
@@ -1258,6 +1299,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         self.trivial_layouts.insert(ty.clone(), trivial);
         Ok(trivial)
     }
+
     fn is_memory_inert(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
         crate::memory::bound_type(ty, fuel)?;
         if self.memory_inert_types.contains(ty) {
@@ -1294,6 +1336,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         }
         result
     }
+
     fn cleanup_reads(
         &mut self,
         ty: &Term,
@@ -1303,6 +1346,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             .map(|footprint| footprint.root_accesses(self.package, fuel))
             .transpose()
     }
+
     fn check_error_embedding(
         &mut self,
         source: &Term,
@@ -1324,6 +1368,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             Err("error embedding requires explicit Drop responsibility transfer for the source result".into())
         }
     }
+
     fn may_reject(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
         crate::memory::bound_type(ty, fuel)?;
         if self.nonrejecting_types.contains(ty) {
@@ -1432,6 +1477,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         }
         result
     }
+
     fn acquire(&mut self, ty: &Term, fuel: &mut usize) -> Result<(), String> {
         if self.find(ty, fuel)?.is_none() {
             let binding = acquire_cleanup(
@@ -1491,6 +1537,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         }
         Ok(())
     }
+
     fn plan(
         &mut self,
         ty: &Term,
@@ -1501,6 +1548,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
     ) -> Result<CleanupPlan, String> {
         self.plan_with_memory(ty, state, place, variants, None, fuel)
     }
+
     fn plan_with_domains(
         &mut self,
         ty: &Term,
@@ -1518,6 +1566,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             source: self.source,
             methods: &mut self.methods,
             summaries: &mut self.summaries,
+            verified_drops: &mut self.verified_drops,
             text_provenance: self.text_provenance,
         };
         plan_cleanup_with_domains_internal(
@@ -1535,6 +1584,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             fuel,
         )
     }
+
     fn plan_with_memory(
         &mut self,
         ty: &Term,
@@ -1733,5 +1783,206 @@ mod tuple_layout_tests {
         assert!(layout(&package, &ty, &mut 0).is_err());
         package.normal_forms[0].role = Role::Opaque;
         assert!(layout(&package, &ty, &mut 1000).is_err());
+    }
+}
+
+#[cfg(test)]
+mod verified_drop_cache_tests {
+    use super::*;
+    use crate::{PlaceId, implementation::ImplementationHead, moves::CleanupPolicy, ptc::Context};
+    use nir::program::{
+        Expr, ExprKind, Function, FunctionDeclaration, Implementation, SourceRange, Struct, Trait,
+        TraitPhase,
+    };
+
+    #[test]
+    fn cleanup_session_caches_verified_drop_declarations_only_on_success() {
+        let id = |local| DeclarationId { package: 1, local };
+        let drop_trait_id = id(1);
+        let self_param = id(2);
+        let member_id = id(3);
+        let struct_id = id(4);
+        let impl_id = id(5);
+        let body_id = id(6);
+        let source = SourceRange { start: 0, end: 1 };
+        let void = Term::Primitive(Primitive::Void);
+        let struct_ty = Term::Nominal {
+            declaration: struct_id,
+            arguments: vec![],
+        };
+        let self_param_ty = Term::Pointer(Box::new(Term::Rigid {
+            declaration: self_param,
+            sort: Sort::Type,
+        }));
+        let concrete_sig = Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Runtime,
+                ty: Term::Pointer(Box::new(struct_ty.clone())),
+            }],
+            result: Box::new(void.clone()),
+        };
+        let receiver_binding = LocalId { owner: 1, index: 0 };
+        let mut package = Package {
+            structs: vec![Struct {
+                capabilities: vec![],
+                packed: false,
+                declaration: struct_id,
+                name: "Owned".into(),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                fields: vec![],
+                requirements: vec![],
+            }],
+            traits: vec![Trait {
+                comptime_only: false,
+                parameter_types: vec![],
+                associated: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                type_parameters: vec![],
+                declaration: drop_trait_id,
+                parents: vec![],
+                self_parameter: self_param,
+                name: "Drop".into(),
+                methods: vec![MethodContract {
+                    source,
+                    phase: TraitPhase::Runtime,
+                    is_quote: false,
+                    pure: false,
+                    is_unsafe: false,
+                    type_arguments: vec![],
+                    type_parameters: vec![],
+                    capabilities: vec![],
+                    program: ProgramContract::default(),
+                    parameter_bindings: vec![receiver_binding],
+                    by_value_receiver: false,
+                    by_reference_receiver: true,
+                    declaration: member_id,
+                    name: "drop".into(),
+                    signature: nir::code_interfaces::MethodSignature::Callable(Term::Function {
+                        parameters: vec![Parameter {
+                            sort: Sort::Runtime,
+                            ty: self_param_ty,
+                        }],
+                        result: Box::new(void.clone()),
+                    }),
+                    requirements: vec![],
+                    default: None,
+                }],
+            }],
+            implementations: vec![Implementation {
+                phases: Default::default(),
+                parameter_types: vec![],
+                associated: vec![],
+                associated_initializers: vec![],
+                interface_arguments: vec![],
+                capabilities: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                declaration: impl_id,
+                subject: struct_ty.clone(),
+                interface: Some(drop_trait_id),
+                methods: vec![("drop".into(), body_id)],
+            }],
+            functions: vec![Function {
+                interface: FunctionDeclaration {
+                    source,
+                    phase: FunctionPhase::Runtime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    declaration: body_id,
+                    name: "drop".into(),
+                    parameters: vec![receiver_binding],
+                    env_parameters: vec![],
+                    defaults: vec![],
+                    signature: concrete_sig,
+                },
+                body: Expr {
+                    source,
+                    ty: void,
+                    kind: ExprKind::Unit,
+                },
+                runtime_deliveries: Default::default(),
+            }],
+            ..Default::default()
+        };
+        package.structs[0]
+            .fields
+            .push(("flag".into(), Term::Primitive(Primitive::Bool)));
+        let mut index = crate::implementation::Index::default();
+        index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
+        index
+            .insert(
+                ImplementationHead {
+                    parameter_types: vec![],
+                    type_parameters: vec![],
+                    requirements: vec![],
+                    declaration: impl_id,
+                    interface: Some(drop_trait_id),
+                    interface_arguments: vec![],
+                    subject: struct_ty.clone(),
+                },
+                Budget::default(),
+            )
+            .unwrap();
+        let context = Context::default();
+        let world = World {
+            index: &index,
+            implementations: &package.implementations,
+            traits: &package.traits,
+            assumptions: &[],
+            context: &context,
+        };
+        let mut session = CleanupSession::new(&package, &world, drop_trait_id, Budget::default());
+        session.acquire(&struct_ty, &mut 10_000).unwrap();
+
+        let place = Place {
+            root: PlaceId { owner: 0, local: 0 },
+            fields: vec![],
+        };
+        let mut state = State::default();
+        state
+            .declare(
+                place.root,
+                &Shape::Fields(vec![Shape::Value]),
+                true,
+                &mut 10_000,
+            )
+            .unwrap();
+
+        // Exhaustion during cold access check must not cache a verified declaration.
+        assert!(
+            session
+                .plan(&struct_ty, &state, &place, &[], &mut 15)
+                .is_err()
+        );
+        assert!(session.verified_drops.is_empty());
+
+        let mut cold_fuel = 10_000;
+        session
+            .plan(&struct_ty, &state, &place, &[], &mut cold_fuel)
+            .unwrap();
+        let cold_cost = 10_000 - cold_fuel;
+        assert_eq!(session.verified_drops.len(), 1);
+
+        let mut warm_fuel = 10_000;
+        session
+            .plan(&struct_ty, &state, &place, &[], &mut warm_fuel)
+            .unwrap();
+        let warm_cost = 10_000 - warm_fuel;
+        assert!(
+            warm_cost < cold_cost,
+            "warm cost {warm_cost} should be strictly less than cold cost {cold_cost}"
+        );
     }
 }

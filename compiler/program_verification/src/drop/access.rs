@@ -47,6 +47,7 @@ pub struct AccessCheck {
     /// Delivered runtime environment expressions matching `selected.env_requirements`.
     pub env_arguments: Vec<nir::program::Expr>,
 }
+
 impl fmt::Display for AccessCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -116,6 +117,7 @@ pub(super) struct AccessContext<'a> {
     pub source: Option<::materialization::DeclarationSource<'a>>,
     pub methods: &'a mut memory::MethodCallees,
     pub summaries: &'a mut memory::SummaryCache,
+    pub verified_drops: &'a mut std::collections::HashSet<(Term, DeclarationId, DeclarationId)>,
     pub text_provenance: memory::TextProvenance,
 }
 
@@ -151,106 +153,121 @@ pub(super) fn check_access_with_context(
     receiver: &Place,
     pointers: Option<PointerMemory<'_>>,
     variant_layouts: &BTreeMap<Place, VariantLayout>,
-    context: Option<&mut AccessContext<'_>>,
+    mut context: Option<&mut AccessContext<'_>>,
     fuel: &mut usize,
 ) -> Result<AccessCheck, String> {
     if *fuel == 0 {
         return Err("Drop access budget exhausted".into());
     }
     *fuel -= 1;
-    if !world.index.type_resolution_is_current(selected.selection()) {
-        return Err("Drop selection belongs to a different implementation world".into());
-    }
-    selected.evidence.check_instance(
-        selected.protocol,
-        &selected.subject,
+    let drop_key = (
+        selected.subject.clone(),
         selected.implementation,
-        &selected.implementation_arguments,
-        fuel,
-    )?;
-    selected.evidence.check_world(world, fuel)?;
-    let implementation = package
-        .implementations
-        .iter()
-        .find(|item| item.declaration == selected.implementation)
-        .ok_or("captured Drop implementation is missing")?;
-    let substitution = nir::DeclarationSubstitution::bounded(
-        &implementation.type_parameters,
-        &implementation.parameter_types,
-        &selected.implementation_arguments,
-        &[],
-        fuel,
-    )
-    .map_err(|e| e.to_string())?;
-    let subject = substitution
-        .instantiate_bounded(&implementation.subject, fuel)
-        .map_err(|e| e.to_string())?;
-    let contract = package
-        .traits
-        .iter()
-        .find(|item| item.declaration == selected.protocol)
-        .ok_or("captured Drop protocol is missing")?;
-    let member = contract
-        .methods
-        .iter()
-        .find(|item| item.declaration == selected.method.member && item.name == "drop")
-        .ok_or("captured Drop member is missing")?;
-    let expected_arguments = if member.default == Some(selected.method.body) {
-        vec![selected.subject.clone()]
+        selected.method.body,
+    );
+    let verified = context
+        .as_deref()
+        .is_some_and(|ctx| ctx.verified_drops.contains(&drop_key));
+    if verified {
+        memory::bound_type(&selected.subject, fuel)?;
     } else {
-        selected.implementation_arguments.clone()
-    };
-    if subject != selected.subject
-        || implementation.interface != Some(selected.protocol)
-        || implementation
+        if !world.index.type_resolution_is_current(selected.selection()) {
+            return Err("Drop selection belongs to a different implementation world".into());
+        }
+        selected.evidence.check_instance(
+            selected.protocol,
+            &selected.subject,
+            selected.implementation,
+            &selected.implementation_arguments,
+            fuel,
+        )?;
+        selected.evidence.check_world(world, fuel)?;
+        let implementation = package
+            .implementations
+            .iter()
+            .find(|item| item.declaration == selected.implementation)
+            .ok_or("captured Drop implementation is missing")?;
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &implementation.type_parameters,
+            &implementation.parameter_types,
+            &selected.implementation_arguments,
+            &[],
+            fuel,
+        )
+        .map_err(|e| e.to_string())?;
+        let subject = substitution
+            .instantiate_bounded(&implementation.subject, fuel)
+            .map_err(|e| e.to_string())?;
+        let contract = package
+            .traits
+            .iter()
+            .find(|item| item.declaration == selected.protocol)
+            .ok_or("captured Drop protocol is missing")?;
+        let member = contract
             .methods
             .iter()
-            .filter(|(name, _)| name == "drop")
-            .map(|(_, body)| *body)
-            .collect::<Vec<_>>()
-            != vec![selected.method.body]
-        || selected.method.arguments != expected_arguments
-        || instantiate_contract(member, contract.self_parameter, &selected.subject, fuel)?
-            != selected.contract
-    {
-        return Err("captured Drop method disagrees with the current package".into());
-    }
-    let function = package
-        .functions
-        .iter()
-        .find(|function| function.declaration == selected.method.body)
-        .ok_or("captured Drop body is missing")?;
-    let domains = if let Some(ctx) = context.as_deref() {
-        ctx.declarations
-            .parameter_domains(&function.type_parameters, fuel)
-            .map_err(|e| e.to_string())?
-    } else {
-        memory::memory_domains(package, &function.type_parameters, fuel)?
-    };
-    let frames = [vec![Sort::Runtime]];
-    let substitution = nir::DeclarationSubstitution::bounded(
-        &function.type_parameters,
-        &domains,
-        &selected.method.arguments,
-        &frames,
-        fuel,
-    )
-    .map_err(|e| e.to_string())?;
-    let program = nir::contracts::CallableProgram::function(function)
-        .instantiate_contract(&substitution, fuel)
+            .find(|item| item.declaration == selected.method.member && item.name == "drop")
+            .ok_or("captured Drop member is missing")?;
+        let expected_arguments = if member.default == Some(selected.method.body) {
+            vec![selected.subject.clone()]
+        } else {
+            selected.implementation_arguments.clone()
+        };
+        if subject != selected.subject
+            || implementation.interface != Some(selected.protocol)
+            || implementation
+                .methods
+                .iter()
+                .filter(|(name, _)| name == "drop")
+                .map(|(_, body)| *body)
+                .collect::<Vec<_>>()
+                != vec![selected.method.body]
+            || selected.method.arguments != expected_arguments
+            || instantiate_contract(member, contract.self_parameter, &selected.subject, fuel)?
+                != selected.contract
+        {
+            return Err("captured Drop method disagrees with the current package".into());
+        }
+        let function = package
+            .functions
+            .iter()
+            .find(|function| function.declaration == selected.method.body)
+            .ok_or("captured Drop body is missing")?;
+        let domains = if let Some(ctx) = context.as_deref() {
+            ctx.declarations
+                .parameter_domains(&function.type_parameters, fuel)
+                .map_err(|e| e.to_string())?
+        } else {
+            memory::memory_domains(package, &function.type_parameters, fuel)?
+        };
+        let frames = [vec![Sort::Runtime]];
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &function.type_parameters,
+            &domains,
+            &selected.method.arguments,
+            &frames,
+            fuel,
+        )
         .map_err(|e| e.to_string())?;
-    if function.parameters != selected.parameters || program != selected.program {
-        return Err("captured Drop body contract changed".into());
-    }
-    let expected_env = drop_environment(
-        package,
-        function,
-        &substitution,
-        &selected.method.arguments,
-        fuel,
-    )?;
-    if expected_env != selected.env_requirements {
-        return Err("captured Drop body environment contract changed".into());
+        let program = nir::contracts::CallableProgram::function(function)
+            .instantiate_contract(&substitution, fuel)
+            .map_err(|e| e.to_string())?;
+        if function.parameters != selected.parameters || program != selected.program {
+            return Err("captured Drop body contract changed".into());
+        }
+        let expected_env = drop_environment(
+            package,
+            function,
+            &substitution,
+            &selected.method.arguments,
+            fuel,
+        )?;
+        if expected_env != selected.env_requirements {
+            return Err("captured Drop body environment contract changed".into());
+        }
+        if let Some(ctx) = context.as_deref_mut() {
+            ctx.verified_drops.insert(drop_key);
+        }
     }
     let mut env_arguments = Vec::with_capacity(selected.env_requirements.len());
     let mut resolved_envs: Vec<(BTreeSet<Place>, Term)> =
