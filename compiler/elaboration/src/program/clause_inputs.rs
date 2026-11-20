@@ -190,6 +190,22 @@ impl std::fmt::Display for ClauseCollection {
 }
 
 impl Checker<'_, '_> {
+    /// Publish a checked prefix slot for use by later domains, bounds and
+    /// defaults. The owner index locates this lexical frame while it exists.
+    pub(super) fn record_clause_input(
+        &mut self,
+        owner: OwnerId,
+        id: DeclarationId,
+        binding: n::LocalId,
+        domain: Term,
+    ) {
+        self.normal_input_prefixes
+            .entry(owner)
+            .or_default()
+            .push((id, binding, domain));
+        self.parameter_domain_owners.entry(id).or_insert(owner);
+    }
+
     pub(super) fn clause_collector(&self, owner: OwnerId) -> Option<(usize, hir::Symbol)> {
         let clauses = self.type_clause_params(owner);
         let (last, prefix) = clauses.split_last()?;

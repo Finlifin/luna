@@ -2903,12 +2903,7 @@ impl Checker<'_, '_> {
                 };
                 let sort = Sort::of_comptime_domain(&domain);
                 local_sorts.insert(id, sort);
-                self.normal_input_prefixes.get_mut(&owner).unwrap().push((
-                    id,
-                    local(parameter.hir_id),
-                    domain,
-                ));
-                self.parameter_domain_owners.entry(id).or_insert(owner);
+                self.record_clause_input(owner, id, local(parameter.hir_id), domain);
                 if !sig.modifiers.is_normal_form_head || sort == Sort::Type {
                     if sig.modifiers.is_normal_form_head {
                         // Publish each Type binder for the next domain check.

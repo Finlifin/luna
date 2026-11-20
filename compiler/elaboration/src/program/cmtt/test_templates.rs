@@ -99,7 +99,7 @@ impl Checker<'_, '_> {
             &[hir::common::Arg<'_>],
         )>,
     ) -> Result<(n::Expr, nir::contracts::ProgramContract), Error> {
-        let saved_parameters = self.normal_parameters.remove(&owner);
+        let saved_parameters = self.normal_input_prefixes.remove(&owner);
         let saved_capabilities = self.capabilities.remove(&owner);
         let result = self.generator_frame(owner, |checker| {
             checker.check_test_template_in_frame(owner, instance)
@@ -108,9 +108,9 @@ impl Checker<'_, '_> {
         if let Some(capabilities) = saved_capabilities {
             self.capabilities.insert(owner, capabilities);
         }
-        self.normal_parameters.remove(&owner);
+        self.normal_input_prefixes.remove(&owner);
         if let Some(parameters) = saved_parameters {
-            self.normal_parameters.insert(owner, parameters);
+            self.normal_input_prefixes.insert(owner, parameters);
         }
         result
     }
@@ -400,10 +400,6 @@ impl Checker<'_, '_> {
                         ));
                     }
                     let binding = local(clause.hir_id);
-                    self.normal_parameters
-                        .entry(self.signature_owner.unwrap())
-                        .or_default()
-                        .push((id, binding, domain.clone()));
                     let value = if abstract_inputs {
                         None
                     } else {
@@ -420,9 +416,11 @@ impl Checker<'_, '_> {
                         Some(self.materialize_generator_data(value, ty, clause.span)?)
                     };
                     self.locals.insert(binding, domain.clone());
-                    self.normal_default_bindings.insert(id, (binding, domain));
+                    self.normal_default_bindings
+                        .insert(id, (binding, domain.clone()));
                     self.generator_data.insert(binding, value);
                     self.forbidden_default_inputs.remove(&id);
+                    self.record_clause_input(self.signature_owner.unwrap(), id, binding, domain);
                     if abstract_inputs {
                         self.ready_signature_capabilities_with_clauses(
                             self.signature_owner.unwrap(),
@@ -452,10 +450,6 @@ impl Checker<'_, '_> {
                         "test template default requires an immutable value domain",
                     ));
                 }
-                self.normal_parameters
-                    .entry(self.signature_owner.unwrap())
-                    .or_default()
-                    .push((id, local(clause.hir_id), domain.clone()));
                 let explicit = supplied.get(&clause.name.name.to_string()).copied();
                 let default = explicit.unwrap_or(default);
                 let saved_owner = self.signature_owner;
@@ -486,11 +480,13 @@ impl Checker<'_, '_> {
                         Some(self.materialize_generator_data(value, ty, default.span)?)
                     };
                     self.locals.insert(binding, domain.clone());
-                    self.normal_default_bindings.insert(id, (binding, domain));
+                    self.normal_default_bindings
+                        .insert(id, (binding, domain.clone()));
                     self.generator_data.insert(binding, value);
                 }
                 self.signature_owner = saved_owner;
                 self.forbidden_default_inputs.remove(&id);
+                self.record_clause_input(self.signature_owner.unwrap(), id, binding, domain);
                 if abstract_inputs {
                     // Only the completed prefix may authorize the next
                     // default. A later clause must remain unavailable.
