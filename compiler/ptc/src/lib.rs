@@ -1710,6 +1710,9 @@ impl Search<'_> {
                 agenda.refresh(classes, &mut self.steps)?;
             }
         }
+        if self.has_structural_type_cycle(classes)? {
+            return Ok(None);
+        }
         for (atom, value) in self.atoms.iter().zip(assignment) {
             if let Atom::TypeEqual(atom) = atom {
                 if *value == Some(false)
@@ -1768,6 +1771,98 @@ impl Search<'_> {
             kinds.push((root, query.kind, *value));
         }
         Ok(Some(kinds))
+    }
+
+    /// Reject finite-tree occurs cycles (e.g. `R == *R` or `A == *B /\ B == *A`)
+    /// among `Sort::Type` equivalence-class roots using a metered iterative DFS.
+    fn has_structural_type_cycle(&mut self, classes: &Classes) -> Result<bool, UnknownReason> {
+        let count = self.terms.nodes.len();
+        let mut outgoing: Vec<Vec<usize>> = Vec::new();
+        for id in 0..count {
+            let children = strict_structural_children(self.context, self.terms, id);
+            if children.is_empty() {
+                continue;
+            }
+            let from = classes.root(id);
+            for &child in children {
+                self.steps = self
+                    .steps
+                    .checked_sub(1)
+                    .ok_or(UnknownReason::BudgetExhausted)?;
+                if self.terms.nodes[child].sort() != Sort::Type {
+                    continue;
+                }
+                let to = classes.root(child);
+                if from == to {
+                    return Ok(true);
+                }
+                if outgoing.is_empty() {
+                    outgoing.resize_with(count, Vec::new);
+                }
+                outgoing[from].push(to);
+            }
+        }
+        if outgoing.is_empty() {
+            return Ok(false);
+        }
+        let mut state = vec![0u8; count];
+        let mut stack: Vec<(usize, usize)> = Vec::new();
+        for start in 0..count {
+            if state[start] != 0 || outgoing[start].is_empty() {
+                continue;
+            }
+            state[start] = 1;
+            stack.push((start, 0));
+            while let Some((node, edge_index)) = stack.last_mut() {
+                let edges = &outgoing[*node];
+                if *edge_index < edges.len() {
+                    let next = edges[*edge_index];
+                    *edge_index += 1;
+                    self.tick().map_err(|()| UnknownReason::BudgetExhausted)?;
+                    match state[next] {
+                        1 => return Ok(true),
+                        0 => {
+                            state[next] = 1;
+                            stack.push((next, 0));
+                        }
+                        _ => {}
+                    }
+                } else {
+                    let done = *node;
+                    state[done] = 2;
+                    stack.pop();
+                }
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// Child term indices whose closed interpretation is strictly smaller than
+/// the parent `Type` in every finite closed model. Excludes `NormalForm`,
+/// `AssociatedType`, unregistered nominals, binders with open captures, and
+/// both `ErrorResult::result` and `Computation::result` tails so cyclic row
+/// tails remain pending per `error_results.rs` and `effects.rs`.
+fn strict_structural_children<'a>(context: &Context, terms: &'a Terms, id: usize) -> &'a [usize] {
+    let term = &terms.nodes[id];
+    let children = &terms.children[id];
+    match term {
+        Term::Pointer(_)
+        | Term::Optional(_)
+        | Term::Lift(_)
+        | Term::ComptimeFunction(_)
+        | Term::NormalFormFunction(_, _)
+        | Term::UnsafeFunction(_)
+        | Term::Tuple(_)
+        | Term::Record(_) => children,
+        Term::Function { .. } if !has_bound(term) => children,
+        Term::Closure { environment, .. } if !environment.is_empty() => children,
+        Term::Nominal { declaration, .. } if context.is_nominal_constructor(*declaration) => {
+            children
+        }
+        Term::Computation { effects, .. } if !effects.is_empty() => &children[..children.len() - 1],
+        Term::ErrorResult { errors, .. } if !errors.is_empty() => &children[..errors.len()],
+        _ => &[],
     }
 }
 
@@ -2867,5 +2962,122 @@ mod tuple_classification_tests {
             })
             .has_bound_or_hole()
         );
+    }
+
+    #[test]
+    fn finite_tree_acyclicity_proves_structural_self_containment_distinct() {
+        let id = |local| DeclarationId { package: 95, local };
+        let rigid = |local| Term::Rigid {
+            declaration: id(local),
+            sort: Sort::Type,
+        };
+        let r = rigid(1);
+        let a = rigid(2);
+        let b = rigid(3);
+        let nominal_head = id(10);
+        let bool_ty = Term::Primitive(Primitive::Bool);
+
+        let mut context = Context::default();
+        context.admit_nominal_constructor(nominal_head);
+
+        for larger in [
+            Term::Pointer(Box::new(r.clone())),
+            Term::Optional(Box::new(r.clone())),
+            Term::Lift(Box::new(r.clone())),
+            Term::Tuple(vec![r.clone(), bool_ty.clone()]),
+            Term::Nominal {
+                declaration: nominal_head,
+                arguments: vec![r.clone()],
+            },
+            Term::ErrorResult {
+                errors: vec![r.clone()],
+                result: Box::new(bool_ty.clone()),
+            },
+        ] {
+            let outcome = context.prove(
+                Formula::equal(r.clone(), larger).negate(),
+                Budget::default(),
+            );
+            let Outcome::Entailed(proof) = outcome else {
+                panic!("expected structural cycle refutation, got {outcome}");
+            };
+            context.verify_proof(&proof, Budget::default()).unwrap();
+        }
+
+        let mut transitive = context.fork();
+        transitive.assume(Formula::equal(
+            a.clone(),
+            Term::Pointer(Box::new(b.clone())),
+        ));
+        let Outcome::Entailed(proof) = transitive.prove(
+            Formula::equal(b, Term::Pointer(Box::new(a))).negate(),
+            Budget::default(),
+        ) else {
+            panic!("two-step pointer cycle must be refuted");
+        };
+        transitive.verify_proof(&proof, Budget::default()).unwrap();
+    }
+
+    #[test]
+    fn finite_tree_acyclicity_preserves_flattening_and_opaque_heads() {
+        let id = |local| DeclarationId { package: 96, local };
+        let r = Term::Rigid {
+            declaration: id(1),
+            sort: Sort::Type,
+        };
+        let io_err = Term::Nominal {
+            declaration: id(2),
+            arguments: vec![],
+        };
+        let err_wrap = Term::ErrorResult {
+            errors: vec![io_err.clone()],
+            result: Box::new(r.clone()),
+        };
+        let nf = Term::NormalForm {
+            head: id(3),
+            sort: Sort::Type,
+            arguments: vec![r.clone()],
+        };
+        let assoc = Term::AssociatedType {
+            origin: Box::new(nir::AssociatedTypeOrigin {
+                interface: id(4),
+                member: id(5),
+            }),
+            arguments: vec![],
+            subject: Box::new(r.clone()),
+        };
+        let unregistered_nominal = Term::Nominal {
+            declaration: id(6),
+            arguments: vec![r.clone()],
+        };
+        let eff_wrap = Term::Computation {
+            effects: vec![nir::effects::Operation {
+                declaration: id(7),
+                arguments: vec![],
+            }],
+            result: Box::new(r.clone()),
+        };
+
+        let context = Context::default();
+        for term in [err_wrap, eff_wrap, nf, assoc, unregistered_nominal] {
+            let outcome =
+                context.prove(Formula::equal(r.clone(), term).negate(), Budget::default());
+            assert!(
+                !matches!(outcome, Outcome::Entailed(_)),
+                "must not falsely refute flattening or opaque self-reference: {outcome}"
+            );
+        }
+
+        let unit_eq = Formula::equal(Term::Primitive(Primitive::Unit), Term::Tuple(vec![]));
+        let mut with_unit = context.fork();
+        with_unit.assume(unit_eq.clone());
+        assert!(!matches!(
+            with_unit.prove(Formula::False, Budget::default()),
+            Outcome::Entailed(_)
+        ));
+        assert!(!matches!(
+            context.prove(unit_eq.negate(), Budget::default()),
+            Outcome::Entailed(_)
+        ));
     }
 }

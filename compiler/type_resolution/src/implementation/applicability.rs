@@ -3,6 +3,7 @@
 mod domain_staging;
 mod eligibility;
 mod replay;
+
 use super::{
     Applicability, Candidates, Error, EvidenceError, ImplementationHead, Index, Selection,
 };
@@ -18,8 +19,9 @@ use std::{
 };
 
 /// Discharge a required Type-domain equality with shared fuel. A validated
-/// counterexample denies this admission, not a proof of the negated equality.
-/// Unknown keeps its reason and must not eliminate a still-pending candidate.
+/// counterexample or a proved disequality (when witness validation cannot
+/// reify auxiliary context assumptions) denies this admission. Remaining
+/// Unknown outcomes keep their reason and must not eliminate a candidate.
 pub(crate) fn equivalent_domains(
     context: &Context,
     left: &Term,
@@ -46,6 +48,30 @@ pub(crate) fn equivalent_domains(
             reason: crate::ptc::UnknownReason::BudgetExhausted,
             ..
         } => Err(Error::Budget),
+        Outcome::Unknown {
+            reason: crate::ptc::UnknownReason::UnvalidatedModel,
+            ..
+        } => {
+            let disequality = context.prove_metered(
+                Formula::equal(left.clone(), right.clone()).negate(),
+                &mut budget,
+            );
+            *fuel = budget.steps;
+            match disequality {
+                Outcome::Entailed(_) => Ok(false),
+                Outcome::Unknown {
+                    reason: crate::ptc::UnknownReason::BudgetExhausted,
+                    ..
+                } => Err(Error::Budget),
+                Outcome::NotEntailed(_) | Outcome::Unknown { .. } => {
+                    Err(Error::Unresolved(format!(
+                        "Type domain equality: {:?}",
+                        crate::ptc::UnknownReason::UnvalidatedModel
+                    )))
+                }
+                Outcome::IllFormed(reason) => Err(Error::Invalid(reason)),
+            }
+        }
         Outcome::Unknown { reason, .. } => Err(Error::Unresolved(format!(
             "Type domain equality: {reason:?}"
         ))),
@@ -61,6 +87,7 @@ pub struct TypeEvidence {
     pub requirement_proofs: Vec<Proof>,
     pub eligibility_proof: Option<Proof>,
 }
+
 /// A matched head is not an applicable implementation. Its instantiated
 /// requirements remain explicit obligations; no implicit conversion publishes
 /// its partial proof as TypeEvidence.
@@ -70,14 +97,17 @@ pub struct HeadMatch {
     requirements: Vec<TypePredicate>,
     requirement_budget: Budget,
 }
+
 impl HeadMatch {
     pub fn type_arguments(&self) -> &[Term] {
         &self.evidence.type_arguments
     }
+
     pub fn requirements(&self) -> &[TypePredicate] {
         &self.requirements
     }
 }
+
 impl fmt::Display for HeadMatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -91,6 +121,7 @@ impl fmt::Display for HeadMatch {
         f.write_str("))")
     }
 }
+
 impl ImplementationHead {
     /// Refute a closed head before reserving a full inference allowance.
     /// Opaque heads are compared by PTC, never by their spelling or layout.
@@ -231,6 +262,7 @@ impl ImplementationHead {
         )
     }
 }
+
 #[derive(Clone, Debug)]
 pub enum TypeAssessment {
     Applicable(TypeEvidence),
@@ -249,6 +281,7 @@ pub enum TypeAssessment {
     Pending(String),
     Invalid(String),
 }
+
 impl TypeAssessment {
     pub fn applicability(&self) -> Applicability {
         match self {
@@ -260,6 +293,7 @@ impl TypeAssessment {
         }
     }
 }
+
 #[derive(Clone, Debug)]
 pub struct TypeResolution {
     pub(super) index_identity: u64,
@@ -456,6 +490,7 @@ pub(super) fn validate(
     }
     Ok(fuel)
 }
+
 fn unresolved(formula: Formula, context: &Context, budget: Budget) -> TypeAssessment {
     // NotEntailed supplies one countermodel; only proof of the negation rules
     // the candidate out for every assignment allowed by this caller scope.
@@ -469,6 +504,7 @@ fn unresolved(formula: Formula, context: &Context, budget: Budget) -> TypeAssess
         _ => TypeAssessment::Pending("type relation has not been proved or refuted".into()),
     }
 }
+
 impl ImplementationHead {
     /// Infer a potential interface instance using receiver information alone.
     /// This is source discovery, not implementation applicability: the result
@@ -607,6 +643,7 @@ impl ImplementationHead {
         }
         self.match_subject_types(subject, interface_arguments, context, budget)
     }
+
     pub fn match_types_with_domains(
         &self,
         subject: &Term,
@@ -661,6 +698,7 @@ impl ImplementationHead {
             layouts,
         )
     }
+
     pub fn assess_types(
         &self,
         subject: &Term,
@@ -673,6 +711,7 @@ impl ImplementationHead {
         }
         self.assess_subject_types(subject, interface_arguments, context, budget)
     }
+
     // Called only after the source domain (fixed trait or inherent member)
     // has been selected. An open trait does not gain inherent semantics.
     pub(super) fn match_subject_types(
@@ -692,6 +731,7 @@ impl ImplementationHead {
             None,
         )
     }
+
     pub(super) fn match_subject_types_with_domains(
         &self,
         subject: &Term,
@@ -1376,6 +1416,7 @@ impl ImplementationHead {
             requirement_budget,
         })
     }
+
     pub(super) fn assess_subject_types(
         &self,
         subject: &Term,
@@ -1391,6 +1432,7 @@ impl ImplementationHead {
         matched.discharge_with(|goal, allowance| context.prove(goal, allowance))
     }
 }
+
 impl HeadMatch {
     pub(crate) fn discharge_with(
         self,
@@ -1512,10 +1554,12 @@ impl HeadMatch {
         })
     }
 }
+
 impl Index {
     pub fn type_resolution_is_current(&self, resolution: &TypeResolution) -> bool {
         resolution.index_identity == self.identity && resolution.index_revision == self.revision
     }
+
     pub fn resolve_types(
         &self,
         interface: DeclarationId,
@@ -1528,6 +1572,7 @@ impl Index {
             super::Applicability::Applicable
         })
     }
+
     pub(crate) fn resolve_types_with(
         &self,
         interface: DeclarationId,
@@ -1566,6 +1611,7 @@ impl Index {
             },
         )
     }
+
     pub(crate) fn resolve_assessed_with(
         &self,
         interface: DeclarationId,
@@ -1584,6 +1630,7 @@ impl Index {
             assess,
         )
     }
+
     pub(crate) fn resolve_assessed_with_search_budget(
         &self,
         interface: DeclarationId,
@@ -1671,6 +1718,7 @@ impl Index {
         })
     }
 }
+
 impl fmt::Display for TypeEvidence {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -1696,6 +1744,7 @@ impl fmt::Display for TypeEvidence {
         f.write_str("))")
     }
 }
+
 impl fmt::Display for TypeAssessment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1716,6 +1765,7 @@ impl fmt::Display for TypeAssessment {
         }
     }
 }
+
 impl fmt::Display for TypeResolution {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -1746,6 +1796,7 @@ impl ImplementationHead {
         }
         self.verify_subject_type_evidence(evidence, subject, interface_arguments, context, budget)
     }
+
     pub fn verify_type_evidence_with_domains(
         &self,
         evidence: &TypeEvidence,
@@ -1814,6 +1865,7 @@ impl ImplementationHead {
             |proof, budget| context.verify_proof(proof, budget),
         )
     }
+
     pub(super) fn verify_subject_type_evidence(
         &self,
         evidence: &TypeEvidence,
@@ -1831,6 +1883,7 @@ impl ImplementationHead {
             |proof, budget| context.verify_proof(proof, budget),
         )
     }
+
     pub(super) fn verify_subject_evidence_with(
         &self,
         evidence: &TypeEvidence,
@@ -1874,6 +1927,7 @@ fn validate_head_arguments(
         fuel,
     )
 }
+
 #[cfg(test)]
 fn validate_head_arguments_with_domains(
     binders: &[nir::DeclarationParameter],
@@ -2097,6 +2151,59 @@ mod captured_head_domains {
         assert!(matches!(
             equivalent_domains(&Context::default(), &escaped, &right, 128, &mut 10_000),
             Err(Error::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn equivalent_domains_refutes_proven_disequality_under_unvalidated_associated_context() {
+        use nir::NominalAdmissionError as Error;
+        let id = |local| DeclarationId { package: 94, local };
+        let var = |local| Term::Rigid {
+            declaration: id(local),
+            sort: Sort::Type,
+        };
+        let r = var(1);
+        let s = var(2);
+        let reader_iface = id(10);
+        let buf_reader_head = id(11);
+        let assoc_member = id(12);
+        let buf_reader_of_r = Term::Nominal {
+            declaration: buf_reader_head,
+            arguments: vec![r.clone()],
+        };
+        let assoc_lhs = Term::AssociatedType {
+            origin: Box::new(nir::AssociatedTypeOrigin {
+                interface: reader_iface,
+                member: assoc_member,
+            }),
+            arguments: vec![],
+            subject: Box::new(buf_reader_of_r.clone()),
+        };
+        let assoc_rhs = Term::AssociatedType {
+            origin: Box::new(nir::AssociatedTypeOrigin {
+                interface: reader_iface,
+                member: assoc_member,
+            }),
+            arguments: vec![],
+            subject: Box::new(r.clone()),
+        };
+        let mut context = Context::default();
+        context.admit_nominal_constructor(buf_reader_head);
+        context.assume(Formula::equal(assoc_lhs, assoc_rhs));
+
+        let ptr_r = Term::Pointer(Box::new(r.clone()));
+        let mut fuel = 100_000;
+        assert_eq!(
+            equivalent_domains(&context, &r, &ptr_r, 128, &mut fuel),
+            Ok(false)
+        );
+        assert_eq!(
+            equivalent_domains(&context, &buf_reader_of_r, &ptr_r, 128, &mut fuel),
+            Ok(false)
+        );
+        assert!(matches!(
+            equivalent_domains(&context, &r, &s, 128, &mut fuel),
+            Err(Error::Unresolved(reason)) if reason.contains("UnvalidatedModel")
         ));
     }
 
