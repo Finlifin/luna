@@ -17161,11 +17161,45 @@ fn conditional_const_exit_joins_ordered_match_arms() {
 }
 
 #[test]
+fn conditional_const_exit_in_a_known_match_preserves_runtime_subject_and_bindings() {
+    let source = r#"
+        enum Choice { absent, found(bool) }
+        comptime fn checked(value: bool) -> bool { assumes value; true }
+        fn flip(state: *bool) -> bool { state.* = not state.*; state.* }
+        fn choose(comptime flag: bool, state: *bool) -> bool {
+            Choice.found(flip(state)) match {
+                .absent => false,
+                .found(value) => {
+                    const v if v = flag else { return value; };
+                    false
+                },
+                _ if flip(state) => true,
+            };
+            const answer = checked(flag);
+            answer
+        }
+        fn run() -> bool {
+            var state = false;
+            let first = choose(false, state.ref);
+            let second = choose(false, state.ref);
+            let third = choose(true, state.ref);
+            first and not second and third and state
+        }
+    "#;
+    let work = Work::new(&format!("{RESOURCE_HEADER} {source}"));
+    success(&resource_build(&work));
+    let output = work.execute();
+    success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
 fn conditional_const_exit_keeps_independent_continuations_checked() {
     for statement in [
         "do { return true; const found if found = flag else { return false; }; };",
         "if enabled { const found if found = flag else { return true; }; };",
         "when { enabled => { const v if v = flag else { return true; }; }, };",
+        "true match { _ if enabled => {}, true => { const v if v=flag else {return true;}; }, _ => {}, };",
         "enabled match { true => { const v if v=flag else {return true;}; }, false => {}, };",
         "enabled match { true => {return true;}, true => {const v if v=flag else {return true;};}, _ => {return false;}, };",
         "enabled match { _ if false => {const v if v=flag else {return true;};}, _ => {return true;}, };",

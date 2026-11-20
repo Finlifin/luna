@@ -352,7 +352,8 @@ impl Emitter<'_> {
         handler: Option<effects::HandlerInvocation<'_>>,
         selected: Option<&effects::Environment>,
     ) -> Result<Value, String> {
-        let ty = if *ty == Term::Primitive(P::Never) {
+        let never = *ty == Term::Primitive(P::Never);
+        let ty = if never {
             Ty::Unit
         } else {
             return_repr(self.graph, ty, self.checked)?
@@ -413,9 +414,17 @@ impl Emitter<'_> {
                     {
                         self.cleanup_boundary(arm.body.source, iir::cleanup::Boundary::ScopeEnd)?;
                     }
-                    self.store(&result, &selected)?;
-                    self.branch(&end);
-                    continues = true;
+                    // Checked ordinary matches retain even the impossible
+                    // arms. A Never match has no normal edge or result slot
+                    // to fill from one of those arms.
+                    if never && handler.is_none() {
+                        self.line("unreachable");
+                        self.terminated = true;
+                    } else {
+                        self.store(&result, &selected)?;
+                        self.branch(&end);
+                        continues = true;
+                    }
                 }
                 Ok::<(), String>(())
             })();

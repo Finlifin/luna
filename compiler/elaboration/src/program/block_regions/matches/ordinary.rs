@@ -180,8 +180,8 @@ impl Ordinary {
     /// A selected arm can account for noncompletion only if some subject
     /// reaches it before any earlier pattern succeeds. Never run a guard
     /// or take its side effects to answer this specialization question.
-    pub(super) fn selected_exit(
-        &self,
+    pub(super) fn join_exits(
+        &mut self,
         checker: &mut Checker<'_, '_>,
         subject: &n::Expr,
         arms: &[(n::Pattern, CheckedBlock)],
@@ -196,13 +196,30 @@ impl Ordinary {
                 .and_then(|index| arms.get(index))
                 .is_some_and(|(_, body)| body.selected_exit()));
         }
-        if !is_never(&self.result) {
-            return Ok(false);
-        }
         checker.required_steps = checker
             .required_steps
             .checked_sub(arms.len() as u64)
             .ok_or_else(|| error(span, "match completion budget exhausted"))?;
+        let diverges = |body: &CheckedBlock| match body {
+            CheckedBlock::Ordinary(body) | CheckedBlock::SelectedExit(body) => is_never(&body.ty),
+            CheckedBlock::Contextual(_) => unreachable!("ordinary match body"),
+        };
+        // Most matches only produce values. No pattern analysis is needed
+        // unless the source contains a noncompleting arm.
+        if !arms.iter().any(|(_, body)| diverges(body)) {
+            return Ok(false);
+        }
+        let possible = control::possible_match_arms(
+            subject,
+            arms.iter().map(|(pattern, _)| pattern),
+            &mut checker.required_steps,
+        );
+        if !is_never(&self.result) {
+            if possible.iter().any(|&(index, _)| !diverges(&arms[index].1)) {
+                return Ok(false);
+            }
+            self.result = p(P::Never);
+        }
         if !arms.iter().any(|(_, body)| body.selected_exit()) {
             return Ok(false);
         }
@@ -216,16 +233,10 @@ impl Ordinary {
             _ => false,
         };
         let mut earlier = Vec::new();
-        for (pattern, body) in arms {
-            let before = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);
-            let mut fuel = before;
-            let matched = control::pattern_matches(pattern, subject, &mut fuel, 0);
-            checker.required_steps -= (before - fuel) as u64;
-            if matched == Some(false) {
-                continue;
-            }
+        for (index, definite) in possible {
+            let (pattern, body) = &arms[index];
             if body.selected_exit() {
-                if earlier.is_empty() && matched == Some(true) {
+                if earlier.is_empty() && definite {
                     return Ok(true);
                 }
                 // A runtime input or call supplies its declared domain. Exact
@@ -252,9 +263,6 @@ impl Ordinary {
                         return Ok(true);
                     }
                 }
-            }
-            if matched == Some(true) {
-                break;
             }
             earlier.push(pattern);
         }

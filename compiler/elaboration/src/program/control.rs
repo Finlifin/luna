@@ -65,8 +65,32 @@ pub(super) fn source_boolean(expr: &Expr<'_>, fuel: &mut u64, depth: usize) -> O
 
 pub(super) use crate::verification::control::{
     boolean, conditional_never, freshen_loop_sites, loop_may_complete, loop_may_continue,
-    pattern_matches,
 };
+
+/// Arms whose bodies may run for this selector, in source order. A definite
+/// match cuts off the suffix even if an earlier arm has an executable guard.
+/// Classification never evaluates those guards or the selector.
+pub(super) fn possible_match_arms<'a>(
+    subject: &n::Expr,
+    patterns: impl Iterator<Item = &'a n::Pattern>,
+    budget: &mut u64,
+) -> Vec<(usize, bool)> {
+    let before = usize::try_from(*budget).unwrap_or(usize::MAX);
+    let mut fuel = before;
+    let mut possible = Vec::new();
+    for (index, pattern) in patterns.enumerate() {
+        match crate::verification::control::pattern_matches(pattern, subject, &mut fuel, 0) {
+            Some(false) => {}
+            Some(true) => {
+                possible.push((index, true));
+                break;
+            }
+            None => possible.push((index, false)),
+        }
+    }
+    *budget -= (before - fuel) as u64;
+    possible
+}
 
 impl std::fmt::Display for Context {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

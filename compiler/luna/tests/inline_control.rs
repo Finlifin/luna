@@ -5176,6 +5176,8 @@ fn open_loop_completion_uses_inert_match_selection() {
         "true match {true=>{return value;},false=>{break;},}",
         "(true,false) match {(false,_)=>{break;},(true,_)=>{return value;},}",
         "false match {_=>{return value;},true=>{break;},}",
+        "true match {true=>{return value;},_ if value=>{break;},_=>{break;},}",
+        "true match {_ if value=>{return true;},true=>{return value;},_=>{break;},}",
     ] {
         let source=format!("fn choose(comptime enabled:bool,value:bool)->bool {{inline if enabled {{}} while true {{{choice}}}}}
             fn yes()->bool {{choose(true,true)}} fn no()->bool {{choose(false,false)}}");

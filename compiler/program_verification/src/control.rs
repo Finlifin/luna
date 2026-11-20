@@ -328,41 +328,39 @@ fn loop_may_transfer(
                     *fuel = fuel
                         .checked_sub(arms.len().saturating_add(1))
                         .ok_or("loop completion budget exhausted")?;
-                    // Classify before pruning. If any pattern needs execution,
-                    // keep the original visitor, which traverses those expressions.
+                    pending.push(value);
                     let mut pattern_fuel = 4096;
-                    let decisions: Option<Vec<_>> = arms
-                        .iter()
-                        .map(|arm| pattern_matches(&arm.pattern, value, &mut pattern_fuel, 0))
-                        .collect();
-                    if let Some(decisions) = decisions {
-                        pending.push(value);
-                        if !is_never(&value.ty) {
-                            for (arm, matches) in arms.iter().zip(decisions) {
-                                if !matches {
-                                    continue;
-                                }
-                                if let Some(guard) = &arm.guard {
-                                    pending.push(guard);
-                                    if is_never(&guard.ty) {
-                                        break;
-                                    }
-                                    match boolean(guard) {
-                                        Some(false) => continue,
-                                        Some(true) => {
-                                            pending.push(&arm.body);
-                                            break;
-                                        }
-                                        None => pending.push(&arm.body),
-                                    }
-                                } else {
-                                    pending.push(&arm.body);
+                    for arm in arms {
+                        let matched = pattern_matches(&arm.pattern, value, &mut pattern_fuel, 0);
+                        if matched == Some(false) {
+                            continue;
+                        }
+                        if matched.is_none() {
+                            pending.extend(nir::visit::pattern_observations(&arm.pattern, fuel)?);
+                        }
+                        if let Some(guard) = &arm.guard {
+                            pending.push(guard);
+                            if is_never(&guard.ty) {
+                                if matched == Some(true) {
                                     break;
                                 }
+                                continue;
+                            }
+                            match boolean(guard) {
+                                Some(false) => continue,
+                                None => {
+                                    pending.push(&arm.body);
+                                    continue;
+                                }
+                                Some(true) => {}
                             }
                         }
-                        return Ok(false);
+                        pending.push(&arm.body);
+                        if matched == Some(true) {
+                            break;
+                        }
                     }
+                    return Ok(false);
                 }
                 K::ScalarEqual(left, right)
                 | K::TypeEqual(left, right)

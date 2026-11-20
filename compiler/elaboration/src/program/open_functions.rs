@@ -4346,21 +4346,12 @@ impl Checker<'_, '_> {
                 ));
             }
             self.open_loop_transfers = incoming_transfers;
-            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-            let before = fuel;
-            let decisions: Option<Vec<_>> = patterns
-                .iter()
-                .map(|pattern| control::pattern_matches(pattern, &value, &mut fuel, 0))
-                .collect();
-            self.required_steps -= (before - fuel) as u64;
-            let selected = decisions
-                .as_ref()
-                .and_then(|decisions| decisions.iter().position(|matches| *matches));
             if !is_never(&value.ty) {
-                for (index, transfers) in branch_transfers.into_iter().enumerate() {
-                    if decisions.is_some() && selected != Some(index) {
-                        continue;
-                    }
+                let possible =
+                    control::possible_match_arms(&value, patterns.iter(), &mut self.required_steps);
+                let all_diverge = possible.iter().all(|&(index, _)| branch_never[index]);
+                for (index, _) in possible {
+                    let transfers = std::mem::take(&mut branch_transfers[index]);
                     self.required_steps = self
                         .required_steps
                         .checked_sub(transfers.len() as u64)
@@ -4373,7 +4364,7 @@ impl Checker<'_, '_> {
                         }
                     }
                 }
-                if selected.is_some_and(|index| branch_never[index]) {
+                if all_diverge {
                     result = D::Known(p(P::Never));
                 }
             }

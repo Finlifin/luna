@@ -298,8 +298,7 @@ impl<'h> Frame<'h> {
     fn finish(&mut self, checker: &mut Checker<'_, '_>, value: n::Expr) -> Result<Step<'h>, Error> {
         let mut selected_exit = false;
         let result = if let Some(ordinary) = &mut self.ordinary {
-            selected_exit =
-                ordinary.selected_exit(checker, &value, &self.arms, self.source.span)?;
+            selected_exit = ordinary.join_exits(checker, &value, &self.arms, self.source.span)?;
             let arms = std::mem::take(&mut self.arms)
                 .into_iter()
                 .map(|(pattern, body)| {
