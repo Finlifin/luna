@@ -2,6 +2,12 @@
 use super::*;
 use comptime_interpretor::Value;
 
+pub(super) type FunctionTypePlan = (
+    Vec<DeclarationId>,
+    Vec<Term>,
+    Vec<(usize, Vec<DeclarationId>)>,
+);
+
 impl<'h> Checker<'_, 'h> {
     /// Packet layout is independent of its element domains. Keep unresolved
     /// domains outside typed NIR until the caller can provide their context.
@@ -450,58 +456,61 @@ impl<'h> Checker<'_, 'h> {
         owner: OwnerId,
         known: &[Term],
         span: Span,
-    ) -> Result<
-        (
-            Vec<DeclarationId>,
-            Vec<Term>,
-            Vec<(usize, Vec<DeclarationId>)>,
-        ),
-        Error,
-    > {
+    ) -> Result<FunctionTypePlan, Error> {
         let parameters = self.type_parameters[&owner].clone();
         if known.len() > parameters.len() {
             return Err(error(span, "too many fixed generic call arguments"));
         }
         let clauses = self.type_clause_params(owner);
         let inherited = parameters.len() - clauses.len();
-        let mut inferred = Vec::new();
-        let mut pending = Vec::new();
-        let mut inputs = known.to_vec();
-        for index in known.len()..parameters.len() {
-            if index >= inherited
-                && matches!(
-                    clauses[index - inherited].kind.unquoted(),
-                    hir::clause::ClauseParamKind::Optional(..)
-                )
-            {
-                let dependencies = self.function_default_dependencies(
-                    owner,
-                    index - inherited,
-                    &inputs,
-                    &inferred,
-                    span,
-                )?;
-                if dependencies.is_empty() {
-                    let default =
-                        self.type_clause_default(owner, index - inherited, &inputs, None, span)?;
-                    inputs.push(default);
-                } else {
-                    pending.push((index, dependencies));
-                    inferred.push(parameters[index]);
-                    inputs.push(Term::Rigid {
-                        declaration: parameters[index],
-                        sort: self.input_binders(&parameters)[index].sort,
-                    });
-                }
-            } else {
-                inferred.push(parameters[index]);
-                inputs.push(Term::Rigid {
-                    declaration: parameters[index],
-                    sort: self.input_binders(&parameters)[index].sort,
-                });
-            }
+        let mut plan = (Vec::new(), known.to_vec(), Vec::new());
+        if known.len() == parameters.len() {
+            return Ok(plan);
         }
-        Ok((inferred, inputs, pending))
+        let binders = self.input_binders(&parameters);
+        for (index, binder) in binders.iter().enumerate().skip(known.len()) {
+            self.plan_omitted_function_clause(
+                owner,
+                binder,
+                index
+                    .checked_sub(inherited)
+                    .map(|slot| (slot, &clauses[slot])),
+                &mut plan,
+                span,
+            )?;
+        }
+        Ok(plan)
+    }
+
+    pub(super) fn plan_omitted_function_clause(
+        &mut self,
+        owner: OwnerId,
+        binder: &nir::DeclarationParameter,
+        clause: Option<(usize, &hir::clause::ClauseParam<'_>)>,
+        plan: &mut FunctionTypePlan,
+        span: Span,
+    ) -> Result<(), Error> {
+        let (inferred, inputs, pending) = plan;
+        if let Some((slot, clause)) = clause
+            && matches!(
+                clause.kind.unquoted(),
+                hir::clause::ClauseParamKind::Optional(..)
+            )
+        {
+            let dependencies =
+                self.function_default_dependencies(owner, slot, inputs, inferred, span)?;
+            if dependencies.is_empty() {
+                inputs.push(self.type_clause_default(owner, slot, inputs, None, span)?);
+                return Ok(());
+            }
+            pending.push((inputs.len(), dependencies));
+        }
+        inferred.push(binder.declaration);
+        inputs.push(Term::Rigid {
+            declaration: binder.declaration,
+            sort: binder.sort,
+        });
+        Ok(())
     }
 
     pub(super) fn default_domain_has_rigid(
@@ -566,7 +575,15 @@ impl<'h> Checker<'_, 'h> {
                 // expression. In particular, index:T can become a Type input
                 // only after T is supplied; substituting index alone loses that
                 // domain evidence.
-                let mut dependencies = self.expression_declaration_dependencies(owner, value)?;
+                let source_inputs = self.expression_declaration_dependencies(owner, value)?;
+                let mut dependencies = BTreeSet::new();
+                for id in source_inputs {
+                    if let Some(actual) = self.alias_substitution.get(&id).cloned() {
+                        dependencies.extend(self.term_declaration_inputs(&actual, span)?);
+                    } else {
+                        dependencies.insert(id);
+                    }
+                }
                 let inferred_set = inferred.iter().copied().collect::<BTreeSet<_>>();
                 dependencies.extend(self.term_declaration_inputs(&domain, span)?);
                 dependencies.retain(|id| inferred_set.contains(id));
@@ -610,8 +627,15 @@ impl<'h> Checker<'_, 'h> {
     ) -> Result<bool, Error> {
         let all = self.type_parameters[&owner].clone();
         let inherited = all.len() - self.type_clause_params(owner).len();
+        let pending_binder = |slot: usize| match template[slot] {
+            Term::Rigid { declaration, .. } => declaration,
+            _ => unreachable!("pending default has an inference binder"),
+        };
         for (&slot, value) in resolved.iter() {
-            let index = parameters.iter().position(|id| *id == all[slot]).unwrap();
+            let index = parameters
+                .iter()
+                .position(|id| *id == pending_binder(slot))
+                .unwrap();
             candidate
                 .constrain_type_argument(index, value, crate::ptc::Budget::default())
                 .map_err(|e| call_inference_error(span, e))?;
@@ -627,10 +651,9 @@ impl<'h> Checker<'_, 'h> {
             let mut available = Vec::new();
             let mut ready = true;
             for dependency in dependencies {
-                if pending
-                    .iter()
-                    .any(|(other, _)| all[*other] == *dependency && !resolved.contains_key(other))
-                {
+                if pending.iter().any(|(other, _)| {
+                    pending_binder(*other) == *dependency && !resolved.contains_key(other)
+                }) {
                     ready = false;
                     break;
                 }
@@ -654,7 +677,10 @@ impl<'h> Checker<'_, 'h> {
                 .map(|ty| self.instantiate_input_types(ty, &substitutions, &available, span))
                 .collect::<Result<Vec<_>, _>>()?;
             let value = self.type_clause_default(owner, *slot - inherited, &inputs, None, span)?;
-            let index = parameters.iter().position(|id| *id == all[*slot]).unwrap();
+            let index = parameters
+                .iter()
+                .position(|id| *id == pending_binder(*slot))
+                .unwrap();
             candidate
                 .constrain_type_argument(index, &value, crate::ptc::Budget::default())
                 .map_err(|e| call_inference_error(span, e))?;

@@ -97,3 +97,60 @@ fn explicit_overrides_do_not_hide_invalid_closure_defaults() {
         assert!(failure.contains("type"), "{failure}");
     }
 }
+
+#[test]
+fn named_clause_overrides_keep_caller_identity_and_infer_missing_slots() {
+    let source = r#"
+        fn inspect(x: T, witness: *Flag, done: bool) -> bool
+        where T, .Flag: Type = bool
+        {
+            if done { true }
+            else {
+                let byte: u8 = 7;
+                inspect<.Flag = T>(byte, x.ref, true)
+            }
+        }
+
+        fn validate(value: T) -> bool
+        where T, .Marker: Type = u32, .chosen: bool = do { let capture = || T == bool; capture() }
+        {
+            chosen
+        }
+
+        fn run() -> bool {
+            let flag = true;
+            inspect(flag, flag.ref, false)
+                and validate<.Marker = u16>(flag)
+                and not validate<.Marker = u16>('x')
+                and validate<.chosen = true>('x')
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let invalid = source.replace("byte, x.ref, true", "byte, byte.ref, true");
+    let error = sysroot::compile(&invalid).unwrap_err();
+    assert!(
+        error.contains("type constraint") || error.contains("type mismatch"),
+        "{error}"
+    );
+}
+
+#[test]
+fn open_calls_infer_missing_clauses_alongside_explicit_overrides() {
+    let source = r#"
+        fn choose(value: T, comptime keep: bool) -> T
+        where T, .Witness: Type = bool
+        {
+            inline if keep { value } else { value }
+        }
+
+        fn wrapper(value: T, comptime keep: bool) -> T where T {
+            choose<.Witness = u16>(value, keep)
+        }
+
+        fn run() -> bool {
+            let byte: u8 = 42;
+            wrapper(byte, true) == byte and choose<.Witness = char>(byte, false) == byte
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}

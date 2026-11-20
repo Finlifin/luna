@@ -5857,6 +5857,31 @@ impl Checker<'_, '_> {
         known: Vec<Term>,
         selected_method: Option<interfaces::SelectedMethod>,
     ) -> Result<n::Expr, Error> {
+        self.ensure_signature(owner, expr.span)?;
+        let plan = self.function_type_plan(owner, &known, expr.span)?;
+        self.generic_call_with_plan(
+            expr,
+            owner,
+            args,
+            expected,
+            partial,
+            prefix,
+            plan,
+            selected_method,
+        )
+    }
+
+    fn generic_call_with_plan(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+        prefix: Vec<n::Expr>,
+        plan: type_defaults::FunctionTypePlan,
+        selected_method: Option<interfaces::SelectedMethod>,
+    ) -> Result<n::Expr, Error> {
         if self.is_quote_function(owner) {
             self.record_quote_application(expr.span)?;
         }
@@ -5866,13 +5891,8 @@ impl Checker<'_, '_> {
             .as_ref()
             .filter(|(id, _)| *id == expr.hir_id)
             .map(|(_, context)| context.clone());
-        self.ensure_signature(owner, expr.span)?;
         let all_parameters = self.type_parameters[&owner].clone();
-        if known.len() > all_parameters.len() {
-            return Err(error(expr.span, "too many fixed generic call arguments"));
-        }
-        let (parameters, template, pending_defaults) =
-            self.function_type_plan(owner, &known, expr.span)?;
+        let (parameters, template, pending_defaults) = plan;
         let signature = self.instantiate_input_types(
             self.declared_signature(owner)
                 .ok_or_else(|| error(expr.span, "declaration is not a supported callable"))?

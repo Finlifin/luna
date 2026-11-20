@@ -81,7 +81,7 @@ fn builtin_debug_formats_primitives_strings_vecs_boxes_and_errors_without_consum
         where
             T :- Debug,
         {
-            let formatted = format_debug<T, .A = FixedBufferAllocator, .allocator = fba>(value)!;
+            let formatted = format_debug<.A = FixedBufferAllocator, .allocator = fba>(value)!;
             formatted.ref.equals_str(expected)
         }
 

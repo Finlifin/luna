@@ -5134,9 +5134,32 @@ impl Checker<'_, '_> {
         if self.open_functions.contains_key(&owner) && !self.type_parameters[&owner].is_empty() {
             let arguments = if let Some(explicit) = explicit {
                 let saved_open_call = std::mem::replace(&mut self.describing_open_call, true);
-                let arguments = self.function_clause_arguments(expr, owner, explicit);
+                let partial =
+                    self.with_partial_named_call_plan(owner, explicit, expr.span, |this, plan| {
+                        let target = match expected {
+                            Some(D::Known(ty)) => Some(ty),
+                            _ => None,
+                        };
+                        this.infer_open_clauses_with_plan(
+                            expr,
+                            owner,
+                            args,
+                            target,
+                            Some((locals, returns, depth)),
+                            plan,
+                        )
+                    });
                 self.describing_open_call = saved_open_call;
-                arguments?
+                match partial? {
+                    Some(OpenClauseInference::Ready(arguments, _, _)) => arguments,
+                    Some(OpenClauseInference::Pending(description)) => return Ok(description),
+                    None => {
+                        let saved = std::mem::replace(&mut self.describing_open_call, true);
+                        let arguments = self.function_clause_arguments(expr, owner, explicit);
+                        self.describing_open_call = saved;
+                        arguments?
+                    }
+                }
             } else {
                 let target = match expected {
                     Some(D::Known(ty)) => Some(ty),
@@ -5742,11 +5765,6 @@ impl Checker<'_, '_> {
         expected: Option<&D>,
         depth: usize,
     ) -> Result<D, Error> {
-        let result_context = self
-            .structural_result_context
-            .as_ref()
-            .filter(|(id, _)| *id == expr.hir_id)
-            .map(|(_, context)| context.clone());
         let signature = self
             .signatures
             .get(&owner)
@@ -5767,7 +5785,30 @@ impl Checker<'_, '_> {
             return self.describe_known_region(expr, expected);
         }
         let signature = signature.clone();
-        let all_generic = self.type_parameters[&owner].clone();
+        if let Some(types) = explicit {
+            let saved = std::mem::replace(&mut self.describing_open_call, true);
+            let partial =
+                self.with_partial_named_call_plan(owner, types, expr.span, |this, plan| {
+                    this.describing_open_call = saved;
+                    this.describe_generic_call_with_plan(
+                        expr,
+                        owner,
+                        sig,
+                        args,
+                        locals,
+                        returns,
+                        expected,
+                        depth,
+                        &signature,
+                        constrained,
+                        plan,
+                    )
+                });
+            self.describing_open_call = saved;
+            if let Some(description) = partial? {
+                return Ok(description);
+            }
+        }
         let fixed = match explicit {
             Some(types) => {
                 let saved_open_call = std::mem::replace(&mut self.describing_open_call, true);
@@ -5777,10 +5818,45 @@ impl Checker<'_, '_> {
             }
             None => self.lexical_function_arguments(owner, expr.span)?,
         };
-        let (generic, template, pending_defaults) =
-            self.function_type_plan(owner, &fixed, expr.span)?;
+        let plan = self.function_type_plan(owner, &fixed, expr.span)?;
+        self.describe_generic_call_with_plan(
+            expr,
+            owner,
+            sig,
+            args,
+            locals,
+            returns,
+            expected,
+            depth,
+            &signature,
+            constrained,
+            plan,
+        )
+    }
+
+    fn describe_generic_call_with_plan(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        sig: &hir::item::FnSig<'_>,
+        args: &[Arg<'_>],
+        locals: &mut BTreeMap<n::LocalId, D>,
+        returns: Option<&D>,
+        expected: Option<&D>,
+        depth: usize,
+        signature: &Term,
+        constrained: bool,
+        plan: type_defaults::FunctionTypePlan,
+    ) -> Result<D, Error> {
+        let result_context = self
+            .structural_result_context
+            .as_ref()
+            .filter(|(id, _)| *id == expr.hir_id)
+            .map(|(_, context)| context.clone());
+        let (generic, template, pending_defaults) = plan;
+        let all_generic = self.type_parameters[&owner].clone();
         let signature =
-            self.instantiate_input_types(&signature, &all_generic, &template, expr.span)?;
+            self.instantiate_input_types(signature, &all_generic, &template, expr.span)?;
         let input_domains = generic
             .iter()
             .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
@@ -6431,7 +6507,21 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         args: &[Arg<'_>],
         expected: Option<&Term>,
+        description: Option<(&mut BTreeMap<n::LocalId, D>, Option<&D>, usize)>,
+    ) -> Result<OpenClauseInference, Error> {
+        let lexical = self.lexical_function_arguments(owner, expr.span)?;
+        let plan = self.function_type_plan(owner, &lexical, expr.span)?;
+        self.infer_open_clauses_with_plan(expr, owner, args, expected, description, plan)
+    }
+
+    fn infer_open_clauses_with_plan(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
         mut description: Option<(&mut BTreeMap<n::LocalId, D>, Option<&D>, usize)>,
+        plan: type_defaults::FunctionTypePlan,
     ) -> Result<OpenClauseInference, Error> {
         self.check_open_interface_dependency(owner)?;
         let mut definition = self.open_functions[&owner].clone();
@@ -6441,8 +6531,7 @@ impl Checker<'_, '_> {
         let (routes, assigned) =
             route_arguments(args, Some(sig.params), sig.params.len(), expr.span)?;
         let all = self.type_parameters[&owner].clone();
-        let lexical = self.lexical_function_arguments(owner, expr.span)?;
-        let (generic, template, pending) = self.function_type_plan(owner, &lexical, expr.span)?;
+        let (generic, template, pending) = plan;
         let mut checked = StagedInputs::new(sig.params.len());
         let mut formed = BTreeMap::new();
         // Prepare staged inputs demanded by formed annotations.
@@ -7334,6 +7423,24 @@ impl Checker<'_, '_> {
                 CallUse::DefinitionBehavior,
             )
         } else {
+            if fixed.is_none()
+                && let Some(clauses) = clauses
+                && let Some(call) =
+                    self.with_partial_named_call_plan(owner, clauses, expr.span, |this, plan| {
+                        this.generic_call_with_plan(
+                            expr,
+                            owner,
+                            args,
+                            expected,
+                            None,
+                            vec![],
+                            plan,
+                            None,
+                        )
+                    })?
+            {
+                return Ok(Some(call));
+            }
             let known = match fixed {
                 Some(arguments) => arguments,
                 None => match clauses {
@@ -7360,6 +7467,16 @@ impl Checker<'_, '_> {
             return Ok(call);
         }
         if let Some(clauses) = clauses {
+            if let Some(call) =
+                self.with_partial_named_call_plan(owner, clauses, expr.span, |this, plan| {
+                    this.check_open_definition(owner)?;
+                    let inferred =
+                        this.infer_open_clauses_with_plan(expr, owner, args, expected, None, plan)?;
+                    this.finish_inferred_open_call(expr, owner, args, expected, inferred)
+                })?
+            {
+                return Ok(call);
+            }
             return self.with_explicit_open_clauses(owner, clauses, expr, |this| {
                 this.instantiated_open_call(expr, owner, args, expected)
             });
@@ -7375,13 +7492,20 @@ impl Checker<'_, '_> {
                 BTreeMap::new(),
             );
         }
-        let (arguments, checked, formed) = match self
-            .infer_open_clause_arguments(expr, owner, args, expected, None)?
-        {
-            OpenClauseInference::Ready(arguments, checked, formed) => (arguments, checked, formed),
-            OpenClauseInference::Pending(_) => {
-                unreachable!("concrete calls cannot suspend inference")
-            }
+        let inferred = self.infer_open_clause_arguments(expr, owner, args, expected, None)?;
+        self.finish_inferred_open_call(expr, owner, args, expected, inferred)
+    }
+
+    fn finish_inferred_open_call(
+        &mut self,
+        expr: &Expr<'_>,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+        inferred: OpenClauseInference,
+    ) -> Result<n::Expr, Error> {
+        let OpenClauseInference::Ready(arguments, checked, formed) = inferred else {
+            unreachable!("concrete calls cannot suspend inference");
         };
         self.check_type_application(owner, &arguments, expr.span)?;
         let saved = self.alias_substitution.clone();

@@ -467,6 +467,77 @@ impl Checker<'_, '_> {
         defaults: Option<&BTreeMap<DeclarationId, std::sync::Arc<Term>>>,
         prefix: Vec<Term>,
     ) -> Result<Vec<Term>, Error> {
+        self.prepare_clause_arguments(owner, args, subject, span, domains, defaults, prefix, None)
+            .map(|plan| plan.1)
+    }
+
+    /// A direct invocation can solve missing mandatory slots from its ordinary
+    /// arguments. A standalone specialization still needs a complete telescope.
+    pub(super) fn with_partial_named_call_plan<R>(
+        &mut self,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        span: Span,
+        finish: impl FnOnce(&mut Self, type_defaults::FunctionTypePlan) -> Result<R, Error>,
+    ) -> Result<Option<R>, Error> {
+        if !args.iter().any(|arg| matches!(arg, Arg::Named(..)))
+            || self.clause_collector(owner).is_some()
+        {
+            return Ok(None);
+        }
+        let Some(flat) = arguments::literal_spread_arguments(args) else {
+            return Ok(None);
+        };
+        let required = self
+            .type_clause_params(owner)
+            .iter()
+            .filter(|clause| {
+                !matches!(
+                    clause.kind.unquoted(),
+                    hir::clause::ClauseParamKind::Optional(..)
+                )
+            })
+            .count();
+        if flat
+            .iter()
+            .filter(|arg| matches!(arg, Arg::Positional(_)))
+            .count()
+            >= required
+        {
+            return Ok(None);
+        }
+        let domains = self.trait_domains(owner)?;
+        let prefix = self.lexical_function_arguments(owner, span)?;
+        let mut locals = Vec::new();
+        let result = self
+            .prepare_clause_arguments(
+                owner,
+                &flat,
+                None,
+                span,
+                &domains,
+                None,
+                prefix,
+                Some(&mut locals),
+            )
+            .and_then(|plan| finish(self, plan));
+        for id in locals {
+            self.lexical_input_domains.remove(&id);
+        }
+        result.map(Some)
+    }
+
+    fn prepare_clause_arguments(
+        &mut self,
+        owner: OwnerId,
+        args: &[Arg<'_>],
+        subject: Option<&Term>,
+        span: Span,
+        domains: &[Term],
+        defaults: Option<&BTreeMap<DeclarationId, std::sync::Arc<Term>>>,
+        prefix: Vec<Term>,
+        mut inference_locals: Option<&mut Vec<DeclarationId>>,
+    ) -> Result<type_defaults::FunctionTypePlan, Error> {
         let clauses = self.type_clause_params(owner);
         let all_parameters = self.type_parameters[&owner].clone();
         if all_parameters.len() != prefix.len() + clauses.len()
@@ -769,7 +840,7 @@ impl Checker<'_, '_> {
                 self.normal_default_bindings.remove(parameter);
                 self.alias_value_bindings.remove(parameter);
             }
-            let mut arguments = prefix;
+            let mut plan = (Vec::new(), prefix, Vec::new());
             for (slot, supplied) in supplied.into_iter().enumerate() {
                 let value = if let Some(value) = supplied {
                     if let Some((actual, value_span)) = &pending_domains[slot] {
@@ -790,6 +861,31 @@ impl Checker<'_, '_> {
                     caller_scope.with_caller(self, |this| {
                         this.normal_value_argument(runtime_expr, &domain)
                     })?
+                } else if let Some(locals) = inference_locals.as_deref_mut() {
+                    // Allocate a call-local binder before admitting an omitted
+                    // slot. An explicit argument may refer to the very same
+                    // declaration in a recursive caller.
+                    let domain = self.substituted_trait_domain(&domains[slot], span)?;
+                    let binder = nir::DeclarationParameter {
+                        declaration: self.fresh_type_binder(owner, span)?.declaration,
+                        sort: Sort::of_comptime_domain(&domain),
+                    };
+                    locals.push(binder.declaration);
+                    self.lexical_input_domains
+                        .insert(binder.declaration, domain);
+                    caller_scope.with_caller(self, |this| {
+                        this.plan_omitted_function_clause(
+                            owner,
+                            &binder,
+                            Some((slot, &clauses[slot])),
+                            &mut plan,
+                            span,
+                        )
+                    })?;
+                    let value = plan.1.last().expect("planned clause slot");
+                    self.alias_substitution
+                        .insert(parameters[slot], std::sync::Arc::new(value.clone()));
+                    continue;
                 } else {
                     let hir::clause::ClauseParamKind::Optional(_, _, value) =
                         *clauses[slot].kind.unquoted()
@@ -809,7 +905,7 @@ impl Checker<'_, '_> {
                             let prefix_args: Vec<_> = subject
                                 .cloned()
                                 .into_iter()
-                                .chain(arguments.iter().cloned())
+                                .chain(plan.1.iter().cloned())
                                 .collect();
                             self.default_runtime_argument(
                                 owner,
@@ -830,9 +926,9 @@ impl Checker<'_, '_> {
                 };
                 self.alias_substitution
                     .insert(parameters[slot], std::sync::Arc::new(value.clone()));
-                arguments.push(value);
+                plan.1.push(value);
             }
-            Ok(arguments)
+            Ok(plan)
         })();
         caller_scope.swap(self);
         result

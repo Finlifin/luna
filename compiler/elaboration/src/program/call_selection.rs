@@ -226,6 +226,24 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                     expected,
                 );
             }
+            if let Some((_, clauses)) = explicit
+                && !comptime
+                && let Some(call) =
+                    self.with_partial_named_call_plan(owner, clauses, callee.span, |this, plan| {
+                        this.generic_call_with_plan(
+                            expr,
+                            owner,
+                            args,
+                            expected,
+                            partial,
+                            vec![],
+                            plan,
+                            None,
+                        )
+                    })?
+            {
+                return Ok(call);
+            }
             if explicit.is_none()
                 && self
                     .type_parameters
