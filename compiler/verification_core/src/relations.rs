@@ -11,11 +11,13 @@ pub(super) struct RelationStore {
     rows: Vec<Polynomial>,
     buckets: BTreeMap<u64, Vec<usize>>,
 }
+
 impl PartialEq for RelationStore {
     fn eq(&self, other: &Self) -> bool {
         self.rows == other.rows
     }
 }
+
 impl RelationStore {
     fn fingerprint(row: &Polynomial, limits: &mut Limits) -> Result<u64, Unknown> {
         use std::hash::{Hash, Hasher};
@@ -32,10 +34,12 @@ impl RelationStore {
         }
         Ok(hash.finish())
     }
+
     pub fn contains(&self, row: &Polynomial, limits: &mut Limits) -> Result<bool, Unknown> {
         let key = Self::fingerprint(row, limits)?;
         self.contains_key(key, row, limits)
     }
+
     fn contains_key(
         &self,
         key: u64,
@@ -52,6 +56,7 @@ impl RelationStore {
         }
         Ok(false)
     }
+
     pub fn insert(&mut self, row: Polynomial, limits: &mut Limits) -> Result<bool, Unknown> {
         let key = Self::fingerprint(&row, limits)?;
         if self.contains_key(key, &row, limits)? {
@@ -64,6 +69,7 @@ impl RelationStore {
         self.rows.push(row);
         Ok(true)
     }
+
     pub(super) fn from_rows(rows: Vec<Polynomial>, limits: &mut Limits) -> Result<Self, Unknown> {
         let mut store = Self::default();
         for row in rows {
@@ -71,28 +77,36 @@ impl RelationStore {
         }
         Ok(store)
     }
+
     pub fn len(&self) -> usize {
         self.rows.len()
     }
+
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
+
     pub fn clear(&mut self) {
         self.rows.clear();
         self.buckets.clear();
     }
+
     #[cfg(test)]
     pub fn push(&mut self, row: Polynomial) {
         self.insert(row, &mut Limits::default()).unwrap();
     }
 }
+
 impl<'a> IntoIterator for &'a RelationStore {
     type Item = &'a Polynomial;
+
     type IntoIter = std::slice::Iter<'a, Polynomial>;
+
     fn into_iter(self) -> Self::IntoIter {
         self.rows.iter()
     }
 }
+
 #[cfg(test)]
 impl From<Vec<Polynomial>> for RelationStore {
     fn from(rows: Vec<Polynomial>) -> Self {
@@ -116,6 +130,7 @@ impl Facts {
         }
         Ok(true)
     }
+
     pub fn copy_relations(&self, limits: &mut Limits) -> Result<Vec<Polynomial>, Unknown> {
         let mut rows = Vec::new();
         for row in &self.inequalities {
@@ -126,6 +141,7 @@ impl Facts {
         }
         Ok(rows)
     }
+
     pub(super) fn common_relations(
         &self,
         other: &Self,
@@ -142,6 +158,7 @@ impl Facts {
         }
         Ok(rows)
     }
+
     pub(super) fn establish_relation(
         &mut self,
         left: &Polynomial,
@@ -149,7 +166,7 @@ impl Facts {
         right: &Polynomial,
         truth: bool,
         limits: &mut Limits,
-    ) -> Result<(), Unknown> {
+    ) -> Result<bool, Unknown> {
         // Validate all identities before deciding whether finite enclosure is
         // available; cancellation must never hide a stale input.
         if !self.relation_is_current(left, limits)? || !self.relation_is_current(right, limits)? {
@@ -173,12 +190,13 @@ impl Facts {
             match condition.truth_by_enclosure(self, limits, 0) {
                 Ok(Some(actual)) => {
                     self.reachable &= actual == truth;
-                    return Ok(());
+                    return Ok(false);
                 }
                 Ok(None) | Err(Unknown::MissingBound(_)) => {}
                 Err(e) => return Err(e),
             }
-            return self.remember_condition(&condition, truth, limits);
+            self.remember_condition(&condition, truth, limits)?;
+            return Ok(false);
         }
 
         let relation = if truth { relation } else { relation.negated() };
@@ -197,20 +215,32 @@ impl Facts {
                     self.reachable = false;
                 }
                 // A hole in a range is not a convex inequality.
-                Vec::new()
+                return Ok(false);
             }
         };
-        self.inequalities = RelationStore::from_rows(self.copy_relations(limits)?, limits)?;
+        let mut missing = Vec::new();
         for row in rows {
+            if !self.inequalities.contains(&row, limits)? {
+                missing.push(row);
+            }
+        }
+        if missing.is_empty() {
+            return Ok(false);
+        }
+        self.inequalities = RelationStore::from_rows(self.copy_relations(limits)?, limits)?;
+        let mut inserted = false;
+        for row in missing {
             if !self.inequalities.contains(&row, limits)? {
                 if self.inequalities.len() >= limits.max_terms {
                     return Err(Unknown::TermLimit);
                 }
                 self.inequalities.insert(row, limits)?;
+                inserted = true;
             }
         }
-        Ok(())
+        Ok(inserted)
     }
+
     pub fn propagate_relations(&mut self, limits: &mut Limits) -> Result<(), Unknown> {
         if !self.reachable || self.inequalities.is_empty() {
             return Ok(());
@@ -279,6 +309,7 @@ impl Facts {
         }
     }
 }
+
 impl Polynomial {
     /// Refine only failed range queries. A derivative enclosed above/below zero
     /// proves coordinate monotonicity throughout the original interval box.
@@ -878,6 +909,7 @@ pub(super) fn divide_floor(
         Ok(quotient)
     }
 }
+
 fn divide_ceil(
     numerator: &Integer,
     divisor: &Integer,

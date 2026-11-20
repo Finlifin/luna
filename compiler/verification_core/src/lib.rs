@@ -10,6 +10,7 @@ mod quadratic;
 mod relations;
 mod retained_conditions;
 mod signs;
+
 pub use predicates::PredicateProof;
 
 use comptime_runtime::{Budget, Error as ArithmeticError, Integer};
@@ -25,11 +26,13 @@ pub struct PlaceId {
     pub owner: u64,
     pub local: u32,
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ValueId {
     pub place: PlaceId,
     pub version: u64,
 }
+
 impl fmt::Display for ValueId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -39,6 +42,7 @@ impl fmt::Display for ValueId {
         )
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unknown {
     Arithmetic(ArithmeticError),
@@ -54,11 +58,13 @@ pub enum Unknown {
     UnrelatedFacts,
     ConditionDepthLimit,
 }
+
 impl From<ArithmeticError> for Unknown {
     fn from(e: ArithmeticError) -> Self {
         Self::Arithmetic(e)
     }
 }
+
 impl fmt::Display for Unknown {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -84,11 +90,13 @@ impl fmt::Display for Unknown {
         }
     }
 }
+
 /// A shared work budget, coefficient size bound and expansion bound.
 pub struct Limits {
     pub arithmetic: Budget,
     pub max_terms: usize,
 }
+
 impl Default for Limits {
     fn default() -> Self {
         Self {
@@ -97,10 +105,12 @@ impl Default for Limits {
         }
     }
 }
+
 impl Limits {
     pub fn step(&mut self, n: usize) -> Result<(), Unknown> {
         self.arithmetic.consume(n).map_err(Into::into)
     }
+
     pub fn integer(&mut self, x: &Integer) -> Result<Integer, Unknown> {
         let limbs = x.bit_len().div_ceil(32);
         if limbs > self.arithmetic.max_limbs {
@@ -109,6 +119,7 @@ impl Limits {
         self.step(limbs.saturating_add(1))?;
         Ok(x.clone())
     }
+
     pub fn compare(&mut self, a: &Integer, b: &Integer) -> Result<std::cmp::Ordering, Unknown> {
         if a.bit_len().max(b.bit_len()).div_ceil(32) > self.arithmetic.max_limbs {
             return Err(ArithmeticError::SizeLimit.into());
@@ -117,11 +128,13 @@ impl Limits {
         Ok(a.cmp(b))
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Interval {
     lower: Integer,
     upper: Integer,
 }
+
 impl Interval {
     pub fn new(lower: Integer, upper: Integer, limits: &mut Limits) -> Result<Self, Unknown> {
         limits.integer(&lower)?;
@@ -131,6 +144,7 @@ impl Interval {
         }
         Ok(Self { lower, upper })
     }
+
     /// A value range only; callers still need proofs before a machine operation.
     /// Target pointer width must be supplied explicitly by the caller.
     pub fn machine(width: u16, signed: bool, limits: &mut Limits) -> Result<Self, Unknown> {
@@ -167,27 +181,32 @@ impl Interval {
     pub fn lower(&self) -> &Integer {
         &self.lower
     }
+
     pub fn upper(&self) -> &Integer {
         &self.upper
     }
+
     pub fn copy(&self, limits: &mut Limits) -> Result<Self, Unknown> {
         Ok(Self {
             lower: limits.integer(&self.lower)?,
             upper: limits.integer(&self.upper)?,
         })
     }
+
     pub fn singleton(value: &Integer, limits: &mut Limits) -> Result<Self, Unknown> {
         Ok(Self {
             lower: limits.integer(value)?,
             upper: limits.integer(value)?,
         })
     }
+
     pub fn add(&self, other: &Self, limits: &mut Limits) -> Result<Self, Unknown> {
         Ok(Self {
             lower: self.lower.add(&other.lower, &mut limits.arithmetic)?,
             upper: self.upper.add(&other.upper, &mut limits.arithmetic)?,
         })
     }
+
     pub fn multiply(&self, other: &Self, limits: &mut Limits) -> Result<Self, Unknown> {
         let mut products = Vec::with_capacity(4);
         for a in [&self.lower, &self.upper] {
@@ -210,6 +229,7 @@ impl Interval {
             upper: limits.integer(&products[high])?,
         })
     }
+
     fn power(&self, exponent: usize, limits: &mut Limits) -> Result<Self, Unknown> {
         if exponent == 1 {
             return self.copy(limits);
@@ -249,6 +269,7 @@ impl Interval {
             && !limits.compare(&self.upper, &target.upper)?.is_gt())
     }
 }
+
 impl fmt::Display for Interval {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -265,6 +286,7 @@ impl fmt::Display for Interval {
 pub struct Polynomial {
     terms: BTreeMap<Vec<ValueId>, Integer>,
 }
+
 impl Polynomial {
     pub fn terms(&self) -> &BTreeMap<Vec<ValueId>, Integer> {
         &self.terms
@@ -275,11 +297,13 @@ impl Polynomial {
         result.insert(vec![], &value, limits)?;
         Ok(result)
     }
+
     pub fn variable(value: ValueId, limits: &mut Limits) -> Result<Self, Unknown> {
         let mut result = Self::default();
         result.insert(vec![value], &Integer::from_u128(1), limits)?;
         Ok(result)
     }
+
     pub fn insert(
         &mut self,
         factors: Vec<ValueId>,
@@ -305,6 +329,7 @@ impl Polynomial {
         self.terms.insert(factors, coefficient);
         Ok(())
     }
+
     pub fn add(&self, other: &Self, limits: &mut Limits) -> Result<Self, Unknown> {
         limits.step(1)?;
         let mut result = Self::default();
@@ -313,6 +338,7 @@ impl Polynomial {
         }
         Ok(result)
     }
+
     pub fn subtract(&self, other: &Self, limits: &mut Limits) -> Result<Self, Unknown> {
         limits.step(1)?;
         let mut result = Self::default();
@@ -324,6 +350,7 @@ impl Polynomial {
         }
         Ok(result)
     }
+
     pub fn multiply(&self, other: &Self, limits: &mut Limits) -> Result<Self, Unknown> {
         let mut result = Self::default();
         limits.step(1)?;
@@ -342,9 +369,11 @@ impl Polynomial {
         }
         Ok(result)
     }
+
     pub fn copy(&self, limits: &mut Limits) -> Result<Self, Unknown> {
         self.add(&Self::default(), limits)
     }
+
     pub fn interval_enclosure(
         &self,
         facts: &Facts,
@@ -352,6 +381,7 @@ impl Polynomial {
     ) -> Result<(Interval, BTreeMap<ValueId, Interval>), Unknown> {
         self.interval_enclosure_with_override(facts, None, limits)
     }
+
     /// Temporary interval-box restriction for discrete step proofs. This does
     /// not alter facts, versions, or propagate relational assumptions.
     fn interval_enclosure_with_override(
@@ -390,6 +420,7 @@ impl Polynomial {
         }
         Ok((result, premises))
     }
+
     pub fn prove_within(&self, target: &Interval, facts: &Facts, limits: &mut Limits) -> Outcome {
         let result = (|| {
             let (enclosure, premises) = self.enclosure_for_target(target, facts, limits)?;
@@ -411,6 +442,7 @@ impl Polynomial {
         }
     }
 }
+
 impl fmt::Display for Polynomial {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(polynomial (terms")?;
@@ -436,6 +468,7 @@ pub struct Facts {
     versions: Arc<AtomicU64>,
     reachable: bool,
 }
+
 impl Default for Facts {
     fn default() -> Self {
         Self {
@@ -447,17 +480,21 @@ impl Default for Facts {
         }
     }
 }
+
 impl Facts {
     /// Branches can share value identities only when they share this clock.
     pub fn shares_lineage(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.versions, &other.versions)
     }
+
     pub fn current_entries(&self) -> &BTreeMap<PlaceId, (u64, Option<Interval>)> {
         &self.current
     }
+
     pub fn relation_rows(&self) -> impl Iterator<Item = &Polynomial> {
         (&self.inequalities).into_iter()
     }
+
     pub fn contains_relation(
         &self,
         row: &Polynomial,
@@ -465,6 +502,7 @@ impl Facts {
     ) -> Result<bool, Unknown> {
         self.inequalities.contains(row, limits)
     }
+
     /// Record a relation already established by the caller's value transfer.
     /// This is an assumption operation, not a proof of the supplied row.
     pub fn assume_relation(&mut self, row: Polynomial, limits: &mut Limits) -> Result<(), Unknown> {
@@ -600,6 +638,86 @@ impl Facts {
         Ok(false)
     }
 
+    fn disjunction_has_noop_branch(
+        &self,
+        disjuncts: &[(&Condition, bool)],
+        truth: bool,
+        limits: &mut Limits,
+    ) -> Result<bool, Unknown> {
+        if disjuncts.len() < 2 {
+            return Ok(false);
+        }
+        for &(disjunct, _) in disjuncts {
+            if self.known_condition(disjunct, limits)? == Some(!truth) {
+                continue;
+            }
+            let mut eff_truth = truth;
+            let mut inner = disjunct;
+            while let Condition::Not(next) = inner {
+                limits.step(1)?;
+                eff_truth = !eff_truth;
+                inner = next;
+            }
+            if self.known_condition(inner, limits)? == Some(!eff_truth) {
+                continue;
+            }
+            match inner {
+                Condition::PolynomialCompare {
+                    left,
+                    relation,
+                    right,
+                } => {
+                    let effective = if eff_truth {
+                        *relation
+                    } else {
+                        relation.negated()
+                    };
+                    if effective == Comparison::NotEqual
+                        && self.relation_is_current(left, limits)?
+                        && self.relation_is_current(right, limits)?
+                    {
+                        let difference = left.subtract(right, limits)?;
+                        match difference.enclosure(self, limits) {
+                            Ok((bound, _)) => {
+                                if !(bound.lower.is_zero() && bound.upper.is_zero()) {
+                                    return Ok(true);
+                                }
+                            }
+                            Err(Unknown::MissingBound(_)) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+                Condition::Compare {
+                    value,
+                    relation,
+                    constant,
+                } => {
+                    let effective = if eff_truth {
+                        *relation
+                    } else {
+                        relation.negated()
+                    };
+                    if effective == Comparison::NotEqual {
+                        match self.bound(*value, limits) {
+                            Ok(bound) => {
+                                if limits.compare(&bound.lower, constant)?.is_lt()
+                                    && limits.compare(constant, &bound.upper)?.is_lt()
+                                {
+                                    return Ok(true);
+                                }
+                            }
+                            Err(Unknown::MissingBound(_) | Unknown::StaleValue(_)) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+
     fn assume_inner(
         &mut self,
         condition: &Condition,
@@ -678,7 +796,10 @@ impl Facts {
                 left,
                 relation,
                 right,
-            } => self.establish_relation(left, *relation, right, truth, limits)?,
+            } => {
+                needs_propagation =
+                    self.establish_relation(left, *relation, right, truth, limits)?;
+            }
             Condition::Not(inner) => {
                 self.assume_inner(inner, !truth, depth + 1, limits)?;
                 needs_propagation = false;
@@ -703,11 +824,14 @@ impl Facts {
                 if surviving.len() == 1 {
                     return self.assume_inner(surviving[0].0, truth, depth + 1, limits);
                 }
-                if self.can_skip_independent_disjunction(&surviving, limits)? {
+                if self.can_skip_independent_disjunction(&surviving, limits)?
+                    || self.disjunction_has_noop_branch(&surviving, truth, limits)?
+                {
                     needs_propagation = false;
                 } else {
                     let mut remainder = self.fork(limits)?;
                     let mut joined: Option<Facts> = None;
+                    let mut unchanged = false;
                     for (index, (disjunct, _)) in surviving.iter().enumerate() {
                         if !remainder.reachable {
                             break;
@@ -729,12 +853,30 @@ impl Facts {
                                 Some(previous) => previous.join(&branch, limits)?,
                                 None => branch,
                             });
+                            if joined.as_ref().is_some_and(|state| {
+                                state.current == self.current
+                                    && state.inequalities == self.inequalities
+                            }) {
+                                unchanged = true;
+                                break;
+                            }
                         }
                         remainder.assume_inner(disjunct, !truth, depth + 1, limits)?;
                     }
-                    match joined {
-                        Some(result) => *self = result,
-                        None => self.reachable = false,
+                    if unchanged {
+                        needs_propagation = false;
+                    } else {
+                        match joined {
+                            Some(result) => {
+                                if result.current == self.current
+                                    && result.inequalities == self.inequalities
+                                {
+                                    needs_propagation = false;
+                                }
+                                *self = result;
+                            }
+                            None => self.reachable = false,
+                        }
                     }
                 }
             }
@@ -750,6 +892,7 @@ impl Facts {
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
             .map_err(|_| Unknown::VersionExhausted)
     }
+
     fn replace(&mut self, place: PlaceId, bound: Option<Interval>) -> Result<ValueId, Unknown> {
         if !self.reachable {
             return Err(Unknown::UnreachablePath);
@@ -758,12 +901,15 @@ impl Facts {
         self.current.insert(place, (version, bound));
         Ok(ValueId { place, version })
     }
+
     pub fn assign(&mut self, place: PlaceId, bound: Interval) -> Result<ValueId, Unknown> {
         self.replace(place, Some(bound))
     }
+
     pub fn invalidate(&mut self, place: PlaceId) -> Result<ValueId, Unknown> {
         self.replace(place, None)
     }
+
     pub fn bound(&self, id: ValueId, limits: &mut Limits) -> Result<&Interval, Unknown> {
         limits.step(1 + self.current.len().max(1).ilog2() as usize)?;
         if !self.reachable {
@@ -823,6 +969,7 @@ impl Facts {
         self.inequalities = relations::RelationStore::from_rows(rows, limits)?;
         Ok(())
     }
+
     pub fn is_reachable(&self) -> bool {
         self.reachable
     }
@@ -1059,6 +1206,7 @@ impl Facts {
         Ok(joined)
     }
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Comparison {
     Equal,
@@ -1068,6 +1216,7 @@ pub enum Comparison {
     Greater,
     GreaterEqual,
 }
+
 /// Program condition over current scalar values; neither a type proposition
 /// nor executable code. Its source check/control edge establishes its truth.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1087,6 +1236,7 @@ pub enum Condition {
     And(Box<Condition>, Box<Condition>),
     Or(Box<Condition>, Box<Condition>),
 }
+
 impl fmt::Display for Condition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1113,6 +1263,7 @@ impl fmt::Display for Condition {
         }
     }
 }
+
 impl Comparison {
     pub fn negated(self) -> Self {
         match self {
@@ -1125,6 +1276,7 @@ impl Comparison {
         }
     }
 }
+
 impl fmt::Display for Comparison {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -1142,12 +1294,15 @@ impl fmt::Display for Comparison {
 // in an unrelated analysis cannot authorize replay of an old proof.
 #[derive(Clone, Debug)]
 struct Lineage(Arc<AtomicU64>);
+
 impl PartialEq for Lineage {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
 }
+
 impl Eq for Lineage {}
+
 impl fmt::Display for Facts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(program-facts (reachable {}) (values", self.reachable)?;
@@ -1199,6 +1354,7 @@ impl fmt::Display for Facts {
         f.write_str("))")
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RangeProof {
     lineage: Lineage,
@@ -1208,10 +1364,12 @@ pub struct RangeProof {
     enclosure: Interval,
     target: Interval,
 }
+
 impl RangeProof {
     pub fn enclosure(&self) -> &Interval {
         &self.enclosure
     }
+
     pub fn replay(&self, facts: &Facts, limits: &mut Limits) -> Result<(), Unknown> {
         limits.step(1)?;
         if !Arc::ptr_eq(&self.lineage.0, &facts.versions) {
@@ -1242,6 +1400,7 @@ impl RangeProof {
         }
     }
 }
+
 impl fmt::Display for RangeProof {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(range-proof (expression {}) (premises", self.expression)?;
@@ -1259,11 +1418,13 @@ impl fmt::Display for RangeProof {
         )
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
     Proven(RangeProof),
     Unknown(Unknown),
 }
+
 impl fmt::Display for Outcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1749,6 +1910,137 @@ mod disjunction_complexity_tests {
         assert_eq!(
             rel.bound(vars[1], &mut setup).unwrap().upper,
             Integer::from_u128(4)
+        );
+    }
+
+    #[test]
+    fn negated_relational_conjunction_skips_noop_join_within_small_budget() {
+        let mut setup = Limits::default();
+        let mut facts = Facts::default();
+        let mut mk = |local| {
+            facts
+                .assign(
+                    PlaceId { owner: 3, local },
+                    Interval::machine(64, false, &mut setup).unwrap(),
+                )
+                .unwrap()
+        };
+        let a = mk(0);
+        let b = mk(1);
+        let c = mk(2);
+        let d = mk(3);
+        let s = mk(4);
+        let n = mk(5);
+        let p = |id, l: &mut Limits| Polynomial::variable(id, l).unwrap();
+        let pa = p(a, &mut setup);
+        let pb = p(b, &mut setup);
+        let pc = p(c, &mut setup);
+        let pd = p(d, &mut setup);
+        let ps = p(s, &mut setup);
+        let pn = p(n, &mut setup);
+        let c_minus_a = pc.subtract(&pa, &mut setup).unwrap();
+        let d_minus_a = pd.subtract(&pa, &mut setup).unwrap();
+
+        let cmp = |left, relation, right| Condition::PolynomialCompare {
+            left,
+            relation,
+            right,
+        };
+        let conj = Condition::And(
+            Box::new(Condition::And(
+                Box::new(Condition::And(
+                    Box::new(Condition::And(
+                        Box::new(cmp(pa.clone(), Comparison::GreaterEqual, pb)),
+                        Box::new(cmp(pa.clone(), Comparison::LessEqual, pc)),
+                    )),
+                    Box::new(cmp(pa, Comparison::LessEqual, pd)),
+                )),
+                Box::new(cmp(c_minus_a, Comparison::Equal, ps.clone())),
+            )),
+            Box::new(cmp(pn.clone(), Comparison::LessEqual, d_minus_a)),
+        );
+
+        let mut small = Limits::default();
+        small.arithmetic.steps = 50_000;
+        let mut branch = facts.fork(&mut setup).unwrap();
+        branch.assume(&conj, false, &mut small).unwrap();
+        assert!(branch.is_reachable());
+
+        let n_le_s = cmp(pn.clone(), Comparison::LessEqual, ps.clone());
+        branch.assume(&n_le_s, true, &mut small).unwrap();
+        assert!(branch.is_reachable());
+        let diff = pn.subtract(&ps, &mut setup).unwrap();
+        let (enclosure, _) = diff.enclosure(&branch, &mut setup).unwrap();
+        assert!(enclosure.upper <= Integer::zero());
+        // The negated conjunction must not leak an unnegated `s <= u64::MAX` / equality premise.
+        assert_ne!(
+            branch.known_condition(&conj, &mut setup).unwrap(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn refuted_not_equal_disjunct_still_refines_surviving_branch() {
+        let mut setup = Limits::default();
+        let mut facts = Facts::default();
+        let x = facts
+            .assign(
+                PlaceId { owner: 4, local: 0 },
+                Interval::machine(16, false, &mut setup).unwrap(),
+            )
+            .unwrap();
+        let y = facts
+            .assign(
+                PlaceId { owner: 4, local: 1 },
+                Interval::machine(16, false, &mut setup).unwrap(),
+            )
+            .unwrap();
+        let z = facts
+            .assign(
+                PlaceId { owner: 4, local: 2 },
+                Interval::machine(16, false, &mut setup).unwrap(),
+            )
+            .unwrap();
+        let px = Polynomial::variable(x, &mut setup).unwrap();
+        let py = Polynomial::variable(y, &mut setup).unwrap();
+        facts
+            .assume(
+                &Condition::PolynomialCompare {
+                    left: px.clone(),
+                    relation: Comparison::LessEqual,
+                    right: py.clone(),
+                },
+                true,
+                &mut setup,
+            )
+            .unwrap();
+        facts
+            .assume(
+                &Condition::PolynomialCompare {
+                    left: py.clone(),
+                    relation: Comparison::LessEqual,
+                    right: px.clone(),
+                },
+                true,
+                &mut setup,
+            )
+            .unwrap();
+        let disj = Condition::Or(
+            Box::new(Condition::PolynomialCompare {
+                left: px,
+                relation: Comparison::NotEqual,
+                right: py,
+            }),
+            Box::new(Condition::Compare {
+                value: z,
+                relation: Comparison::LessEqual,
+                constant: Integer::from_u128(5),
+            }),
+        );
+        facts.assume(&disj, true, &mut setup).unwrap();
+        assert_eq!(
+            facts.bound(z, &mut setup).unwrap().upper,
+            Integer::from_u128(5)
         );
     }
 }

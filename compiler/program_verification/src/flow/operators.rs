@@ -43,7 +43,10 @@ fn guarded_scalar_observation(expr: &Expr, limits: &mut Limits) -> Result<bool, 
         limits.step(1)?;
         match &expr.kind {
             K::Local(_) | K::Literal(_) => {}
-            K::Not(value) | K::IntegerNegate(value) => pending.push(value),
+            K::Not(value)
+            | K::IntegerNegate(value)
+            | K::Field { value, .. }
+            | K::AnonymousField { value, .. } => pending.push(value),
             K::And(a, b)
             | K::Or(a, b)
             | K::ScalarEqual(a, b)
@@ -146,6 +149,7 @@ impl Walker<'_> {
         }
         result.ok_or(Unknown::InsufficientBounds)
     }
+
     #[inline(never)]
     pub(super) fn integer_expression(
         &mut self,
@@ -359,6 +363,7 @@ impl Walker<'_> {
         }
         Ok(result)
     }
+
     #[inline(never)]
     pub(super) fn logical_expression(
         &mut self,
@@ -433,11 +438,32 @@ impl Walker<'_> {
                 } else {
                     None
                 };
-                let mut short = state.fork(self.limits)?;
                 let continue_truth = matches!(expr.kind, K::And(..));
-                if let Some(a) = &a {
-                    short.facts.assume(a, !continue_truth, self.limits)?;
-                    state.facts.assume(a, continue_truth, self.limits)?;
+                let (short_opt, short_reachable) = if unchanged.is_some() {
+                    let reachable = if !state.facts.is_reachable() {
+                        false
+                    } else if let Some(cond) = &a {
+                        if let Some(known) = state.facts.known_condition(cond, self.limits)? {
+                            known != continue_truth
+                        } else {
+                            let mut short_facts = state.facts.fork(self.limits)?;
+                            short_facts.assume(cond, !continue_truth, self.limits)?;
+                            short_facts.is_reachable()
+                        }
+                    } else {
+                        true
+                    };
+                    (None, reachable)
+                } else {
+                    let mut short = state.fork(self.limits)?;
+                    if let Some(cond) = &a {
+                        short.facts.assume(cond, !continue_truth, self.limits)?;
+                    }
+                    let reachable = short.facts.is_reachable();
+                    (Some(short), reachable)
+                };
+                if let Some(cond) = &a {
+                    state.facts.assume(cond, continue_truth, self.limits)?;
                 }
                 let continued = state.facts.is_reachable();
                 let b = self.child(b, state, depth)?;
@@ -455,7 +481,7 @@ impl Walker<'_> {
                 } else {
                     None
                 };
-                let short_range = if short.facts.is_reachable() {
+                let short_range = if short_reachable {
                     let bit = Integer::from_u128(u128::from(!continue_truth));
                     Some(Interval::new(bit.clone(), bit, self.limits)?)
                 } else {
@@ -469,7 +495,7 @@ impl Walker<'_> {
                 let mut b = b.condition;
                 if let Some(unchanged) = unchanged {
                     *state = unchanged;
-                } else {
+                } else if let Some(short) = short_opt {
                     state.join_aggregates(&short, self.limits)?;
                     state.join_paths_and_facts(&short, self.limits)?;
                 }
