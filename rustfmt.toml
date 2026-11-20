@@ -1,0 +1,23 @@
+# Repository Rust formatting rules.
+#
+# Note: rustfmt's unstable `blank_lines_lower_bound = 1` erroneously inserts
+# blank lines between statements inside function bodies, inside braces, and
+# between doc comments/attributes and their items. Item-level blank-line
+# separation (>= 1 blank line between adjacent Rust items) is therefore enforced
+# by `development/rust_fmt.py`, invoked automatically by `development/cargo.py`.
+edition = "2024"
+unstable_features = true
+newline_style = "Unix"
+max_width = 100
+blank_lines_upper_bound = 1
+ignore = [
+    "compiler/luna/tests/support/attrs_source.rs",
+    "compiler/luna/tests/support/comparison_source.rs",
+    "compiler/luna/tests/support/iterator_source.rs",
+    "compiler/luna/tests/support/math_source.rs",
+    "compiler/luna/tests/support/meta_source.rs",
+    "compiler/luna/tests/support/operators_source.rs",
+    "compiler/luna/tests/support/resources_source.rs",
+    "compiler/luna/tests/support/text_source.rs",
+    "compiler/luna/tests/support/tuple_source.rs",
+]

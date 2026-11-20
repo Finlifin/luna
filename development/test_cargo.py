@@ -10,7 +10,10 @@ from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location("cargo_runner", Path(__file__).with_name("cargo.py"))
 cargo = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = cargo
 spec.loader.exec_module(cargo)
+
+rust_fmt = cargo.load_rust_fmt()
 
 
 class CargoCacheTests(unittest.TestCase):
@@ -251,6 +254,262 @@ class CargoCacheTests(unittest.TestCase):
             with self.assertRaises(OSError):
                 runner.run(['build'], on_success=Mock(side_effect=OSError('disk full')))
             self.assertEqual(runner.reclaim.call_count, 2)
+
+
+class RustFmtItemSpacingTests(unittest.TestCase):
+    def test_inserts_blank_lines_between_top_level_and_nested_items(self):
+        source = "\n".join([
+            "use a::One;",
+            "use b::Two;",
+            "struct Foo {",
+            "    x: i32,",
+            "    y: i32,",
+            "}",
+            "impl Foo {",
+            "    fn first(&self) -> i32 {",
+            "        let a = 1;",
+            "        let b = 2;",
+            "        a + b",
+            "    }",
+            "    fn second(&self) -> i32 {",
+            "        42",
+            "    }",
+            "}",
+            "const LIMIT: usize = {",
+            "    let n = 4;",
+            "    n * 2",
+            "};",
+            "type Pair = (i32, i32);",
+            "",
+        ])
+        expected = "\n".join([
+            "use a::One;",
+            "use b::Two;",
+            "",
+            "struct Foo {",
+            "    x: i32,",
+            "    y: i32,",
+            "}",
+            "",
+            "impl Foo {",
+            "    fn first(&self) -> i32 {",
+            "        let a = 1;",
+            "        let b = 2;",
+            "        a + b",
+            "    }",
+            "",
+            "    fn second(&self) -> i32 {",
+            "        42",
+            "    }",
+            "}",
+            "",
+            "const LIMIT: usize = {",
+            "    let n = 4;",
+            "    n * 2",
+            "};",
+            "",
+            "type Pair = (i32, i32);",
+            "",
+        ])
+        formatted = rust_fmt.ensure_blank_lines_between_items(source)
+        self.assertEqual(formatted, expected)
+        self.assertEqual(rust_fmt.ensure_blank_lines_between_items(formatted), formatted)
+
+    def test_keeps_docs_attributes_mod_decls_and_macro_bodies_intact(self):
+        source = "\n".join([
+            "//! Crate header.",
+            "#![allow(unused)]",
+            "mod alpha;",
+            "mod beta;",
+            "/// Docs stay attached.",
+            "#[derive(Debug)]",
+            "enum Kind {",
+            "    One,",
+            "    Two { inner: i32 },",
+            "}",
+            "// Leading note.",
+            "#[inline]",
+            "extern \"C\" fn c_entry() {",
+            "    let raw = r#\"}\nfn fake() {}\"#;",
+            "    /* /* } */ */",
+            "    let ch = '}';",
+            "}",
+            "trait Ops {",
+            "    type Out;",
+            "    fn apply<'a>(&'a self, x: i32) -> i32;",
+            "}",
+            "macro_rules! mk {",
+            "    ($name:ident) => { fn $name() {} };",
+            "}",
+            "fn after_macro() {}",
+            "",
+        ])
+        expected = "\n".join([
+            "//! Crate header.",
+            "#![allow(unused)]",
+            "mod alpha;",
+            "mod beta;",
+            "",
+            "/// Docs stay attached.",
+            "#[derive(Debug)]",
+            "enum Kind {",
+            "    One,",
+            "    Two { inner: i32 },",
+            "}",
+            "",
+            "// Leading note.",
+            "#[inline]",
+            "extern \"C\" fn c_entry() {",
+            "    let raw = r#\"}\nfn fake() {}\"#;",
+            "    /* /* } */ */",
+            "    let ch = '}';",
+            "}",
+            "",
+            "trait Ops {",
+            "    type Out;",
+            "",
+            "    fn apply<'a>(&'a self, x: i32) -> i32;",
+            "}",
+            "",
+            "macro_rules! mk {",
+            "    ($name:ident) => { fn $name() {} };",
+            "}",
+            "",
+            "fn after_macro() {}",
+            "",
+        ])
+        formatted = rust_fmt.ensure_blank_lines_between_items(source)
+        self.assertEqual(formatted, expected)
+        self.assertEqual(rust_fmt.ensure_blank_lines_between_items(formatted), formatted)
+
+    def test_const_generics_inline_const_and_attributed_mods(self):
+        source = "\n".join([
+            "mod first;",
+            "#[cfg(test)]",
+            "mod second;",
+            "impl<const N: usize> Wrapper<const { 1 + 1 }, N> {",
+            "    const unsafe fn tag(&self) -> usize { N }",
+            "    fn next(&self) -> usize { N }",
+            "}",
+            "",
+        ])
+        expected = "\n".join([
+            "mod first;",
+            "",
+            "#[cfg(test)]",
+            "mod second;",
+            "",
+            "impl<const N: usize> Wrapper<const { 1 + 1 }, N> {",
+            "    const unsafe fn tag(&self) -> usize { N }",
+            "",
+            "    fn next(&self) -> usize { N }",
+            "}",
+            "",
+        ])
+        self.assertEqual(rust_fmt.ensure_blank_lines_between_items(source), expected)
+
+
+class CargoAutoFmtTests(unittest.TestCase):
+    def _init_git_repo(self, root: Path) -> None:
+        env = {
+            **os.environ,
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+        cargo.subprocess.run(["git", "init"], cwd=root, env=env, check=True, capture_output=True)
+        (root / "rustfmt.toml").write_text(
+            'edition = "2024"\nignore = ["src/ignored.rs"]\n',
+            encoding="utf-8",
+        )
+        (root / "src").mkdir()
+        (root / "src/clean.rs").write_text("fn clean() {}\n", encoding="utf-8")
+        (root / "src/deleted.rs").write_text("fn gone() {}\n", encoding="utf-8")
+        cargo.subprocess.run(["git", "add", "."], cwd=root, env=env, check=True, capture_output=True)
+        cargo.subprocess.run(
+            ["git", "commit", "-m", "init"], cwd=root, env=env, check=True, capture_output=True
+        )
+
+    def test_cargo_arguments_accept_leading_no_fmt_and_reject_fmt_as_cargo_subcmd(self):
+        args = cargo.cargo_arguments(["--no-fmt", "test", "-p", "luna"], Path("/tmp/test-target"))
+        self.assertEqual(args[:2], ["cargo", "test"])
+        with self.assertRaises(ValueError):
+            cargo.cargo_arguments(["fmt"], Path("/tmp/test-target"))
+
+    def test_modified_rust_files_skips_ignored_clean_and_deleted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._init_git_repo(root)
+            (root / "src/dirty.rs").write_text("fn a() {}\nfn b() {}\n", encoding="utf-8")
+            (root / "src/ignored.rs").write_text("concat!(a\n", encoding="utf-8")
+            (root / "src/deleted.rs").unlink()
+            runner = cargo.Runner(root, root / "target")
+            files = runner.modified_rust_files()
+            self.assertEqual(files, [(root / "src/dirty.rs").resolve()])
+
+    def test_run_formats_modified_files_before_build_and_respects_opt_outs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._init_git_repo(root)
+            dirty = root / "src/dirty.rs"
+            raw = "fn a() {}\nfn b() {}\n"
+            dirty.write_text(raw, encoding="utf-8")
+
+            # Opt-out via env var leaves modified file untouched.
+            with patch.dict(os.environ, {"LUNA_SKIP_AUTO_FMT": "1"}):
+                runner_env = cargo.Runner(root, root / "target")
+                runner_env.reclaim = Mock()
+                runner_env.execute = Mock(return_value=(0, False))
+                self.assertEqual(runner_env.run(["check", "-p", "foo"]), 0)
+            self.assertEqual(dirty.read_text(encoding="utf-8"), raw)
+
+            # Opt-out via --no-fmt flag leaves modified file untouched.
+            runner_flag = cargo.Runner(root, root / "target")
+            runner_flag.reclaim = Mock()
+            runner_flag.execute = Mock(return_value=(0, False))
+            self.assertEqual(runner_flag.run(["--no-fmt", "check", "-p", "foo"]), 0)
+            self.assertEqual(dirty.read_text(encoding="utf-8"), raw)
+
+            # Without opt-out, running `check` auto-formats dirty.rs before executing Cargo.
+            observed = []
+            runner = cargo.Runner(root, root / "target")
+            runner.reclaim = Mock()
+            runner.execute = lambda cmd: (observed.append(dirty.read_text(encoding="utf-8")) or 0, False)
+            self.assertEqual(runner.run(["check", "-p", "foo"]), 0)
+            self.assertEqual(len(observed), 1)
+            self.assertEqual(observed[0], "fn a() {}\n\nfn b() {}\n")
+            self.assertEqual(dirty.read_text(encoding="utf-8"), "fn a() {}\n\nfn b() {}\n")
+            self.assertEqual((root / "src/clean.rs").read_text(encoding="utf-8"), "fn clean() {}\n")
+
+    def test_auto_fmt_syntax_error_is_nonfatal(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._init_git_repo(root)
+            broken = root / "src/broken.rs"
+            broken.write_text("fn broken( {", encoding="utf-8")
+            runner = cargo.Runner(root, root / "target")
+            runner.reclaim = Mock()
+            runner.execute = Mock(return_value=(101, False))
+            stderr_buf = io.StringIO()
+            with patch.object(cargo.sys, "stderr", stderr_buf):
+                self.assertEqual(runner.run(["build"]), 101)
+            runner.execute.assert_called_once()
+            self.assertIn("rustfmt-auto: warning", stderr_buf.getvalue())
+
+    def test_fmt_subcommand_check_and_fix(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self._init_git_repo(root)
+            dirty = root / "src/dirty.rs"
+            dirty.write_text("fn a() {}\nfn b() {}\n", encoding="utf-8")
+            runner = cargo.Runner(root, root / "target")
+            stderr_buf = io.StringIO()
+            with patch.object(cargo.sys, "stderr", stderr_buf):
+                self.assertNotEqual(runner.run(["fmt", "--check"]), 0)
+            self.assertEqual(runner.run(["fmt"]), 0)
+            self.assertEqual(dirty.read_text(encoding="utf-8"), "fn a() {}\n\nfn b() {}\n")
+            self.assertEqual(runner.run(["fmt", "--check"]), 0)
 
 
 if __name__ == "__main__":

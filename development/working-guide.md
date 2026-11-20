@@ -10,6 +10,7 @@
 ```sh
 python3 -B development/check.py --timeout 900 -- test -p luna --test type_model_inference
 python3 -B development/check.py --timeout 900 -- test -p ptc
+python3 -B development/check.py --timeout 120 -- fmt --check
 python3 -B development/command.py --timeout 120 -- cargo fmt --all -- --check
 ```
 
@@ -17,6 +18,12 @@ Cargo 经 `development/cargo.py` 固定复用 `/tmp/luna-dev-002/target`，并�
 关闭 incremental 和 dev/test debuginfo。入口管理共享维护锁、预算空间及可重建缓存清理，
 不能同时再启动直接 Cargo。编辑编译中的源码会使结果对应旧输入，不应当作当前验证。
 开发通常用 dev/test；release 用于性能或确需优化的验收，同一阶段不要来回重建 profile。
+
+在执行 `build`/`check`/`test`/`run` 前，`development/cargo.py` 会自动对当前 git 变更中
+涉及的 `.rs` 文件执行格式化（遵循仓库根目录 [rustfmt.toml](../rustfmt.toml) 与
+`development/rust_fmt.py` 的 item 间至少保留一空行规则，跳过 `rustfmt.toml` 中 `ignore`
+列的片段文件，不会主动重排未改动源码）。需要跳过自动格式化时可传 `--no-fmt` 或设置
+`LUNA_SKIP_AUTO_FMT=1`；手动格式化可用 `cargo.py fmt [--check] [--all | paths...]`。
 
 ## 单二进制 CLI
 

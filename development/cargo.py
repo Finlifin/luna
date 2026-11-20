@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Bounded local Cargo cache; run from any directory, without shell expansion.
 
-Usage: python3 development/cargo.py test -p luna --test execution
+Usage: python3 development/cargo.py [--no-fmt] test -p luna --test execution
        python3 development/cargo.py run -p luna -- input.fl --emit nir
+       python3 development/cargo.py fmt [--check] [--all | paths...]
        python3 development/cargo.py clean
+
+Before `build`, `check`, `test`, or `run`, modified `.rs` files in git status
+are automatically formatted via `development/rust_fmt.py` (`rustfmt.toml` plus
+item-level blank-line separation, ignoring configured fragment files). Pass
+`--no-fmt` or set `LUNA_SKIP_AUTO_FMT=1` to bypass automatic formatting.
 
 Only /tmp/luna-dev-002/target is cleaned. Source files, Cargo.lock, and the
 registry/download cache are never cleanup targets. Builds and cleanup share
@@ -19,8 +25,9 @@ cause failures. Evidence forwarding errors still never replay completed work.
 """
 from __future__ import annotations
 
-import fcntl
 import errno
+import fcntl
+import importlib.util
 import os
 from pathlib import Path
 import shutil
@@ -36,6 +43,8 @@ MIN_FREE = 2 * 1024**3
 REBUILDABLE_PACKAGES = ("elaboration", "luna")
 SPACE_ERRORS = ("quota exceeded", "no space left on device", "os error 122", "os error 28")
 SPACE_ERRNOS = (errno.EDQUOT, errno.ENOSPC)
+TRUTHY_FLAGS = frozenset({"1", "true", "yes", "on"})
+FALSY_FLAGS = frozenset({"0", "false", "no", "off"})
 
 
 def diagnostic(message: str) -> None:
@@ -46,11 +55,52 @@ def diagnostic(message: str) -> None:
         pass
 
 
+def load_rust_fmt():
+    module_name = "luna_rust_fmt"
+    existing = sys.modules.get(module_name)
+    if existing is not None:
+        return existing
+    rust_fmt_path = Path(__file__).resolve().with_name("rust_fmt.py")
+    spec = importlib.util.spec_from_file_location(module_name, rust_fmt_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load {rust_fmt_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
+def split_runner_flags(arguments: list[str]) -> tuple[bool, list[str]]:
+    skip_fmt = False
+    index = 0
+    while index < len(arguments) and arguments[index] == "--no-fmt":
+        skip_fmt = True
+        index += 1
+    return skip_fmt, arguments[index:]
+
+
+def should_skip_auto_fmt(skip_flag: bool, env: dict[str, str]) -> bool:
+    if skip_flag:
+        return True
+    skip_env = env.get("LUNA_SKIP_AUTO_FMT", "").strip().lower()
+    if skip_env in TRUTHY_FLAGS:
+        return True
+    auto_env = env.get("LUNA_AUTO_FMT", "").strip().lower()
+    if auto_env in FALSY_FLAGS:
+        return True
+    return False
+
+
 def cargo_arguments(arguments: list[str], target: Path) -> list[str]:
-    if not arguments or arguments[0] not in {"build", "check", "test", "run", "clean"}:
-        raise ValueError("expected build, check, test, run, or clean")
-    split = arguments.index("--") if "--" in arguments else len(arguments)
-    options, tail = arguments[:split], arguments[split:]
+    _, remaining = split_runner_flags(arguments)
+    if not remaining or remaining[0] not in {"build", "check", "test", "run", "clean"}:
+        raise ValueError("expected build, check, test, run, clean, or fmt")
+    split = remaining.index("--") if "--" in remaining else len(remaining)
+    options, tail = remaining[:split], remaining[split:]
     if any(arg == "--target-dir" or arg.startswith("--target-dir=") for arg in options):
         raise ValueError("target-dir is managed by this entrypoint")
     # Keep caller-selected tests/packages/features; always use the shared cache.
@@ -196,15 +246,182 @@ class Runner:
             raise OSError(error.errno, f"cannot forward Cargo {label}: {error}") from error
         return status, quota_failure.is_set()
 
+    def modified_rust_files(self) -> list[Path]:
+        if not any((p / ".git").exists() for p in (self.root, *self.root.parents)):
+            return []
+        top_proc = subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+        )
+        repo_root = (
+            Path(top_proc.stdout.strip()).resolve()
+            if top_proc.returncode == 0 and top_proc.stdout.strip()
+            else self.root.resolve()
+        )
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.root),
+                "status",
+                "--porcelain",
+                "-z",
+                "--untracked-files=all",
+                "--",
+                "*.rs",
+            ],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            return []
+        rust_fmt = load_rust_fmt()
+        ignored = rust_fmt.load_ignored_paths(self.root)
+        if repo_root != self.root.resolve():
+            ignored |= rust_fmt.load_ignored_paths(repo_root)
+        entries = result.stdout.split(b"\0")
+        paths: list[Path] = []
+        seen: set[Path] = set()
+        index = 0
+        while index < len(entries):
+            raw = entries[index]
+            index += 1
+            if not raw:
+                continue
+            text = raw.decode("utf-8", errors="surrogateescape")
+            if len(text) < 4:
+                continue
+            status_xy = text[:2]
+            rel_path = text[3:]
+            if "R" in status_xy or "C" in status_xy:
+                # `-z` puts the original source path as the next NUL record.
+                index += 1
+            if "D" in status_xy:
+                continue
+            candidate = (repo_root / rel_path).resolve()
+            if candidate in ignored or candidate in seen or not candidate.is_file():
+                continue
+            seen.add(candidate)
+            paths.append(candidate)
+        return paths
+
+    def tracked_rust_files(self) -> list[Path]:
+        if not any((p / ".git").exists() for p in (self.root, *self.root.parents)):
+            return sorted(self.root.rglob("*.rs"))
+        top_proc = subprocess.run(
+            ["git", "-C", str(self.root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+        )
+        repo_root = (
+            Path(top_proc.stdout.strip()).resolve()
+            if top_proc.returncode == 0 and top_proc.stdout.strip()
+            else self.root.resolve()
+        )
+        result = subprocess.run(
+            ["git", "-C", str(self.root), "ls-files", "-z", "--", "*.rs"],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            return []
+        rust_fmt = load_rust_fmt()
+        ignored = rust_fmt.load_ignored_paths(self.root) | rust_fmt.load_ignored_paths(repo_root)
+        paths: list[Path] = []
+        for raw in result.stdout.split(b"\0"):
+            if not raw:
+                continue
+            rel = raw.decode("utf-8", errors="surrogateescape")
+            candidate = (repo_root / rel).resolve()
+            if candidate not in ignored and candidate.is_file():
+                paths.append(candidate)
+        return paths
+
+    def format_modified_rust(self, *, skip_flag: bool = False) -> None:
+        if should_skip_auto_fmt(skip_flag, self.env):
+            return
+        files = self.modified_rust_files()
+        if not files:
+            return
+        rust_fmt = load_rust_fmt()
+        try:
+            status, detail = rust_fmt.format_files(self.root, files, check=False)
+        except OSError as error:
+            diagnostic(f"rustfmt-auto: warning: cannot run formatter: {error}")
+            return
+        if status != 0:
+            summary = detail.splitlines()[0] if detail else f"exit status {status}"
+            diagnostic(f"rustfmt-auto: warning: skipped invalid/unformattable changes ({summary})")
+
+    def run_fmt(self, args: list[str]) -> int:
+        check = False
+        format_all = False
+        raw_paths: list[str] = []
+        for arg in args:
+            if arg == "--check":
+                check = True
+            elif arg == "--all":
+                format_all = True
+            elif arg.startswith("-"):
+                raise ValueError(f"unsupported fmt option: {arg}")
+            else:
+                raw_paths.append(arg)
+        if format_all and raw_paths:
+            raise ValueError("fmt --all does not take explicit file paths")
+        rust_fmt = load_rust_fmt()
+        if format_all:
+            cargo_cmd = ["cargo", "fmt", "--all"]
+            if check:
+                cargo_cmd += ["--", "--check"]
+            proc = subprocess.run(cargo_cmd, cwd=self.root, env=self.env)
+            targets = self.tracked_rust_files()
+            if not check:
+                changed: list[Path] = []
+                for path in targets:
+                    original = path.read_text(encoding="utf-8")
+                    updated = rust_fmt.ensure_blank_lines_between_items(original)
+                    if updated != original:
+                        path.write_text(updated, encoding="utf-8")
+                        changed.append(path)
+                if changed:
+                    subprocess.run(["cargo", "fmt", "--all"], cwd=self.root, env=self.env)
+                return proc.returncode
+            unspaced = [
+                str(p)
+                for p in targets
+                if rust_fmt.ensure_blank_lines_between_items(p.read_text(encoding="utf-8"))
+                != p.read_text(encoding="utf-8")
+            ]
+            if unspaced:
+                diagnostic("missing blank line between Rust items in: " + ", ".join(unspaced))
+                return 1
+            return proc.returncode
+        if raw_paths:
+            ignored = rust_fmt.load_ignored_paths(self.root)
+            files = rust_fmt._expand_paths(self.root, raw_paths, ignored)
+        else:
+            files = self.modified_rust_files()
+        status, message = rust_fmt.format_files(self.root, files, check=check)
+        if message:
+            diagnostic(message)
+        return status
+
     def run(self, arguments: list[str], *, on_success=None) -> int:
-        command = cargo_arguments(arguments, self.target)
+        skip_fmt, remaining = split_runner_flags(arguments)
+        if remaining and remaining[0] == "fmt":
+            self.target.parent.mkdir(parents=True, exist_ok=True)
+            with (self.target.parent / "cargo-maintenance.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                return self.run_fmt(remaining[1:])
+        command = cargo_arguments(remaining, self.target)
         self.target.parent.mkdir(parents=True, exist_ok=True)
         with (self.target.parent / "cargo-maintenance.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
+            if remaining[0] != "clean":
+                self.format_modified_rust(skip_flag=skip_fmt)
             self.reclaim()
             try:
                 status, quota_failure = self.execute(command)
-                if status and quota_failure and arguments[0] != "clean":
+                if status and quota_failure and remaining[0] != "clean":
                     # This process is already inside the sandbox: recovery does
                     # not need another sandbox mount when the quota is full.
                     self.reclaim(force=True)
