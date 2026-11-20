@@ -69,6 +69,64 @@ mod owned_substitution_tests {
     }
 
     #[test]
+    fn call_projections_keep_both_caller_namespaces_under_nested_binders() {
+        use crate::program::TypePredicate;
+        use std::collections::BTreeMap;
+        let bound = |depth| Term::Bound {
+            depth,
+            index: 0,
+            sort: Sort::Type,
+        };
+        let rigid = Term::Rigid {
+            declaration: id(4),
+            sort: Sort::Type,
+        };
+        let function = |result| Term::Function {
+            parameters: vec![crate::Parameter {
+                sort: Sort::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            result: Box::new(result),
+        };
+        let scoped = [vec![Sort::Type]];
+        let ids = [id(4)];
+        let actual = [bound(0)];
+        let declarations = DeclarationSubstitution::bounded(
+            &ids,
+            &[Term::Primitive(Primitive::Type)],
+            &actual,
+            &scoped,
+            &mut 1000,
+        )
+        .unwrap();
+        let ordinary = BTreeMap::from([(0, &rigid)]);
+        let predicate = TypePredicate::Equal(
+            function(Term::Tuple(vec![bound(0), bound(1), rigid.clone()])),
+            rigid.clone(),
+        );
+        let expected = TypePredicate::Equal(
+            function(Term::Tuple(vec![bound(0), rigid.clone(), bound(1)])),
+            bound(0),
+        );
+        assert_eq!(
+            declarations
+                .instantiate_call_predicate_bounded(&predicate, &ordinary, &mut 1000)
+                .unwrap(),
+            expected,
+        );
+        assert!(
+            declarations
+                .instantiate_call_predicate_bounded(&predicate, &ordinary, &mut 4)
+                .is_err()
+        );
+        assert!(
+            declarations
+                .instantiate_call_predicate_bounded(&predicate, &BTreeMap::new(), &mut 1000)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn owning_a_substitution_charges_borrowed_payloads_before_copying() {
         let parameters = [id(1)];
         let domains = [Term::Primitive(Primitive::Type)];
@@ -565,6 +623,35 @@ impl<'a> DeclarationSubstitution<'a> {
         self.instantiate_predicate(predicate)
             .map_err(crate::type_computations::Error::Scope)
     }
+    /// Transport a checked producer postcondition to the caller. Declaration
+    /// arguments can mention caller slots, and ordinary arguments can mention
+    /// caller declarations (including recursive uses of the same declaration).
+    pub fn instantiate_call_predicate_bounded(
+        &self,
+        predicate: &crate::program::TypePredicate,
+        ordinary: &std::collections::BTreeMap<usize, &Term>,
+        fuel: &mut usize,
+    ) -> Result<crate::program::TypePredicate, crate::type_computations::Error> {
+        use crate::type_computations::{Error, charge_frame_slots};
+        self.charge_template(crate::copy_budget::Node::Predicate(predicate), fuel)?;
+        predicate.try_map_types(&mut |ty| {
+            if !ordinary.is_empty() {
+                charge_frame_slots(ty, |slot| ordinary.get(&slot).copied(), fuel)?;
+            }
+            let projected = ty
+                .replace_call_inputs(
+                    &|id| {
+                        let &(index, sort) = self.parameters.positions.get(&id)?;
+                        Some((sort, &self.arguments[index]))
+                    },
+                    Some(ordinary),
+                )
+                .map_err(Error::Scope)?;
+            projected.check_scope(&self.frames).map_err(Error::Scope)?;
+            Ok(projected)
+        })
+    }
+
     pub fn instantiate_interface_bounded(
         &self,
         interface: &crate::program::InterfaceInstance,

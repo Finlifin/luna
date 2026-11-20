@@ -777,7 +777,7 @@ impl Term {
     }
 }
 
-fn charge_frame_slots<'a>(
+pub(crate) fn charge_frame_slots<'a>(
     root: &Term,
     slot: impl Fn(usize) -> Option<&'a Term>,
     fuel: &mut usize,

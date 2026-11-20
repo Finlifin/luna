@@ -34,7 +34,7 @@ impl PreparedRequired {
         let Some(entry) = lookup(self.entry, fuel)? else {
             return Ok(None);
         };
-        let Some((id, operands)) = CallableClauseView::direct_call(&entry.body, fuel)? else {
+        let Some((id, operands, call)) = CallableClauseView::direct_call(&entry.body, fuel)? else {
             return Ok(None);
         };
         let Some(target) = lookup(id, fuel)? else {
@@ -64,9 +64,20 @@ impl PreparedRequired {
                 .map_err(|e| e.to_string())?;
         let clauses =
             clause_inputs::ResultClauses::new(&target.type_parameters, &domains, operands, fuel)?;
+        let observe = |demanded: &BTreeMap<usize, Sort>, fuel: &mut usize| {
+            *fuel = fuel
+                .checked_sub(self.inputs.len())
+                .ok_or("result capture budget exhausted")?;
+            let captures: BTreeMap<_, _> = self
+                .inputs
+                .iter()
+                .filter_map(|(id, _, value)| value.as_ref().map(|value| (*id, value)))
+                .collect();
+            clause_inputs::ordinary_identities(call, demanded, |id| captures.get(id).copied(), fuel)
+        };
         let mut facts = Vec::new();
         for predicate in &target.result_guarantees {
-            let Some(mut fact) = clauses.specialize(predicate, &[], fuel)? else {
+            let Some(mut fact) = clauses.specialize(predicate, observe, &[], fuel)? else {
                 continue;
             };
             if !self.scope.scoped_parameters.is_empty() {

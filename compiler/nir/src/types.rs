@@ -1330,7 +1330,37 @@ impl Term {
         &self,
         lookup: &impl Fn(DeclarationId) -> Option<(Sort, &'a Term)>,
     ) -> Result<Term, TypeError> {
+        self.replace_call_inputs(lookup, None)
+    }
+
+    /// Replace both namespaces in one pass. Ordinary inputs remove the
+    /// producer's frame. Every replacement already belongs to the caller.
+    pub(crate) fn replace_call_inputs<'a>(
+        &self,
+        lookup: &impl Fn(DeclarationId) -> Option<(Sort, &'a Term)>,
+        ordinary: Option<&BTreeMap<usize, &Term>>,
+    ) -> Result<Term, TypeError> {
         self.rewrite(0, &mut |term, depth| {
+            if let Some(ordinary) = ordinary
+                && let Self::Bound {
+                    depth: outer,
+                    index,
+                    sort,
+                } = term
+                && *outer >= depth
+            {
+                if *outer > depth {
+                    return Err(TypeError::InvalidBound {
+                        depth: *outer,
+                        index: *index,
+                    });
+                }
+                let argument = ordinary
+                    .get(index)
+                    .ok_or(TypeError::MissingArgument(*index))?;
+                require_sort(argument, *sort)?;
+                return argument.shift(depth, 0);
+            }
             if let Self::Rigid { declaration, sort } = term
                 && let Some((expected, argument)) = lookup(*declaration)
             {

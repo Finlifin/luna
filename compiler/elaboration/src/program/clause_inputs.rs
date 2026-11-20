@@ -1,7 +1,7 @@
 //! Source-order preparation of ordinary clause inputs and collection values.
 use super::*;
 mod result_contracts;
-pub(super) use result_contracts::ResultClauses;
+pub(super) use result_contracts::{ResultClauses, ordinary_identities};
 
 /// HIR supplies only entry declarations; no input values or domains are routed here.
 pub(super) fn entries(
@@ -303,7 +303,7 @@ impl<'v> CallableClauseView<'v> {
     pub(super) fn direct_call(
         mut value: &'v n::Expr,
         fuel: &mut usize,
-    ) -> Result<Option<(DeclarationId, Self)>, String> {
+    ) -> Result<Option<(DeclarationId, Self, &'v n::Expr)>, String> {
         loop {
             *fuel = fuel
                 .checked_sub(1)
@@ -318,7 +318,9 @@ impl<'v> CallableClauseView<'v> {
                     statements,
                     result: Some(inner),
                 } if statements.is_empty() => value = inner,
-                K::Call { callee, .. } => return Ok(Self::direct(callee)),
+                K::Call { callee, .. } => {
+                    return Ok(Self::direct(callee).map(|(id, clauses)| (id, clauses, value)));
+                }
                 _ => return Ok(None),
             }
         }

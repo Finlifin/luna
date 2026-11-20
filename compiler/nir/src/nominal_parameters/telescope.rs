@@ -7,7 +7,7 @@ use std::ops::Bound::{Excluded, Unbounded};
 
 pub(super) struct Binders {
     pub(super) ordered: Vec<DeclarationParameter>,
-    positions: BTreeMap<DeclarationId, (usize, Sort)>,
+    pub(super) positions: BTreeMap<DeclarationId, (usize, Sort)>,
 }
 
 impl Binders {

@@ -608,3 +608,31 @@ fn suspended_producer_contracts_reach_comptime_and_pending_parameter_bodies() {
         );
     }
 }
+
+#[test]
+fn forwarded_type_results_use_the_supplied_ordinary_slot_identity() {
+    let source = r#"
+        pure comptime fn Second(comptime A: Type, comptime B: Type) -> R: Type
+        where ensures R == B
+        {
+            B
+        }
+        pure comptime fn Relay(comptime X: Type, comptime Y: Type) -> R: Type
+        where ensures R == X
+        {
+            Second(Y, X)
+        }
+        fn run() -> bool {
+            const valid = Relay(u8, bool) == u8 and Relay(bool, u8) == bool;
+            valid
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    for body in ["Second(X, Y)", "Second(do { X = Y; Y }, X)"] {
+        let error = support::compile(&source.replace("Second(Y, X)", body)).unwrap_err();
+        assert!(
+            error.contains("result guarantee contract is not established"),
+            "{error}"
+        );
+    }
+}

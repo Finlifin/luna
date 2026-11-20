@@ -130,11 +130,13 @@ impl Checker<'_, '_> {
         let mut fuel = before;
         let facts = (|| {
             let target = if let Some(checked) = &checked {
-                CallableClauseView::direct_call(checked, &mut fuel)?.and_then(|(id, operands)| {
-                    self.source_declarations
-                        .owner(id)
-                        .map(|owner| (owner, Some(operands)))
-                })
+                CallableClauseView::direct_call(checked, &mut fuel)?.and_then(
+                    |(id, operands, call)| {
+                        self.source_declarations
+                            .owner(id)
+                            .map(|owner| (owner, Some((operands, call))))
+                    },
+                )
             } else if let H::Application(callee, _) = &value.kind {
                 // Description checking has resolved and checked this call. It
                 // did not deliver an operand packet. Never repeat a supplier

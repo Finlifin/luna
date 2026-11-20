@@ -1177,7 +1177,7 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    fn invalidate_mutated_type_bindings(
+    pub(super) fn invalidate_mutated_type_bindings(
         expr: &n::Expr,
         bindings: &mut BTreeMap<n::LocalId, &n::Expr>,
         fuel: &mut usize,
@@ -1560,7 +1560,7 @@ impl Checker<'_, '_> {
                     let before = fuel;
                     let checked = (|| -> Result<(), Error> {
                         let Some((callee_binder, facts)) = self
-                            .source_result_facts(owner, Some(operands), &frames, &mut fuel)
+                            .source_result_facts(owner, Some((operands, expr)), &frames, &mut fuel)
                             .map_err(|e| error(span, e))?
                         else {
                             return Ok(());

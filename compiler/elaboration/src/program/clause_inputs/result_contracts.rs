@@ -3,6 +3,65 @@
 use super::*;
 use std::borrow::Borrow;
 
+/// Read only already represented identities. A default's local names its
+/// declaration-side prefix, whereas an explicit operand reads the caller.
+pub(in crate::program) fn ordinary_identities<'a>(
+    call: &'a n::Expr,
+    demanded: &BTreeMap<usize, Sort>,
+    local: impl Fn(&n::LocalId) -> Option<&'a Term>,
+    fuel: &mut usize,
+) -> Result<BTreeMap<usize, &'a Term>, String> {
+    let K::Call {
+        callee, arguments, ..
+    } = &call.kind
+    else {
+        return Err("result producer requires a checked call".into());
+    };
+    let Term::Function { parameters, .. } = callee.ty.callable_signature() else {
+        return Err("result producer requires a callable signature".into());
+    };
+    *fuel = fuel
+        .checked_sub(arguments.len())
+        .ok_or("result argument budget exhausted")?;
+    let mut locals: BTreeMap<_, _> = arguments
+        .iter()
+        .filter_map(|arg| {
+            if let K::Local(id) = arg.value.kind
+                && demanded.contains_key(&arg.parameter)
+                && !arg.is_default
+                && arg.passing == n::ArgumentPassing::Value
+                && local(&id).is_some()
+            {
+                Some((id, &arg.value))
+            } else {
+                None
+            }
+        })
+        .collect();
+    Checker::invalidate_mutated_type_bindings(callee, &mut locals, fuel)?;
+    let mut known = BTreeMap::new();
+    for arg in arguments {
+        let param = parameters
+            .get(arg.parameter)
+            .ok_or("invalid result producer argument slot")?;
+        if demanded.contains_key(&arg.parameter)
+            && param.sort != Sort::Runtime
+            && arg.passing == n::ArgumentPassing::Value
+        {
+            let identity = match &arg.value.kind {
+                K::TypeValue(ty) | K::ComptimeValue(ty) => Some(ty),
+                K::Local(id) if !arg.is_default && locals.contains_key(id) => local(id),
+                _ => None,
+            };
+            if let Some(identity) = identity {
+                known.insert(arg.parameter, identity);
+            }
+        }
+        Checker::invalidate_mutated_type_bindings(&arg.value, &mut locals, fuel)?;
+    }
+    Ok(known)
+}
+
 pub(in crate::program) struct ResultClauses<'arg, 'domain> {
     operands: CallableClauseView<'arg>,
     slots: BTreeMap<DeclarationId, (usize, &'domain Term)>,
@@ -36,9 +95,13 @@ impl<'arg, 'domain> ResultClauses<'arg, 'domain> {
 
     // A proposition needs only the formals it mentions and the dependencies
     // of their domains. Never follow a replacement as a callee template.
-    pub(in crate::program) fn specialize(
+    pub(in crate::program) fn specialize<'v>(
         &self,
         predicate: &n::TypePredicate,
+        observe: impl FnOnce(
+            &BTreeMap<usize, Sort>,
+            &mut usize,
+        ) -> Result<BTreeMap<usize, &'v Term>, String>,
         frames: &[Vec<Sort>],
         fuel: &mut usize,
     ) -> Result<Option<n::TypePredicate>, String> {
@@ -46,7 +109,16 @@ impl<'arg, 'domain> ResultClauses<'arg, 'domain> {
         let observed = nir::copy_budget::predicate_inputs(predicate, &mut steps);
         *fuel = steps as usize;
         let used = observed.map_err(|e| e.to_string())?;
-        if !used.parameters.is_empty() {
+        let ordinary = if used.parameters.is_empty() {
+            BTreeMap::new()
+        } else {
+            observe(&used.parameters, fuel)?
+        };
+        if used
+            .parameters
+            .iter()
+            .any(|(slot, sort)| ordinary.get(slot).is_none_or(|value| value.sort() != *sort))
+        {
             return Ok(None);
         }
         let mut pending = used.declarations.into_keys().collect::<BTreeSet<_>>();
@@ -80,7 +152,7 @@ impl<'arg, 'domain> ResultClauses<'arg, 'domain> {
             nir::DeclarationInputScope::Caller(frames),
             fuel,
         )
-        .and_then(|sub| sub.instantiate_predicate_bounded(predicate, fuel))
+        .and_then(|sub| sub.instantiate_call_predicate_bounded(predicate, &ordinary, fuel))
         {
             Ok(fact) => Ok(Some(fact)),
             Err(nir::type_computations::Error::Scope(nir::TypeError::InvalidBound { .. })) => {
@@ -97,7 +169,7 @@ impl Checker<'_, '_> {
     pub(in crate::program) fn source_result_facts(
         &self,
         owner: OwnerId,
-        operands: Option<CallableClauseView<'_>>,
+        operands: Option<(CallableClauseView<'_>, &n::Expr)>,
         frames: &[Vec<Sort>],
         fuel: &mut usize,
     ) -> Result<Option<(DeclarationId, Vec<n::TypePredicate>)>, String> {
@@ -105,7 +177,19 @@ impl Checker<'_, '_> {
             return Ok(None);
         };
         let mut facts = Vec::new();
-        if let Some(operands) = operands {
+        if let Some((operands, call)) = operands {
+            let observe = |demanded: &BTreeMap<usize, Sort>, fuel: &mut usize| {
+                ordinary_identities(
+                    call,
+                    demanded,
+                    |id| {
+                        self.input_facts
+                            .type_identity(id)
+                            .or_else(|| self.input_facts.value_identity(id).map(|(value, _)| value))
+                    },
+                    fuel,
+                )
+            };
             let parameters = self
                 .type_parameters
                 .get(&owner)
@@ -125,7 +209,7 @@ impl Checker<'_, '_> {
             }
             let clauses = ResultClauses::new(parameters, &domains, operands, fuel)?;
             for guarantee in guarantees {
-                if let Some(fact) = clauses.specialize(guarantee, frames, fuel)? {
+                if let Some(fact) = clauses.specialize(guarantee, observe, frames, fuel)? {
                     facts.push(fact);
                 }
             }
@@ -197,7 +281,12 @@ mod tests {
                 CallableClauseView::Prepared(packet),
                 fuel,
             )?
-            .specialize(fact, &[], fuel)
+            .specialize(
+                fact,
+                |_, _| panic!("clause-only fact read ordinary arguments"),
+                &[],
+                fuel,
+            )
         };
         assert_eq!(
             project(&packet, &independent, &mut 2048).unwrap(),
