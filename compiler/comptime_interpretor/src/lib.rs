@@ -2956,7 +2956,9 @@ impl<'a> Interpreter<'a> {
                 Value::Tuple(values)
                 | Value::Record { fields: values, .. }
                 | Value::Variant { fields: values, .. } => values.len(),
-                Value::Newtype { .. } => 1,
+                Value::Object(object) => object.entries().len(),
+                Value::Optional { value, .. } => usize::from(value.is_some()),
+                Value::Newtype { .. } | Value::ErrorResult { .. } => 1,
                 Value::AnonymousRecord(fields) => fields.len(),
                 Value::AbstractValue { declaration, ty }
                     if self.abstract_value_parameters.get(declaration) == Some(ty) =>
@@ -2993,7 +2995,19 @@ impl<'a> Interpreter<'a> {
                 | Value::Variant { fields: values, .. } => {
                     pending.extend(values.iter().rev().map(|value| (value, depth + 1)))
                 }
-                Value::Newtype { value, .. } => pending.push((value, depth + 1)),
+                Value::Object(object) => pending.extend(
+                    object
+                        .entries()
+                        .iter()
+                        .rev()
+                        .map(|entry| (&entry.value().value, depth + 1)),
+                ),
+                Value::Optional { value, .. } => {
+                    pending.extend(value.as_deref().map(|v| (v, depth + 1)));
+                }
+                Value::Newtype { value, .. } | Value::ErrorResult { value, .. } => {
+                    pending.push((value, depth + 1));
+                }
                 Value::AnonymousRecord(fields) => {
                     pending.extend(fields.iter().rev().map(|(_, value)| (value, depth + 1)))
                 }
@@ -6220,6 +6234,17 @@ mod normal_input_data_tests {
             }),
         ]);
         assert!(!vm.normal_input_is_data(&executable, source).unwrap());
+        let payload_type = Term::Primitive(Primitive::Bool);
+        let optional = Value::Optional {
+            ty: Term::Optional(Box::new(payload_type.clone())),
+            value: Some(Box::new(executable)),
+        };
+        let tagged = Value::ErrorResult {
+            ty: Term::error_result(vec![Term::Primitive(Primitive::Char)], payload_type),
+            error: None,
+            value: Box::new(optional),
+        };
+        assert!(!vm.normal_input_is_data(&tagged, source).unwrap());
         assert!(vm.normal_input_is_data(&data, source).unwrap());
         let mut deep = Value::Bool(true);
         for _ in 0..130 {

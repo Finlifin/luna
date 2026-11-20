@@ -547,6 +547,21 @@ impl Checker<'_, '_> {
                 return Ok(observed);
             }
         }
+        if let K::ErrorConvert {
+            conversion,
+            value: operand,
+        } = &value.kind
+        {
+            let observed = self.partial_staged_value_in(operand, depth + 1, fuel, scope)?;
+            let Some(payload) = observed.known_term() else {
+                return Ok(PartialStagedValue::unknown());
+            };
+            let result =
+                self.observe_error_conversion(*conversion, &operand.ty, &value.ty, payload, fuel);
+            return Ok(normal::observation::optional(result)
+                .map_err(|reason| reason.to_string())?
+                .map_or_else(PartialStagedValue::unknown, PartialStagedValue::known));
+        }
         if let K::ListConcat(left, right) = &value.kind {
             if self.list_element_type(&value.ty).is_none()
                 || left.ty != value.ty

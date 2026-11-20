@@ -5,7 +5,8 @@
 pub mod specialize;
 mod transport;
 pub use transport::{
-    RepresentationTransport, transport_plan_in_scope_with_layouts, transport_plan_with_layouts,
+    RepresentationTransport, convert_frozen_in_scope, transport_plan_in_scope_with_layouts,
+    transport_plan_with_layouts,
 };
 
 use crate::{Sort, Term};

@@ -1606,3 +1606,51 @@ fn symbolic_conversions_validate_the_lexical_scope_without_relaxing_closed_check
         assert!(validate_conversion_in_scope(kind, &from, &to, &frames, &mut 1000, equal).is_ok());
     }
 }
+
+#[test]
+fn observed_error_conversions_preserve_scope_and_physical_row_order() {
+    use nir::error_results::{Conversion as C, convert_frozen_in_scope as convert};
+    let first = label(1, true);
+    let second = label(2, true);
+    let payload = Term::Bound {
+        depth: 0,
+        index: 0,
+        sort: Sort::ComptimeValue,
+    };
+    let result = Term::Primitive(P::Bool);
+    let narrow = physical_result(vec![first.clone()], result.clone());
+    let wide = physical_result(vec![second, first.clone()], result.clone());
+    let frames = [vec![Sort::ComptimeValue]];
+    for (kind, input, tag) in [
+        (C::Failure, &first, Some(Box::new(first.clone()))),
+        (C::Success, &result, None),
+    ] {
+        let construct = |domain: &Term, scope: &[Vec<Sort>], fuel: &mut usize| {
+            convert(kind, input, domain, &payload, scope, fuel, &|_| None)
+        };
+        let small = construct(&narrow, &frames, &mut 1000).unwrap();
+        let direct = construct(&wide, &frames, &mut 1000).unwrap();
+        assert_eq!(
+            direct,
+            Term::ErrorValue {
+                ty: Box::new(wide.clone()),
+                label: tag,
+                value: Box::new(payload.clone()),
+            }
+        );
+        assert_eq!(
+            convert(
+                C::Embed,
+                &narrow,
+                &wide,
+                &small,
+                &frames,
+                &mut 1000,
+                &|_| { None }
+            ),
+            Ok(direct)
+        );
+        assert_eq!(construct(&wide, &[], &mut 1000), Err(Error::InvalidType));
+        assert_eq!(construct(&wide, &frames, &mut 0), Err(Error::Budget));
+    }
+}

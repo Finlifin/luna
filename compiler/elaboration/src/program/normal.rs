@@ -1001,6 +1001,29 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
+    pub(super) fn observe_error_conversion(
+        &self,
+        conversion: nir::error_results::Conversion,
+        input: &Term,
+        output: &Term,
+        payload: &Term,
+        fuel: &mut usize,
+    ) -> Result<Term, observation::Failure> {
+        nir::error_results::convert_frozen_in_scope(
+            conversion,
+            input,
+            output,
+            payload,
+            &self.call_input_frames(),
+            fuel,
+            &|ty| self.bound_tuple_elements(ty),
+        )
+        .map_err(|reason| match reason {
+            nir::error_results::Error::Budget => observation::Failure::Steps,
+            _ => observation::Failure::Unavailable,
+        })
+    }
+
     // Control observation owns its traversal in control_observations. Keep
     // value constructors in a separate frame, entered only for non-control nodes.
     #[inline(never)]
@@ -1065,6 +1088,16 @@ impl Checker<'_, '_> {
                         bindings,
                     )?)),
                 })
+            }
+            K::ErrorConvert { conversion, value } => {
+                let payload = self.observe_normal_input_in(value, depth + 1, budget, bindings)?;
+                self.observe_error_conversion(
+                    *conversion,
+                    &value.ty,
+                    &expr.ty,
+                    &payload,
+                    &mut budget.steps,
+                )
             }
             K::TypeListIndex(values, index) => {
                 let element = self

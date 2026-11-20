@@ -507,3 +507,31 @@ fn required_runtime_inputs_resume_their_own_call_and_default_slots() {
     );
     assert_eq!(sysroot::run(&source), Value::Bool(true));
 }
+
+#[test]
+fn dependent_inputs_preserve_optional_error_and_object_values() {
+    let source = r#"
+        enum ProbeErr { Missing }
+        enum OtherErr { Failed }
+        struct Stamp where T, key: T { flag: bool }
+        comptime fn accept(comptime T: Type, comptime key: T, item: Stamp<T, key>) -> Stamp<T, key> { item }
+
+        comptime fn check() -> bool {
+            let empty: ?bool = null;
+            let present: ?bool = true;
+            let ok: !ProbeErr bool = true;
+            let failed: !ProbeErr bool = error ProbeErr.Missing;
+            let wide: ![OtherErr, ProbeErr] bool = failed;
+            let object: Object = {ready: true};
+            accept(?bool, empty, Stamp<?bool, null> { flag: true }).flag and
+                accept(?bool, present, Stamp<?bool, true> { flag: true }).flag and
+                accept(!ProbeErr bool, ok, Stamp<!ProbeErr bool, true> { flag: true }).flag and
+                accept(!ProbeErr bool, failed, Stamp<!ProbeErr bool, error ProbeErr.Missing> { flag: true }).flag and
+                accept(![OtherErr, ProbeErr] bool, wide, Stamp<![OtherErr, ProbeErr] bool, error ProbeErr.Missing> { flag: true }).flag and
+                accept(Object, object, Stamp<Object, {ready: true}> { flag: true }).flag
+        }
+    "#;
+    check_both(source, 6);
+    let mismatch = source.replace("Stamp<?bool, null> {", "Stamp<?bool, true> {");
+    assert!(sysroot::compile(&mismatch).is_err());
+}

@@ -41,6 +41,59 @@ pub fn transport_plan_in_scope_with_layouts(
     type_input_in_scope(output, frames, fuel)?;
     build(input, output, exact_rows, fuel, equal, tuple_fields, 0)
 }
+
+/// Observe a checked NIR conversion of an already admitted payload. Labels
+/// retain their full type identity even if the destination row reorders them.
+pub fn convert_frozen_in_scope(
+    conversion: Conversion,
+    input: &Term,
+    output: &Term,
+    value: &Term,
+    frames: &[Vec<Sort>],
+    fuel: &mut usize,
+    tuple_fields: &impl for<'t> Fn(&'t Term) -> Option<&'t [Term]>,
+) -> Result<Term, Error> {
+    match conversion {
+        Conversion::Embed | Conversion::Product => {
+            if conversion == Conversion::Embed {
+                for domain in [input, output] {
+                    if !matches!(domain, Term::ErrorResult { errors, .. } if !errors.is_empty()) {
+                        return Err(Error::InvalidType);
+                    }
+                }
+            }
+            let plan = transport_plan_in_scope_with_layouts(
+                input,
+                output,
+                conversion == Conversion::Product,
+                frames,
+                fuel,
+                &mut |a, b| a == b,
+                tuple_fields,
+            )?;
+            plan.frozen_in_scope(value, frames, fuel)
+        }
+        Conversion::Success | Conversion::Failure => {
+            validate_conversion_in_scope(conversion, input, output, frames, fuel, &mut |a, b| {
+                a == b
+            })?;
+            if value.sort() == Sort::Runtime
+                || (conversion == Conversion::Success && matches!(value, Term::ErrorValue { .. }))
+            {
+                return Err(Error::InvalidType);
+            }
+            charge(value, fuel)?;
+            value.check_scope(frames).map_err(|_| Error::InvalidType)?;
+            let label = (conversion == Conversion::Failure).then(|| Box::new(input.clone()));
+            Ok(Term::ErrorValue {
+                ty: Box::new(output.clone()),
+                label,
+                value: Box::new(value.clone()),
+            })
+        }
+    }
+}
+
 fn build(
     input: &Term,
     output: &Term,
@@ -159,8 +212,17 @@ impl RepresentationTransport {
     /// source domain and branch identity; payload admission still belongs to
     /// the typed constant producer, not to representation conversion.
     pub fn frozen(&self, value: &Term, fuel: &mut usize) -> Result<Term, Error> {
+        self.frozen_in_scope(value, &[], fuel)
+    }
+
+    fn frozen_in_scope(
+        &self,
+        value: &Term,
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Term, Error> {
         charge(value, fuel)?;
-        value.check_scope(&[]).map_err(|_| Error::InvalidType)?;
+        value.check_scope(frames).map_err(|_| Error::InvalidType)?;
         self.frozen_at(value, fuel, 0)
     }
 
