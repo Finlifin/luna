@@ -16986,6 +16986,8 @@ fn conditional_local_constants_preserve_phase_and_failure_scope() {
         "fn run()->bool {const true as found=false else {return found;};found}",
         "fn run()->bool {const value if do {value=false;true}=true else {return false;};value}",
         "fn run()->bool {const true=true else {return 42;};true}",
+        "fn configured(comptime flag:bool, input:bool)->bool {const found if found=flag else {return false;};const answer=input;answer} fn run()->bool {configured(false,false)}",
+        "fn configured(comptime flag:bool)->bool {const found if found=flag else {return false;};let wrong:bool=42;wrong} fn run()->bool {configured(false)}",
     ] {
         let work = Work::new(source);
         primitive_bindings::write_fixture(work.0.join("native program"), b"previous output")
@@ -17001,6 +17003,35 @@ fn conditional_local_constants_preserve_phase_and_failure_scope() {
             fs::read(work.0.join("native program")).unwrap(),
             b"previous output"
         );
+    }
+}
+
+#[test]
+fn conditional_const_failure_skips_success_invocations_after_runtime_transfers() {
+    for (before, transfer, after) in [
+        ("", "return fallback;", "return answer;"),
+        ("while true {", "break;", "return answer; } fallback"),
+        (
+            "var active = true; while active { active = false;",
+            "continue;",
+            "return answer; } fallback",
+        ),
+    ] {
+        let program = format!(
+            r#"
+            comptime fn checked(value: bool) -> bool {{ assumes value; true }}
+            fn configured(comptime flag: bool, fallback: bool) -> bool {{
+                {before}
+                const found if found = flag else {{ {transfer} }};
+                const answer = checked(found);
+                {after}
+            }}
+            fn run() -> bool {{
+                configured(true, false) and not configured(false, false) and configured(false, true)
+            }}
+            "#
+        );
+        native(&program, "(bool true)\n");
     }
 }
 

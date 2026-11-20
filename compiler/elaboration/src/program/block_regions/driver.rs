@@ -284,6 +284,13 @@ impl<'h> BlockFrame<'h> {
                 }
                 None => Ok(Step::Continue),
             },
+            Phase::SelectedExit => {
+                self.progress.phase = Phase::TailChild;
+                self.progress
+                    .tail
+                    .complete(checker, &self.progress.block, true, None)
+                    .map(Step::Tail)
+            }
             Phase::Tail => {
                 let tail = self.progress.request_tail()?.clone();
                 match tail.prepare(checker, &self.progress.block, self.progress.diverges)? {

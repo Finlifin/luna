@@ -149,19 +149,30 @@ enum OpenClauseInference {
     Pending(D),
 }
 
+/// Source regions whose ordinary checks are complete before specialization.
+#[derive(Clone, Default)]
+pub(super) struct CheckedRegions {
+    tuple_loops: BTreeSet<n::LocalId>,
+    conditional_constants: BTreeSet<n::LocalId>,
+}
+
 #[derive(Clone)]
 pub(super) struct Definition {
     parameters: Vec<(Sort, Annotation)>,
     result: Annotation,
     default_types: BTreeMap<usize, Term>,
     default_dependencies: BTreeMap<usize, BTreeSet<usize>>,
-    checked_tuple_loops: BTreeSet<n::LocalId>,
+    regions: CheckedRegions,
     checked: bool,
 }
 
 impl Definition {
     pub(super) fn checked_empty_iteration(&self, site: hir::HirId) -> bool {
-        self.checked && self.checked_tuple_loops.contains(&local(site))
+        self.checked && self.regions.tuple_loops.contains(&local(site))
+    }
+
+    pub(super) fn checked_const_continuation(&self, site: hir::HirId) -> bool {
+        self.checked && self.regions.conditional_constants.contains(&local(site))
     }
 
     pub(super) fn input_domain_refs(&self) -> lexical_domains::InputDomains<'_> {
@@ -1777,7 +1788,7 @@ impl Checker<'_, '_> {
                 result,
                 default_types: BTreeMap::new(),
                 default_dependencies: BTreeMap::new(),
-                checked_tuple_loops: BTreeSet::new(),
+                regions: CheckedRegions::default(),
                 checked: false,
             },
         );
@@ -2039,7 +2050,7 @@ impl Checker<'_, '_> {
                 // A signature template has no executable body. Its annotation,
                 // default and contract checks above still apply; each instance
                 // independently checks its supplied body in the inherited domain.
-                return Ok((default_types, default_dependencies, BTreeSet::new()));
+                return Ok((default_types, default_dependencies, CheckedRegions::default()));
             };
             let body = this
                 .package
@@ -2156,15 +2167,15 @@ impl Checker<'_, '_> {
             Ok((
                 default_types,
                 default_dependencies,
-                std::mem::take(&mut this.definition_refinements.checked_tuple_loops),
+                std::mem::take(&mut this.definition_refinements.regions),
             ))
         });
         self.active_open_definitions.remove(&owner);
-        let (default_types, default_dependencies, checked_tuple_loops) = checked?;
+        let (default_types, default_dependencies, regions) = checked?;
         let definition = self.open_functions.get_mut(&owner).unwrap();
         definition.default_types = default_types;
         definition.default_dependencies = default_dependencies;
-        definition.checked_tuple_loops = checked_tuple_loops;
+        definition.regions = regions;
         definition.checked = true;
         Ok(())
     }
@@ -2335,6 +2346,15 @@ impl Checker<'_, '_> {
                 let ty = self.with_open_reachability(completing, statement.span, |this| {
                     this.describe_open_expression(statement, locals, returns, None, depth + 1)
                 })?;
+                if matches!(statement.kind, H::Let(binding) if binding.comptime && binding.otherwise.is_some())
+                {
+                    // Only a completed definition publishes these sites. Its
+                    // success continuation is checked with the pattern bindings.
+                    self.definition_refinements
+                        .regions
+                        .conditional_constants
+                        .insert(local(statement.hir_id));
+                }
                 completing &= !matches!(ty, D::Known(ref ty) if is_never(ty));
                 if completing {
                     self.assume_open_continuation(statement)?;
@@ -4468,7 +4488,8 @@ impl Checker<'_, '_> {
             self.definition_refinements.tuple_elements.pop();
             if computed && checked.is_ok() {
                 self.definition_refinements
-                    .checked_tuple_loops
+                    .regions
+                    .tuple_loops
                     .insert(local(expr.hir_id));
             }
         }

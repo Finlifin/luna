@@ -103,6 +103,7 @@ enum Phase {
     Statements,
     Child,
     Tail,
+    SelectedExit,
     TailChild,
 }
 
@@ -180,10 +181,22 @@ impl<'h, T: Tail> Progress<'h, T> {
             self.staged_patterns
                 .insert(self.statements.len(), (statement, inputs));
         }
+        // A successful const binding yields void. Its diverging result is
+        // the selected failure branch, which supplies no success bindings.
+        let selected_exit = is_never(&value.ty)
+            && checker
+                .open_instance
+                .as_ref()
+                .and_then(|instance| checker.open_functions.get(&instance.owner))
+                .is_some_and(|definition| definition.checked_const_continuation(statement.hir_id));
         self.statements.push(value);
         self.next_statement += 1;
         self.diverges = diverges;
-        self.phase = Phase::Statements;
+        self.phase = if selected_exit {
+            Phase::SelectedExit
+        } else {
+            Phase::Statements
+        };
         Ok(())
     }
 
@@ -231,6 +244,7 @@ impl<T: Tail> std::fmt::Display for Progress<'_, T> {
             Phase::Statements => "statements",
             Phase::Child => "child",
             Phase::Tail => "tail",
+            Phase::SelectedExit => "selected-exit",
             Phase::TailChild => "tail-child",
         };
         write!(
