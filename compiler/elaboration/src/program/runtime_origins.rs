@@ -13,6 +13,8 @@ pub(super) enum Region {
 pub(super) struct LocalOrigins {
     pub(super) ids: BTreeMap<LocalRuntimeOrigin, nir::RuntimeId>,
     pub(super) sources: SourceBindings<Term>,
+    pub(super) type_inputs: SourceBindings<Vec<nir::RuntimeId>>,
+    pub(super) child_type_inputs: type_acquisition::ChildPlans,
     pub(super) defaults:
         super::local_bindings::Bindings<nir::RuntimeId, super::runtime_defaults::ScopedDefault>,
     pub(super) acquired_bindings: LocalBindings<nir::RuntimeId>,

@@ -58,61 +58,58 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(head.span, "constructor head inspection budget exhausted"))?;
             subject = base;
         }
-        let args = match subject.kind {
-            H::NFApplication(_, args) => args,
-            _ => &[],
+        let plan = if let Some(plan) = self
+            .local_runtime_origins
+            .type_inputs
+            .shared(&subject.hir_id)
+        {
+            plan.clone()
+        } else {
+            let args = match subject.kind {
+                H::NFApplication(_, args) => args,
+                _ => &[],
+            };
+            std::sync::Arc::new(self.ordered_type_inputs(args, Some(ty), 0, &[], head.span)?)
         };
-        self.required_steps = self
-            .required_steps
-            .checked_sub(args.len() as u64)
-            .ok_or_else(|| error(head.span, "constructor input inspection budget exhausted"))?;
-
-        for arg in args {
-            let (Arg::Positional(value)
-            | Arg::Named(_, value)
-            | Arg::Expand(value)
-            | Arg::Implicit(value)
-            | Arg::PostLambda(value)) = arg;
-            let Some(Term::Runtime(id)) = self.local_runtime_origins.sources.get(&value.hir_id)
-            else {
-                continue;
-            };
-            let id = *id;
-            // Stable storage and forwarded environments already have delivery.
-            let Some(entry) = self.local_runtime_deliveries.get(&id) else {
-                continue;
-            };
-            if entry.producer_site != Some(local(value.hir_id))
-                || matches!(entry.expr.kind, K::Local(_))
-            {
-                continue;
-            }
-            let domain = declaration_inputs::copy_input_domain(
-                &entry.expr.ty,
-                &mut self.required_steps,
-                value.span,
-            )?;
-            let mut operand =
-                self.deliver_runtime_dependency(&Term::Runtime(id), &domain, value.span)?;
-            statements.push(self.prepare_call_operand(&mut operand, value.span)?);
-            let K::Local(binding) = operand.kind else {
-                unreachable!("prepared operand")
-            };
-            self.locals.insert(binding, domain);
-            self.immutable.insert(binding);
-            self.local_runtime_origins
-                .acquired_bindings
-                .insert(binding, id);
-            self.local_runtime_deliveries.get_mut(&id).unwrap().expr = operand;
-        }
-        if !self.local_runtime_origins.defaults.is_empty() {
-            for id in self.result_dependencies(ty, head.span)? {
-                if self.local_runtime_origins.defaults.contains_key(&id) {
-                    statements.push(self.acquire_runtime_default(id, |_| None, head.span)?);
-                }
+        for &id in plan.iter() {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(head.span, "constructor acquisition budget exhausted"))?;
+            if self.local_runtime_origins.defaults.contains_key(&id) {
+                statements.push(self.acquire_runtime_default(id, |_| None, head.span)?);
+            } else if let Some(statement) = self.acquire_explicit_type_input(id, head.span)? {
+                statements.push(statement);
             }
         }
         Ok(Acquisition(statements))
+    }
+
+    fn acquire_explicit_type_input(
+        &mut self,
+        id: nir::RuntimeId,
+        span: Span,
+    ) -> Result<Option<n::Expr>, Error> {
+        let Some(entry) = self.local_runtime_deliveries.get(&id) else {
+            return Ok(None);
+        };
+        if entry.producer_site.is_none() || matches!(entry.expr.kind, K::Local(_)) {
+            return Ok(None);
+        }
+        let domain =
+            declaration_inputs::copy_input_domain(&entry.expr.ty, &mut self.required_steps, span)?;
+        let mut operand = self.deliver_runtime_dependency(&Term::Runtime(id), &domain, span)?;
+        let statement = self.prepare_call_operand(&mut operand, span)?;
+        let K::Local(binding) = operand.kind else {
+            unreachable!("prepared operand")
+        };
+        self.locals.insert(binding, domain);
+        self.immutable.insert(binding);
+        self.local_runtime_origins
+            .acquired_bindings
+            .insert(binding, id);
+        self.local_runtime_deliveries.get_mut(&id).unwrap().expr = operand;
+        Ok(Some(statement))
     }
 
     /// Transfer acquired bindings to the value's consumer. Nominal

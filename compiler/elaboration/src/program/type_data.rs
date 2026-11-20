@@ -114,7 +114,7 @@ impl Checker<'_, '_> {
         }
     }
 
-    pub(super) fn completed_type(&mut self, expr: &Expr<'_>) -> Result<CompletedType, Error> {
+    pub(super) fn complete_type_data(&mut self, expr: &Expr<'_>) -> Result<CompletedType, Error> {
         if let H::DeliveredType(ty) = &expr.kind {
             return self
                 .delivered_type(expr.hir_id, ty, expr.span)

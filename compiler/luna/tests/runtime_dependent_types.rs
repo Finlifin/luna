@@ -1050,6 +1050,45 @@ fn variants_acquire_quote_inputs_before_payloads_and_retain_their_values() {
 }
 
 #[test]
+fn nested_type_inputs_acquire_each_application_in_written_order() {
+    let source = r#"
+        struct Cell { value: i32 }
+        fn read(p: *Cell) -> i32 { p.value.* }
+        fn select(p: *Cell, times: *i32, n: i32) -> *Cell {
+            p.*.value = n;
+            if times.* < 10 { times.* = times.* + 1; }
+            p
+        }
+        enum Sample where quote src: lift *Cell, quote .saved: lift i32 = read(src) { empty, }
+        enum Outer where .A: Type = bool, .B: Type = bool { both(A, B), }
+        fn saved(v: Sample<src, .saved = n>) -> i32
+        where quote src: lift *Cell, quote n: lift i32
+        { n }
+        fn saved_optional(v: ?Sample<src, .saved = n>) -> i32
+        where quote src: lift *Cell, quote n: lift i32
+        { n }
+        fn run() -> bool {
+            var cell = Cell { value: 0 };
+            var times: i32 = 0;
+            let v: Outer<.B = Sample<select(cell.ref, times.ref, 7)>,
+                .A = ?Sample<select(cell.ref, times.ref, 13)>> = .both(null, .empty);
+            let before: i32 = times;
+            let last: i32 = cell.value;
+            cell.value = 23;
+            v match {
+                .both(a, b) => saved(b) == 7 and saved_optional(a) == 13
+                    and before == 2 and times == 2 and last == 13,
+            }
+        }
+    "#;
+    let case = NativeCase::new(source);
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
 fn computed_default_identities_are_per_acquisition_and_cannot_export_dead_storage() {
     let definitions = r#"
         struct Pair { first: i32 }

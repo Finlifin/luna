@@ -87,6 +87,7 @@ mod source_declarations;
 mod splicing;
 mod text_queries;
 mod trait_inputs;
+mod type_acquisition;
 mod type_data;
 mod type_defaults;
 
