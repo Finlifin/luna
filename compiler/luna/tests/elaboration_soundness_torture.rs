@@ -264,6 +264,60 @@ fn p0_3_ptc_ensures_type_guarantees_reject_mutated_locals_and_preserve_immutable
 }
 
 #[test]
+fn type_result_guarantees_follow_writes_in_ordered_match_tests() {
+    let producer = r#"
+        comptime fn Choose(flag: bool) -> R: Type
+        where ensures Type.predicates.is_tuple(R)
+        {
+            var chosen: Type = Tuple<bool>;
+            MATCH
+        }
+    "#;
+    for selection in [
+        "flag match { _ if do { chosen = bool; false } => Tuple<bool>, _ => chosen, }",
+        "(flag, true) match { (_ if do { chosen = bool; flag }, _) => chosen, _ => Tuple<bool>, }",
+        "(flag, true) match { (_ if do { chosen = bool; flag }, _) => Tuple<bool>, _ => chosen, }",
+        "flag match { first and (do { chosen = bool; first }) is true => Tuple<bool>, _ => chosen, }",
+        "(true, flag) match { (_ if do { chosen = bool; true }, true) => Tuple<bool>, _ => chosen, }",
+    ] {
+        let error = sysroot_support::compile(&producer.replace("MATCH", selection)).unwrap_err();
+        assert!(
+            error.contains("result guarantee contract is not established"),
+            "{selection}: {error}"
+        );
+    }
+
+    // An earlier arm's body cannot run on the fallthrough path. Its guard
+    // writes a different local, so both outcomes still establish the contract.
+    let active = producer.replace(
+        "MATCH",
+        r#"
+        var other = true;
+        flag match {
+            _ if do { other = flag; other } => do { chosen = bool; Tuple<u8> },
+            _ => chosen,
+        }
+    "#,
+    );
+    // Here the pattern can fail before writing. Once the guard executes it
+    // always succeeds, so a later arm still sees the original tuple.
+    let guaranteed = producer.replace("Choose", "Guarded").replace(
+        "MATCH",
+        "flag match { true if do { chosen = bool; true } => Tuple<u8>, _ => chosen, }",
+    );
+    let program = active + &guaranteed + r#"
+        comptime fn run() -> bool {
+            Choose(true) == Tuple<u8> and Choose(false) == Tuple<bool>
+                and Guarded(true) == Tuple<u8> and Guarded(false) == Tuple<bool>
+        }
+    "#;
+    assert_eq!(
+        sysroot_support::invoke(&program, "run").unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
 fn p0_4_open_function_defer_annotation_stays_isolated_under_caller_binder_premises() {
     let source = r#"
         typealias Type = .Type'builtin;

@@ -2,6 +2,8 @@
 //! Retain their declaration context, never a caller's later assumptions.
 use super::*;
 
+mod match_evidence;
+
 /// Definition evidence belongs to the lexical declaration being checked.
 #[derive(Default)]
 pub(super) struct DefinitionRefinements {
@@ -1406,22 +1408,11 @@ impl Checker<'_, '_> {
                 self.required_steps -= (before - fuel) as u64;
                 invalidated.map_err(|message| error(span, message))?;
                 for arm in arms {
-                    let mut arm_bindings = match_bindings.clone();
                     let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                     let before = fuel;
-                    let arm_res = (|| {
-                        Self::remove_pattern_bindings(&arm.pattern, &mut arm_bindings, &mut fuel)?;
-                        if let Some(guard) = &arm.guard {
-                            Self::invalidate_mutated_type_bindings(
-                                guard,
-                                &mut arm_bindings,
-                                &mut fuel,
-                            )?;
-                        }
-                        Ok::<_, String>(())
-                    })();
+                    let arm_res = match_evidence::arm_bindings(arm, &mut match_bindings, &mut fuel);
                     self.required_steps -= (before - fuel) as u64;
-                    arm_res.map_err(|message| error(span, message))?;
+                    let arm_bindings = arm_res.map_err(|message| error(span, message))?;
                     self.verify_type_guarantees_expr(
                         &arm.body,
                         binder,
