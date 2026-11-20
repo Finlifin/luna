@@ -1446,39 +1446,7 @@ impl Checker<'_, '_> {
                     });
                 self.prove_guarantees_for_term(context, &target, binder, guarantees, span)
             }
-            K::TypeValue(ty) => {
-                let mut local_context = context.fork();
-                if let Term::NormalForm {
-                    head, arguments, ..
-                } = ty
-                    && let Some(contract) = self.alias_contracts.get(head).cloned()
-                    && contract.parameters.len() == arguments.len()
-                {
-                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                    let before = fuel;
-                    let frames = self.call_input_frames();
-                    let sub = nir::DeclarationSubstitution::bounded(
-                        &contract.parameters,
-                        &contract.parameter_types,
-                        arguments,
-                        &frames,
-                        &mut fuel,
-                    )
-                    .map_err(|e| error(span, e.to_string()))?;
-                    for req in &contract.requirements {
-                        let pred = sub
-                            .instantiate_predicate_bounded(req, &mut fuel)
-                            .map_err(|e| error(span, e.to_string()))?;
-                        let fact = crate::ptc::Formula::from_predicate(&pred);
-                        local_context
-                            .validate_formula(&fact, &mut crate::ptc::Budget::default())
-                            .map_err(|failure| error(span, failure.to_string()))?;
-                        local_context.assume(fact);
-                    }
-                    self.required_steps -= (before - fuel) as u64;
-                }
-                self.prove_guarantees_for_term(&local_context, ty, binder, guarantees, span)
-            }
+            K::TypeValue(ty) => self.prove_returned_identity(context, ty, binder, guarantees, span),
             K::Literal(n::Literal::Description(desc)) => {
                 let mut local_context = context.fork();
                 let subject_term = Term::Rigid {
@@ -1514,28 +1482,6 @@ impl Checker<'_, '_> {
                     local_context.assume(fact);
                 }
                 self.required_steps -= (before - fuel) as u64;
-                self.prove_guarantees_for_term(
-                    &local_context,
-                    &subject_term,
-                    binder,
-                    guarantees,
-                    span,
-                )
-            }
-            K::NormalFormType { head, .. } => {
-                let mut local_context = context.fork();
-                let subject_term = Term::Rigid {
-                    declaration: binder,
-                    sort: Sort::Type,
-                };
-                if Some(*head) == self.protocols.tuple {
-                    let fact =
-                        crate::ptc::Formula::kind(subject_term.clone(), nir::TypeKind::Tuple);
-                    local_context
-                        .validate_formula(&fact, &mut crate::ptc::Budget::default())
-                        .map_err(|failure| error(span, failure.to_string()))?;
-                    local_context.assume(fact);
-                }
                 self.prove_guarantees_for_term(
                     &local_context,
                     &subject_term,
@@ -1597,13 +1543,95 @@ impl Checker<'_, '_> {
                 )
             }
             _ => {
-                let subject_term = Term::Rigid {
+                let subject = Term::Rigid {
                     declaration: binder,
                     sort: Sort::Type,
                 };
-                self.prove_guarantees_for_term(context, &subject_term, binder, guarantees, span)
+                let mut local_context = context.fork();
+                if let K::NormalFormType { head, .. } = &expr.kind
+                    && Some(*head) == self.protocols.tuple
+                {
+                    // The head already proves tuple shape, even when a field
+                    // is a description or requires an invocation.
+                    let fact = crate::ptc::Formula::kind(subject.clone(), nir::TypeKind::Tuple);
+                    local_context
+                        .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                        .map_err(|failure| error(span, failure.to_string()))?;
+                    local_context.assume(fact);
+                    if guarantees.iter().all(|guarantee| {
+                        matches!(
+                            local_context.prove(
+                                crate::ptc::Formula::from_predicate(guarantee),
+                                crate::ptc::Budget::default()
+                            ),
+                            crate::ptc::Outcome::Entailed(_)
+                        )
+                    }) {
+                        return Ok(());
+                    }
+                }
+                // A checked construction has its ordinary identity on normal
+                // completion. Observation neither runs a supplier nor unfolds
+                // an opaque head; an unavailable operand leaves just the facts
+                // already known about the result.
+                let identity = self.with_observation_budget(span, |this, budget| {
+                    this.normal_input_hint(expr, budget)
+                })?;
+                match identity {
+                    Some(ty) if ty.sort() == Sort::Type => {
+                        self.prove_returned_identity(&local_context, &ty, binder, guarantees, span)
+                    }
+                    _ => self.prove_guarantees_for_term(
+                        &local_context,
+                        &subject,
+                        binder,
+                        guarantees,
+                        span,
+                    ),
+                }
             }
         }
+    }
+
+    fn prove_returned_identity(
+        &mut self,
+        context: &crate::ptc::Context,
+        ty: &Term,
+        binder: DeclarationId,
+        guarantees: &[n::TypePredicate],
+        span: Span,
+    ) -> Result<(), Error> {
+        let mut local_context = context.fork();
+        if let Term::NormalForm {
+            head, arguments, ..
+        } = ty
+            && let Some(contract) = self.alias_contracts.get(head).cloned()
+            && contract.parameters.len() == arguments.len()
+        {
+            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let before = fuel;
+            let frames = self.call_input_frames();
+            let sub = nir::DeclarationSubstitution::bounded(
+                &contract.parameters,
+                &contract.parameter_types,
+                arguments,
+                &frames,
+                &mut fuel,
+            )
+            .map_err(|e| error(span, e.to_string()))?;
+            for req in &contract.requirements {
+                let pred = sub
+                    .instantiate_predicate_bounded(req, &mut fuel)
+                    .map_err(|e| error(span, e.to_string()))?;
+                let fact = crate::ptc::Formula::from_predicate(&pred);
+                local_context
+                    .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                    .map_err(|failure| error(span, failure.to_string()))?;
+                local_context.assume(fact);
+            }
+            self.required_steps -= (before - fuel) as u64;
+        }
+        self.prove_guarantees_for_term(&local_context, ty, binder, guarantees, span)
     }
 
     fn prove_guarantees_for_term(

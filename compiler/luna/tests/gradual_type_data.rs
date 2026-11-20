@@ -674,3 +674,43 @@ fn deferred_type_result_equality_restores_sparse_source_parameters() {
         );
     }
 }
+
+#[test]
+fn constructed_type_results_keep_their_heads_and_mixed_input_identities() {
+    let source = r#"
+        struct Pair where A, B { flag: bool }
+        pure comptime fn Opaque<A, B> -> Type { B }
+        pure comptime fn Joined(comptime T: Type) -> R: Type
+        where A, ensures R == Pair<A, ?T>
+        {
+            Pair<A, ?T>
+        }
+        pure comptime fn Relay(comptime T: Type, comptime U: Type) -> R: Type
+        where ensures R == Pair<T, ?U>
+        {
+            Joined<T>(U)
+        }
+        pure comptime fn Wrapped(comptime T: Type) -> R: Type
+        where A, ensures R == Opaque<A, T>
+        {
+            Opaque<A, T>
+        }
+        fn run() -> bool {
+            const exact = Relay(bool, u8) == Pair<bool, ?u8>
+                and Wrapped<bool>(u8) == Opaque<bool, u8>;
+            exact
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    for (from, to) in [
+        ("ensures R == Pair<A, ?T>", "ensures R == Pair<T, ?A>"),
+        ("ensures R == Opaque<A, T>", "ensures R == T"),
+        ("            Pair<A, ?T>", "            T = A; Pair<A, ?T>"),
+    ] {
+        let error = support::compile(&source.replace(from, to)).unwrap_err();
+        assert!(
+            error.contains("result guarantee contract is not established"),
+            "{error}"
+        );
+    }
+}
