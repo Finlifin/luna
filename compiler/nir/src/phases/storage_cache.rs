@@ -1,12 +1,10 @@
 //! Storage observations belong to one borrowed, immutable declaration world.
 //! A failed budget is not a reusable statement about a type's storage phase.
-use super::{
-    Package, Sort, StorageError, Term, storage_domains::Domains,
-    validate_runtime_storage_with_domains,
-};
+use super::{Package, Sort, StorageError, Term, runtime_storage, storage_domains::Domains};
 use std::collections::HashMap;
 
 type Entries = HashMap<Term, HashMap<usize, Result<(), StorageError>>>;
+
 #[derive(Clone, Copy)]
 enum Phase {
     Runtime,
@@ -59,10 +57,12 @@ impl<'a> StorageQueries<'a> {
         for frame in frames {
             *fuel = fuel.checked_sub(frame.len()).ok_or(StorageError::Budget)?;
         }
-        let id = if let Some(id) = self.frames.get(frames) {
+        let id = if frames.is_empty() {
+            0
+        } else if let Some(id) = self.frames.get(frames) {
             *id
         } else {
-            let id = self.frames.len();
+            let id = self.frames.len() + 1;
             self.frames.insert(frames.to_vec(), id);
             id
         };
@@ -103,11 +103,18 @@ impl StorageScope<'_, '_> {
             Phase::Runtime => &mut self.queries.runtime_entries,
             Phase::Comptime => &mut self.queries.comptime_entries,
         };
-        if let Some(result) = entries.get(ty).and_then(|scopes| scopes.get(&self.id)) {
-            return *result;
+        if let Some(scopes) = entries.get(ty) {
+            if let Some(result) = scopes.get(&self.id) {
+                return *result;
+            }
+            // A runtime domain admitted without ambient binders stays valid
+            // under weakening. Rejections and open-domain evidence stay local.
+            if matches!(phase, Phase::Runtime) && scopes.get(&0) == Some(&Ok(())) {
+                return Ok(());
+            }
         }
         let result = match phase {
-            Phase::Runtime => validate_runtime_storage_with_domains(
+            Phase::Runtime => runtime_storage::validate(
                 ty,
                 self.queries.package,
                 self.frames,
@@ -158,6 +165,43 @@ impl StorageQueries<'_> {
 mod tests {
     use super::*;
     use crate::{DeclarationId, Primitive as P, program::Struct};
+
+    #[test]
+    fn closed_runtime_evidence_weakens_but_outer_binder_rejections_do_not() {
+        let package = Package::default();
+        let mut queries = StorageQueries::new(&package);
+        let reference = Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        };
+        let function = Term::Function {
+            parameters: vec![crate::Parameter {
+                sort: Sort::Type,
+                ty: Term::Primitive(P::Type),
+            }],
+            result: Box::new(reference.clone()),
+        };
+        queries.check_runtime(&function, &[], &mut 1000).unwrap();
+        assert!(matches!(
+            queries.check_runtime(&reference, &[], &mut 1000),
+            Err(StorageError::Invalid(_))
+        ));
+        let frames = [vec![Sort::Type]];
+        let mut scope = queries.scope(&frames, &mut 1000).unwrap();
+        // A full key traversal pays for the lookup; no layout walk remains.
+        let mut remaining = 1000;
+        crate::type_computations::charge_term(&function, &mut remaining).unwrap();
+        let mut lookup = 1000 - remaining;
+        scope.check_runtime(&function, &mut lookup).unwrap();
+        assert_eq!(lookup, 0);
+        scope.check_runtime(&reference, &mut 1000).unwrap();
+        assert!(
+            queries
+                .check_runtime(&reference, &[vec![Sort::Runtime]], &mut 1000)
+                .is_err()
+        );
+    }
 
     #[test]
     fn a_callable_checks_many_domains_in_the_same_admitted_sort_frame() {
@@ -316,6 +360,7 @@ mod tests {
             Err(StorageError::Invalid(_))
         ));
     }
+
     #[test]
     fn storage_phase_and_world_cannot_share_incompatible_evidence() {
         let package = Package::default();
