@@ -1244,6 +1244,7 @@ impl<'a> Analysis<'a> {
         pat: &Pattern,
         width: usize,
         steps: &mut usize,
+        exact: bool,
     ) -> Result<Vec<Cube>, ()> {
         let mut complete = true;
         let states = self.pattern(
@@ -1258,6 +1259,9 @@ impl<'a> Analysis<'a> {
             0,
             &mut complete,
         )?;
+        if exact && !complete {
+            return Err(());
+        }
         Ok(states.into_iter().map(|state| state.cube).collect())
     }
 }

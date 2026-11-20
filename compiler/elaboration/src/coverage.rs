@@ -105,6 +105,25 @@ pub(crate) fn check_metered_with_collections_in(
     collection: &dyn Fn(&Term, &mut usize) -> Result<Option<Term>, nir::NominalAdmissionError>,
     target: Option<nir::target::TargetData>,
 ) -> (Coverage, usize) {
+    check_rows_in(
+        structs, enums, ty, patterns, None, steps, context, tuple_head, collection, target,
+    )
+}
+
+/// With a candidate, Missing proves a member of that pattern remains after
+/// all earlier rows. Only exact patterns may contribute to this witness.
+pub(crate) fn check_rows_in(
+    structs: &BTreeMap<DeclarationId, Struct>,
+    enums: &BTreeMap<DeclarationId, Enum>,
+    ty: &Term,
+    patterns: &[&Pattern],
+    candidate: Option<&Pattern>,
+    steps: usize,
+    context: &Context,
+    tuple_head: Option<&nir::normal_forms::Head>,
+    collection: &dyn Fn(&Term, &mut usize) -> Result<Option<Term>, nir::NominalAdmissionError>,
+    target: Option<nir::target::TargetData>,
+) -> (Coverage, usize) {
     let mut engine = Engine {
         collection,
         target,
@@ -114,8 +133,14 @@ pub(crate) fn check_metered_with_collections_in(
         steps,
         context,
         domains: HashMap::new(),
+        exact: candidate.is_some(),
     };
-    let outcome = match engine.matrix(vec![ty], patterns.iter().map(|p| vec![*p]).collect(), 0) {
+    let covered = if let Some(candidate) = candidate {
+        engine.covers_candidate(ty, patterns, candidate)
+    } else {
+        engine.matrix(vec![ty], patterns.iter().map(|p| vec![*p]).collect(), 0)
+    };
+    let outcome = match covered {
         Ok(true) => Coverage::Exhaustive,
         Ok(false) => Coverage::Missing,
         Err(()) => Coverage::Unknown,
@@ -145,10 +170,32 @@ struct Engine<'a> {
     enums: &'a BTreeMap<DeclarationId, Enum>,
     context: &'a Context,
     domains: HashMap<Term, Term>,
+    exact: bool,
     steps: usize,
 }
 static WILD: Pattern = Pattern::Wild;
 impl Engine<'_> {
+    fn covers_candidate(
+        &mut self,
+        ty: &Term,
+        earlier: &[&Pattern],
+        candidate: &Pattern,
+    ) -> Result<bool, ()> {
+        // earlier ∪ ¬candidate covers the domain exactly when the arm is
+        // shadowed or empty. Ordinary exhaustiveness can underapproximate
+        // opaque guards, which cannot establish a reachable witness here.
+        self.spend(earlier.len().saturating_add(1))?;
+        let mut excluded = Vec::with_capacity(earlier.len() + 1);
+        for pattern in earlier {
+            excluded.push(self.constructor_pattern(pattern, ty, false, 0)?.ok_or(())?);
+        }
+        excluded.push(
+            self.constructor_pattern(candidate, ty, true, 0)?
+                .ok_or(())?,
+        );
+        self.matrix(vec![ty], excluded.iter().map(|p| vec![p]).collect(), 0)
+    }
+
     fn spend(&mut self, n: usize) -> Result<(), ()> {
         let Some(remaining) = self.steps.checked_sub(n) else {
             self.steps = 0;
@@ -607,7 +654,7 @@ impl Engine<'_> {
         let mut initial = Vec::new();
         let mut analysis = crate::bit_coverage::Analysis::new(self.context, self.target);
         for row in rows {
-            for cube in analysis.extract(row[0], width, &mut self.steps)? {
+            for cube in analysis.extract(row[0], width, &mut self.steps, self.exact)? {
                 self.spend(cube.len().saturating_add(row.len()).saturating_add(1))?;
                 initial.push((cubes.len(), 0usize));
                 cubes.push(cube.into_iter().collect::<Vec<_>>());
@@ -804,6 +851,82 @@ mod tests {
             fields,
         }
     }
+    #[test]
+    fn candidate_coverage_requires_an_unshadowed_witness() {
+        use nir::program::{Expr, ExprKind, SourceRange};
+
+        let yes = boolean(true);
+        let no = boolean(false);
+        let opaque = Pattern::Guard {
+            pattern: Box::new(Pattern::Wild),
+            // Coverage must not run an arbitrary runtime predicate.
+            condition: Box::new(Expr {
+                source: SourceRange { start: 0, end: 0 },
+                ty: Term::Primitive(Primitive::Bool),
+                kind: ExprKind::Call {
+                    callee: Box::new(Expr {
+                        source: SourceRange { start: 0, end: 0 },
+                        ty: Term::Function {
+                            parameters: vec![],
+                            result: Box::new(Term::Primitive(Primitive::Bool)),
+                        },
+                        kind: ExprKind::Function(id()),
+                    }),
+                    arguments: vec![],
+                    parameter_bindings: vec![],
+                    env_arguments: vec![],
+                },
+            }),
+        };
+        let check = |ty, previous: &[&Pattern], current, budget| {
+            check_rows_in(
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &Term::Primitive(ty),
+                previous,
+                Some(current),
+                budget,
+                &Context::default(),
+                None,
+                &|_, _| Ok(None),
+                None,
+            )
+            .0
+        };
+        assert_eq!(
+            check(Primitive::Bool, &[&no], &yes, 1000),
+            Coverage::Missing
+        );
+        assert_eq!(
+            check(Primitive::Bool, &[&yes], &yes, 1000),
+            Coverage::Exhaustive
+        );
+        assert_eq!(check(Primitive::Bool, &[&no], &yes, 0), Coverage::Unknown);
+        let bits = |value| {
+            Pattern::Literal(Literal::BitVec {
+                width: 3,
+                words: vec![value],
+            })
+        };
+        let zero = bits(0);
+        let one = bits(1);
+        assert_eq!(
+            check(Primitive::BitVec(3), &[&one], &one, 10000),
+            Coverage::Exhaustive
+        );
+        assert_eq!(
+            check(Primitive::BitVec(3), &[&one], &zero, 10000),
+            Coverage::Missing
+        );
+        for ty in [Primitive::Bool, Primitive::BitVec(3)] {
+            assert_eq!(
+                check(ty, &[&opaque], &Pattern::Wild, 10000),
+                Coverage::Unknown
+            );
+            assert_eq!(check(ty, &[], &opaque, 10000), Coverage::Unknown);
+        }
+    }
+
     #[test]
     fn anonymous_record_matrix_preserves_labels_and_correlated_fields() {
         let ty = Term::Record(vec![

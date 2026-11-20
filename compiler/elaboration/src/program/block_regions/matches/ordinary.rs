@@ -10,6 +10,7 @@ struct BodyScope {
 
 pub(super) struct Ordinary {
     pub(super) selector: Option<n::Expr>,
+    pub(super) selector_exit: bool,
     subject: Option<Term>,
     pub(super) behavior_pattern: bool,
     staged_match: bool,
@@ -56,6 +57,7 @@ impl Ordinary {
         Ok(Self {
             staged_match: subject.is_some() || (checker.in_unselected_inline && own_selection),
             selector,
+            selector_exit: false,
             subject,
             behavior_pattern: checker.checking_open_behavior && own_selection,
             result: p(P::Never),
@@ -148,10 +150,12 @@ impl Ordinary {
         &mut self,
         checker: &mut Checker<'_, '_>,
         pattern: n::Pattern,
-        body: n::Expr,
+        body: CheckedBlock,
         input: &Term,
         span: Span,
     ) -> Result<(n::Pattern, CheckedBlock), Error> {
+        let selected_exit = body.selected_exit();
+        let body = body.ordinary(span)?;
         if !is_never(&body.ty) {
             if !is_never(&self.result) {
                 checker.require(&body.ty, &self.result, span)?;
@@ -167,7 +171,94 @@ impl Ordinary {
             checker.stabilize_error_success_binding(&mut arm, input, span)?;
         }
         debug_assert!(arm.guard.is_none());
-        Ok((arm.pattern, CheckedBlock::Ordinary(arm.body)))
+        Ok((
+            arm.pattern,
+            CheckedBlock::Ordinary(arm.body).with_selected_exit(selected_exit),
+        ))
+    }
+
+    /// A selected arm can account for noncompletion only if some subject
+    /// reaches it before any earlier pattern succeeds. Never run a guard
+    /// or take its side effects to answer this specialization question.
+    pub(super) fn selected_exit(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        subject: &n::Expr,
+        arms: &[(n::Pattern, CheckedBlock)],
+        span: Span,
+    ) -> Result<bool, Error> {
+        if is_never(&subject.ty) {
+            return Ok(self.selector_exit);
+        }
+        if self.subject.is_some() {
+            return Ok(self
+                .selected
+                .and_then(|index| arms.get(index))
+                .is_some_and(|(_, body)| body.selected_exit()));
+        }
+        if !is_never(&self.result) {
+            return Ok(false);
+        }
+        checker.required_steps = checker
+            .required_steps
+            .checked_sub(arms.len() as u64)
+            .ok_or_else(|| error(span, "match completion budget exhausted"))?;
+        if !arms.iter().any(|(_, body)| body.selected_exit()) {
+            return Ok(false);
+        }
+
+        let domain_input = match &subject.kind {
+            K::Local(_) | K::Call { .. } => true,
+            K::CallPreparation {
+                result: Some(result),
+                ..
+            } => matches!(result.kind, K::Call { .. }),
+            _ => false,
+        };
+        let mut earlier = Vec::new();
+        for (pattern, body) in arms {
+            let before = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);
+            let mut fuel = before;
+            let matched = control::pattern_matches(pattern, subject, &mut fuel, 0);
+            checker.required_steps -= (before - fuel) as u64;
+            if matched == Some(false) {
+                continue;
+            }
+            if body.selected_exit() {
+                if earlier.is_empty() && matched == Some(true) {
+                    return Ok(true);
+                }
+                // A runtime input or call supplies its declared domain. Exact
+                // constructor coverage distinguishes useful and shadowed arms.
+                // A partially known aggregate is not an unconstrained input.
+                if domain_input {
+                    let budget = usize::try_from(checker.required_steps)
+                        .unwrap_or(usize::MAX)
+                        .min(100_000);
+                    let (covered, used) = crate::coverage::check_rows_in(
+                        &checker.structs,
+                        &checker.enums,
+                        &subject.ty,
+                        &earlier,
+                        Some(pattern),
+                        budget,
+                        &checker.context,
+                        checker.bound_tuple_metadata().as_ref(),
+                        &|ty, fuel| checker.collection_domain_budgeted(ty, fuel),
+                        checker.target,
+                    );
+                    checker.required_steps -= used as u64;
+                    if covered == crate::coverage::Coverage::Missing {
+                        return Ok(true);
+                    }
+                }
+            }
+            if matched == Some(true) {
+                break;
+            }
+            earlier.push(pattern);
+        }
+        Ok(false)
     }
 
     pub(super) fn finish(
@@ -284,6 +375,7 @@ mod tests {
     fn dump_distinguishes_staged_selection_bindings_and_pending_scope() {
         let state = Ordinary {
             selector: None,
+            selector_exit: false,
             subject: Some(Term::String("subject\"\n".into())),
             behavior_pattern: false,
             staged_match: true,
@@ -316,8 +408,8 @@ impl std::fmt::Display for Ordinary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(match-delivery (result {}) (behavior-pattern {}) (staged {}) (selected",
-            self.result, self.behavior_pattern, self.staged_match
+            "(match-delivery (result {}) (behavior-pattern {}) (staged {}) (selector-exit {}) (selected",
+            self.result, self.behavior_pattern, self.staged_match, self.selector_exit
         )?;
         if let Some(index) = self.selected {
             write!(f, " {index}")?;

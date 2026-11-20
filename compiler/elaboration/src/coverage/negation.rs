@@ -713,6 +713,7 @@ mod tests {
             context: &context,
             steps: 2,
             domains: HashMap::new(),
+            exact: false,
         };
         assert!(engine.complement_fields(&ty, Some(0)).is_err());
         assert!(

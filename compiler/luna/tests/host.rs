@@ -17119,11 +17119,57 @@ fn conditional_const_exit_joins_ordered_when_conditions_and_bodies() {
 }
 
 #[test]
+fn conditional_const_exit_joins_ordered_match_arms() {
+    let source = r#"
+        enum Side { left, right }
+        impl Duplicate for Side {}
+        comptime fn checked(v: bool) -> bool { assumes v; true }
+        fn choose(comptime flag: bool, side: Side) -> bool {
+            side match {
+                .left => { return false; },
+                .right => { const found if found = flag else { return true; }; },
+            };
+            const answer = checked(flag);
+            answer
+        }
+        fn read(side: bool) -> bool { side }
+        fn call_subject(comptime flag: bool, side: bool) -> bool {
+            read(side) match {
+                true => { const found if found = flag else { return true; }; },
+                false => { return false; },
+            };
+            const answer = checked(flag);
+            answer
+        }
+        fn selector(comptime flag: bool) -> bool {
+            do { const v if v = flag else { return true; }; v } match { _ => {}, };
+            const answer = checked(flag);
+            answer
+        }
+        fn run() -> bool {
+            choose(true, .right) and not choose(true, .left)
+                and choose(false, .right) and not choose(false, .left)
+                and call_subject(false, true) and not call_subject(false, false)
+                and selector(true) and selector(false)
+        }
+    "#;
+    let work = Work::new(&format!("{RESOURCE_HEADER} {source}"));
+    success(&resource_build(&work));
+    let output = work.execute();
+    success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
 fn conditional_const_exit_keeps_independent_continuations_checked() {
     for statement in [
         "do { return true; const found if found = flag else { return false; }; };",
         "if enabled { const found if found = flag else { return true; }; };",
         "when { enabled => { const v if v = flag else { return true; }; }, };",
+        "enabled match { true => { const v if v=flag else {return true;}; }, false => {}, };",
+        "enabled match { true => {return true;}, true => {const v if v=flag else {return true;};}, _ => {return false;}, };",
+        "enabled match { _ if false => {const v if v=flag else {return true;};}, _ => {return true;}, };",
+        "true match { true => {return true;}, false => {const v if v=flag else {return true;};}, };",
         "when { false => { const v if v = flag else { return true; }; }, else => { return true; }, };",
         "when { true => { return true; }, do {const v if v=flag else {return false;};v} => {}, };",
         "if false { const found if found = flag else { return true; }; } else { return true; };",

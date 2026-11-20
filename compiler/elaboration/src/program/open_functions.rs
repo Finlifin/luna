@@ -4200,7 +4200,10 @@ impl Checker<'_, '_> {
         expected: Option<&D>,
         depth: usize,
     ) -> Result<D, Error> {
-        if self.contains_inline_control(value)? {
+        if self.scan_body_requirement(value, |_, node| {
+            Ok(matches!(node.kind, H::InlineControl(_))
+                || matches!(node.kind, H::Let(binding) if binding.comptime))
+        })? {
             let staged = self.in_staged_input
                 || self
                     .inline_selection

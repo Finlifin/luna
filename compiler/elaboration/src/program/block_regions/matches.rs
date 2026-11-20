@@ -143,6 +143,9 @@ impl<'h> Frame<'h> {
                 )))
             }
             (State::Selector, Some(value)) => {
+                if let Some(ordinary) = &mut self.ordinary {
+                    ordinary.selector_exit = value.selected_exit();
+                }
                 self.accept_selector(checker, value.ordinary(selector.span)?)?;
                 Ok(Step::Continue)
             }
@@ -196,13 +199,7 @@ impl<'h> Frame<'h> {
                 self.leave_body(checker);
                 let arm = &arms[self.arms.len()];
                 let checked = if let Some(ordinary) = &mut self.ordinary {
-                    ordinary.accept_body(
-                        checker,
-                        pattern,
-                        body.ordinary(arm.body.span)?,
-                        &value.ty,
-                        arm.span,
-                    )?
+                    ordinary.accept_body(checker, pattern, body, &value.ty, arm.span)?
                 } else {
                     (
                         pattern,
@@ -299,7 +296,10 @@ impl<'h> Frame<'h> {
     }
 
     fn finish(&mut self, checker: &mut Checker<'_, '_>, value: n::Expr) -> Result<Step<'h>, Error> {
+        let mut selected_exit = false;
         let result = if let Some(ordinary) = &mut self.ordinary {
+            selected_exit =
+                ordinary.selected_exit(checker, &value, &self.arms, self.source.span)?;
             let arms = std::mem::take(&mut self.arms)
                 .into_iter()
                 .map(|(pattern, body)| {
@@ -345,7 +345,7 @@ impl<'h> Frame<'h> {
         } else {
             result
         };
-        Ok(Step::Completed(result))
+        Ok(Step::Completed(result.with_selected_exit(selected_exit)))
     }
 
     fn leave_body(&mut self, checker: &mut Checker<'_, '_>) {
