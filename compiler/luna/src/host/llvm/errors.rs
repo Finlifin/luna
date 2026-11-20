@@ -194,7 +194,11 @@ impl Emitter<'_> {
         if plans.len() == 0 && value.ty == Ty::Unit && target == Ty::Unit {
             return Ok(value);
         }
-        let (Ty::Record(source_fields), Ty::Record(target_fields)) = (&value.ty, &target) else {
+        let (
+            Ty::Record(source_fields) | Ty::PackedRecord(source_fields),
+            Ty::Record(target_fields) | Ty::PackedRecord(target_fields),
+        ) = (&value.ty, &target)
+        else {
             return Err("host product transport requires product layouts".into());
         };
         if plans.len() != target_fields.len() || source_fields.len() != target_fields.len() {

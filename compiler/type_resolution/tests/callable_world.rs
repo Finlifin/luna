@@ -429,6 +429,7 @@ fn metadata_payloads_are_charged_but_borrowed_function_bodies_are_not_copied() {
         capabilities: vec![],
         requirements: vec![],
         fields: vec![("x".repeat(200_000), boolean())],
+        packed: false,
     });
     let mut limited = Budget::default();
     assert!(matches!(

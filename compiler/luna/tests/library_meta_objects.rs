@@ -364,7 +364,7 @@ fn public_object_preserves_order_duplicate_keys_and_nested_constants() {
          use meta.prelude.*;
          const saved = {{ flag: true, 'x', flag: false }};
          comptime fn identity(value: meta.Object) -> Object {{ value }}
-         comptime fn metadata() -> Object {{
+         comptime fn metadata_sample() -> Object {{
              let result = {{ nested: saved, mode: .c }};
              identity(result)
          }}"
@@ -372,7 +372,7 @@ fn public_object_preserves_order_duplicate_keys_and_nested_constants() {
     .unwrap();
     let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
     let value = vm
-        .invoke(support::id(&package, "metadata"), vec![])
+        .invoke(support::id(&package, "metadata_sample"), vec![])
         .unwrap();
     let Value::Object(object) = value else {
         panic!("expected Object")

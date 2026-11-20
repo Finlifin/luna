@@ -5,7 +5,13 @@
 `abi(name: Symbol) -> Object` 是普通的 `pure comptime fn`，返回含 `abi`
 属性的 Object，并保留 Symbol 值及其类型。`comptime_phase` 是包含
 `comptime_phase: true` 的 Object 常量，条目保留 Bool 类型。
-`attrs.prelude` 导出两者。
+`metadata(data: Object) -> Object` 将用户自定义元数据包装为 `{ metadata: data }`。
+`attrs.prelude` 导出 `abi`、`comptime_phase` 和 `metadata`。
+
+命名子模块另提供：
+- `attrs.layout.{packed, packed_layout}`：产生 `{ packed: bool }`，供结构体布局检查与紧致降码消费。
+- `attrs.effects.direct_passing`：产生 `{ direct_passing: true }`，供直接传递效应声明检查消费。
+- `attrs.derivation`：编译器已消费 `{ derivation_default: bool }`；`attrs.derivation.default` 导出仍待 `default` 成员声明语法决定（见 `derivation/README.md`）。
 
 Object 通过 `meta.Object` 导入，attrs 不重复建立原始 builtin 绑定。
 meta 的基础域绑定与集合操作分开；属性消费者仍通过普通包依赖取得同一域。
@@ -68,4 +74,4 @@ comptime fn run() -> bool {
 单个 comptime 实现、泛型主体及该相可用的默认方法已有源码调用路径。
 同一关系的普通与 comptime 源码实现支持方法和关联项的合并，包括泛型参数改名。
 关联项按成员 phase 检查；共享值必须一致，泛型初始化程序目前要求替换参数后的
-结构一致。依赖尚未完成接口的属性计算仍待接通。ABI 等其他属性的正常编译仍会明确拒绝。
+结构一致。`derivation_default`、`packed`、`direct_passing` 与 `metadata` 已接通对应编译器消费者；`abi` 降码仍未接通，普通 NIR 编译会明确拒绝 `abi` 及其他未消费属性。

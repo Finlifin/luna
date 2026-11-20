@@ -91,6 +91,9 @@ pub fn omit_generation_sources<'h>(
         .member_access
         .retain(|id, _| !omitted.contains(&id.owner));
     package
+        .derive_visible_strategies
+        .retain(|owner, _| !omitted.contains(owner));
+    package
         .staged_parameter_definitions
         .retain(|id, _| !omitted.contains(&id.owner));
     package

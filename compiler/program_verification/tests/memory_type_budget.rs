@@ -90,6 +90,7 @@ fn infer_in_package_validates_specialized_pending_and_payload_intrinsics() {
             fields: vec![("v".into(), Term::Primitive(Primitive::U64))],
             requirements: vec![],
             capabilities: vec![],
+            packed: false,
         }],
         functions: vec![
             Function {

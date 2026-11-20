@@ -28,6 +28,7 @@ fn trait_admission_preserves_nested_lookup_and_relation_failures() {
             fields: vec![("flag".into(), boolean.clone())],
             requirements: vec![],
             capabilities: vec![],
+            packed: false,
         }],
         ..Default::default()
     };
@@ -914,6 +915,7 @@ fn nominal_trait_indices_require_full_payload_layout_evidence() {
         fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     let subject = Term::Primitive(Primitive::Bool);
     let domains = Default::default();
@@ -1108,6 +1110,7 @@ fn symbolic_nominal_payloads_require_independent_field_domains() {
         fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     for (domain, accepted) in [
         (None, false),
@@ -1238,6 +1241,7 @@ fn record_error_nominal_payloads_require_layouts_and_reject_forged_fields() {
         fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     let valid = input(Term::Bool(true));
     assert!(

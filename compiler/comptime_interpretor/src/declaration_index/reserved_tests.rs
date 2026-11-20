@@ -149,6 +149,7 @@ fn structure(identity: DeclarationId) -> nir::program::Struct {
         capabilities: vec![],
         requirements: vec![],
         fields: vec![],
+        packed: false,
     }
 }
 

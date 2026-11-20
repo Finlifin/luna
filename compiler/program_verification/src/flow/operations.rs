@@ -121,6 +121,7 @@ impl Walker<'_> {
                 result = self.unknown_value(&expr.ty)?;
             }
             K::NewtypeRepresentation(subject)
+            | K::DefinitionAttributes(subject)
             | K::StructFieldTypes(subject)
             | K::StructFieldNames(subject)
             | K::BuildStruct(subject)

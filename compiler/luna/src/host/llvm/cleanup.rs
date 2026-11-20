@@ -680,7 +680,7 @@ impl Emitter<'_> {
                     indices.push(field);
                     ty = fields.get(field).ok_or("host capture field missing")?;
                 }
-                Ty::Record(fields) => {
+                Ty::Record(fields) | Ty::PackedRecord(fields) => {
                     indices.push(field);
                     ty = fields
                         .get(field)
@@ -710,6 +710,7 @@ impl Emitter<'_> {
         Ok(Some(Slot {
             ty: Ty::Bool,
             pointer: pointer.text,
+            align: None,
         }))
     }
     pub(super) fn set_live(
@@ -1019,6 +1020,7 @@ impl Emitter<'_> {
     }
     fn cleanup_field_slot(&mut self, mut slot: Slot, path: &[usize]) -> Result<Slot, String> {
         for index in path {
+            let packed = slot.align == Some(1) || matches!(slot.ty, Ty::PackedRecord(_));
             let (ty, indices) = field_layout(&slot.ty, *index, None)
                 .ok_or("host cleanup field requires a product layout")?;
             let path = indices
@@ -1034,6 +1036,11 @@ impl Emitter<'_> {
                 ),
             );
             slot = Slot {
+                align: if packed || matches!(ty, Ty::PackedRecord(_)) {
+                    Some(1)
+                } else {
+                    slot.align
+                },
                 ty,
                 pointer: pointer.text,
             };
@@ -1064,6 +1071,7 @@ impl Emitter<'_> {
     ) -> Result<Slot, String> {
         let mut logical = logical.cloned();
         for (depth, field) in path.iter().enumerate() {
+            let packed = slot.align == Some(1) || matches!(slot.ty, Ty::PackedRecord(_));
             let (next, ty, indices) = cleanup_field_layout(
                 self.graph,
                 logical.as_ref(),
@@ -1074,6 +1082,9 @@ impl Emitter<'_> {
             .ok_or("host cleanup payload path lacks a supported active variant")?;
             logical = next;
             if indices.is_empty() {
+                if packed || matches!(ty, Ty::PackedRecord(_)) {
+                    slot.align = Some(1);
+                }
                 slot.ty = ty;
                 continue;
             }
@@ -1090,6 +1101,11 @@ impl Emitter<'_> {
                 ),
             );
             slot = Slot {
+                align: if packed || matches!(ty, Ty::PackedRecord(_)) {
+                    Some(1)
+                } else {
+                    slot.align
+                },
                 ty,
                 pointer: pointer.text,
             };
@@ -1391,7 +1407,9 @@ fn variant_count(ty: &Ty) -> Option<usize> {
 }
 fn field_layout(ty: &Ty, field: usize, tag: Option<usize>) -> Option<(Ty, Vec<usize>)> {
     match ty {
-        Ty::Record(fields) => Some((fields.get(field)?.clone(), vec![field])),
+        Ty::Record(fields) | Ty::PackedRecord(fields) => {
+            Some((fields.get(field)?.clone(), vec![field]))
+        }
         Ty::Closure(fields) => Some((fields.get(field)?.clone(), vec![1, field])),
         Ty::Enum(layout) if layout.aggregate => {
             let tag = tag?;
@@ -2464,7 +2482,7 @@ enum Owner {
 }
 pub(super) fn product_paths(ty: &Ty, prefix: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
     out.push(prefix.clone());
-    if let Ty::Record(fields) | Ty::Closure(fields) = ty {
+    if let Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) = ty {
         for (index, field) in fields.iter().enumerate() {
             prefix.push(index);
             product_paths(field, prefix, out);
@@ -2476,7 +2494,7 @@ pub(super) fn product_paths(ty: &Ty, prefix: &mut Vec<usize>, out: &mut Vec<Vec<
 // state model. The sum itself (including a sum stored in a product) has a token.
 fn product_projection<'a>(mut ty: &'a Ty, path: &[usize]) -> Option<&'a Ty> {
     for index in path {
-        let (Ty::Record(fields) | Ty::Closure(fields)) = ty else {
+        let (Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields)) = ty else {
             return None;
         };
         ty = fields.get(*index)?;

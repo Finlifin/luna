@@ -745,6 +745,7 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
             requirements: vec![],
             capabilities: vec![],
             fields: vec![],
+            packed: false,
         }],
         vec![],
         vec![],

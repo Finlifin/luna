@@ -64,6 +64,7 @@ fn fixture(is_enum: bool, argument: Term, fields: usize) -> (Package, Term) {
             requirements: vec![],
             capabilities: vec![],
             fields: vec![("payload".into(), field)],
+            packed: false,
         });
     }
     (

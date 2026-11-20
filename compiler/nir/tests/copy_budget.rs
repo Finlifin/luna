@@ -484,6 +484,7 @@ fn struct_reflection_charges_subject_copy_before_allocation() {
     check(&expr(K::StructFieldTypes(Box::new(large()))));
     check(&expr(K::StructFieldNames(Box::new(large()))));
     check(&expr(K::NewtypeRepresentation(Box::new(large()))));
+    check(&expr(K::DefinitionAttributes(Box::new(large()))));
 }
 
 #[test]

@@ -25,6 +25,7 @@ fn structure(local: u32, fields: Vec<(&str, Term)>) -> Struct {
             .into_iter()
             .map(|(name, ty)| (name.into(), ty))
             .collect(),
+        packed: false,
     }
 }
 fn package() -> Package {

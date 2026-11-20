@@ -94,3 +94,14 @@ enum、primitive 和 opaque normal-form 头不能冒充 newtype。
 返回值是 Type 元数据，可以描述 runtime 指针，不会因此在 comptime 中创建
 指针值。观察不改变类型身份、成员查找或 trait 证据。`NewtypeBuilder.from_type`
 使用这一接口复制表示，随后 Build 发布新身份。
+
+
+## 定义属性反射与 Object / Symbol 辅助方法
+
+- `meta.attrs_of(target)` 与 `Type.attrs(self) -> Object` 返回目标声明经由
+  attribute merge 后冻结的 `Object`（无属性或非定义值返回空 `{}`；属性仍在
+  求值期间发生环引用或目标未完成时诊断拒绝）。
+- `Type.is_packed(self) -> bool` 查询合并后 `.packed` 属性值是否启用紧凑布局。
+- `Object.{is_empty, has_key, keys, merge}` 保留异构值域与未命名位置项，`merge`
+  对重复 Symbol 键按最后一次出现保留条目。
+- `Symbol.{byte_length, byte}` 提供 comptime UTF-8 字节观测。

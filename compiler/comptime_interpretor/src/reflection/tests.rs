@@ -38,6 +38,7 @@ fn package() -> Package {
                 }]))),
             ),
         ],
+        packed: false,
     });
     package
 }

@@ -1,5 +1,6 @@
+use List;
 use bindings;
-use builtin.{Integer, Symbol, Type, void}
+use builtin.{Integer, Symbol, Type, bool, void}
 
 pub use bindings.Object;
 
@@ -228,5 +229,81 @@ impl Object {
             .slice(0, start)
             .concat(replacement)
             .concat(self.slice(end, self.length()))
+    }
+
+    pub pure comptime fn is_empty(self) -> bool {
+        self.length() == 0
+    }
+
+    pub pure comptime fn has_key(self, target: Symbol) -> bool {
+        let count = self.length();
+        var index: Integer = 0;
+        while index < count {
+            self.key(index) match {
+                key? => {
+                    if key == target {
+                        return true;
+                    }
+                },
+                null => {},
+            }
+            index += 1;
+        }
+        false
+    }
+
+    pub pure comptime fn keys(self) -> List<Symbol> {
+        let count = self.length();
+        var result: List<Symbol> = [];
+        var index: Integer = 0;
+        while index < count {
+            self.key(index) match {
+                key? => {
+                    result = result.concat([key]);
+                },
+                null => {},
+            }
+            index += 1;
+        }
+        result
+    }
+
+    {-
+        Merge two Objects, keeping unnamed positional entries in order and
+        retaining only the last entry for each duplicate Symbol key without
+        erasing heterogeneous entry domains.
+    -}
+    pub pure comptime fn merge(self, right: Object) -> Object {
+        let combined = self.concat(right);
+        let count = combined.length();
+        var result: Object = {}
+        var index: Integer = 0;
+        while index < count {
+            combined.key(index) match {
+                null => {
+                    result = result.concat(combined.slice(index, index + 1));
+                },
+                key? => {
+                    var has_later = false;
+                    var j = index + 1;
+                    while j < count {
+                        combined.key(j) match {
+                            later? => {
+                                if later == key {
+                                    has_later = true;
+                                }
+                            },
+                            null => {},
+                        }
+                        j += 1;
+                    }
+                    if not has_later {
+                        result = result.concat(combined.slice(index, index + 1));
+                    }
+                },
+            }
+            index += 1;
+        }
+        result
     }
 }

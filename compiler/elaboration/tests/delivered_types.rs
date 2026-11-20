@@ -204,6 +204,7 @@ fn reflected_type_values_can_feed_generated_fields_without_source_reconstruction
         parameter_types: vec![],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     let mut vm = comptime_interpretor::Interpreter::for_comptime(
         &source,

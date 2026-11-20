@@ -2916,6 +2916,7 @@ fn nominal_value_subjects_require_layouts_for_selection_and_replay() {
         fields: vec![("flag".into(), ty(P::Bool))],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     assert!(
         h.match_types(&subject, &[], &context, Budget::default())

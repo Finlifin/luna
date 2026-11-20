@@ -571,6 +571,7 @@ mod tests {
             capabilities: vec![],
             requirements: vec![],
             fields: vec![],
+            packed: false,
         };
         let package = Arc::new(n::Package {
             structs: vec![definition],

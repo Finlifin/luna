@@ -29,9 +29,14 @@ impl Emitter<'_> {
                     Ty::Pointer,
                     format!("inttoptr {} {} to ptr", addr.ty.llvm(), addr.text),
                 );
+                let align_suffix = if matches!(result_ty, Ty::PackedRecord(_)) {
+                    ", align 1"
+                } else {
+                    ""
+                };
                 Ok(self.instruction(
                     result_ty.clone(),
-                    format!("load {}, ptr {}", result_ty.llvm(), ptr.text),
+                    format!("load {}, ptr {}{align_suffix}", result_ty.llvm(), ptr.text),
                 ))
             }
             Operation::MemRawWrite => {
@@ -49,8 +54,13 @@ impl Emitter<'_> {
                     Ty::Pointer,
                     format!("inttoptr {} {} to ptr", addr.ty.llvm(), addr.text),
                 );
+                let align_suffix = if matches!(val.ty, Ty::PackedRecord(_)) {
+                    ", align 1"
+                } else {
+                    ""
+                };
                 self.line(format!(
-                    "store {} {}, ptr {}",
+                    "store {} {}, ptr {}{align_suffix}",
                     val.ty.llvm(),
                     val.text,
                     ptr.text

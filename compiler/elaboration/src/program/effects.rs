@@ -546,7 +546,12 @@ impl Checker<'_, '_> {
                 .map(|id| self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type)))
                 .collect(),
             signature: self.signatures[&owner].clone(),
-            abi: if modifiers.is_direct_passing {
+            abi: if self
+                .direct_passing_effects
+                .get(&owner)
+                .copied()
+                .unwrap_or(modifiers.is_direct_passing)
+            {
                 nir::effects::Abi::DirectPassing
             } else if modifiers.is_async {
                 nir::effects::Abi::Async

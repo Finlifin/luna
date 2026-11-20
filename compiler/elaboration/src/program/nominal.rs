@@ -737,6 +737,7 @@ impl Checker<'_, '_> {
                             declaration: declaration(self.package, &self.package_identities, owner),
                             name: item.ident.name.as_str().into(),
                             fields,
+                            packed: self.packed_structs.contains(&owner),
                         },
                     );
                 }

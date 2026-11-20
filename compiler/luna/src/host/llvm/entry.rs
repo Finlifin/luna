@@ -196,7 +196,7 @@ impl Printer<'_> {
                 self.print(&format!("({tag}{close}"))?;
                 return Ok(());
             }
-            let Ty::Record(layout) = physical else {
+            let (Ty::Record(layout) | Ty::PackedRecord(layout)) = physical else {
                 return Err("host entry product layout mismatch".into());
             };
             if fields.len() != layout.len() {

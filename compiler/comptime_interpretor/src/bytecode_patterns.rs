@@ -382,6 +382,7 @@ fn nominal_type_fields_convert_against_the_completed_telescope() {
         capabilities: vec![],
         requirements: vec![],
         fields: vec![],
+        packed: false,
     });
     for compiled in [false, true] {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();

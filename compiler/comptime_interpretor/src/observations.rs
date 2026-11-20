@@ -79,6 +79,7 @@ impl Interpreter<'_> {
         use comptime_compiler::observations::{Kind as O, Observation};
         let (kind, operand) = match &expr.kind {
             K::NewtypeRepresentation(operand) => (O::NewtypeRepresentation, operand.as_ref()),
+            K::DefinitionAttributes(operand) => (O::DefinitionAttributes, operand.as_ref()),
             K::StructFieldTypes(operand) => (O::StructFields { names: false }, operand.as_ref()),
             K::StructFieldNames(operand) => (O::StructFields { names: true }, operand.as_ref()),
             K::EnumStructure { subject, query } => (O::EnumStructure(*query), subject.as_ref()),
@@ -142,6 +143,20 @@ impl Interpreter<'_> {
                 if !((*input == type_ty && *output == type_ty)
                     || (*input == never && *output == never))
                 {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+            }
+            O::DefinitionAttributes => {
+                if !self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+                }
+                let never = Term::Primitive(Primitive::Never);
+                let expected = if *input == never {
+                    never
+                } else {
+                    Term::Primitive(Primitive::Object)
+                };
+                if *output != expected {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 }
             }
@@ -250,6 +265,43 @@ impl Interpreter<'_> {
                         error.source = Some(source);
                         error
                     })
+            }
+            O::DefinitionAttributes => {
+                if self
+                    .declaration_world
+                    .is_some_and(|pkg| pkg.attributes_evaluating)
+                {
+                    return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
+                }
+                let declaration = match value {
+                    Value::TypeParameter(_)
+                    | Value::Type(Term::Rigid { .. })
+                    | Value::AbstractValue { .. } => {
+                        return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
+                    }
+                    Value::Type(Term::Nominal { declaration, .. }) => Some(declaration),
+                    Value::Type(Term::NormalForm { head, .. }) => Some(head),
+                    Value::Type(_) | Value::Description(_) => None,
+                    Value::Function(declaration) | Value::FunctionInstance { declaration, .. } => {
+                        Some(declaration)
+                    }
+                    Value::IirCallable(handle) => Some(handle.key.declaration),
+                    _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+                };
+                if let Some(frozen) = declaration.and_then(|id| {
+                    self.declaration_world
+                        .and_then(|pkg| pkg.definition_attributes.get(&id))
+                }) {
+                    self.decode_immutable_input(frozen, &Term::Primitive(Primitive::Object))
+                        .map_err(|mut error| {
+                            error.source = Some(source);
+                            error
+                        })
+                } else {
+                    Ok(Value::Object(
+                        comptime_runtime::object::Object::from_entries(vec![]),
+                    ))
+                }
             }
             O::StructFields { names } => self.observe_struct_fields(value, output, names, source),
             O::EnumStructure(query) => self.observe_enum_structure(value, output, query, source),
@@ -523,7 +575,12 @@ impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
             };
             return Ok(Some(match concrete {
                 ConcreteNominal::Struct(def) => {
-                    nir::NominalLayout::Struct(def.fields.iter().map(|(_, t)| t.clone()).collect())
+                    let fields = def.fields.iter().map(|(_, t)| t.clone()).collect();
+                    if def.packed {
+                        nir::NominalLayout::PackedStruct(fields)
+                    } else {
+                        nir::NominalLayout::Struct(fields)
+                    }
                 }
                 ConcreteNominal::Newtype(def) => {
                     nir::NominalLayout::Newtype(def.representation.clone())
@@ -554,7 +611,11 @@ impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
                 fuel,
             )
             .map_err(admission_err)?;
-            return Ok(Some(nir::NominalLayout::Struct(fields)));
+            return Ok(Some(if def.packed {
+                nir::NominalLayout::PackedStruct(fields)
+            } else {
+                nir::NominalLayout::Struct(fields)
+            }));
         }
         if let Some(def) = self.0.newtypes.get(declaration) {
             let repr =

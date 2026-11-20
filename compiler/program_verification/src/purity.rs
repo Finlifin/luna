@@ -4722,6 +4722,7 @@ mod resource_world_tests {
                 .collect(),
             requirements: vec![],
             capabilities: vec![],
+            packed: false,
         });
         let mut analysis = Analysis::new(&wide, true);
         analysis.fuel = base_cost + 64;

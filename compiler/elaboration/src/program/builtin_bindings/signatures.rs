@@ -92,6 +92,25 @@ pub(super) fn callable(
             result: Box::new(p(P::Object)),
         }))));
     }
+    if name == "attrs_of" {
+        return Ok(Some(Term::ComptimeFunction(Box::new(Term::Function {
+            parameters: vec![
+                Parameter {
+                    sort: Sort::Type,
+                    ty: p(P::Type),
+                },
+                Parameter {
+                    sort: Sort::Runtime,
+                    ty: Term::Bound {
+                        depth: 0,
+                        index: 0,
+                        sort: Sort::Type,
+                    },
+                },
+            ],
+            result: Box::new(p(P::Object)),
+        }))));
+    }
     if matches!(name, "object_value" | "object_get") {
         return Ok(Some(Term::ComptimeFunction(Box::new(Term::Function {
             parameters: vec![

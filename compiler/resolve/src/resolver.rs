@@ -364,4 +364,86 @@ impl<'a> Resolver<'a> {
     pub fn def_name(&self, def_id: DefId) -> Option<&str> {
         self.tree.def_names.get(&def_id).map(|s| s.as_str())
     }
+
+    /// Collect definitions lexically accessible from `from_scope`, skipping
+    /// modules whose enclosing module chain is inaccessible from `from_scope`.
+    pub fn accessible_definitions(&self, from_scope: ScopeId) -> Vec<DefId> {
+        use crate::binding::BindingKind;
+        use crate::scope::ScopeKind;
+        use std::collections::HashSet;
+
+        let tree = self.scope_tree();
+        let from_ancestors: HashSet<ScopeId> =
+            tree.ancestors(from_scope).map(|scope| scope.id).collect();
+        let module_accessible = |scope_id: ScopeId| -> bool {
+            for ancestor in tree.ancestors(scope_id) {
+                if from_ancestors.contains(&ancestor.id) || ancestor.kind == ScopeKind::Root {
+                    return true;
+                }
+                if ancestor.kind != ScopeKind::Module {
+                    continue;
+                }
+                let Some(parent_id) = ancestor.parent else {
+                    continue;
+                };
+                let Some(parent) = tree.get(parent_id) else {
+                    return false;
+                };
+                let mut found = false;
+                let mut accessible = false;
+                for binding in parent
+                    .items
+                    .declarations()
+                    .values()
+                    .chain(parent.items.glob_candidates.values().flatten())
+                {
+                    if matches!(binding.kind, BindingKind::Definition(def, _) if def == ancestor.owner_def)
+                    {
+                        found = true;
+                        if binding.accessible(tree, from_scope) {
+                            accessible = true;
+                            break;
+                        }
+                    }
+                }
+                if found && !accessible {
+                    return false;
+                }
+            }
+            true
+        };
+
+        let mut visible = Vec::new();
+        for scope in tree.iter() {
+            if !matches!(
+                scope.kind,
+                ScopeKind::Module | ScopeKind::Package | ScopeKind::Root
+            ) || !module_accessible(scope.id)
+            {
+                continue;
+            }
+            for binding in scope.items.declarations().values() {
+                if let BindingKind::Definition(def_id, _) = binding.kind {
+                    if binding.accessible(tree, from_scope) {
+                        visible.push(def_id);
+                    }
+                }
+            }
+            for name in scope.items.glob_candidates.keys() {
+                if scope.items.ambiguous_glob(*name) {
+                    continue;
+                }
+                if let Some(binding) = scope.items.unique_glob(*name) {
+                    if let BindingKind::Definition(def_id, _) = binding.kind {
+                        if binding.accessible(tree, from_scope) {
+                            visible.push(def_id);
+                        }
+                    }
+                }
+            }
+        }
+        visible.sort_unstable();
+        visible.dedup();
+        visible
+    }
 }

@@ -732,6 +732,7 @@ impl Emitter<'_> {
                 &Slot {
                     ty: value.ty.clone(),
                     pointer: address.text,
+                    align: None,
                 },
                 value,
             )?;
@@ -792,6 +793,7 @@ impl Emitter<'_> {
                 Slot {
                     ty: slot.ty.clone(),
                     pointer: pointer.text,
+                    align: slot.align,
                 },
             );
         }
@@ -808,6 +810,7 @@ impl Emitter<'_> {
                 child.load(&Slot {
                     ty,
                     pointer: address.text,
+                    align: None,
                 })
             };
             let first = load(offset);
@@ -851,6 +854,7 @@ impl Emitter<'_> {
                 value: Slot {
                     ty: storage.value.ty.clone(),
                     pointer,
+                    align: storage.value.align,
                 },
             });
         }

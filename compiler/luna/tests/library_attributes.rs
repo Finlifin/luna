@@ -16,11 +16,11 @@ fn abi_constructor_preserves_symbol_and_object_entry_type() {
     let package = support::compile(&format!(
         "mod attrs {{ {ATTRS} }}
         use attrs.abi as calling_convention;
-        comptime fn metadata() -> attrs.bindings.Object {{ calling_convention(.c) }}"
+        comptime fn metadata_sample() -> attrs.bindings.Object {{ calling_convention(.c) }}"
     ));
     let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
     let value = vm
-        .invoke(support::id(&package, "metadata"), vec![])
+        .invoke(support::id(&package, "metadata_sample"), vec![])
         .unwrap();
     let Value::Object(object) = value else {
         panic!("expected attribute object")
@@ -184,11 +184,11 @@ fn source_merge_preserves_application_order_and_failed_output() {
 #[test]
 fn comptime_phase_prelude_value_preserves_boolean_metadata() {
     let package = support::compile(&format!(
-        "mod attrs {{{ATTRS}}} use attrs.prelude.*; comptime fn metadata()->attrs.bindings.Object {{comptime_phase}}"
+        "mod attrs {{{ATTRS}}} use attrs.prelude.*; comptime fn metadata_sample()->attrs.bindings.Object {{comptime_phase}}"
     ));
     let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
     let Value::Object(object) = vm
-        .invoke(support::id(&package, "metadata"), vec![])
+        .invoke(support::id(&package, "metadata_sample"), vec![])
         .unwrap()
     else {
         panic!("expected Object")

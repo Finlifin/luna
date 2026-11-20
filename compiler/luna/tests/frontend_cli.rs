@@ -49,7 +49,10 @@ fn derivation_requests_preserve_phase_strategy_and_subject_without_impl_evidence
     assert!(!dump.contains("(impl (definition"), "{dump}");
     let output = sandbox.run(&["input.fl", "--emit", "nir"]);
     failure(&output, 1);
-    assert!(String::from_utf8_lossy(&output.stderr).contains("derivation expansion"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("no applicable default derivation strategy found")
+    );
 }
 
 #[test]

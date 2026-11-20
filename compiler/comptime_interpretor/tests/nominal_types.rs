@@ -78,6 +78,7 @@ fn record(requirements: Vec<nir::program::TypePredicate>) -> nir::program::Struc
                 sort: Sort::Type,
             },
         )],
+        packed: false,
     }
 }
 fn nominal(argument: Expr) -> Expr {

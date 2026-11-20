@@ -109,6 +109,7 @@ fn contextual_closure_checks_environment_and_signature_formation() {
         requirements: vec![nir::program::TypePredicate::Bool(false)],
         capabilities: vec![],
         fields: vec![],
+        packed: false,
     });
     let nominal = Term::Nominal {
         declaration: id(1),

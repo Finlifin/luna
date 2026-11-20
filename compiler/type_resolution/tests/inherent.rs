@@ -493,6 +493,7 @@ fn nominal_payload_layouts_govern_selection_replay_and_revision() {
         fields: vec![("flag".into(), Term::Primitive(P::Bool))],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     };
     index.set_nominal_layouts(vec![layout.clone()], vec![], vec![]);
     assert!(!index.resolution_is_current(&before));

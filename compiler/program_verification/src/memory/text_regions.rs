@@ -2657,6 +2657,7 @@ mod tests {
                 declaration: pair_decl,
                 name: "Pair".into(),
                 fields: vec![("s".into(), str_ty.clone()), ("n".into(), u32_ty.clone())],
+                packed: false,
             }],
             functions: vec![
                 Function {

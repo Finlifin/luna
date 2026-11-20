@@ -213,6 +213,7 @@ mod tests {
                     .collect(),
                 requirements: vec![],
                 capabilities: vec![],
+                packed: false,
             }],
             ..Default::default()
         };
@@ -297,6 +298,7 @@ mod tests {
                 fields: vec![("value".into(), Term::Primitive(P::Bool))],
                 requirements: vec![],
                 capabilities: vec![],
+                packed: false,
             }],
             ..Default::default()
         };
@@ -353,6 +355,7 @@ mod tests {
                 requirements: vec![],
                 capabilities: vec![],
                 fields: vec![("data".into(), Term::Primitive(P::Bool))],
+                packed: false,
             }],
             ..Default::default()
         };

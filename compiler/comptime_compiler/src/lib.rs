@@ -1726,6 +1726,7 @@ fn compile_root<'a>(
                     | K::SymbolName(_)
                     | K::TextQuery { .. }
                     | K::NewtypeRepresentation(_)
+                    | K::DefinitionAttributes(_)
                     | K::StructFieldTypes(_)
                     | K::StructFieldNames(_)
                     | K::EnumStructure { .. }
@@ -1734,6 +1735,9 @@ fn compile_root<'a>(
                         let (kind, operand) = match &expr.kind {
                             K::NewtypeRepresentation(operand) => {
                                 (O::NewtypeRepresentation, operand.as_ref())
+                            }
+                            K::DefinitionAttributes(operand) => {
+                                (O::DefinitionAttributes, operand.as_ref())
                             }
                             K::StructFieldTypes(operand) => {
                                 (O::StructFields { names: false }, operand.as_ref())

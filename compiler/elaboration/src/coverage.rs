@@ -924,6 +924,7 @@ mod tests {
                         ("left".into(), Term::Primitive(Primitive::Bool)),
                         ("right".into(), Term::Primitive(Primitive::Bool)),
                     ],
+                    packed: false,
                 },
             )]);
             let record_patterns: Vec<_> = selected
@@ -1028,6 +1029,7 @@ mod tests {
                         requirements: vec![],
                         capabilities: vec![],
                         fields: vec![("payload".into(), fields[0].clone())],
+                        packed: false,
                     },
                 );
                 enums.clear();

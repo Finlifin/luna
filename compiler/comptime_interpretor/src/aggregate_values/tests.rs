@@ -26,6 +26,7 @@ fn package() -> Package {
             declaration: id(1),
             name: "Holder".into(),
             fields: vec![("item".into(), parameter.clone())],
+            packed: false,
         }],
         enums: vec![nir::program::Enum {
             is_intrinsic: false,

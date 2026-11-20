@@ -38,6 +38,7 @@ fn baseline() -> Package {
             parameter_types: vec![],
             requirements: vec![],
             capabilities: vec![],
+            packed: false,
         }],
         ..Default::default()
     }

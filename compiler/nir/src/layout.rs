@@ -92,6 +92,7 @@ impl std::error::Error for LayoutError {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NominalLayout {
     Struct(Vec<Term>),
+    PackedStruct(Vec<Term>),
     Newtype(Term),
     EnumUnit,
     EnumSymbol,
@@ -325,6 +326,14 @@ fn layout_at(
                         .collect::<Result<Vec<_>, _>>()?;
                     struct_layout(&layouts)
                 }
+                NominalLayout::PackedStruct(fields) => {
+                    charge(fuel, fields.len())?;
+                    let layouts = fields
+                        .iter()
+                        .map(|field_ty| layout_at(world, field_ty, depth + 1, visiting, fuel))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    packed_struct_layout(&layouts)
+                }
                 NominalLayout::Newtype(representation) => {
                     layout_at(world, &representation, depth + 1, visiting, fuel)
                 }
@@ -408,6 +417,14 @@ fn tuple_fields_layout(
     struct_layout(&layouts)
 }
 
+fn packed_struct_layout(fields: &[TypeLayout]) -> Result<TypeLayout, LayoutError> {
+    let mut size = 0u64;
+    for field in fields {
+        size = size.checked_add(field.size).ok_or(LayoutError::Overflow)?;
+    }
+    Ok(TypeLayout { size, align: 1 })
+}
+
 fn closure_env_state_count(
     world: &impl LayoutWorld,
     fields: &[Term],
@@ -466,6 +483,9 @@ fn closure_field_state_count(
         }
         Term::Nominal { .. } => match world.nominal_layout(ty, fuel)? {
             Some(NominalLayout::Struct(fields)) => {
+                closure_env_state_count(world, &fields, depth + 1, fuel)
+            }
+            Some(NominalLayout::PackedStruct(fields)) => {
                 closure_env_state_count(world, &fields, depth + 1, fuel)
             }
             Some(NominalLayout::Newtype(repr)) => {

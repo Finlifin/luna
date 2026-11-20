@@ -60,6 +60,7 @@ mod tests {
                 capabilities: vec![],
                 requirements: vec![],
                 fields: (0..16).map(|i| (format!("field{i}"), p(P::Bool))).collect(),
+                packed: false,
             }],
             ..Default::default()
         }

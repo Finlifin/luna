@@ -91,6 +91,7 @@ impl Struct {
             parameter_types: vec![],
             requirements,
             capabilities,
+            packed: self.packed,
         })
     }
 

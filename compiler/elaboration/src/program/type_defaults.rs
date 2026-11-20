@@ -140,6 +140,8 @@ impl<'h> Checker<'_, 'h> {
             ItemKind::Struct(def) => Cow::Borrowed(def.clause_params),
             ItemKind::Enum(def) => Cow::Borrowed(def.clause_params),
             ItemKind::Impl(def) => Cow::Borrowed(def.clause_params),
+            ItemKind::Deriver(def) => Cow::Borrowed(def.clause_params),
+            ItemKind::Derive(req) => Cow::Borrowed(req.clause_params),
             ItemKind::TypeAlias(_, clauses, _) | ItemKind::Newtype(_, clauses, _) => {
                 Cow::Borrowed(clauses)
             }

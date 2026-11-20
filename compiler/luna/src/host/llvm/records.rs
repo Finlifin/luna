@@ -23,7 +23,7 @@ impl Emitter<'_> {
         if ty == Ty::Unit && fields.is_empty() {
             return Ok(Value::unit());
         }
-        let Ty::Record(layout) = &ty else {
+        let (Ty::Record(layout) | Ty::PackedRecord(layout)) = &ty else {
             return Err("host anonymous construction lacks a record layout".into());
         };
         if fields.len() != layout.len() {
@@ -62,7 +62,7 @@ impl Emitter<'_> {
     }
 
     pub(super) fn record_field(&mut self, value: &Value, index: usize) -> Result<Value, String> {
-        let Ty::Record(fields) = &value.ty else {
+        let (Ty::Record(fields) | Ty::PackedRecord(fields)) = &value.ty else {
             return Err("host field projection requires an anonymous record".into());
         };
         let field = fields
@@ -87,18 +87,20 @@ impl Emitter<'_> {
             return Ok(root);
         }
         let mut ty = root.ty.clone();
+        let mut packed = root.align == Some(1) || matches!(ty, Ty::PackedRecord(_));
         let mut path = String::from("i32 0");
         for (owner, index) in &place.fields {
             if *owner != FieldOwner::Anonymous && !self.checked {
                 return Err("host nominal field assignment requires resource verification".into());
             }
-            let Ty::Record(fields) = &ty else {
+            let (Ty::Record(fields) | Ty::PackedRecord(fields)) = &ty else {
                 return Err("host assignment path is not an anonymous record".into());
             };
             ty = fields
                 .get(*index)
                 .cloned()
                 .ok_or("host assignment field index out of range")?;
+            packed |= matches!(ty, Ty::PackedRecord(_));
             path.push_str(&format!(", i32 {index}"));
         }
         let name = self.fresh();
@@ -110,6 +112,7 @@ impl Emitter<'_> {
         Ok(Slot {
             ty,
             pointer: format!("%{name}"),
+            align: if packed { Some(1) } else { root.align },
         })
     }
 }

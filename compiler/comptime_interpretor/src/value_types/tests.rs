@@ -28,6 +28,7 @@ fn fixture() -> (Package, Term, Value) {
                 interface_arguments: vec![],
             }],
             requirements: vec![],
+            packed: false,
         }],
         ..Default::default()
     };

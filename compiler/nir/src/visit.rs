@@ -698,6 +698,7 @@ fn walk_mut(
                     | K::PointerType(value)
                     | K::ListLength(value)
                     | K::NewtypeRepresentation(value)
+                    | K::DefinitionAttributes(value)
                     | K::StructFieldTypes(value)
                     | K::BuildStruct(value)
                     | K::BuildNewtype(value)

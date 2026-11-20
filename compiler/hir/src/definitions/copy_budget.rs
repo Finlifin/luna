@@ -71,10 +71,14 @@ pub(super) fn charge_package(package: &Package<'_>, fuel: &mut usize) -> Result<
         clause_definitions,
         next_definition_index: _,
         lexical_parents,
+        derive_visible_strategies,
         staged_parameter_definitions,
         function_template_bodies,
         function_template_applications,
     } = package;
+    for strategies in derive_visible_strategies.values() {
+        charge(fuel, strategies.len().saturating_add(1))?;
+    }
     charge(fuel, 1)?;
     charge(fuel, owners.len())?;
     for (_, owner) in owners.iter_enumerated() {

@@ -142,6 +142,9 @@ fn operation_body(name: &str, mut inputs: Vec<n::Expr>, source: n::SourceRange) 
             right: Box::new(right),
         };
     }
+    if name == "attrs_of" {
+        return K::DefinitionAttributes(Box::new(inputs.pop().unwrap()));
+    }
     if name.starts_with("object_") {
         // The explicit Type input is already bound by ordinary invocation.
         // Its identity lives in the dependent domains, not the operation packet.

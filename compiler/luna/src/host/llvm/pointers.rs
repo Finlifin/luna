@@ -15,9 +15,12 @@ impl Emitter<'_> {
         let Ty::Pointer = &pointer.ty else {
             return Err("host memory access requires a data pointer".into());
         };
+        let ty = repr(self.graph, pointee, self.checked)?;
+        let align = matches!(ty, Ty::PackedRecord(_)).then_some(1);
         Ok(Slot {
-            ty: repr(self.graph, pointee, self.checked)?,
+            ty,
             pointer: pointer.text.clone(),
+            align,
         })
     }
     pub(super) fn address(&mut self, place: &Expr, depth: usize) -> Result<Value, String> {
@@ -58,7 +61,7 @@ impl Emitter<'_> {
         pointee: &Term,
     ) -> Result<Value, String> {
         let slot = self.pointer_slot(&pointer, pointee)?;
-        let Ty::Record(fields) = &slot.ty else {
+        let (Ty::Record(fields) | Ty::PackedRecord(fields)) = &slot.ty else {
             return Err("host pointer projection requires an aggregate layout".into());
         };
         fields

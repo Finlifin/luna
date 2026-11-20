@@ -1396,6 +1396,8 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<splicing::Operand, Error> {
+        let allow_packed_projection =
+            std::mem::replace(&mut self.allow_packed_pointer_projection, false);
         // Type members preserve invocation-time inputs in their prepared
         // receiver. Classify them before probing enum namespaces, whose type
         // identity must already be complete.
@@ -1532,7 +1534,16 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            let (value, is_source) = self.field_operand(value)?.into_parts();
+            let (value, is_source) = {
+                let prev = std::mem::replace(
+                    &mut self.allow_packed_pointer_projection,
+                    allow_packed_projection,
+                );
+                let result = self.field_operand(value);
+                self.allow_packed_pointer_projection = prev;
+                result?
+            }
+            .into_parts();
             source_operand = is_source;
             // Field checking sees the source domain. Only the projected result
             // is constrained by the runtime destination after conversion.
@@ -1588,6 +1599,18 @@ impl Checker<'_, '_> {
                 };
                 if pointer_projection {
                     projected = self.contextual_field_read(projected, expected, expr.span)?;
+                    if !allow_packed_projection
+                        && matches!(
+                            projected.kind,
+                            K::PointerField { .. } | K::PointerAnonymousField { .. }
+                        )
+                        && self.pointer_targets_packed_field(&projected)
+                    {
+                        return Err(error(
+                            expr.span,
+                            "cannot take an aligned pointer to a field of a packed struct",
+                        ));
+                    }
                 }
                 if let Some(expected) = expected {
                     self.require(&projected.ty, expected, expr.span)?;
@@ -1634,6 +1657,18 @@ impl Checker<'_, '_> {
                     kind: projection,
                 };
                 let projected = self.contextual_field_read(pointer, expected, expr.span)?;
+                if !allow_packed_projection
+                    && matches!(
+                        projected.kind,
+                        K::PointerField { .. } | K::PointerAnonymousField { .. }
+                    )
+                    && self.pointer_targets_packed_field(&projected)
+                {
+                    return Err(error(
+                        expr.span,
+                        "cannot take an aligned pointer to a field of a packed struct",
+                    ));
+                }
                 (projected.ty, projected.kind)
             } else {
                 (

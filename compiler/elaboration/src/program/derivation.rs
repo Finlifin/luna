@@ -100,6 +100,8 @@ fn members<'h>(
 pub(super) fn expand<'h>(
     source: &Package<'h>,
     arena: &'h HirArena,
+    resolved_defaults: &BTreeMap<OwnerId, OwnerId>,
+    validated_deriver_attrs: &BTreeSet<OwnerId>,
     fuel: &mut usize,
 ) -> Result<Package<'h>, Error> {
     let mut requests = Vec::new();
@@ -118,20 +120,26 @@ pub(super) fn expand<'h>(
             }) {
                 return Err(unsupported(item.span, "block-local derive requests"));
             }
-            let selection = request
-                .strategy
-                .ok_or_else(|| unsupported(item.span, "default strategy selection"))?;
-            let (head, arguments, extended) = match selection.kind {
-                E::Application(head, arguments) => (head, arguments, false),
-                E::ExtendedApplication(head, arguments) => (head, arguments, true),
-                _ => (selection, &[] as &[_], false),
+            let selection_span = request.strategy.map_or(item.span, |expr| expr.span);
+            let (strategy, arguments, extended) = if let Some(selection) = request.strategy {
+                let (head, arguments, extended) = match selection.kind {
+                    E::Application(head, arguments) => (head, arguments, false),
+                    E::ExtendedApplication(head, arguments) => (head, arguments, true),
+                    _ => (selection, &[] as &[_], false),
+                };
+                let E::ResolvedDef { def_id, .. } = head.kind else {
+                    return Err(unsupported(selection.span, "computed strategy selection"));
+                };
+                let strategy = source
+                    .definition_owner(def_id)
+                    .ok_or_else(|| error(selection.span, "missing derivation strategy"))?;
+                (strategy, arguments, extended)
+            } else {
+                let strategy = resolved_defaults.get(&owner).copied().ok_or_else(|| {
+                    error(item.span, "no applicable default derivation strategy found")
+                })?;
+                (strategy, &[] as &[_], false)
             };
-            let E::ResolvedDef { def_id, .. } = head.kind else {
-                return Err(unsupported(selection.span, "computed strategy selection"));
-            };
-            let strategy = source
-                .definition_owner(def_id)
-                .ok_or_else(|| error(selection.span, "missing derivation strategy"))?;
             if !strategies.contains_key(&strategy) {
                 strategies.insert(strategy, members(source, strategy, fuel)?);
             }
@@ -144,7 +152,7 @@ pub(super) fn expand<'h>(
                 && !request.clause_params.is_empty()
             {
                 return Err(unsupported(
-                    selection.span,
+                    selection_span,
                     "strategy inputs in generic request environments",
                 ));
             }
@@ -170,7 +178,7 @@ pub(super) fn expand<'h>(
             }
             *fuel = fuel
                 .checked_sub(arguments.len().saturating_add(generator.parameters.len()))
-                .ok_or_else(|| error(selection.span, "strategy input routing budget exhausted"))?;
+                .ok_or_else(|| error(selection_span, "strategy input routing budget exhausted"))?;
             // Nonempty signatures use ordinary invocation preparation, including
             // expansion and extended collections. No execution group is built
             // for a declaration-only zero-input strategy, so check that case here.
@@ -179,7 +187,7 @@ pub(super) fn expand<'h>(
                     arguments,
                     Some(generator.parameters),
                     0,
-                    selection.span,
+                    selection_span,
                 )?;
             }
             selected.insert(strategy);
@@ -216,14 +224,20 @@ pub(super) fn expand<'h>(
             hir::AttributeTarget::Definition(owner) => owner,
             hir::AttributeTarget::Member(id) => id.owner,
         };
-        if matches!(
-            source.item(target).map(|item| &item.kind),
-            Some(ItemKind::Derive(_) | ItemKind::Deriver(_))
-        ) {
-            return Err(unsupported(
-                attribute.span,
-                "strategy and derive-request attributes",
-            ));
+        match source.item(target).map(|item| &item.kind) {
+            Some(ItemKind::Deriver(_))
+                if matches!(
+                    attribute.target,
+                    hir::AttributeTarget::Definition(owner)
+                        if validated_deriver_attrs.contains(&owner)
+                ) => {}
+            Some(ItemKind::Derive(_) | ItemKind::Deriver(_)) => {
+                return Err(unsupported(
+                    attribute.span,
+                    "strategy and derive-request attributes",
+                ));
+            }
+            _ => {}
         }
     }
     let mut candidate = hir::definitions::omit_generation_sources(source, arena, &omitted, fuel)
@@ -546,8 +560,15 @@ pub(super) fn expand<'h>(
         }
         candidate.insert_owner(owner, info);
     }
-    candidate
-        .pending_semantics
-        .retain(|(_, feature)| feature != "derivation expansion");
+    let cleared_all_attributes =
+        !source.definition_attributes.is_empty() && candidate.definition_attributes.is_empty();
+    candidate.pending_semantics.retain(|(_, feature)| {
+        feature != "derivation expansion"
+            && (!cleared_all_attributes
+                || !matches!(
+                    feature.as_str(),
+                    "definition attribute" | "definition configuration"
+                ))
+    });
     Ok(candidate)
 }

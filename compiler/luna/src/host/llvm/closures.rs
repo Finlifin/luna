@@ -6,7 +6,9 @@ use super::*;
 pub(super) fn state_count(fields: &std::sync::Arc<Vec<Ty>>) -> usize {
     fn count(ty: &Ty) -> usize {
         match ty {
-            Ty::Record(fields) | Ty::Closure(fields) => state_count(fields),
+            Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) => {
+                state_count(fields)
+            }
             _ => 1,
         }
     }
@@ -29,7 +31,8 @@ pub(super) fn state_index(
         *fuel = fuel
             .checked_sub(1)
             .ok_or("host capture state index budget exhausted")?;
-        let (Ty::Record(children) | Ty::Closure(children)) = current else {
+        let (Ty::Record(children) | Ty::PackedRecord(children) | Ty::Closure(children)) = current
+        else {
             return Err("host capture state path is not a product".into());
         };
         current = children
@@ -43,7 +46,7 @@ pub(super) fn state_index(
             index = index
                 .checked_add(1)
                 .ok_or("host capture state index overflow")?;
-            if let Ty::Record(fields) | Ty::Closure(fields) = node {
+            if let Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) = node {
                 *fuel = fuel
                     .checked_sub(fields.len())
                     .ok_or("host capture state index budget exhausted")?;
@@ -407,6 +410,7 @@ impl Emitter<'_> {
             self.locals.insert(
                 capture.binding,
                 Slot {
+                    align: matches!(field, Ty::PackedRecord(_)).then_some(1),
                     ty: field.clone(),
                     pointer: format!("%{name}"),
                 },
@@ -416,6 +420,7 @@ impl Emitter<'_> {
             let environment = Slot {
                 ty: ty.clone(),
                 pointer: "%environment".into(),
+                align: None,
             };
             for path in paths {
                 let full = std::iter::once(index)
@@ -441,13 +446,21 @@ impl Emitter<'_> {
                 let Some(slot) = self.closure_place(value, depth + 1)? else {
                     return Ok(None);
                 };
-                let Ty::Record(fields) = &slot.ty else {
+                let (Ty::Record(fields) | Ty::PackedRecord(fields)) = &slot.ty else {
                     return Err("host closure field layout missing".into());
                 };
                 let ty = fields
                     .get(*index)
                     .cloned()
                     .ok_or("host closure field out of range")?;
+                let align = if slot.align == Some(1)
+                    || matches!(slot.ty, Ty::PackedRecord(_))
+                    || matches!(ty, Ty::PackedRecord(_))
+                {
+                    Some(1)
+                } else {
+                    slot.align
+                };
                 let name = self.fresh();
                 self.line(format!(
                     "%{name} = getelementptr {}, ptr {}, i32 0, i32 {index}",
@@ -457,6 +470,7 @@ impl Emitter<'_> {
                 Ok(Some(Slot {
                     ty,
                     pointer: format!("%{name}"),
+                    align,
                 }))
             }
             _ => Ok(None),

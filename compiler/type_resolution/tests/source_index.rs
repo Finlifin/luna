@@ -113,6 +113,7 @@ fn metadata_copy_and_invalid_domains_are_bounded_before_publication() {
             .collect(),
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     let mut limited = Budget {
         steps: cost,

@@ -989,6 +989,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     | K::ReadPointer(value)
                     | K::ListLength(value)
                     | K::NewtypeRepresentation(value)
+                    | K::DefinitionAttributes(value)
                     | K::StructFieldTypes(value)
                     | K::BuildStruct(value)
                     | K::BuildNewtype(value)

@@ -39,6 +39,7 @@ fn baseline(count: usize) -> Package {
                 fields: (0..4)
                     .map(|field| (format!("field{field}"), Term::Primitive(Primitive::Bool)))
                     .collect(),
+                packed: false,
             })
             .collect(),
         ..Default::default()

@@ -214,6 +214,7 @@ fn enum_formation_phase_and_cross_kind_collisions_are_checked() {
         requirements: vec![],
         capabilities: vec![],
         fields: vec![],
+        packed: false,
     };
     package.structs.push(structure.clone());
     let collision = [enumeration(30)];

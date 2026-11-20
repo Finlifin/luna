@@ -210,6 +210,7 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
             | K::PointerType(value)
             | K::ListLength(value)
             | K::NewtypeRepresentation(value)
+            | K::DefinitionAttributes(value)
             | K::StructFieldTypes(value)
             | K::BuildStruct(value)
             | K::BuildNewtype(value)

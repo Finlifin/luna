@@ -209,6 +209,7 @@ impl Host {
                     .iter()
                     .map(|field| (field.name.clone(), field.ty.clone()))
                     .collect(),
+                packed: false,
             }]
             .into(),
             commit: Box::new(|| self.commit()),

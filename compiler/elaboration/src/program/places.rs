@@ -166,7 +166,10 @@ impl Checker<'_, '_> {
         let H::Deref(pointer) = &base.kind else {
             return Ok(None);
         };
-        let mut pointer = self.expr(pointer, None)?;
+        let prev_allow = std::mem::replace(&mut self.allow_packed_pointer_projection, true);
+        let pointer = self.expr(pointer, None);
+        self.allow_packed_pointer_projection = prev_allow;
+        let mut pointer = pointer?;
         if !matches!(pointer.ty, Term::Pointer(_)) {
             return Err(error(base.span, "dereference requires a pointer"));
         }

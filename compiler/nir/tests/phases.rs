@@ -725,6 +725,7 @@ fn nominal_callback_storage_preserves_ordinary_input_frames() {
                 sort: Sort::Type,
             },
         )],
+        packed: false,
     };
     let mut root = function(1, Phase::Runtime, &[Sort::Type, Sort::Runtime]);
     let callback = Term::Function {
@@ -805,6 +806,7 @@ fn recursive_runtime_callback_storage_terminates_across_function_frames() {
         requirements: vec![],
         capabilities: vec![],
         fields: vec![("next".into(), callback)],
+        packed: false,
     };
     let mut root = function(1, Phase::Runtime, &[Sort::Runtime]);
     let Term::Function { parameters, .. } = &mut root.signature else {
@@ -1570,7 +1572,7 @@ fn declaration_responsibility_survives_specialization_without_wrapping_its_teles
 
 #[test]
 fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annotation() {
-    for operation in 0..21 {
+    for operation in 0..=21 {
         let mut f = function(1, Phase::Runtime, &[]);
         let subject = Box::new(Expr {
             source: f.body.source,
@@ -1584,6 +1586,7 @@ fn struct_reflection_is_not_a_runtime_operation_even_with_a_runtime_result_annot
             3 => K::BuildEnum(subject),
             19 => K::BuildNewtype(subject),
             20 => K::NewtypeRepresentation(subject),
+            21 => K::DefinitionAttributes(subject),
             4..=8 => K::EnumStructure {
                 subject,
                 query: [

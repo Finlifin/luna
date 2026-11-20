@@ -51,6 +51,8 @@ pub(super) fn charge_world_tables(
 ) -> Result<(), Error> {
     let Package {
         refinements: _, // Borrowed immutable registry; no VM index is constructed.
+        definition_attributes: _,
+        attributes_evaluating: _,
         builtin_implementation_packages,
         target: _,
         tests,

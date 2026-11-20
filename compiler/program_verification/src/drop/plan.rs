@@ -1578,6 +1578,7 @@ mod tuple_layout_tests {
                     fields: (0..64)
                         .map(|i| (format!("slot{i}"), parameter.clone()))
                         .collect(),
+                    packed: false,
                 });
             }
             let failure = layout(&package, &ty, &mut 2000)

@@ -49,6 +49,7 @@ const compiler_enum_bit_values: comptime fn(Type) -> List<Integer> = .enum_bit_v
 const compiler_enum_bit_offsets: comptime fn(Type) -> List<List<Integer>> =
     .enum_bit_offsets'builtin;
 const CompilerNewtypeRepresentation: comptime fn(Type) -> Type = .newtype_representation'builtin;
+const compiler_attrs_of: comptime fn(comptime T: Type, T) -> Object = .attrs_of'builtin;
 const CompilerBuildNewtype: comptime fn(Symbol, Type) -> Type = .build_newtype'builtin;
 const CompilerBuildStruct: comptime fn(Symbol, List<Symbol>, List<Type>) -> Type =
     .build_struct'builtin;
@@ -267,4 +268,8 @@ pub const BuildNewtype: comptime fn(Symbol, Type) -> Type = CompilerBuildNewtype
 
 pub pure comptime fn NewtypeRepresentation(subject: Type) -> Type {
     CompilerNewtypeRepresentation(subject)
+}
+
+pub pure comptime fn attrs_of(target: T) -> Object where T {
+    compiler_attrs_of(T, target)
 }

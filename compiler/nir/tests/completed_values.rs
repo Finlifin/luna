@@ -847,6 +847,7 @@ fn nominal_completed_values_check_instantiated_layouts_and_constructor_identity(
         capabilities: vec![],
         requirements: vec![],
         fields: vec![("value".into(), parameter.clone())],
+        packed: false,
     };
     let enumeration = Enum {
         declaration: decl(2),
@@ -1313,6 +1314,7 @@ fn completed_nominal_lookup_distinguishes_absence_budget_and_duplicate_identity(
         capabilities: vec![],
         requirements: vec![],
         fields: vec![],
+        packed: false,
     };
     let mut package = nir::program::Package::default();
     package.structs.push(definition.clone());

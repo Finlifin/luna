@@ -2503,6 +2503,7 @@ fn nominal_trait_indices_resolve_only_with_valid_layouts() {
             fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
             requirements: vec![],
             capabilities: vec![],
+            packed: false,
         }],
         vec![],
         vec![],
@@ -2562,6 +2563,7 @@ fn nominal_capability_sources_and_subject_facts_require_layout_evidence() {
         fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     let assumptions = vec![assumption];
     let domains = Default::default();

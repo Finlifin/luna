@@ -41,7 +41,7 @@ impl Emitter<'_> {
             Pattern::Tuple(fields)
             | Pattern::AnonymousRecord { fields, .. }
             | Pattern::Record { fields, .. } => {
-                let Ty::Record(layout) = &value.ty else {
+                let (Ty::Record(layout) | Ty::PackedRecord(layout)) = &value.ty else {
                     return Err("host record pattern subject has no record layout".into());
                 };
                 if fields.len() != layout.len() {

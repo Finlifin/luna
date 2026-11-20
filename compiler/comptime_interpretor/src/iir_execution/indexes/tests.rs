@@ -42,6 +42,7 @@ fn graph(padding: u32) -> iir::Package {
                 requirements: vec![],
                 capabilities: vec![],
                 fields: vec![("value".into(), scalar.clone())],
+                packed: false,
             }),
         });
         nominals.push(iir::NominalInstance {
@@ -328,6 +329,7 @@ fn generated_graph_definitions_are_transactional_and_reject_artifact_collisions(
         requirements: vec![],
         capabilities: vec![],
         fields: vec![("base".into(), ty(1, boolean()))],
+        packed: false,
     }]
     .into();
     assert!(

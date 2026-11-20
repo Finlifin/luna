@@ -1449,6 +1449,7 @@ impl<'a> PhaseContext<'a> {
                         | K::ObjectQuery { subject: value, .. }
                         | K::ObjectEdit { subject: value, .. }
                         | K::NewtypeRepresentation(value)
+                        | K::DefinitionAttributes(value)
                         | K::StructFieldTypes(value)
                         | K::StructFieldNames(value) => {
                             if !ct {

@@ -211,6 +211,7 @@ fn nominal_fields_and_variants_instantiate_in_explicit_input_frames() {
         fields: vec![("value".into(), field.clone())],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     };
     let frames = vec![vec![Sort::Type]];
     let arguments = vec![bound(0, 0, Sort::Type)];

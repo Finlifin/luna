@@ -23,6 +23,14 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         subject: &Term,
     ) -> Result<n::InterfaceInstance, Error> {
+        self.interface_expr_optional_subject(expr, Some(subject))
+    }
+
+    pub(in crate::program) fn interface_expr_optional_subject(
+        &mut self,
+        expr: &Expr<'_>,
+        subject: Option<&Term>,
+    ) -> Result<n::InterfaceInstance, Error> {
         let (head, args) = match &expr.kind {
             H::NFApplication(head, args) => (*head, Some(*args)),
             _ => (expr, None),
@@ -44,7 +52,7 @@ impl Checker<'_, '_> {
             return Err(error(expr.span, "interface expression must be a trait"));
         }
         let arguments = self
-            .type_clause_arguments(owner, args.unwrap_or_default(), Some(subject), expr.span)
+            .type_clause_arguments(owner, args.unwrap_or_default(), subject, expr.span)
             .map_err(|mut failure| {
                 if failure.message == "type argument count mismatch" {
                     failure.message = "interface type argument count mismatch".into();

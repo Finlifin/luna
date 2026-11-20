@@ -153,7 +153,17 @@ fn merged_default_marker_consumes_values_not_helper_names() {
         report.contains("(enabled false)") && !report.contains("(enabled true)"),
         "{report}"
     );
-    assert!(compile(source, Emit::Nir).is_err());
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR artifact");
+    };
+    assert_eq!(package.implementations.len(), 1);
+    let error = compile(&disabled, Emit::Nir)
+        .err()
+        .expect("disabled marker should leave request without a default strategy");
+    assert!(
+        error.contains("no applicable default derivation strategy found"),
+        "{error}"
+    );
 }
 
 #[test]

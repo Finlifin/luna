@@ -33,6 +33,7 @@ impl CheckedDefinitionPublisher<'_> {
                     .iter()
                     .map(|field| (field.name.clone(), field.ty.clone()))
                     .collect(),
+                packed: false,
             }]
             .into();
             let prepared =

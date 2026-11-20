@@ -798,6 +798,7 @@ mod tests {
                 fields: vec![],
                 requirements: vec![],
                 capabilities: vec![],
+                packed: false,
             }],
             ..Default::default()
         });

@@ -2543,6 +2543,7 @@ impl<'a> Interpreter<'a> {
             K::ObjectEdit { .. } => self.eval_object_edit(expr, environment),
             K::ObjectQuery { .. } => self.eval_object_query(expr, environment),
             K::NewtypeRepresentation(_)
+            | K::DefinitionAttributes(_)
             | K::StructFieldTypes(_)
             | K::StructFieldNames(_)
             | K::TypeLayout { .. } => self.eval_observation(expr, environment),
@@ -5715,6 +5716,7 @@ mod normal_input_data_tests {
                 parameter_types: vec![],
                 requirements: vec![],
                 capabilities: vec![],
+                packed: false,
             }],
             ..Default::default()
         };
@@ -6483,6 +6485,7 @@ mod nominal_environment_tests {
                 requirements: vec![],
                 capabilities: vec![],
                 fields: vec![],
+                packed: false,
             }],
             ..Default::default()
         };

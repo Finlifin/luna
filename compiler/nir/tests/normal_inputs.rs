@@ -1600,6 +1600,7 @@ fn receiving_world_fields_admit_registered_products_in_nested_nominal_inputs() {
         fields: vec![("value".into(), primitive(P::Bool))],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     let instance = |value| Term::Nominal {
         declaration: id(40),

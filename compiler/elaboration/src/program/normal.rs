@@ -1851,7 +1851,11 @@ impl nir::LayoutWorld for Checker<'_, '_> {
                 fuel,
             )
             .map_err(admission_err)?;
-            return Ok(Some(nir::NominalLayout::Struct(fields)));
+            return Ok(Some(if def.packed {
+                nir::NominalLayout::PackedStruct(fields)
+            } else {
+                nir::NominalLayout::Struct(fields)
+            }));
         }
         if let Some(def) = self.newtypes.get(declaration) {
             let repr =

@@ -14,6 +14,7 @@ fn record(local: u32) -> n::Struct {
         capabilities: vec![],
         requirements: vec![],
         fields: vec![("flag".into(), p(P::Bool))],
+        packed: false,
     }
 }
 

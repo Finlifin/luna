@@ -142,6 +142,7 @@ fn packages() -> Vec<(&'static str, n::Package)> {
         declaration: id(7),
         name: "Record".into(),
         fields: vec![("field".repeat(512), boolean())],
+        packed: false,
     });
     cases.push(("nominal labels", package));
 

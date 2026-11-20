@@ -430,6 +430,7 @@ fn source_struct_build_rejection_does_not_commit_and_can_retry_in_the_same_vm() 
                 .iter()
                 .map(|field| (field.name.clone(), field.ty.clone()))
                 .collect(),
+            packed: false,
         };
         let mode = &mode;
         let commits = &commits;
@@ -517,6 +518,7 @@ fn source_struct_build_shares_budget_and_does_not_request_after_early_return() {
                 .iter()
                 .map(|field| (field.name.clone(), field.ty.clone()))
                 .collect(),
+            packed: false,
         };
         let commits = &commits;
         Ok(PreparedStructBuild {
@@ -790,7 +792,7 @@ fn sysroot_reflection_uses_receiver_domains_without_unfolding_type_identity() {
     let methods = |callee: &nir::program::Expr, fuel: &mut u64| queries.resolve(callee, fuel);
     let associated = |access: &nir::program::Expr, fuel: &mut u64| queries.associated(access, fuel);
     for tree in [false, true] {
-        let budget = comptime_interpretor::Budget::default();
+        let budget = sysroot::COMPTIME_BUDGET;
         let mut vm = if tree {
             comptime_interpretor::Interpreter::for_comptime_tree(&package, budget)
         } else {
@@ -866,7 +868,7 @@ fn computed_normal_form_receiver_keeps_live_clause_inputs() {
     )
     .unwrap();
     for tree in [false, true] {
-        let budget = comptime_interpretor::Budget::default();
+        let budget = sysroot::COMPTIME_BUDGET;
         let mut vm = if tree {
             comptime_interpretor::Interpreter::for_comptime_tree(&package, budget)
         } else {

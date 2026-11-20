@@ -2074,6 +2074,25 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     }
 
     fn lower_derive_request(&mut self, node: NodeIndex, phase: ImplementationPhase) -> OwnerId {
+        let request_scope = self.file_scope;
+        let owner_id = self.lower_derive_request_inner(node, phase);
+        if matches!(
+            self.package.item(owner_id).map(|item| &item.kind),
+            Some(ItemKind::Derive(request)) if request.strategy.is_none()
+        ) {
+            self.package.derive_visible_strategies.insert(
+                owner_id,
+                self.resolver.accessible_definitions(request_scope).into(),
+            );
+        }
+        owner_id
+    }
+
+    fn lower_derive_request_inner(
+        &mut self,
+        node: NodeIndex,
+        phase: ImplementationPhase,
+    ) -> OwnerId {
         let (_, span, children) = self.ast.get_node(node).expect("derive node");
         let owner_id = self.package.alloc_owner_id();
         let previous_owner = self.current_owner;

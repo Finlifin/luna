@@ -1,4 +1,4 @@
-use builtin.{bool, str, u64, u8}
+use builtin.{Symbol, bool, str, u64, u8}
 use text_impl.bindings;
 
 {-
@@ -112,5 +112,15 @@ impl str {
             index = index + 1;
         }
         true
+    }
+}
+
+impl Symbol {
+    pub pure comptime fn byte_length(self) -> u64 {
+        bindings.symbol_byte_length(self)
+    }
+
+    pub pure comptime fn byte(self, index: u64) -> ?u8 {
+        bindings.symbol_byte(self, index)
     }
 }

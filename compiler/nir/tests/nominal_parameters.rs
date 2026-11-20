@@ -31,6 +31,7 @@ fn full_nominal_instances_preserve_metadata_and_specialize_contracts() {
             subject: parameter.clone(),
             interface_arguments: vec![parameter],
         }],
+        packed: false,
     };
     let original = declaration.clone();
     let argument = Term::Primitive(P::Bool);
@@ -370,6 +371,7 @@ fn record(domains: Vec<Term>) -> Struct {
                 },
             ),
         ],
+        packed: false,
     }
 }
 
@@ -1013,6 +1015,7 @@ fn layout_lookup_preserves_exhaustion_evidence_for_valid_indices() {
         fields: vec![],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     let mut invalid_fuel = 2000;
     let invalid = Term::Nominal {
@@ -1405,6 +1408,7 @@ fn nominal_collection_layouts_use_registered_domains_and_capture_order() {
         fields: vec![],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     let outer = |payload| Term::Nominal {
         declaration: id(30),
@@ -1624,6 +1628,7 @@ fn named_payload_views_charge_labels_but_do_not_copy_declaration_metadata() {
         fields: vec![("field".repeat(1000), rigid(1, Sort::Type))],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     };
     let arguments = [Term::Primitive(P::Bool)];
     let mut fuel = 500;
@@ -1700,6 +1705,7 @@ fn named_payload_views_bound_expanded_arguments_and_recover() {
         )],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     };
     let arguments = [Term::Record(
         (0..32)

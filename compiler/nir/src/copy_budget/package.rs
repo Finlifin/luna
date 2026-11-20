@@ -100,6 +100,8 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         newtypes,
         alias_contracts,
         enums,
+        definition_attributes,
+        attributes_evaluating,
     } = package;
     let mut meter = Meter {
         fuel,
@@ -210,6 +212,10 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     for definition in enums {
         meter.enumeration(definition)?;
     }
+    meter.width(definition_attributes.len())?;
+    for term in definition_attributes.values() {
+        meter.node(Node::Type(term))?;
+    }
     // No clone above this point. Failure leaves the caller's source untouched
     // and cannot expose a partially captured declaration world.
     Ok(n::Package {
@@ -237,6 +243,8 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         newtypes: newtypes.clone(),
         alias_contracts: alias_contracts.clone(),
         enums: enums.clone(),
+        definition_attributes: definition_attributes.clone(),
+        attributes_evaluating: *attributes_evaluating,
     })
 }
 
@@ -323,6 +331,7 @@ impl Meter<'_> {
             declaration: _,
             name,
             fields,
+            packed: _,
         } = definition;
         self.width(name.len())?;
         self.width(type_parameters.len())?;

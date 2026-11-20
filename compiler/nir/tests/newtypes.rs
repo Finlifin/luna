@@ -155,6 +155,7 @@ fn metadata_rejects_duplicate_identity_parameters_and_non_types() {
         requirements: vec![],
         capabilities: vec![],
         fields: vec![],
+        packed: false,
     });
     assert!(nir::normal_forms::validate(&package).is_err());
     package.structs.clear();

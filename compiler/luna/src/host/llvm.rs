@@ -49,6 +49,7 @@ enum Ty {
     // its layout from the checked logical IIR type, preserving nominal identity.
     Pointer,
     Record(std::sync::Arc<Vec<Ty>>),
+    PackedRecord(std::sync::Arc<Vec<Ty>>),
 }
 impl Ty {
     fn llvm(&self) -> String {
@@ -94,18 +95,28 @@ impl Ty {
                 Self::Record(fields.clone()).llvm(),
                 closures::state_count(fields)
             ),
-            Self::Record(fields) => format!(
-                "{{ {} }}",
-                fields
+            Self::Record(fields) | Self::PackedRecord(fields) => {
+                let inner = fields
                     .iter()
-                    .map(|ty| if *ty == Ty::Unit {
-                        "{}".into()
-                    } else {
-                        ty.llvm()
+                    .map(|ty| {
+                        if *ty == Ty::Unit {
+                            "{}".into()
+                        } else {
+                            ty.llvm()
+                        }
                     })
                     .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+                    .join(", ");
+                if matches!(self, Self::PackedRecord(_)) {
+                    if fields.is_empty() {
+                        "<{}>".into()
+                    } else {
+                        format!("<{{ {inner} }}>")
+                    }
+                } else {
+                    format!("{{ {inner} }}")
+                }
+            }
             Self::Pointer | Self::FunctionPointer => "ptr".into(),
             Self::TemplateIdentity(_) => "i64".into(),
             Self::Float16 => "half".into(),
@@ -166,7 +177,12 @@ impl nir::LayoutWorld for HostLayoutWorld<'_> {
         };
         Ok(Some(match &instance.definition {
             iir::NominalDefinition::Struct(def) => {
-                nir::NominalLayout::Struct(def.fields.iter().map(|(_, t)| t.clone()).collect())
+                let fields = def.fields.iter().map(|(_, t)| t.clone()).collect();
+                if def.packed {
+                    nir::NominalLayout::PackedStruct(fields)
+                } else {
+                    nir::NominalLayout::Struct(fields)
+                }
             }
             iir::NominalDefinition::Newtype(def) => {
                 nir::NominalLayout::Newtype(def.representation.clone())
@@ -294,13 +310,18 @@ fn repr_at(
                     )?)));
                 }
             };
-            Ok(Ty::Record(std::sync::Arc::new(
+            let fields = std::sync::Arc::new(
                 definition
                     .fields
                     .iter()
                     .map(|(_, ty)| repr_at(graph, ty, depth + 1, checked, remaining))
                     .collect::<Result<Vec<_>, _>>()?,
-            )))
+            );
+            Ok(if definition.packed {
+                Ty::PackedRecord(fields)
+            } else {
+                Ty::Record(fields)
+            })
         }
         Term::Closure {
             environment,
@@ -394,6 +415,7 @@ impl Value {
 struct Slot {
     ty: Ty,
     pointer: String,
+    align: Option<u64>,
 }
 struct Emitter<'a> {
     graph: &'a iir::Package,
@@ -449,8 +471,10 @@ impl Emitter<'_> {
     }
     fn slot(&mut self, ty: Ty) -> Slot {
         let name = self.fresh();
+        let align = matches!(ty, Ty::PackedRecord(_)).then_some(1);
+        let align_suffix = align.map_or(String::new(), |a| format!(", align {a}"));
         self.prologue.push_str(&format!(
-            "  %{name} = alloca {}\n",
+            "  %{name} = alloca {}{align_suffix}\n",
             if ty == Ty::Unit {
                 "{}".into()
             } else {
@@ -460,6 +484,7 @@ impl Emitter<'_> {
         Slot {
             ty,
             pointer: format!("%{name}"),
+            align,
         }
     }
     fn store(&mut self, slot: &Slot, value: &Value) -> Result<(), String> {
@@ -467,8 +492,12 @@ impl Emitter<'_> {
             return Err("host LLVM store representation mismatch".into());
         }
         if value.ty != Ty::Unit {
+            let align = slot
+                .align
+                .or_else(|| matches!(value.ty, Ty::PackedRecord(_)).then_some(1));
+            let align_suffix = align.map_or(String::new(), |a| format!(", align {a}"));
             self.line(format!(
-                "store {} {}, ptr {}",
+                "store {} {}, ptr {}{align_suffix}",
                 value.ty.llvm(),
                 value.text,
                 slot.pointer
@@ -480,10 +509,38 @@ impl Emitter<'_> {
         if slot.ty == Ty::Unit {
             Value::unit()
         } else {
+            let align = slot
+                .align
+                .or_else(|| matches!(slot.ty, Ty::PackedRecord(_)).then_some(1));
+            let align_suffix = align.map_or(String::new(), |a| format!(", align {a}"));
             self.instruction(
                 slot.ty.clone(),
-                format!("load {}, ptr {}", slot.ty.llvm(), slot.pointer),
+                format!(
+                    "load {}, ptr {}{align_suffix}",
+                    slot.ty.llvm(),
+                    slot.pointer
+                ),
             )
+        }
+    }
+    fn is_packed_pointer_field(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            K::PointerField {
+                pointer,
+                declaration,
+                ..
+            } => {
+                let packed = self.graph.nominals.iter().any(|instance| {
+                    matches!(
+                        &instance.definition,
+                        iir::NominalDefinition::Struct(def)
+                            if def.declaration == *declaration && def.packed
+                    )
+                });
+                packed || self.is_packed_pointer_field(pointer)
+            }
+            K::PointerAnonymousField { pointer, .. } => self.is_packed_pointer_field(pointer),
+            _ => false,
         }
     }
     fn bind(&mut self, id: LocalId, value: &Value) -> Result<(), String> {
@@ -1534,11 +1591,15 @@ impl Emitter<'_> {
                 Ok(self.load(&slot))
             }
             K::ReadPointer(pointer) => {
+                let unaligned = self.is_packed_pointer_field(pointer);
                 let pointer = self.expr(pointer, depth)?;
                 if self.terminated {
                     Ok(Value::unit())
                 } else {
-                    let slot = self.pointer_slot(&pointer, &expr.ty)?;
+                    let mut slot = self.pointer_slot(&pointer, &expr.ty)?;
+                    if unaligned {
+                        slot.align = Some(1);
+                    }
                     Ok(self.load(&slot))
                 }
             }
@@ -1553,11 +1614,15 @@ impl Emitter<'_> {
                 }
             }
             K::WritePointer { pointer, value } => {
+                let unaligned = self.is_packed_pointer_field(pointer);
                 let pointer_type = &pointer.ty;
                 let pointer = self.expr(pointer, depth)?;
                 let value = self.expr(value, depth)?;
                 if !self.terminated {
-                    let slot = self.pointer_slot(&pointer, pointers::pointee(pointer_type)?)?;
+                    let mut slot = self.pointer_slot(&pointer, pointers::pointee(pointer_type)?)?;
+                    if unaligned {
+                        slot.align = Some(1);
+                    }
                     self.store(&slot, &value)?;
                 }
                 Ok(Value::unit())
@@ -1928,12 +1993,16 @@ impl Emitter<'_> {
                 selections,
                 value,
             } => {
+                let unaligned = self.is_packed_pointer_field(pointer);
                 let pointer_type = &pointer.ty;
                 let pointer = self.expr(pointer, depth)?;
                 if self.terminated {
                     Ok(Value::unit())
                 } else {
-                    let slot = self.pointer_slot(&pointer, pointers::pointee(pointer_type)?)?;
+                    let mut slot = self.pointer_slot(&pointer, pointers::pointee(pointer_type)?)?;
+                    if unaligned {
+                        slot.align = Some(1);
+                    }
                     self.bit_write(slot, selections, value, depth)
                 }
             }
@@ -2583,8 +2652,10 @@ pub(super) fn emit_with_result_output(
         );
         return Ok(module);
     }
-    if matches!(result, Ty::Record(_) | Ty::ErrorResult(_))
-        || matches!(logical_result.as_ref(), Term::Tuple(_))
+    if matches!(
+        result,
+        Ty::Record(_) | Ty::PackedRecord(_) | Ty::ErrorResult(_)
+    ) || matches!(logical_result.as_ref(), Term::Tuple(_))
         || graph
             .normal_forms
             .iter()
@@ -2961,6 +3032,7 @@ mod recursive_layout_tests {
                     requirements: vec![],
                     type_parameters: vec![],
                     fields: vec![("next".into(), field)],
+                    packed: false,
                 }),
             }],
             ..Default::default()
@@ -3006,6 +3078,7 @@ mod layout_budget_tests {
                     requirements: vec![],
                     type_parameters: vec![],
                     fields: vec![("left".into(), ty.clone()), ("right".into(), ty)],
+                    packed: false,
                 }),
             });
             ty = next;

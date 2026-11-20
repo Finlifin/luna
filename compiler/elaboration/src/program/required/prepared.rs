@@ -1029,6 +1029,7 @@ mod tests {
                     )],
                     capabilities: vec![],
                     fields: vec![],
+                    packed: false,
                 });
                 let representation = Term::Nominal {
                     declaration: owner,
@@ -1657,6 +1658,7 @@ mod tests {
                 capabilities: vec![],
                 requirements: vec![],
                 fields: vec![],
+                packed: false,
             });
             package
                 .runtime_function_identities

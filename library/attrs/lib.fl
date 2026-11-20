@@ -1,8 +1,18 @@
 {- Attribute values are ordinary comptime data checked by their consumers. -}
 pub use calling_convention.constructors.abi;
+pub use metadata_impl.constructors.metadata;
 pub use staging.phase.comptime_phase;
+
+pub mod layout {
+    pub use .layout_impl.constructors.{packed, packed_layout}
+}
+
+pub mod effects {
+    pub use .effects_impl.strategy.direct_passing;
+}
 
 pub mod prelude {
     pub use .abi;
     pub use .comptime_phase;
+    pub use .metadata;
 }

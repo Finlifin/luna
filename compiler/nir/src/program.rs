@@ -1217,6 +1217,7 @@ pub enum ExprKind {
     /// Length of a checked immutable comptime list.
     ListLength(Box<Expr>),
     NewtypeRepresentation(Box<Expr>),
+    DefinitionAttributes(Box<Expr>),
     StructFieldTypes(Box<Expr>),
     StructFieldNames(Box<Expr>),
     /// Compiler-private packet: definition name, field names, field Types.
@@ -2062,6 +2063,8 @@ pub struct Package {
     pub newtypes: Vec<crate::newtypes::Newtype>,
     pub alias_contracts: Vec<crate::type_aliases::Contract>,
     pub enums: Vec<Enum>,
+    pub definition_attributes: std::collections::BTreeMap<DeclarationId, Term>,
+    pub attributes_evaluating: bool,
 }
 
 /// Acquired cleanup accesses, expressed relative to one residual invocation's inputs.
@@ -2843,6 +2846,7 @@ pub struct Struct {
     pub declaration: DeclarationId,
     pub name: String,
     pub fields: Vec<(String, Term)>,
+    pub packed: bool,
 }
 impl Struct {
     /// Check completed indices before constructing a concrete layout instance.
@@ -2889,7 +2893,11 @@ impl fmt::Display for Struct {
             string(f, name)?;
             write!(f, ") (type {ty}))")?;
         }
-        f.write_str("))")
+        if self.packed {
+            f.write_str(") (packed true))")
+        } else {
+            f.write_str("))")
+        }
     }
 }
 
@@ -3440,6 +3448,7 @@ impl fmt::Display for ExprKind {
             }
             Self::ListLength(values) => write!(f, "(list-length {values})"),
             Self::NewtypeRepresentation(subject) => write!(f, "(newtype-representation {subject})"),
+            Self::DefinitionAttributes(subject) => write!(f, "(definition-attributes {subject})"),
             Self::StructFieldTypes(subject) => write!(f, "(struct-field-types {subject})"),
             Self::BuildStruct(request) => write!(f, "(build-struct {request})"),
             Self::BuildNewtype(request) => write!(f, "(build-newtype {request})"),
@@ -3647,6 +3656,16 @@ impl fmt::Display for Package {
         for instance in &self.dispatch_instances {
             write!(f, "\n {instance}")?;
         }
+        if self.attributes_evaluating {
+            f.write_str(" (attributes-evaluating true)")?;
+        }
+        if !self.definition_attributes.is_empty() {
+            f.write_str("\n (definition-attributes")?;
+            for (declaration, object) in &self.definition_attributes {
+                write!(f, " (entry {declaration} {object})")?;
+            }
+            f.write_str(")")?;
+        }
         f.write_str(")\n")
     }
 }
@@ -3825,6 +3844,7 @@ impl Expr {
                     | ExprKind::PointerType(_)
                     | ExprKind::ListLength(_)
                     | ExprKind::NewtypeRepresentation(_)
+                    | ExprKind::DefinitionAttributes(_)
                     | ExprKind::StructFieldTypes(_)
                     | ExprKind::BuildStruct(_)
                     | ExprKind::BuildNewtype(_)
@@ -3935,6 +3955,7 @@ impl Expr {
                 | ExprKind::PointerType(value)
                 | ExprKind::ListLength(value)
                 | ExprKind::NewtypeRepresentation(value)
+                | ExprKind::DefinitionAttributes(value)
                 | ExprKind::StructFieldTypes(value)
                 | ExprKind::BuildStruct(value)
                 | ExprKind::BuildNewtype(value)
@@ -4372,6 +4393,7 @@ impl Expr {
             | ExprKind::PointerType(value)
             | ExprKind::ListLength(value)
             | ExprKind::NewtypeRepresentation(value)
+            | ExprKind::DefinitionAttributes(value)
             | ExprKind::StructFieldTypes(value)
             | ExprKind::BuildStruct(value)
             | ExprKind::BuildNewtype(value)

@@ -473,6 +473,7 @@ fn ordinary_struct_builder_rejects_host_added_metadata_before_commit() {
                     parameter_types: vec![],
                     requirements: vec![],
                     capabilities: vec![],
+                    packed: false,
                 };
                 if altered.get() {
                     match case {

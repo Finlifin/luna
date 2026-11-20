@@ -326,6 +326,8 @@ impl Checker<'_, '_> {
                 ItemKind::Struct(def) => def.clause_constraints,
                 ItemKind::Enum(def) => def.clause_constraints,
                 ItemKind::Impl(def) => def.clause_constraints,
+                ItemKind::Deriver(def) => def.clause_constraints,
+                ItemKind::Derive(req) => req.clause_constraints,
                 ItemKind::Trait(def) => def.clause_constraints,
                 ItemKind::Associated(def) => def.clause_constraints,
                 // Lexical const initializers and explicit template-instance inputs
@@ -539,6 +541,8 @@ impl Checker<'_, '_> {
             ItemKind::Struct(def) => def.clause_constraints,
             ItemKind::Enum(def) => def.clause_constraints,
             ItemKind::Impl(def) => def.clause_constraints,
+            ItemKind::Deriver(def) => def.clause_constraints,
+            ItemKind::Derive(req) => req.clause_constraints,
             ItemKind::Trait(def) => def.clause_constraints,
             ItemKind::EffectGroup(group) => group.clause_constraints,
             _ => &[],
@@ -1487,6 +1491,10 @@ impl Checker<'_, '_> {
                 newtypes: self.newtypes.values().cloned().collect(),
                 alias_contracts: self.alias_contracts.values().cloned().collect(),
                 enums: self.enums.values().cloned().collect(),
+                definition_attributes: self.definition_attributes.clone(),
+                attributes_evaluating: self.evaluating_attributes
+                    || (!self.attributes_prepared
+                        && !self.package.definition_attributes.is_empty()),
                 ..Default::default()
             };
             crate::verification::contracts::inherit(&mut package, &mut self.next_temporary_binding)

@@ -249,6 +249,7 @@ fn stable_defaults_discard_tuple_values_using_registered_collector_layout() {
         requirements: vec![],
         capabilities: vec![],
         fields: vec![],
+        packed: false,
     });
     let affine = tuple(vec![Expr {
         source,

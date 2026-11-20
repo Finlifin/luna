@@ -1,5 +1,3 @@
-// Assemble the shipped attributes and their primitive/domain dependencies.
-// Full sysroot cases separately cover meta's operations and package wiring.
 concat!(
     "mod builtin {\n",
     include_str!("../../../../library/builtin/primitives.fl"),
@@ -12,6 +10,12 @@ concat!(
     include_str!("../../../../library/attrs/calling_convention/constructors.fl"),
     "\n}} mod staging { mod phase {\n",
     include_str!("../../../../library/attrs/staging/phase.fl"),
+    "\n}} mod layout_impl { mod constructors {\n",
+    include_str!("../../../../library/attrs/layout_impl/constructors.fl"),
+    "\n}} mod effects_impl { mod strategy {\n",
+    include_str!("../../../../library/attrs/effects_impl/strategy.fl"),
+    "\n}} mod metadata_impl { mod constructors {\n",
+    include_str!("../../../../library/attrs/metadata_impl/constructors.fl"),
     "\n}}\n",
     include_str!("../../../../library/attrs/lib.fl"),
 )

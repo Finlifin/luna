@@ -2,6 +2,33 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    pub(in crate::program) fn pointer_targets_packed_field(&self, expr: &n::Expr) -> bool {
+        let mut cursor = expr;
+        loop {
+            match &cursor.kind {
+                K::AddressOf(place) => cursor = place,
+                K::Field {
+                    value, declaration, ..
+                }
+                | K::PointerField {
+                    pointer: value,
+                    declaration,
+                    ..
+                } => {
+                    if self.structs.get(declaration).is_some_and(|def| def.packed) {
+                        return true;
+                    }
+                    cursor = value;
+                }
+                K::AnonymousField { value, .. }
+                | K::PointerAnonymousField { pointer: value, .. } => {
+                    cursor = value;
+                }
+                _ => return false,
+            }
+        }
+    }
+
     #[inline(never)]
     pub(super) fn places_value_expression(
         &mut self,
@@ -15,6 +42,12 @@ impl Checker<'_, '_> {
                     self.forget_generator_schema_evidence(expr.span)?;
                 }
                 if let Some(pointer) = self.dereferenced_place(inner)? {
+                    if self.pointer_targets_packed_field(&pointer) {
+                        return Err(error(
+                            expr.span,
+                            "cannot take an aligned pointer to a field of a packed struct",
+                        ));
+                    }
                     if let Some(expected) = expected {
                         self.require(&pointer.ty, expected, expr.span)?;
                     }
@@ -26,6 +59,12 @@ impl Checker<'_, '_> {
                     source: source(expr.span),
                     kind: K::AddressOf(Box::new(place)),
                 };
+                if self.pointer_targets_packed_field(&result) {
+                    return Err(error(
+                        expr.span,
+                        "cannot take an aligned pointer to a field of a packed struct",
+                    ));
+                }
                 if let Some(message) = n::pointer_operation_error_in(&result, self.target) {
                     return Err(error(expr.span, message));
                 }
@@ -35,7 +74,10 @@ impl Checker<'_, '_> {
                 return Ok(result);
             }
             H::Deref(inner) => {
-                let pointer = self.expr(inner, None)?;
+                let prev_allow = std::mem::replace(&mut self.allow_packed_pointer_projection, true);
+                let pointer = self.expr(inner, None);
+                self.allow_packed_pointer_projection = prev_allow;
+                let pointer = pointer?;
                 let Term::Pointer(ty) = &pointer.ty else {
                     return Err(error(expr.span, "dereference requires a pointer"));
                 };

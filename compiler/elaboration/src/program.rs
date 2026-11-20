@@ -332,12 +332,44 @@ pub fn elaborate_packages_with_invocation_budget(
     .map(|(program, _)| program)
 }
 
+enum ElaborationMode<'r> {
+    Full,
+    InspectAttributes,
+    ResolveDerivationDefaults {
+        resolved_defaults: &'r mut BTreeMap<OwnerId, OwnerId>,
+        validated_deriver_attrs: &'r mut BTreeSet<OwnerId>,
+    },
+}
+
 fn elaborate_with_attributes(
     package: &hir::Package<'_>,
     package_identities: &BTreeMap<u32, u64>,
     protocols: &Protocols,
     target: Option<nir::target::TargetData>,
     inspect_attributes: bool,
+    invocation_steps: &mut u64,
+) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
+    let mode = if inspect_attributes {
+        ElaborationMode::InspectAttributes
+    } else {
+        ElaborationMode::Full
+    };
+    elaborate_in_mode(
+        package,
+        package_identities,
+        protocols,
+        target,
+        mode,
+        invocation_steps,
+    )
+}
+
+fn elaborate_in_mode(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+    target: Option<nir::target::TargetData>,
+    mode: ElaborationMode<'_>,
     invocation_steps: &mut u64,
 ) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
     if package
@@ -347,37 +379,75 @@ fn elaborate_with_attributes(
     {
         let arena = hir::HirArena::new();
         let expanded = function_templates::expand(package, &arena)?;
-        return elaborate_with_attributes(
+        return elaborate_in_mode(
             &expanded,
             package_identities,
             protocols,
             target,
-            inspect_attributes,
+            mode,
             invocation_steps,
         );
     }
-    if !inspect_attributes
+    if matches!(mode, ElaborationMode::Full)
         && package
             .pending_semantics
             .iter()
             .any(|(_, feature)| feature == "derivation expansion")
     {
+        let mut resolved_defaults = BTreeMap::new();
+        let mut validated_deriver_attrs = BTreeSet::new();
+        let has_unselected_derive = package.owners().any(|(_, info)| {
+            matches!(
+                &info.node.expect_item().kind,
+                ItemKind::Derive(request) if request.strategy.is_none()
+            )
+        });
+        let has_derivation_attrs = package.definition_attributes.iter().any(|attribute| {
+            let target_owner = match attribute.target {
+                hir::AttributeTarget::Definition(owner) => owner,
+                hir::AttributeTarget::Member(id) => id.owner,
+            };
+            matches!(
+                package.item(target_owner).map(|item| &item.kind),
+                Some(ItemKind::Deriver(_) | ItemKind::Derive(_))
+            )
+        });
+        if has_unselected_derive || has_derivation_attrs {
+            elaborate_in_mode(
+                package,
+                package_identities,
+                protocols,
+                target.clone(),
+                ElaborationMode::ResolveDerivationDefaults {
+                    resolved_defaults: &mut resolved_defaults,
+                    validated_deriver_attrs: &mut validated_deriver_attrs,
+                },
+                invocation_steps,
+            )?;
+        }
         let arena = hir::HirArena::new();
-        let expanded = derivation::expand(package, &arena, &mut 100_000)
-            .map_err(|failure| derivation::with_context(package, failure))?;
-        return elaborate_with_attributes(
+        let expanded = derivation::expand(
+            package,
+            &arena,
+            &resolved_defaults,
+            &validated_deriver_attrs,
+            &mut 100_000,
+        )
+        .map_err(|failure| derivation::with_context(package, failure))?;
+        return elaborate_in_mode(
             &expanded,
             package_identities,
             protocols,
             target,
-            inspect_attributes,
+            ElaborationMode::Full,
             invocation_steps,
         )
         .map_err(|failure| derivation::with_context(package, failure));
     }
+    let allow_derivation_pending = !matches!(mode, ElaborationMode::Full);
     if let Some((span, feature)) = package.pending_semantics.iter().find(|(_, feature)| {
         feature != "test template CMTT expansion"
-            && !(inspect_attributes && feature == "derivation expansion")
+            && !(allow_derivation_pending && feature == "derivation expansion")
             && !matches!(
                 feature.as_str(),
                 "definition attribute" | "definition configuration"
@@ -395,7 +465,7 @@ fn elaborate_with_attributes(
             ),
         ));
     }
-    if !inspect_attributes && package.definition_attributes.is_empty() {
+    if matches!(mode, ElaborationMode::Full) && package.definition_attributes.is_empty() {
         if let Some((span, feature)) = package.pending_semantics.iter().find(|(_, feature)| {
             matches!(
                 feature.as_str(),
@@ -465,6 +535,12 @@ fn elaborate_with_attributes(
         self_containers: BTreeMap::new(),
         interfaces_ready: false,
         member_phases: BTreeMap::new(),
+        packed_structs: BTreeSet::new(),
+        direct_passing_effects: BTreeMap::new(),
+        definition_attributes: BTreeMap::new(),
+        evaluating_attributes: false,
+        attributes_prepared: false,
+        allow_packed_pointer_projection: false,
         active_early_inherent: BTreeSet::new(),
         checking_method_contract: false,
         pending_contract_projections: Vec::new(),
@@ -590,13 +666,7 @@ fn elaborate_with_attributes(
     // Account even on unwinding, then preserve the original panic. Candidate
     // state remains private; this does not recover or reuse a panicking checker.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        elaborate_candidate(
-            &mut checker,
-            package,
-            package_identities,
-            target,
-            inspect_attributes,
-        )
+        elaborate_candidate(&mut checker, package, package_identities, target, mode)
     }));
     *invocation_steps = checker.required_steps;
     match result {
@@ -610,7 +680,7 @@ fn elaborate_candidate<'a, 'h>(
     package: &'a hir::Package<'h>,
     package_identities: &BTreeMap<u32, u64>,
     target: Option<nir::target::TargetData>,
-    inspect_attributes: bool,
+    mode: ElaborationMode<'_>,
 ) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
     // Register all declaration telescopes before interpreting interface arguments.
     for (owner, info) in package.owners() {
@@ -630,6 +700,8 @@ fn elaborate_candidate<'a, 'h>(
             ItemKind::Struct(def) => def.clause_params,
             ItemKind::Enum(def) => def.clause_params,
             ItemKind::Impl(def) => def.clause_params,
+            ItemKind::Deriver(def) => def.clause_params,
+            ItemKind::Derive(req) => req.clause_params,
             ItemKind::Trait(def) => def.clause_params,
             ItemKind::Associated(def) => def.clause_params,
             ItemKind::Effect(sig, _) => sig.clause_params,
@@ -689,6 +761,8 @@ fn elaborate_candidate<'a, 'h>(
             ItemKind::Struct(def) => Some(def.clause_params),
             ItemKind::Enum(def) => Some(def.clause_params),
             ItemKind::Impl(def) => Some(def.clause_params),
+            ItemKind::Deriver(def) => Some(def.clause_params),
+            ItemKind::Derive(req) => Some(req.clause_params),
             ItemKind::Trait(def) => Some(def.clause_params),
             ItemKind::EffectGroup(group) => Some(group.clause_params),
             _ => None,
@@ -705,6 +779,8 @@ fn elaborate_candidate<'a, 'h>(
                         | ItemKind::Newtype(..)
                         | ItemKind::TypeAlias(..)
                         | ItemKind::Impl(_)
+                        | ItemKind::Deriver(_)
+                        | ItemKind::Derive(_)
                         | ItemKind::EffectGroup(_)
                 ) {
                     match parameter.kind {
@@ -871,6 +947,23 @@ fn elaborate_candidate<'a, 'h>(
     }
     checker.signature_owner = None;
     checker.context = checker.nominal_context();
+    let inspect_attributes = match mode {
+        ElaborationMode::InspectAttributes => true,
+        ElaborationMode::Full => false,
+        ElaborationMode::ResolveDerivationDefaults {
+            resolved_defaults,
+            validated_deriver_attrs,
+        } => {
+            checker.resolve_derivation_defaults(resolved_defaults, validated_deriver_attrs)?;
+            return Ok((
+                n::Package {
+                    target,
+                    ..Default::default()
+                },
+                Vec::new(),
+            ));
+        }
+    };
     let prepared_attributes = checker.prepare_phase_attributes(inspect_attributes)?;
     if inspect_attributes
         && package
@@ -1227,7 +1320,12 @@ fn elaborate_candidate<'a, 'h>(
                     })
                     .collect(),
                 signature: checker.signatures[&owner].clone(),
-                abi: if modifiers.is_direct_passing {
+                abi: if checker
+                    .direct_passing_effects
+                    .get(&owner)
+                    .copied()
+                    .unwrap_or(modifiers.is_direct_passing)
+                {
                     nir::effects::Abi::DirectPassing
                 } else if modifiers.is_async {
                     nir::effects::Abi::Async
@@ -1378,6 +1476,7 @@ fn elaborate_candidate<'a, 'h>(
     output.alias_contracts = checker.alias_contracts.values().cloned().collect();
     output.refinements = std::mem::take(&mut checker.refinements);
     output.expansion_sources = std::mem::take(&mut checker.expansion_sources);
+    output.definition_attributes = std::mem::take(&mut checker.definition_attributes);
     crate::verification::contracts::inherit(&mut output, &mut checker.next_temporary_binding)
         .map_err(|mut failure| {
             failure.source = failure
@@ -1475,6 +1574,533 @@ fn elaborate_candidate<'a, 'h>(
         &mut checker.required_steps,
     )?;
     Ok((output, attributes))
+}
+
+impl Checker<'_, '_> {
+    fn resolve_derivation_defaults(
+        &mut self,
+        resolved_defaults: &mut BTreeMap<OwnerId, OwnerId>,
+        validated_deriver_attrs: &mut BTreeSet<OwnerId>,
+    ) -> Result<(), Error> {
+        let evaluated = self.evaluate_attributes_filtered(|attribute| {
+            let hir::AttributeTarget::Definition(owner) = attribute.target else {
+                return false;
+            };
+            matches!(
+                self.package.item(owner).map(|item| &item.kind),
+                Some(ItemKind::Deriver(_) | ItemKind::Derive(_))
+            )
+        })?;
+        let markers = if evaluated.is_empty() {
+            Vec::new()
+        } else {
+            let mut budget = comptime_runtime::Budget {
+                steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
+                ..Default::default()
+            };
+            let before = budget.steps;
+            let result = (|| {
+                let selected = attributes::merge(&evaluated, 1024, &mut budget)?;
+                let markers =
+                    attributes::default_strategy_markers(self.package, &selected, &mut budget)?;
+                for target in &selected {
+                    let hir::AttributeTarget::Definition(owner) = target.target else {
+                        continue;
+                    };
+                    if self
+                        .package
+                        .item(owner)
+                        .is_some_and(|item| matches!(item.kind, ItemKind::Deriver(_)))
+                        && target.iter().all(|(key, _)| key == "derivation_default")
+                    {
+                        validated_deriver_attrs.insert(owner);
+                    }
+                }
+                Ok(markers)
+            })();
+            self.required_steps = self
+                .required_steps
+                .saturating_sub((before - budget.steps) as u64);
+            result.map_err(|failure: attributes::MergeFailure| {
+                let mut diagnostic = error(Span::default(), failure.message);
+                diagnostic.source = failure.source;
+                diagnostic
+            })?
+        };
+
+        let mut registry = crate::derivation::Registry::default();
+        let mut strategy_owners = BTreeMap::new();
+        let mut strategy_params: BTreeMap<DeclarationId, Vec<DeclarationId>> = BTreeMap::new();
+        for marker in markers {
+            if !marker.enabled {
+                continue;
+            }
+            let Some(item) = self.package.item(marker.owner) else {
+                continue;
+            };
+            let ItemKind::Deriver(generator) = &item.kind else {
+                continue;
+            };
+            self.ensure_contract(marker.owner, item.span)?;
+            self.signature_owner = Some(marker.owner);
+            self.context = self.definition_context(marker.owner);
+            let instance = self.interface_expr_optional_subject(generator.trait_ref, None)?;
+            let decl = declaration(self.package, &self.package_identities, marker.owner);
+            registry
+                .register(
+                    crate::derivation::DefaultStrategy {
+                        declaration: decl,
+                        interface: instance.declaration,
+                        interface_arguments: instance.arguments,
+                    },
+                    crate::ptc::Budget::default(),
+                )
+                .map_err(|failure| {
+                    let message = match failure {
+                        crate::implementation::Error::Ownership(
+                            crate::implementation::OwnershipError::NoLocalIdentity,
+                        ) => "default derivation strategy requires a local trait or trait argument",
+                        crate::implementation::Error::Ownership(
+                            crate::implementation::OwnershipError::OpenBeforeLocalIdentity,
+                        ) => "default derivation strategy trait arguments must establish a local identity before open parameters",
+                        crate::implementation::Error::Ownership(
+                            crate::implementation::OwnershipError::InherentRequiresLocalNominal,
+                        ) => "default derivation strategy ownership requires a trait or nominal identity",
+                        crate::implementation::Error::DuplicateDeclaration(_) => {
+                            "conflicting default derivation strategy registration"
+                        }
+                        crate::implementation::Error::BudgetExhausted => {
+                            "default derivation strategy registration budget exhausted"
+                        }
+                        crate::implementation::Error::InvalidPhaseHead(_)
+                        | crate::implementation::Error::AmbiguousPhaseRelationship
+                        | crate::implementation::Error::UndeterminedPhaseRelationship(_) => {
+                            "invalid default derivation strategy ownership"
+                        }
+                    };
+                    let mut diagnostic = error(Span::default(), message);
+                    diagnostic.source = marker.source;
+                    diagnostic
+                })?;
+            strategy_owners.insert(decl, marker.owner);
+            strategy_params.insert(
+                decl,
+                self.type_parameters
+                    .get(&marker.owner)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+        }
+
+        let mut select_fuel = 100_000usize;
+        for (request_owner, info) in self.package.owners() {
+            let item = info.node.expect_item();
+            let ItemKind::Derive(request) = &item.kind else {
+                continue;
+            };
+            if request.strategy.is_some() {
+                continue;
+            }
+            self.ensure_contract(request_owner, item.span)?;
+            self.signature_owner = Some(request_owner);
+            self.context = self.definition_context(request_owner);
+            let subject = self.type_expr(request.self_ty)?;
+            let requested = self.interface_expr_for(request.trait_ref, &subject)?;
+            let visible: BTreeSet<DeclarationId> = self
+                .package
+                .derive_visible_strategies
+                .get(&request_owner)
+                .into_iter()
+                .flat_map(|defs| defs.iter())
+                .filter_map(|def_id| self.package.definition_owner(*def_id))
+                .map(|owner| declaration(self.package, &self.package_identities, owner))
+                .collect();
+            let selection = registry
+                .select(
+                    requested.declaration,
+                    &visible,
+                    &mut select_fuel,
+                    |candidate, fuel| {
+                        if candidate.interface_arguments.len() != requested.arguments.len() {
+                            return Ok(crate::derivation::Applicability::Rejected);
+                        }
+                        if candidate.interface_arguments == requested.arguments {
+                            return Ok(crate::derivation::Applicability::Applicable);
+                        }
+                        let params = strategy_params
+                            .get(&candidate.declaration)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        if params.is_empty() {
+                            return Ok(crate::derivation::Applicability::Rejected);
+                        }
+                        let mut bindings = BTreeMap::new();
+                        if match_default_strategy_pairs(
+                            &candidate.interface_arguments,
+                            &requested.arguments,
+                            params,
+                            &mut bindings,
+                            fuel,
+                        )? {
+                            Ok(crate::derivation::Applicability::Applicable)
+                        } else {
+                            Ok(crate::derivation::Applicability::Rejected)
+                        }
+                    },
+                )
+                .map_err(|failure| {
+                    let message = match failure {
+                        crate::implementation::Error::BudgetExhausted => {
+                            "default derivation strategy selection budget exhausted"
+                        }
+                        _ => "default derivation strategy selection failed",
+                    };
+                    error(item.span, message)
+                })?;
+            match selection {
+                crate::derivation::Selection::Unique(decl) => {
+                    resolved_defaults.insert(request_owner, strategy_owners[&decl]);
+                }
+                crate::derivation::Selection::Missing => {
+                    return Err(error(
+                        item.span,
+                        "no applicable default derivation strategy found",
+                    ));
+                }
+                crate::derivation::Selection::Ambiguous(_) => {
+                    return Err(error(
+                        item.span,
+                        "ambiguous default derivation strategies for trait",
+                    ));
+                }
+                crate::derivation::Selection::Pending { .. } => {
+                    return Err(error(
+                        item.span,
+                        "default derivation strategy applicability could not be resolved",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn match_default_strategy_pairs(
+    patterns: &[Term],
+    actuals: &[Term],
+    params: &[DeclarationId],
+    bindings: &mut BTreeMap<DeclarationId, Term>,
+    fuel: &mut usize,
+) -> Result<bool, crate::implementation::Error> {
+    if patterns.len() != actuals.len() {
+        return Ok(false);
+    }
+    for (pattern, actual) in patterns.iter().zip(actuals) {
+        if !match_default_strategy_term(pattern, actual, params, bindings, fuel)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn match_default_strategy_term(
+    pattern: &Term,
+    actual: &Term,
+    params: &[DeclarationId],
+    bindings: &mut BTreeMap<DeclarationId, Term>,
+    fuel: &mut usize,
+) -> Result<bool, crate::implementation::Error> {
+    *fuel = fuel
+        .checked_sub(1)
+        .ok_or(crate::implementation::Error::BudgetExhausted)?;
+    if let Term::Rigid { declaration, sort } = pattern
+        && params.contains(declaration)
+    {
+        if actual.sort() != *sort {
+            return Ok(false);
+        }
+        return match bindings.get(declaration) {
+            Some(previous) => Ok(previous == actual),
+            None => {
+                bindings.insert(*declaration, actual.clone());
+                Ok(true)
+            }
+        };
+    }
+    match (pattern, actual) {
+        (
+            Term::Nominal {
+                declaration: a_decl,
+                arguments: a_args,
+            },
+            Term::Nominal {
+                declaration: b_decl,
+                arguments: b_args,
+            },
+        ) => Ok(a_decl == b_decl
+            && match_default_strategy_pairs(a_args, b_args, params, bindings, fuel)?),
+        (
+            Term::NormalForm {
+                head: a_head,
+                sort: a_sort,
+                arguments: a_args,
+            },
+            Term::NormalForm {
+                head: b_head,
+                sort: b_sort,
+                arguments: b_args,
+            },
+        ) => Ok(a_head == b_head
+            && a_sort == b_sort
+            && match_default_strategy_pairs(a_args, b_args, params, bindings, fuel)?),
+        (Term::Tuple(a), Term::Tuple(b))
+        | (Term::TupleValue(a), Term::TupleValue(b))
+        | (Term::ClosureContextValue(a), Term::ClosureContextValue(b)) => {
+            match_default_strategy_pairs(a, b, params, bindings, fuel)
+        }
+        (
+            Term::ListConcat {
+                ty: a_ty,
+                parts: a_parts,
+            },
+            Term::ListConcat {
+                ty: b_ty,
+                parts: b_parts,
+            },
+        ) => Ok(
+            match_default_strategy_term(a_ty, b_ty, params, bindings, fuel)?
+                && match_default_strategy_pairs(a_parts, b_parts, params, bindings, fuel)?,
+        ),
+        (Term::Record(a), Term::Record(b)) | (Term::RecordValue(a), Term::RecordValue(b)) => {
+            if a.len() != b.len() {
+                return Ok(false);
+            }
+            for ((a_name, a_val), (b_name, b_val)) in a.iter().zip(b) {
+                if a_name != b_name
+                    || !match_default_strategy_term(a_val, b_val, params, bindings, fuel)?
+                {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        (
+            Term::NominalValue {
+                ty: a_ty,
+                variant: a_var,
+                fields: a_fields,
+            },
+            Term::NominalValue {
+                ty: b_ty,
+                variant: b_var,
+                fields: b_fields,
+            },
+        ) => Ok(a_var == b_var
+            && match_default_strategy_term(a_ty, b_ty, params, bindings, fuel)?
+            && match_default_strategy_pairs(a_fields, b_fields, params, bindings, fuel)?),
+        (
+            Term::OptionalValue {
+                ty: a_ty,
+                value: a_val,
+            },
+            Term::OptionalValue {
+                ty: b_ty,
+                value: b_val,
+            },
+        ) => {
+            if !match_default_strategy_term(a_ty, b_ty, params, bindings, fuel)? {
+                return Ok(false);
+            }
+            match (a_val, b_val) {
+                (None, None) => Ok(true),
+                (Some(a), Some(b)) => match_default_strategy_term(a, b, params, bindings, fuel),
+                _ => Ok(false),
+            }
+        }
+        (
+            Term::ErrorValue {
+                ty: a_ty,
+                label: a_lbl,
+                value: a_val,
+            },
+            Term::ErrorValue {
+                ty: b_ty,
+                label: b_lbl,
+                value: b_val,
+            },
+        ) => {
+            if !match_default_strategy_term(a_ty, b_ty, params, bindings, fuel)?
+                || !match_default_strategy_term(a_val, b_val, params, bindings, fuel)?
+            {
+                return Ok(false);
+            }
+            match (a_lbl, b_lbl) {
+                (None, None) => Ok(true),
+                (Some(a), Some(b)) => match_default_strategy_term(a, b, params, bindings, fuel),
+                _ => Ok(false),
+            }
+        }
+        (Term::Optional(a), Term::Optional(b))
+        | (Term::Pointer(a), Term::Pointer(b))
+        | (Term::ComptimeFunction(a), Term::ComptimeFunction(b))
+        | (Term::UnsafeFunction(a), Term::UnsafeFunction(b)) => {
+            match_default_strategy_term(a, b, params, bindings, fuel)
+        }
+        (Term::NormalFormFunction(a_sig, a_idx), Term::NormalFormFunction(b_sig, b_idx)) => Ok(
+            a_idx == b_idx && match_default_strategy_term(a_sig, b_sig, params, bindings, fuel)?,
+        ),
+        (
+            Term::ErrorResult {
+                errors: a_err,
+                result: a_res,
+            },
+            Term::ErrorResult {
+                errors: b_err,
+                result: b_res,
+            },
+        ) => Ok(
+            match_default_strategy_pairs(a_err, b_err, params, bindings, fuel)?
+                && match_default_strategy_term(a_res, b_res, params, bindings, fuel)?,
+        ),
+        (
+            Term::Computation {
+                effects: a_eff,
+                result: a_res,
+            },
+            Term::Computation {
+                effects: b_eff,
+                result: b_res,
+            },
+        ) => Ok(
+            a_eff == b_eff && match_default_strategy_term(a_res, b_res, params, bindings, fuel)?
+        ),
+        (
+            Term::AssociatedType {
+                origin: a_orig,
+                arguments: a_args,
+                subject: a_subj,
+            },
+            Term::AssociatedType {
+                origin: b_orig,
+                arguments: b_args,
+                subject: b_subj,
+            },
+        ) => Ok(a_orig == b_orig
+            && match_default_strategy_pairs(a_args, b_args, params, bindings, fuel)?
+            && match_default_strategy_term(a_subj, b_subj, params, bindings, fuel)?),
+        (
+            Term::ContextualClosure {
+                context: a_ctx,
+                signature: a_sig,
+            },
+            Term::ContextualClosure {
+                context: b_ctx,
+                signature: b_sig,
+            },
+        ) => Ok(
+            match_default_strategy_term(a_ctx, b_ctx, params, bindings, fuel)?
+                && match_default_strategy_term(a_sig, b_sig, params, bindings, fuel)?,
+        ),
+        (
+            Term::Closure {
+                environment: a_env,
+                signature: a_sig,
+            },
+            Term::Closure {
+                environment: b_env,
+                signature: b_sig,
+            },
+        ) => Ok(
+            match_default_strategy_pairs(a_env, b_env, params, bindings, fuel)?
+                && match_default_strategy_term(a_sig, b_sig, params, bindings, fuel)?,
+        ),
+        (
+            Term::Function {
+                parameters: a_params,
+                result: a_res,
+            },
+            Term::Function {
+                parameters: b_params,
+                result: b_res,
+            },
+        ) => {
+            if a_params.len() != b_params.len() {
+                return Ok(false);
+            }
+            for (ap, bp) in a_params.iter().zip(b_params) {
+                if ap.sort != bp.sort
+                    || !match_default_strategy_term(&ap.ty, &bp.ty, params, bindings, fuel)?
+                {
+                    return Ok(false);
+                }
+            }
+            match_default_strategy_term(a_res, b_res, params, bindings, fuel)
+        }
+        (
+            Term::FunctionValue {
+                declaration: a_decl,
+                arguments: a_args,
+            },
+            Term::FunctionValue {
+                declaration: b_decl,
+                arguments: b_args,
+            },
+        ) => Ok(a_decl == b_decl
+            && match_default_strategy_pairs(a_args, b_args, params, bindings, fuel)?),
+        (
+            Term::ClosureSnapshot {
+                factory: a_fac,
+                arguments: a_args,
+            },
+            Term::ClosureSnapshot {
+                factory: b_fac,
+                arguments: b_args,
+            },
+        ) => {
+            Ok(a_fac == b_fac
+                && match_default_strategy_pairs(a_args, b_args, params, bindings, fuel)?)
+        }
+        (Term::MethodValue(a), Term::MethodValue(b)) => Ok(a.member == b.member
+            && a.interface.declaration == b.interface.declaration
+            && match_default_strategy_pairs(
+                &a.interface.arguments,
+                &b.interface.arguments,
+                params,
+                bindings,
+                fuel,
+            )?
+            && match_default_strategy_term(&a.subject, &b.subject, params, bindings, fuel)?
+            && match_default_strategy_pairs(
+                &a.method_arguments,
+                &b.method_arguments,
+                params,
+                bindings,
+                fuel,
+            )?),
+        (
+            Term::Primitive(_)
+            | Term::ClosureContextType
+            | Term::Hole { .. }
+            | Term::Bound { .. }
+            | Term::Rigid { .. }
+            | Term::Runtime(_)
+            | Term::Unit
+            | Term::Bool(_)
+            | Term::Char(_)
+            | Term::BitVec(_)
+            | Term::Float16(_)
+            | Term::BFloat16(_)
+            | Term::Float32(_)
+            | Term::Float64(_)
+            | Term::String(_)
+            | Term::Symbol(_)
+            | Term::Integer(_)
+            | Term::Float(_)
+            | Term::Value { .. },
+            _,
+        ) => Ok(pattern == actual),
+        _ => Ok(false),
+    }
 }
 #[derive(Clone)]
 struct CaptureFrame {
@@ -1578,6 +2204,12 @@ struct Checker<'a, 'h> {
     self_containers: BTreeMap<OwnerId, OwnerId>,
     interfaces_ready: bool,
     member_phases: BTreeMap<OwnerId, n::TraitPhase>,
+    packed_structs: BTreeSet<OwnerId>,
+    direct_passing_effects: BTreeMap<OwnerId, bool>,
+    definition_attributes: BTreeMap<DeclarationId, Term>,
+    evaluating_attributes: bool,
+    attributes_prepared: bool,
+    allow_packed_pointer_projection: bool,
     active_early_inherent: BTreeSet<String>,
     checking_method_contract: bool,
     pending_contract_projections: Vec<interfaces::PendingProjection>,
@@ -1986,7 +2618,12 @@ impl Checker<'_, '_> {
             }
             self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
             if let ItemKind::Effect(_, modifiers) = &item.kind {
-                if modifiers.is_direct_passing && (modifiers.is_async || !sig.params.is_empty()) {
+                let is_direct_passing = self
+                    .direct_passing_effects
+                    .get(&owner)
+                    .copied()
+                    .unwrap_or(modifiers.is_direct_passing);
+                if is_direct_passing && (modifiers.is_async || !sig.params.is_empty()) {
                     return Err(error(
                         item.span,
                         "direct passing effects must be synchronous and have no parameters",
@@ -6495,6 +7132,8 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
+        let allow_packed_projection =
+            std::mem::replace(&mut self.allow_packed_pointer_projection, false);
         if self.data_consumer_call(expr)?.is_some() {
             return self.check_data_consumer_expression(expr, expected);
         }
@@ -6590,6 +7229,9 @@ impl Checker<'_, '_> {
                 }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "struct_field_types" | "struct_field_names")) => {
                     self.struct_reflection_builtin(expr, callee, args, expected)
+                }
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "attrs_of") => {
+                    self.attrs_of_reflection_builtin(expr, args, expected)
                 }
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "list_length" | "list_concat")) => {
                     self.list_builtin(expr, callee, args, expected)
@@ -6774,7 +7416,10 @@ impl Checker<'_, '_> {
                     }
                 }
                 H::Projection(value, field) => {
-                    self.projection_expression(expr, value, field, expected, partial)
+                    self.allow_packed_pointer_projection = allow_packed_projection;
+                    let result = self.projection_expression(expr, value, field, expected, partial);
+                    self.allow_packed_pointer_projection = false;
+                    result
                 }
                 H::Binary(BinOp::Concat, _, _) => self.concat_expression(expr, expected),
                 _ => self.expr_context_inner(expr, expected, partial),

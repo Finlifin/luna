@@ -335,6 +335,7 @@ mod tests {
                         nominal(index + 1)
                     },
                 )],
+                packed: false,
             });
         }
         (package, nominal(0))

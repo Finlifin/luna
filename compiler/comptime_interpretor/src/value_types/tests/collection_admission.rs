@@ -125,6 +125,7 @@ fn nominal_decoding_can_spend_more_than_the_old_private_query_ceiling() {
                 .collect(),
             capabilities: vec![],
             requirements: vec![],
+            packed: false,
         }],
         ..Default::default()
     };

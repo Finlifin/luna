@@ -538,7 +538,7 @@ fn capture_failure_does_not_rewrite_later_captures_or_clone_shared_body() {
 
 #[test]
 fn struct_reflection_rewrites_and_visits_its_subject() {
-    for operation in 0..21 {
+    for operation in 0..=21 {
         let subject = Box::new(expr(K::TypeValue(rigid())));
         let mut query = expr(match operation {
             0 => K::StructFieldNames(subject),
@@ -547,6 +547,7 @@ fn struct_reflection_rewrites_and_visits_its_subject() {
             3 => K::BuildEnum(subject),
             19 => K::BuildNewtype(subject),
             20 => K::NewtypeRepresentation(subject),
+            21 => K::DefinitionAttributes(subject),
             4..=8 => K::EnumStructure {
                 subject,
                 query: [

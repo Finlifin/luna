@@ -139,6 +139,7 @@ mod tests {
             )],
             requirements: vec![],
             capabilities: vec![],
+            packed: false,
         };
         let arguments = [Term::Primitive(P::Bool)];
         let mut steps = 500;

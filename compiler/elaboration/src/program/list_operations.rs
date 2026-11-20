@@ -228,6 +228,41 @@ impl Checker<'_, '_> {
         })
     }
 
+    pub(super) fn attrs_of_reflection_builtin(
+        &mut self,
+        expr: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let [Arg::Positional(subject_ty), Arg::Positional(subject)] = args else {
+            return Err(error(
+                expr.span,
+                "attrs_of reflection requires Type and target positional inputs",
+            ));
+        };
+        if self.runtime_value_context() || self.in_code_body {
+            return Err(error(
+                expr.span,
+                "attrs_of reflection requires comptime invocation",
+            ));
+        }
+        let subject_ty = self.type_expr(subject_ty)?;
+        let subject = self.expr(subject, Some(&subject_ty))?;
+        let ty = if is_never(&subject.ty) {
+            p(P::Never)
+        } else {
+            p(P::Object)
+        };
+        if let Some(expected) = expected {
+            self.require_expression(&ty, expected, expr.span)?;
+        }
+        Ok(n::Expr {
+            source: source(expr.span),
+            ty,
+            kind: K::DefinitionAttributes(Box::new(subject)),
+        })
+    }
+
     pub(super) fn struct_reflection_builtin(
         &mut self,
         expr: &Expr<'_>,

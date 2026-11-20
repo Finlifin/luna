@@ -35,6 +35,7 @@ fn structs(local: u32, field: Term) -> Arc<[Struct]> {
         requirements: vec![],
         capabilities: vec![],
         fields: vec![("value".into(), field)],
+        packed: false,
     }]
     .into()
 }

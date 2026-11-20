@@ -21,6 +21,7 @@ fn definition(local: u32, field: Term) -> Struct {
         requirements: vec![],
         capabilities: vec![],
         fields: vec![("field".into(), field)],
+        packed: false,
     }
 }
 fn enumeration(local: u32, field: Term) -> nir::program::Enum {

@@ -1,0 +1,8 @@
+use bindings.{Object, bool}
+
+pub const packed = { packed: true }
+
+pub pure comptime fn packed_layout(.enabled: bool = true) -> Object {
+    let metadata = { packed: enabled }
+    metadata
+}

@@ -439,6 +439,7 @@ fn source_definition_admission_demands_proof_and_recovers_without_publication() 
         requirements: vec![obligation.clone()],
         capabilities: vec![],
         fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
+        packed: false,
     }]
     .into();
     for (outcome, expected) in [

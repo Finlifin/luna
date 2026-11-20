@@ -511,6 +511,7 @@ fn body_free_runtime_identity_checks_unused_value_parameter_domains() {
         fields: vec![],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     package.runtime_function_identities[0].signature = signature(Term::Primitive(Primitive::Bool));
     for value in [Term::Char('x'), Term::Bool(true), Term::Bool(false)] {
@@ -558,6 +559,7 @@ fn runtime_identity_admission_checks_structured_value_layouts() {
         fields: vec![("enabled".into(), Term::Primitive(Primitive::Bool))],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     package
         .function_parameters
@@ -753,6 +755,7 @@ fn host_runtime_identity_checks_dependent_domains_inside_aggregates() {
         fields: vec![("enabled".into(), Term::Primitive(Primitive::Bool))],
         requirements: vec![],
         capabilities: vec![],
+        packed: false,
     });
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     for (domain, value, valid) in [
