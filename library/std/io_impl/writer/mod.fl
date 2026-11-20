@@ -1,6 +1,8 @@
 use builtin.fmt.ByteWriter;
+use collections_impl.vec.Vec;
 use io_impl.errors.Error;
 use std.os.unix;
+use string_impl.string.String;
 
 {- A complete text write retries short transfers and EINTR. A zero transfer
    fails rather than spinning. Errors may follow an already written prefix. -}
@@ -14,6 +16,50 @@ pub fn write_all(fd: i32) -> !Error void where text: str {
         }
         assumes count <= length - offset;
         offset = offset + count;
+    }
+}
+
+pub fn write_all_str(fd: i32, text: str) -> !Error void {
+    let length: u64 = builtin.compiler.str_byte_length(text);
+    var offset: u64 = 0;
+    while offset < length {
+        let count = unix.write_str(fd, text, offset)!;
+        if count == 0 {
+            return error Error.write_zero;
+        }
+        assumes count <= length - offset;
+        offset = offset + count;
+    }
+}
+
+pub unsafe fn write_all_raw(fd: i32, addr: usize, count: usize) -> !Error void {
+    var written: usize = 0;
+    while written < count {
+        let remaining_usize = count - written;
+        let remaining = builtin.compiler.try_usize_to_u64(remaining_usize) match {
+            v? => v,
+            null => return error Error.os(22),
+        }
+        let ptr = builtin.mem.checked_add_usize(addr, written) match {
+            p? => p,
+            null => return error Error.os(22),
+        }
+        let n = unix.write_raw(fd, ptr, remaining)!;
+        if n == 0 {
+            return error Error.write_zero;
+        }
+        let n_usize = builtin.compiler.try_u64_to_usize(n) match {
+            v? => v,
+            null => return error Error.os(5),
+        }
+        let next_written = builtin.mem.checked_add_usize(written, n_usize) match {
+            v? => v,
+            null => return error Error.os(5),
+        }
+        if next_written > count {
+            return error Error.os(5);
+        }
+        written = next_written;
     }
 }
 
@@ -33,6 +79,24 @@ impl Writer {
     pub fn write_all(self) -> !Error void where text: str {
         io_impl.writer.write_all<text>(self.descriptor)
     }
+
+    pub fn write_bytes(self, bytes: *Vec<u8>) -> !Error void {
+        let len = bytes.len();
+        if len == 0 {
+            return;
+        }
+        unsafe { write_all_raw(self.descriptor, bytes.as_addr(), len) }
+    }
+
+    pub fn write_string(self, text: *String) -> !Error void {
+        let len = text.len();
+        if len == 0 {
+            return;
+        }
+        unsafe {
+            write_all_raw(self.descriptor, text.as_bytes_addr(), len)
+        }
+    }
 }
 
 impl ByteWriter for Writer {
@@ -40,6 +104,10 @@ impl ByteWriter for Writer {
 
     fn write_byte(*self, byte: u8) -> !Error void {
         unix.write_byte(self.descriptor.*, byte)
+    }
+
+    fn write_str(*self, text: str) -> !Error void {
+        write_all_str(self.descriptor.*, text)
     }
 }
 

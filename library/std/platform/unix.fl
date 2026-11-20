@@ -19,6 +19,15 @@ pub fn write(fd: i32, offset: u64) -> !Error u64 where text: str {
     }
 }
 
+pub fn write_str(fd: i32, text: str, offset: u64) -> !Error u64 {
+    while true {
+        let result = linux.write_str(fd, text, offset);
+        if result != linux.interrupted {
+            return check(result)!'bitvec.as(u64);
+        }
+    }
+}
+
 pub fn write_byte(fd: i32, byte: u8) -> !Error void {
     while true {
         let result = linux.write_byte(fd, byte);

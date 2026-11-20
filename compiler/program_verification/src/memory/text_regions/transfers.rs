@@ -2,7 +2,7 @@
 //! Depth and fuel are charged by `Query::expr`, before dispatch.
 use super::*;
 
-impl Query<'_, '_> {
+impl Query<'_, '_, '_, '_> {
     #[inline(never)]
     pub(super) fn transfer_function(
         &mut self,
@@ -36,7 +36,15 @@ impl Query<'_, '_> {
         let K::TraitMethod { .. } = &expr.kind else {
             unreachable!("checked text transfer variant")
         };
-        let selected = self.methods.select(self.package, expr, self.fuel)?;
+        let selected = self.methods.select_with_context(
+            self.package,
+            expr,
+            self.source,
+            Some(self.declarations),
+            &mut self.cached_domains,
+            self.fuel,
+            false,
+        )?;
         self.expr(&selected, locals, returned, next)
     }
 
@@ -96,12 +104,13 @@ impl Query<'_, '_> {
         &mut self,
         expr: &Expr,
         locals: &mut Locals,
-        _returned: &mut Option<Regions>,
-        _next: usize,
+        returned: &mut Option<Regions>,
+        next: usize,
     ) -> Result<Option<Regions>, String> {
         let K::AddressOf(place) = &expr.kind else {
             unreachable!("checked text transfer variant")
         };
+        let may_hold = type_may_hold_text_or_callable(self.package, &place.ty, self.fuel)?;
         let mut empty = Some(Regions::new());
         let mut place = place.as_ref();
         let mut path = Vec::new();
@@ -112,18 +121,28 @@ impl Query<'_, '_> {
             path.push(*index);
             place = value;
         }
-        let K::Local(root) = place.kind else {
-            return Err("text descriptor address requires local storage".into());
-        };
-        if !locals.contains_key(&root) {
-            return Err("text descriptor address root is unavailable".into());
+        match &place.kind {
+            K::Local(root) => {
+                if !locals.contains_key(root) {
+                    return Err("text descriptor address root is unavailable".into());
+                }
+                if may_hold {
+                    path.reverse();
+                    empty.as_mut().unwrap().places.insert(
+                        vec![],
+                        Some(BTreeSet::from([(DescriptorRoot::Local(*root), path)])),
+                    );
+                }
+                Ok(empty)
+            }
+            K::ReadPointer(inner) if !may_hold => {
+                if self.expr(inner, locals, returned, next)?.is_none() {
+                    return Ok(None);
+                }
+                Ok(empty)
+            }
+            _ => Err("text descriptor address requires local storage".into()),
         }
-        path.reverse();
-        empty.as_mut().unwrap().places.insert(
-            vec![],
-            Some(BTreeSet::from([(DescriptorRoot::Local(root), path)])),
-        );
-        Ok(empty)
     }
 
     #[inline(never)]
@@ -142,11 +161,12 @@ impl Query<'_, '_> {
         let Some(mut value) = self.expr(pointer, locals, returned, next)? else {
             return Ok(None);
         };
-        let target = value
-            .places
-            .get_mut(&vec![])
-            .and_then(Option::as_mut)
-            .ok_or("text descriptor pointer target is unknown")?;
+        let Some(target) = value.places.get_mut(&vec![]).and_then(Option::as_mut) else {
+            if !type_may_hold_text_or_callable(self.package, &expr.ty, self.fuel)? {
+                return Ok(Some(Regions::new()));
+            }
+            return Err("text descriptor pointer target is unknown".into());
+        };
         for (root, mut path) in std::mem::take(target) {
             charge(self.fuel, path.len().saturating_add(1))?;
             path.push(*index);
@@ -169,12 +189,17 @@ impl Query<'_, '_> {
         let Some(value) = self.expr(pointer, locals, returned, next)? else {
             return Ok(None);
         };
-        let targets = value
+        let Some(targets) = value
             .places
             .get(&vec![])
             .and_then(Option::as_ref)
             .filter(|targets| !targets.is_empty())
-            .ok_or("text descriptor pointer target is unknown")?;
+        else {
+            if !type_may_hold_text_or_callable(self.package, &expr.ty, self.fuel)? {
+                return Ok(Some(Regions::new()));
+            }
+            return Err("text descriptor pointer target is unknown".into());
+        };
         let mut result = None;
         for (root, path) in targets {
             let value = locals
@@ -208,18 +233,27 @@ impl Query<'_, '_> {
         let Some(pointer) = self.expr(pointer, locals, returned, next)? else {
             return Ok(None);
         };
-        let targets = pointer
+        let Some(value_regions) = self.expr(value, locals, returned, next)? else {
+            return Ok(None);
+        };
+        let Some(targets) = pointer
             .places
             .get(&vec![])
             .and_then(Option::as_ref)
             .filter(|targets| !targets.is_empty())
-            .ok_or("text descriptor pointer target is unknown")?;
-        let Some(value) = self.expr(value, locals, returned, next)? else {
-            return Ok(None);
+        else {
+            if !type_may_hold_text_or_callable(self.package, &value.ty, self.fuel)?
+                && value_regions.text.is_empty()
+                && value_regions.code.is_empty()
+                && value_regions.places.is_empty()
+            {
+                return Ok(empty);
+            }
+            return Err("text descriptor pointer target is unknown".into());
         };
         for (root, path) in targets {
-            charge_regions(&value, self.fuel)?;
-            let replacement = prefix(value.clone(), path, self.fuel)?;
+            charge_regions(&value_regions, self.fuel)?;
+            let replacement = prefix(value_regions.clone(), path, self.fuel)?;
             let target = locals
                 .get_storage_mut(root)
                 .ok_or("text descriptor storage is no longer live")?;
@@ -1029,6 +1063,7 @@ impl Query<'_, '_> {
         | K::BitEqual(left, right)
         | K::BitConcat(left, right)
         | K::BitIndex(left, right)
+        | K::TypeEqual(left, right)
         | K::TemplateEqual(left, right)) = &expr.kind
         else {
             unreachable!("checked text transfer variant")
@@ -1040,6 +1075,41 @@ impl Query<'_, '_> {
             }
         }
         Ok(empty)
+    }
+
+    #[inline(never)]
+    pub(super) fn transfer_bit_update(
+        &mut self,
+        pointer: Option<&Expr>,
+        selections: &[nir::program::BitSelection],
+        value: &Expr,
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        next: usize,
+    ) -> Result<Option<Regions>, String> {
+        if let Some(pointer) = pointer
+            && self.expr(pointer, locals, returned, next)?.is_none()
+        {
+            return Ok(None);
+        }
+        for selection in selections {
+            let normal = match selection {
+                nir::program::BitSelection::Static { .. } => true,
+                nir::program::BitSelection::Index(index) => {
+                    self.expr(index, locals, returned, next)?.is_some()
+                }
+                nir::program::BitSelection::Window { start, end, .. } => {
+                    self.expr(start, locals, returned, next)?.is_some()
+                        && self.expr(end, locals, returned, next)?.is_some()
+                }
+            };
+            if !normal {
+                return Ok(None);
+            }
+        }
+        Ok(self
+            .expr(value, locals, returned, next)?
+            .map(|_| Regions::new()))
     }
 
     #[inline(never)]
@@ -1091,6 +1161,14 @@ impl Query<'_, '_> {
                     .last_mut()
                     .unwrap()
                     .extend(origins.iter().cloned());
+            }
+        }
+        for leaf in borrowed_input_layout(Some(self.package), &expr.ty, self.fuel)? {
+            if matches!(leaf, BorrowedInputLeaf::Text(_)) {
+                return Err(
+                    "intrinsic cannot synthesize text view without backing-region provenance"
+                        .into(),
+                );
             }
         }
         Ok(empty)
@@ -1161,5 +1239,192 @@ impl Query<'_, '_> {
             }
         }
         Ok(empty)
+    }
+
+    #[inline(never)]
+    pub(super) fn transfer_effect_resume(
+        &mut self,
+        value: &Expr,
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        next: usize,
+    ) -> Result<Option<Regions>, String> {
+        if type_may_hold_text_or_callable(self.package, &value.ty, self.fuel)? {
+            return Err("text effect resume cannot transmit text or callables".into());
+        }
+        self.expr(value, locals, returned, next)?;
+        Ok(None)
+    }
+
+    #[inline(never)]
+    pub(super) fn transfer_effect_request(
+        &mut self,
+        expr: &Expr,
+        arguments: &[Expr],
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        next: usize,
+    ) -> Result<Option<Regions>, String> {
+        if type_may_hold_text_or_callable(self.package, &expr.ty, self.fuel)? {
+            return Err("text effect request cannot return text or callables".into());
+        }
+        for argument in arguments {
+            if type_may_hold_text_or_callable(self.package, &argument.ty, self.fuel)? {
+                return Err("text effect request cannot transmit text or callables".into());
+            }
+            if self.expr(argument, locals, returned, next)?.is_none() {
+                return Ok(None);
+            }
+        }
+        Ok(Some(Regions::new()))
+    }
+
+    #[inline(never)]
+    pub(super) fn transfer_effect_handle(
+        &mut self,
+        computation: &Expr,
+        handlers: &[nir::program::EffectHandler],
+        locals: &mut Locals,
+        returned: &mut Option<Regions>,
+        next: usize,
+    ) -> Result<Option<Regions>, String> {
+        let mut handler_subjects = Vec::with_capacity(handlers.len());
+        for handler in handlers {
+            let Term::Function { parameters, result } = handler.signature.callable_signature()
+            else {
+                return Err("text effect handler requires a callable signature".into());
+            };
+            for parameter in parameters {
+                if type_may_hold_text_or_callable(self.package, &parameter.ty, self.fuel)? {
+                    return Err("text effect handler cannot transmit text or callables".into());
+                }
+            }
+            if type_may_hold_text_or_callable(self.package, result, self.fuel)? {
+                return Err("text effect handler cannot return text or callables".into());
+            }
+            handler_subjects.push(Term::Tuple(
+                parameters.iter().map(|p| p.ty.clone()).collect(),
+            ));
+        }
+
+        let initial_frame = self.next_storage_frame;
+        let mut max_frame = initial_frame;
+        let mut head = self.locals_copy(locals)?;
+        let bindings: Vec<_> = head.keys().copied().collect();
+        let outcome = loop {
+            self.next_storage_frame = initial_frame;
+            let mut exits = None;
+            let mut result = None;
+            let mut next_head = Some(self.locals_copy(&head)?);
+
+            let mut comp_locals = self.locals_copy(&head)?;
+            let comp_result = self.expr(computation, &mut comp_locals, returned, next)?;
+            max_frame = max_frame.max(self.next_storage_frame);
+            for value in comp_result
+                .iter()
+                .chain(bindings.iter().filter_map(|id| comp_locals.get(id)))
+                .chain(comp_locals.frames.values())
+            {
+                for (root, _) in value.places.values().flatten().flatten() {
+                    if !head.contains_storage(root) {
+                        return Err("text descriptor address escapes effect computation".into());
+                    }
+                }
+            }
+            join_locals(&mut next_head, &comp_locals, &bindings, self.fuel)?;
+            if comp_result.is_some() {
+                join_locals(&mut exits, &comp_locals, &bindings, self.fuel)?;
+                merge(&mut result, comp_result, self.fuel)?;
+            }
+
+            for (handler, subject_ty) in handlers.iter().zip(&handler_subjects) {
+                let mut pending = Some(self.locals_copy(&head)?);
+                for arm in &handler.arms {
+                    let Some(input) = pending.take() else { break };
+                    let mut pattern = &arm.pattern;
+                    let mut guards = Vec::new();
+                    while let Pattern::Guard {
+                        pattern: inner,
+                        condition,
+                    } = pattern
+                    {
+                        charge(self.fuel, 1)?;
+                        guards.push(condition.as_ref());
+                        pattern = inner;
+                    }
+                    guards.reverse();
+                    if let Some(guard) = &arm.guard {
+                        guards.push(guard);
+                    }
+                    let mut scope = self.locals_copy(&input)?;
+                    let matched = self.bind_pattern(
+                        pattern,
+                        subject_ty,
+                        &Regions::new(),
+                        None,
+                        &mut scope,
+                        next,
+                    )?;
+                    if matched == Some(false) {
+                        pending = Some(input);
+                        continue;
+                    }
+                    if matched != Some(true) {
+                        pending = Some(input);
+                    }
+                    let mut accepted = true;
+                    for guard in guards {
+                        if self.expr(guard, &mut scope, returned, next)?.is_none() {
+                            accepted = false;
+                            break;
+                        }
+                        let condition = constant_bool(guard, 0);
+                        if condition != Some(true) {
+                            join_locals(&mut pending, &scope, &bindings, self.fuel)?;
+                        }
+                        if condition == Some(false) {
+                            accepted = false;
+                            break;
+                        }
+                    }
+                    if !accepted {
+                        continue;
+                    }
+                    let arm_result = self.expr(&arm.body, &mut scope, returned, next)?;
+                    max_frame = max_frame.max(self.next_storage_frame);
+                    for value in arm_result
+                        .iter()
+                        .chain(bindings.iter().filter_map(|id| scope.get(id)))
+                        .chain(scope.frames.values())
+                    {
+                        for (root, _) in value.places.values().flatten().flatten() {
+                            if !head.contains_storage(root) {
+                                return Err(
+                                    "text descriptor address escapes effect handler arm".into()
+                                );
+                            }
+                        }
+                    }
+                    join_locals(&mut next_head, &scope, &bindings, self.fuel)?;
+                    if arm_result.is_some() {
+                        join_locals(&mut exits, &scope, &bindings, self.fuel)?;
+                        merge(&mut result, arm_result, self.fuel)?;
+                    }
+                }
+            }
+
+            let next_head = next_head.unwrap();
+            if next_head == head {
+                break (exits, result);
+            }
+            head = next_head;
+        };
+        self.next_storage_frame = max_frame;
+        if let (Some(exits), result) = outcome {
+            *locals = exits;
+            Ok(result)
+        } else {
+            Ok(outcome.1)
+        }
     }
 }

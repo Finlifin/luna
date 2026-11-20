@@ -46,44 +46,105 @@ impl Checker<'_, '_> {
                 declaration: protocol,
                 arguments: vec![],
             };
-            let direct = if self
-                .symbolic_interface_evidence(&iterable.ty, &interface)
-                .map_err(|e| error(expr.span, e.to_string()))?
-            {
-                true
-            } else if self
-                .symbolic_interface_evidence(
-                    &iterable.ty,
-                    &n::InterfaceInstance {
-                        declaration: conversion,
-                        arguments: vec![],
-                    },
-                )
-                .map_err(|e| error(expr.span, e.to_string()))?
-            {
-                // A generic body's declared conversion evidence determines
-                // its operation; possible future Iterator implementations do
-                // not change that body when it is instantiated.
-                false
-            } else {
-                let resolution = self
-                    .resolve_trait_capability(&interface, &iterable.ty, Budget::default())
-                    .map_err(|reason| {
-                        error(
-                            expr.span,
-                            format!("iteration capability query failed: {reason:?}"),
-                        )
-                    })?;
-                match resolution.selection {
-                    crate::implementation::Selection::Selected(_) => true,
-                    crate::implementation::Selection::NoApplicableCandidate => false,
-                    other => {
-                        return Err(error(
-                            expr.span,
-                            format!("iteration capability is not established: {other}"),
-                        ));
+            let conversion_interface = n::InterfaceInstance {
+                declaration: conversion,
+                arguments: vec![],
+            };
+            let mut incomplete_given: Option<nir::NominalAdmissionError> = None;
+            let direct = match self.symbolic_interface_evidence(&iterable.ty, &interface) {
+                Ok(true) => true,
+                Ok(false) => match self
+                    .symbolic_interface_evidence(&iterable.ty, &conversion_interface)
+                {
+                    Ok(true) => {
+                        // A generic body's declared conversion evidence determines
+                        // its operation; possible future Iterator implementations do
+                        // not change that body when it is instantiated.
+                        false
+                    }
+                    Ok(false) => {
+                        let resolution = self
+                            .resolve_trait_capability(&interface, &iterable.ty, Budget::default())
+                            .map_err(|reason| {
+                                error(
+                                    expr.span,
+                                    format!("iteration capability query failed: {reason:?}"),
+                                )
+                            })?;
+                        match resolution.selection {
+                            crate::implementation::Selection::Selected(_) => true,
+                            crate::implementation::Selection::NoApplicableCandidate => false,
+                            other => {
+                                return Err(error(
+                                    expr.span,
+                                    format!("iteration capability is not established: {other}"),
+                                ));
+                            }
+                        }
+                    }
+                    Err(e @ nir::NominalAdmissionError::Unresolved(_)) => {
+                        if incomplete_given.is_none() {
+                            incomplete_given = Some(e);
+                        }
+                        let resolution = self
+                            .resolve_trait_capability(&interface, &iterable.ty, Budget::default())
+                            .map_err(|reason| {
+                                error(
+                                    expr.span,
+                                    format!("iteration capability query failed: {reason:?}"),
+                                )
+                            })?;
+                        match resolution.selection {
+                            crate::implementation::Selection::Selected(_) => true,
+                            crate::implementation::Selection::NoApplicableCandidate => false,
+                            other => {
+                                if let Some(given_error) = incomplete_given {
+                                    return Err(error(expr.span, given_error.to_string()));
+                                }
+                                return Err(error(
+                                    expr.span,
+                                    format!("iteration capability is not established: {other}"),
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => return Err(error(expr.span, e.to_string())),
+                },
+                Err(e @ nir::NominalAdmissionError::Unresolved(_)) => {
+                    incomplete_given = Some(e);
+                    match self.symbolic_interface_evidence(&iterable.ty, &conversion_interface) {
+                        Ok(true) => false,
+                        Ok(false) | Err(nir::NominalAdmissionError::Unresolved(_)) => {
+                            let resolution = self
+                                .resolve_trait_capability(
+                                    &interface,
+                                    &iterable.ty,
+                                    Budget::default(),
+                                )
+                                .map_err(|reason| {
+                                    error(
+                                        expr.span,
+                                        format!("iteration capability query failed: {reason:?}"),
+                                    )
+                                })?;
+                            match resolution.selection {
+                                crate::implementation::Selection::Selected(_) => true,
+                                crate::implementation::Selection::NoApplicableCandidate => false,
+                                other => {
+                                    if let Some(given_error) = incomplete_given {
+                                        return Err(error(expr.span, given_error.to_string()));
+                                    }
+                                    return Err(error(
+                                        expr.span,
+                                        format!("iteration capability is not established: {other}"),
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => return Err(error(expr.span, e.to_string())),
                     }
                 }
+                Err(e) => return Err(error(expr.span, e.to_string())),
             };
             if !direct {
                 let method = self

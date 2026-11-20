@@ -91,6 +91,14 @@ pub fn check_access_with_memory(
     )
 }
 
+pub(super) struct AccessContext<'a> {
+    pub declarations: &'a crate::declarations::Metadata<'a>,
+    pub source: Option<::materialization::DeclarationSource<'a>>,
+    pub methods: &'a mut memory::MethodCallees,
+    pub summaries: &'a mut memory::SummaryCache,
+    pub text_provenance: memory::TextProvenance,
+}
+
 pub(super) fn check_access_with_layout(
     package: &Package,
     world: &World<'_>,
@@ -99,6 +107,31 @@ pub(super) fn check_access_with_layout(
     receiver: &Place,
     pointers: Option<PointerMemory<'_>>,
     variant_layouts: &BTreeMap<Place, VariantLayout>,
+    fuel: &mut usize,
+) -> Result<AccessCheck, String> {
+    check_access_with_context(
+        package,
+        world,
+        selected,
+        state,
+        receiver,
+        pointers,
+        variant_layouts,
+        None,
+        fuel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_access_with_context(
+    package: &Package,
+    world: &World<'_>,
+    selected: &SelectedDrop,
+    state: &State,
+    receiver: &Place,
+    pointers: Option<PointerMemory<'_>>,
+    variant_layouts: &BTreeMap<Place, VariantLayout>,
+    context: Option<&mut AccessContext<'_>>,
     fuel: &mut usize,
 ) -> Result<AccessCheck, String> {
     if *fuel == 0 {
@@ -167,7 +200,13 @@ pub(super) fn check_access_with_layout(
         .iter()
         .find(|function| function.declaration == selected.method.body)
         .ok_or("captured Drop body is missing")?;
-    let domains = memory::memory_domains(package, &function.type_parameters, fuel)?;
+    let domains = if let Some(ctx) = context.as_deref() {
+        ctx.declarations
+            .parameter_domains(&function.type_parameters, fuel)
+            .map_err(|e| e.to_string())?
+    } else {
+        memory::memory_domains(package, &function.type_parameters, fuel)?
+    };
     let frames = [vec![Sort::Runtime]];
     let substitution = nir::DeclarationSubstitution::bounded(
         &function.type_parameters,
@@ -193,12 +232,26 @@ pub(super) fn check_access_with_layout(
                 .into(),
         );
     }
-    let footprint = memory::infer_in_package(
-        package,
-        selected.method.body,
-        &selected.method.arguments,
-        fuel,
-    )?;
+    let footprint = if let Some(ctx) = context {
+        memory::infer_in_package_with_full_context(
+            package,
+            selected.method.body,
+            &selected.method.arguments,
+            ctx.text_provenance,
+            ctx.source,
+            Some(&mut *ctx.methods),
+            Some(ctx.declarations),
+            &mut *ctx.summaries,
+            fuel,
+        )?
+    } else {
+        memory::infer_in_package(
+            package,
+            selected.method.body,
+            &selected.method.arguments,
+            fuel,
+        )?
+    };
     if footprint.signature != signature(selected.subject.clone()) {
         return Err("captured Drop body signature changed".into());
     }

@@ -4,7 +4,7 @@
 use super::pattern_facts::{bounded_outer_guards, constant_bool, known_pattern};
 use nir::{
     DeclarationId, Primitive, Term,
-    program::{Expr, ExprKind as K, Function, FunctionPhase, Package, Pattern},
+    program::{Expr, ExprKind as K, FunctionPhase, Package, Pattern},
 };
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -78,11 +78,36 @@ enum Work<'a> {
 /// are substituted structurally and are part of every cached instance key.
 /// Every query must use the same fixed cleanup policy; its selection evidence
 /// is part of this transaction, not a globally reusable property of the body.
+#[derive(Default)]
+pub(crate) struct Memo {
+    completed: HashMap<Instance, bool>,
+}
+
+enum MemoStorage<'a> {
+    Owned(Memo),
+    Borrowed(&'a mut Memo),
+}
+
+impl MemoStorage<'_> {
+    fn as_ref(&self) -> &Memo {
+        match self {
+            Self::Owned(memo) => memo,
+            Self::Borrowed(memo) => memo,
+        }
+    }
+
+    fn as_mut(&mut self) -> &mut Memo {
+        match self {
+            Self::Owned(memo) => memo,
+            Self::Borrowed(memo) => memo,
+        }
+    }
+}
+
 pub(super) struct Cache<'a> {
     package: Option<&'a Package>,
-    definitions: Option<BTreeMap<DeclarationId, &'a Function>>,
     declarations: std::rc::Rc<super::declarations::Metadata<'a>>,
-    completed: HashMap<Instance, bool>,
+    memo: MemoStorage<'a>,
 }
 impl<'a> Cache<'a> {
     pub(super) fn new(package: Option<&'a Package>) -> Self {
@@ -93,12 +118,23 @@ impl<'a> Cache<'a> {
     pub(super) fn with_declarations(
         declarations: std::rc::Rc<super::declarations::Metadata<'a>>,
     ) -> Self {
+        Self::with_declarations_and_memo(declarations, None)
+    }
+    pub(super) fn with_declarations_and_memo(
+        declarations: std::rc::Rc<super::declarations::Metadata<'a>>,
+        memo: Option<&'a mut Memo>,
+    ) -> Self {
         Self {
             package: declarations.package(),
-            definitions: None,
             declarations,
-            completed: HashMap::new(),
+            memo: memo.map_or_else(
+                || MemoStorage::Owned(Memo::default()),
+                MemoStorage::Borrowed,
+            ),
         }
+    }
+    pub(super) fn memo_mut(&mut self) -> &mut Memo {
+        self.memo.as_mut()
     }
     #[cfg(test)]
     pub(super) fn may_reject(
@@ -151,28 +187,19 @@ impl<'a> Cache<'a> {
         fuel: &mut usize,
         cleanup: &mut dyn FnMut(&Term, &mut usize) -> Result<bool, String>,
     ) -> Result<bool, &'static str> {
-        let Some(package) = self.package else {
+        if self.package.is_none() {
             return Ok(true);
-        };
-        if let Some(result) = self.completed.get(&root) {
+        }
+        if let Some(result) = self.memo.as_ref().completed.get(&root) {
             return Ok(*result);
         }
-        if self.definitions.is_none() {
-            *fuel = fuel
-                .checked_sub(package.functions.len())
-                .ok_or("rejection summary budget exhausted")?;
-            let mut definitions = BTreeMap::new();
-            for function in &package.functions {
-                if definitions.insert(function.declaration, function).is_some() {
-                    return Err("duplicate function identity in rejection summary");
-                }
-            }
-            self.definitions = Some(definitions);
-        }
+        let Some(definitions) = self.declarations.function_index(fuel)? else {
+            return Ok(true);
+        };
         let (result, visited) = scan(
             &self.declarations,
-            self.definitions.as_ref().unwrap(),
-            &self.completed,
+            &definitions,
+            &self.memo.as_ref().completed,
             root.clone(),
             fuel,
             cleanup,
@@ -180,11 +207,12 @@ impl<'a> Cache<'a> {
         // On success with no rejection, every visited definition's reachable
         // subgraph was closed. A positive search only establishes its root.
         if !result {
+            let completed = &mut self.memo.as_mut().completed;
             for id in visited {
-                self.completed.insert(id, false);
+                completed.insert(id, false);
             }
         }
-        self.completed.insert(root, result);
+        self.memo.as_mut().completed.insert(root, result);
         Ok(result)
     }
 }
@@ -203,7 +231,7 @@ fn cleanup_rejection(
 
 fn scan<'a>(
     declarations: &super::declarations::Metadata<'a>,
-    definitions: &BTreeMap<DeclarationId, &'a Function>,
+    definitions: &BTreeMap<DeclarationId, usize>,
     completed: &HashMap<Instance, bool>,
     root: Instance,
     fuel: &mut usize,
@@ -581,7 +609,7 @@ fn scan<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nir::program::{Literal, SourceRange};
+    use nir::program::{Function, Literal, SourceRange};
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 0, local }
     }
@@ -825,7 +853,7 @@ mod tests {
                 })
                 .is_err()
         );
-        assert!(cache.completed.is_empty());
+        assert!(cache.memo.as_ref().completed.is_empty());
         assert!(
             !cache
                 .may_reject_with_cleanup(&callee(0), &mut 1000, &mut |ty, _| {
@@ -1149,7 +1177,7 @@ mod tests {
                 )
                 .unwrap()
         );
-        let completed = cache.completed.len();
+        let completed = cache.memo.as_ref().completed.len();
         assert!(
             cache
                 .may_reject(
@@ -1159,7 +1187,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(
-            cache.completed.len(),
+            cache.memo.as_ref().completed.len(),
             completed,
             "exhausted expansion cannot certify a recursive component"
         );
@@ -1201,7 +1229,7 @@ mod tests {
         };
         let mut cache = Cache::new(Some(&package));
         assert!(cache.may_reject(&callee(0), &mut 40).is_err());
-        assert!(cache.completed.is_empty());
+        assert!(cache.memo.as_ref().completed.is_empty());
         assert!(cache.may_reject(&callee(0), &mut 1000).unwrap());
         assert!(cache.may_reject(&callee(0), &mut 1).unwrap());
     }
@@ -1274,7 +1302,7 @@ mod tests {
         );
         let mut cache = Cache::new(Some(&package));
         assert!(cache.may_reject(&callee, &mut 1).is_err());
-        assert!(cache.completed.is_empty());
+        assert!(cache.memo.as_ref().completed.is_empty());
         assert!(!cache.may_reject(&callee, &mut 1000).unwrap());
         let invalid = generic_callee(
             0,
@@ -1284,10 +1312,10 @@ mod tests {
             ],
         );
         assert!(cache.may_reject(&invalid, &mut 1000).is_err());
-        assert_eq!(cache.completed.len(), 1);
+        assert_eq!(cache.memo.as_ref().completed.len(), 1);
         let valid = generic_callee(0, vec![Term::Primitive(Primitive::Bool), Term::Bool(true)]);
         assert!(!cache.may_reject(&valid, &mut 1000).unwrap());
-        assert_eq!(cache.completed.len(), 2);
+        assert_eq!(cache.memo.as_ref().completed.len(), 2);
     }
 
     #[test]
@@ -1312,15 +1340,15 @@ mod tests {
         let mut cache = Cache::new(Some(&package));
         assert!(cache.may_reject(&callee(0), &mut 64).is_err());
         assert!(!cache.declarations.domains_prepared());
-        assert!(cache.completed.is_empty());
+        assert!(cache.memo.as_ref().completed.is_empty());
         assert!(!cache.may_reject(&callee(0), &mut 10_000).unwrap());
         assert!(cache.declarations.domains_prepared());
         // This is a different root, so only the declaration directory is warm.
-        assert_eq!(cache.completed.len(), 1);
+        assert_eq!(cache.memo.as_ref().completed.len(), 1);
         let mut fuel = 64;
         assert!(!cache.may_reject(&callee(1), &mut fuel).unwrap());
         assert!(fuel < 64);
-        assert_eq!(cache.completed.len(), 2);
+        assert_eq!(cache.memo.as_ref().completed.len(), 2);
         assert!(
             Cache::new(Some(&package))
                 .may_reject(&callee(1), &mut 64)
@@ -1340,7 +1368,7 @@ mod tests {
         for _ in 0..2 {
             assert!(invalid.may_reject(&callee(1), &mut 10_000).is_err());
             assert!(!invalid.declarations.domains_prepared());
-            assert!(invalid.completed.is_empty());
+            assert!(invalid.memo.as_ref().completed.is_empty());
         }
     }
 
@@ -1368,7 +1396,7 @@ mod tests {
         assert!(!cache.declarations.domains_prepared());
         assert!(cache.may_reject(&callee(1), &mut 64).is_err());
         assert!(!cache.declarations.domains_prepared());
-        assert_eq!(cache.completed.len(), 1);
+        assert_eq!(cache.memo.as_ref().completed.len(), 1);
         assert!(!cache.may_reject(&callee(1), &mut 10_000).unwrap());
         assert!(cache.declarations.domains_prepared());
     }

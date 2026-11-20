@@ -21,7 +21,10 @@ impl Walker<'_> {
             let world = match &mut self.associated_world {
                 Some(world) => world,
                 slot => slot.insert(
-                    type_resolution::dispatch::DeclarationSource::Borrowed(package)
+                    self.declaration_source
+                        .unwrap_or_else(|| {
+                            type_resolution::dispatch::DeclarationSource::Borrowed(package)
+                        })
                         .world(&mut budget, None)?,
                 ),
             };

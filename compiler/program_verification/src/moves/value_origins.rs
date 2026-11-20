@@ -156,9 +156,14 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         }
         match &expr.kind {
             K::ReadPointer(pointer)
-                if !crate::memory::pointer_input_layout(self.package, &expr.ty, &mut self.fuel)
-                    .map_err(|reason| error(expr.source, reason))?
-                    .is_empty() =>
+                if !crate::memory::pointer_input_layout_for(
+                    self.package,
+                    &expr.ty,
+                    self.text_provenance,
+                    &mut self.fuel,
+                )
+                .map_err(|reason| error(expr.source, reason))?
+                .is_empty() =>
             {
                 self.read_aggregate_origins(expr, pointer, flow, depth + 1)
             }
@@ -178,9 +183,10 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         | Term::Optional(_)
                 )
                 && self.storage_inputs_are_closed(completion_type(&expr.ty), expr.source)?
-                && !crate::memory::pointer_input_layout(
+                && !crate::memory::pointer_input_layout_for(
                     self.package,
                     completion_type(&expr.ty),
+                    self.text_provenance,
                     &mut self.fuel,
                 )
                 .map_err(|reason| error(expr.source, reason))?

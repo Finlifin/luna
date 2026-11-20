@@ -1127,29 +1127,49 @@ fn negated_string_patterns_execute_without_bypassing_resource_layout_checks() {
         comptime fn inspect_comptime(value:str)->bool {value match {not "blocked"=>true,_=>false}}
     "#,
     );
+    let expected = Value::Tuple(vec![
+        Value::Bool(true),
+        Value::Bool(false),
+        Value::Bool(true),
+        Value::Bool(false),
+        Value::Bool(true),
+    ]);
     assert_eq!(
         luna::execution::interpret(&package, "entry", 100_000).unwrap(),
-        Value::Tuple(vec![
-            Value::Bool(true),
-            Value::Bool(false),
-            Value::Bool(true),
-            Value::Bool(false),
-            Value::Bool(true)
-        ])
+        expected
     );
     assert_eq!(
         luna::invocation::invoke(&package, "check", 100_000).unwrap(),
         Value::Bool(true)
     );
-    let error = luna::execution::interpret_with_protocols(
-        &package,
-        "entry",
-        "Duplicate",
-        "Retire",
-        100_000,
-    )
-    .unwrap_err();
-    assert!(error.contains("string-view memory provenance"), "{error}");
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            100_000,
+        )
+        .unwrap(),
+        expected
+    );
+
+    let uncopied = execution_support::compile_with_tuple(
+        r#"typealias str=.str'builtin; trait Duplicate {} trait Retire {fn drop(*self);}
+        fn inspect(value:str)->bool {value match {not "blocked"=>true,_=>false}}
+        fn entry()->bool {inspect("allowed")}
+    "#,
+    );
+    assert!(
+        luna::execution::interpret_with_protocols(
+            &uncopied,
+            "entry",
+            "Duplicate",
+            "Retire",
+            100_000,
+        )
+        .is_err()
+    );
 }
 
 #[test]

@@ -1,6 +1,9 @@
 use builtin.fmt.ByteWriter;
+use collections_impl.vec.Vec;
 use io_impl.errors.{Error, check}
+use io_impl.writer.write_all_raw;
 use std.os.{linux, unix}
+use string_impl.string.String;
 
 {- File owns one descriptor. Drop closes it once; close reports errors and
    retires ownership even on failure. Borrowed operations cannot export a
@@ -39,6 +42,24 @@ impl File {
         io_impl.writer.write_all<text>(self.descriptor.*)
     }
 
+    pub fn write_bytes(*self, bytes: *Vec<u8>) -> !Error void {
+        let len = bytes.len();
+        if len == 0 {
+            return;
+        }
+        unsafe { write_all_raw(self.descriptor.*, bytes.as_addr(), len) }
+    }
+
+    pub fn write_string(*self, text: *String) -> !Error void {
+        let len = text.len();
+        if len == 0 {
+            return;
+        }
+        unsafe {
+            write_all_raw(self.descriptor.*, text.as_bytes_addr(), len)
+        }
+    }
+
     pub fn read_byte(*self) -> !Error ?u8 {
         unix.read_byte(self.descriptor.*)
     }
@@ -59,5 +80,9 @@ impl ByteWriter for File {
 
     fn write_byte(*self, byte: u8) -> !Error void {
         unix.write_byte(self.descriptor.*, byte)
+    }
+
+    fn write_str(*self, text: str) -> !Error void {
+        io_impl.writer.write_all_str(self.descriptor.*, text)
     }
 }

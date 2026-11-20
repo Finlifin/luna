@@ -179,3 +179,9 @@ impl Display for char {
         }
     }
 }
+
+impl Display for str {
+    fn write(self, output: *W) -> !W.as(ByteWriter).Error void where W :- ByteWriter {
+        output.write_str(self)
+    }
+}

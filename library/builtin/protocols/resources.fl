@@ -172,3 +172,13 @@ impl Clone for *T where T {
 }
 
 impl Copy for *T where T {}
+
+-- Cloning a str copies its view descriptor; text-region analysis checks that its
+-- backing character storage remains valid across every use.
+impl Clone for str {
+    fn clone(*self) -> Self {
+        self.*
+    }
+}
+
+impl Copy for str {}

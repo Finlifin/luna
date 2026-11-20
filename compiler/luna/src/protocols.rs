@@ -63,6 +63,22 @@ pub(crate) fn copy_delivery(
     }
 }
 
+pub(crate) fn copy_delivery_cached(
+    package: &nir::program::Package,
+    world: &World<'_>,
+    items: &LangItems,
+    ty: &nir::Term,
+    budget: Budget,
+    cache: &mut std::collections::HashMap<nir::Term, elaboration::verification::moves::Delivery>,
+) -> Result<elaboration::verification::moves::Delivery, String> {
+    if let Some(delivery) = cache.get(ty) {
+        return Ok(delivery.clone());
+    }
+    let delivery = copy_delivery(package, world, items, ty, budget)?;
+    cache.insert(ty.clone(), delivery.clone());
+    Ok(delivery)
+}
+
 /// Analyze moves using bound protocol identity. Explicit or assumed Copy
 /// capabilities still require representation/resource evidence before this
 /// driver can authorize copying them. No optimistic fallback to Move is made.
@@ -307,8 +323,13 @@ pub fn analyze_cleanup_with_borrowed_code_context(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn analyze_cleanup_with_borrowed_code_context_requiring_instances(
-    package: &nir::program::Package,
+pub(crate) fn analyze_cleanup_in_session<'a>(
+    session: &mut elaboration::verification::PackageSession<'a>,
+    cleanup: Option<&mut elaboration::verification::drop::CleanupSession<'a, '_>>,
+    copy_cache: &mut std::collections::HashMap<
+        nir::Term,
+        elaboration::verification::moves::Delivery,
+    >,
     world: &World<'_>,
     items: &LangItems,
     function: &nir::program::Function,
@@ -320,12 +341,13 @@ pub(crate) fn analyze_cleanup_with_borrowed_code_context_requiring_instances(
     effects: Vec<elaboration::verification::moves::EffectResultInput>,
     fields: &[elaboration::verification::moves::BorrowedField],
     borrowed: &[elaboration::verification::moves::BorrowedCode],
+    text_provenance: elaboration::verification::memory::TextProvenance,
 ) -> (
     Result<elaboration::verification::moves::Report, elaboration::verification::moves::Error>,
     Vec<elaboration::verification::drop::RequiredDropInstance>,
 ) {
-    use elaboration::verification::{drop::CleanupSession, moves};
-    let Some(LangItemDef::UserDef(protocol)) = items.get(LangItem::Drop) else {
+    use elaboration::verification::moves;
+    let Some(cleanup) = cleanup else {
         return (
             Err(moves::Error {
                 source: function.body.source,
@@ -334,22 +356,22 @@ pub(crate) fn analyze_cleanup_with_borrowed_code_context_requiring_instances(
             vec![],
         );
     };
-    let mut session =
-        CleanupSession::new(package, world, protocol, query_budget).require_runtime_instances();
-    let result = moves::analyze_in_package_with_borrowed_code_context(
-        package,
+    let package = session.package();
+    let result = moves::analyze_in_package_with_session(
+        session,
         function,
-        |ty| copy_delivery(package, world, items, ty, query_budget),
+        |ty| copy_delivery_cached(package, world, items, ty, query_budget, copy_cache),
         fuel,
-        Some(&mut session),
+        Some(&mut *cleanup),
         borrows,
         callables,
         enums,
         effects,
         fields,
         borrowed,
+        text_provenance,
     );
-    (result, session.into_missing_runtime_instances())
+    (result, cleanup.take_missing_runtime_instances())
 }
 
 /// Resolve the comptime phase using trusted language-item identity. Returned
@@ -420,45 +442,43 @@ pub fn infer_borrowed_callable_memory(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn infer_borrowed_callable_memory_requiring_instances(
-    package: &nir::program::Package,
-    world: &World<'_>,
-    items: &LangItems,
+pub(crate) fn infer_borrowed_callable_memory_in_session<'a>(
+    session: &mut elaboration::verification::PackageSession<'a>,
+    cleanup: Option<&mut elaboration::verification::drop::CleanupSession<'a, '_>>,
     declaration: nir::DeclarationId,
     arguments: &[nir::Term],
     callables: &[elaboration::verification::moves::CallableParameter],
     enums: &[elaboration::verification::moves::EnumParameter],
     effects: &[elaboration::verification::moves::EffectResultInput],
     borrowed: &[elaboration::verification::moves::BorrowedCode],
+    text_provenance: elaboration::verification::memory::TextProvenance,
     fuel: &mut usize,
-    budget: Budget,
     source: nir::program::SourceRange,
 ) -> (
     Result<elaboration::verification::memory::Summary, String>,
     Vec<elaboration::verification::drop::RequiredDropInstance>,
 ) {
-    use elaboration::verification::{drop::CleanupSession, moves};
-    let Some(LangItemDef::UserDef(protocol)) = items.get(LangItem::Drop) else {
+    use elaboration::verification::moves;
+    let Some(cleanup) = cleanup else {
         return (
             Err("Drop language item is not bound to a source trait".into()),
             vec![],
         );
     };
-    let mut session =
-        CleanupSession::new(package, world, protocol, budget).require_runtime_instances();
-    let result = moves::infer_callable_memory_with_borrowed_cleanup_context(
-        package,
+    let result = moves::infer_callable_memory_with_session(
+        session,
         declaration,
         arguments,
         callables,
         enums,
         effects,
         borrowed,
-        Some(&mut session),
+        Some(&mut *cleanup),
+        text_provenance,
         fuel,
         source,
     );
-    (result, session.into_missing_runtime_instances())
+    (result, cleanup.take_missing_runtime_instances())
 }
 
 /// Invocation-scoped resource evidence, including the interface frame used to

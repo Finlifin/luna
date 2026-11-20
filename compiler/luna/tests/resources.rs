@@ -16113,31 +16113,79 @@ fn monotone_cubic_correlations_prove_unsigned_subtraction_safety() {
 
 #[test]
 fn borrowed_string_views_do_not_gain_pointer_free_layout_from_copy() {
+    // Low-level Unchecked layout queries still reject bare str without region provenance.
+    let err = elaboration::verification::memory::pointer_input_layout(
+        None,
+        &nir::Term::Primitive(nir::Primitive::Str),
+        &mut 10_000,
+    )
+    .unwrap_err();
+    assert!(err.contains("string-view memory provenance"), "{err}");
+    assert!(err.contains("backing character storage"), "{err}");
+
     for (extra, body) in [
-        ("fn inspect(value:str)->bool {true}", "inspect(\"static\")"),
         (
-            "struct Text {view:str} fn inspect(value:Text)->bool {true}",
+            "fn inspect(value:str)->bool {let first=value;let second=value;true}",
+            "inspect(\"static\")",
+        ),
+        (
+            "struct Text {view:str} fn inspect(value:Text)->bool {let first=value.view;let second=value.view;true}",
             "inspect(Text {view:\"static\"})",
         ),
         (
-            "fn inspect(value:Tuple<bool,str>)->bool {true}",
+            "fn inspect(value:Tuple<bool,str>)->bool {let (flag,view)=value;let first=view;let second=view;flag}",
             "inspect((true,\"static\"))",
         ),
     ] {
-        let package = tuple_support::compile_with_tuple(&format!(
-            "typealias str=.str'builtin; trait Duplicate {{}} trait Retire {{fn drop(*self);}} impl Duplicate for str {{}} {extra} fn entry()->bool {{{body}}}"
+        // Without Duplicate impl for str, copying fails even for static views.
+        let uncopied = tuple_support::compile_with_tuple(&format!(
+            "typealias str=.str'builtin; trait Duplicate {{}} trait Retire {{fn drop(*self);}} {extra} fn entry()->bool {{{body}}}"
         ));
-        let error = luna::execution::interpret_with_protocols(
-            &package,
+        assert!(
+            luna::execution::interpret_with_protocols(
+                &uncopied,
+                "entry",
+                "Duplicate",
+                "Retire",
+                100_000,
+            )
+            .is_err()
+        );
+
+        // With Duplicate for str and full-graph text-region provenance, static views pass.
+        let package = tuple_support::compile_with_tuple(&format!(
+            "typealias str=.str'builtin; trait Duplicate {{}} trait Retire {{fn drop(*self);}} impl Duplicate for str {{}} impl Duplicate for bool {{}} {extra} fn entry()->bool {{{body}}}"
+        ));
+        assert_eq!(
+            luna::execution::interpret_with_protocols(
+                &package,
+                "entry",
+                "Duplicate",
+                "Retire",
+                100_000,
+            )
+            .unwrap(),
+            comptime_interpretor::Value::Bool(true)
+        );
+    }
+
+    // Returning a pointer to a local str binding still fails closed.
+    let escaping = tuple_support::compile_with_tuple(
+        "typealias str=.str'builtin; trait Duplicate {} trait Retire {fn drop(*self);}
+         impl Duplicate for str {} impl Duplicate for bool {}
+         fn leak()->*str {let local=\"ephemeral\";local.ref}
+         fn entry()->bool {let _=leak();true}",
+    );
+    assert!(
+        luna::execution::interpret_with_protocols(
+            &escaping,
             "entry",
             "Duplicate",
             "Retire",
-            100_000,
+            100_000
         )
-        .unwrap_err();
-        assert!(error.contains("string-view memory provenance"), "{error}");
-        assert!(error.contains("backing character storage"), "{error}");
-    }
+        .is_err()
+    );
 }
 
 #[test]

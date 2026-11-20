@@ -535,12 +535,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         // Formation has no concrete arguments. Assume each input
                         // field conditionally; invocation still establishes the
                         // actual targets and checks the full memory footprint.
-                        let layout = crate::memory::pointer_input_layout(
-                            self.package,
-                            &parameter.ty,
-                            &mut self.fuel,
-                        )
-                        .map_err(|reason| error(source, reason))?;
+                        let layout = self.pointer_input_layout(&parameter.ty, source)?;
                         let premises = layout
                             .into_iter()
                             .filter(|leaf| !leaf.input_fields.is_empty())
@@ -751,13 +746,9 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         )
                         && self.storage_inputs_are_closed(&argument.value.ty, source)?
                     {
-                        pointer_arguments |= !crate::memory::pointer_input_layout(
-                            self.package,
-                            &argument.value.ty,
-                            &mut self.fuel,
-                        )
-                        .map_err(|reason| error(source, reason))?
-                        .is_empty();
+                        pointer_arguments |= !self
+                            .pointer_input_layout(&argument.value.ty, source)?
+                            .is_empty();
                     }
                     // A pointer constructed inside a record/block is just as
                     // observable as a pointer-valued root argument. Inspect
@@ -783,13 +774,10 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 if matches!(callee.kind, K::TraitMethod { .. })
                     && (flow.memory_exposed || pointer_arguments)
                 {
-                    let package = self.package.ok_or_else(|| {
+                    let _ = self.package.ok_or_else(|| {
                         error(source, "method memory analysis requires a package")
                     })?;
-                    let selected = self
-                        .method_callees
-                        .select(package, callee, &mut self.fuel)
-                        .map_err(|reason| error(source, reason))?;
+                    let selected = self.select_method_callee(callee, source)?;
                     let resolved = Expr {
                         source,
                         ty: expr.ty.clone(),
@@ -996,9 +984,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         let source = expr.source;
         match &expr.kind {
             K::ReadPointer(pointer) => {
-                if !crate::memory::pointer_input_layout(self.package, &expr.ty, &mut self.fuel)
-                    .map_err(|reason| error(source, reason))?
-                    .is_empty()
+                if !self.pointer_input_layout(&expr.ty, source)?.is_empty()
                     && crate::memory::pointer_representation(self.package, &expr.ty, &mut self.fuel)
                         .map_err(|reason| error(source, reason))?
                         .is_none()
@@ -1012,9 +998,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 }
                 let target = target
                     .ok_or_else(|| error(source, "pointer target provenance is not established"))?;
-                if !crate::memory::readable_representation(self.package, &expr.ty, &mut self.fuel)
-                    .map_err(|reason| error(source, reason))?
-                {
+                if !self.readable_representation(&expr.ty, source)? {
                     return Err(error(
                         source,
                         "owned pointer read requires a memory transfer contract",
@@ -1244,9 +1228,10 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         value.ty,
                         Term::Function { .. } | Term::UnsafeFunction(_) | Term::Closure { .. }
                     )
-                    && !crate::memory::capture_pointer_replacement_layout(
+                    && !crate::memory::capture_pointer_replacement_layout_for(
                         self.package,
                         &value.ty,
+                        self.text_provenance,
                         &mut self.fuel,
                     )
                     .map_err(|reason| {
@@ -1258,9 +1243,10 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         )
                     })?
                 {
-                    crate::memory::require_pointer_free_owned(
+                    crate::memory::require_pointer_free_owned_for(
                         self.package,
                         &value.ty,
+                        self.text_provenance,
                         &mut self.fuel,
                         0,
                     )

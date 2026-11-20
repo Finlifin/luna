@@ -118,6 +118,109 @@ fn remap_descriptor_roots(value: &mut Regions, mapping: &BTreeMap<DescriptorRoot
     }
 }
 
+/// Conservative type-level predicate for whether values of `ty` (or storage
+/// reachable through pointers inside `ty`) can hold a `str` view or callable.
+/// Exhaustion propagates as `Err`; any unknown/opaque type fails closed (`true`).
+pub(super) fn type_may_hold_text_or_callable(
+    package: &Package,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    fn walk(
+        package: &Package,
+        ty: &Term,
+        fuel: &mut usize,
+        depth: usize,
+        visiting: &mut Vec<Term>,
+        clean_false: &mut HashSet<Term>,
+    ) -> Result<(bool, bool), String> {
+        if depth >= 128 {
+            return Ok((true, false));
+        }
+        charge(fuel, 1)?;
+        if matches!(
+            ty,
+            Term::Primitive(Primitive::Str | Primitive::Type | Primitive::Object)
+                | Term::Function { .. }
+                | Term::UnsafeFunction(_)
+                | Term::Closure { .. }
+        ) {
+            return Ok((true, false));
+        }
+        if matches!(ty, Term::Primitive(_)) {
+            return Ok((false, false));
+        }
+        if visiting.contains(ty) {
+            return Ok((false, true));
+        }
+        if clean_false.contains(ty) {
+            return Ok((false, false));
+        }
+        visiting.push(ty.clone());
+        let outcome = (|| {
+            match pointer_representation(Some(package), ty, fuel) {
+                Ok(Some((_, pointee))) => {
+                    return walk(package, &pointee, fuel, depth + 1, visiting, clean_false);
+                }
+                Ok(None) => {}
+                Err(error) if error.contains("exhausted") => return Err(error),
+                Err(_) => return Ok((true, false)),
+            }
+            if intrinsic_pointer_value(ty) {
+                return Ok((false, false));
+            }
+            let is_enum = matches!(ty, Term::ErrorResult { .. } | Term::Optional(_))
+                || matches!(
+                    ty,
+                    Term::Nominal { declaration, .. }
+                        if package.enums.iter().any(|e| e.declaration == *declaration)
+                );
+            let mut hit_cycle = false;
+            if is_enum {
+                let variants = match owned_variant_fields(Some(package), ty, fuel) {
+                    Ok(variants) => variants,
+                    Err(error) if error.contains("exhausted") => return Err(error),
+                    Err(_) => return Ok((true, false)),
+                };
+                for fields in variants {
+                    for field in fields {
+                        let (may_hold, field_cycle) =
+                            walk(package, &field, fuel, depth + 1, visiting, clean_false)?;
+                        if may_hold {
+                            return Ok((true, false));
+                        }
+                        hit_cycle |= field_cycle;
+                    }
+                }
+            } else {
+                let fields = match owned_fields(Some(package), ty, fuel) {
+                    Ok(fields) => fields,
+                    Err(error) if error.contains("exhausted") => return Err(error),
+                    Err(_) => return Ok((true, false)),
+                };
+                for field in fields {
+                    let (may_hold, field_cycle) =
+                        walk(package, &field, fuel, depth + 1, visiting, clean_false)?;
+                    if may_hold {
+                        return Ok((true, false));
+                    }
+                    hit_cycle |= field_cycle;
+                }
+            }
+            Ok((false, hit_cycle))
+        })();
+        visiting.pop();
+        if let Ok((false, false)) = &outcome {
+            clean_false.insert(ty.clone());
+        }
+        outcome
+    }
+
+    let mut visiting = Vec::new();
+    let mut clean_false = HashSet::new();
+    Ok(walk(package, ty, fuel, 0, &mut visiting, &mut clean_false)?.0)
+}
+
 #[derive(Clone, PartialEq, Eq)]
 struct StorageKey {
     declaration: DeclarationId,
@@ -545,13 +648,54 @@ pub fn infer_text_regions(
     arguments: &[Term],
     fuel: &mut usize,
 ) -> Result<TextRegionSummary, String> {
+    let declarations = crate::declarations::Metadata::new(Some(package));
+    infer_text_regions_with_metadata(package, &declarations, declaration, arguments, fuel)
+}
+
+pub(crate) fn infer_text_regions_with_metadata(
+    package: &Package,
+    declarations: &crate::declarations::Metadata<'_>,
+    declaration: DeclarationId,
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<TextRegionSummary, String> {
+    let mut methods = MethodCallees::default();
+    infer_text_regions_with_context(
+        package,
+        None,
+        declarations,
+        &mut methods,
+        declaration,
+        arguments,
+        fuel,
+    )
+}
+
+pub(crate) fn infer_text_regions_with_context<'a>(
+    package: &'a Package,
+    source: Option<::materialization::DeclarationSource<'a>>,
+    declarations: &crate::declarations::Metadata<'a>,
+    methods: &mut MethodCallees,
+    declaration: DeclarationId,
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<TextRegionSummary, String> {
     Query {
         package,
+        source,
+        declarations,
+        cached_domains: None,
         fuel,
         current: None,
         local_callables: BTreeMap::new(),
         closed_closures: vec![],
         storage_entries: vec![],
+        storage_pending: VecDeque::new(),
+        storage_scheduled: HashSet::new(),
+        storage_dependents: HashMap::new(),
+        storage_cache_dependents: HashMap::new(),
+        storage_outer_dependents: HashMap::new(),
+        storage_current: None,
         solving_storage: false,
         next_storage_frame: 0,
         readonly_storage: None,
@@ -563,8 +707,7 @@ pub fn infer_text_regions(
         loops: vec![],
         exits: vec![],
         cache: HashMap::new(),
-        metadata: Round::default(),
-        methods: MethodCallees::default(),
+        methods,
     }
     .solve(declaration, arguments)
     .map(|summary| TextRegionSummary {
@@ -574,13 +717,22 @@ pub fn infer_text_regions(
         returned: summary.returned.map(|value| value.text),
     })
 }
-struct Query<'a, 'f> {
+struct Query<'a, 'd, 'm, 'f> {
     package: &'a Package,
+    source: Option<::materialization::DeclarationSource<'a>>,
+    declarations: &'d crate::declarations::Metadata<'a>,
+    cached_domains: Option<std::sync::Arc<BTreeMap<DeclarationId, Term>>>,
     fuel: &'f mut usize,
     current: Option<SummaryKey>,
     local_callables: BTreeMap<LocalId, CodeValue>,
     closed_closures: Vec<ClosedClosure>,
     storage_entries: Vec<StorageEntry>,
+    storage_pending: VecDeque<usize>,
+    storage_scheduled: HashSet<usize>,
+    storage_dependents: HashMap<usize, BTreeSet<usize>>,
+    storage_cache_dependents: HashMap<SummaryKey, BTreeSet<usize>>,
+    storage_outer_dependents: HashMap<usize, Vec<SummaryKey>>,
+    storage_current: Option<usize>,
     solving_storage: bool,
     next_storage_frame: usize,
     readonly_storage: Option<&'static str>,
@@ -592,10 +744,9 @@ struct Query<'a, 'f> {
     loops: Vec<LoopRegions>,
     exits: Vec<Option<ExitRegions>>,
     cache: HashMap<SummaryKey, Summary>,
-    metadata: Round<'static>,
-    methods: MethodCallees,
+    methods: &'m mut MethodCallees,
 }
-impl Query<'_, '_> {
+impl Query<'_, '_, '_, '_> {
     fn record_exit(&mut self, locals: &Locals) -> Result<(), String> {
         if let Some(Some(exit)) = self.exits.last_mut() {
             join_locals(&mut exit.locals, locals, &exit.bindings, self.fuel)?;
@@ -925,7 +1076,15 @@ impl Query<'_, '_> {
         if matches!(value.expression.kind, K::TraitMethod { .. }) {
             value.expression = self
                 .methods
-                .select(self.package, &value.expression, self.fuel)?
+                .select_with_context(
+                    self.package,
+                    &value.expression,
+                    self.source,
+                    Some(self.declarations),
+                    &mut self.cached_domains,
+                    self.fuel,
+                    false,
+                )?
                 .into();
         }
         if value.closure.is_some() {
@@ -1152,6 +1311,13 @@ impl Query<'_, '_> {
                         self.schedule(caller);
                     }
                 }
+                if let Some(storage_callers) = self.storage_cache_dependents.get(&key) {
+                    charge(self.fuel, storage_callers.len())?;
+                    let storage_callers: Vec<_> = storage_callers.iter().copied().collect();
+                    for storage_caller in storage_callers {
+                        self.schedule_storage(storage_caller);
+                    }
+                }
             }
         }
         if let Some((_, error)) = deferred.into_iter().next() {
@@ -1196,6 +1362,14 @@ impl Query<'_, '_> {
                 callers.push(caller.clone());
             }
         }
+        if let Some(storage_caller) = self.storage_current {
+            let callers = self
+                .storage_cache_dependents
+                .entry(key.clone())
+                .or_default();
+            charge(self.fuel, callers.len().saturating_add(1))?;
+            callers.insert(storage_caller);
+        }
         if !self.cache.contains_key(&key) {
             // Bottom means no observed normal return yet, not static storage.
             // Every discovered instance is analyzed before a result escapes.
@@ -1225,11 +1399,9 @@ impl Query<'_, '_> {
         if body.phase != FunctionPhase::Runtime || body.type_parameters.len() != arguments.len() {
             return Err("text region inference requires a concrete runtime body".into());
         }
-        let domains =
-            self.metadata
-                .domains(Some(self.package), &body.type_parameters, self.fuel)?;
-        let body = body
-            .instantiate_declaration_parameters(&domains, arguments, self.fuel)
+        let body = self
+            .declarations
+            .specialize_function(body, arguments, self.fuel)
             .map_err(|e| e.to_string())?;
         self.index_local_callables(&body)?;
         let Term::Function { parameters, result } = body.signature.callable_signature() else {
@@ -1280,6 +1452,15 @@ impl Query<'_, '_> {
         }
         let mut locals = Locals::new();
         for (parameter, (id, ty)) in body.parameters.iter().zip(parameters).enumerate() {
+            if ty.sort != nir::Sort::Runtime
+                && matches!(
+                    ty.ty,
+                    Term::Primitive(Primitive::Type) | Term::ClosureContextType
+                )
+            {
+                locals.insert(*id, Regions::new());
+                continue;
+            }
             let mut regions = Regions::new();
             regions.code = owned_callable_bottom(Some(self.package), &ty.ty, self.fuel, true)?
                 .into_keys()
@@ -1360,7 +1541,11 @@ impl Query<'_, '_> {
             if returned.places.values().any(Option::is_some) {
                 return Err("text summary cannot export local descriptor addresses".into());
             }
-            for leaf in borrowed_input_layout(Some(self.package), result, self.fuel)? {
+            let mut completion = result.as_ref();
+            while let Term::Computation { result: inner, .. } = completion {
+                completion = inner.as_ref();
+            }
+            for leaf in borrowed_input_layout(Some(self.package), completion, self.fuel)? {
                 if let BorrowedInputLeaf::Text(leaf) = leaf {
                     if leaf.guards.is_empty()
                         && returned
@@ -1461,9 +1646,22 @@ impl Query<'_, '_> {
                 summary: StorageSummary::default(),
                 cost,
             });
+            self.schedule_storage(id);
             id
         };
-        if !self.solving_storage {
+        if let Some(caller) = self.storage_current {
+            let callers = self.storage_dependents.entry(id).or_default();
+            charge(self.fuel, callers.len().saturating_add(1))?;
+            callers.insert(caller);
+        }
+        if let Some(outer) = &self.current {
+            let outers = self.storage_outer_dependents.entry(id).or_default();
+            charge(self.fuel, outers.len().saturating_add(1))?;
+            if !outers.contains(outer) {
+                outers.push(outer.clone());
+            }
+        }
+        if !self.solving_storage && !self.storage_pending.is_empty() {
             self.solving_storage = true;
             let result = self.solve_storage();
             self.solving_storage = false;
@@ -1502,47 +1700,73 @@ impl Query<'_, '_> {
         Ok(Some(value))
     }
 
-    fn solve_storage(&mut self) -> Result<(), String> {
-        loop {
-            let count = self.storage_entries.len();
-            let mut changed = false;
-            let mut failure = None;
-            for id in 0..count {
-                charge(self.fuel, self.storage_entries[id].cost)?;
-                let key = self.storage_entries[id].key.clone();
-                let mut next = match self.analyze_storage(&key) {
-                    Ok(summary) => summary,
-                    Err(error) => {
-                        failure = Some(error);
-                        continue;
-                    }
-                };
-                let previous = &self.storage_entries[id].summary;
-                charge(self.fuel, previous.reads.len())?;
-                next.reads.extend(previous.reads.iter().cloned());
-                if let Some(value) = &previous.returned {
-                    charge_regions(value, self.fuel)?;
-                    merge(&mut next.returned, Some(value.clone()), self.fuel)?;
-                }
-                if let Some(storage) = &previous.storage {
-                    let output = next.storage.get_or_insert_with(BTreeMap::new);
-                    for (slot, value) in storage {
-                        charge_regions(value, self.fuel)?;
-                        let mut joined = output.remove(slot);
-                        merge(&mut joined, Some(value.clone()), self.fuel)?;
-                        output.insert(*slot, joined.unwrap());
-                    }
-                }
-                if next != *previous {
-                    self.storage_entries[id].summary = next;
-                    changed = true;
-                }
-            }
-            if changed || self.storage_entries.len() != count {
-                continue;
-            }
-            return failure.map_or(Ok(()), Err);
+    fn schedule_storage(&mut self, id: usize) {
+        if self.storage_scheduled.insert(id) {
+            self.storage_pending.push_back(id);
         }
+    }
+
+    fn solve_storage(&mut self) -> Result<(), String> {
+        let mut deferred = Vec::<(usize, String)>::new();
+        while let Some(id) = self.storage_pending.pop_front() {
+            self.storage_scheduled.remove(&id);
+            charge(self.fuel, self.storage_entries[id].cost)?;
+            let key = self.storage_entries[id].key.clone();
+            let previous_current = self.storage_current.replace(id);
+            let result = self.analyze_storage(&key);
+            self.storage_current = previous_current;
+            deferred.retain(|(entry_id, _)| *entry_id != id);
+            let mut next = match result {
+                Ok(summary) => summary,
+                Err(error) => {
+                    deferred.push((id, error));
+                    continue;
+                }
+            };
+            let previous = &self.storage_entries[id].summary;
+            charge(self.fuel, previous.reads.len())?;
+            next.reads.extend(previous.reads.iter().cloned());
+            if let Some(value) = &previous.returned {
+                charge_regions(value, self.fuel)?;
+                merge(&mut next.returned, Some(value.clone()), self.fuel)?;
+            }
+            if let Some(storage) = &previous.storage {
+                let output = next.storage.get_or_insert_with(BTreeMap::new);
+                for (slot, value) in storage {
+                    charge_regions(value, self.fuel)?;
+                    let mut joined = output.remove(slot);
+                    merge(&mut joined, Some(value.clone()), self.fuel)?;
+                    output.insert(*slot, joined.unwrap());
+                }
+            }
+            if next != *previous {
+                self.storage_entries[id].summary = next;
+                if let Some(callers) = self.storage_dependents.get(&id) {
+                    charge(self.fuel, callers.len())?;
+                    let callers: Vec<_> = callers.iter().copied().collect();
+                    for caller in callers {
+                        self.schedule_storage(caller);
+                    }
+                }
+                if let Some(outers) = self.storage_outer_dependents.get(&id) {
+                    charge(self.fuel, outers.len())?;
+                    let outers: Vec<_> = outers.iter().cloned().collect();
+                    for outer in outers {
+                        if self.current.as_ref() != Some(&outer) {
+                            self.schedule(outer);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((_, error)) = deferred.first() {
+            let error = error.clone();
+            for (failed_id, _) in deferred {
+                self.schedule_storage(failed_id);
+            }
+            return Err(error);
+        }
+        Ok(())
     }
 
     fn analyze_storage(&mut self, key: &StorageKey) -> Result<StorageSummary, String> {
@@ -1552,11 +1776,9 @@ impl Query<'_, '_> {
         if body.phase != FunctionPhase::Runtime || body.type_parameters.len() != arguments.len() {
             return Err("text descriptor call requires a concrete runtime body".into());
         }
-        let domains =
-            self.metadata
-                .domains(Some(self.package), &body.type_parameters, self.fuel)?;
-        let body = body
-            .instantiate_declaration_parameters(&domains, arguments, self.fuel)
+        let body = self
+            .declarations
+            .specialize_function(body, arguments, self.fuel)
             .map_err(|e| e.to_string())?;
         let mut scope = Locals {
             bindings: BTreeMap::new(),
@@ -2053,7 +2275,44 @@ impl Query<'_, '_> {
             K::Literal(nir::program::Literal::String(_)) => Ok(Some(Regions::from(
                 BTreeMap::from([(vec![], BTreeSet::from([TextRegionOrigin::Static]))]),
             ))),
+            K::ComptimeValue(_) | K::AssociatedValue { .. } => {
+                if !owned_callable_bottom(Some(self.package), &expr.ty, self.fuel, true)?.is_empty()
+                {
+                    return Err("text region comptime value cannot embed a callable".into());
+                }
+                if matches!(expr.ty, Term::Primitive(Primitive::Type | Primitive::Unit)) {
+                    return Ok(empty);
+                }
+                let mut regions = Regions::new();
+                for leaf in borrowed_input_layout(Some(self.package), &expr.ty, self.fuel)? {
+                    match leaf {
+                        BorrowedInputLeaf::Pointer(_) => {
+                            return Err("text region comptime value cannot embed a pointer".into());
+                        }
+                        BorrowedInputLeaf::Text(leaf) => {
+                            regions.insert(
+                                leaf.input_fields,
+                                BTreeSet::from([TextRegionOrigin::Static]),
+                            );
+                        }
+                    }
+                }
+                Ok(Some(regions))
+            }
             K::Literal(_) | K::TypeValue(_) | K::Unit => Ok(empty),
+            K::EffectComputation { body, .. }
+            | K::EffectRun {
+                computation: body, ..
+            } => self.expr(body, locals, returned, next),
+            K::EffectResume(value) => self.transfer_effect_resume(value, locals, returned, next),
+            K::EffectRequest { arguments, .. } => {
+                self.transfer_effect_request(expr, arguments, locals, returned, next)
+            }
+            K::EffectHandle {
+                computation,
+                handlers,
+                ..
+            } => self.transfer_effect_handle(computation, handlers, locals, returned, next),
             K::Function { .. } => self.transfer_function(expr, locals, returned, next),
             K::TraitMethod { .. } => self.transfer_trait_method(expr, locals, returned, next),
             K::FunctionInstance { .. } => {
@@ -2120,14 +2379,29 @@ impl Query<'_, '_> {
             | K::ComptimeIntegerConvert(value)
             | K::TypeKind { operand: value, .. }
             | K::TypeLayout { operand: value, .. }
+            | K::BitAssign { value, .. }
             | K::BitSlice { value, .. } => Ok(self
                 .expr(value, locals, returned, next)?
                 .map(|_| Regions::new())),
+            K::BitUpdate {
+                selections, value, ..
+            } => self.transfer_bit_update(None, selections, value, locals, returned, next),
+            K::BitWritePointer {
+                pointer,
+                selections,
+                value,
+            } => {
+                if let Some(message) = self.readonly_storage {
+                    return Err(message.into());
+                }
+                self.transfer_bit_update(Some(pointer), selections, value, locals, returned, next)
+            }
             K::IntegerBinary { .. }
             | K::FloatBinary { .. }
             | K::BitEqual { .. }
             | K::BitConcat { .. }
             | K::BitIndex { .. }
+            | K::TypeEqual(..)
             | K::TemplateEqual { .. } => self.transfer_integer_binary(expr, locals, returned, next),
             K::BitWindow { .. } => self.transfer_bit_window(expr, locals, returned, next),
             K::Intrinsic { .. } => self.transfer_intrinsic(expr, locals, returned, next),
@@ -2144,5 +2418,675 @@ impl Query<'_, '_> {
                 expr.source
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn src() -> nir::program::SourceRange {
+        nir::program::SourceRange { start: 0, end: 1 }
+    }
+
+    fn decl(local: u32) -> DeclarationId {
+        DeclarationId { package: 0, local }
+    }
+
+    fn lid(index: u32) -> LocalId {
+        LocalId { owner: 0, index }
+    }
+
+    fn expr(ty: Term, kind: K) -> Expr {
+        Expr {
+            source: src(),
+            ty,
+            kind,
+        }
+    }
+
+    fn fn_decl(
+        declaration: DeclarationId,
+        name: &str,
+        parameters: Vec<Term>,
+        param_ids: Vec<LocalId>,
+        result: Term,
+    ) -> nir::program::FunctionDeclaration {
+        nir::program::FunctionDeclaration {
+            source: src(),
+            phase: nir::program::FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            result_type_binder: None,
+            result_guarantees: vec![],
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration,
+            name: name.into(),
+            signature: Term::Function {
+                parameters: parameters
+                    .into_iter()
+                    .map(|ty| nir::Parameter {
+                        sort: nir::Sort::Runtime,
+                        ty,
+                    })
+                    .collect(),
+                result: Box::new(result),
+            },
+            parameters: param_ids,
+            defaults: vec![],
+        }
+    }
+
+    #[test]
+    fn infer_text_regions_with_metadata_handles_comptime_type_equal_and_bit_ops() {
+        let str_ty = Term::Primitive(Primitive::Str);
+        let type_ty = Term::Primitive(Primitive::Type);
+        let u8_ty = Term::Primitive(Primitive::U8);
+        let bv4_ty = Term::Primitive(Primitive::BitVec(4));
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let fn_ty = Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Void)),
+        };
+
+        let comptime_str_fn = decl(1);
+        let comptime_fn_fn = decl(2);
+        let bit_and_type_eq_fn = decl(3);
+
+        let local_bv = lid(1);
+        let bv_place = nir::program::Place {
+            root: local_bv,
+            fields: vec![],
+        };
+
+        let package = Package {
+            functions: vec![
+                Function {
+                    interface: fn_decl(comptime_str_fn, "ct_str", vec![], vec![], str_ty.clone()),
+                    body: expr(str_ty.clone(), K::ComptimeValue(str_ty.clone())),
+                },
+                Function {
+                    interface: fn_decl(comptime_fn_fn, "ct_fn", vec![], vec![], fn_ty.clone()),
+                    body: expr(fn_ty.clone(), K::ComptimeValue(fn_ty.clone())),
+                },
+                Function {
+                    interface: fn_decl(
+                        bit_and_type_eq_fn,
+                        "bit_and_type_eq",
+                        vec![],
+                        vec![],
+                        str_ty.clone(),
+                    ),
+                    body: expr(
+                        str_ty.clone(),
+                        K::Block {
+                            statements: vec![
+                                expr(
+                                    bv4_ty.clone(),
+                                    K::Let {
+                                        binding: local_bv,
+                                        value: Box::new(expr(
+                                            bv4_ty.clone(),
+                                            K::ComptimeValue(u8_ty.clone()),
+                                        )),
+                                    },
+                                ),
+                                expr(
+                                    Term::Primitive(Primitive::Void),
+                                    K::BitAssign {
+                                        place: bv_place.clone(),
+                                        storage_type: bv4_ty.clone(),
+                                        start: 0,
+                                        end: 2,
+                                        value: Box::new(expr(
+                                            Term::Primitive(Primitive::BitVec(2)),
+                                            K::Unit,
+                                        )),
+                                    },
+                                ),
+                                expr(
+                                    bv4_ty.clone(),
+                                    K::BitUpdate {
+                                        place: bv_place,
+                                        storage_type: bv4_ty.clone(),
+                                        selections: vec![nir::program::BitSelection::Index(
+                                            Box::new(expr(
+                                                Term::Primitive(Primitive::Usize),
+                                                K::Unit,
+                                            )),
+                                        )],
+                                        value: Box::new(expr(
+                                            Term::Primitive(Primitive::BitVec(1)),
+                                            K::Unit,
+                                        )),
+                                    },
+                                ),
+                                expr(
+                                    bool_ty,
+                                    K::Discard(Box::new(expr(
+                                        Term::Primitive(Primitive::Bool),
+                                        K::TypeEqual(
+                                            Box::new(expr(
+                                                type_ty.clone(),
+                                                K::TypeValue(u8_ty.clone()),
+                                            )),
+                                            Box::new(expr(
+                                                type_ty.clone(),
+                                                K::ComptimeValue(u8_ty),
+                                            )),
+                                        ),
+                                    ))),
+                                ),
+                            ],
+                            result: Some(Box::new(expr(
+                                str_ty.clone(),
+                                K::Call {
+                                    callee: Box::new(expr(
+                                        Term::Function {
+                                            parameters: vec![],
+                                            result: Box::new(str_ty),
+                                        },
+                                        K::Function(comptime_str_fn),
+                                    )),
+                                    arguments: vec![],
+                                    parameter_bindings: vec![],
+                                },
+                            ))),
+                        },
+                    ),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let metadata = crate::declarations::Metadata::new(Some(&package));
+        let mut fuel = 20_000;
+        let summary = infer_text_regions_with_metadata(
+            &package,
+            &metadata,
+            bit_and_type_eq_fn,
+            &[],
+            &mut fuel,
+        )
+        .expect("comptime str + bit ops + type equal succeed");
+        let returned = summary.returned.expect("normal return");
+        assert_eq!(
+            returned.get(&vec![]),
+            Some(&BTreeSet::from([TextRegionOrigin::Static]))
+        );
+
+        let err =
+            infer_text_regions_with_metadata(&package, &metadata, comptime_fn_fn, &[], &mut fuel)
+                .expect_err("comptime callable must fail closed");
+        assert!(err.contains("callable"), "{err}");
+    }
+
+    #[test]
+    fn non_text_pointer_ops_skip_descriptor_roots_while_text_pointers_fail_closed() {
+        let pair_decl = decl(10);
+        let pair_ty = Term::Nominal {
+            declaration: pair_decl,
+            arguments: vec![],
+        };
+        let str_ty = Term::Primitive(Primitive::Str);
+        let u32_ty = Term::Primitive(Primitive::U32);
+        let u8_ty = Term::Primitive(Primitive::U8);
+
+        let ptr_u8_fn = decl(1);
+        let local_u8_fn = decl(2);
+        let ptr_str_fn = decl(3);
+        let pair_num_fn = decl(4);
+        let pair_str_fn = decl(5);
+
+        let p0 = lid(0);
+        let local_u8 = lid(1);
+
+        let package = Package {
+            structs: vec![nir::program::Struct {
+                parameter_types: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration: pair_decl,
+                name: "Pair".into(),
+                fields: vec![("s".into(), str_ty.clone()), ("n".into(), u32_ty.clone())],
+            }],
+            functions: vec![
+                Function {
+                    interface: fn_decl(
+                        ptr_u8_fn,
+                        "read_u8",
+                        vec![Term::Pointer(Box::new(u8_ty.clone()))],
+                        vec![p0],
+                        u8_ty.clone(),
+                    ),
+                    body: expr(
+                        u8_ty.clone(),
+                        K::ReadPointer(Box::new(expr(
+                            Term::Pointer(Box::new(u8_ty.clone())),
+                            K::Local(p0),
+                        ))),
+                    ),
+                },
+                Function {
+                    interface: fn_decl(local_u8_fn, "addr_u8", vec![], vec![], u8_ty.clone()),
+                    body: expr(
+                        u8_ty.clone(),
+                        K::Block {
+                            statements: vec![expr(
+                                u8_ty.clone(),
+                                K::Let {
+                                    binding: local_u8,
+                                    value: Box::new(expr(u8_ty.clone(), K::Unit)),
+                                },
+                            )],
+                            result: Some(Box::new(expr(
+                                u8_ty.clone(),
+                                K::ReadPointer(Box::new(expr(
+                                    Term::Pointer(Box::new(u8_ty.clone())),
+                                    K::AddressOf(Box::new(expr(u8_ty.clone(), K::Local(local_u8)))),
+                                ))),
+                            ))),
+                        },
+                    ),
+                },
+                Function {
+                    interface: fn_decl(
+                        ptr_str_fn,
+                        "read_str",
+                        vec![Term::Pointer(Box::new(str_ty.clone()))],
+                        vec![p0],
+                        str_ty.clone(),
+                    ),
+                    body: expr(
+                        str_ty.clone(),
+                        K::ReadPointer(Box::new(expr(
+                            Term::Pointer(Box::new(str_ty.clone())),
+                            K::Local(p0),
+                        ))),
+                    ),
+                },
+                Function {
+                    interface: fn_decl(
+                        pair_num_fn,
+                        "read_pair_num",
+                        vec![Term::Pointer(Box::new(pair_ty.clone()))],
+                        vec![p0],
+                        u32_ty.clone(),
+                    ),
+                    body: expr(
+                        u32_ty.clone(),
+                        K::ReadPointer(Box::new(expr(
+                            Term::Pointer(Box::new(u32_ty.clone())),
+                            K::PointerField {
+                                pointer: Box::new(expr(
+                                    Term::Pointer(Box::new(pair_ty.clone())),
+                                    K::Local(p0),
+                                )),
+                                declaration: pair_decl,
+                                index: 1,
+                            },
+                        ))),
+                    ),
+                },
+                Function {
+                    interface: fn_decl(
+                        pair_str_fn,
+                        "read_pair_str",
+                        vec![Term::Pointer(Box::new(pair_ty.clone()))],
+                        vec![p0],
+                        str_ty.clone(),
+                    ),
+                    body: expr(
+                        str_ty.clone(),
+                        K::ReadPointer(Box::new(expr(
+                            Term::Pointer(Box::new(str_ty.clone())),
+                            K::PointerField {
+                                pointer: Box::new(expr(
+                                    Term::Pointer(Box::new(pair_ty)),
+                                    K::Local(p0),
+                                )),
+                                declaration: pair_decl,
+                                index: 0,
+                            },
+                        ))),
+                    ),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let metadata = crate::declarations::Metadata::new(Some(&package));
+        let mut fuel = 20_000;
+        infer_text_regions_with_metadata(&package, &metadata, ptr_u8_fn, &[], &mut fuel)
+            .expect("*u8 read succeeds without descriptor root");
+        infer_text_regions_with_metadata(&package, &metadata, local_u8_fn, &[], &mut fuel)
+            .expect("local u8 address_of succeeds without descriptor root");
+        infer_text_regions_with_metadata(&package, &metadata, pair_num_fn, &[], &mut fuel)
+            .expect("reading non-text field from opaque *Pair succeeds");
+
+        let err = infer_text_regions_with_metadata(&package, &metadata, ptr_str_fn, &[], &mut fuel)
+            .expect_err("opaque *str read must fail closed");
+        assert!(err.contains("pointer target is unknown"), "{err}");
+
+        let err =
+            infer_text_regions_with_metadata(&package, &metadata, pair_str_fn, &[], &mut fuel)
+                .expect_err("reading str field from opaque *Pair must fail closed");
+        assert!(err.contains("pointer target is unknown"), "{err}");
+    }
+
+    #[test]
+    fn intrinsic_returning_str_fails_closed() {
+        let str_ty = Term::Primitive(Primitive::Str);
+        let usize_ty = Term::Primitive(Primitive::Usize);
+        let family_decl = decl(99);
+        let tag = nir::intrinsics::Tag {
+            family: family_decl,
+            variant: 0,
+        };
+        let family = nir::program::Enum {
+            is_intrinsic: true,
+            parameter_types: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration: family_decl,
+            name: "MemOps".into(),
+            variants: vec![nir::program::Variant {
+                name: "RawRead".into(),
+                shape: nir::program::VariantShape::Unit,
+                fields: vec![],
+            }],
+            groups: vec![],
+            encoding: None,
+            symbol_encoding: None,
+        };
+        let checked = nir::intrinsics::Registry::for_family(
+            &family,
+            0,
+            nir::intrinsics::Operation::MemRawRead,
+        )
+        .unwrap()
+        .check(tag, std::slice::from_ref(&usize_ty), &str_ty)
+        .unwrap();
+        let raw_read_fn = decl(1);
+        let package = Package {
+            enums: vec![family],
+            functions: vec![Function {
+                interface: fn_decl(raw_read_fn, "forged_str", vec![], vec![], str_ty.clone()),
+                body: expr(
+                    str_ty,
+                    K::Intrinsic {
+                        tag,
+                        binding: Some(checked),
+                        inputs: vec![expr(usize_ty, K::Unit)],
+                    },
+                ),
+            }],
+            ..Default::default()
+        };
+        let metadata = crate::declarations::Metadata::new(Some(&package));
+        let mut fuel = 10_000;
+        let err =
+            infer_text_regions_with_metadata(&package, &metadata, raw_read_fn, &[], &mut fuel)
+                .expect_err("intrinsic returning str must fail closed");
+        assert!(err.contains("backing-region provenance"), "{err}");
+    }
+
+    #[test]
+    fn effect_handle_and_request_preserve_text_mutations_and_fail_closed_for_text_payloads() {
+        let str_ty = Term::Primitive(Primitive::Str);
+        let u32_ty = Term::Primitive(Primitive::U32);
+        let void_ty = Term::Primitive(Primitive::Void);
+        let effect_decl = decl(80);
+        let s_local = lid(1);
+        let ok_fn = decl(1);
+        let bad_payload_fn = decl(2);
+        let bad_result_fn = decl(3);
+
+        let u32_handler_sig = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: u32_ty.clone(),
+            }],
+            result: Box::new(void_ty.clone()),
+        };
+        let str_handler_sig = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: str_ty.clone(),
+            }],
+            result: Box::new(void_ty.clone()),
+        };
+
+        let op = nir::effects::Operation {
+            declaration: effect_decl,
+            arguments: vec![],
+        };
+
+        let package = Package {
+            functions: vec![
+                Function {
+                    interface: fn_decl(ok_fn, "effect_ok", vec![], vec![], str_ty.clone()),
+                    body: expr(
+                        str_ty.clone(),
+                        K::Block {
+                            statements: vec![
+                                expr(
+                                    str_ty.clone(),
+                                    K::Let {
+                                        binding: s_local,
+                                        value: Box::new(expr(
+                                            str_ty.clone(),
+                                            K::Literal(nir::program::Literal::String("init".into())),
+                                        )),
+                                    },
+                                ),
+                                expr(
+                                    void_ty.clone(),
+                                    K::EffectHandle {
+                                        computation: Box::new(expr(
+                                            void_ty.clone(),
+                                            K::EffectComputation {
+                                                effects: vec![op.clone()],
+                                                body: Box::new(expr(
+                                                    void_ty.clone(),
+                                                    K::EffectRequest {
+                                                        operation: op.clone(),
+                                                        abi: nir::effects::Abi::Direct,
+                                                        allowed_index: 0,
+                                                        signature: Box::new(
+                                                            u32_handler_sig.clone(),
+                                                        ),
+                                                        arguments: vec![expr(u32_ty.clone(), K::Unit)],
+                                                    },
+                                                )),
+                                            },
+                                        )),
+                                        handlers: vec![nir::program::EffectHandler {
+                                            operation: op.clone(),
+                                            abi: nir::effects::Abi::Direct,
+                                            signature: u32_handler_sig,
+                                            arms: vec![nir::program::MatchArm {
+                                                pattern: nir::program::Pattern::Tuple(vec![
+                                                    nir::program::Pattern::Wild,
+                                                ]),
+                                                guard: None,
+                                                body: expr(
+                                                    Term::Primitive(Primitive::Never),
+                                                    K::Block {
+                                                        statements: vec![expr(
+                                                            void_ty.clone(),
+                                                            K::Assign {
+                                                                place: nir::program::Place {
+                                                                    root: s_local,
+                                                                    fields: vec![],
+                                                                },
+                                                                value: Box::new(expr(
+                                                                    str_ty.clone(),
+                                                                    K::Literal(
+                                                                        nir::program::Literal::String(
+                                                                            "armed".into(),
+                                                                        ),
+                                                                    ),
+                                                                )),
+                                                            },
+                                                        )],
+                                                        result: Some(Box::new(expr(
+                                                            Term::Primitive(Primitive::Never),
+                                                            K::EffectResume(Box::new(expr(
+                                                                void_ty.clone(),
+                                                                K::Unit,
+                                                            ))),
+                                                        ))),
+                                                    },
+                                                ),
+                                            }],
+                                            fallback: None,
+                                        }],
+                                        outer: vec![],
+                                    },
+                                ),
+                            ],
+                            result: Some(Box::new(expr(str_ty.clone(), K::Local(s_local)))),
+                        },
+                    ),
+                },
+                Function {
+                    interface: fn_decl(
+                        bad_payload_fn,
+                        "effect_bad_payload",
+                        vec![],
+                        vec![],
+                        void_ty.clone(),
+                    ),
+                    body: expr(
+                        void_ty.clone(),
+                        K::EffectHandle {
+                            computation: Box::new(expr(void_ty.clone(), K::Unit)),
+                            handlers: vec![nir::program::EffectHandler {
+                                operation: op.clone(),
+                                abi: nir::effects::Abi::Direct,
+                                signature: str_handler_sig,
+                                arms: vec![],
+                                fallback: None,
+                            }],
+                            outer: vec![],
+                        },
+                    ),
+                },
+                Function {
+                    interface: fn_decl(
+                        bad_result_fn,
+                        "effect_bad_result",
+                        vec![],
+                        vec![],
+                        str_ty.clone(),
+                    ),
+                    body: expr(
+                        str_ty.clone(),
+                        K::EffectRequest {
+                            operation: op,
+                            abi: nir::effects::Abi::Direct,
+                            allowed_index: 0,
+                            signature: Box::new(Term::Function {
+                                parameters: vec![],
+                                result: Box::new(str_ty.clone()),
+                            }),
+                            arguments: vec![],
+                        },
+                    ),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let metadata = crate::declarations::Metadata::new(Some(&package));
+        let mut fuel = 50_000;
+        let summary = infer_text_regions_with_metadata(&package, &metadata, ok_fn, &[], &mut fuel)
+            .expect("text-free effect handle with outer static str write succeeds");
+        assert_eq!(
+            summary.returned.expect("normal return").get(&vec![]),
+            Some(&BTreeSet::from([TextRegionOrigin::Static]))
+        );
+
+        let err =
+            infer_text_regions_with_metadata(&package, &metadata, bad_payload_fn, &[], &mut fuel)
+                .expect_err("effect handler with str payload must fail closed");
+        assert!(err.contains("text or callables"), "{err}");
+
+        let err =
+            infer_text_regions_with_metadata(&package, &metadata, bad_result_fn, &[], &mut fuel)
+                .expect_err("effect request returning str must fail closed");
+        assert!(err.contains("text or callables"), "{err}");
+    }
+
+    #[test]
+    fn effect_computation_return_unwraps_for_text_layout_checks() {
+        let str_ty = Term::Primitive(Primitive::Str);
+        let void_ty = Term::Primitive(Primitive::Void);
+        let effect_decl = decl(81);
+        let op = nir::effects::Operation {
+            declaration: effect_decl,
+            arguments: vec![],
+        };
+        let void_comp = Term::Computation {
+            effects: vec![op.clone()],
+            result: Box::new(void_ty.clone()),
+        };
+        let str_comp = Term::Computation {
+            effects: vec![op.clone()],
+            result: Box::new(str_ty.clone()),
+        };
+        let ok_fn = decl(10);
+        let bad_fn = decl(11);
+        let package = Package {
+            functions: vec![
+                Function {
+                    interface: fn_decl(ok_fn, "comp_void", vec![], vec![], void_comp.clone()),
+                    body: expr(
+                        void_comp,
+                        K::EffectComputation {
+                            effects: vec![op.clone()],
+                            body: Box::new(expr(void_ty.clone(), K::Unit)),
+                        },
+                    ),
+                },
+                Function {
+                    interface: fn_decl(
+                        bad_fn,
+                        "comp_str_no_origin",
+                        vec![],
+                        vec![],
+                        str_comp.clone(),
+                    ),
+                    body: expr(
+                        str_comp,
+                        K::EffectComputation {
+                            effects: vec![op],
+                            body: Box::new(expr(str_ty.clone(), K::Tuple(vec![]))),
+                        },
+                    ),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let metadata = crate::declarations::Metadata::new(Some(&package));
+        let mut fuel = 20_000;
+        infer_text_regions_with_metadata(&package, &metadata, ok_fn, &[], &mut fuel).expect(
+            "effectful void computation should unwrap before checking returned text layout",
+        );
+
+        let err = infer_text_regions_with_metadata(&package, &metadata, bad_fn, &[], &mut fuel)
+            .expect_err("effectful str computation without backing origin must still fail closed");
+        assert!(err.contains("backing-region origin"), "{err}");
     }
 }

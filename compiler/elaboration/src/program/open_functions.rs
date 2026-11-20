@@ -6010,6 +6010,35 @@ impl Checker<'_, '_> {
             .collect()
     }
 
+    fn specialized_open_binder_assumptions(
+        &self,
+        owner: OwnerId,
+        symbols: &[Option<Term>],
+        span: Span,
+    ) -> Result<Vec<n::TraitRequirement>, Error> {
+        self.binder_assumptions(owner)
+            .into_iter()
+            .map(|requirement| {
+                Ok(n::TraitRequirement {
+                    interface: requirement.interface,
+                    subject: self
+                        .specialize_open_clause_type(owner, &requirement.subject, span)?
+                        .substitute_partial(symbols)
+                        .map_err(|failure| error(span, failure.to_string()))?,
+                    interface_arguments: requirement
+                        .interface_arguments
+                        .iter()
+                        .map(|ty| {
+                            self.specialize_open_clause_type(owner, ty, span)?
+                                .substitute_partial(symbols)
+                                .map_err(|failure| error(span, failure.to_string()))
+                        })
+                        .collect::<Result<_, _>>()?,
+                })
+            })
+            .collect()
+    }
+
     fn specialized_open_predicates(
         &self,
         owner: OwnerId,
@@ -7711,6 +7740,40 @@ impl Checker<'_, '_> {
             let Term::Function { parameters, result } = signature else {
                 unreachable!()
             };
+            let specialized_assumptions =
+                this.specialized_open_binder_assumptions(owner, symbols, span)?;
+            let requirements = this.specialized_open_requirements(owner, symbols, span)?;
+            let capabilities = this.specialized_open_capabilities(owner, symbols, span)?;
+            this.open_instance_capabilities = Some(specialized_assumptions.clone());
+            let mut context = this
+                .nominal_context()
+                .theory_in_scope(this.call_input_frames());
+            for requirement in crate::capabilities::subject_requirements_with_layouts(
+                &this.checked_traits,
+                &specialized_assumptions,
+                crate::ptc::Budget::default(),
+                this.implementation_index.parameter_domains(),
+                Some(this.implementation_index.nominal_layouts()),
+            ) {
+                context.assume(crate::ptc::Formula::from_predicate(&requirement));
+            }
+            for capability in &specialized_assumptions {
+                if std::iter::once(&capability.subject)
+                    .chain(&capability.interface_arguments)
+                    .any(|ty| {
+                        ty.substitution_parameters()
+                            .is_ok_and(|slots| !slots.is_empty())
+                    })
+                {
+                    context.assume(crate::ptc::Formula::from_predicate(
+                        &n::TypePredicate::Trait(capability.clone()),
+                    ));
+                }
+            }
+            for requirement in &requirements {
+                context.assume(crate::ptc::Formula::from_predicate(requirement));
+            }
+            this.context = context;
             for (slot, parameter) in sig.params.iter().enumerate() {
                 let binding = local(parameter.hir_id);
                 let ty = &parameters[slot].ty;
@@ -7774,8 +7837,8 @@ impl Checker<'_, '_> {
                     .iter()
                     .map(|(parameter, _)| parameter.declaration)
                     .collect(),
-                requirements: this.specialized_open_requirements(owner, symbols, span)?,
-                capabilities: this.specialized_open_capabilities(owner, symbols, span)?,
+                requirements,
+                capabilities,
                 defaults: vec![],
             };
             this.generated_functions.begin_body(interface);

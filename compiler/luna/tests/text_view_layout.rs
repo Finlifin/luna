@@ -55,7 +55,15 @@ fn nominal_wrappers_and_tuple_heads_keep_conditional_text_slots() {
 
 #[test]
 fn text_descriptor_storage_operations_form_without_granting_resource_safety() {
-    for copy_impl in ["", "impl Duplicate for str {}"] {
+    for (copy_impl, expect_scalar_ok, expect_composite_ok) in [
+        ("", false, false),
+        ("impl Duplicate for str {}", true, false),
+        (
+            "impl Duplicate for str {} impl Duplicate for bool {} impl Duplicate for Box {} impl Duplicate for Tuple<bool,str> {}",
+            true,
+            true,
+        ),
+    ] {
         let package = support::compile_with_tuple(&format!(
             "typealias str=.str'builtin;
             trait Duplicate {{}}
@@ -110,18 +118,48 @@ fn text_descriptor_storage_operations_form_without_granting_resource_safety() {
                 comptime_interpretor::Value::Bool(true),
                 "{name}"
             );
-            let error = luna::execution::interpret_with_protocols(
+            let result = luna::execution::interpret_with_protocols(
                 &package,
                 name,
                 "Duplicate",
                 "Retire",
                 1_000_000,
-            )
-            .unwrap_err();
-            assert!(
-                error.contains("string-view memory provenance") || error.contains("Copy"),
-                "{name}: {error}"
             );
+            let should_succeed = match name {
+                "direct" | "projected" | "written" => expect_scalar_ok,
+                _ => expect_composite_ok,
+            };
+            if !should_succeed {
+                let error = result.unwrap_err();
+                assert!(error.contains("Copy"), "{name}: {error}");
+            } else {
+                assert_eq!(
+                    result.unwrap(),
+                    comptime_interpretor::Value::Bool(true),
+                    "{name}"
+                );
+            }
         }
     }
+
+    // Dangling *str return must still fail closed even with Duplicate for str.
+    let escaping = support::compile_with_tuple(
+        "typealias str=.str'builtin;
+        trait Duplicate {}
+        trait Retire {fn drop(*self);}
+        impl Duplicate for str {}
+        impl Duplicate for bool {}
+        fn leak()->*str {let local=\"ephemeral\";local.ref}
+        fn entry()->bool {let _=leak();true}",
+    );
+    assert!(
+        luna::execution::interpret_with_protocols(
+            &escaping,
+            "entry",
+            "Duplicate",
+            "Retire",
+            1_000_000,
+        )
+        .is_err()
+    );
 }

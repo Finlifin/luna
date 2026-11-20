@@ -291,6 +291,118 @@ mod bounded_exclusion_tests {
             facts.prove_condition(&opposite, true, &mut limits).unwrap();
         }
     }
+
+    #[test]
+    fn endpoint_excluded_disequalities_do_not_accumulate_while_interior_holes_survive_branches() {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let bool_range = || {
+            Interval::new(
+                Integer::zero(),
+                Integer::from_u128(1),
+                &mut Limits::default(),
+            )
+            .unwrap()
+        };
+
+        // 32 sequential `b_i != 0` assumptions on bounded [0, 1] values refine to [1, 1]
+        // and must NOT accumulate redundant retained conditions.
+        let mut small = Limits::default();
+        small.arithmetic.steps = 15_000;
+        for idx in 0..32u32 {
+            let b = facts
+                .assign(
+                    PlaceId {
+                        owner: 3,
+                        local: idx,
+                    },
+                    bool_range(),
+                )
+                .unwrap();
+            let cond = Condition::Compare {
+                value: b,
+                relation: Comparison::NotEqual,
+                constant: Integer::zero(),
+            };
+            facts.assume(&cond, true, &mut small).unwrap();
+            let bound = facts.bound(b, &mut limits).unwrap();
+            assert_eq!(bound.lower, Integer::from_u128(1));
+            assert_eq!(bound.upper, Integer::from_u128(1));
+        }
+        assert!(
+            facts.conditions.is_empty(),
+            "endpoint-excluded disequalities should not bloat retained conditions: {:?}",
+            facts.conditions
+        );
+
+        // Similarly `u != 0` on [0, 100] refines to [1, 100] with no retained hole.
+        let u = facts
+            .assign(
+                PlaceId {
+                    owner: 3,
+                    local: 100,
+                },
+                Interval::new(Integer::zero(), Integer::from_u128(100), &mut limits).unwrap(),
+            )
+            .unwrap();
+        facts
+            .assume(
+                &Condition::Compare {
+                    value: u,
+                    relation: Comparison::NotEqual,
+                    constant: Integer::zero(),
+                },
+                true,
+                &mut small,
+            )
+            .unwrap();
+        assert_eq!(
+            facts.bound(u, &mut limits).unwrap().lower,
+            Integer::from_u128(1)
+        );
+        assert!(facts.conditions.is_empty());
+
+        // Contrast: an interior hole `d != 0` on [-10, 10] MUST be retained and MUST
+        // survive splitting `d > 0` ([1, 10]) vs `d <= 0` ([-10, -1]) and joining back.
+        let d = facts
+            .assign(
+                PlaceId {
+                    owner: 3,
+                    local: 101,
+                },
+                Interval::new(Integer::from_i128(-10), Integer::from_i128(10), &mut limits)
+                    .unwrap(),
+            )
+            .unwrap();
+        let hole = Condition::Compare {
+            value: d,
+            relation: Comparison::NotEqual,
+            constant: Integer::zero(),
+        };
+        facts.assume(&hole, true, &mut limits).unwrap();
+        assert_eq!(facts.conditions.len(), 1);
+        facts.prove_condition(&hole, true, &mut limits).unwrap();
+
+        let gt_zero = Condition::Compare {
+            value: d,
+            relation: Comparison::Greater,
+            constant: Integer::zero(),
+        };
+        let mut yes = facts.fork(&mut limits).unwrap();
+        yes.assume(&gt_zero, true, &mut limits).unwrap();
+        yes.prove_condition(&hole, true, &mut limits).unwrap();
+
+        let mut no = facts.fork(&mut limits).unwrap();
+        no.assume(&gt_zero, false, &mut limits).unwrap();
+        assert_eq!(
+            no.bound(d, &mut limits).unwrap().upper,
+            Integer::from_i128(-1)
+        );
+        no.prove_condition(&hole, true, &mut limits).unwrap();
+
+        let joined = yes.join(&no, &mut limits).unwrap();
+        joined.prove_condition(&hole, true, &mut limits).unwrap();
+    }
 }
 
 impl Condition {
@@ -437,7 +549,9 @@ impl Facts {
                     relation.negated()
                 }) == Comparison::NotEqual
                 {
-                    self.remember_condition(premise, *truth, limits)?;
+                    limits.step(1)?;
+                    self.conditions
+                        .push((premise.copy_bounded(limits, 0)?, *truth));
                 }
             }
         }
@@ -447,6 +561,28 @@ impl Facts {
         for _ in 0..retained.len().saturating_add(1) {
             let before = self.fork(limits)?;
             for (premise, truth) in &retained {
+                if let Condition::Compare {
+                    value,
+                    relation,
+                    constant,
+                } = premise
+                {
+                    let effective = if *truth {
+                        *relation
+                    } else {
+                        relation.negated()
+                    };
+                    if effective == Comparison::NotEqual
+                        && matches!(
+                            self.bound(*value, limits),
+                            Ok(bound)
+                                if limits.compare(constant, &bound.lower)?.is_lt()
+                                    || limits.compare(constant, &bound.upper)?.is_gt()
+                        )
+                    {
+                        continue;
+                    }
+                }
                 self.assume_inner_mode(premise, *truth, 0, limits, true)?;
                 if !self.is_reachable() {
                     break;
@@ -462,6 +598,14 @@ impl Facts {
             limits.step(1)?;
         }
         for (premise, truth) in retained {
+            if let Condition::Compare { relation, .. }
+            | Condition::PolynomialCompare { relation, .. } = &premise
+            {
+                let effective = if truth { *relation } else { relation.negated() };
+                if effective == Comparison::NotEqual {
+                    continue;
+                }
+            }
             self.remember_condition(&premise, truth, limits)?;
         }
         Ok(())
@@ -491,17 +635,15 @@ impl Facts {
             return Ok(None);
         }
         for (known, truth) in &self.conditions {
-            // Charge tree and coefficient comparison work before structural equality.
-            let known = known.copy_bounded(limits, 0)?;
-            let query = condition.copy_bounded(limits, 0)?;
+            limits.step(1)?;
             if !known.is_current(self, limits, 0)? {
                 continue;
             }
-            if known.equivalent(&query, limits, 0)? {
+            if known.equivalent(condition, limits, 0)? {
                 return Ok(Some(*truth));
             }
             if let Some(answer) =
-                factors::nonzero_factor_entailment(&known, *truth, &query, limits)?
+                factors::nonzero_factor_entailment(known, *truth, condition, limits)?
             {
                 return Ok(Some(answer));
             }
@@ -516,7 +658,7 @@ impl Facts {
                     relation: br,
                     constant: bc,
                 },
-            ) = (&known, &query)
+            ) = (known, condition)
             {
                 if a == b {
                     let ar = if *truth { *ar } else { ar.negated() };
@@ -650,10 +792,19 @@ impl Facts {
             }
             _ => false,
         };
-        if let Condition::Compare { value, .. } = condition {
+        if let Condition::Compare {
+            value, constant, ..
+        } = condition
+        {
             match self.bound(*value, limits) {
                 Ok(_) if !disequality => return Ok(()),
-                Ok(_) => {}
+                Ok(bound) => {
+                    if limits.compare(constant, &bound.lower)?.is_lt()
+                        || limits.compare(constant, &bound.upper)?.is_gt()
+                    {
+                        return Ok(());
+                    }
+                }
                 Err(Unknown::MissingBound(_)) => {}
                 Err(e) => return Err(e),
             }

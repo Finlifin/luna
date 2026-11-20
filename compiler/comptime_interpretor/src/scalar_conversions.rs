@@ -69,6 +69,23 @@ impl Interpreter<'_> {
         let Term::Primitive(dst) = inner.as_ref() else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };
+        if *dst == Primitive::Char {
+            if src != Primitive::U32 {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            }
+            self.check_retained_value(&value, scalar.left, Some(source))?;
+            let Value::UnsignedInteger(raw) = value else {
+                return Err(self.failure(ErrorKind::Type, Some(source)));
+            };
+            MachineInteger::from_unsigned(raw, 32)
+                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+            self.tick(Some(source))?;
+            let converted = u32::try_from(raw)
+                .ok()
+                .and_then(char::from_u32)
+                .map(Value::Char);
+            return self.complete_optional(scalar.result, converted, source);
+        }
         let (dst_signed, dst_width) = self
             .integer_layout(*dst)
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;

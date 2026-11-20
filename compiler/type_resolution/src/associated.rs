@@ -538,6 +538,7 @@ impl Normalizer<'_, '_, '_> {
                     return Ok(value.clone());
                 }
                 self.charge_copy(&key)?;
+                let mut incomplete_given: Option<String> = None;
                 if self.preserve_given && !self.world.assumptions.is_empty() {
                     let Term::AssociatedType {
                         origin,
@@ -547,47 +548,62 @@ impl Normalizer<'_, '_, '_> {
                     else {
                         unreachable!()
                     };
-                    let query_steps = self.remaining / 2;
-                    if query_steps == 0 {
-                        return Err(QueryError::Budget);
-                    }
-                    let given = nir::program::TraitRequirement {
-                        subject: subject.as_ref().clone(),
-                        interface: origin.interface,
-                        interface_arguments: arguments.clone(),
-                    };
-                    let mut given_budget = Budget {
-                        steps: query_steps,
+                    let mut closure_budget = Budget {
+                        steps: self.remaining,
                         ..self.budget
                     };
-                    // The projection is closed, but its evidence may still
-                    // refer to the world's enclosing input frame. Nested
-                    // callable frames belong to the observed type, not to
-                    // those premises, so use the world's original context.
-                    let found = self
-                        .world
-                        .given_in_context_metered(&given, &mut given_budget);
-                    // A failed premise lookup may consume very little work.
-                    // Charging its whole allowance starves nested projections.
-                    self.spend(query_steps - given_budget.steps)?;
-                    let preserve = if found?.is_some() {
-                        let mut allowance = Budget {
-                            steps: self.remaining,
+                    if closure_budget.steps == 0 {
+                        return Err(QueryError::Budget);
+                    }
+                    let closed = self.world.closed_inputs_metered(
+                        std::iter::once(subject.as_ref()).chain(arguments),
+                        &mut closure_budget,
+                    );
+                    self.remaining = closure_budget.steps;
+                    let may_be_open = match closed {
+                        Ok(closed) => !closed,
+                        // An unfinished closure proof leaves an established given view
+                        // abstract rather than forcing a default or concrete selection.
+                        Err(QueryError::Unresolved(_)) => true,
+                        Err(failure) => return Err(failure),
+                    };
+                    let preserve = if may_be_open {
+                        let query_steps = self.remaining / 2;
+                        if query_steps == 0 {
+                            return Err(QueryError::Budget);
+                        }
+                        let given = nir::program::TraitRequirement {
+                            subject: subject.as_ref().clone(),
+                            interface: origin.interface,
+                            interface_arguments: arguments.clone(),
+                        };
+                        let mut given_budget = Budget {
+                            steps: query_steps,
                             ..self.budget
                         };
-                        let closed = self.world.closed_inputs_metered(
-                            std::iter::once(subject.as_ref()).chain(arguments),
-                            &mut allowance,
-                        );
-                        self.remaining = allowance.steps;
-                        match closed {
-                            Ok(closed) => !closed,
-                            // This proof only permits refining an already
-                            // valid given view. An unfinished closure proof
-                            // leaves that view abstract; it is not evidence
-                            // of absence or permission to choose a default.
-                            Err(QueryError::Unresolved(_)) => true,
-                            Err(failure) => return Err(failure),
+                        // The projection is closed, but its evidence may still
+                        // refer to the world's enclosing input frame. Nested
+                        // callable frames belong to the observed type, not to
+                        // those premises, so use the world's original context.
+                        let found = self
+                            .world
+                            .given_in_context_metered(&given, &mut given_budget);
+                        // A failed premise lookup may consume very little work.
+                        // Charging its whole allowance starves nested projections.
+                        self.spend(query_steps - given_budget.steps)?;
+                        match found {
+                            Ok(Some(_)) => true,
+                            Ok(None) => false,
+                            Err(nir::NominalAdmissionError::Budget) => {
+                                return Err(QueryError::Budget);
+                            }
+                            Err(nir::NominalAdmissionError::Invalid(reason)) => {
+                                return Err(QueryError::Invalid(reason));
+                            }
+                            Err(nir::NominalAdmissionError::Unresolved(reason)) => {
+                                incomplete_given = Some(reason);
+                                false
+                            }
                         }
                     } else {
                         false
@@ -659,9 +675,17 @@ impl Normalizer<'_, '_, '_> {
                         QueryError::Invalid(message) => QueryError::Invalid(format!(
                             "associated Type normalization of {key}: {message}"
                         )),
-                        QueryError::Unresolved(message) => QueryError::Unresolved(format!(
-                            "associated Type normalization of {key}: {message}"
-                        )),
+                        QueryError::Unresolved(message) => {
+                            if let Some(reason) = &incomplete_given {
+                                QueryError::Unresolved(format!(
+                                    "associated Type normalization of {key}: {message} (given lookup unresolved: {reason})"
+                                ))
+                            } else {
+                                QueryError::Unresolved(format!(
+                                    "associated Type normalization of {key}: {message}"
+                                ))
+                            }
+                        }
                     })?;
                     let value = self.normalize(&resolution.value, depth + 1)?;
                     self.charge_copy(&value)?;

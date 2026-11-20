@@ -495,8 +495,8 @@ impl Walker<'_> {
                     let value = state.facts.assign(root, range)?;
                     let unknown = Some(Condition::Compare {
                         value,
-                        relation: C::NotEqual,
-                        constant: Integer::from_u128(0),
+                        relation: C::Equal,
+                        constant: Integer::from_u128(1),
                     });
                     if a.is_none() {
                         a = unknown;
@@ -523,20 +523,30 @@ impl Walker<'_> {
                     }),
                     _ => None,
                 };
-                let current = match &result.condition {
-                    Some(condition) => condition.is_current(&state.facts, self.limits, 0)?,
-                    None => false,
-                };
-                if !current {
-                    // A right-hand observation may exist only on the continued
-                    // path. Its identity does not survive the join, but the
-                    // already evaluated Boolean still has the joined range.
-                    result.condition = None;
-                    let root = self
-                        .result_root(&expr.ty)?
-                        .ok_or(Reason::InvalidSignature)?;
-                    self.bind_result(state, root, &expr.ty, result)?;
-                    result = self.local_value_at(state, root)?;
+                if let Some(condition) = &result.condition {
+                    if !condition.is_current(&state.facts, self.limits, 0)? {
+                        // A right-hand observation may exist only on the continued
+                        // path. Its identity does not survive the join, but the
+                        // already evaluated Boolean still has the joined range.
+                        result.condition = None;
+                        let root = self
+                            .result_root(&expr.ty)?
+                            .ok_or(Reason::InvalidSignature)?;
+                        self.bind_result(state, root, &expr.ty, result)?;
+                        result = self.local_value_at(state, root)?;
+                    }
+                } else {
+                    let singleton = match &result.range {
+                        Some(range) => self
+                            .limits
+                            .compare(range.lower(), range.upper())?
+                            .is_eq()
+                            .then_some(!range.lower().is_zero()),
+                        None => None,
+                    };
+                    if let Some(bit) = singleton {
+                        result.condition = Some(Condition::Bool(bit));
+                    }
                 }
             }
             _ => unreachable!("flow operator dispatcher selected an incompatible expression"),

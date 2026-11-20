@@ -200,11 +200,56 @@ impl fmt::Display for Executable {
         )
     }
 }
+fn term_contains_str(ty: &nir::Term, fuel: &mut usize) -> Result<bool, String> {
+    let mut stack = vec![(ty, 0usize)];
+    while let Some((term, depth)) = stack.pop() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("text detection type budget exhausted")?;
+        if depth >= 128 {
+            return Ok(true);
+        }
+        if matches!(term, nir::Term::Primitive(nir::Primitive::Str)) {
+            return Ok(true);
+        }
+        term.visit_children::<String>(|child| {
+            stack.push((child, depth + 1));
+            Ok(())
+        })?;
+    }
+    Ok(false)
+}
+
+fn graph_uses_text(graph: &iir::Package, fuel: &mut usize) -> Result<bool, String> {
+    for instance in &graph.functions {
+        if term_contains_str(&instance.function.signature, fuel)? {
+            return Ok(true);
+        }
+        for argument in instance.key.arguments.iter() {
+            if term_contains_str(argument, fuel)? {
+                return Ok(true);
+            }
+        }
+        let mut found = false;
+        nir::visit::expressions(&instance.function, fuel, |expr, fuel| {
+            if !found && term_contains_str(&expr.ty, fuel)? {
+                found = true;
+            }
+            Ok(())
+        })?;
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Publish schedules for every reachable concrete function, including captured
 /// destructors. Unmapped responsibilities are rejected before execution.
 fn field_borrows(
     package: &Package,
     function: &nir::program::Function,
+    text_provenance: elaboration::verification::memory::TextProvenance,
     fuel: &mut usize,
 ) -> Result<Vec<moves::BorrowedField>, String> {
     let nir::Term::Function { parameters, .. } = function.signature.callable_signature() else {
@@ -212,14 +257,22 @@ fn field_borrows(
     };
     let mut fields = vec![];
     for (parameter, input) in parameters.iter().enumerate() {
-        if input.sort == nir::Sort::Type && input.ty == nir::Term::Primitive(nir::Primitive::Type) {
+        if input.sort != nir::Sort::Runtime
+            && matches!(
+                input.ty,
+                nir::Term::Primitive(nir::Primitive::Type) | nir::Term::ClosureContextType
+            )
+        {
             continue;
         }
         // Closure code identity is supplied separately, but its owned
         // environment still needs parameter-relative pointee premises.
-        for leaf in
-            elaboration::verification::memory::pointer_input_layout(Some(package), &input.ty, fuel)?
-        {
+        for leaf in elaboration::verification::memory::pointer_input_layout_for(
+            Some(package),
+            &input.ty,
+            text_provenance,
+            fuel,
+        )? {
             let path = leaf.input_fields;
             let pointee = leaf.pointee;
             if !path.is_empty() {
@@ -331,6 +384,9 @@ fn prepare_source_impl(
     // Rebuilding for new destructor roots consumes the same graph allowance;
     // it must not receive a fresh budget on each pass through the loop.
     let mut construction_budget = budget;
+    let mut verified_text_shape: Option<(usize, usize)> = None;
+    let mut owned_layouts: Option<Package> = None;
+    let mut copy_cache = std::collections::HashMap::new();
 
     loop {
         *fuel = fuel
@@ -351,13 +407,15 @@ fn prepare_source_impl(
             &mut construction_budget,
         )?;
         graph.validate_cleanup_control(fuel)?;
+        let active_enums = owned_layouts
+            .as_ref()
+            .map_or(&package.enums, |view| &view.enums);
         let generated = graph
             .nominals
             .iter()
             .filter_map(|nominal| match &nominal.definition {
                 iir::NominalDefinition::Enum(definition)
-                    if !package
-                        .enums
+                    if !active_enums
                         .iter()
                         .any(|source| source.declaration == definition.declaration) =>
                 {
@@ -366,17 +424,21 @@ fn prepare_source_impl(
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut layouts = std::borrow::Cow::Borrowed(package);
         if !generated.is_empty() {
             // New roots can change the traversal order of late expansions.
             // Recompute schedules against this graph's identities and sources.
             schedule = Schedule::default();
-            for function in package.functions.iter().chain(&package.quote_templates) {
-                nir::visit::expressions(function, fuel, |expr, fuel| {
-                    nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())
-                })?;
+            copy_cache.clear();
+            if owned_layouts.is_none() {
+                for function in package.functions.iter().chain(&package.quote_templates) {
+                    nir::visit::expressions(function, fuel, |expr, fuel| {
+                        nir::type_computations::charge_term(&expr.ty, fuel)
+                            .map_err(|e| e.to_string())
+                    })?;
+                }
+                owned_layouts = Some(package.clone());
             }
-            let view = layouts.to_mut();
+            let view = owned_layouts.as_mut().unwrap();
             for (ty, definition) in generated {
                 generated_layouts.insert(ty);
                 view.enums.push(definition.clone());
@@ -409,7 +471,8 @@ fn prepare_source_impl(
             }
         }
         let mut cleanup_changed = false;
-        layouts.to_mut().runtime_instances = graph
+        let view = owned_layouts.get_or_insert_with(|| package.clone());
+        view.runtime_instances = graph
             .functions
             .iter()
             .map(|instance| nir::program::RuntimeInstance {
@@ -423,7 +486,38 @@ fn prepare_source_impl(
                     .unwrap_or_default(),
             })
             .collect();
-        let package = layouts.as_ref();
+        let package: &Package = &*view;
+        let dispatch_catalog = elaboration::materialization::BorrowedCatalog::new(package);
+        let dispatch_source =
+            elaboration::materialization::DeclarationSource::Prepared(&dispatch_catalog);
+        let mut verification_session = elaboration::verification::PackageSession::new(package)
+            .with_source(dispatch_source)
+            .with_dispatch(&graph.dispatch);
+        let text_provenance = if graph_uses_text(&graph, fuel)? {
+            let shape = (graph.functions.len(), roots.len());
+            if verified_text_shape != Some(shape) {
+                for root in &roots {
+                    verification_session.infer_text_regions(
+                        root.declaration,
+                        &root.arguments,
+                        fuel,
+                    )?;
+                }
+                verified_text_shape = Some(shape);
+            }
+            elaboration::verification::memory::TextProvenance::VerifiedByRegionAnalysis
+        } else {
+            elaboration::verification::memory::TextProvenance::Unchecked
+        };
+        let mut cleanup_session = match items.get(intrinsic::LangItem::Drop) {
+            Some(intrinsic::LangItemDef::UserDef(protocol)) => Some(
+                verification_session
+                    .cleanup_session(world, protocol, budget)
+                    .require_runtime_instances()
+                    .with_text_provenance(text_provenance),
+            ),
+            _ => None,
+        };
         let previous = (roots.len(), types.len());
         let initial_roots_len = roots.len();
         let mut deferred = false;
@@ -486,26 +580,28 @@ fn prepare_source_impl(
                         borrows.push((index, subject));
                     }
                 }
-                fields = field_borrows(package, function, fuel)?;
+                fields = field_borrows(package, function, text_provenance, fuel)?;
                 if !fields.is_empty() {
                     // Moving an aggregate need not borrow its pointees. Try an
                     // unconditional plan before demanding field validity.
                     let allowance = (*fuel / 2).min(4096);
-                    let (result, missing) =
-                        crate::protocols::analyze_cleanup_with_borrowed_code_context_requiring_instances(
-                            package,
-                            world,
-                            items,
-                            function,
-                            allowance,
-                            budget,
-                            &borrows,
-                            &[],
-                            &[],
-                            vec![],
-                            &[],
-                            &[],
-                        );
+                    let (result, missing) = crate::protocols::analyze_cleanup_in_session(
+                        &mut verification_session,
+                        cleanup_session.as_mut(),
+                        &mut copy_cache,
+                        world,
+                        items,
+                        function,
+                        allowance,
+                        budget,
+                        &borrows,
+                        &[],
+                        &[],
+                        vec![],
+                        &[],
+                        &[],
+                        text_provenance,
+                    );
                     if register_missing_roots(
                         missing,
                         initial_roots_len,
@@ -527,10 +623,10 @@ fn prepare_source_impl(
                     // Non-entry pointer calls are checked by the caller's memory
                     // analysis. Only supported, initialization-preserving body
                     // footprints justify these conditional parameter roots.
-                    let footprint = match elaboration::verification::memory::infer_in_package(
-                        package,
+                    let footprint = match verification_session.infer_memory(
                         instance.key.declaration,
                         &instance.key.arguments,
+                        text_provenance,
                         fuel,
                     ) {
                         Ok(footprint) => footprint,
@@ -564,21 +660,23 @@ fn prepare_source_impl(
             let report = if let Some(report) = independent_report {
                 report
             } else {
-                let (result, missing) =
-                    crate::protocols::analyze_cleanup_with_borrowed_code_context_requiring_instances(
-                        package,
-                        world,
-                        items,
-                        function,
-                        *fuel,
-                        budget,
-                        &borrows,
-                        &[],
-                        &[],
-                        vec![],
-                        &fields,
-                        &[],
-                    );
+                let (result, missing) = crate::protocols::analyze_cleanup_in_session(
+                    &mut verification_session,
+                    cleanup_session.as_mut(),
+                    &mut copy_cache,
+                    world,
+                    items,
+                    function,
+                    *fuel,
+                    budget,
+                    &borrows,
+                    &[],
+                    &[],
+                    vec![],
+                    &fields,
+                    &[],
+                    text_provenance,
+                );
                 if register_missing_roots(missing, initial_roots_len, &mut roots, &mut receivers)? {
                     deferred = true;
                     continue 'instances;
@@ -979,27 +1077,29 @@ fn prepare_source_impl(
                             }
                         }
                     }
-                    let mut fields = field_borrows(package, &child, fuel)?;
+                    let mut fields = field_borrows(package, &child, text_provenance, fuel)?;
                     let mut independent_invocation = None;
                     if !fields.is_empty() && call.borrowed_code.is_empty() {
                         let effects = moves::copy_effect_inputs(&call.effects, fuel, call.source)
                             .map_err(|e| e.to_string())?;
                         let allowance = (*fuel / 2).min(4096);
-                        let (result, missing) =
-                            crate::protocols::analyze_cleanup_with_borrowed_code_context_requiring_instances(
-                                package,
-                                world,
-                                items,
-                                &child,
-                                allowance,
-                                budget,
-                                &borrows,
-                                &call.callables,
-                                &call.enums,
-                                effects,
-                                &[],
-                                &[],
-                            );
+                        let (result, missing) = crate::protocols::analyze_cleanup_in_session(
+                            &mut verification_session,
+                            cleanup_session.as_mut(),
+                            &mut copy_cache,
+                            world,
+                            items,
+                            &child,
+                            allowance,
+                            budget,
+                            &borrows,
+                            &call.callables,
+                            &call.enums,
+                            effects,
+                            &[],
+                            &[],
+                            text_provenance,
+                        );
                         if register_missing_roots(
                             missing,
                             initial_roots_len,
@@ -1019,18 +1119,17 @@ fn prepare_source_impl(
                     }
                     if !borrows.is_empty() || !fields.is_empty() {
                         let (result, missing) =
-                            crate::protocols::infer_borrowed_callable_memory_requiring_instances(
-                                package,
-                                world,
-                                items,
+                            crate::protocols::infer_borrowed_callable_memory_in_session(
+                                &mut verification_session,
+                                cleanup_session.as_mut(),
                                 key.declaration,
                                 &key.arguments,
                                 &call.callables,
                                 &call.enums,
                                 &call.effects,
                                 &call.borrowed_code,
+                                text_provenance,
                                 fuel,
-                                budget,
                                 call.source,
                             );
                         if register_missing_roots(
@@ -1055,21 +1154,23 @@ fn prepare_source_impl(
                     } else {
                         let effects = moves::copy_effect_inputs(&call.effects, fuel, call.source)
                             .map_err(|e| e.to_string())?;
-                        let (result, missing) =
-                            crate::protocols::analyze_cleanup_with_borrowed_code_context_requiring_instances(
-                                package,
-                                world,
-                                items,
-                                &child,
-                                *fuel,
-                                budget,
-                                &borrows,
-                                &call.callables,
-                                &call.enums,
-                                effects,
-                                &fields,
-                                &call.borrowed_code,
-                            );
+                        let (result, missing) = crate::protocols::analyze_cleanup_in_session(
+                            &mut verification_session,
+                            cleanup_session.as_mut(),
+                            &mut copy_cache,
+                            world,
+                            items,
+                            &child,
+                            *fuel,
+                            budget,
+                            &borrows,
+                            &call.callables,
+                            &call.enums,
+                            effects,
+                            &fields,
+                            &call.borrowed_code,
+                            text_provenance,
+                        );
                         if register_missing_roots(
                             missing,
                             initial_roots_len,
@@ -1304,7 +1405,10 @@ fn prepare_source_impl(
                             };
                             // Plain scalar/pointer representations have no runtime
                             // teardown when the captured plan contains only releases.
-                            if nir::program::intrinsic_pointer_value(ty)
+                            if (nir::program::intrinsic_pointer_value(ty)
+                                || (text_provenance
+                                    == elaboration::verification::memory::TextProvenance::VerifiedByRegionAnalysis
+                                    && *ty == nir::Term::Primitive(nir::Primitive::Str)))
                                 && plan
                                     .steps
                                     .iter()

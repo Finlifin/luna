@@ -146,7 +146,17 @@ pub(crate) fn effect_data_layout(
     fuel: &mut usize,
     depth: usize,
 ) -> Result<bool, String> {
-    effect_storage_layout(package, ty, fuel, depth, false)
+    effect_data_layout_for(package, ty, TextProvenance::Unchecked, fuel, depth)
+}
+
+pub(crate) fn effect_data_layout_for(
+    package: Option<&Package>,
+    ty: &Term,
+    text_provenance: TextProvenance,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<bool, String> {
+    effect_storage_layout(package, ty, text_provenance, fuel, depth, false)
 }
 
 /// Layout only: borrowing code-bearing captures also requires complete code
@@ -156,7 +166,16 @@ pub(crate) fn effect_borrowed_code_layout(
     ty: &Term,
     fuel: &mut usize,
 ) -> Result<bool, String> {
-    effect_storage_layout(package, ty, fuel, 0, true)
+    effect_borrowed_code_layout_for(package, ty, TextProvenance::Unchecked, fuel)
+}
+
+pub(crate) fn effect_borrowed_code_layout_for(
+    package: Option<&Package>,
+    ty: &Term,
+    text_provenance: TextProvenance,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    effect_storage_layout(package, ty, text_provenance, fuel, 0, true)
 }
 
 // Code-bearing layouts need separate candidate and storage evidence.
@@ -164,6 +183,7 @@ pub(crate) fn effect_borrowed_code_layout(
 fn effect_storage_layout(
     package: Option<&Package>,
     ty: &Term,
+    text_provenance: TextProvenance,
     fuel: &mut usize,
     depth: usize,
     allow_code: bool,
@@ -172,7 +192,11 @@ fn effect_storage_layout(
         return Err("effect data layout depth exhausted".into());
     }
     bound_type(ty, fuel)?;
-    if scalar(ty) || (allow_code && matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_))) {
+    if scalar(ty)
+        || (text_provenance == TextProvenance::VerifiedByRegionAnalysis
+            && *ty == Term::Primitive(Primitive::Str))
+        || (allow_code && matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_)))
+    {
         return Ok(true);
     }
     let fields = if let Some(fields) = tuple_fields(package, ty) {
@@ -259,7 +283,14 @@ fn effect_storage_layout(
         }
     };
     for field in fields {
-        if !effect_storage_layout(package, &field, fuel, depth + 1, allow_code)? {
+        if !effect_storage_layout(
+            package,
+            &field,
+            text_provenance,
+            fuel,
+            depth + 1,
+            allow_code,
+        )? {
             return Ok(false);
         }
     }
@@ -503,7 +534,11 @@ impl<'a> Infer<'a, '_> {
                 self.bind_data_pattern(first, ty, depth + 1)?;
                 let computed_ty = self.ty(&value.ty)?;
                 if !matches!(computed_ty, Term::Pointer(_))
-                    && !Self::guard_value_type(self.package, &computed_ty)
+                    && !Self::guard_value_type_for(
+                        self.package,
+                        &computed_ty,
+                        self.round.text_provenance,
+                    )
                 {
                     return Err(
                         "computed memory pattern needs independent result provenance".into(),
@@ -746,10 +781,22 @@ impl<'a> Infer<'a, '_> {
                     bound_type(ty, self.fuel)?;
                     let ty = ty.clone();
                     captures.push((binding, ty.clone()));
-                    let layout = pointer_input_layout(self.package, &ty, self.fuel)?;
+                    let layout = pointer_input_layout_for(
+                        self.package,
+                        &ty,
+                        self.round.text_provenance,
+                        self.fuel,
+                    )?;
                     if !layout.is_empty() {
                         pointer_captures.insert(binding);
-                    } else if !effect_storage_layout(self.package, &ty, self.fuel, 0, true)? {
+                    } else if !effect_storage_layout(
+                        self.package,
+                        &ty,
+                        self.round.text_provenance,
+                        self.fuel,
+                        0,
+                        true,
+                    )? {
                         return Err(
                             "handler memory capture needs tracked data, code or stable pointers"
                                 .into(),
@@ -778,23 +825,26 @@ impl<'a> Infer<'a, '_> {
                     }
                 }
                 if !code_captures.is_empty() {
-                    validate_capture_storage(
+                    validate_capture_storage_except_for(
                         false,
                         false,
                         self.package,
                         self.scope,
                         &code_captures,
+                        self.round.text_provenance,
                         self.fuel,
+                        &BTreeSet::new(),
                     )?;
-                    validate_borrowed_capture_storage(
+                    validate_borrowed_capture_storage_for(
                         false,
                         self.package,
                         expr,
                         &code_captures,
+                        self.round.text_provenance,
                         self.fuel,
                     )?;
                 }
-                if let Some(summary) = direct_handler_accesses_with_code(
+                if let Some(summary) = direct_handler_accesses_with_code_for(
                     self.package,
                     handler,
                     arm,
@@ -803,14 +853,16 @@ impl<'a> Infer<'a, '_> {
                     &prepared_code,
                     &self.round.effects,
                     &outer_row,
+                    self.round.text_provenance,
                     self.fuel,
                 )? {
-                    stable_writes.extend(stationary_handler_write_sites(
+                    stable_writes.extend(stationary_handler_write_sites_for(
                         self.package,
                         arm,
                         parameters.len(),
                         &captures,
                         &summary.memory,
+                        self.round.text_provenance,
                         self.fuel,
                     )?);
                     self.may_reject |= summary.memory.may_reject;
@@ -866,12 +918,13 @@ impl<'a> Infer<'a, '_> {
             }
             row.push(operation);
         }
-        validate_capture_storage_except(
+        validate_capture_storage_except_for(
             true,
             false,
             self.package,
             expr,
             &pointer_captures,
+            self.round.text_provenance,
             self.fuel,
             &stable_writes,
         )?;
@@ -1285,7 +1338,7 @@ pub fn infer_handler_arm_memory(
     arm: &nir::program::MatchArm,
     fuel: &mut usize,
 ) -> Result<HandlerParameterSummary, String> {
-    infer_handler_arm_memory_with_captures(
+    infer_handler_arm_memory_with_captures_for(
         package,
         handler,
         arm,
@@ -1294,11 +1347,13 @@ pub fn infer_handler_arm_memory(
         &BTreeMap::new(),
         &[],
         &[],
+        TextProvenance::Unchecked,
         fuel,
     )
 }
 
-fn infer_handler_arm_memory_with_captures(
+#[allow(clippy::too_many_arguments)]
+fn infer_handler_arm_memory_with_captures_for(
     package: &Package,
     handler: &nir::program::EffectHandler,
     arm: &nir::program::MatchArm,
@@ -1307,6 +1362,7 @@ fn infer_handler_arm_memory_with_captures(
     prepared_code: &PreparedCaptures,
     effects: &[EffectInput],
     effect_row: &[nir::effects::Operation],
+    text_provenance: TextProvenance,
     fuel: &mut usize,
 ) -> Result<HandlerParameterSummary, String> {
     if handler.abi != nir::effects::Abi::Direct {
@@ -1320,12 +1376,13 @@ fn infer_handler_arm_memory_with_captures(
     let mut capture_bindings = BTreeSet::new();
     for (binding, ty) in captures {
         bound_type(ty, fuel)?;
-        let layout = pointer_input_layout(Some(package), ty, fuel)?;
+        let layout = pointer_input_layout_for(Some(package), ty, text_provenance, fuel)?;
         // Pointer captures retain their declared pointee layout. Validate each
         // accessed projection below instead of requiring the entire pointee
         // to be scalar; unrelated aggregate fields need not be accessed.
         if !capture_bindings.insert(*binding)
-            || (layout.is_empty() && !effect_storage_layout(Some(package), ty, fuel, 0, true)?)
+            || (layout.is_empty()
+                && !effect_storage_layout(Some(package), ty, text_provenance, fuel, 0, true)?)
         {
             return Err("handler parameter inference requires data or pointer captures".into());
         }
@@ -1503,7 +1560,8 @@ fn infer_handler_arm_memory_with_captures(
     nir::visit::expression_mut_in_handler_scope(&mut body, fuel, |node, fuel| {
         match &node.kind {
             K::Return(Some(value)) => {
-                if !effect_storage_layout(Some(package), &value.ty, fuel, 0, true)? {
+                if !effect_storage_layout(Some(package), &value.ty, text_provenance, fuel, 0, true)?
+                {
                     return Err("handler lexical return requires a separate exit summary".into());
                 }
                 // This private body describes memory accesses, not handler
@@ -1582,7 +1640,7 @@ fn infer_handler_arm_memory_with_captures(
             body: std::sync::Arc::new(body),
         },
     };
-    let memory = infer_closure_with_borrowed_effect_context(
+    let memory = infer_closure_with_borrowed_effect_context_for(
         package,
         &definition,
         captured_code,
@@ -1590,11 +1648,12 @@ fn infer_handler_arm_memory_with_captures(
         &BTreeMap::new(),
         &BTreeMap::new(),
         effects,
+        text_provenance,
         fuel,
     )?;
     let mut pointer_captures = Vec::new();
     for capture in captures {
-        if !pointer_input_layout(Some(package), &capture.1, fuel)?.is_empty() {
+        if !pointer_input_layout_for(Some(package), &capture.1, text_provenance, fuel)?.is_empty() {
             pointer_captures.push(capture);
         }
     }
@@ -1616,7 +1675,7 @@ fn infer_handler_arm_memory_with_captures(
             let (binding, ty) = pointer_captures
                 .get(access.target.parameter - parameters.len())
                 .ok_or("handler memory access is not a parameter or capture")?;
-            let layout = pointer_input_layout(Some(package), ty, fuel)?;
+            let layout = pointer_input_layout_for(Some(package), ty, text_provenance, fuel)?;
             let leaf = layout
                 .iter()
                 .find(|leaf| leaf.input_fields == access.target.input_fields)
@@ -1680,6 +1739,7 @@ fn infer_handler_arm_memory_with_captures(
 /// Admission shared by source memory inference and resource installation.
 /// Direct arms with data results and explicit scalar input accesses can combine
 /// their parameter contract with independently validated lexical captures.
+#[allow(dead_code)]
 pub(crate) fn direct_handler_accesses(
     package: Option<&Package>,
     handler: &nir::program::EffectHandler,
@@ -1700,6 +1760,7 @@ pub(crate) fn direct_handler_accesses(
     )
 }
 
+#[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) fn direct_handler_accesses_with_code(
     package: Option<&Package>,
     handler: &nir::program::EffectHandler,
@@ -1709,6 +1770,33 @@ pub(crate) fn direct_handler_accesses_with_code(
     prepared_code: &PreparedCaptures,
     effects: &[EffectInput],
     effect_row: &[nir::effects::Operation],
+    fuel: &mut usize,
+) -> Result<Option<HandlerParameterSummary>, String> {
+    direct_handler_accesses_with_code_for(
+        package,
+        handler,
+        arm,
+        captures,
+        captured_code,
+        prepared_code,
+        effects,
+        effect_row,
+        TextProvenance::Unchecked,
+        fuel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn direct_handler_accesses_with_code_for(
+    package: Option<&Package>,
+    handler: &nir::program::EffectHandler,
+    arm: &nir::program::MatchArm,
+    captures: &[(LocalId, Term)],
+    captured_code: &BTreeMap<CallablePlace, CallableResult>,
+    prepared_code: &PreparedCaptures,
+    effects: &[EffectInput],
+    effect_row: &[nir::effects::Operation],
+    text_provenance: TextProvenance,
     fuel: &mut usize,
 ) -> Result<Option<HandlerParameterSummary>, String> {
     let Some(package) = package else {
@@ -1724,14 +1812,16 @@ pub(crate) fn direct_handler_accesses_with_code(
     }
     let mut has_pointer = false;
     for parameter in parameters {
-        if !pointer_input_layout(Some(package), &parameter.ty, fuel)?.is_empty() {
+        if !pointer_input_layout_for(Some(package), &parameter.ty, text_provenance, fuel)?
+            .is_empty()
+        {
             has_pointer = true;
             break;
         }
     }
     if !has_pointer {
         for (_, ty) in captures {
-            if !pointer_input_layout(Some(package), ty, fuel)?.is_empty() {
+            if !pointer_input_layout_for(Some(package), ty, text_provenance, fuel)?.is_empty() {
                 has_pointer = true;
                 break;
             }
@@ -1740,7 +1830,7 @@ pub(crate) fn direct_handler_accesses_with_code(
     if !has_pointer {
         return Ok(None);
     }
-    let mut summary = match infer_handler_arm_memory_with_captures(
+    let mut summary = match infer_handler_arm_memory_with_captures_for(
         package,
         handler,
         arm,
@@ -1749,6 +1839,7 @@ pub(crate) fn direct_handler_accesses_with_code(
         prepared_code,
         effects,
         effect_row,
+        text_provenance,
         fuel,
     ) {
         Ok(summary) => summary,
@@ -1762,7 +1853,7 @@ pub(crate) fn direct_handler_accesses_with_code(
     // This is an invocation premise, not a verified cleanup summary.
     if summary.memory.may_run_cleanup {
         for (parameter, input) in parameters.iter().enumerate() {
-            for leaf in pointer_input_layout(Some(package), &input.ty, fuel)? {
+            for leaf in pointer_input_layout_for(Some(package), &input.ty, text_provenance, fuel)? {
                 *fuel = fuel
                     .checked_sub(leaf.input_fields.len().saturating_add(1))
                     .ok_or("handler cleanup parameter budget exhausted")?;
@@ -1777,11 +1868,12 @@ pub(crate) fn direct_handler_accesses_with_code(
     }
     if (summary.accesses.is_empty()
         && summary.capture_accesses.is_empty()
-        && !handler_capture_origins_preserved(
+        && !handler_capture_origins_preserved_for(
             Some(package),
             &summary.memory,
             parameters.len(),
             captures,
+            text_provenance,
             fuel,
         )?)
         || summary.memory.result_targets.is_some()
@@ -1798,17 +1890,18 @@ pub(crate) fn direct_handler_accesses_with_code(
 /// pointer leaf must have one exact self origin on every completing path.
 /// Missing, local, joined, traversed and variant-dependent origins do not prove
 /// this invariant. Callable identities have their separate stability checks.
-fn handler_capture_origins_preserved(
+fn handler_capture_origins_preserved_for(
     package: Option<&Package>,
     summary: &ArgumentSummary,
     parameter_count: usize,
     captures: &[(LocalId, Term)],
+    text_provenance: TextProvenance,
     fuel: &mut usize,
 ) -> Result<bool, String> {
     let mut slot = parameter_count;
     let mut found = false;
     for (_, ty) in captures {
-        let leaves = pointer_input_layout(package, ty, fuel)?;
+        let leaves = pointer_input_layout_for(package, ty, text_provenance, fuel)?;
         if leaves.is_empty() {
             continue;
         }
@@ -1862,6 +1955,7 @@ fn handler_arm_cannot_suspend(body: &Expr, fuel: &mut usize) -> Result<bool, Str
 }
 
 /// Return only writes belonging to this arm, with no persisted node identity.
+#[allow(dead_code)]
 pub(crate) fn stationary_handler_write_sites(
     package: Option<&Package>,
     arm: &nir::program::MatchArm,
@@ -1870,13 +1964,40 @@ pub(crate) fn stationary_handler_write_sites(
     summary: &ArgumentSummary,
     fuel: &mut usize,
 ) -> Result<BTreeSet<usize>, String> {
+    stationary_handler_write_sites_for(
+        package,
+        arm,
+        parameter_count,
+        captures,
+        summary,
+        TextProvenance::Unchecked,
+        fuel,
+    )
+}
+
+pub(crate) fn stationary_handler_write_sites_for(
+    package: Option<&Package>,
+    arm: &nir::program::MatchArm,
+    parameter_count: usize,
+    captures: &[(LocalId, Term)],
+    summary: &ArgumentSummary,
+    text_provenance: TextProvenance,
+    fuel: &mut usize,
+) -> Result<BTreeSet<usize>, String> {
     let mut writes = BTreeSet::new();
     let (_, guards) = outer_guards(&arm.pattern);
     if !guards.is_empty()
         || arm.guard.is_some()
         || !nir::visit::pattern_observations(&arm.pattern, fuel)?.is_empty()
         || !handler_arm_cannot_suspend(&arm.body, fuel)?
-        || !handler_capture_origins_preserved(package, summary, parameter_count, captures, fuel)?
+        || !handler_capture_origins_preserved_for(
+            package,
+            summary,
+            parameter_count,
+            captures,
+            text_provenance,
+            fuel,
+        )?
     {
         return Ok(writes);
     }

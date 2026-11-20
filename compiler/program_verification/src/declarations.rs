@@ -7,6 +7,7 @@ pub(crate) struct Metadata<'a> {
     package: Option<&'a Package>,
     domains: OnceCell<Arc<BTreeMap<DeclarationId, Term>>>,
     sorts: OnceCell<Arc<BTreeMap<DeclarationId, Sort>>>,
+    function_index: OnceCell<Arc<BTreeMap<DeclarationId, usize>>>,
 }
 
 #[cfg(test)]
@@ -115,6 +116,7 @@ impl<'a> Metadata<'a> {
             package,
             domains: OnceCell::new(),
             sorts: OnceCell::new(),
+            function_index: OnceCell::new(),
         }
     }
 
@@ -122,9 +124,36 @@ impl<'a> Metadata<'a> {
         self.package
     }
 
+    pub(crate) fn function_index(
+        &self,
+        fuel: &mut usize,
+    ) -> Result<Option<Arc<BTreeMap<DeclarationId, usize>>>, &'static str> {
+        let Some(package) = self.package else {
+            return Ok(None);
+        };
+        if let Some(index) = self.function_index.get() {
+            return Ok(Some(Arc::clone(index)));
+        }
+        let cost = package.functions.len().max(1);
+        *fuel = fuel
+            .checked_sub(cost)
+            .ok_or("rejection summary budget exhausted")?;
+        let mut definitions = BTreeMap::new();
+        for (slot, function) in package.functions.iter().enumerate() {
+            if definitions.insert(function.declaration, slot).is_some() {
+                return Err("duplicate function identity in rejection summary");
+            }
+        }
+        let index = Arc::new(definitions);
+        let _ = self.function_index.set(Arc::clone(&index));
+        Ok(Some(index))
+    }
+
     /// A residual body without declaration inputs needs no copy or rewrite.
-    /// Borrow it from its owner; consumers still pay for their analysis. This
-    /// is preparation of checked code, not a replacement for NIR validation.
+    /// Borrow it from its owner unless an uncanonical error row still needs
+    /// instantiation normalization; consumers still pay for their analysis.
+    /// This is preparation of checked code, not a replacement for NIR
+    /// validation.
     pub(crate) fn specialize_function<'f>(
         &self,
         function: &'f nir::program::Function,
@@ -132,7 +161,11 @@ impl<'a> Metadata<'a> {
         fuel: &mut usize,
     ) -> Result<Cow<'f, nir::program::Function>, Error> {
         *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
-        if function.type_parameters.is_empty() && arguments.is_empty() {
+        if function.type_parameters.is_empty()
+            && arguments.is_empty()
+            && !term_has_noncanonical_error_row(&function.signature, fuel)?
+            && !term_has_noncanonical_error_row(&function.body.ty, fuel)?
+        {
             return Ok(Cow::Borrowed(function));
         }
         let domains = self.parameter_domains(&function.type_parameters, fuel)?;
@@ -204,8 +237,38 @@ impl<'a> Metadata<'a> {
         Ok(self.sorts.get().expect("complete declaration directory"))
     }
 
-    #[cfg(test)]
     pub(crate) fn domains_prepared(&self) -> bool {
         self.domains.get().is_some()
     }
+}
+
+fn term_has_noncanonical_error_row(ty: &Term, fuel: &mut usize) -> Result<bool, Error> {
+    let mut stack = vec![(ty, 0usize)];
+    while let Some((term, depth)) = stack.pop() {
+        *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
+        if depth >= 128 {
+            return Ok(true);
+        }
+        if let Term::ErrorResult { errors, result } = term {
+            if errors.is_empty() || matches!(result.as_ref(), Term::ErrorResult { .. }) {
+                return Ok(true);
+            }
+            if errors.len() > 1 {
+                let mut keys = errors.iter().map(ToString::to_string);
+                let mut prev = keys.next().unwrap();
+                for key in keys {
+                    *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
+                    if prev >= key {
+                        return Ok(true);
+                    }
+                    prev = key;
+                }
+            }
+        }
+        term.visit_children::<Error>(|child| {
+            stack.push((child, depth + 1));
+            Ok(())
+        })?;
+    }
+    Ok(false)
 }

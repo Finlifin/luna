@@ -47,11 +47,20 @@ fn check(body: &str) {
             luna::execution::interpret(package, "run", 2_000_000).unwrap(),
             Value::Bool(true)
         );
-        let error =
+        assert_eq!(
             luna::execution::interpret_with_protocols(package, "run", "Copy", "Drop", 2_000_000)
-                .unwrap_err();
-        assert!(error.contains("string-view memory provenance"), "{error}");
+                .unwrap(),
+            Value::Bool(true)
+        );
     }
+    let escaping = compile(
+        "fn leak()->*str {let local=\"ephemeral\";local.ref}
+         fn run()->bool {let _=leak();true}",
+    );
+    assert!(
+        luna::execution::interpret_with_protocols(&escaping, "run", "Copy", "Drop", 2_000_000)
+            .is_err()
+    );
 }
 
 #[test]

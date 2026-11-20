@@ -1598,16 +1598,16 @@ impl Checker<'_, '_> {
             Some(interface) => Some(interface),
             None => self.context_member_interface(&subject, name, span)?,
         };
-        let subject = if interface
+        let subject = match interface
             .as_ref()
             .map(|interface| self.symbolic_interface_evidence(&subject, interface))
             .transpose()
-            .map_err(|e| error(span, e.to_string()))?
-            .unwrap_or(false)
         {
-            subject
-        } else {
-            self.method_subject_view(&subject, span)?
+            Ok(Some(true)) => subject,
+            Ok(Some(false) | None) | Err(nir::NominalAdmissionError::Unresolved(_)) => {
+                self.method_subject_view(&subject, span)?
+            }
+            Err(e) => return Err(error(span, e.to_string())),
         };
         let implicit = interface.is_none();
         let mut selected = self.selected_method(subject.clone(), interface, name, span)?;
@@ -1751,7 +1751,7 @@ impl Checker<'_, '_> {
                 "required comptime evaluation is waiting for the trait implementation world",
             ));
         }
-        if let Some(interface) = interface.as_ref() {
+        let incomplete_given = if let Some(interface) = interface.as_ref() {
             // Establish membership before querying implementations. An absent
             // member is not a capability obligation, especially while ordinary
             // Type inputs still contain signature-bound references.
@@ -1762,10 +1762,13 @@ impl Checker<'_, '_> {
             if &origin != interface {
                 // The requested child view must itself be justified. A
                 // parent implementation alone cannot grant that view.
-                if !self
-                    .symbolic_interface_evidence(&subject, interface)
-                    .map_err(|e| error(span, e.to_string()))?
-                {
+                let incomplete_child = match self.symbolic_interface_evidence(&subject, interface) {
+                    Ok(true) => None,
+                    Ok(false) => Some(None),
+                    Err(e @ nir::NominalAdmissionError::Unresolved(_)) => Some(Some(e)),
+                    Err(e) => return Err(error(span, e.to_string())),
+                };
+                if let Some(incomplete) = incomplete_child {
                     let resolution = self
                         .resolve_trait_capability(interface, &subject, Budget::default())
                         .map_err(|e| error(span, format!("interface view query failed: {e:?}")))?;
@@ -1773,6 +1776,9 @@ impl Checker<'_, '_> {
                         resolution.selection,
                         crate::implementation::Selection::Selected(_)
                     ) {
+                        if let Some(given_error) = incomplete {
+                            return Err(error(span, given_error.to_string()));
+                        }
                         return Err(error(span, "requested interface view is not established"));
                     }
                 }
@@ -1788,41 +1794,45 @@ impl Checker<'_, '_> {
             }) {
                 return Ok(None);
             }
-            if self
-                .symbolic_interface_evidence(&subject, interface)
-                .map_err(|e| error(span, e.to_string()))?
-            {
-                let contract = self
-                    .checked_traits
-                    .by_id(interface.declaration)
-                    .unwrap()
-                    .methods
-                    .iter()
-                    .find(|m| m.name == name)
-                    .ok_or_else(|| error(span, "unknown trait method"))?;
-                self.check_method_contract(contract, interface, &subject, span)?;
-                let (parameters, arguments) = self.interface_substitution(interface, &subject);
-                return Ok(Some(n::Expr {
-                    ty: self.instantiate_input_types(
-                        contract
-                            .signature
-                            .ordinary()
-                            .map_err(|e| error(span, e.to_string()))?,
-                        &parameters,
-                        &arguments,
-                        span,
-                    )?,
-                    source: source(span),
-                    kind: K::TraitMethod {
-                        method_arguments: vec![],
-                        interface_arguments: interface.arguments.clone(),
-                        interface: interface.declaration,
-                        member: contract.declaration,
-                        subject,
-                    },
-                }));
+            match self.symbolic_interface_evidence(&subject, interface) {
+                Ok(true) => {
+                    let contract = self
+                        .checked_traits
+                        .by_id(interface.declaration)
+                        .unwrap()
+                        .methods
+                        .iter()
+                        .find(|m| m.name == name)
+                        .ok_or_else(|| error(span, "unknown trait method"))?;
+                    self.check_method_contract(contract, interface, &subject, span)?;
+                    let (parameters, arguments) = self.interface_substitution(interface, &subject);
+                    return Ok(Some(n::Expr {
+                        ty: self.instantiate_input_types(
+                            contract
+                                .signature
+                                .ordinary()
+                                .map_err(|e| error(span, e.to_string()))?,
+                            &parameters,
+                            &arguments,
+                            span,
+                        )?,
+                        source: source(span),
+                        kind: K::TraitMethod {
+                            method_arguments: vec![],
+                            interface_arguments: interface.arguments.clone(),
+                            interface: interface.declaration,
+                            member: contract.declaration,
+                            subject,
+                        },
+                    }));
+                }
+                Ok(false) => None,
+                Err(e @ nir::NominalAdmissionError::Unresolved(_)) => Some(e),
+                Err(e) => return Err(error(span, e.to_string())),
             }
-        }
+        } else {
+            None
+        };
         let mut implementation_arguments = Vec::new();
         let selected = if let Some(interface) = interface.as_ref() {
             let resolution = self
@@ -1839,6 +1849,9 @@ impl Checker<'_, '_> {
                     Some(id)
                 }
                 other => {
+                    if let Some(given_error) = incomplete_given {
+                        return Err(error(span, given_error.to_string()));
+                    }
                     return Err(error(
                         span,
                         format!(
@@ -2399,16 +2412,16 @@ impl Checker<'_, '_> {
         let interface = interface
             .map(|expr| self.interface_expr_for(expr, &receiver.ty))
             .transpose()?;
-        let mut subject = if interface
+        let mut subject = match interface
             .as_ref()
             .map(|interface| self.symbolic_interface_evidence(&receiver.ty, interface))
             .transpose()
-            .map_err(|e| error(expr.span, e.to_string()))?
-            .unwrap_or(false)
         {
-            receiver.ty.clone()
-        } else {
-            self.method_subject_view(&receiver.ty, base.span)?
+            Ok(Some(true)) => receiver.ty.clone(),
+            Ok(Some(false) | None) | Err(nir::NominalAdmissionError::Unresolved(_)) => {
+                self.method_subject_view(&receiver.ty, base.span)?
+            }
+            Err(e) => return Err(error(expr.span, e.to_string())),
         };
         let mut depth = 0;
         let method = loop {
@@ -2427,16 +2440,51 @@ impl Checker<'_, '_> {
                 return Ok(None);
             }
             let absent_at_pointer = if let Some(interface) = &candidate_interface {
-                matches!(subject, Term::Pointer(_))
-                    && !self
-                        .symbolic_interface_evidence(&subject, interface)
-                        .map_err(|e| error(expr.span, e.to_string()))?
-                    && matches!(
-                        self.resolve_trait_capability(interface, &subject, Budget::default())
-                            .map_err(|message| error(expr.span, message))?
-                            .selection,
-                        crate::implementation::Selection::NoApplicableCandidate
-                    )
+                if !matches!(subject, Term::Pointer(_)) {
+                    false
+                } else {
+                    match self.symbolic_interface_evidence(&subject, interface) {
+                        Ok(true) => false,
+                        Ok(false) => matches!(
+                            self.resolve_trait_capability(interface, &subject, Budget::default())
+                                .map_err(|message| error(expr.span, message))?
+                                .selection,
+                            crate::implementation::Selection::NoApplicableCandidate
+                        ),
+                        Err(nir::NominalAdmissionError::Unresolved(_)) => {
+                            let assumptions = self.capability_assumptions();
+                            let world = crate::capabilities::World {
+                                index: &self.implementation_index,
+                                implementations: &self.checked_implementations,
+                                traits: &self.checked_traits,
+                                assumptions: &assumptions,
+                                context: &self.context,
+                            };
+                            let closed = match world.closed_inputs_metered(
+                                std::iter::once(&subject).chain(&interface.arguments),
+                                &mut Budget::default(),
+                            ) {
+                                Ok(closed) => closed,
+                                Err(nir::NominalAdmissionError::Unresolved(_)) => false,
+                                Err(failure) => {
+                                    return Err(error(expr.span, failure.to_string()));
+                                }
+                            };
+                            closed
+                                && matches!(
+                                    self.resolve_trait_capability(
+                                        interface,
+                                        &subject,
+                                        Budget::default(),
+                                    )
+                                    .map_err(|message| error(expr.span, message))?
+                                    .selection,
+                                    crate::implementation::Selection::NoApplicableCandidate
+                                )
+                        }
+                        Err(e) => return Err(error(expr.span, e.to_string())),
+                    }
+                }
             } else {
                 false
             };
@@ -2714,11 +2762,14 @@ impl Checker<'_, '_> {
                     .instantiate_parameters_in_scope(&parameters, arguments, &frames)
                     .map_err(|e| error(span, e.to_string()))?;
                 let instance = requirement.interface_instance();
-                if self
-                    .symbolic_interface_evidence(&requirement.subject, &instance)
-                    .map_err(|e| error(span, e.to_string()))?
-                {
-                    continue;
+                let mut incomplete_given: Option<nir::NominalAdmissionError> = None;
+                match self.symbolic_interface_evidence(&requirement.subject, &instance) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(e @ nir::NominalAdmissionError::Unresolved(_)) => {
+                        incomplete_given = Some(e);
+                    }
+                    Err(e) => return Err(error(span, e.to_string())),
                 }
                 let mut requirement = requirement;
                 requirement.subject = self.callable_input_view(&requirement.subject, span)?;
@@ -2726,11 +2777,15 @@ impl Checker<'_, '_> {
                     *argument = self.capability_argument_view(argument, span)?;
                 }
                 let instance = requirement.interface_instance();
-                if self
-                    .symbolic_interface_evidence(&requirement.subject, &instance)
-                    .map_err(|e| error(span, e.to_string()))?
-                {
-                    continue;
+                match self.symbolic_interface_evidence(&requirement.subject, &instance) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(e @ nir::NominalAdmissionError::Unresolved(_)) => {
+                        if incomplete_given.is_none() {
+                            incomplete_given = Some(e);
+                        }
+                    }
+                    Err(e) => return Err(error(span, e.to_string())),
                 }
                 let resolution = self
                     .resolve_trait_capability(&instance, &requirement.subject, Budget::default())
@@ -2739,6 +2794,9 @@ impl Checker<'_, '_> {
                     resolution.selection,
                     crate::implementation::Selection::Selected(_)
                 ) {
+                    if let Some(given_error) = incomplete_given {
+                        return Err(error(span, given_error.to_string()));
+                    }
                     return Err(error(
                         span,
                         format!("trait bound is not established: {}", resolution.selection),
@@ -2752,10 +2810,13 @@ impl Checker<'_, '_> {
 
 impl Checker<'_, '_> {
     pub(super) fn capability_assumptions(&self) -> Vec<n::TraitRequirement> {
-        let mut assumptions = self
-            .signature_owner
-            .map(|owner| self.binder_assumptions(owner))
-            .unwrap_or_default();
+        let mut assumptions = if let Some(capabilities) = &self.open_instance_capabilities {
+            capabilities.clone()
+        } else {
+            self.signature_owner
+                .map(|owner| self.binder_assumptions(owner))
+                .unwrap_or_default()
+        };
         // Positive conjunctive type facts are local trait evidence. Do not
         // extract a branch of a disjunction or turn negative facts positive.
         let mut pending = self.context.assumptions().iter().collect::<Vec<_>>();

@@ -1,0 +1,698 @@
+use builtin.fmt.ByteWriter;
+use collections_impl.vec.Vec;
+use mem_impl.allocator.AllocError;
+
+{-
+    Byte offset at which UTF-8 validation first failed. All preceding bytes in
+    [0, valid_up_to()) form valid UTF-8.
+-}
+pub struct Utf8Error {
+    valid_up_to_offset: usize,
+}
+
+impl Clone for Utf8Error {
+    fn clone(*self) -> Self {
+        Utf8Error {
+            valid_up_to_offset: self.valid_up_to_offset.*,
+        }
+    }
+}
+
+impl Copy for Utf8Error {}
+
+impl Eq for Utf8Error {
+    fn eq(self, other: Self) -> bool {
+        self.valid_up_to_offset == other.valid_up_to_offset
+    }
+}
+
+impl Utf8Error {
+    pub pure fn valid_up_to(self) -> usize {
+        self.valid_up_to_offset
+    }
+}
+
+fn is_cont(byte: u8) -> bool {
+    byte >= 128 and byte <= 191
+}
+
+fn validate_utf8_2(bytes: *Vec<u8>, i: usize, len: usize) -> bool {
+    if i >= len or len - i < 2 {
+        return false;
+    }
+    let b1 = bytes.get(i + 1) match {
+        v? => v,
+        null => return false,
+    }
+    is_cont(b1)
+}
+
+fn validate_utf8_3(bytes: *Vec<u8>, i: usize, len: usize, b0: u8) -> bool {
+    if i >= len or len - i < 3 {
+        return false;
+    }
+    let b1 = bytes.get(i + 1) match {
+        v? => v,
+        null => return false,
+    }
+    let b2 = bytes.get(i + 2) match {
+        v? => v,
+        null => return false,
+    }
+    if not is_cont(b2) {
+        return false;
+    }
+    if b0 == 224 {
+        return b1 >= 160 and b1 <= 191;
+    }
+    if b0 == 237 {
+        return b1 >= 128 and b1 <= 159;
+    }
+    is_cont(b1)
+}
+
+fn validate_utf8_4(bytes: *Vec<u8>, i: usize, len: usize, b0: u8) -> bool {
+    if i >= len or len - i < 4 {
+        return false;
+    }
+    let b1 = bytes.get(i + 1) match {
+        v? => v,
+        null => return false,
+    }
+    let b2 = bytes.get(i + 2) match {
+        v? => v,
+        null => return false,
+    }
+    let b3 = bytes.get(i + 3) match {
+        v? => v,
+        null => return false,
+    }
+    if not is_cont(b2) or not is_cont(b3) {
+        return false;
+    }
+    if b0 == 240 {
+        return b1 >= 144 and b1 <= 191;
+    }
+    if b0 == 244 {
+        return b1 >= 128 and b1 <= 143;
+    }
+    is_cont(b1)
+}
+
+fn validate_utf8_step(bytes: *Vec<u8>, i: usize, len: usize) -> usize {
+    if i >= len {
+        return 0;
+    }
+    let b0 = bytes.get(i) match {
+        v? => v,
+        null => return 0,
+    }
+    if b0 <= 127 {
+        return 1;
+    }
+    if b0 >= 194 and b0 <= 223 {
+        return if validate_utf8_2(bytes, i, len) { 2 } else { 0 }
+    }
+    if b0 >= 224 and b0 <= 239 {
+        return if validate_utf8_3(bytes, i, len, b0) {
+            3
+        } else {
+            0
+        }
+    }
+    if b0 >= 240 and b0 <= 244 {
+        return if validate_utf8_4(bytes, i, len, b0) {
+            4
+        } else {
+            0
+        }
+    }
+    0
+}
+
+fn validate_utf8(bytes: *Vec<u8>) -> ?usize {
+    let len = bytes.len();
+    var i: usize = 0;
+    while i < len {
+        let step = validate_utf8_step(bytes, i, len);
+        if step == 0 or step > len - i {
+            return i;
+        }
+        i = i + step;
+    }
+    null
+}
+
+fn decode_utf8_2(bytes: *Vec<u8>, start: usize, len: usize, b0: u8) -> ?u32 {
+    if start >= len or len - start < 2 or b0 < 194 or b0 > 223 {
+        return null;
+    }
+    let b1 = bytes.get(start + 1) match {
+        v? => v,
+        null => return null,
+    }
+    if b1 < 128 or b1 > 191 {
+        return null;
+    }
+    let p0 = (b0 - 192)'bitvec.as(u32);
+    let p1 = (b1 - 128)'bitvec.as(u32);
+    if p0 > 31 or p1 > 63 {
+        return null;
+    }
+    p0 * 64 + p1
+}
+
+fn decode_utf8_3(bytes: *Vec<u8>, start: usize, len: usize, b0: u8) -> ?u32 {
+    if start >= len or len - start < 3 or b0 < 224 or b0 > 239 {
+        return null;
+    }
+    let b1 = bytes.get(start + 1) match {
+        v? => v,
+        null => return null,
+    }
+    let b2 = bytes.get(start + 2) match {
+        v? => v,
+        null => return null,
+    }
+    if b1 < 128 or b1 > 191 or b2 < 128 or b2 > 191 {
+        return null;
+    }
+    let p0 = (b0 - 224)'bitvec.as(u32);
+    let p1 = (b1 - 128)'bitvec.as(u32);
+    let p2 = (b2 - 128)'bitvec.as(u32);
+    if p0 > 15 or p1 > 63 or p2 > 63 {
+        return null;
+    }
+    p0 * 4096 + p1 * 64 + p2
+}
+
+fn decode_utf8_4(bytes: *Vec<u8>, start: usize, len: usize, b0: u8) -> ?u32 {
+    if start >= len or len - start < 4 or b0 < 240 or b0 > 244 {
+        return null;
+    }
+    let b1 = bytes.get(start + 1) match {
+        v? => v,
+        null => return null,
+    }
+    let b2 = bytes.get(start + 2) match {
+        v? => v,
+        null => return null,
+    }
+    let b3 = bytes.get(start + 3) match {
+        v? => v,
+        null => return null,
+    }
+    if b1 < 128 or b1 > 191 or b2 < 128 or b2 > 191 or b3 < 128 or b3 > 191 {
+        return null;
+    }
+    let p0 = (b0 - 240)'bitvec.as(u32);
+    let p1 = (b1 - 128)'bitvec.as(u32);
+    let p2 = (b2 - 128)'bitvec.as(u32);
+    let p3 = (b3 - 128)'bitvec.as(u32);
+    if p0 > 4 or p1 > 63 or p2 > 63 or p3 > 63 {
+        return null;
+    }
+    p0 * 262144 + p1 * 4096 + p2 * 64 + p3
+}
+
+{-
+    Owned, heap-allocated, UTF-8 encoded growable string. Inherits structural
+    affine Drop through its underlying Vec<u8> while maintaining valid UTF-8
+    across all public mutators and constructors.
+-}
+pub struct String {
+    bytes: Vec<u8>,
+}
+
+impl String {
+    pub pure fn new() -> Self {
+        String { bytes: Vec<u8>.new() }
+    }
+
+    pub fn with_capacity(capacity: usize) -> !AllocError Self {
+        let bytes = Vec<u8>.with_capacity(capacity)!;
+        String { bytes: bytes }
+    }
+
+    pub fn from_str(text: str) -> !AllocError Self {
+        var out = String.new();
+        out.ref.push_str(text)!;
+        out
+    }
+
+    pub fn from_utf8(bytes: Vec<u8>) -> !Utf8Error Self {
+        var owned = bytes;
+        validate_utf8(owned.ref) match {
+            offset? => return error Utf8Error { valid_up_to_offset: offset },
+            null => {},
+        }
+        String { bytes: owned }
+    }
+
+    pub fn from_utf8_lossy(bytes: Vec<u8>) -> !AllocError Self {
+        var owned = bytes;
+        validate_utf8(owned.ref) match {
+            null => return String { bytes: owned },
+            _? => {},
+        }
+        let len = owned.ref.len();
+        var out = Vec<u8>.with_capacity(len)!;
+        var i: usize = 0;
+        while i < len {
+            let step = validate_utf8_step(owned.ref, i, len);
+            if step == 0 or step > len - i {
+                out.ref.push(239)!;
+                out.ref.push(191)!;
+                out.ref.push(189)!;
+                i = i + 1;
+            } else {
+                let end = i + step;
+                var pos = i;
+                while pos < end {
+                    let b = owned.ref.get(pos) match {
+                        v? => v,
+                        null => break,
+                    }
+                    out.ref.push(b)!;
+                    pos = pos + 1;
+                }
+                i = end;
+            }
+        }
+        String { bytes: out }
+    }
+
+    pub fn len(*self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn capacity(*self) -> usize {
+        self.bytes.capacity()
+    }
+
+    pub fn is_empty(*self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    pub fn byte(*self, index: usize) -> ?u8 {
+        self.bytes.get(index)
+    }
+
+    pub fn as_bytes_addr(*self) -> usize {
+        self.bytes.as_addr()
+    }
+
+    pub fn is_char_boundary(*self, index: usize) -> bool {
+        let len = self.bytes.len();
+        if index == 0 or index == len {
+            return true;
+        }
+        if index > len {
+            return false;
+        }
+        let b = self.bytes.get(index) match {
+            v? => v,
+            null => return false,
+        }
+        not is_cont(b)
+    }
+
+    pub fn is_valid_utf8(*self) -> bool {
+        validate_utf8(self.bytes) match {
+            _? => false,
+            null => true,
+        }
+    }
+
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    pub fn reserve(*self, additional: usize) -> !AllocError void {
+        self.bytes.reserve(additional)
+    }
+
+    pub fn shrink_to_fit(*self) -> !AllocError void {
+        self.bytes.shrink_to_fit()
+    }
+
+    pub fn clear(*self) {
+        self.bytes.clear();
+    }
+
+    pub fn push_str(*self, text: str) -> !AllocError void {
+        self.bytes.write_str(text)
+    }
+
+    pub fn push_string(*self, other: *String) -> !AllocError void {
+        let other_len = other.len();
+        if other_len == 0 {
+            return;
+        }
+        self.bytes.reserve(other_len)!;
+        var i: usize = 0;
+        while i < other_len {
+            let b = other.byte(i) match {
+                v? => v,
+                null => break,
+            }
+            self.bytes.push(b)!;
+            i = i + 1;
+        }
+    }
+
+    pub fn push_char(*self, ch: char) -> !AllocError void {
+        let code = ch'bitvec.as(u32);
+        if code <= 127 {
+            self.bytes.push(code'bitvec[0..8].as(u8))
+        } else if code <= 2047 {
+            self.bytes.reserve(2)!;
+            let first = (code / 64) + 192;
+            let second = (code % 64) + 128;
+            self.bytes.push(first'bitvec[0..8].as(u8))!;
+            self.bytes.push(second'bitvec[0..8].as(u8))
+        } else if code <= 65535 {
+            self.bytes.reserve(3)!;
+            let first = (code / 4096) + 224;
+            let second = (code / 64 % 64) + 128;
+            let third = (code % 64) + 128;
+            self.bytes.push(first'bitvec[0..8].as(u8))!;
+            self.bytes.push(second'bitvec[0..8].as(u8))!;
+            self.bytes.push(third'bitvec[0..8].as(u8))
+        } else {
+            self.bytes.reserve(4)!;
+            let first = (code / 262144) + 240;
+            let second = (code / 4096 % 64) + 128;
+            let third = (code / 64 % 64) + 128;
+            let fourth = (code % 64) + 128;
+            self.bytes.push(first'bitvec[0..8].as(u8))!;
+            self.bytes.push(second'bitvec[0..8].as(u8))!;
+            self.bytes.push(third'bitvec[0..8].as(u8))!;
+            self.bytes.push(fourth'bitvec[0..8].as(u8))
+        }
+    }
+
+    pub fn pop_char(*self) -> ?char {
+        let len = self.bytes.len();
+        if len == 0 {
+            return null;
+        }
+        var start = len - 1;
+        while start > 0 {
+            let b = self.bytes.get(start) match {
+                v? => v,
+                null => return null,
+            }
+            if not is_cont(b) {
+                break;
+            }
+            start = start - 1;
+        }
+        if start >= len {
+            return null;
+        }
+        let width = len - start;
+        let b0 = self.bytes.get(start) match {
+            v? => v,
+            null => return null,
+        }
+        let code_opt: ?u32 = if width == 1 and b0 <= 127 {
+            b0'bitvec.as(u32)
+        } else if width == 2 {
+            decode_utf8_2(self.bytes, start, len, b0)
+        } else if width == 3 {
+            decode_utf8_3(self.bytes, start, len, b0)
+        } else if width == 4 {
+            decode_utf8_4(self.bytes, start, len, b0)
+        } else {
+            null
+        }
+        let code = code_opt match {
+            v? => v,
+            null => return null,
+        }
+        let ch = char.from_u32(code) match {
+            c? => c,
+            null => return null,
+        }
+        self.bytes.truncate(start);
+        ch
+    }
+
+    pub fn truncate(*self, new_len: usize) -> bool {
+        let len = self.bytes.len();
+        if new_len > len or not self.is_char_boundary(new_len) {
+            return false;
+        }
+        self.bytes.truncate(new_len);
+        true
+    }
+
+    pub fn try_clone(*self) -> !AllocError Self {
+        let cloned = self.bytes.try_clone()!;
+        String { bytes: cloned }
+    }
+
+    pub fn equals(*self, other: *Self) -> bool {
+        let len = self.len();
+        if len != other.len() {
+            return false;
+        }
+        if len == 0 {
+            return true;
+        }
+        unsafe {
+            builtin
+                .mem
+                .compare_bytes(self.as_bytes_addr(), other.as_bytes_addr(), len)
+                == 0
+        }
+    }
+
+    pub fn equals_str(*self, other: str) -> bool {
+        let len = self.len();
+        let other_len = builtin
+            .compiler
+            .try_u64_to_usize(builtin.compiler.str_byte_length(other)) match {
+            v? => v,
+            null => return false,
+        }
+        if len != other_len {
+            return false;
+        }
+        self.starts_with(other)
+    }
+
+    pub fn cmp_ref(*self, other: *Self) -> Order {
+        let a_len = self.len();
+        let b_len = other.len();
+        let min_len = if a_len < b_len { a_len } else { b_len }
+        var i: usize = 0;
+        while i < min_len {
+            let a_b = self.byte(i) match {
+                v? => v,
+                null => break,
+            }
+            let b_b = other.byte(i) match {
+                v? => v,
+                null => break,
+            }
+            if a_b < b_b {
+                return .less;
+            }
+            if a_b > b_b {
+                return .greater;
+            }
+            i = i + 1;
+        }
+        if a_len < b_len {
+            .less
+        } else if a_len > b_len {
+            .greater
+        } else {
+            .equal
+        }
+    }
+
+    pub fn starts_with(*self, prefix: str) -> bool {
+        let p_u64 = builtin.compiler.str_byte_length(prefix);
+        let p_len = builtin.compiler.try_u64_to_usize(p_u64) match {
+            v? => v,
+            null => return false,
+        }
+        if p_len > self.len() {
+            return false;
+        }
+        var i: usize = 0;
+        var j: u64 = 0;
+        while i < p_len and j < p_u64 {
+            let left = self.byte(i) match {
+                v? => v,
+                null => return false,
+            }
+            let right = builtin.compiler.str_byte(prefix, j) match {
+                v? => v,
+                null => return false,
+            }
+            if left != right {
+                return false;
+            }
+            i = i + 1;
+            j = j + 1;
+        }
+        i == p_len
+    }
+
+    pub fn ends_with(*self, suffix: str) -> bool {
+        let len = self.len();
+        let s_u64 = builtin.compiler.str_byte_length(suffix);
+        let s_len = builtin.compiler.try_u64_to_usize(s_u64) match {
+            v? => v,
+            null => return false,
+        }
+        if s_len > len {
+            return false;
+        }
+        var pos: usize = len - s_len;
+        var j: u64 = 0;
+        while pos < len and j < s_u64 {
+            let left = self.byte(pos) match {
+                v? => v,
+                null => return false,
+            }
+            let right = builtin.compiler.str_byte(suffix, j) match {
+                v? => v,
+                null => return false,
+            }
+            if left != right {
+                return false;
+            }
+            pos = pos + 1;
+            j = j + 1;
+        }
+        pos == len
+    }
+
+    pub fn find(*self, needle: str) -> ?usize {
+        let n_u64 = builtin.compiler.str_byte_length(needle);
+        let n_len = builtin.compiler.try_u64_to_usize(n_u64) match {
+            v? => v,
+            null => return null,
+        }
+        let len = self.len();
+        if n_len == 0 {
+            return 0;
+        }
+        if n_len > len {
+            return null;
+        }
+        let limit = len - n_len;
+        var start: usize = 0;
+        while start <= limit {
+            var pos: usize = start;
+            var j: u64 = 0;
+            var matched = true;
+            while j < n_u64 and pos < len {
+                let left = self.byte(pos) match {
+                    v? => v,
+                    null => {
+                        matched = false;
+                        break;
+                    },
+                }
+                let right = builtin.compiler.str_byte(needle, j) match {
+                    v? => v,
+                    null => {
+                        matched = false;
+                        break;
+                    },
+                }
+                if left != right {
+                    matched = false;
+                    break;
+                }
+                pos = pos + 1;
+                j = j + 1;
+            }
+            if matched and j == n_u64 {
+                return start;
+            }
+            if start >= limit {
+                break;
+            }
+            start = start + 1;
+        }
+        null
+    }
+
+    pub fn contains(*self, needle: str) -> bool {
+        self.find(needle) match {
+            _? => true,
+            null => false,
+        }
+    }
+
+    pub fn hash_bytes(*self) -> u64 {
+        let len = self.len();
+        var i: usize = 0;
+        var state: u64 = 14695981039346656037;
+        while i < len {
+            let byte = self.byte(i) match {
+                v? => v,
+                null => return state,
+            }
+            let bits = state'bitvec;
+            let widened = byte'bitvec.as(u64);
+            let input = widened'bitvec;
+            let mixed = ((bits and not input) or (not bits and input)).as(u128);
+            assumes mixed <= 18446744073709551615;
+            let product = mixed * 1099511628211;
+            state = product'bitvec[0..64].as(u64);
+            i = i + 1;
+        }
+        state
+    }
+
+    pub fn write_to(*self, output: *W) -> !W.as(ByteWriter).Error void where W :- ByteWriter {
+        let len = self.len();
+        var i: usize = 0;
+        while i < len {
+            let byte = self.byte(i) match {
+                v? => v,
+                null => return,
+            }
+            output.write_byte(byte)!;
+            i = i + 1;
+        }
+    }
+}
+
+impl Display for String {
+    fn write(self, output: *W) -> !W.as(ByteWriter).Error void where W :- ByteWriter {
+        var this = self;
+        this.ref.write_to(output)
+    }
+}
+
+impl Eq for String {
+    fn eq(self, other: Self) -> bool {
+        var left = self;
+        var right = other;
+        left.ref.equals(right.ref)
+    }
+}
+
+impl Ord for String {
+    fn cmp(self, other: Self) -> Order {
+        var left = self;
+        var right = other;
+        left.ref.cmp_ref(right.ref)
+    }
+}
+
+impl Hash for String {
+    fn hash(self) -> u64 {
+        var this = self;
+        this.ref.hash_bytes()
+    }
+}

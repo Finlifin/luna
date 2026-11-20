@@ -79,9 +79,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             for field in environment {
                 // The environment is borrowed in place. Non-Copy data may be
                 // observed or updated; every exit must preserve its ownership.
-                data_only &= super::super::memory::effect_data_layout(
+                data_only &= super::super::memory::effect_data_layout_for(
                     self.package,
                     field,
+                    self.text_provenance,
                     &mut self.fuel,
                     depth + 1,
                 )
@@ -91,8 +92,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 return Ok(());
             }
         }
-        if !super::super::memory::effect_data_layout(self.package, ty, &mut self.fuel, depth)
-            .map_err(|reason| error(source, reason))?
+        if !super::super::memory::effect_data_layout_for(
+            self.package,
+            ty,
+            self.text_provenance,
+            &mut self.fuel,
+            depth,
+        )
+        .map_err(|reason| error(source, reason))?
         {
             return Err(error(
                 source,
@@ -184,12 +191,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let Term::Function { parameters, .. } = function.signature.callable_signature() else {
             return Ok(targets.clone());
         };
-        let source_layout = super::super::memory::pointer_input_layout(
-            self.package,
-            &parameters[parameter].ty,
-            &mut self.fuel,
-        )
-        .map_err(|reason| error(argument.source, reason))?;
+        let source_layout =
+            self.pointer_input_layout(&parameters[parameter].ty, argument.source)?;
         let mut kept = BTreeSet::new();
         for target in targets {
             let mut excluded = false;
@@ -397,8 +400,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         origins: &ValueOrigins,
         source: SourceRange,
     ) -> Result<(), Error> {
-        let leaves = super::super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
-            .map_err(|reason| error(source, reason))?;
+        let leaves = self.pointer_input_layout(ty, source)?;
         for leaf in leaves {
             let mut absent = false;
             for (path, tag) in &leaf.guards {
@@ -756,17 +758,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     if access.parameter != slot {
                         continue;
                     }
-                    let leaf = super::super::memory::pointer_input_layout(
-                        this.package,
-                        &argument.ty,
-                        &mut this.fuel,
-                    )
-                    .map_err(|reason| error(expr.source, reason))?
-                    .into_iter()
-                    .find(|leaf| leaf.input_fields == access.input_fields)
-                    .ok_or_else(|| {
-                        error(expr.source, "effect parameter access path is not a pointer")
-                    })?;
+                    let leaf = this
+                        .pointer_input_layout(&argument.ty, expr.source)?
+                        .into_iter()
+                        .find(|leaf| leaf.input_fields == access.input_fields)
+                        .ok_or_else(|| {
+                            error(expr.source, "effect parameter access path is not a pointer")
+                        })?;
                     let targets = symbolic_origins.get(&access.input_fields).ok_or_else(|| {
                         error(
                             expr.source,
@@ -1044,12 +1042,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     })?;
                     let code_paths =
                         callable_value_paths(self.package, ty, &mut self.fuel, installation, 0)?;
-                    let layout = super::super::memory::pointer_input_layout(
-                        self.package,
-                        ty,
-                        &mut self.fuel,
-                    )
-                    .map_err(|reason| error(installation, reason))?;
+                    let layout = self.pointer_input_layout(ty, installation)?;
                     if !layout.is_empty() {
                         let allowed = if let Some(allowed) = borrowed_result_delivery {
                             allowed
@@ -1242,9 +1235,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         // suspended exits as well as ordinary completion.
                         if code_paths.is_empty() {
                             self.require_capture_value_layout(ty, installation, 0)?;
-                        } else if !super::super::memory::effect_borrowed_code_layout(
+                        } else if !super::super::memory::effect_borrowed_code_layout_for(
                             self.package,
                             ty,
+                            self.text_provenance,
                             &mut self.fuel,
                         )
                         .map_err(|reason| error(installation, reason))?
@@ -1501,7 +1495,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         ));
                     }
                 }
-                let parameter_summary = super::super::memory::direct_handler_accesses_with_code(
+                let parameter_summary = super::super::memory::direct_handler_accesses_with_code_for(
                     self.package,
                     handler,
                     arm,
@@ -1510,6 +1504,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     &capture_memory_code,
                     &self.effect_memory_inputs,
                     effect_row,
+                    self.text_provenance,
                     &mut self.fuel,
                 )
                 .map_err(|reason| error(installation, reason))?;
@@ -1539,9 +1534,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     // owner itself does not need Copy.
                     for (_, access) in &summary.capture_accesses {
                         if access.write {
-                            super::super::memory::require_pointer_free_owned(
+                            super::super::memory::require_pointer_free_owned_for(
                                 self.package,
                                 &access.ty,
+                                self.text_provenance,
                                 &mut self.fuel,
                                 0,
                             )
@@ -1559,12 +1555,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     }
                 }
                 let stable_writes = match &parameter_summary {
-                    Some(summary) => super::super::memory::stationary_handler_write_sites(
+                    Some(summary) => super::super::memory::stationary_handler_write_sites_for(
                         self.package,
                         arm,
                         parameters.len(),
                         &captures,
                         &summary.memory,
+                        self.text_provenance,
                         &mut self.fuel,
                     )
                     .map_err(|reason| error(installation, reason))?,
@@ -1606,16 +1603,32 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 frame.stable_handler_slots.insert(root(*binding));
                             }
                             for (place, callable) in &capture_callables {
-                                this.fuel = this.fuel.checked_sub(place.fields.len() + 1)
-                                    .ok_or_else(|| error(installation, "handler code field installation budget exhausted"))?;
+                                this.fuel = this
+                                    .fuel
+                                    .checked_sub(place.fields.len() + 1)
+                                    .ok_or_else(|| {
+                                        error(
+                                            installation,
+                                            "handler code field installation budget exhausted",
+                                        )
+                                    })?;
                                 if place.root == root(*binding) {
                                     bound_callable_copy(callable, &mut this.fuel, installation, 0)?;
                                     frame.set_callable_at(place, callable.clone());
                                 }
                             }
-                            if let Some(domains)=capture_domains.get(binding) {
-                                let domains=copy_enum_domains(domains,&mut this.fuel,installation)?;
-                                this.install_enum_domains(frame,&Place {root:root(*binding),fields:vec![]},domains,installation)?;
+                            if let Some(domains) = capture_domains.get(binding) {
+                                let domains =
+                                    copy_enum_domains(domains, &mut this.fuel, installation)?;
+                                this.install_enum_domains(
+                                    frame,
+                                    &Place {
+                                        root: root(*binding),
+                                        fields: vec![],
+                                    },
+                                    domains,
+                                    installation,
+                                )?;
                             }
                         }
                         for (place, targets) in &pointer_captures {
@@ -1645,14 +1658,18 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             frame
                                 .effect_borrows
                                 .extend(targets.iter().map(|target| target.root));
-                            frame.pointers.insert(place.clone(),targets.clone());
-                            if let Some(qualified)=outer.pointer_guards.get(place) {
-                                let mut retained=PointerTargetGuards::new();
-                                for (target,guards) in qualified {
-                                    this.charge_pointer_conditions(guards,installation)?;
-                                    if targets.contains(target) {retained.insert(target.clone(),guards.clone());}
+                            frame.pointers.insert(place.clone(), targets.clone());
+                            if let Some(qualified) = outer.pointer_guards.get(place) {
+                                let mut retained = PointerTargetGuards::new();
+                                for (target, guards) in qualified {
+                                    this.charge_pointer_conditions(guards, installation)?;
+                                    if targets.contains(target) {
+                                        retained.insert(target.clone(), guards.clone());
+                                    }
                                 }
-                                if !retained.is_empty() {frame.pointer_guards.insert(place.clone(),retained);}
+                                if !retained.is_empty() {
+                                    frame.pointer_guards.insert(place.clone(), retained);
+                                }
                             }
                         }
                         // Read-only pointer fields retain their installer origins.
@@ -1662,9 +1679,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         if let Some(summary) = &parameter_summary {
                             for (_, access) in &summary.capture_accesses {
                                 reads_pointer_fields |= !access.target.through.is_empty()
-                                    || !super::super::memory::pointer_input_layout(
-                                        this.package, &access.ty, &mut this.fuel,
-                                    ).map_err(|reason| error(installation, reason))?.is_empty();
+                                    || !this
+                                        .pointer_input_layout(&access.ty, installation)?
+                                        .is_empty();
                             }
                         }
                         let mut pending: Vec<_> = if reads_pointer_fields {
@@ -1680,9 +1697,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             }
                             // Only pointer-presence tags are stable. Ordinary data
                             // variants may still change while this handler is installed.
-                            let layout = super::super::memory::pointer_input_layout(
-                                this.package, &outer.types[&owner], &mut this.fuel,
-                            ).map_err(|reason| error(installation, reason))?;
+                            let owner_ty = outer.types[&owner].clone();
+                            let layout = this.pointer_input_layout(&owner_ty, installation)?;
                             let mut stable_domains = EnumDomains::new();
                             for leaf in layout {
                                 imported_slots.insert(Place {root: owner, fields: leaf.storage_fields});
@@ -1750,11 +1766,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             }
                         }
                         if reads_pointer_fields {
+                            let package = this.package;
+                            let text_provenance = this.text_provenance;
                             nir::visit::expression_in_closure_environment(expression, &mut this.fuel, |node, fuel| {
                                 // Pointer writes through an alias require a request-time
                                 // transition summary; an installation snapshot is insufficient.
                                 if let K::WritePointer { value, .. } = &node.kind {
-                                    if !super::super::memory::pointer_input_layout(this.package, &value.ty, fuel)?.is_empty() {
+                                    if !super::super::memory::pointer_input_layout_for(package, &value.ty, text_provenance, fuel)?.is_empty() {
                                         return Err("handler borrowed pointer fields require stable storage during installation".into());
                                     }
                                 }
@@ -1790,17 +1808,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                     continue;
                                 }
                                 let parameter = &parameters[access.parameter].ty;
-                                let leaf = super::super::memory::pointer_input_layout(
-                                    this.package,
-                                    parameter,
-                                    &mut this.fuel,
-                                )
-                                .map_err(|reason| error(installation, reason))?
-                                .into_iter()
-                                .find(|leaf| leaf.input_fields == access.input_fields)
-                                .ok_or_else(|| {
-                                    error(installation, "handler input field is not a pointer")
-                                })?;
+                                let leaf = this
+                                    .pointer_input_layout(parameter, installation)?
+                                    .into_iter()
+                                    .find(|leaf| leaf.input_fields == access.input_fields)
+                                    .ok_or_else(|| {
+                                        error(installation, "handler input field is not a pointer")
+                                    })?;
                                 if (this.delivery)(&leaf.pointee)
                                     .map_err(|reason| error(installation, reason))?
                                     != Delivery::Copy

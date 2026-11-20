@@ -1,4 +1,4 @@
-use builtin.{Integer, i128, i16, i32, i64, i8, isize, u128, u16, u32, u64, u8, usize}
+use builtin.{Integer, char, i128, i16, i32, i64, i8, isize, u128, u16, u32, u64, u8, usize}
 
 -- Bind target-sized representation observations to the comptime phase.
 pub const usize_representation: comptime fn(usize) -> u128 = .integer_representation'builtin;
@@ -144,3 +144,4 @@ pub const try_isize_to_i16: comptime fn(isize) -> ?i16 = .try_integer_convert'bu
 pub const try_isize_to_i32: comptime fn(isize) -> ?i32 = .try_integer_convert'builtin;
 pub const try_isize_to_i64: comptime fn(isize) -> ?i64 = .try_integer_convert'builtin;
 pub const try_isize_to_i128: comptime fn(isize) -> ?i128 = .try_integer_convert'builtin;
+pub const try_u32_to_char: comptime fn(u32) -> ?char = .try_integer_convert'builtin;

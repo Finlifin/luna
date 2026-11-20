@@ -895,6 +895,7 @@ impl Emitter<'_> {
         }
         result.map_err(|e| format!("{}..{}: {e}", expr.source.start, expr.source.end))
     }
+    #[inline(never)]
     fn inner(
         &mut self,
         expr: &Expr,
@@ -914,45 +915,631 @@ impl Emitter<'_> {
         {
             return Err("host mapped computation requires an explicit execution boundary".into());
         }
-        Ok(match &expr.kind {
-            K::UnsafeScope(body) => self.expr(body, depth)?,
-            K::Literal(literal) => {
-                let ty = repr(self.graph, &expr.ty, self.checked)?;
-                self.literal(literal, ty)?
-            }
+        match &expr.kind {
+            K::UnsafeScope(body) | K::Snapshot(body) => self.expr(body, depth),
             K::EffectComputation { .. } if selected.is_some() => {
-                let selected = selected.unwrap();
-                *self.fuel = self
-                    .fuel
-                    .checked_sub(selected.len())
-                    .ok_or("host mapped environment budget exhausted")?;
-                let previous = std::mem::replace(&mut self.effects, selected.to_vec());
-                let result = self.effect(expr, depth);
-                self.effects = previous;
-                result?
+                self.inner_selected_effect(expr, depth, selected.unwrap())
             }
             K::EffectResume(_)
             | K::EffectComputation { .. }
             | K::EffectRun { .. }
             | K::EffectHandle { .. }
-            | K::EffectRequest { .. } => self.effect(expr, depth)?,
-            K::Closure { .. } => self.closure(expr, depth)?,
+            | K::EffectRequest { .. } => self.effect(expr, depth),
+            K::Closure { .. } => self.closure(expr, depth),
             K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. } => {
-                self.callable(expr)?
+                self.callable(expr)
             }
-            K::OptionalAbsent | K::OptionalPresent(_) => self.optional(expr, depth)?,
+            K::OptionalAbsent | K::OptionalPresent(_) => self.optional(expr, depth),
             K::Variant { index, fields, .. } => {
-                self.variant(expr.source, *index, fields, &expr.ty, depth)?
+                self.variant(expr.source, *index, fields, &expr.ty, depth)
             }
-            K::Tuple(fields) => self.record(expr.source, fields, &expr.ty, depth)?,
-            K::AddressOf(place) => self.address(place, depth)?,
+            K::Tuple(fields) | K::AnonymousRecord { fields } | K::Record { fields, .. } => {
+                self.record(expr.source, fields, &expr.ty, depth)
+            }
+            K::AddressOf(place) => self.address(place, depth),
+            K::Unit => Ok(Value::unit()),
+            K::LetPattern {
+                pattern,
+                value,
+                guard,
+                otherwise,
+            } => self.let_pattern(
+                expr.source,
+                pattern,
+                value,
+                guard.as_deref(),
+                otherwise.as_deref(),
+                depth,
+            ),
+            K::EnumName(value) => self.enum_name(value, depth),
+            K::TextQuery { subject, query } => self.text_query(expr, subject, *query, depth),
+            K::Block { .. } | K::CallPreparation { .. } => self.inner_block(expr, depth, selected),
+            K::Let { binding, value } => self.inner_let(*binding, value, depth),
+            K::Discard(inner) => self.inner_discard(expr, inner, depth),
+            K::Match { .. } => self.inner_match(expr, depth, selected),
+            K::If { .. } => self.inner_if(expr, depth, selected),
+            K::Loop { .. } => self.inner_loop(expr, depth),
+            K::Call { .. } => self.inner_call(expr, depth, selected),
+            K::Intrinsic { inputs, .. } => self.inner_intrinsic(expr, inputs, depth),
+            K::Literal(_)
+            | K::Local(_)
+            | K::ReadPointer(_)
+            | K::PointerAnonymousField { .. }
+            | K::PointerField { .. }
+            | K::WritePointer { .. }
+            | K::AnonymousField { .. }
+            | K::Field { .. }
+            | K::Assign { .. } => self.inner_access(expr, depth),
+            K::Break(_)
+            | K::Continue(_)
+            | K::Return(_)
+            | K::RequirePredicate(_)
+            | K::EnsurePredicate(_)
+            | K::CheckPredicate(_) => self.inner_control(expr, depth),
+            K::And(..) | K::Or(..) | K::Not(_) => self.inner_logic(expr, depth),
+            K::FloatBinary { op, left, right } => self.inner_float_binary(*op, left, right, depth),
+            K::IntegerBinary { .. }
+            | K::FloatNegate(_)
+            | K::IntegerNegate(_)
+            | K::TemplateEqual(..)
+            | K::SymbolName(_)
+            | K::ScalarEqual(..)
+            | K::ScalarLess(..)
+            | K::ScalarLessEqual(..)
+            | K::ScalarGreater(..)
+            | K::ScalarGreaterEqual(..) => self.inner_arithmetic(expr, depth),
+            K::ErrorConvert { .. }
+            | K::BitAssign { .. }
+            | K::BitUpdate { .. }
+            | K::BitWritePointer { .. }
+            | K::ComptimeIntegerConvert(_)
+            | K::TypeLayout { .. }
+            | K::TypeKind { .. }
+            | K::IntegerRepresentation(_)
+            | K::TryIntegerConvert(_)
+            | K::TakeBits(_)
+            | K::BitEqual(..)
+            | K::BitConcat(..)
+            | K::BitSlice { .. }
+            | K::BitIndex(..)
+            | K::BitWindow { .. }
+            | K::BitConvert(_)
+            | K::NewtypeConvert(_) => self.inner_conversions_and_bits(expr, depth),
+            _ => self.inner_unimplemented(expr),
+        }
+    }
+
+    #[inline(never)]
+    fn inner_selected_effect(
+        &mut self,
+        expr: &Expr,
+        depth: usize,
+        selected: &effects::Environment,
+    ) -> Result<Value, String> {
+        *self.fuel = self
+            .fuel
+            .checked_sub(selected.len())
+            .ok_or("host mapped environment budget exhausted")?;
+        let previous = std::mem::replace(&mut self.effects, selected.to_vec());
+        let result = self.effect(expr, depth);
+        self.effects = previous;
+        result
+    }
+
+    #[inline(never)]
+    fn inner_block(
+        &mut self,
+        expr: &Expr,
+        depth: usize,
+        selected: Option<&effects::Environment>,
+    ) -> Result<Value, String> {
+        let (K::Block { statements, result } | K::CallPreparation { statements, result }) =
+            &expr.kind
+        else {
+            unreachable!()
+        };
+        let saved = self.locals.clone();
+        for statement in statements {
+            self.expr(statement, depth)?;
+        }
+        let value = if let Some(result) = result {
+            self.expr_with_effects(result, depth, selected)?
+        } else {
+            Value::unit()
+        };
+        if !self.terminated && matches!(expr.kind, K::Block { .. }) {
+            self.cleanup_boundary(expr.source, iir::cleanup::Boundary::ScopeEnd)?;
+        }
+        self.locals = saved;
+        Ok(value)
+    }
+
+    #[inline(never)]
+    fn inner_let(&mut self, binding: LocalId, value: &Expr, depth: usize) -> Result<Value, String> {
+        let value = self.expr(value, depth)?;
+        if !self.terminated {
+            self.bind(binding, &value)?;
+        }
+        Ok(Value::unit())
+    }
+
+    #[inline(never)]
+    fn inner_discard(&mut self, expr: &Expr, inner: &Expr, depth: usize) -> Result<Value, String> {
+        let value = self.expr(inner, depth)?;
+        if !self.terminated {
+            self.cleanup_discard(expr.source, inner.source, &value)?;
+        }
+        Ok(Value::unit())
+    }
+
+    #[inline(never)]
+    fn inner_match(
+        &mut self,
+        expr: &Expr,
+        depth: usize,
+        selected: Option<&effects::Environment>,
+    ) -> Result<Value, String> {
+        let K::Match { value, arms } = &expr.kind else {
+            unreachable!()
+        };
+        let value = self.expr(value, depth)?;
+        if self.terminated {
+            Ok(Value::unit())
+        } else {
+            self.match_with_fallback(value, arms, &expr.ty, depth, None, None, selected)
+        }
+    }
+
+    #[inline(never)]
+    fn inner_if(
+        &mut self,
+        expr: &Expr,
+        depth: usize,
+        selected: Option<&effects::Environment>,
+    ) -> Result<Value, String> {
+        let K::If {
+            condition,
+            then_branch,
+            else_branch,
+        } = &expr.kind
+        else {
+            unreachable!()
+        };
+        let condition = self.expr(condition, depth)?;
+        if self.terminated {
+            Ok(Value::unit())
+        } else {
+            self.choice_with_effects(
+                &condition,
+                then_branch,
+                else_branch.as_deref(),
+                if expr.ty == Term::Primitive(P::Never) {
+                    Ty::Unit
+                } else {
+                    return_repr(self.graph, &expr.ty, self.checked)?
+                },
+                depth,
+                selected,
+            )
+        }
+    }
+
+    #[inline(never)]
+    fn inner_loop(&mut self, expr: &Expr, depth: usize) -> Result<Value, String> {
+        let K::Loop { identity, body } = &expr.kind else {
+            unreachable!()
+        };
+        let head = self.fresh();
+        let end = self.fresh();
+        self.branch(&head);
+        self.label(&head);
+        let control = if self.checked && self.loop_destinations.contains(identity) {
+            Some((self.slot(Ty::Bool).pointer, self.slot(Ty::Bool).pointer))
+        } else {
+            None
+        };
+        self.loops.insert(
+            *identity,
+            frames::LoopTarget {
+                control,
+                head: head.clone(),
+                end: end.clone(),
+                owner: self
+                    .cleanup
+                    .map(|scope| (scope.instance.clone(), scope.context.clone())),
+            },
+        );
+        self.expr(body, depth)?;
+        if !self.terminated {
+            self.branch(&head);
+        }
+        self.loops.remove(identity);
+        self.label(&end);
+        if expr.ty == Term::Primitive(P::Never) {
+            self.line("unreachable");
+            self.terminated = true;
+        }
+        Ok(Value::unit())
+    }
+
+    #[inline(never)]
+    fn inner_call(
+        &mut self,
+        expr: &Expr,
+        depth: usize,
+        selected: Option<&effects::Environment>,
+    ) -> Result<Value, String> {
+        let K::Call {
+            callee,
+            arguments,
+            parameter_bindings,
+        } = &expr.kind
+        else {
+            unreachable!()
+        };
+        // The target expression runs once, before any argument effects.
+        let function = self.expr(callee, depth)?;
+        if self.terminated {
+            return Ok(Value::unit());
+        }
+        if matches!(function.ty, Ty::Closure(_)) {
+            if self.checked && !self.has_checked_closure_call(expr.source)? {
+                // This invocation has no acquired resource frame within
+                // an otherwise checked parent. Keep the syntactic arm,
+                // but never execute its callback without that evidence.
+                // In particular, do not borrow another call's frame or
+                // fall back to the canonical unchecked lambda body.
+                self.line("call void @llvm.trap()");
+                self.line("unreachable");
+                self.terminated = true;
+                return Ok(Value::unit());
+            }
+            self.check_closure_receiver(callee, arguments)?;
+        }
+        let (function, environment) = self.closure_callee(callee, function)?;
+        let function = self.specialize_closure_call(expr.source, function)?;
+        let function = self.specialize_named_call(expr.source, function)?;
+        let Term::Function { parameters, result } = callee.ty.callable_signature() else {
+            return Err("host callee has no concrete function signature".into());
+        };
+        let mut values = vec![None; parameters.len()];
+        let caller = self.locals.clone();
+        let mut frame = BTreeMap::new();
+        for argument in arguments {
+            self.locals = caller.clone();
+            if argument.is_default {
+                self.locals.extend(frame.clone());
+            }
+            let value = if argument.is_default {
+                self.eval_default(expr.source, argument, frame.clone(), caller.clone(), depth)?
+            } else {
+                self.expr(&argument.value, depth)?
+            };
+            if self.terminated {
+                self.locals = caller;
+                return Ok(Value::unit());
+            }
+            self.retain_prepared_field(
+                expr.source,
+                argument.parameter,
+                argument.value.source,
+                &value,
+            )?;
+            let cell = values
+                .get_mut(argument.parameter)
+                .ok_or("host call slot out of range")?;
+            if cell.is_some() {
+                return Err("host duplicate call slot".into());
+            }
+            if let Some(binding) = parameter_bindings.get(argument.parameter) {
+                let slot = self.slot(value.ty.clone());
+                self.store(&slot, &value)?;
+                frame.insert(*binding, slot);
+            }
+            *cell = Some(value);
+        }
+        self.locals = caller;
+        let method_frame = self.method_entry(callee, &values, expr.source, depth)?;
+        let mut args = environment
+            .into_iter()
+            .map(|slot| format!("ptr {}", slot.pointer))
+            .collect::<Vec<_>>();
+        for (value, parameter) in values.into_iter().zip(parameters) {
+            let value = value.ok_or("host missing call slot")?;
+            if parameter.sort != Sort::Runtime
+                || value.ty != repr(self.graph, &parameter.ty, self.checked)?
+            {
+                return Err("host call input representation mismatch".into());
+            }
+            if value.ty != Ty::Unit {
+                args.push(format!("{} {}", value.ty.llvm(), value.text));
+            }
+        }
+        let (row, logical_result) = effects::row_result(result);
+        args.extend(self.effect_arguments(row, selected)?);
+        let ty = return_repr(self.graph, result, self.checked)?;
+        let call = format!("call {} {}({})", ty.llvm(), function.text, args.join(", "));
+        self.finish_prepared_construction(expr.source)?;
+        let value = if ty == Ty::Unit {
+            self.line(call);
+            Value::unit()
+        } else {
+            self.instruction(ty, call)
+        };
+        if self.failure_result.is_some() {
+            let failed = self.instruction(Ty::Bool, "load i1, ptr @flurry_failed".into());
+            let succeeded = self.instruction(Ty::Bool, format!("xor i1 {}, true", failed.text));
+            self.guard_at(&succeeded, Some(expr.source))?;
+        }
+        if !row.is_empty() {
+            self.check_effect_control(expr.source)?;
+        }
+        if *logical_result == Term::Primitive(P::Never) {
+            self.line("unreachable");
+            self.terminated = true;
+        } else {
+            self.method_exit(method_frame, &value, depth)?;
+        }
+        Ok(value)
+    }
+
+    #[inline(never)]
+    fn inner_intrinsic(
+        &mut self,
+        expr: &Expr,
+        inputs: &[Expr],
+        depth: usize,
+    ) -> Result<Value, String> {
+        let checked = nir::intrinsics::checked(expr).map_err(str::to_owned)?;
+        let mut values = Vec::new();
+        for input in inputs {
+            values.push(self.expr(input, depth)?);
+            if self.terminated {
+                return Ok(Value::unit());
+            }
+        }
+        if checked.operation().is_platform() {
+            return self.platform_intrinsic(checked.operation(), &values);
+        }
+        if checked.operation().is_memory() {
+            let result_ty = repr(self.graph, &expr.ty, self.checked)?;
+            return self.memory_intrinsic(checked.operation(), &values, result_ty);
+        }
+        let width = checked
+            .validate_target_layout(self.graph.target)
+            .map_err(str::to_owned)?
+            .ok_or("host intrinsic requires concrete width (platform integers need an explicit pointer-width)")?;
+        let ty = repr(self.graph, &expr.ty, self.checked)?;
+        if checked.operation().is_float_predicate() {
+            let input = &values[0];
+            if ty != Ty::Bool
+                || !matches!(
+                    input.ty,
+                    Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
+                )
+            {
+                return Err("host float predicate representation mismatch".into());
+            }
+            if checked.operation() == nir::intrinsics::Operation::SignBit {
+                let bits = self.to_bits(input.clone())?;
+                let width = bits::bit_width(&bits.ty).ok_or("float sign has no bit width")?;
+                return Ok(
+                    self.instruction(Ty::Bool, format!("icmp slt i{width} {}, 0", bits.text))
+                );
+            }
+            if matches!(input.ty, Ty::Float16 | Ty::BFloat16) {
+                return self.half_float_predicate(input.clone(), checked.operation());
+            }
+            let mask = match checked.operation() {
+                nir::intrinsics::Operation::IsNan => 3,
+                nir::intrinsics::Operation::IsInfinite => 516,
+                nir::intrinsics::Operation::IsFinite => 504,
+                nir::intrinsics::Operation::IsNormal => 264,
+                nir::intrinsics::Operation::IsSubnormal => 144,
+                _ => unreachable!(),
+            };
+            let symbol = format!("llvm.is.fpclass.f{width}");
+            self.declarations.insert(format!(
+                "declare i1 @{symbol}({}, i32 immarg)",
+                input.ty.llvm()
+            ));
+            return Ok(self.instruction(
+                Ty::Bool,
+                format!(
+                    "call i1 @{symbol}({} {}, i32 {mask})",
+                    input.ty.llvm(),
+                    input.text
+                ),
+            ));
+        }
+        if checked.operation().has_integer_exponent() {
+            if !matches!(ty, Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64)
+                || values[0].ty != ty
+                || values[1].ty != Ty::Int(32, true)
+            {
+                return Err("host integer-exponent operand representation mismatch".into());
+            }
+            if ty == Ty::BFloat16 {
+                return self.bfloat_intrinsic(checked.operation(), &values);
+            }
+            let scalar = ty.llvm();
+            let symbol = format!("llvm.{}.f{width}.i32", checked.operation().name());
+            self.declarations
+                .insert(format!("declare {scalar} @{symbol}({scalar}, i32)"));
+            return Ok(self.instruction(
+                ty,
+                format!(
+                    "call {scalar} @{symbol}({scalar} {}, i32 {})",
+                    values[0].text, values[1].text
+                ),
+            ));
+        }
+        if values.iter().any(|value| value.ty != ty) {
+            return Err("host intrinsic operand representation mismatch".into());
+        }
+        if checked.operation() == nir::intrinsics::Operation::FusedMultiplyAdd
+            && matches!(ty, Ty::Float16 | Ty::BFloat16)
+        {
+            return Ok(self.half_fma(&values));
+        }
+        if ty == Ty::BFloat16 {
+            return self.bfloat_intrinsic(checked.operation(), &values);
+        }
+        // These target operations lower to LLVM instructions, not to
+        // fictitious llvm.bit_* functions. Both inputs above are
+        // evaluated once in source order, even for zero/all-one masks.
+        let bit_operation = match checked.operation() {
+            nir::intrinsics::Operation::BitAnd => Some("and"),
+            nir::intrinsics::Operation::BitOr => Some("or"),
+            nir::intrinsics::Operation::BitXor => Some("xor"),
+            _ => None,
+        };
+        if let Some(operation) = bit_operation {
+            return Ok(self.instruction(
+                ty.clone(),
+                format!(
+                    "{operation} {} {}, {}",
+                    ty.llvm(),
+                    values[0].text,
+                    values[1].text
+                ),
+            ));
+        }
+        // LLVM 21's native minimumNumber lowering can lose signed-zero
+        // ordering. Use the propagating intrinsic plus explicit single-NaN
+        // selection; both inputs above are still evaluated exactly once.
+        let number_operation = matches!(
+            checked.operation(),
+            nir::intrinsics::Operation::MinimumNumber | nir::intrinsics::Operation::MaximumNumber
+        );
+        let operation = match checked.operation() {
+            nir::intrinsics::Operation::SaturatingAdd => {
+                if matches!(ty, Ty::Int(_, true)) {
+                    "sadd.sat"
+                } else {
+                    "uadd.sat"
+                }
+            }
+            nir::intrinsics::Operation::SaturatingSubtract => {
+                if matches!(ty, Ty::Int(_, true)) {
+                    "ssub.sat"
+                } else {
+                    "usub.sat"
+                }
+            }
+            nir::intrinsics::Operation::IntegerMinimum => {
+                if matches!(ty, Ty::Int(_, true)) {
+                    "smin"
+                } else {
+                    "umin"
+                }
+            }
+            nir::intrinsics::Operation::IntegerMaximum => {
+                if matches!(ty, Ty::Int(_, true)) {
+                    "smax"
+                } else {
+                    "umax"
+                }
+            }
+            nir::intrinsics::Operation::MinimumNumber => "minimum",
+            nir::intrinsics::Operation::MaximumNumber => "maximum",
+            operation => operation.name(),
+        };
+        let suffix = match &ty {
+            Ty::Float16 | Ty::Float32 | Ty::Float64 => format!("f{width}"),
+            Ty::Int(bits, _) if *bits == width => format!("i{width}"),
+            _ => return Err("host intrinsic scalar representation mismatch".into()),
+        };
+        let symbol = format!("llvm.{operation}.{suffix}");
+        let total_integer = matches!(
+            checked.operation(),
+            nir::intrinsics::Operation::LeadingZeros
+                | nir::intrinsics::Operation::TrailingZeros
+                | nir::intrinsics::Operation::WrappingAbsoluteValue
+        );
+        let mut parameters = vec![ty.llvm(); checked.operation().operand_count()].join(", ");
+        if total_integer {
+            parameters.push_str(", i1 immarg");
+        }
+        self.declarations
+            .insert(format!("declare {} @{symbol}({parameters})", ty.llvm()));
+        let mut arguments = values
+            .iter()
+            .map(|v| format!("{} {}", ty.llvm(), v.text))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Zero counts and wrapping absolute value are total, including
+        // zero and INT_MIN. The poison flag is a lowering constant,
+        // never an extra source argument.
+        if total_integer {
+            arguments.push_str(", i1 false");
+        }
+        let reduced = self.instruction(
+            ty.clone(),
+            format!("call {} @{symbol}({arguments})", ty.llvm()),
+        );
+        if number_operation {
+            let a = &values[0];
+            let b = &values[1];
+            let a_nan = self.instruction(
+                Ty::Bool,
+                format!("fcmp uno {} {}, {}", ty.llvm(), a.text, a.text),
+            );
+            let b_nan = self.instruction(
+                Ty::Bool,
+                format!("fcmp uno {} {}, {}", ty.llvm(), b.text, b.text),
+            );
+            let single_nan =
+                self.instruction(Ty::Bool, format!("xor i1 {}, {}", a_nan.text, b_nan.text));
+            let numeric = self.instruction(
+                ty.clone(),
+                format!(
+                    "select i1 {}, {} {}, {} {}",
+                    a_nan.text,
+                    ty.llvm(),
+                    b.text,
+                    ty.llvm(),
+                    a.text
+                ),
+            );
+            Ok(self.instruction(
+                ty.clone(),
+                format!(
+                    "select i1 {}, {} {}, {} {}",
+                    single_nan.text,
+                    ty.llvm(),
+                    numeric.text,
+                    ty.llvm(),
+                    reduced.text
+                ),
+            ))
+        } else {
+            Ok(reduced)
+        }
+    }
+
+    #[inline(never)]
+    fn inner_access(&mut self, expr: &Expr, depth: usize) -> Result<Value, String> {
+        match &expr.kind {
+            K::Literal(literal) => {
+                let ty = repr(self.graph, &expr.ty, self.checked)?;
+                self.literal(literal, ty)
+            }
+            K::Local(id) => {
+                let slot = self
+                    .locals
+                    .get(id)
+                    .cloned()
+                    .ok_or("host local binding is unavailable")?;
+                Ok(self.load(&slot))
+            }
             K::ReadPointer(pointer) => {
                 let pointer = self.expr(pointer, depth)?;
                 if self.terminated {
-                    Value::unit()
+                    Ok(Value::unit())
                 } else {
                     let slot = self.pointer_slot(&pointer, &expr.ty)?;
-                    self.load(&slot)
+                    Ok(self.load(&slot))
                 }
             }
             K::PointerAnonymousField { pointer, index, .. }
@@ -960,9 +1547,9 @@ impl Emitter<'_> {
                 let pointer_type = &pointer.ty;
                 let pointer = self.expr(pointer, depth)?;
                 if self.terminated {
-                    Value::unit()
+                    Ok(Value::unit())
                 } else {
-                    self.project_pointer(pointer, *index, pointers::pointee(pointer_type)?)?
+                    self.project_pointer(pointer, *index, pointers::pointee(pointer_type)?)
                 }
             }
             K::WritePointer { pointer, value } => {
@@ -973,83 +1560,14 @@ impl Emitter<'_> {
                     let slot = self.pointer_slot(&pointer, pointers::pointee(pointer_type)?)?;
                     self.store(&slot, &value)?;
                 }
-                Value::unit()
-            }
-            K::AnonymousRecord { fields } | K::Record { fields, .. } => {
-                self.record(expr.source, fields, &expr.ty, depth)?
+                Ok(Value::unit())
             }
             K::AnonymousField { value, index, .. } | K::Field { value, index, .. } => {
                 let value = self.expr(value, depth)?;
                 if self.terminated {
-                    Value::unit()
+                    Ok(Value::unit())
                 } else {
-                    self.record_field(&value, *index)?
-                }
-            }
-            K::Unit => Value::unit(),
-            K::Local(id) => {
-                let slot = self
-                    .locals
-                    .get(id)
-                    .cloned()
-                    .ok_or("host local binding is unavailable")?;
-                self.load(&slot)
-            }
-            K::Let { binding, value } => {
-                let value = self.expr(value, depth)?;
-                if !self.terminated {
-                    self.bind(*binding, &value)?;
-                }
-                Value::unit()
-            }
-            K::ErrorConvert { conversion, value } => {
-                let source_type = &value.ty;
-                let value = self.expr(value, depth)?;
-                if self.terminated {
-                    Value::unit()
-                } else {
-                    self.error_convert(*conversion, value, source_type, &expr.ty)?
-                }
-            }
-            K::BitAssign {
-                place,
-                start,
-                end,
-                value,
-                ..
-            } => {
-                let slot = self.assignment_slot(place)?;
-                self.bit_write(
-                    slot,
-                    &[nir::program::BitSelection::Static {
-                        start: *start,
-                        end: *end,
-                    }],
-                    value,
-                    depth,
-                )?
-            }
-            K::BitUpdate {
-                place,
-                selections,
-                value,
-                ..
-            } => {
-                let slot = self.assignment_slot(place)?;
-                self.bit_write(slot, selections, value, depth)?
-            }
-            K::BitWritePointer {
-                pointer,
-                selections,
-                value,
-            } => {
-                let pointer_type = &pointer.ty;
-                let pointer = self.expr(pointer, depth)?;
-                if self.terminated {
-                    Value::unit()
-                } else {
-                    let slot = self.pointer_slot(&pointer, pointers::pointee(pointer_type)?)?;
-                    self.bit_write(slot, selections, value, depth)?
+                    self.record_field(&value, *index)
                 }
             }
             K::Assign { place, value } => {
@@ -1068,525 +1586,15 @@ impl Emitter<'_> {
                         true,
                     )?;
                 }
-                Value::unit()
+                Ok(Value::unit())
             }
-            K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                let saved = self.locals.clone();
-                for statement in statements {
-                    self.expr(statement, depth)?;
-                }
-                let value = if let Some(result) = result {
-                    self.expr_with_effects(result, depth, selected)?
-                } else {
-                    Value::unit()
-                };
-                if !self.terminated && matches!(expr.kind, K::Block { .. }) {
-                    self.cleanup_boundary(expr.source, iir::cleanup::Boundary::ScopeEnd)?;
-                }
-                self.locals = saved;
-                value
-            }
-            K::LetPattern {
-                pattern,
-                value,
-                guard,
-                otherwise,
-            } => self.let_pattern(
-                expr.source,
-                pattern,
-                value,
-                guard.as_deref(),
-                otherwise.as_deref(),
-                depth,
-            )?,
-            K::Match { value, arms } => {
-                let value = self.expr(value, depth)?;
-                if self.terminated {
-                    Value::unit()
-                } else {
-                    self.match_with_fallback(value, arms, &expr.ty, depth, None, None, selected)?
-                }
-            }
-            K::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                let condition = self.expr(condition, depth)?;
-                if self.terminated {
-                    Value::unit()
-                } else {
-                    self.choice_with_effects(
-                        &condition,
-                        then_branch,
-                        else_branch.as_deref(),
-                        if expr.ty == Term::Primitive(P::Never) {
-                            Ty::Unit
-                        } else {
-                            return_repr(self.graph, &expr.ty, self.checked)?
-                        },
-                        depth,
-                        selected,
-                    )?
-                }
-            }
-            K::And(left, right) | K::Or(left, right) => {
-                let left = self.expr(left, depth)?;
-                if self.terminated {
-                    return Ok(Value::unit());
-                }
-                if matches!(left.ty, Ty::Int(_, _)) {
-                    let right = self.expr(right, depth)?;
-                    if self.terminated {
-                        return Ok(Value::unit());
-                    }
-                    let op = if matches!(expr.kind, K::And(..)) {
-                        "and"
-                    } else {
-                        "or"
-                    };
-                    return Ok(self.bit_binary(op, left, right)?);
-                }
-                let constant = Expr {
-                    source: expr.source,
-                    ty: Term::Primitive(P::Bool),
-                    kind: K::Literal(Literal::Bool(matches!(expr.kind, K::Or(..)))),
-                };
-                if matches!(expr.kind, K::And(..)) {
-                    self.choice(&left, right, Some(&constant), Ty::Bool, depth)?
-                } else {
-                    self.choice(&left, &constant, Some(right), Ty::Bool, depth)?
-                }
-            }
-            K::Not(value) => {
-                let value = self.expr(value, depth)?;
-                if self.terminated {
-                    return Ok(Value::unit());
-                }
-                if value.ty == Ty::Int(0, false) {
-                    return Ok(value);
-                }
-                let mask = if value.ty == Ty::Bool { "true" } else { "-1" };
-                self.instruction(
-                    value.ty.clone(),
-                    format!("xor {} {}, {mask}", value.ty.llvm(), value.text),
-                )
-            }
-            K::IntegerBinary { op, left, right } => {
-                let left = self.expr(left, depth)?;
-                let right = self.expr(right, depth)?;
-                if self.terminated {
-                    Value::unit()
-                } else {
-                    self.integer(*op, left, right)?
-                }
-            }
-            K::FloatNegate(value) => {
-                let value = self.expr(value, depth)?;
-                if self.terminated {
-                    return Ok(Value::unit());
-                }
-                if value.ty == Ty::BFloat16 {
-                    self.instruction(Ty::BFloat16, format!("xor i16 {}, 32768", value.text))
-                } else {
-                    self.instruction(
-                        value.ty.clone(),
-                        format!("fneg {} {}", value.ty.llvm(), value.text),
-                    )
-                }
-            }
-            K::Intrinsic { inputs, .. } => {
-                let checked = nir::intrinsics::checked(expr).map_err(str::to_owned)?;
-                let mut values = Vec::new();
-                for input in inputs {
-                    values.push(self.expr(input, depth)?);
-                    if self.terminated {
-                        return Ok(Value::unit());
-                    }
-                }
-                if checked.operation().is_platform() {
-                    return self.platform_intrinsic(checked.operation(), &values);
-                }
-                if checked.operation().is_memory() {
-                    let result_ty = repr(self.graph, &expr.ty, self.checked)?;
-                    return self.memory_intrinsic(checked.operation(), &values, result_ty);
-                }
-                let width = checked
-                    .validate_target_layout(self.graph.target).map_err(str::to_owned)?
-                    .ok_or("host intrinsic requires concrete width (platform integers need an explicit pointer-width)")?;
-                let ty = repr(self.graph, &expr.ty, self.checked)?;
-                if checked.operation().is_float_predicate() {
-                    let input = &values[0];
-                    if ty != Ty::Bool
-                        || !matches!(
-                            input.ty,
-                            Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
-                        )
-                    {
-                        return Err("host float predicate representation mismatch".into());
-                    }
-                    if checked.operation() == nir::intrinsics::Operation::SignBit {
-                        let bits = self.to_bits(input.clone())?;
-                        let width =
-                            bits::bit_width(&bits.ty).ok_or("float sign has no bit width")?;
-                        return Ok(self
-                            .instruction(Ty::Bool, format!("icmp slt i{width} {}, 0", bits.text)));
-                    }
-                    if matches!(input.ty, Ty::Float16 | Ty::BFloat16) {
-                        return self.half_float_predicate(input.clone(), checked.operation());
-                    }
-                    let mask = match checked.operation() {
-                        nir::intrinsics::Operation::IsNan => 3,
-                        nir::intrinsics::Operation::IsInfinite => 516,
-                        nir::intrinsics::Operation::IsFinite => 504,
-                        nir::intrinsics::Operation::IsNormal => 264,
-                        nir::intrinsics::Operation::IsSubnormal => 144,
-                        _ => unreachable!(),
-                    };
-                    let symbol = format!("llvm.is.fpclass.f{width}");
-                    self.declarations.insert(format!(
-                        "declare i1 @{symbol}({}, i32 immarg)",
-                        input.ty.llvm()
-                    ));
-                    return Ok(self.instruction(
-                        Ty::Bool,
-                        format!(
-                            "call i1 @{symbol}({} {}, i32 {mask})",
-                            input.ty.llvm(),
-                            input.text
-                        ),
-                    ));
-                }
-                if checked.operation().has_integer_exponent() {
-                    if !matches!(ty, Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64)
-                        || values[0].ty != ty
-                        || values[1].ty != Ty::Int(32, true)
-                    {
-                        return Err("host integer-exponent operand representation mismatch".into());
-                    }
-                    if ty == Ty::BFloat16 {
-                        return self.bfloat_intrinsic(checked.operation(), &values);
-                    }
-                    let scalar = ty.llvm();
-                    let symbol = format!("llvm.{}.f{width}.i32", checked.operation().name());
-                    self.declarations
-                        .insert(format!("declare {scalar} @{symbol}({scalar}, i32)"));
-                    return Ok(self.instruction(
-                        ty,
-                        format!(
-                            "call {scalar} @{symbol}({scalar} {}, i32 {})",
-                            values[0].text, values[1].text
-                        ),
-                    ));
-                }
-                if values.iter().any(|value| value.ty != ty) {
-                    return Err("host intrinsic operand representation mismatch".into());
-                }
-                if checked.operation() == nir::intrinsics::Operation::FusedMultiplyAdd
-                    && matches!(ty, Ty::Float16 | Ty::BFloat16)
-                {
-                    return Ok(self.half_fma(&values));
-                }
-                if ty == Ty::BFloat16 {
-                    return self.bfloat_intrinsic(checked.operation(), &values);
-                }
-                // These target operations lower to LLVM instructions, not to
-                // fictitious llvm.bit_* functions. Both inputs above are
-                // evaluated once in source order, even for zero/all-one masks.
-                let bit_operation = match checked.operation() {
-                    nir::intrinsics::Operation::BitAnd => Some("and"),
-                    nir::intrinsics::Operation::BitOr => Some("or"),
-                    nir::intrinsics::Operation::BitXor => Some("xor"),
-                    _ => None,
-                };
-                if let Some(operation) = bit_operation {
-                    return Ok(self.instruction(
-                        ty.clone(),
-                        format!(
-                            "{operation} {} {}, {}",
-                            ty.llvm(),
-                            values[0].text,
-                            values[1].text
-                        ),
-                    ));
-                }
-                // LLVM 21's native minimumNumber lowering can lose signed-zero
-                // ordering. Use the propagating intrinsic plus explicit single-NaN
-                // selection; both inputs above are still evaluated exactly once.
-                let number_operation = matches!(
-                    checked.operation(),
-                    nir::intrinsics::Operation::MinimumNumber
-                        | nir::intrinsics::Operation::MaximumNumber
-                );
-                let operation = match checked.operation() {
-                    nir::intrinsics::Operation::SaturatingAdd => {
-                        if matches!(ty, Ty::Int(_, true)) {
-                            "sadd.sat"
-                        } else {
-                            "uadd.sat"
-                        }
-                    }
-                    nir::intrinsics::Operation::SaturatingSubtract => {
-                        if matches!(ty, Ty::Int(_, true)) {
-                            "ssub.sat"
-                        } else {
-                            "usub.sat"
-                        }
-                    }
-                    nir::intrinsics::Operation::IntegerMinimum => {
-                        if matches!(ty, Ty::Int(_, true)) {
-                            "smin"
-                        } else {
-                            "umin"
-                        }
-                    }
-                    nir::intrinsics::Operation::IntegerMaximum => {
-                        if matches!(ty, Ty::Int(_, true)) {
-                            "smax"
-                        } else {
-                            "umax"
-                        }
-                    }
-                    nir::intrinsics::Operation::MinimumNumber => "minimum",
-                    nir::intrinsics::Operation::MaximumNumber => "maximum",
-                    operation => operation.name(),
-                };
-                let suffix = match &ty {
-                    Ty::Float16 | Ty::Float32 | Ty::Float64 => format!("f{width}"),
-                    Ty::Int(bits, _) if *bits == width => format!("i{width}"),
-                    _ => return Err("host intrinsic scalar representation mismatch".into()),
-                };
-                let symbol = format!("llvm.{operation}.{suffix}");
-                let total_integer = matches!(
-                    checked.operation(),
-                    nir::intrinsics::Operation::LeadingZeros
-                        | nir::intrinsics::Operation::TrailingZeros
-                        | nir::intrinsics::Operation::WrappingAbsoluteValue
-                );
-                let mut parameters =
-                    vec![ty.llvm(); checked.operation().operand_count()].join(", ");
-                if total_integer {
-                    parameters.push_str(", i1 immarg");
-                }
-                self.declarations
-                    .insert(format!("declare {} @{symbol}({parameters})", ty.llvm()));
-                let mut arguments = values
-                    .iter()
-                    .map(|v| format!("{} {}", ty.llvm(), v.text))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                // Zero counts and wrapping absolute value are total, including
-                // zero and INT_MIN. The poison flag is a lowering constant,
-                // never an extra source argument.
-                if total_integer {
-                    arguments.push_str(", i1 false");
-                }
-                let reduced = self.instruction(
-                    ty.clone(),
-                    format!("call {} @{symbol}({arguments})", ty.llvm()),
-                );
-                if number_operation {
-                    let a = &values[0];
-                    let b = &values[1];
-                    let a_nan = self.instruction(
-                        Ty::Bool,
-                        format!("fcmp uno {} {}, {}", ty.llvm(), a.text, a.text),
-                    );
-                    let b_nan = self.instruction(
-                        Ty::Bool,
-                        format!("fcmp uno {} {}, {}", ty.llvm(), b.text, b.text),
-                    );
-                    let single_nan = self
-                        .instruction(Ty::Bool, format!("xor i1 {}, {}", a_nan.text, b_nan.text));
-                    let numeric = self.instruction(
-                        ty.clone(),
-                        format!(
-                            "select i1 {}, {} {}, {} {}",
-                            a_nan.text,
-                            ty.llvm(),
-                            b.text,
-                            ty.llvm(),
-                            a.text
-                        ),
-                    );
-                    self.instruction(
-                        ty.clone(),
-                        format!(
-                            "select i1 {}, {} {}, {} {}",
-                            single_nan.text,
-                            ty.llvm(),
-                            numeric.text,
-                            ty.llvm(),
-                            reduced.text
-                        ),
-                    )
-                } else {
-                    reduced
-                }
-            }
-            K::FloatBinary { op, left, right } => {
-                let a = self.expr(left, depth)?;
-                let b = self.expr(right, depth)?;
-                if self.terminated {
-                    return Ok(Value::unit());
-                }
-                if a.ty != b.ty
-                    || !matches!(
-                        a.ty.clone(),
-                        Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
-                    )
-                {
-                    return Err("host floating operand mismatch".into());
-                }
-                let operation = match op {
-                    nir::program::FloatOp::Add => "fadd",
-                    nir::program::FloatOp::Subtract => "fsub",
-                    nir::program::FloatOp::Multiply => "fmul",
-                    nir::program::FloatOp::Divide => "fdiv",
-                };
-                if a.ty == Ty::BFloat16 {
-                    return Ok(self.bfloat_arithmetic(operation, &a, &b));
-                }
-                let value = self.instruction(
-                    a.ty.clone(),
-                    format!("{operation} {} {}, {}", a.ty.llvm(), a.text, b.text),
-                );
-                // Match the reference evaluator's deterministic arithmetic NaN;
-                // literal bits and unary sign changes retain their payloads.
-                let nan = self.instruction(
-                    Ty::Bool,
-                    format!(
-                        "fcmp uno {} {}, {}",
-                        value.ty.llvm(),
-                        value.text,
-                        value.text
-                    ),
-                );
-                let canonical = match a.ty {
-                    Ty::Float16 => "bitcast (i16 32256 to half)",
-                    Ty::Float32 => "bitcast (i32 2143289344 to float)",
-                    _ => "bitcast (i64 9221120237041090560 to double)",
-                };
-                self.instruction(
-                    a.ty.clone(),
-                    format!(
-                        "select i1 {}, {} {canonical}, {} {}",
-                        nan.text,
-                        a.ty.llvm(),
-                        a.ty.llvm(),
-                        value.text
-                    ),
-                )
-            }
-            K::IntegerNegate(value) => {
-                let value = self.expr(value, depth)?;
-                if self.terminated {
-                    return Ok(Value::unit());
-                }
-                self.integer(
-                    Op::Subtract,
-                    Value {
-                        ty: value.ty.clone(),
-                        text: "0".into(),
-                    },
-                    value,
-                )?
-            }
-            K::TemplateEqual(a, b) => {
-                let a = self.expr(a, depth)?;
-                let b = self.expr(b, depth)?;
-                if self.terminated {
-                    return Ok(Value::unit());
-                }
-                if a.ty != b.ty || !matches!(a.ty, Ty::TemplateIdentity(_)) {
-                    return Err(
-                        "host template comparison requires matching identity domains".into(),
-                    );
-                }
-                self.instruction(Ty::Bool, format!("icmp eq i64 {}, {}", a.text, b.text))
-            }
-            K::SymbolName(operand) => {
-                let mut value = self.expr(operand, depth)?;
-                if self.terminated {
-                    return Ok(Value::unit());
-                }
-                if value.ty != Ty::Symbol {
-                    return Err("host symbol name requires a Symbol".into());
-                }
-                value.ty = Ty::String;
-                value
-            }
-            K::EnumName(value) => self.enum_name(value, depth)?,
-            K::TextQuery { subject, query } => self.text_query(expr, subject, *query, depth)?,
-            K::ScalarEqual(a, b)
-            | K::ScalarLess(a, b)
-            | K::ScalarLessEqual(a, b)
-            | K::ScalarGreater(a, b)
-            | K::ScalarGreaterEqual(a, b) => {
-                let a = self.expr(a, depth)?;
-                let b = self.expr(b, depth)?;
-                if self.terminated {
-                    return Ok(Value::unit());
-                }
-                if matches!(
-                    a.ty.clone(),
-                    Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
-                ) {
-                    if a.ty != b.ty {
-                        return Err("host floating comparison mismatch".into());
-                    }
-                    let predicate = match expr.kind {
-                        K::ScalarEqual(..) => "oeq",
-                        K::ScalarLess(..) => "olt",
-                        K::ScalarLessEqual(..) => "ole",
-                        K::ScalarGreater(..) => "ogt",
-                        _ => "oge",
-                    };
-                    return Ok(self.float_compare(predicate, &a, &b));
-                }
-                let tag = if a.ty.signed() { "s" } else { "u" };
-                let op = match expr.kind {
-                    K::ScalarEqual(..) => "eq".into(),
-                    K::ScalarLess(..) => format!("{tag}lt"),
-                    K::ScalarLessEqual(..) => format!("{tag}le"),
-                    K::ScalarGreater(..) => format!("{tag}gt"),
-                    _ => format!("{tag}ge"),
-                };
-                self.compare(&op, a, b)?
-            }
-            K::Loop { identity, body } => {
-                let head = self.fresh();
-                let end = self.fresh();
-                self.branch(&head);
-                self.label(&head);
-                let control = if self.checked && self.loop_destinations.contains(identity) {
-                    Some((self.slot(Ty::Bool).pointer, self.slot(Ty::Bool).pointer))
-                } else {
-                    None
-                };
-                self.loops.insert(
-                    *identity,
-                    frames::LoopTarget {
-                        control,
-                        head: head.clone(),
-                        end: end.clone(),
-                        owner: self
-                            .cleanup
-                            .map(|scope| (scope.instance.clone(), scope.context.clone())),
-                    },
-                );
-                self.expr(body, depth)?;
-                if !self.terminated {
-                    self.branch(&head);
-                }
-                self.loops.remove(identity);
-                self.label(&end);
-                if expr.ty == Term::Primitive(P::Never) {
-                    self.line("unreachable");
-                    self.terminated = true;
-                }
-                Value::unit()
-            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline(never)]
+    fn inner_control(&mut self, expr: &Expr, depth: usize) -> Result<Value, String> {
+        match &expr.kind {
             K::Break(id) | K::Continue(id) => {
                 if !self.loops.contains_key(id) {
                     if let Some((exit, again)) = self.outlined_loops.get(id).cloned() {
@@ -1633,7 +1641,7 @@ impl Emitter<'_> {
                 } else {
                     &target.head
                 });
-                Value::unit()
+                Ok(Value::unit())
             }
             K::Return(value) => {
                 let value = if let Some(value) = value {
@@ -1644,7 +1652,7 @@ impl Emitter<'_> {
                 if !self.terminated {
                     self.ret(&value, Some(expr.source))?;
                 }
-                Value::unit()
+                Ok(Value::unit())
             }
             K::RequirePredicate(e) | K::EnsurePredicate(e) | K::CheckPredicate(e) => {
                 let condition = self.expr(e, depth)?;
@@ -1655,19 +1663,282 @@ impl Emitter<'_> {
                         Some(e.source),
                     )?;
                 }
-                Value::unit()
+                Ok(Value::unit())
             }
-            K::Discard(e) => {
-                let value = self.expr(e, depth)?;
-                if !self.terminated {
-                    self.cleanup_discard(expr.source, e.source, &value)?;
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline(never)]
+    fn inner_logic(&mut self, expr: &Expr, depth: usize) -> Result<Value, String> {
+        match &expr.kind {
+            K::And(left, right) | K::Or(left, right) => {
+                let left = self.expr(left, depth)?;
+                if self.terminated {
+                    return Ok(Value::unit());
                 }
-                Value::unit()
+                if matches!(left.ty, Ty::Int(_, _)) {
+                    let right = self.expr(right, depth)?;
+                    if self.terminated {
+                        return Ok(Value::unit());
+                    }
+                    let op = if matches!(expr.kind, K::And(..)) {
+                        "and"
+                    } else {
+                        "or"
+                    };
+                    return self.bit_binary(op, left, right);
+                }
+                let constant = Expr {
+                    source: expr.source,
+                    ty: Term::Primitive(P::Bool),
+                    kind: K::Literal(Literal::Bool(matches!(expr.kind, K::Or(..)))),
+                };
+                if matches!(expr.kind, K::And(..)) {
+                    self.choice(&left, right, Some(&constant), Ty::Bool, depth)
+                } else {
+                    self.choice(&left, &constant, Some(right), Ty::Bool, depth)
+                }
+            }
+            K::Not(value) => {
+                let value = self.expr(value, depth)?;
+                if self.terminated {
+                    return Ok(Value::unit());
+                }
+                if value.ty == Ty::Int(0, false) {
+                    return Ok(value);
+                }
+                let mask = if value.ty == Ty::Bool { "true" } else { "-1" };
+                Ok(self.instruction(
+                    value.ty.clone(),
+                    format!("xor {} {}, {mask}", value.ty.llvm(), value.text),
+                ))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline(never)]
+    fn inner_float_binary(
+        &mut self,
+        op: nir::program::FloatOp,
+        left: &Expr,
+        right: &Expr,
+        depth: usize,
+    ) -> Result<Value, String> {
+        let a = self.expr(left, depth)?;
+        let b = self.expr(right, depth)?;
+        if self.terminated {
+            return Ok(Value::unit());
+        }
+        if a.ty != b.ty
+            || !matches!(
+                a.ty.clone(),
+                Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
+            )
+        {
+            return Err("host floating operand mismatch".into());
+        }
+        let operation = match op {
+            nir::program::FloatOp::Add => "fadd",
+            nir::program::FloatOp::Subtract => "fsub",
+            nir::program::FloatOp::Multiply => "fmul",
+            nir::program::FloatOp::Divide => "fdiv",
+        };
+        if a.ty == Ty::BFloat16 {
+            return Ok(self.bfloat_arithmetic(operation, &a, &b));
+        }
+        let value = self.instruction(
+            a.ty.clone(),
+            format!("{operation} {} {}, {}", a.ty.llvm(), a.text, b.text),
+        );
+        // Match the reference evaluator's deterministic arithmetic NaN;
+        // literal bits and unary sign changes retain their payloads.
+        let nan = self.instruction(
+            Ty::Bool,
+            format!(
+                "fcmp uno {} {}, {}",
+                value.ty.llvm(),
+                value.text,
+                value.text
+            ),
+        );
+        let canonical = match a.ty {
+            Ty::Float16 => "bitcast (i16 32256 to half)",
+            Ty::Float32 => "bitcast (i32 2143289344 to float)",
+            _ => "bitcast (i64 9221120237041090560 to double)",
+        };
+        Ok(self.instruction(
+            a.ty.clone(),
+            format!(
+                "select i1 {}, {} {canonical}, {} {}",
+                nan.text,
+                a.ty.llvm(),
+                a.ty.llvm(),
+                value.text
+            ),
+        ))
+    }
+
+    #[inline(never)]
+    fn inner_arithmetic(&mut self, expr: &Expr, depth: usize) -> Result<Value, String> {
+        match &expr.kind {
+            K::IntegerBinary { op, left, right } => {
+                let left = self.expr(left, depth)?;
+                let right = self.expr(right, depth)?;
+                if self.terminated {
+                    Ok(Value::unit())
+                } else {
+                    self.integer(*op, left, right)
+                }
+            }
+            K::FloatNegate(value) => {
+                let value = self.expr(value, depth)?;
+                if self.terminated {
+                    return Ok(Value::unit());
+                }
+                if value.ty == Ty::BFloat16 {
+                    Ok(self.instruction(Ty::BFloat16, format!("xor i16 {}, 32768", value.text)))
+                } else {
+                    Ok(self.instruction(
+                        value.ty.clone(),
+                        format!("fneg {} {}", value.ty.llvm(), value.text),
+                    ))
+                }
+            }
+            K::IntegerNegate(value) => {
+                let value = self.expr(value, depth)?;
+                if self.terminated {
+                    return Ok(Value::unit());
+                }
+                self.integer(
+                    Op::Subtract,
+                    Value {
+                        ty: value.ty.clone(),
+                        text: "0".into(),
+                    },
+                    value,
+                )
+            }
+            K::TemplateEqual(a, b) => {
+                let a = self.expr(a, depth)?;
+                let b = self.expr(b, depth)?;
+                if self.terminated {
+                    return Ok(Value::unit());
+                }
+                if a.ty != b.ty || !matches!(a.ty, Ty::TemplateIdentity(_)) {
+                    return Err(
+                        "host template comparison requires matching identity domains".into(),
+                    );
+                }
+                Ok(self.instruction(Ty::Bool, format!("icmp eq i64 {}, {}", a.text, b.text)))
+            }
+            K::SymbolName(operand) => {
+                let mut value = self.expr(operand, depth)?;
+                if self.terminated {
+                    return Ok(Value::unit());
+                }
+                if value.ty != Ty::Symbol {
+                    return Err("host symbol name requires a Symbol".into());
+                }
+                value.ty = Ty::String;
+                Ok(value)
+            }
+            K::ScalarEqual(a, b)
+            | K::ScalarLess(a, b)
+            | K::ScalarLessEqual(a, b)
+            | K::ScalarGreater(a, b)
+            | K::ScalarGreaterEqual(a, b) => {
+                let a = self.expr(a, depth)?;
+                let b = self.expr(b, depth)?;
+                if self.terminated {
+                    return Ok(Value::unit());
+                }
+                if matches!(
+                    a.ty.clone(),
+                    Ty::Float16 | Ty::BFloat16 | Ty::Float32 | Ty::Float64
+                ) {
+                    if a.ty != b.ty {
+                        return Err("host floating comparison mismatch".into());
+                    }
+                    let predicate = match expr.kind {
+                        K::ScalarEqual(..) => "oeq",
+                        K::ScalarLess(..) => "olt",
+                        K::ScalarLessEqual(..) => "ole",
+                        K::ScalarGreater(..) => "ogt",
+                        _ => "oge",
+                    };
+                    return Ok(self.float_compare(predicate, &a, &b));
+                }
+                let tag = if a.ty.signed() { "s" } else { "u" };
+                let op = match expr.kind {
+                    K::ScalarEqual(..) => "eq".into(),
+                    K::ScalarLess(..) => format!("{tag}lt"),
+                    K::ScalarLessEqual(..) => format!("{tag}le"),
+                    K::ScalarGreater(..) => format!("{tag}gt"),
+                    _ => format!("{tag}ge"),
+                };
+                self.compare(&op, a, b)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline(never)]
+    fn inner_conversions_and_bits(&mut self, expr: &Expr, depth: usize) -> Result<Value, String> {
+        match &expr.kind {
+            K::ErrorConvert { conversion, value } => {
+                let source_type = &value.ty;
+                let value = self.expr(value, depth)?;
+                if self.terminated {
+                    Ok(Value::unit())
+                } else {
+                    self.error_convert(*conversion, value, source_type, &expr.ty)
+                }
+            }
+            K::BitAssign {
+                place,
+                start,
+                end,
+                value,
+                ..
+            } => {
+                let slot = self.assignment_slot(place)?;
+                self.bit_write(
+                    slot,
+                    &[nir::program::BitSelection::Static {
+                        start: *start,
+                        end: *end,
+                    }],
+                    value,
+                    depth,
+                )
+            }
+            K::BitUpdate {
+                place,
+                selections,
+                value,
+                ..
+            } => {
+                let slot = self.assignment_slot(place)?;
+                self.bit_write(slot, selections, value, depth)
+            }
+            K::BitWritePointer {
+                pointer,
+                selections,
+                value,
+            } => {
+                let pointer_type = &pointer.ty;
+                let pointer = self.expr(pointer, depth)?;
+                if self.terminated {
+                    Ok(Value::unit())
+                } else {
+                    let slot = self.pointer_slot(&pointer, pointers::pointee(pointer_type)?)?;
+                    self.bit_write(slot, selections, value, depth)
+                }
             }
             K::ComptimeIntegerConvert(_) => {
-                return Err(
-                    "comptime integer conversion must complete before LLVM lowering".into(),
-                );
+                Err("comptime integer conversion must complete before LLVM lowering".into())
             }
             K::TypeLayout { query, operand } => {
                 let K::TypeValue(ty) = &operand.kind else {
@@ -1687,10 +1958,10 @@ impl Emitter<'_> {
                 {
                     return Err("host layout query overflows target usize".into());
                 }
-                Value {
+                Ok(Value {
                     ty: Ty::Int(bits, false),
                     text: val.to_string(),
-                }
+                })
             }
             K::TypeKind { kind, operand } => {
                 let K::TypeValue(ty) = &operand.kind else {
@@ -1698,10 +1969,10 @@ impl Emitter<'_> {
                 };
                 let result = nir::layout::evaluate_kind(&HostLayoutWorld(self.graph), *kind, ty)
                     .ok_or("host type predicate evaluation is unresolved")?;
-                Value {
+                Ok(Value {
                     ty: Ty::Bool,
                     text: if result { "true" } else { "false" }.into(),
-                }
+                })
             }
             K::IntegerRepresentation(e) => {
                 if !nir::program::integer_representation_valid(&e.ty, &expr.ty) {
@@ -1709,21 +1980,21 @@ impl Emitter<'_> {
                 }
                 let value = self.expr(e, depth)?;
                 if self.terminated {
-                    Value::unit()
+                    Ok(Value::unit())
                 } else {
                     let Ty::Int(width, _) = value.ty else {
                         return Err("host integer representation requires an integer".into());
                     };
                     if width == 128 {
-                        Value {
+                        Ok(Value {
                             ty: Ty::Int(128, false),
                             text: value.text,
-                        }
+                        })
                     } else {
-                        self.instruction(
+                        Ok(self.instruction(
                             Ty::Int(128, false),
                             format!("zext {} {} to i128", value.ty.llvm(), value.text),
-                        )
+                        ))
                     }
                 }
             }
@@ -1733,45 +2004,45 @@ impl Emitter<'_> {
                 }
                 let value = self.expr(e, depth)?;
                 if self.terminated {
-                    Value::unit()
+                    Ok(Value::unit())
                 } else {
-                    self.emit_try_integer_convert(&value, &expr.ty)?
+                    self.emit_try_integer_convert(&value, &expr.ty)
                 }
             }
             K::TakeBits(e) => {
                 let value = self.expr(e, depth)?;
                 if self.terminated {
-                    Value::unit()
+                    Ok(Value::unit())
                 } else {
-                    self.to_bits(value)?
+                    self.to_bits(value)
                 }
             }
             K::BitEqual(a, b) | K::BitConcat(a, b) => {
                 let a = self.expr(a, depth)?;
                 let b = self.expr(b, depth)?;
                 if self.terminated {
-                    Value::unit()
+                    Ok(Value::unit())
                 } else if matches!(expr.kind, K::BitEqual(..)) {
-                    self.bit_binary("icmp eq", a, b)?
+                    self.bit_binary("icmp eq", a, b)
                 } else {
-                    self.bit_concat(a, b)?
+                    self.bit_concat(a, b)
                 }
             }
             K::BitSlice { value, start, end } => {
                 let value = self.expr(value, depth)?;
                 if self.terminated {
-                    Value::unit()
+                    Ok(Value::unit())
                 } else {
-                    self.bit_slice(value, *start, *end)?
+                    self.bit_slice(value, *start, *end)
                 }
             }
             K::BitIndex(value, index) => {
                 let value = self.expr(value, depth)?;
                 let index = self.expr(index, depth)?;
                 if self.terminated {
-                    Value::unit()
+                    Ok(Value::unit())
                 } else {
-                    self.bit_window(value, index, None, 1)?
+                    self.bit_window(value, index, None, 1)
                 }
             }
             K::BitWindow { value, start, end } => {
@@ -1779,22 +2050,21 @@ impl Emitter<'_> {
                 let start = self.expr(start, depth)?;
                 let end = self.expr(end, depth)?;
                 if self.terminated {
-                    Value::unit()
+                    Ok(Value::unit())
                 } else {
                     let target = repr(self.graph, &expr.ty, self.checked)?;
                     let width = bit_width(&target).ok_or("host bit window result has no width")?;
-                    self.bit_window(value, start, Some(end), width)?
+                    self.bit_window(value, start, Some(end), width)
                 }
             }
             K::BitConvert(e) => {
                 let value = self.expr(e, depth)?;
                 if self.terminated {
-                    Value::unit()
+                    Ok(Value::unit())
                 } else {
-                    self.bit_convert(value, repr(self.graph, &expr.ty, self.checked)?)?
+                    self.bit_convert(value, repr(self.graph, &expr.ty, self.checked)?)
                 }
             }
-            K::Snapshot(e) => self.expr(e, depth)?,
             K::NewtypeConvert(value) => {
                 let value = self.expr(value, depth)?;
                 if self.terminated {
@@ -1806,132 +2076,18 @@ impl Emitter<'_> {
                 if value.ty != target {
                     return Err("host newtype representation edge changes its layout".into());
                 }
-                value
+                Ok(value)
             }
-            K::Call {
-                callee,
-                arguments,
-                parameter_bindings,
-            } => {
-                // The target expression runs once, before any argument effects.
-                let function = self.expr(callee, depth)?;
-                if self.terminated {
-                    return Ok(Value::unit());
-                }
-                if matches!(function.ty, Ty::Closure(_)) {
-                    if self.checked && !self.has_checked_closure_call(expr.source)? {
-                        // This invocation has no acquired resource frame within
-                        // an otherwise checked parent. Keep the syntactic arm,
-                        // but never execute its callback without that evidence.
-                        // In particular, do not borrow another call's frame or
-                        // fall back to the canonical unchecked lambda body.
-                        self.line("call void @llvm.trap()");
-                        self.line("unreachable");
-                        self.terminated = true;
-                        return Ok(Value::unit());
-                    }
-                    self.check_closure_receiver(callee, arguments)?;
-                }
-                let (function, environment) = self.closure_callee(callee, function)?;
-                let function = self.specialize_closure_call(expr.source, function)?;
-                let function = self.specialize_named_call(expr.source, function)?;
-                let Term::Function { parameters, result } = callee.ty.callable_signature() else {
-                    return Err("host callee has no concrete function signature".into());
-                };
-                let mut values = vec![None; parameters.len()];
-                let caller = self.locals.clone();
-                let mut frame = BTreeMap::new();
-                for argument in arguments {
-                    self.locals = caller.clone();
-                    if argument.is_default {
-                        self.locals.extend(frame.clone());
-                    }
-                    let value = if argument.is_default {
-                        self.eval_default(
-                            expr.source,
-                            argument,
-                            frame.clone(),
-                            caller.clone(),
-                            depth,
-                        )?
-                    } else {
-                        self.expr(&argument.value, depth)?
-                    };
-                    if self.terminated {
-                        self.locals = caller;
-                        return Ok(Value::unit());
-                    }
-                    self.retain_prepared_field(
-                        expr.source,
-                        argument.parameter,
-                        argument.value.source,
-                        &value,
-                    )?;
-                    let cell = values
-                        .get_mut(argument.parameter)
-                        .ok_or("host call slot out of range")?;
-                    if cell.is_some() {
-                        return Err("host duplicate call slot".into());
-                    }
-                    if let Some(binding) = parameter_bindings.get(argument.parameter) {
-                        let slot = self.slot(value.ty.clone());
-                        self.store(&slot, &value)?;
-                        frame.insert(*binding, slot);
-                    }
-                    *cell = Some(value);
-                }
-                self.locals = caller;
-                let method_frame = self.method_entry(callee, &values, expr.source, depth)?;
-                let mut args = environment
-                    .into_iter()
-                    .map(|slot| format!("ptr {}", slot.pointer))
-                    .collect::<Vec<_>>();
-                for (value, parameter) in values.into_iter().zip(parameters) {
-                    let value = value.ok_or("host missing call slot")?;
-                    if parameter.sort != Sort::Runtime
-                        || value.ty != repr(self.graph, &parameter.ty, self.checked)?
-                    {
-                        return Err("host call input representation mismatch".into());
-                    }
-                    if value.ty != Ty::Unit {
-                        args.push(format!("{} {}", value.ty.llvm(), value.text));
-                    }
-                }
-                let (row, logical_result) = effects::row_result(result);
-                args.extend(self.effect_arguments(row, selected)?);
-                let ty = return_repr(self.graph, result, self.checked)?;
-                let call = format!("call {} {}({})", ty.llvm(), function.text, args.join(", "));
-                self.finish_prepared_construction(expr.source)?;
-                let value = if ty == Ty::Unit {
-                    self.line(call);
-                    Value::unit()
-                } else {
-                    self.instruction(ty, call)
-                };
-                if self.failure_result.is_some() {
-                    let failed = self.instruction(Ty::Bool, "load i1, ptr @flurry_failed".into());
-                    let succeeded =
-                        self.instruction(Ty::Bool, format!("xor i1 {}, true", failed.text));
-                    self.guard_at(&succeeded, Some(expr.source))?;
-                }
-                if !row.is_empty() {
-                    self.check_effect_control(expr.source)?;
-                }
-                if *logical_result == Term::Primitive(P::Never) {
-                    self.line("unreachable");
-                    self.terminated = true;
-                } else {
-                    self.method_exit(method_frame, &value, depth)?;
-                }
-                value
-            }
-            _ => {
-                return Err(format!(
-                    "host LLVM lowering is not implemented at {}..{} for {}",
-                    expr.source.start, expr.source.end, expr.kind
-                ));
-            }
-        })
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline(never)]
+    fn inner_unimplemented(&self, expr: &Expr) -> Result<Value, String> {
+        Err(format!(
+            "host LLVM lowering is not implemented at {}..{} for {}",
+            expr.source.start, expr.source.end, expr.kind
+        ))
     }
 
     fn emit_try_integer_convert(
@@ -1950,6 +2106,8 @@ impl Emitter<'_> {
         let Ty::Int(dst_bits, dst_signed) = dst_ty else {
             return Err("host try integer convert requires an integer destination".into());
         };
+        let is_char_target =
+            matches!(result_ty, Term::Optional(inner) if **inner == Term::Primitive(P::Char));
         let mask_u128 = |bits: u32| -> u128 {
             if bits == 128 {
                 u128::MAX
@@ -1972,7 +2130,31 @@ impl Emitter<'_> {
             }
         };
         let src_llvm = value.ty.llvm();
-        let in_range: Option<Value> =
+        let in_range: Option<Value> = if is_char_target {
+            if src_bits != 32 || src_signed || dst_bits != 32 || dst_signed {
+                return Err("host u32-to-char convert representation mismatch".into());
+            }
+            let le_max = self.instruction(
+                Ty::Bool,
+                format!("icmp ule {src_llvm} {}, 1114111", value.text),
+            );
+            let lt_surr = self.instruction(
+                Ty::Bool,
+                format!("icmp ult {src_llvm} {}, 55296", value.text),
+            );
+            let gt_surr = self.instruction(
+                Ty::Bool,
+                format!("icmp ugt {src_llvm} {}, 57343", value.text),
+            );
+            let not_surr = self.instruction(
+                Ty::Bool,
+                format!("or i1 {}, {}", lt_surr.text, gt_surr.text),
+            );
+            Some(self.instruction(
+                Ty::Bool,
+                format!("and i1 {}, {}", le_max.text, not_surr.text),
+            ))
+        } else {
             match (src_signed, dst_signed) {
                 (false, false) => {
                     if src_bits <= dst_bits {
@@ -2034,7 +2216,8 @@ impl Emitter<'_> {
                         Some(self.instruction(Ty::Bool, format!("and i1 {}, {}", lo.text, hi.text)))
                     }
                 }
-            };
+            }
+        };
         let dst_llvm = dst_ty.llvm();
         let converted = if src_bits == dst_bits {
             Value {

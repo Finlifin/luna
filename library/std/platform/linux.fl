@@ -24,6 +24,10 @@ pub fn write(fd: i32, offset: u64) -> i64 where text: str {
     unsafe { target.System.write'intrinsic(fd, text, offset).as(i64) }
 }
 
+pub fn write_str(fd: i32, text: str, offset: u64) -> i64 {
+    unsafe { target.System.write'intrinsic(fd, text, offset).as(i64) }
+}
+
 pub fn write_byte(fd: i32, byte: u8) -> i64 {
     unsafe { target.System.write_byte'intrinsic(fd, byte).as(i64) }
 }

@@ -179,8 +179,9 @@ impl Infer<'_, '_> {
         }
         if let K::Assign { value, .. } = &expr.kind {
             let ty = self.ty(&value.ty)?;
-            self.round.mutates_pointer_storage = pointer_input_layout(self.package, &ty, self.fuel)
-                .map_or(true, |leaves| !leaves.is_empty());
+            self.round.mutates_pointer_storage =
+                pointer_input_layout_for(self.package, &ty, self.round.text_provenance, self.fuel)
+                    .map_or(true, |leaves| !leaves.is_empty());
         }
         Ok(())
     }
@@ -392,7 +393,8 @@ impl Infer<'_, '_> {
         } else {
             self.pointer_fields_for(expr)?
         };
-        let layout = pointer_input_layout(self.package, &ty, self.fuel)?;
+        let layout =
+            pointer_input_layout_for(self.package, &ty, self.round.text_provenance, self.fuel)?;
         for read in reads {
             let Some(slot) = read.target.through.first() else {
                 continue;

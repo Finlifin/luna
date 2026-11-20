@@ -93,7 +93,7 @@ pub fn acquire(
             && nir::normal_forms::tuple_fields(Some(package), ty).is_none()
             && !matches!(
                 ty,
-                Term::Primitive(Primitive::Type)
+                Term::Primitive(Primitive::Type | Primitive::Str)
                     | Term::Nominal { .. }
                     | Term::ErrorResult { .. }
                     | Term::Optional(_)

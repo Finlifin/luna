@@ -7394,20 +7394,38 @@ fn native_string_patterns_compare_content_and_length() {
                 command.args(["--copy-protocol", "Duplicate", "--drop-protocol", "Retire"]);
             }
             let built = command.output().unwrap();
-            if checked {
-                assert!(!built.status.success());
-                assert!(
-                    String::from_utf8_lossy(&built.stderr)
-                        .contains("string-view memory provenance is not implemented")
-                );
-            } else {
-                success(&built);
-                let output = w.execute();
-                success(&output);
-                assert_eq!(output.stdout, b"(bool true)\n");
-            }
+            success(&built);
+            let output = w.execute();
+            success(&output);
+            assert_eq!(output.stdout, b"(bool true)\n");
         }
     }
+    let escaping_source = r#"typealias Text=.str'builtin;
+        trait Duplicate {}
+        trait Retire {fn drop(*self);}
+        impl Duplicate for Text {}
+        impl Duplicate for bool {}
+        fn leak()->*Text {let local="temp";local.ref}
+        fn run()->bool {let _=leak();true}"#;
+    let w = Work::new(escaping_source);
+    let mut command = w.command();
+    command.args([
+        "--build",
+        "run",
+        "--opt-level",
+        "0",
+        "--output",
+        "native program",
+        "--copy-protocol",
+        "Duplicate",
+        "--drop-protocol",
+        "Retire",
+    ]);
+    let leak_built = command.output().unwrap();
+    assert!(
+        !leak_built.status.success(),
+        "returning dangling *str unexpectedly succeeded"
+    );
 }
 
 #[test]

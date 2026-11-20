@@ -1,7 +1,7 @@
 //! Scalar pattern candidates, ordered failure continuation and guard effects.
 use super::*;
 use nir::{
-    Primitive,
+    DeclarationId, Primitive,
     program::{MatchArm, Pattern},
 };
 use std::collections::BTreeSet;
@@ -538,6 +538,7 @@ impl Walker<'_> {
         }
         Ok(())
     }
+    #[inline(never)]
     fn fields_pattern(
         &mut self,
         patterns: &[Pattern],
@@ -581,6 +582,7 @@ impl Walker<'_> {
         }
         Ok((state, failure))
     }
+    #[inline(never)]
     fn pattern(
         &mut self,
         pattern: &Pattern,
@@ -602,368 +604,552 @@ impl Walker<'_> {
             Pattern::NominalType {
                 declaration,
                 fields,
-            } => {
-                if *ty != Term::Primitive(Primitive::Type) {
-                    return Err(Reason::InvalidSignature);
-                }
-                let package = self.package.ok_or(Reason::Unsupported)?;
-                self.limits.step(
-                    package
-                        .structs
-                        .len()
-                        .saturating_add(package.enums.len())
-                        .saturating_add(package.newtypes.len()),
-                )?;
-                let (parameters, domains) = if let Some(definition) = package
-                    .structs
-                    .iter()
-                    .find(|definition| definition.declaration == *declaration)
-                {
-                    (&definition.type_parameters, &definition.parameter_types)
-                } else if let Some(definition) = package
-                    .enums
-                    .iter()
-                    .find(|definition| definition.declaration == *declaration)
-                {
-                    (&definition.type_parameters, &definition.parameter_types)
-                } else if let Some(definition) = package
-                    .newtypes
-                    .iter()
-                    .find(|definition| definition.declaration == *declaration)
-                {
-                    (&definition.type_parameters, &definition.parameter_types)
-                } else {
-                    return Err(Reason::InvalidSignature);
-                };
-                if fields.len() != parameters.len()
-                    || (!domains.is_empty() && domains.len() != parameters.len())
-                {
-                    return Err(Reason::InvalidSignature);
-                }
-                // These are constructor inputs, not runtime record fields.
-                // Empty domains are the compact all-Type signature. Captured
-                // parameters are included in the declaration telescope.
-                let mut failure = state.fork(self.limits)?;
-                for (index, field) in fields.iter().enumerate() {
-                    let domain = domains
-                        .get(index)
-                        .unwrap_or(&Term::Primitive(Primitive::Type));
-                    let value = self.unknown_value(domain)?;
-                    let (yes, no) = self.pattern(field, &value, domain, state, depth)?;
-                    failure = failure.merge(no, self.limits)?;
-                    state = yes;
-                }
-                Ok((state, failure))
-            }
+            } => self.pattern_nominal_type(*declaration, fields, ty, state, depth),
             Pattern::NormalForm { head, arguments } => {
-                if *ty != Term::Primitive(Primitive::Type) {
-                    return Err(Reason::InvalidSignature);
-                }
-                let package = self.package.ok_or(Reason::Unsupported)?;
-                self.limits.step(package.normal_forms.len())?;
-                let signature = package
-                    .normal_forms
-                    .iter()
-                    .find(|signature| signature.declaration == *head)
-                    .ok_or(Reason::InvalidSignature)?;
-                if signature.parameters.len() != arguments.len() {
-                    return Err(Reason::InvalidSignature);
-                }
-                // Matching a Type observes retained inputs, never the head's
-                // body. Without a known subject, both head outcomes remain
-                // possible. Keep failure effects in declaration order, just
-                // as for runtime aggregate patterns.
-                let mut failure = state.fork(self.limits)?;
-                for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
-                    let value = self.unknown_value(&parameter.ty)?;
-                    let (yes, no) = self.pattern(argument, &value, &parameter.ty, state, depth)?;
-                    failure = failure.merge(no, self.limits)?;
-                    state = yes;
-                }
-                Ok((state, failure))
+                self.pattern_normal_form(*head, arguments, ty, state, depth)
             }
-            Pattern::TypeTuple(fields) => {
-                if *ty != Term::Primitive(Primitive::Type) {
-                    return Err(Reason::InvalidSignature);
-                }
-                let mut failure = state.fork(self.limits)?;
-                for field in fields {
-                    let value = self.unknown_value(ty)?;
-                    let (yes, no) = self.pattern(field, &value, ty, state, depth)?;
-                    failure = failure.merge(no, self.limits)?;
-                    state = yes;
-                }
-                Ok((state, failure))
-            }
-            Pattern::Tuple(patterns) => {
-                let Some(types) = self.tuple_field_types(ty)? else {
-                    return Err(Reason::Unsupported);
-                };
-                self.fields_pattern(patterns, &types, input, AggregateKind::Tuple, state, depth)
-            }
+            Pattern::TypeTuple(fields) => self.pattern_type_tuple(fields, ty, state, depth),
+            Pattern::Tuple(patterns) => self.pattern_tuple(patterns, input, ty, state, depth),
             Pattern::AnonymousRecord { names, fields } => {
-                let Term::Record(types) = ty else {
-                    return Err(Reason::InvalidSignature);
-                };
-                if names.len() != fields.len()
-                    || names.len() != types.len()
-                    || names
-                        .iter()
-                        .zip(types)
-                        .any(|(name, (expected, _))| name != expected)
-                {
-                    return Err(Reason::InvalidSignature);
-                }
-                let types = types.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>();
-                self.fields_pattern(
-                    fields,
-                    &types,
-                    input,
-                    AggregateKind::AnonymousRecord,
-                    state,
-                    depth,
-                )
+                self.pattern_anonymous_record(names, fields, input, ty, state, depth)
             }
             Pattern::Record {
                 declaration,
                 fields,
-            } => {
-                let types = self.nominal_fields(ty, *declaration, None)?;
-                if input
-                    .aggregate_kind
-                    .is_some_and(|kind| kind != AggregateKind::Record(*declaration))
-                {
-                    return Err(Reason::InvalidSignature);
-                }
-                self.fields_pattern(
-                    fields,
-                    &types,
-                    input,
-                    AggregateKind::Record(*declaration),
-                    state,
-                    depth,
-                )
-            }
+            } => self.pattern_record(*declaration, fields, input, ty, state, depth),
             Pattern::ErrorResult { label, inner } => {
-                let tag = self.error_pattern_tag(ty, label.as_ref())?;
-                let condition = self.error_condition(input, ty, tag, &mut state)?;
-                let (yes, no) = self.split_condition(state, condition.as_ref())?;
-                if !yes.facts.is_reachable() {
-                    return Ok((yes, no));
-                }
-                let payload = self.error_payload_type(ty, tag)?.clone();
-                let (yes, failed) = self.fields_pattern(
-                    std::slice::from_ref(inner.as_ref()),
-                    std::slice::from_ref(&payload),
-                    input,
-                    AggregateKind::ErrorResult(tag),
-                    yes,
-                    depth,
-                )?;
-                Ok((yes, no.merge(failed, self.limits)?))
+                self.pattern_error_result(label.as_ref(), inner, input, ty, state, depth)
             }
             Pattern::OptionalAbsent | Pattern::OptionalPresent(_) => {
-                let Term::Optional(payload) = ty else {
-                    return Err(Reason::InvalidSignature);
-                };
-                let present = matches!(pattern, Pattern::OptionalPresent(_));
-                let condition = self.optional_condition(input, present, &mut state)?;
-                let (yes, no) = self.split_condition(state, condition.as_ref())?;
-                if !yes.facts.is_reachable() || !present {
-                    return Ok((yes, no));
-                }
-                let Pattern::OptionalPresent(inner) = pattern else {
-                    unreachable!()
-                };
-                let (yes, failed) = self.fields_pattern(
-                    std::slice::from_ref(inner.as_ref()),
-                    std::slice::from_ref(payload.as_ref()),
-                    input,
-                    AggregateKind::Optional(true),
-                    yes,
-                    depth,
-                )?;
-                Ok((yes, no.merge(failed, self.limits)?))
+                self.pattern_optional(pattern, input, ty, state, depth)
             }
             Pattern::Variant {
                 declaration,
                 index,
                 fields,
-            } => {
-                let types = self.nominal_fields(ty, *declaration, Some(*index))?;
-                let condition = self.variant_condition(input, *declaration, *index, &mut state)?;
-                let (yes, no) = self.split_condition(state, condition.as_ref())?;
-                if !yes.facts.is_reachable() {
-                    return Ok((yes, no));
-                }
-                let (yes, failed_fields) = self.fields_pattern(
-                    fields,
-                    &types,
-                    input,
-                    AggregateKind::Variant(*declaration, *index),
-                    yes,
-                    depth,
-                )?;
-                Ok((yes, no.merge(failed_fields, self.limits)?))
-            }
+            } => self.pattern_variant(*declaration, *index, fields, input, ty, state, depth),
             Pattern::Wild | Pattern::Unit => {
                 self.split_condition(state, Some(&Condition::Bool(true)))
             }
-            Pattern::Literal(literal) => {
-                let condition = self.literal_condition(input, literal, &state)?;
-                self.split_condition(state, condition.as_ref())
-            }
-
+            Pattern::Literal(literal) => self.pattern_literal(literal, input, state),
             Pattern::Observe { binding, inner } => {
-                let snapshot = input.snapshot(self.limits, 0)?;
-                bind_value(&mut state, *binding, ty, snapshot, self.limits)?;
-                let (mut yes, mut no) = self.pattern(inner, input, ty, state, depth)?;
-                for branch in [&mut yes, &mut no] {
-                    let retained = branch
-                        .domains
-                        .keys()
-                        .copied()
-                        .filter(|id| *id != place(*binding))
-                        .collect();
-                    branch.keep(&retained, self.limits)?;
-                }
-                Ok((yes, no))
+                self.pattern_observe(*binding, inner, input, ty, state, depth)
             }
             Pattern::Binding { binding, inner } => {
-                let (mut yes, no) = self.pattern(inner, input, ty, state, depth)?;
-                if yes.facts.is_reachable() {
-                    let range = self.input_range(input, &yes)?;
-                    let mut snapshot = input.snapshot(self.limits, 0)?;
-                    snapshot.range = range;
-                    let immutable = input
-                        .projection
-                        .as_ref()
-                        .filter(|projection| {
-                            input.nominal_type.is_some()
-                                && !self.written_locals.contains(binding)
-                                && !self.addressed_locals.contains(binding)
-                                && yes.frozen.contains_key(&projection.path.root)
-                                && yes.facts.value(projection.path.root)
-                                    == Some(projection.root_version)
-                        })
-                        .cloned();
-                    let transfer = if immutable.is_none() {
-                        self.prepare_copy(input, &yes)?
-                    } else {
-                        None
-                    };
-                    bind_value(&mut yes, *binding, ty, snapshot, self.limits)?;
-                    if let Some(projection) = immutable {
-                        self.limits
-                            .step(projection.path.fields.len().saturating_add(1))?;
-                        yes.aggregates
-                            .get_mut(&place(*binding))
-                            .ok_or(Reason::InvalidSignature)?
-                            .immutable_projection = Some((yes.frame, projection));
-                    }
-                    if let Some(transfer) = transfer {
-                        let installed = self.install_copy(&mut yes, *binding, transfer)?;
-                        self.finish_copies(&mut yes, installed)?;
-                    }
-                }
-                Ok((yes, no))
+                self.pattern_binding(*binding, inner, input, ty, state, depth)
             }
             Pattern::Guard { pattern, condition } => {
-                let (mut yes, no) = self.pattern(pattern, input, ty, state, depth)?;
-                let condition = self.child(condition, &mut yes, depth)?.condition;
-                let (yes, failed_guard) = self.split_condition(yes, condition.as_ref())?;
-                Ok((yes, no.merge(failed_guard, self.limits)?))
+                self.pattern_guard(pattern, condition, input, ty, state, depth)
             }
             Pattern::Then { first, value, next } => {
-                let (mut yes, no) = self.pattern(first, input, ty, state, depth)?;
-                let next_input = self.child(value, &mut yes, depth)?;
-                let (yes, failed_next) = self.pattern(next, &next_input, &value.ty, yes, depth)?;
-                Ok((yes, no.merge(failed_next, self.limits)?))
+                self.pattern_then(first, value, next, input, ty, state, depth)
             }
-            Pattern::Or(alternatives) => {
-                let existing: BTreeSet<_> = state.domains.keys().copied().collect();
-                let mut accepted = state.fork(self.limits)?;
-                accepted
-                    .facts
-                    .assume(&Condition::Bool(false), true, self.limits)?;
-                for alternative in alternatives {
-                    let (yes, mut no) = self.pattern(alternative, input, ty, state, depth)?;
-                    accepted = accepted.merge(yes, self.limits)?;
-                    no.keep(&existing, self.limits)?;
-                    state = no;
-                }
-                Ok((accepted, state))
-            }
+            Pattern::Or(alternatives) => self.pattern_or(alternatives, input, ty, state, depth),
             Pattern::Remap { pattern, bindings } => {
-                let (mut yes, no) = self.pattern(pattern, input, ty, state, depth)?;
-                if yes.facts.is_reachable() {
-                    let mut snapshots = Vec::new();
-                    for (from, to) in bindings {
-                        self.limits.step(1)?;
-                        let source_value = self.local_value(&yes, *from)?;
-                        let transfer = self.prepare_copy(&source_value, &yes)?;
-                        let from = place(*from);
-                        let domain = yes
-                            .domains
-                            .get(&from)
-                            .ok_or(Reason::InvalidSignature)?
-                            .as_ref()
-                            .map(|b| b.copy(self.limits))
-                            .transpose()?;
-                        let bound = if let Some(id) = yes.facts.value(from) {
-                            match yes.facts.bound(id, self.limits) {
-                                Ok(b) => Some(b.copy(self.limits)?),
-                                Err(Unknown::MissingBound(_)) => None,
-                                Err(e) => return Err(e.into()),
-                            }
-                        } else {
-                            None
-                        };
-                        let tuple = yes
-                            .aggregates
-                            .get(&from)
-                            .map(|_| source_value.snapshot(self.limits, 0))
-                            .transpose()?;
-                        snapshots.push((*to, domain, bound, tuple, transfer));
-                    }
-                    let mut copied_relations = Vec::new();
-                    for (binding, domain, bound, tuple, transfer) in snapshots {
-                        let to = place(binding);
-                        yes.invalidate_paths(Some(to), &[], self.limits)?;
-                        if let Some(tuple) = tuple {
-                            yes.aggregates.insert(to, tuple);
-                        } else {
-                            yes.aggregates.remove(&to);
-                        }
-                        yes.domains.insert(to, domain);
-                        if let Some(bound) = bound {
-                            yes.facts.assign(to, bound)?;
-                        } else {
-                            yes.facts.invalidate(to)?;
-                        }
-                        if let Some(transfer) = transfer {
-                            copied_relations
-                                .extend(self.install_copy(&mut yes, binding, transfer)?);
-                        }
-                    }
-                    self.finish_copies(&mut yes, copied_relations)?;
-                    self.limits
-                        .step(yes.domains.len().saturating_add(bindings.len()))?;
-                    let destinations: BTreeSet<_> =
-                        bindings.iter().map(|(_, to)| place(*to)).collect();
-                    let mut retained: BTreeSet<_> = yes.domains.keys().copied().collect();
-                    for (from, _) in bindings {
-                        let from = place(*from);
-                        if !destinations.contains(&from) {
-                            retained.remove(&from);
-                        }
-                    }
-                    yes.keep(&retained, self.limits)?;
-                }
-                Ok((yes, no))
+                self.pattern_remap(pattern, bindings, input, ty, state, depth)
             }
             _ => Err(Reason::Unsupported),
         }
+    }
+
+    #[inline(never)]
+    fn pattern_nominal_type(
+        &mut self,
+        declaration: DeclarationId,
+        fields: &[Pattern],
+        ty: &Term,
+        mut state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        if *ty != Term::Primitive(Primitive::Type) {
+            return Err(Reason::InvalidSignature);
+        }
+        let package = self.package.ok_or(Reason::Unsupported)?;
+        self.limits.step(
+            package
+                .structs
+                .len()
+                .saturating_add(package.enums.len())
+                .saturating_add(package.newtypes.len()),
+        )?;
+        let (parameters, domains) = if let Some(definition) = package
+            .structs
+            .iter()
+            .find(|definition| definition.declaration == declaration)
+        {
+            (&definition.type_parameters, &definition.parameter_types)
+        } else if let Some(definition) = package
+            .enums
+            .iter()
+            .find(|definition| definition.declaration == declaration)
+        {
+            (&definition.type_parameters, &definition.parameter_types)
+        } else if let Some(definition) = package
+            .newtypes
+            .iter()
+            .find(|definition| definition.declaration == declaration)
+        {
+            (&definition.type_parameters, &definition.parameter_types)
+        } else {
+            return Err(Reason::InvalidSignature);
+        };
+        if fields.len() != parameters.len()
+            || (!domains.is_empty() && domains.len() != parameters.len())
+        {
+            return Err(Reason::InvalidSignature);
+        }
+        // These are constructor inputs, not runtime record fields.
+        // Empty domains are the compact all-Type signature. Captured
+        // parameters are included in the declaration telescope.
+        let mut failure = state.fork(self.limits)?;
+        for (index, field) in fields.iter().enumerate() {
+            let domain = domains
+                .get(index)
+                .unwrap_or(&Term::Primitive(Primitive::Type));
+            let value = self.unknown_value(domain)?;
+            let (yes, no) = self.pattern(field, &value, domain, state, depth)?;
+            failure = failure.merge(no, self.limits)?;
+            state = yes;
+        }
+        Ok((state, failure))
+    }
+
+    #[inline(never)]
+    fn pattern_normal_form(
+        &mut self,
+        head: DeclarationId,
+        arguments: &[Pattern],
+        ty: &Term,
+        mut state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        if *ty != Term::Primitive(Primitive::Type) {
+            return Err(Reason::InvalidSignature);
+        }
+        let package = self.package.ok_or(Reason::Unsupported)?;
+        self.limits.step(package.normal_forms.len())?;
+        let signature = package
+            .normal_forms
+            .iter()
+            .find(|signature| signature.declaration == head)
+            .ok_or(Reason::InvalidSignature)?;
+        if signature.parameters.len() != arguments.len() {
+            return Err(Reason::InvalidSignature);
+        }
+        // Matching a Type observes retained inputs, never the head's
+        // body. Without a known subject, both head outcomes remain
+        // possible. Keep failure effects in declaration order, just
+        // as for runtime aggregate patterns.
+        let mut failure = state.fork(self.limits)?;
+        for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
+            let value = self.unknown_value(&parameter.ty)?;
+            let (yes, no) = self.pattern(argument, &value, &parameter.ty, state, depth)?;
+            failure = failure.merge(no, self.limits)?;
+            state = yes;
+        }
+        Ok((state, failure))
+    }
+
+    #[inline(never)]
+    fn pattern_type_tuple(
+        &mut self,
+        fields: &[Pattern],
+        ty: &Term,
+        mut state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        if *ty != Term::Primitive(Primitive::Type) {
+            return Err(Reason::InvalidSignature);
+        }
+        let mut failure = state.fork(self.limits)?;
+        for field in fields {
+            let value = self.unknown_value(ty)?;
+            let (yes, no) = self.pattern(field, &value, ty, state, depth)?;
+            failure = failure.merge(no, self.limits)?;
+            state = yes;
+        }
+        Ok((state, failure))
+    }
+
+    #[inline(never)]
+    fn pattern_tuple(
+        &mut self,
+        patterns: &[Pattern],
+        input: &Value,
+        ty: &Term,
+        state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        let Some(types) = self.tuple_field_types(ty)? else {
+            return Err(Reason::Unsupported);
+        };
+        self.fields_pattern(patterns, &types, input, AggregateKind::Tuple, state, depth)
+    }
+
+    #[inline(never)]
+    fn pattern_anonymous_record(
+        &mut self,
+        names: &[String],
+        fields: &[Pattern],
+        input: &Value,
+        ty: &Term,
+        state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        let Term::Record(types) = ty else {
+            return Err(Reason::InvalidSignature);
+        };
+        if names.len() != fields.len()
+            || names.len() != types.len()
+            || names
+                .iter()
+                .zip(types)
+                .any(|(name, (expected, _))| name != expected)
+        {
+            return Err(Reason::InvalidSignature);
+        }
+        let types = types.iter().map(|(_, ty)| ty.clone()).collect::<Vec<_>>();
+        self.fields_pattern(
+            fields,
+            &types,
+            input,
+            AggregateKind::AnonymousRecord,
+            state,
+            depth,
+        )
+    }
+
+    #[inline(never)]
+    fn pattern_record(
+        &mut self,
+        declaration: DeclarationId,
+        fields: &[Pattern],
+        input: &Value,
+        ty: &Term,
+        state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        let types = self.nominal_fields(ty, declaration, None)?;
+        if input
+            .aggregate_kind
+            .is_some_and(|kind| kind != AggregateKind::Record(declaration))
+        {
+            return Err(Reason::InvalidSignature);
+        }
+        self.fields_pattern(
+            fields,
+            &types,
+            input,
+            AggregateKind::Record(declaration),
+            state,
+            depth,
+        )
+    }
+
+    #[inline(never)]
+    fn pattern_error_result(
+        &mut self,
+        label: Option<&Term>,
+        inner: &Pattern,
+        input: &Value,
+        ty: &Term,
+        mut state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        let tag = self.error_pattern_tag(ty, label)?;
+        let condition = self.error_condition(input, ty, tag, &mut state)?;
+        let (yes, no) = self.split_condition(state, condition.as_ref())?;
+        if !yes.facts.is_reachable() {
+            return Ok((yes, no));
+        }
+        let payload = self.error_payload_type(ty, tag)?.clone();
+        let (yes, failed) = self.fields_pattern(
+            std::slice::from_ref(inner),
+            std::slice::from_ref(&payload),
+            input,
+            AggregateKind::ErrorResult(tag),
+            yes,
+            depth,
+        )?;
+        Ok((yes, no.merge(failed, self.limits)?))
+    }
+
+    #[inline(never)]
+    fn pattern_optional(
+        &mut self,
+        pattern: &Pattern,
+        input: &Value,
+        ty: &Term,
+        mut state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        let Term::Optional(payload) = ty else {
+            return Err(Reason::InvalidSignature);
+        };
+        let present = matches!(pattern, Pattern::OptionalPresent(_));
+        let condition = self.optional_condition(input, present, &mut state)?;
+        let (yes, no) = self.split_condition(state, condition.as_ref())?;
+        if !yes.facts.is_reachable() || !present {
+            return Ok((yes, no));
+        }
+        let Pattern::OptionalPresent(inner) = pattern else {
+            unreachable!()
+        };
+        let (yes, failed) = self.fields_pattern(
+            std::slice::from_ref(inner.as_ref()),
+            std::slice::from_ref(payload.as_ref()),
+            input,
+            AggregateKind::Optional(true),
+            yes,
+            depth,
+        )?;
+        Ok((yes, no.merge(failed, self.limits)?))
+    }
+
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn pattern_variant(
+        &mut self,
+        declaration: DeclarationId,
+        index: usize,
+        fields: &[Pattern],
+        input: &Value,
+        ty: &Term,
+        mut state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        let types = self.nominal_fields(ty, declaration, Some(index))?;
+        let condition = self.variant_condition(input, declaration, index, &mut state)?;
+        let (yes, no) = self.split_condition(state, condition.as_ref())?;
+        if !yes.facts.is_reachable() {
+            return Ok((yes, no));
+        }
+        let (yes, failed_fields) = self.fields_pattern(
+            fields,
+            &types,
+            input,
+            AggregateKind::Variant(declaration, index),
+            yes,
+            depth,
+        )?;
+        Ok((yes, no.merge(failed_fields, self.limits)?))
+    }
+
+    #[inline(never)]
+    fn pattern_literal(
+        &mut self,
+        literal: &nir::program::Literal,
+        input: &Value,
+        state: State,
+    ) -> Result<(State, State), Reason> {
+        let condition = self.literal_condition(input, literal, &state)?;
+        self.split_condition(state, condition.as_ref())
+    }
+
+    #[inline(never)]
+    fn pattern_observe(
+        &mut self,
+        binding: nir::program::LocalId,
+        inner: &Pattern,
+        input: &Value,
+        ty: &Term,
+        mut state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        let snapshot = input.snapshot(self.limits, 0)?;
+        bind_value(&mut state, binding, ty, snapshot, self.limits)?;
+        let (mut yes, mut no) = self.pattern(inner, input, ty, state, depth)?;
+        for branch in [&mut yes, &mut no] {
+            let retained = branch
+                .domains
+                .keys()
+                .copied()
+                .filter(|id| *id != place(binding))
+                .collect();
+            branch.keep(&retained, self.limits)?;
+        }
+        Ok((yes, no))
+    }
+
+    #[inline(never)]
+    fn pattern_binding(
+        &mut self,
+        binding: nir::program::LocalId,
+        inner: &Pattern,
+        input: &Value,
+        ty: &Term,
+        state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        let (mut yes, no) = self.pattern(inner, input, ty, state, depth)?;
+        if yes.facts.is_reachable() {
+            let range = self.input_range(input, &yes)?;
+            let mut snapshot = input.snapshot(self.limits, 0)?;
+            snapshot.range = range;
+            let immutable = input
+                .projection
+                .as_ref()
+                .filter(|projection| {
+                    input.nominal_type.is_some()
+                        && !self.written_locals.contains(&binding)
+                        && !self.addressed_locals.contains(&binding)
+                        && yes.frozen.contains_key(&projection.path.root)
+                        && yes.facts.value(projection.path.root) == Some(projection.root_version)
+                })
+                .cloned();
+            let transfer = if immutable.is_none() {
+                self.prepare_copy(input, &yes)?
+            } else {
+                None
+            };
+            bind_value(&mut yes, binding, ty, snapshot, self.limits)?;
+            if let Some(projection) = immutable {
+                self.limits
+                    .step(projection.path.fields.len().saturating_add(1))?;
+                yes.aggregates
+                    .get_mut(&place(binding))
+                    .ok_or(Reason::InvalidSignature)?
+                    .immutable_projection = Some((yes.frame, projection));
+            }
+            if let Some(transfer) = transfer {
+                let installed = self.install_copy(&mut yes, binding, transfer)?;
+                self.finish_copies(&mut yes, installed)?;
+            }
+        }
+        Ok((yes, no))
+    }
+
+    #[inline(never)]
+    fn pattern_guard(
+        &mut self,
+        pattern: &Pattern,
+        condition: &Expr,
+        input: &Value,
+        ty: &Term,
+        state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        let (mut yes, no) = self.pattern(pattern, input, ty, state, depth)?;
+        let condition = self.child(condition, &mut yes, depth)?.condition;
+        let (yes, failed_guard) = self.split_condition(yes, condition.as_ref())?;
+        Ok((yes, no.merge(failed_guard, self.limits)?))
+    }
+
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn pattern_then(
+        &mut self,
+        first: &Pattern,
+        value: &Expr,
+        next: &Pattern,
+        input: &Value,
+        ty: &Term,
+        state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        let (mut yes, no) = self.pattern(first, input, ty, state, depth)?;
+        let next_input = self.child(value, &mut yes, depth)?;
+        let (yes, failed_next) = self.pattern(next, &next_input, &value.ty, yes, depth)?;
+        Ok((yes, no.merge(failed_next, self.limits)?))
+    }
+
+    #[inline(never)]
+    fn pattern_or(
+        &mut self,
+        alternatives: &[Pattern],
+        input: &Value,
+        ty: &Term,
+        mut state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        let existing: BTreeSet<_> = state.domains.keys().copied().collect();
+        let mut accepted = state.fork(self.limits)?;
+        accepted
+            .facts
+            .assume(&Condition::Bool(false), true, self.limits)?;
+        for alternative in alternatives {
+            let (yes, mut no) = self.pattern(alternative, input, ty, state, depth)?;
+            accepted = accepted.merge(yes, self.limits)?;
+            no.keep(&existing, self.limits)?;
+            state = no;
+        }
+        Ok((accepted, state))
+    }
+
+    #[inline(never)]
+    fn pattern_remap(
+        &mut self,
+        pattern: &Pattern,
+        bindings: &[(nir::program::LocalId, nir::program::LocalId)],
+        input: &Value,
+        ty: &Term,
+        state: State,
+        depth: usize,
+    ) -> Result<(State, State), Reason> {
+        let (mut yes, no) = self.pattern(pattern, input, ty, state, depth)?;
+        if yes.facts.is_reachable() {
+            let mut snapshots = Vec::new();
+            for (from, to) in bindings {
+                self.limits.step(1)?;
+                let source_value = self.local_value(&yes, *from)?;
+                let transfer = self.prepare_copy(&source_value, &yes)?;
+                let from = place(*from);
+                let domain = yes
+                    .domains
+                    .get(&from)
+                    .ok_or(Reason::InvalidSignature)?
+                    .as_ref()
+                    .map(|b| b.copy(self.limits))
+                    .transpose()?;
+                let bound = if let Some(id) = yes.facts.value(from) {
+                    match yes.facts.bound(id, self.limits) {
+                        Ok(b) => Some(b.copy(self.limits)?),
+                        Err(Unknown::MissingBound(_)) => None,
+                        Err(e) => return Err(e.into()),
+                    }
+                } else {
+                    None
+                };
+                let tuple = yes
+                    .aggregates
+                    .get(&from)
+                    .map(|_| source_value.snapshot(self.limits, 0))
+                    .transpose()?;
+                snapshots.push((*to, domain, bound, tuple, transfer));
+            }
+            let mut copied_relations = Vec::new();
+            for (binding, domain, bound, tuple, transfer) in snapshots {
+                let to = place(binding);
+                yes.invalidate_paths(Some(to), &[], self.limits)?;
+                if let Some(tuple) = tuple {
+                    yes.aggregates.insert(to, tuple);
+                } else {
+                    yes.aggregates.remove(&to);
+                }
+                yes.domains.insert(to, domain);
+                if let Some(bound) = bound {
+                    yes.facts.assign(to, bound)?;
+                } else {
+                    yes.facts.invalidate(to)?;
+                }
+                if let Some(transfer) = transfer {
+                    copied_relations.extend(self.install_copy(&mut yes, binding, transfer)?);
+                }
+            }
+            self.finish_copies(&mut yes, copied_relations)?;
+            self.limits
+                .step(yes.domains.len().saturating_add(bindings.len()))?;
+            let destinations: BTreeSet<_> = bindings.iter().map(|(_, to)| place(*to)).collect();
+            let mut retained: BTreeSet<_> = yes.domains.keys().copied().collect();
+            for (from, _) in bindings {
+                let from = place(*from);
+                if !destinations.contains(&from) {
+                    retained.remove(&from);
+                }
+            }
+            yes.keep(&retained, self.limits)?;
+        }
+        Ok((yes, no))
     }
     pub(super) fn let_pattern(
         &mut self,
@@ -1033,6 +1219,7 @@ impl Walker<'_> {
         )
     }
 
+    #[inline(never)]
     fn match_cases<'b>(
         &mut self,
         value: &Expr,
@@ -1044,6 +1231,79 @@ impl Walker<'_> {
     ) -> Result<Value, Reason> {
         let input = self.child(value, state, depth)?;
         let input = self.materialize_aggregate(input, &value.ty, state)?;
+        let collected = self.collect_match_cases(arms)?;
+        let (compose_tags, tag_conditions) =
+            self.prepare_match_tags(&collected, &input, &value.ty, result_type, state, tail)?;
+        let existing: BTreeSet<_> = state.domains.keys().copied().collect();
+        let result_root = if tail {
+            None
+        } else {
+            self.result_root(result_type)?
+        };
+        let mut result_scope = existing.clone();
+        if tail {
+            if let Some(binding) = self.exit_contract.as_ref().and_then(|c| c.binding) {
+                result_scope.insert(place(binding));
+            }
+        }
+        if let Some(root) = result_root {
+            result_scope.insert(root);
+        }
+        let pending = state.fork(self.limits)?;
+        let mut merged = state.fork(self.limits)?;
+        merged
+            .facts
+            .assume(&Condition::Bool(false), true, self.limits)?;
+        let mut join_state = MatchCasesState {
+            pending: Some(pending),
+            merged: Some(merged),
+            joined_value: Value::default(),
+            has_result: false,
+            sole_condition: None,
+            tagged_condition: Condition::Bool(false),
+            remaining_condition: Condition::Bool(true),
+            alternative_remaining: Condition::Bool(true),
+            arm_success: Condition::Bool(false),
+            guard_failures: None,
+            compose_tags,
+        };
+        for ((arm, pattern, guards, last), tag) in collected.into_iter().zip(tag_conditions) {
+            self.eval_match_arm(
+                arm,
+                pattern,
+                guards,
+                last,
+                tag,
+                &input,
+                &value.ty,
+                result_type,
+                &existing,
+                &result_scope,
+                result_root,
+                depth,
+                tail,
+                &mut join_state,
+            )?;
+        }
+        // Exhaustiveness is checked by elaboration. A residual failure path
+        // would terminate with NonExhaustiveMatch, never yield a normal result.
+        *state = join_state.merged.take().expect("match cases merged state");
+        self.finish_match_cases(
+            state,
+            result_root,
+            join_state.has_result,
+            join_state.compose_tags,
+            join_state.tagged_condition,
+            join_state.sole_condition,
+            join_state.joined_value,
+        )
+    }
+
+    #[inline(never)]
+    fn collect_match_cases<'b>(
+        &mut self,
+        arms: impl Iterator<Item = MatchCase<'b>>,
+    ) -> Result<Vec<CollectedMatchCase<'b>>, Reason> {
         let mut collected = Vec::new();
         for arm in arms {
             self.limits.step(1)?;
@@ -1059,10 +1319,23 @@ impl Walker<'_> {
                 collected.push((arm, pattern, guards, true));
             }
         }
+        Ok(collected)
+    }
+
+    #[inline(never)]
+    fn prepare_match_tags<'b>(
+        &mut self,
+        collected: &[CollectedMatchCase<'b>],
+        input: &Value,
+        value_ty: &Term,
+        result_type: &Term,
+        state: &mut State,
+        tail: bool,
+    ) -> Result<(bool, Vec<Option<Condition>>), Reason> {
         let mut tag_conditions = Vec::new();
         let mut prepared_structural_input = false;
         let mut compose_tags = !tail && *result_type == Term::Primitive(nir::Primitive::Bool);
-        for (_, pattern, guards, _) in &collected {
+        for (_, pattern, guards, _) in collected {
             let pattern = *pattern;
             for guard in guards.iter().flatten() {
                 if !nir::program::checkable_predicate(guard, &mut self.limits.arithmetic.steps)
@@ -1076,11 +1349,11 @@ impl Walker<'_> {
                 declaration, index, ..
             } = pattern
             {
-                let mut tag = self.variant_condition(&input, *declaration, *index, state)?;
+                let mut tag = self.variant_condition(input, *declaration, *index, state)?;
                 if input.aggregate_kind.is_none()
                     || input.aggregate_kind == Some(AggregateKind::Variant(*declaration, *index))
                 {
-                    let types = self.nominal_fields(&value.ty, *declaration, Some(*index))?;
+                    let types = self.nominal_fields(value_ty, *declaration, Some(*index))?;
                     for (slot, ty) in types.iter().enumerate() {
                         let mut field =
                             match input.fields.as_ref().and_then(|fields| fields.get(slot)) {
@@ -1099,7 +1372,7 @@ impl Walker<'_> {
                     }
                 }
                 if compose_tags {
-                    tag = self.pattern_selection_condition(pattern, &input, &value.ty, state, 0)?;
+                    tag = self.pattern_selection_condition(pattern, input, value_ty, state, 0)?;
                     compose_tags &= tag.is_some();
                 }
                 tag_conditions.push(tag);
@@ -1113,164 +1386,177 @@ impl Walker<'_> {
                     prepared_structural_input = true;
                 }
                 let condition =
-                    self.pattern_selection_condition(pattern, &input, &value.ty, state, 0)?;
+                    self.pattern_selection_condition(pattern, input, value_ty, state, 0)?;
                 compose_tags &= condition.is_some();
                 tag_conditions.push(condition);
             } else {
                 tag_conditions.push(None);
             }
         }
-        let mut tagged_condition = Condition::Bool(false);
-        let existing: BTreeSet<_> = state.domains.keys().copied().collect();
-        let result_root = if tail {
-            None
+        Ok((compose_tags, tag_conditions))
+    }
+
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn eval_match_arm<'b>(
+        &mut self,
+        arm: MatchCase<'b>,
+        pattern: &Pattern,
+        guards: [Option<&Expr>; 2],
+        last: bool,
+        tag: Option<Condition>,
+        input: &Value,
+        value_ty: &Term,
+        result_type: &Term,
+        existing: &BTreeSet<PlaceId>,
+        result_scope: &BTreeSet<PlaceId>,
+        result_root: Option<PlaceId>,
+        depth: usize,
+        tail: bool,
+        join_state: &mut MatchCasesState,
+    ) -> Result<(), Reason> {
+        let pending = join_state
+            .pending
+            .take()
+            .expect("match cases pending state");
+        let (mut candidate, mut failure) =
+            self.pattern(pattern, input, value_ty, pending, depth)?;
+        let pattern_selection = if join_state.compose_tags {
+            tag.as_ref()
+                .map(|tag| tag.copy_bounded(self.limits, 0))
+                .transpose()?
         } else {
-            self.result_root(result_type)?
+            None
         };
-        let mut result_scope = existing.clone();
-        if tail {
-            if let Some(binding) = self.exit_contract.as_ref().and_then(|c| c.binding) {
-                result_scope.insert(place(binding));
+        let mut selection = tag;
+        for guard in guards.into_iter().flatten() {
+            let condition = self.child(guard, &mut candidate, depth)?.condition;
+            if join_state.compose_tags && candidate.facts.is_reachable() {
+                if let (Some(selected), Some(condition)) = (selection.take(), condition.as_ref()) {
+                    selection = Some(conjunction(
+                        selected,
+                        self.scoped_condition(condition, &candidate, existing)?,
+                    ));
+                } else {
+                    join_state.compose_tags = false;
+                }
             }
+            let (yes, mut no) = self.split_condition(candidate, condition.as_ref())?;
+            candidate = yes;
+            no.keep(existing, self.limits)?;
+            join_state.guard_failures = Some(match join_state.guard_failures.take() {
+                Some(previous) => previous.merge(no, self.limits)?,
+                None => no,
+            });
         }
-        if let Some(root) = result_root {
-            result_scope.insert(root);
-        }
-        let mut pending = state.fork(self.limits)?;
-        let mut merged = state.fork(self.limits)?;
-        merged
-            .facts
-            .assume(&Condition::Bool(false), true, self.limits)?;
-        let mut joined_value = Value::default();
-        let mut has_result = false;
-        let mut sole_condition = None;
-        let mut remaining_condition = Condition::Bool(true);
-        let mut alternative_remaining = Condition::Bool(true);
-        let mut arm_success = Condition::Bool(false);
-        let mut guard_failures: Option<State> = None;
-        for ((arm, pattern, guards, last), tag) in collected.into_iter().zip(tag_conditions) {
-            let (mut candidate, mut failure) =
-                self.pattern(pattern, &input, &value.ty, pending, depth)?;
-            let pattern_selection = if compose_tags {
-                tag.as_ref()
-                    .map(|tag| tag.copy_bounded(self.limits, 0))
+        let selected = if join_state.compose_tags {
+            if let (Some(selection), Some(pattern_selection)) = (selection, pattern_selection) {
+                let remaining_copy = join_state
+                    .remaining_condition
+                    .copy_bounded(self.limits, 0)?;
+                let alt_remaining_copy = join_state
+                    .alternative_remaining
+                    .copy_bounded(self.limits, 0)?;
+                let selected_alternative = conjunction(alt_remaining_copy, selection);
+                let selected_alt_copy = selected_alternative.copy_bounded(self.limits, 0)?;
+                let selected = conjunction(remaining_copy, selected_alt_copy);
+                let arm_success =
+                    std::mem::replace(&mut join_state.arm_success, Condition::Bool(false));
+                join_state.arm_success = disjunction(arm_success, selected_alternative);
+                let alt_remaining =
+                    std::mem::replace(&mut join_state.alternative_remaining, Condition::Bool(true));
+                join_state.alternative_remaining =
+                    conjunction(alt_remaining, negation(pattern_selection));
+                if last {
+                    let remaining = std::mem::replace(
+                        &mut join_state.remaining_condition,
+                        Condition::Bool(true),
+                    );
+                    let arm_success_done =
+                        std::mem::replace(&mut join_state.arm_success, Condition::Bool(false));
+                    join_state.remaining_condition =
+                        conjunction(remaining, negation(arm_success_done));
+                    join_state.alternative_remaining = Condition::Bool(true);
+                }
+                Some(selected)
+            } else {
+                join_state.compose_tags = false;
+                None
+            }
+        } else {
+            None
+        };
+        let result = match arm {
+            MatchCase::Expression(arm) if tail => {
+                self.tail(&arm.body, &mut candidate, depth)?;
+                Value::default()
+            }
+            MatchCase::Expression(arm) => self.child(&arm.body, &mut candidate, depth)?,
+            MatchCase::Contextual(arm) => {
+                self.normal_input_value(&arm.body, Some(result_type), &mut candidate, depth + 1)?
+                    .0
+            }
+        };
+        if candidate.facts.is_reachable() {
+            if join_state.compose_tags {
+                if let (Some(selected), Some(condition)) = (selected, result.condition.as_ref()) {
+                    let condition = self.scoped_condition(condition, &candidate, existing)?;
+                    let tagged =
+                        std::mem::replace(&mut join_state.tagged_condition, Condition::Bool(false));
+                    join_state.tagged_condition =
+                        disjunction(tagged, conjunction(selected, condition));
+                } else {
+                    join_state.compose_tags = false;
+                }
+            }
+            join_state.sole_condition = if !join_state.has_result {
+                result
+                    .condition
+                    .as_ref()
+                    .map(|condition| self.scoped_condition(condition, &candidate, existing))
                     .transpose()?
             } else {
                 None
             };
-            let mut selection = tag;
-            for guard in guards.into_iter().flatten() {
-                let condition = self.child(guard, &mut candidate, depth)?.condition;
-                if compose_tags && candidate.facts.is_reachable() {
-                    if let (Some(selected), Some(condition)) =
-                        (selection.take(), condition.as_ref())
-                    {
-                        selection = Some(conjunction(
-                            selected,
-                            self.scoped_condition(condition, &candidate, &existing)?,
-                        ));
-                    } else {
-                        compose_tags = false;
-                    }
-                }
-                let (yes, mut no) = self.split_condition(candidate, condition.as_ref())?;
-                candidate = yes;
-                no.keep(&existing, self.limits)?;
-                guard_failures = Some(match guard_failures.take() {
-                    Some(previous) => previous.merge(no, self.limits)?,
-                    None => no,
-                });
-            }
-            let selected = if compose_tags {
-                if let (Some(selection), Some(pattern_selection)) = (selection, pattern_selection) {
-                    let selected_alternative = conjunction(
-                        alternative_remaining.copy_bounded(self.limits, 0)?,
-                        selection,
-                    );
-                    let selected = conjunction(
-                        remaining_condition.copy_bounded(self.limits, 0)?,
-                        selected_alternative.copy_bounded(self.limits, 0)?,
-                    );
-                    arm_success = disjunction(arm_success, selected_alternative);
-                    alternative_remaining =
-                        conjunction(alternative_remaining, negation(pattern_selection));
-                    if last {
-                        remaining_condition =
-                            conjunction(remaining_condition, negation(arm_success));
-                        alternative_remaining = Condition::Bool(true);
-                        arm_success = Condition::Bool(false);
-                    }
-                    Some(selected)
-                } else {
-                    compose_tags = false;
-                    None
-                }
+            if let Some(root) = result_root {
+                self.bind_result(&mut candidate, root, result_type, result)?;
+            } else if !join_state.has_result {
+                join_state.joined_value = result;
             } else {
-                None
-            };
-            let result = match arm {
-                MatchCase::Expression(arm) if tail => {
-                    self.tail(&arm.body, &mut candidate, depth)?;
-                    Value::default()
-                }
-                MatchCase::Expression(arm) => self.child(&arm.body, &mut candidate, depth)?,
-                MatchCase::Contextual(arm) => {
-                    self.normal_input_value(
-                        &arm.body,
-                        Some(result_type),
-                        &mut candidate,
-                        depth + 1,
-                    )?
-                    .0
-                }
-            };
-            if candidate.facts.is_reachable() {
-                if compose_tags {
-                    if let (Some(selected), Some(condition)) = (selected, result.condition.as_ref())
-                    {
-                        let condition = self.scoped_condition(condition, &candidate, &existing)?;
-                        tagged_condition =
-                            disjunction(tagged_condition, conjunction(selected, condition));
-                    } else {
-                        compose_tags = false;
-                    }
-                }
-                sole_condition = if !has_result {
-                    result
-                        .condition
-                        .as_ref()
-                        .map(|condition| self.scoped_condition(condition, &candidate, &existing))
-                        .transpose()?
-                } else {
-                    None
-                };
-                if let Some(root) = result_root {
-                    self.bind_result(&mut candidate, root, result_type, result)?;
-                } else {
-                    joined_value = if !has_result {
-                        result
-                    } else {
-                        joined_value.join(&result, self.limits, 0)?
-                    };
-                }
-                has_result = true;
+                join_state.joined_value = join_state.joined_value.join(&result, self.limits, 0)?;
             }
-            candidate.keep(&result_scope, self.limits)?;
-            failure.keep(&existing, self.limits)?;
-            if last {
-                if let Some(guard_failed) = guard_failures.take() {
-                    failure = failure.merge(guard_failed, self.limits)?;
-                }
+            join_state.has_result = true;
+        }
+        candidate.keep(result_scope, self.limits)?;
+        failure.keep(existing, self.limits)?;
+        if last {
+            if let Some(guard_failed) = join_state.guard_failures.take() {
+                failure = failure.merge(guard_failed, self.limits)?;
             }
-            merged = merged.merge(candidate, self.limits)?;
-            pending = failure;
         }
-        // Exhaustiveness is checked by elaboration. A residual failure path
-        // would terminate with NonExhaustiveMatch, never yield a normal result.
-        *state = merged;
-        if compose_tags {
-            sole_condition = Some(tagged_condition);
-        }
+        let merged = join_state.merged.take().expect("match cases merged state");
+        join_state.merged = Some(merged.merge(candidate, self.limits)?);
+        join_state.pending = Some(failure);
+        Ok(())
+    }
+
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn finish_match_cases(
+        &mut self,
+        state: &mut State,
+        result_root: Option<PlaceId>,
+        has_result: bool,
+        compose_tags: bool,
+        tagged_condition: Condition,
+        sole_condition: Option<Condition>,
+        joined_value: Value,
+    ) -> Result<Value, Reason> {
+        let sole_condition = if compose_tags {
+            Some(tagged_condition)
+        } else {
+            sole_condition
+        };
         if let Some(root) = result_root {
             if has_result {
                 let mut value = self.local_value_at(state, root)?;
@@ -1284,6 +1570,22 @@ impl Walker<'_> {
         }
         Ok(joined_value)
     }
+}
+
+type CollectedMatchCase<'b> = (MatchCase<'b>, &'b Pattern, [Option<&'b Expr>; 2], bool);
+
+struct MatchCasesState {
+    pending: Option<State>,
+    merged: Option<State>,
+    joined_value: Value,
+    has_result: bool,
+    sole_condition: Option<Condition>,
+    tagged_condition: Condition,
+    remaining_condition: Condition,
+    alternative_remaining: Condition,
+    arm_success: Condition,
+    guard_failures: Option<State>,
+    compose_tags: bool,
 }
 
 impl Walker<'_> {

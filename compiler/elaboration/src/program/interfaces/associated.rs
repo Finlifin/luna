@@ -182,53 +182,63 @@ impl Checker<'_, '_> {
             return Ok(Some(value));
         }
 
-        if interface != requested
-            && !self
-                .symbolic_interface_evidence(&subject, &requested)
-                .map_err(|e| capability_query_error(span, e))?
-        {
-            let resolution = self
-                .resolve_trait_capability(&requested, &subject, Budget::default())
-                .map_err(|message| error(span, message))?;
-            if !matches!(
-                resolution.selection,
-                crate::implementation::Selection::Selected(_)
-            ) {
-                return Err(error(span, "requested interface view is not established"));
+        if interface != requested {
+            let incomplete_requested = match self.symbolic_interface_evidence(&subject, &requested)
+            {
+                Ok(true) => None,
+                Ok(false) => Some(None),
+                Err(e @ nir::NominalAdmissionError::Unresolved(_)) => Some(Some(e)),
+                Err(e) => return Err(capability_query_error(span, e)),
+            };
+            if let Some(incomplete) = incomplete_requested {
+                let resolution = self
+                    .resolve_trait_capability(&requested, &subject, Budget::default())
+                    .map_err(|message| error(span, message))?;
+                if !matches!(
+                    resolution.selection,
+                    crate::implementation::Selection::Selected(_)
+                ) {
+                    if let Some(given_error) = incomplete {
+                        return Err(capability_query_error(span, given_error));
+                    }
+                    return Err(error(span, "requested interface view is not established"));
+                }
             }
         }
-        if self
-            .symbolic_interface_evidence(&subject, &interface)
-            .map_err(|e| capability_query_error(span, e))?
-        {
-            // Given evidence fixes the member's origin, not its selected value.
-            // In particular, a default must not become an abstract equality.
-            let (parameters, inputs) = self.interface_substitution(&interface, &subject);
-            let ty = self.instantiate_input_types(&member_type, &parameters, &inputs, span)?;
-            if ty != p(P::Type) {
+        let incomplete_given = match self.symbolic_interface_evidence(&subject, &interface) {
+            Ok(true) => {
+                // Given evidence fixes the member's origin, not its selected value.
+                // In particular, a default must not become an abstract equality.
+                let (parameters, inputs) = self.interface_substitution(&interface, &subject);
+                let ty = self.instantiate_input_types(&member_type, &parameters, &inputs, span)?;
+                if ty != p(P::Type) {
+                    return Ok(Some(n::Expr {
+                        ty,
+                        source: source(span),
+                        kind: K::AssociatedValue {
+                            interface,
+                            member,
+                            subject,
+                        },
+                    }));
+                }
                 return Ok(Some(n::Expr {
                     ty,
                     source: source(span),
-                    kind: K::AssociatedValue {
-                        interface,
-                        member,
-                        subject,
-                    },
+                    kind: K::TypeValue(Term::AssociatedType {
+                        origin: Box::new(nir::AssociatedTypeOrigin {
+                            interface: interface.declaration,
+                            member,
+                        }),
+                        arguments: interface.arguments,
+                        subject: Box::new(subject),
+                    }),
                 }));
             }
-            return Ok(Some(n::Expr {
-                ty,
-                source: source(span),
-                kind: K::TypeValue(Term::AssociatedType {
-                    origin: Box::new(nir::AssociatedTypeOrigin {
-                        interface: interface.declaration,
-                        member,
-                    }),
-                    arguments: interface.arguments,
-                    subject: Box::new(subject),
-                }),
-            }));
-        }
+            Ok(false) => None,
+            Err(e @ nir::NominalAdmissionError::Unresolved(_)) => Some(e),
+            Err(e) => return Err(capability_query_error(span, e)),
+        };
         if std::iter::once(&subject)
             .chain(&interface.arguments)
             .any(|ty| {
@@ -236,6 +246,9 @@ impl Checker<'_, '_> {
                     .is_ok_and(|slots| !slots.is_empty())
             })
         {
+            if let Some(given_error) = incomplete_given {
+                return Err(capability_query_error(span, given_error));
+            }
             return Err(Error {
                 retry_after_capability_progress: true,
                 ..error(
@@ -248,6 +261,9 @@ impl Checker<'_, '_> {
             .resolve_trait_capability(&interface, &subject, Budget::default())
             .map_err(|message| error(span, message))?;
         let crate::implementation::Selection::Selected(selected) = resolution.selection else {
+            if let Some(given_error) = incomplete_given {
+                return Err(capability_query_error(span, given_error));
+            }
             return Err(Error {
                 retry_after_capability_progress: true,
                 ..error(

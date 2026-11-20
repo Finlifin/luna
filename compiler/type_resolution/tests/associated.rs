@@ -280,6 +280,80 @@ fn concrete_projection_inputs_select_values_despite_scoped_givens() {
 }
 
 #[test]
+fn closed_and_coherent_projections_ignore_unrelated_unvalidated_given_models() {
+    use type_resolution::ptc::Formula;
+
+    let mut source = contract();
+    source.associated[0].default = Some(value(ty(P::Bool)));
+    let mut marker = contract();
+    marker.declaration = id(99);
+    marker.self_parameter = id(100);
+    marker.associated.clear();
+    let generic_param = id(20);
+    let mut pointer_impl = implementation(Term::Pointer(Box::new(rigid(20))), ty(P::U16));
+    pointer_impl.declaration = id(5);
+    pointer_impl.type_parameters = vec![generic_param];
+    pointer_impl.requirements = vec![TypePredicate::Trait(TraitRequirement {
+        subject: rigid(20),
+        interface: id(1),
+        interface_arguments: vec![],
+    })];
+    let package = nir::program::Package {
+        traits: vec![source, marker],
+        implementations: vec![implementation(ty(P::Bool), ty(P::Char)), pointer_impl],
+        ..Default::default()
+    };
+    let (declarations, _) =
+        type_resolution::dispatch::DeclarationWorld::new(&package, Budget::default(), None)
+            .unwrap();
+    let mut context = Context::default();
+    context.assume(Formula::from_predicate(&TypePredicate::Trait(
+        TraitRequirement {
+            subject: rigid(91),
+            interface: id(99),
+            interface_arguments: vec![],
+        },
+    )));
+    let assumptions = [TraitRequirement {
+        subject: rigid(90),
+        interface: id(1),
+        interface_arguments: vec![],
+    }];
+    let world = World {
+        index: declarations.index(),
+        implementations: &package.implementations,
+        traits: &package.traits,
+        assumptions: &assumptions,
+        context: &context,
+    };
+    let closed_result = world
+        .associated_type_view(&projection(ty(P::Bool), vec![]), Budget::default())
+        .unwrap();
+    assert_eq!(closed_result.value, ty(P::Char));
+    assert_eq!(closed_result.steps.len(), 1);
+    assert_eq!(
+        closed_result.steps[0].resolution.evidence.implementation,
+        id(4)
+    );
+
+    let open_pointer_result = world
+        .associated_type_view(
+            &projection(Term::Pointer(Box::new(rigid(90))), vec![]),
+            Budget::default(),
+        )
+        .unwrap();
+    assert_eq!(open_pointer_result.value, ty(P::U16));
+    assert_eq!(open_pointer_result.steps.len(), 1);
+    assert_eq!(
+        open_pointer_result.steps[0]
+            .resolution
+            .evidence
+            .implementation,
+        id(5)
+    );
+}
+
+#[test]
 fn declaration_selection_preserves_query_fuel_and_failure_categories() {
     use nir::value_admission::Error;
     use type_resolution::{

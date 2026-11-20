@@ -82,6 +82,72 @@ pub fn infer_with_borrowed_callable_inputs_and_cleanup(
     cleanup: Option<&mut dyn super::super::moves::CleanupPolicy>,
     fuel: &mut usize,
 ) -> Result<Summary, String> {
+    infer_with_borrowed_callable_inputs_and_cleanup_cached(
+        package,
+        declaration,
+        arguments,
+        inputs,
+        code_inputs,
+        effects,
+        borrowed,
+        cleanup,
+        None,
+        TextProvenance::Unchecked,
+        None,
+        fuel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn infer_with_borrowed_callable_inputs_and_cleanup_cached<'a>(
+    package: &Package,
+    declaration: DeclarationId,
+    arguments: &[Term],
+    inputs: &BTreeMap<CallableInput, CallableResult>,
+    code_inputs: &CodeInputs<'_>,
+    effects: &[EffectInput],
+    borrowed: &BorrowedCallableInputs,
+    cleanup: Option<&'a mut dyn super::super::moves::CleanupPolicy>,
+    declarations: Option<&'a crate::declarations::Metadata<'a>>,
+    text_provenance: TextProvenance,
+    summary_cache: Option<&'a mut SummaryCache>,
+    fuel: &mut usize,
+) -> Result<Summary, String> {
+    infer_with_borrowed_callable_inputs_and_cleanup_full_context(
+        package,
+        declaration,
+        arguments,
+        inputs,
+        code_inputs,
+        effects,
+        borrowed,
+        cleanup,
+        None,
+        None,
+        declarations,
+        text_provenance,
+        summary_cache,
+        fuel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn infer_with_borrowed_callable_inputs_and_cleanup_full_context<'a>(
+    package: &Package,
+    declaration: DeclarationId,
+    arguments: &[Term],
+    inputs: &BTreeMap<CallableInput, CallableResult>,
+    code_inputs: &CodeInputs<'_>,
+    effects: &[EffectInput],
+    borrowed: &BorrowedCallableInputs,
+    cleanup: Option<&'a mut dyn super::super::moves::CleanupPolicy>,
+    source: Option<::materialization::DeclarationSource<'a>>,
+    methods: Option<&'a mut MethodCallees>,
+    declarations: Option<&'a crate::declarations::Metadata<'a>>,
+    text_provenance: TextProvenance,
+    summary_cache: Option<&'a mut SummaryCache>,
+    fuel: &mut usize,
+) -> Result<Summary, String> {
     for value in inputs.values() {
         if !matches!(
             value,
@@ -102,7 +168,7 @@ pub fn infer_with_borrowed_callable_inputs_and_cleanup(
     }
     charge(borrowed, fuel)?;
     let prepared = own_code_inputs(code_inputs, &[], &[], fuel)?;
-    infer_borrowed_context_with_cleanup(
+    infer_borrowed_context_with_full_context(
         package,
         declaration,
         arguments,
@@ -111,6 +177,11 @@ pub fn infer_with_borrowed_callable_inputs_and_cleanup(
         effects,
         borrowed,
         cleanup,
+        source,
+        methods,
+        declarations,
+        text_provenance,
+        summary_cache,
         fuel,
     )
 }
@@ -220,10 +291,15 @@ impl Infer<'_, '_> {
             {
                 vec![(vec![], pointee)]
             } else {
-                pointer_input_layout(self.package, &parameter.ty, self.fuel)?
-                    .into_iter()
-                    .map(|leaf| (leaf.input_fields, leaf.pointee))
-                    .collect()
+                pointer_input_layout_for(
+                    self.package,
+                    &parameter.ty,
+                    self.round.text_provenance,
+                    self.fuel,
+                )?
+                .into_iter()
+                .map(|leaf| (leaf.input_fields, leaf.pointee))
+                .collect()
             };
             for (input_fields, pointee) in leaves {
                 let Some(actual) = actuals

@@ -1000,12 +1000,15 @@ pub fn integer_representation_valid(input: &Term, result: &Term) -> bool {
     }
 }
 
-/// Checked conversion between machine integer representations returns `?Dst`.
+/// Checked conversion between machine integer representations or `u32 -> char` returns `?Dst`.
 pub fn try_integer_convert_valid(input: &Term, result: &Term) -> bool {
     use crate::Primitive as P;
     let is_machine = |p: &P| p.fixed_integer_layout().is_some() || matches!(p, P::Usize | P::Isize);
     match input {
         Term::Primitive(P::Never) => *result == Term::Primitive(P::Never),
+        Term::Primitive(P::U32) if matches!(result, Term::Optional(inner) if **inner == Term::Primitive(P::Char)) => {
+            true
+        }
         Term::Primitive(src) if is_machine(src) => matches!(
             result,
             Term::Optional(inner) if matches!(inner.as_ref(), Term::Primitive(dst) if is_machine(dst))

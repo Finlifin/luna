@@ -1,11 +1,13 @@
 {- Runtime host facilities. std.prelude is imported explicitly. -}
 pub use builtin.*;
+use collections_impl.vec;
 use fmt_impl.arguments;
 use fmt_impl.parse;
 use fs_impl.file;
 use io_impl.{errors, writer}
 use mem_impl.{allocator, boxed, layout}
 use platform.{linux as linux_impl, unix as unix_impl}
+use string_impl.string as string_mod;
 
 pub mod os {
     pub mod linux {
@@ -21,7 +23,7 @@ pub mod io {
     pub use builtin.fmt.ByteWriter;
     pub use errors.Error;
     pub use unix_impl.read_byte;
-    pub use writer.{Writer, stderr, stdout, write_all}
+    pub use writer.{Writer, stderr, stdout, write_all, write_all_raw, write_all_str}
 }
 
 pub mod fs {
@@ -34,14 +36,45 @@ pub mod mem {
     pub use layout.Layout;
 }
 
+pub mod collections {
+    pub use vec.{Vec, VecIter}
+}
+
+pub mod string {
+    pub use string_mod.{String, Utf8Error}
+}
+
 pub mod fmt {
-    pub use arguments.{eprint, eprintln, print, print_value, println, println_value, write_fmt}
+    pub use arguments.{
+        eprint,
+        eprintln,
+        format,
+        format_into,
+        print,
+        print_value,
+        println,
+        println_value,
+        write_fmt,
+    }
     pub use builtin.fmt.Display;
     pub use parse.{FormatError, FormatPiece, FormatPlan, Parse}
 }
 
 pub mod prelude {
-    pub use arguments.{eprint, eprintln, print, print_value, println, println_value, write_fmt}
+    pub use arguments.{
+        eprint,
+        eprintln,
+        format,
+        format_into,
+        print,
+        print_value,
+        println,
+        println_value,
+        write_fmt,
+    }
+    pub use boxed.Box;
     pub use builtin.fmt.Display;
     pub use builtin.prelude.*;
+    pub use string_mod.String;
+    pub use vec.Vec;
 }

@@ -240,11 +240,71 @@ impl DeclarationSnapshot {
     }
 }
 
+/// Reusable declaration directory and theory for an immutable borrowed `Package`.
+/// Shares prepared metadata across queries without cloning the `Package`.
+pub struct BorrowedCatalog<'a> {
+    package: &'a n::Package,
+    theory: OnceLock<DeclarationTheory>,
+    metadata: OnceLock<Arc<DeclarationMetadata>>,
+}
+
+impl<'a> BorrowedCatalog<'a> {
+    pub fn new(package: &'a n::Package) -> Self {
+        Self {
+            package,
+            theory: OnceLock::new(),
+            metadata: OnceLock::new(),
+        }
+    }
+
+    pub fn package(&self) -> &'a n::Package {
+        self.package
+    }
+
+    pub fn package_context(
+        &self,
+        steps: &mut usize,
+    ) -> Result<Context, nir::normal_forms::ValidationError> {
+        *steps = steps
+            .checked_sub(1)
+            .ok_or(nir::normal_forms::ValidationError::Budget)?;
+        let theory = match self.theory.get() {
+            Some(theory) => theory,
+            None => {
+                let completed = DeclarationTheory::from_package_metered(self.package, steps)?;
+                self.theory.get_or_init(|| completed)
+            }
+        };
+        Ok(theory.clone().into_context())
+    }
+
+    pub fn prepare(&self, budget: &mut Budget) -> Result<(), AdmissionError> {
+        self.ensure_metadata(budget).map(|_| ())
+    }
+
+    fn metadata(&self, budget: &mut Budget) -> Result<Arc<DeclarationMetadata>, AdmissionError> {
+        construction::spend(&mut budget.steps, 1)?;
+        Ok(Arc::clone(self.ensure_metadata(budget)?))
+    }
+
+    fn ensure_metadata(
+        &self,
+        budget: &mut Budget,
+    ) -> Result<&Arc<DeclarationMetadata>, AdmissionError> {
+        if let Some(metadata) = self.metadata.get() {
+            return Ok(metadata);
+        }
+        let completed = DeclarationMetadata::build(self.package, budget)?;
+        Ok(self.metadata.get_or_init(|| completed))
+    }
+}
+
 /// The source and its directory cannot be supplied independently. Borrowed
-/// scratch sources build privately; retained snapshots share only metadata.
+/// scratch sources build privately; prepared catalogs and snapshots share metadata.
 #[derive(Clone, Copy)]
 pub enum DeclarationSource<'a> {
     Borrowed(&'a n::Package),
+    Prepared(&'a BorrowedCatalog<'a>),
     Snapshot(&'a DeclarationSnapshot),
 }
 impl<'a> DeclarationSource<'a> {
@@ -261,6 +321,7 @@ impl<'a> DeclarationSource<'a> {
     pub fn package(self) -> &'a n::Package {
         match self {
             Self::Borrowed(package) => package,
+            Self::Prepared(catalog) => catalog.package(),
             Self::Snapshot(snapshot) => snapshot.package(),
         }
     }
@@ -271,6 +332,7 @@ impl<'a> DeclarationSource<'a> {
     ) -> Result<Context, nir::normal_forms::ValidationError> {
         match self {
             Self::Snapshot(snapshot) => snapshot.package_context(steps),
+            Self::Prepared(catalog) => catalog.package_context(steps),
             Self::Borrowed(package) => Context::from_package_metered(package, steps),
         }
     }
@@ -301,7 +363,7 @@ impl<'a> DeclarationSource<'a> {
                     .ok_or(nir::copy_budget::CopyBudgetExhausted::Steps)?;
                 Ok(snapshot.clone())
             }
-            Self::Borrowed(_) => self.retain_declarations(fuel),
+            Self::Borrowed(_) | Self::Prepared(_) => self.retain_declarations(fuel),
         }
     }
 
@@ -332,7 +394,7 @@ impl<'a> DeclarationSource<'a> {
                         snapshot.0.programs.clone(),
                         snapshot.0.data.clone(),
                     ),
-                    Self::Borrowed(_) => DeclarationSnapshot::new(package),
+                    Self::Borrowed(_) | Self::Prepared(_) => DeclarationSnapshot::new(package),
                 })
             }
         }
@@ -352,6 +414,7 @@ impl<'a> DeclarationSource<'a> {
     ) -> Result<Arc<DeclarationMetadata>, AdmissionError> {
         match self {
             Self::Borrowed(package) => DeclarationMetadata::build(package, budget),
+            Self::Prepared(catalog) => catalog.metadata(budget),
             Self::Snapshot(snapshot) => snapshot.metadata(budget),
         }
     }

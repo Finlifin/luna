@@ -1,7 +1,10 @@
 use builtin.fmt.{ByteWriter, Display}
+use collections_impl.vec.Vec;
 use fmt_impl.parse.{FormatPlan, Parse}
 use io_impl.errors.Error;
 use io_impl.writer.{stderr, stdout, write_all}
+use mem_impl.allocator.AllocError;
+use string_impl.string.String;
 
 pub fn print(comptime text: str) -> !Error void {
     write_all<text>(1)
@@ -9,9 +12,9 @@ pub fn print(comptime text: str) -> !Error void {
 
 {- Emit one unescaped literal segment selected by field position. -}
 fn write_segment(
-    output: *std.io.Writer,
+    output: *W,
     index: usize,
-) -> !Error void where segments: meta.List<str> {
+) -> !W.as(ByteWriter).Error void where W :- ByteWriter, segments: meta.List<str> {
     inline for i in 0..segments.length() {
         const segment_index: usize = i.to_usize();
         if index == segment_index {
@@ -19,22 +22,21 @@ fn write_segment(
                 value? => value,
                 null => "",
             }
-            let writer = output.*;
-            return writer.write_all<segment>();
+            return output.write_str(segment);
         }
     }
 }
 
 fn write_fmt_tuple(
-    output: *std.io.Writer,
+    output: *W,
     comptime format: str,
     values: defer Parse(format),
-) -> !Error void {
+) -> !W.as(ByteWriter).Error void where W :- ByteWriter {
     const segments = FormatPlan.literal_segments_for(format);
     const segment_count: usize = segments.length().to_usize();
     var index: usize = 0;
     inline for value in values'tuple_enumerate {
-        write_segment<segments>(output, index)!;
+        write_segment<W, segments>(output, index)!;
         const T = value'type;
         inline if T :- Display {
             value.write(output)!;
@@ -43,15 +45,32 @@ fn write_fmt_tuple(
             index = index + 1;
         }
     }
-    write_segment<segments>(output, index)
+    write_segment<W, segments>(output, index)
 }
 
 pub fn write_fmt(
-    output: *std.io.Writer,
+    output: *W,
     comptime format: str,
     ...varargs: defer Parse(format),
-) -> !Error void {
+) -> !W.as(ByteWriter).Error void where W :- ByteWriter {
     write_fmt_tuple(output, format, varargs)
+}
+
+pub fn format(comptime format: str, ...varargs: defer Parse(format)) -> !AllocError String {
+    var bytes = Vec<u8>.new();
+    write_fmt_tuple(bytes.ref, format, varargs)!;
+    String.from_utf8_lossy(bytes)
+}
+
+pub fn format_into(
+    target: *String,
+    comptime format: str,
+    ...varargs: defer Parse(format),
+) -> !AllocError void {
+    var bytes = Vec<u8>.new();
+    write_fmt_tuple(bytes.ref, format, varargs)!;
+    var formatted = String.from_utf8_lossy(bytes)!;
+    target.push_string(formatted.ref)
 }
 
 pub fn println(comptime format: str, ...varargs: defer Parse(format)) -> !Error void {

@@ -245,7 +245,16 @@ impl Condition {
                 relation,
                 constant,
             } => {
-                facts.bound(*value, limits)?;
+                let bound = facts.bound(*value, limits)?;
+                if !facts.inequalities_mention(*value) {
+                    let constant = limits.integer(constant)?;
+                    let range = Interval::new(
+                        bound.lower.subtract(&constant, &mut limits.arithmetic)?,
+                        bound.upper.subtract(&constant, &mut limits.arithmetic)?,
+                        limits,
+                    )?;
+                    return enclosed_comparison(&range, *relation, limits);
+                }
                 let left = Polynomial::variable(*value, limits)?;
                 (
                     left.subtract(

@@ -12,28 +12,7 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         check: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        self.with_lexical_scope(owner, None, input_facts::State::default(), |this| {
-            let saved_code = std::mem::take(&mut this.in_code_body);
-            let saved_holes = std::mem::take(&mut this.quote_holes);
-            let pattern_quote = this.pattern_quote_pending.take();
-            let checking_generator = std::mem::take(&mut this.checking_code_generator);
-            let generator_data = std::mem::take(&mut this.generator_data);
-            let generator_cells = std::mem::take(&mut this.generator_cells);
-            let dependencies = std::mem::take(&mut this.abstract_code_dependencies);
-            let codes = std::mem::take(&mut this.code_values);
-            let patterns = std::mem::take(&mut this.pattern_codes);
-            let result = check(this);
-            this.pattern_codes = patterns;
-            this.code_values = codes;
-            this.abstract_code_dependencies = dependencies;
-            this.generator_cells = generator_cells;
-            this.generator_data = generator_data;
-            this.checking_code_generator = checking_generator;
-            this.pattern_quote_pending = pattern_quote;
-            this.in_code_body = saved_code;
-            this.quote_holes = saved_holes;
-            result
-        })
+        self.with_lexical_scope(owner, None, input_facts::State::default(), check)
     }
 
     /// Enter a declaration without substitutions from the requesting expression.
@@ -89,12 +68,20 @@ impl Checker<'_, '_> {
         let saved_spread = std::mem::replace(&mut self.describing_open_spread, false);
         let saved_owner = self.signature_owner.replace(owner);
         let saved_instance = std::mem::replace(&mut self.open_instance, instance);
+        let saved_instance_capabilities = self.open_instance_capabilities.take();
         let saved_inline = self.inline_selection.take();
         let saved_match_input = self.inline_match_input.take();
         let saved_unselected = std::mem::replace(&mut self.in_unselected_inline, false);
         let saved_locals = std::mem::take(&mut self.locals);
-        let saved_code = self.code_values.clone();
-        let saved_patterns = self.pattern_codes.clone();
+        let saved_code = std::mem::take(&mut self.in_code_body);
+        let saved_holes = std::mem::take(&mut self.quote_holes);
+        let pattern_quote = self.pattern_quote_pending.take();
+        let checking_generator = std::mem::take(&mut self.checking_code_generator);
+        let generator_data = std::mem::take(&mut self.generator_data);
+        let generator_cells = std::mem::take(&mut self.generator_cells);
+        let dependencies = std::mem::take(&mut self.abstract_code_dependencies);
+        let saved_code_values = std::mem::take(&mut self.code_values);
+        let saved_patterns = std::mem::take(&mut self.pattern_codes);
         let saved_staged_locals = std::mem::take(&mut self.open_staged_locals);
         let saved_staged_locals_members = std::mem::take(&mut self.open_member_locals);
         let saved_captures = std::mem::take(&mut self.captures);
@@ -122,12 +109,20 @@ impl Checker<'_, '_> {
         self.describing_open_spread = saved_spread;
         self.signature_owner = saved_owner;
         self.open_instance = saved_instance;
+        self.open_instance_capabilities = saved_instance_capabilities;
         self.inline_selection = saved_inline;
         self.inline_match_input = saved_match_input;
         self.in_unselected_inline = saved_unselected;
         self.locals = saved_locals;
-        self.code_values = saved_code;
         self.pattern_codes = saved_patterns;
+        self.code_values = saved_code_values;
+        self.abstract_code_dependencies = dependencies;
+        self.generator_cells = generator_cells;
+        self.generator_data = generator_data;
+        self.checking_code_generator = checking_generator;
+        self.pattern_quote_pending = pattern_quote;
+        self.quote_holes = saved_holes;
+        self.in_code_body = saved_code;
         self.open_staged_locals = saved_staged_locals;
         self.open_member_locals = saved_staged_locals_members;
         self.captures = saved_captures;

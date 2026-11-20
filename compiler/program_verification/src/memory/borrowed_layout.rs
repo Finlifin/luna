@@ -74,6 +74,13 @@ impl fmt::Display for BorrowedInputLeaf {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TextProvenance {
+    #[default]
+    Unchecked,
+    VerifiedByRegionAnalysis,
+}
+
 /// Existing pointer-only consumers must reject text leaves explicitly until
 /// they can transport and validate backing-region evidence at call boundaries.
 pub fn pointer_input_layout(
@@ -87,6 +94,26 @@ pub fn pointer_input_layout(
             "string-view memory provenance is not implemented; str requires its backing character storage to remain valid; {leaf}"
         )),
     }).collect()
+}
+
+/// Separate text views from pointer inputs only after backing-region
+/// provenance has been verified for the compilation graph.
+pub fn pointer_input_layout_for(
+    package: Option<&Package>,
+    ty: &Term,
+    provenance: TextProvenance,
+    fuel: &mut usize,
+) -> Result<Vec<PointerInputLeaf>, String> {
+    match provenance {
+        TextProvenance::Unchecked => pointer_input_layout(package, ty, fuel),
+        TextProvenance::VerifiedByRegionAnalysis => Ok(borrowed_input_layout(package, ty, fuel)?
+            .into_iter()
+            .filter_map(|leaf| match leaf {
+                BorrowedInputLeaf::Pointer(leaf) => Some(leaf),
+                BorrowedInputLeaf::Text(_) => None,
+            })
+            .collect()),
+    }
 }
 
 // Borrow original closure environments and move already instantiated fields.
@@ -239,7 +266,11 @@ pub fn borrowed_input_layout(
                 ty.as_ref(),
                 Term::Function { .. }
                     | Term::UnsafeFunction(_)
-                    | Term::Primitive(Primitive::Void | Primitive::Never)
+                    | Term::ClosureContextType
+                    | Term::ClosureContextValue(_)
+                    | Term::Primitive(
+                        Primitive::Void | Primitive::Never | Primitive::Type | Primitive::Unit,
+                    )
             )
         {
             continue;
@@ -450,6 +481,15 @@ mod tests {
                 .unwrap_err()
                 .contains("string-view memory provenance")
         );
+        let verified = pointer_input_layout_for(
+            None,
+            &ty,
+            TextProvenance::VerifiedByRegionAnalysis,
+            &mut 10_000,
+        )
+        .unwrap();
+        assert_eq!(verified.len(), 1);
+        assert_eq!(verified[0].input_fields, vec![0]);
     }
 
     #[test]
@@ -492,5 +532,29 @@ mod tests {
             deep = Term::Optional(Box::new(deep));
         }
         assert!(borrowed_input_layout(None, &deep, &mut 100_000).is_err());
+    }
+
+    #[test]
+    fn erased_and_closure_context_terms_have_no_borrowed_leaves_and_unknowns_fail_closed() {
+        let context_value = Term::ClosureContextValue(vec![
+            Term::Primitive(Primitive::Str),
+            Term::Pointer(Box::new(Term::Primitive(Primitive::U8))),
+        ]);
+        for ty in [
+            Term::Primitive(Primitive::Type),
+            Term::ClosureContextType,
+            context_value.clone(),
+            Term::Tuple(vec![Term::Primitive(Primitive::Type), context_value]),
+        ] {
+            assert_eq!(borrowed_input_layout(None, &ty, &mut 1000).unwrap(), vec![]);
+        }
+        let unknown_rigid = Term::Rigid {
+            declaration: DeclarationId {
+                package: 1,
+                local: 2,
+            },
+            sort: nir::Sort::Type,
+        };
+        assert!(borrowed_input_layout(None, &unknown_rigid, &mut 1000).is_err());
     }
 }

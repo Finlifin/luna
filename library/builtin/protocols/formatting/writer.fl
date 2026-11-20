@@ -1,3 +1,6 @@
+use bindings.{str_byte, str_byte_length}
+use primitives.{str, u64, u8, void}
+
 {-
     A synchronous byte sink. Success accepts the byte exactly once. Failure
     accepts no byte from that operation; earlier successful writes remain.
@@ -7,4 +10,17 @@ pub trait ByteWriter {
     assoc Error: Type;
 
     fn write_byte(*self, byte: u8) -> !Error void;
+
+    fn write_str(*self, text: str) -> !Error void {
+        let length = str_byte_length(text);
+        var index: u64 = 0;
+        while index < length {
+            let byte = str_byte(text, index) match {
+                found? => found,
+                null => break,
+            }
+            self.write_byte(byte)!;
+            index = index + 1;
+        }
+    }
 }

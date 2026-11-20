@@ -693,6 +693,7 @@ pub fn analyze(function: &Function, limits: &mut Limits) -> Result<Report, Error
         &function.requirements,
         None,
         None,
+        None,
         limits,
         true,
     )
@@ -706,6 +707,7 @@ pub fn analyze_in_package(
         CallableProgram::function(function),
         &function.requirements,
         Some(package),
+        None,
         None,
         limits,
         true,
@@ -775,6 +777,7 @@ pub fn validate_residual_contracts(
             &function.requirements,
             Some(package),
             None,
+            None,
             limits,
             false,
         )?;
@@ -803,19 +806,24 @@ pub fn prove_implication(
         &declaration.requirements,
         package,
         None,
+        None,
         limits,
         true,
     )
 }
 
-fn analyze_impl(
-    program: CallableProgram<'_>,
-    requirements: &[nir::program::TypePredicate],
-    package: Option<&nir::program::Package>,
-    imports: Option<&RegionDeclarations>,
+fn analyze_impl<'a, 'b>(
+    program: CallableProgram<'b>,
+    requirements: &'b [nir::program::TypePredicate],
+    package: Option<&'a nir::program::Package>,
+    cache: Option<&'b mut MachineOwnerCache<'a>>,
+    imports: Option<&'a RegionDeclarations>,
     limits: &mut Limits,
     collect_points: bool,
-) -> Result<Report, Error> {
+) -> Result<Report, Error>
+where
+    'a: 'b,
+{
     let function = program.parts();
     let source = function.source;
     let error = |reason| Error { source, reason };
@@ -933,6 +941,20 @@ fn analyze_impl(
             }
         }
     }
+    let (declaration_source, declarations, method_callees, memory_summaries) = match cache {
+        Some(cache) => (
+            Some(cache.source),
+            cache.declarations.clone(),
+            super::memory::MethodCalleesStorage::Borrowed(&mut cache.method_callees),
+            SummaryCacheStorage::Borrowed(&mut cache.memory_summaries),
+        ),
+        None => (
+            None,
+            std::rc::Rc::new(crate::declarations::Metadata::new(package)),
+            Default::default(),
+            Default::default(),
+        ),
+    };
     let mut walker = Walker {
         handler_unstable_locals: Some(addressed_locals.union(&written_locals).copied().collect()),
         addressed_locals,
@@ -942,9 +964,11 @@ fn analyze_impl(
         next_frame: 1,
         limits,
         package,
+        declaration_source,
+        method_callees,
         imports,
         associated_world: None,
-        declarations: crate::declarations::Metadata::new(package),
+        declarations,
         points: vec![],
         collect_points,
         failure_source: None,
@@ -954,7 +978,8 @@ fn analyze_impl(
         captured_values: BTreeMap::new(),
         associated_scalars: Vec::new(),
         assuming_postcondition: false,
-        memory_summaries: std::collections::HashMap::new(),
+        memory_summaries,
+        failed_memory_summaries: std::collections::HashMap::new(),
         exit_contract: Some(ExitContract {
             conditions: function.postconditions,
             binding: function.result_binding,
@@ -1036,6 +1061,57 @@ struct CallMemoryPlan {
     returned: Option<Vec<nir::program::Place>>,
 }
 
+enum SummaryCacheStorage<'a> {
+    Owned(super::memory::SummaryCache),
+    Borrowed(&'a mut super::memory::SummaryCache),
+}
+impl Default for SummaryCacheStorage<'_> {
+    fn default() -> Self {
+        Self::Owned(Default::default())
+    }
+}
+impl SummaryCacheStorage<'_> {
+    fn as_ref(&self) -> &super::memory::SummaryCache {
+        match self {
+            Self::Owned(cache) => cache,
+            Self::Borrowed(cache) => cache,
+        }
+    }
+    fn as_mut(&mut self) -> &mut super::memory::SummaryCache {
+        match self {
+            Self::Owned(cache) => cache,
+            Self::Borrowed(cache) => cache,
+        }
+    }
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.as_ref().is_empty()
+    }
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.as_ref().len()
+    }
+}
+struct MachineOwnerCache<'a> {
+    source: type_resolution::dispatch::DeclarationSource<'a>,
+    declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
+    method_callees: super::memory::MethodCallees,
+    memory_summaries: super::memory::SummaryCache,
+}
+impl<'a> MachineOwnerCache<'a> {
+    fn new(
+        package: &'a nir::program::Package,
+        source: type_resolution::dispatch::DeclarationSource<'a>,
+    ) -> Self {
+        Self {
+            source,
+            declarations: std::rc::Rc::new(crate::declarations::Metadata::new(Some(package))),
+            method_callees: super::memory::MethodCallees::default(),
+            memory_summaries: super::memory::SummaryCache::default(),
+        }
+    }
+}
+
 struct Walker<'a> {
     addressed_locals: BTreeSet<LocalId>,
     // Handler arms can run at arbitrary request points, so preserve only
@@ -1046,8 +1122,8 @@ struct Walker<'a> {
     // Type bindings are separate from symbolic program-state frames.
     input_frames: Vec<Vec<nir::Sort>>,
     next_frame: u64,
-    memory_summaries:
-        std::collections::HashMap<iir::InstanceKey, std::sync::Arc<super::memory::Summary>>,
+    memory_summaries: SummaryCacheStorage<'a>,
+    failed_memory_summaries: std::collections::HashMap<iir::InstanceKey, usize>,
     exit_contract: Option<ExitContract<'a>>,
     assuming_postcondition: bool,
     next_field: u32,
@@ -1059,8 +1135,10 @@ struct Walker<'a> {
     )>,
     limits: &'a mut Limits,
     package: Option<&'a nir::program::Package>,
+    declaration_source: Option<type_resolution::dispatch::DeclarationSource<'a>>,
+    method_callees: super::memory::MethodCalleesStorage<'a>,
     imports: Option<&'a RegionDeclarations>,
-    declarations: crate::declarations::Metadata<'a>,
+    declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
     associated_world: Option<type_resolution::dispatch::DeclarationWorld<'a>>,
     points: Vec<Point>,
     // Final validation consumes only success/failure, not report snapshots.
@@ -1090,28 +1168,26 @@ impl Walker<'_> {
             return Err(Reason::DepthLimit);
         }
         if let Some(fields) = self.tuple_field_types(ty)? {
+            let mut values = Vec::with_capacity(fields.len());
+            for field in &fields {
+                values.push(self.unknown_value_at(field, depth + 1)?);
+            }
             return Ok(Value {
                 nominal_type: Some(std::sync::Arc::new(ty.clone())),
                 aggregate_kind: Some(AggregateKind::Tuple),
-                fields: Some(
-                    fields
-                        .iter()
-                        .map(|ty| self.unknown_value_at(ty, depth + 1))
-                        .collect::<Result<_, _>>()?,
-                ),
+                fields: Some(values),
                 ..Value::default()
             });
         }
         if let Term::Record(fields) = ty {
+            let mut values = Vec::with_capacity(fields.len());
+            for (_, field) in fields {
+                values.push(self.unknown_value_at(field, depth + 1)?);
+            }
             return Ok(Value {
                 nominal_type: Some(std::sync::Arc::new(ty.clone())),
                 aggregate_kind: Some(AggregateKind::AnonymousRecord),
-                fields: Some(
-                    fields
-                        .iter()
-                        .map(|(_, ty)| self.unknown_value_at(ty, depth + 1))
-                        .collect::<Result<_, _>>()?,
-                ),
+                fields: Some(values),
                 ..Value::default()
             });
         }
@@ -1954,6 +2030,15 @@ impl Walker<'_> {
             } => (*declaration, arguments.as_slice()),
             _ => return None,
         };
+        if !self.declarations.domains_prepared() && self.limits.arithmetic.steps >= 1_000 {
+            let domain_allowance = (self.limits.arithmetic.steps / 2).min(100_000);
+            let mut domain_fuel = domain_allowance;
+            let warmed = self.declarations.domains(&mut domain_fuel).is_ok();
+            self.limits.arithmetic.steps -= domain_allowance - domain_fuel;
+            if !warmed {
+                return None;
+            }
+        }
         let allowance = (self.limits.arithmetic.steps / 4).min(20_000);
         let mut fuel = allowance;
         let result = (|| {
@@ -1965,16 +2050,63 @@ impl Walker<'_> {
                 declaration,
                 arguments: arguments.to_vec().into(),
             };
-            let summary = if let Some(cached) = self.memory_summaries.get(&key) {
+            let summary = if let Some(cached) = self
+                .memory_summaries
+                .as_ref()
+                .get(super::memory::TextProvenance::Unchecked, &key)
+            {
                 cached.clone()
             } else {
+                let infer_allowance = fuel;
+                if self
+                    .failed_memory_summaries
+                    .get(&key)
+                    .is_some_and(|&failed_at| infer_allowance <= failed_at)
+                {
+                    return None;
+                }
                 // A failed attempt is not a property of the instance: resource
                 // exhaustion must not become permanent negative evidence.
-                let summary = std::sync::Arc::new(
-                    super::memory::infer_in_package(package, declaration, arguments, &mut fuel)
-                        .ok()?,
-                );
-                self.memory_summaries.insert(key, summary.clone());
+                // However, retrying the same instance within this walker when
+                // no larger inference allowance is available would only burn
+                // budget repeatedly for the same outcome.
+                let summary = match super::memory::infer_in_package_with_full_context(
+                    package,
+                    declaration,
+                    arguments,
+                    super::memory::TextProvenance::Unchecked,
+                    self.declaration_source,
+                    Some(self.method_callees.as_mut()),
+                    Some(self.declarations.as_ref()),
+                    self.memory_summaries.as_mut(),
+                    &mut fuel,
+                ) {
+                    Ok(inferred) => {
+                        self.failed_memory_summaries.remove(&key);
+                        if let Some(cached) = self
+                            .memory_summaries
+                            .as_ref()
+                            .get(super::memory::TextProvenance::Unchecked, &key)
+                        {
+                            cached.clone()
+                        } else {
+                            let summary = std::sync::Arc::new(inferred);
+                            self.memory_summaries.as_mut().insert(
+                                super::memory::TextProvenance::Unchecked,
+                                key,
+                                summary.clone(),
+                            );
+                            summary
+                        }
+                    }
+                    Err(_) => {
+                        self.failed_memory_summaries
+                            .entry(key)
+                            .and_modify(|prev| *prev = (*prev).max(infer_allowance))
+                            .or_insert(infer_allowance);
+                        return None;
+                    }
+                };
                 summary
             };
             if summary.may_run_cleanup || summary.signature != *callee.ty.callable_signature() {
@@ -3321,6 +3453,7 @@ impl Walker<'_> {
         });
         Ok(())
     }
+    #[inline(never)]
     fn inner(&mut self, expr: &Expr, state: &mut State, depth: usize) -> Result<Value, Reason> {
         self.limits.step(1)?;
         if depth >= 128 {
@@ -3339,12 +3472,12 @@ impl Walker<'_> {
             | K::TypeValue(_)
             | K::Function(_)
             | K::FunctionInstance { .. }
-            | K::TraitMethod { .. } => self.binding_expression(expr, state, depth)?,
+            | K::TraitMethod { .. } => self.binding_expression(expr, state, depth),
             K::Block { .. } | K::CallPreparation { .. } | K::Let { .. } => {
-                self.scope_expression(expr, state, depth)?
+                self.scope_expression(expr, state, depth)
             }
             K::IntegerBinary { .. } | K::IntegerNegate(_) => {
-                self.integer_expression(expr, state, depth)?
+                self.integer_expression(expr, state, depth)
             }
             K::Not(_)
             | K::And(..)
@@ -3354,7 +3487,7 @@ impl Walker<'_> {
             | K::ScalarLess(..)
             | K::ScalarLessEqual(..)
             | K::ScalarGreater(..)
-            | K::ScalarGreaterEqual(..) => self.logical_expression(expr, state, depth)?,
+            | K::ScalarGreaterEqual(..) => self.logical_expression(expr, state, depth),
             K::Snapshot(_)
             | K::EffectResume(_)
             | K::EffectHandle { .. }
@@ -3371,9 +3504,20 @@ impl Walker<'_> {
             | K::Loop { .. }
             | K::Break(_)
             | K::Continue(_)
-            | K::Call { .. } => self.control_expression(expr, state, depth)?,
-            _ => self.general_expression(expr, state, depth)?,
-        };
+            | K::Call { .. } => self.control_expression(expr, state, depth),
+            _ => self.general_expression(expr, state, depth),
+        }?;
+        self.finish_expression(expr, &mut result, state)?;
+        Ok(result)
+    }
+
+    #[inline(never)]
+    fn finish_expression(
+        &mut self,
+        expr: &Expr,
+        result: &mut Value,
+        state: &mut State,
+    ) -> Result<(), Reason> {
         let invalidates_external_reads = match &expr.kind {
             K::Assign { place, .. } | K::BitAssign { place, .. } | K::BitUpdate { place, .. } => {
                 self.limits.step(1)?;
@@ -3422,7 +3566,7 @@ impl Walker<'_> {
                 result.condition = Some(Condition::Bool(truth));
             }
         }
-        Ok(result)
+        Ok(())
     }
     #[inline(never)]
     fn call_expression(
@@ -4403,8 +4547,20 @@ impl Walker<'_> {
                 }
             }
         }
-        if stable_defaults && state.facts.is_reachable() {
-            if let Some(summary) = self.call_summary(callee) {
+        if stable_defaults
+            && state.facts.is_reachable()
+            && !matches!(
+                delivered,
+                Term::Primitive(_) | Term::Function { .. } | Term::UnsafeFunction(_)
+            )
+        {
+            let probe_allowance = (self.limits.arithmetic.steps / 16).min(1024);
+            let mut probe_fuel = probe_allowance;
+            let pure_data =
+                super::memory::data_representation(self.package, delivered, &mut probe_fuel)
+                    .unwrap_or(false);
+            self.limits.arithmetic.steps -= probe_allowance - probe_fuel;
+            if !pure_data && let Some(summary) = self.call_summary(callee) {
                 if !summary.pointer_fields.is_empty() && !summary.may_run_cleanup {
                     let stable_storage = self.call_preserves_pointer_bindings(callee)?;
                     self.expand_owned_shape(&mut result, 0)?;
@@ -4945,7 +5101,6 @@ impl Walker<'_> {
         state: &mut State,
         depth: usize,
     ) -> Result<Value, Reason> {
-        let mut result = Value::default();
         match &expr.kind {
             K::Block {
                 statements,
@@ -4959,37 +5114,46 @@ impl Walker<'_> {
                     self.child(statement, state, depth)?;
                 }
                 if let Some(tail) = tail {
-                    result = self.child(tail, state, depth)?;
+                    self.child(tail, state, depth)
+                } else {
+                    Ok(Value::default())
                 }
             }
-            K::Let { binding, value } => {
-                let value_result = self.child(value, state, depth)?;
-                if state.facts.is_reachable() {
-                    let alias = if matches!(value.ty, Term::Pointer(_)) {
-                        let path = match self.aliased_read_path(value, state)? {
-                            Some(path) => Some(path),
-                            None => self.pointer_value_path(&value_result, state)?,
-                        };
-                        path.and_then(|path| {
-                            state.facts.value(path.root).map(|version| (path, version))
-                        })
-                    } else {
-                        None
-                    };
-                    self.bind_related_value(state, *binding, &value.ty, value_result)?;
-                    state.read_aliases.remove(&place(*binding));
-                    if let Some((path, source_version)) = alias {
-                        if let Some(alias_version) = state.facts.value(place(*binding)) {
-                            state
-                                .read_aliases
-                                .insert(place(*binding), (path, source_version, alias_version));
-                        }
-                    }
-                }
-            }
+            K::Let { binding, value } => self.let_expression(*binding, value, state, depth),
             _ => unreachable!(),
         }
-        Ok(result)
+    }
+
+    #[inline(never)]
+    fn let_expression(
+        &mut self,
+        binding: nir::program::LocalId,
+        value: &Expr,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        let value_result = self.child(value, state, depth)?;
+        if state.facts.is_reachable() {
+            let alias = if matches!(value.ty, Term::Pointer(_)) {
+                let path = match self.aliased_read_path(value, state)? {
+                    Some(path) => Some(path),
+                    None => self.pointer_value_path(&value_result, state)?,
+                };
+                path.and_then(|path| state.facts.value(path.root).map(|version| (path, version)))
+            } else {
+                None
+            };
+            self.bind_related_value(state, binding, &value.ty, value_result)?;
+            state.read_aliases.remove(&place(binding));
+            if let Some((path, source_version)) = alias {
+                if let Some(alias_version) = state.facts.value(place(binding)) {
+                    state
+                        .read_aliases
+                        .insert(place(binding), (path, source_version, alias_version));
+                }
+            }
+        }
+        Ok(Value::default())
     }
     fn completed_aggregate_value(
         &mut self,
@@ -5354,52 +5518,19 @@ impl Walker<'_> {
         state: &mut State,
         depth: usize,
     ) -> Result<Value, Reason> {
-        let mut result = Value::default();
         match &expr.kind {
-            K::EffectResume(value) => {
-                self.child(value, state, depth)?;
-                state
-                    .facts
-                    .assume(&Condition::Bool(false), true, self.limits)?;
-            }
+            K::EffectResume(value) => self.effect_resume_expression(value, state, depth),
             K::EffectHandle {
                 computation,
                 handlers,
                 ..
-            } => {
-                for handler in handlers {
-                    self.effect_handler_arms(handler, state, depth)?;
-                }
-                // Installation-time providers can mutate captured storage even
-                // when the subject never requests an operation. Entry facts
-                // therefore cannot flow into that subject unchanged. Stable
-                // by-value scalars remain valid: the full-function scan rules
-                // out both writes and address exposure for those bindings.
-                if handlers
-                    .iter()
-                    .any(|handler| handler.abi == nir::effects::Abi::DirectPassing)
-                {
-                    state.havoc_with_private_scalars(
-                        self.handler_unstable_locals.as_ref(),
-                        self.limits,
-                    )?;
-                }
-                let completed = self.child(computation, state, depth)?;
-                result = self.completed_effect_result(completed, &expr.ty, state)?;
-            }
-            K::EffectComputation { body, .. } => {
-                result = self.child(body, state, depth)?;
-            }
+            } => self.effect_handle_expression(expr, computation, handlers, state, depth),
+            K::EffectComputation { body, .. } => self.child(body, state, depth),
             K::EffectRun { computation, .. } => {
-                let completed = self.child(computation, state, depth)?;
-                result = self.completed_effect_result(completed, &expr.ty, state)?;
+                self.effect_run_expression(expr, computation, state, depth)
             }
             K::EffectRequest { arguments, .. } => {
-                for argument in arguments {
-                    self.child(argument, state, depth)?;
-                }
-                state.havoc_with_private_scalars(Some(&self.addressed_locals), self.limits)?;
-                result = self.unknown_value(&expr.ty)?;
+                self.effect_request_expression(expr, arguments, state, depth)
             }
             K::LetPattern {
                 pattern,
@@ -5415,104 +5546,207 @@ impl Walker<'_> {
                     state,
                     depth,
                 )?;
+                Ok(Value::default())
             }
             K::Match { value, arms } => {
-                result = self.match_expression(value, arms, &expr.ty, state, depth, false)?;
+                self.match_expression(value, arms, &expr.ty, state, depth, false)
             }
             K::RequirePredicate(predicate) | K::EnsurePredicate(predicate) => {
-                if state.facts.is_reachable() {
-                    let failure = || {
-                        if matches!(expr.kind, K::RequirePredicate(_)) {
-                            Reason::MissingPreconditionProof
-                        } else {
-                            Reason::MissingPostconditionProof
-                        }
-                    };
-                    // Predicate-local pattern bindings and constructor ghosts
-                    // cannot escape a void proof obligation. Keep caller roots
-                    // and project surviving observations when leaving its scope.
-                    self.limits.step(state.domains.len())?;
-                    let existing = state.domains.keys().copied().collect();
-                    let checked = self.child(predicate, state, depth)?;
-                    let condition = checked.condition.ok_or_else(&failure)?;
-                    state
-                        .facts
-                        .check_condition(&condition, true, self.limits)
-                        .map_err(|_| failure())?;
-                    state.facts.assume(&condition, true, self.limits)?;
-                    state.keep(&existing, self.limits)?;
-                }
+                self.predicate_obligation_expression(expr, predicate, state, depth)
             }
             K::CheckPredicate(condition) => {
-                let checked = self.child(condition, state, depth)?;
-                let check_input = if let Some(condition) = checked.condition {
-                    let facts = if self.collect_points {
-                        Some(state.facts.fork(self.limits)?)
-                    } else {
-                        None
-                    };
-                    state.facts.assume(&condition, true, self.limits)?;
-                    facts.map(|facts| CheckInput {
-                        site: expr as *const Expr as usize,
-                        condition,
-                        facts,
-                    })
-                } else {
-                    None
-                };
-                self.record(expr, state, PointKind::Check, None)?;
-                if self.collect_points {
-                    self.points.last_mut().unwrap().check_input = check_input;
-                }
+                self.check_predicate_expression(expr, condition, state, depth)
             }
-            K::If { .. } => {
-                result = self.branch_expression(expr, state, depth)?;
-            }
-            K::Return(value) => {
-                if let Some(value) = value {
-                    self.tail(value, state, depth)?;
-                } else {
-                    self.check_exit(Value::default(), None, state, depth)?;
-                }
-                state
-                    .facts
-                    .assume(&Condition::Bool(false), true, self.limits)?;
-            }
+            K::If { .. } => self.branch_expression(expr, state, depth),
+            K::Return(value) => self.return_expression(value.as_deref(), state, depth),
             K::Loop { identity, body } => {
                 self.loop_expression(*identity, body, state, depth)?;
+                Ok(Value::default())
             }
             K::Break(identity) | K::Continue(identity) => {
-                if matches!(expr.kind, K::Break(_)) && self.single_pass_exits.contains_key(identity)
-                {
-                    let exit = state.fork(self.limits)?;
-                    self.single_pass_exits.get_mut(identity).unwrap().push(exit);
-                }
-                state
-                    .facts
-                    .assume(&Condition::Bool(false), true, self.limits)?;
+                self.jump_expression(expr, *identity, state)
             }
             K::Call {
                 callee,
                 arguments,
                 parameter_bindings,
-            } => {
-                result = self.call_expression(
-                    expr,
-                    callee,
-                    arguments,
-                    parameter_bindings,
-                    state,
-                    depth,
-                )?;
-            }
-            K::Snapshot(value) => {
-                result = self.child(value, state, depth)?;
-            }
+            } => self.call_expression(expr, callee, arguments, parameter_bindings, state, depth),
+            K::Snapshot(value) => self.child(value, state, depth),
             _ => unreachable!(),
         }
-        Ok(result)
     }
 
+    #[inline(never)]
+    fn effect_resume_expression(
+        &mut self,
+        value: &Expr,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        self.child(value, state, depth)?;
+        state
+            .facts
+            .assume(&Condition::Bool(false), true, self.limits)?;
+        Ok(Value::default())
+    }
+
+    #[inline(never)]
+    fn effect_handle_expression(
+        &mut self,
+        expr: &Expr,
+        computation: &Expr,
+        handlers: &[nir::program::EffectHandler],
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        for handler in handlers {
+            self.effect_handler_arms(handler, state, depth)?;
+        }
+        // Installation-time providers can mutate captured storage even
+        // when the subject never requests an operation. Entry facts
+        // therefore cannot flow into that subject unchanged. Stable
+        // by-value scalars remain valid: the full-function scan rules
+        // out both writes and address exposure for those bindings.
+        if handlers
+            .iter()
+            .any(|handler| handler.abi == nir::effects::Abi::DirectPassing)
+        {
+            state.havoc_with_private_scalars(self.handler_unstable_locals.as_ref(), self.limits)?;
+        }
+        let completed = self.child(computation, state, depth)?;
+        self.completed_effect_result(completed, &expr.ty, state)
+    }
+
+    #[inline(never)]
+    fn effect_run_expression(
+        &mut self,
+        expr: &Expr,
+        computation: &Expr,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        let completed = self.child(computation, state, depth)?;
+        self.completed_effect_result(completed, &expr.ty, state)
+    }
+
+    #[inline(never)]
+    fn effect_request_expression(
+        &mut self,
+        expr: &Expr,
+        arguments: &[Expr],
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        for argument in arguments {
+            self.child(argument, state, depth)?;
+        }
+        state.havoc_with_private_scalars(Some(&self.addressed_locals), self.limits)?;
+        self.unknown_value(&expr.ty)
+    }
+
+    #[inline(never)]
+    fn predicate_obligation_expression(
+        &mut self,
+        expr: &Expr,
+        predicate: &Expr,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        if state.facts.is_reachable() {
+            let failure = || {
+                if matches!(expr.kind, K::RequirePredicate(_)) {
+                    Reason::MissingPreconditionProof
+                } else {
+                    Reason::MissingPostconditionProof
+                }
+            };
+            // Predicate-local pattern bindings and constructor ghosts
+            // cannot escape a void proof obligation. Keep caller roots
+            // and project surviving observations when leaving its scope.
+            self.limits.step(state.domains.len())?;
+            let existing = state.domains.keys().copied().collect();
+            let checked = self.child(predicate, state, depth)?;
+            let condition = checked.condition.ok_or_else(&failure)?;
+            state
+                .facts
+                .check_condition(&condition, true, self.limits)
+                .map_err(|_| failure())?;
+            state.facts.assume(&condition, true, self.limits)?;
+            state.keep(&existing, self.limits)?;
+        }
+        Ok(Value::default())
+    }
+
+    #[inline(never)]
+    fn check_predicate_expression(
+        &mut self,
+        expr: &Expr,
+        condition: &Expr,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        let checked = self.child(condition, state, depth)?;
+        let check_input = if let Some(condition) = checked.condition {
+            let facts = if self.collect_points {
+                Some(state.facts.fork(self.limits)?)
+            } else {
+                None
+            };
+            state.facts.assume(&condition, true, self.limits)?;
+            facts.map(|facts| CheckInput {
+                site: expr as *const Expr as usize,
+                condition,
+                facts,
+            })
+        } else {
+            None
+        };
+        self.record(expr, state, PointKind::Check, None)?;
+        if self.collect_points {
+            self.points.last_mut().unwrap().check_input = check_input;
+        }
+        Ok(Value::default())
+    }
+
+    #[inline(never)]
+    fn return_expression(
+        &mut self,
+        value: Option<&Expr>,
+        state: &mut State,
+        depth: usize,
+    ) -> Result<Value, Reason> {
+        if let Some(value) = value {
+            self.tail(value, state, depth)?;
+        } else {
+            self.check_exit(Value::default(), None, state, depth)?;
+        }
+        state
+            .facts
+            .assume(&Condition::Bool(false), true, self.limits)?;
+        Ok(Value::default())
+    }
+
+    #[inline(never)]
+    fn jump_expression(
+        &mut self,
+        expr: &Expr,
+        identity: nir::program::LocalId,
+        state: &mut State,
+    ) -> Result<Value, Reason> {
+        if matches!(expr.kind, K::Break(_)) && self.single_pass_exits.contains_key(&identity) {
+            let exit = state.fork(self.limits)?;
+            self.single_pass_exits
+                .get_mut(&identity)
+                .unwrap()
+                .push(exit);
+        }
+        state
+            .facts
+            .assume(&Condition::Bool(false), true, self.limits)?;
+        Ok(Value::default())
+    }
+
+    #[inline(never)]
     fn general_expression(
         &mut self,
         expr: &Expr,
@@ -5681,6 +5915,7 @@ pub fn validate_definition_region_with_declarations(
             region,
             owners.parameter_domains(),
             Some(imports),
+            None,
             &mut Limits::default(),
         )?;
     }
@@ -5706,6 +5941,11 @@ fn validate_machine_owners(
     owners: &nir::phases::ArithmeticObligations,
     imports: Option<&RegionDeclarations>,
 ) -> Result<(), Error> {
+    let catalog = type_resolution::dispatch::BorrowedCatalog::new(package);
+    let mut cache = MachineOwnerCache::new(
+        package,
+        type_resolution::dispatch::DeclarationSource::Prepared(&catalog),
+    );
     for function in package.functions.iter().chain(&package.quote_templates) {
         if !owners.functions().contains(&function.declaration) {
             continue;
@@ -5715,6 +5955,7 @@ fn validate_machine_owners(
             function,
             owners.parameter_domains(),
             imports,
+            Some(&mut cache),
             &mut Limits::default(),
         )?;
     }
@@ -5733,6 +5974,7 @@ fn validate_machine_owners(
                         &body,
                         owners.parameter_domains(),
                         imports,
+                        Some(&mut cache),
                         &mut limits,
                     )?;
                 }
@@ -5742,15 +5984,16 @@ fn validate_machine_owners(
     Ok(())
 }
 
-fn validate_machine_instances<B: finite_domains::MachineBody>(
-    package: &nir::program::Package,
+fn validate_machine_instances<'a, B: finite_domains::MachineBody>(
+    package: &'a nir::program::Package,
     body: &B,
     domains: &std::collections::BTreeMap<nir::DeclarationId, Term>,
-    imports: Option<&RegionDeclarations>,
+    imports: Option<&'a RegionDeclarations>,
+    mut cache: Option<&mut MachineOwnerCache<'a>>,
     limits: &mut Limits,
 ) -> Result<(), Error> {
     let Some(instances) = finite_domains::integer_instances(body, domains, limits)? else {
-        return validate_machine_body(package, body, imports);
+        return validate_machine_body(package, body, imports, cache);
     };
     for mut instance in instances {
         // An unspecified target is not the compiler host. A generic
@@ -5781,11 +6024,11 @@ fn validate_machine_instances<B: finite_domains::MachineBody>(
                 proof_package.target = Some(nir::target::TargetData::new(width).unwrap());
                 let mut proof = instance.clone();
                 finite_domains::complete_literals(&mut proof, proof_package.target, limits)?;
-                validate_machine_body(&proof_package, &proof, imports)?;
+                validate_machine_body(&proof_package, &proof, imports, None)?;
             }
         } else {
             finite_domains::complete_literals(&mut instance, package.target, limits)?;
-            validate_machine_body(package, &instance, imports)?;
+            validate_machine_body(package, &instance, imports, cache.as_deref_mut())?;
         }
     }
     Ok(())
@@ -5793,10 +6036,11 @@ fn validate_machine_instances<B: finite_domains::MachineBody>(
 
 // Each universally checked body has the same bounded analysis budget as a
 // monomorphic declaration. Type/layout enumeration is separately finite.
-fn validate_machine_body(
-    package: &nir::program::Package,
+fn validate_machine_body<'a>(
+    package: &'a nir::program::Package,
     body: &impl finite_domains::MachineBody,
-    imports: Option<&RegionDeclarations>,
+    imports: Option<&'a RegionDeclarations>,
+    mut cache: Option<&mut MachineOwnerCache<'a>>,
 ) -> Result<(), Error> {
     let program = body.program();
     for execution in std::iter::once(program).chain(program.default_bodies()) {
@@ -5804,6 +6048,7 @@ fn validate_machine_body(
             execution,
             body.requirements(),
             Some(package),
+            cache.as_deref_mut(),
             imports,
             &mut Limits::default(),
             false,
@@ -5846,19 +6091,17 @@ impl Value {
                 None
             },
             fields: if let Term::Record(fields) = ty {
-                Some(
-                    fields
-                        .iter()
-                        .map(|(_, ty)| Self::unknown_at(ty, limits, depth + 1))
-                        .collect::<Result<_, _>>()?,
-                )
+                let mut values = Vec::with_capacity(fields.len());
+                for (_, field) in fields {
+                    values.push(Self::unknown_at(field, limits, depth + 1)?);
+                }
+                Some(values)
             } else if let Term::Tuple(types) = ty {
-                Some(
-                    types
-                        .iter()
-                        .map(|t| Self::unknown_at(t, limits, depth + 1))
-                        .collect::<Result<_, _>>()?,
-                )
+                let mut values = Vec::with_capacity(types.len());
+                for field in types {
+                    values.push(Self::unknown_at(field, limits, depth + 1)?);
+                }
+                Some(values)
             } else {
                 None
             },
@@ -5916,57 +6159,122 @@ impl Value {
         }
     }
     fn snapshot(&self, limits: &mut Limits, depth: usize) -> Result<Self, Unknown> {
-        limits.step(1)?;
-        if depth >= 128 {
-            return Err(Unknown::ConditionDepthLimit);
+        struct Frame<'a> {
+            partial: Value,
+            children: &'a [Value],
+            next: usize,
+            built: Vec<Value>,
+            depth: usize,
         }
-        Ok(Self {
-            unbounded_integer: self.unbounded_integer,
-            pointer_target: self.copy_pointer_target(limits)?,
-            pointer_origins: self.copy_pointer_origins(limits)?,
-            projection: None,
-            immutable_projection: None,
-            polynomial: None,
-            evidence: self.evidence.clone(),
-            range: self.range.as_ref().map(|r| r.copy(limits)).transpose()?,
-            scalar: match &self.scalar {
+
+        fn snapshot_leaf(
+            node: &Value,
+            limits: &mut Limits,
+            depth: usize,
+        ) -> Result<Value, Unknown> {
+            limits.step(1)?;
+            if depth >= 128 {
+                return Err(Unknown::ConditionDepthLimit);
+            }
+            let pointer_target = node.copy_pointer_target(limits)?;
+            let pointer_origins = node.copy_pointer_origins(limits)?;
+            let range = match &node.range {
+                Some(r) => Some(r.copy(limits)?),
+                None => None,
+            };
+            let scalar = match &node.scalar {
                 Some(Scalar::Constant(n)) => Some(Scalar::Constant(limits.integer(n)?)),
                 _ => None,
-            },
-            condition: match self.condition {
+            };
+            let condition = match node.condition {
                 Some(Condition::Bool(b)) => Some(Condition::Bool(b)),
                 _ => None,
-            },
-            aggregate_kind: self.aggregate_kind,
-            nominal_type: self.nominal_type.clone(),
-            fields: self
-                .fields
-                .as_ref()
-                .map(|fields| {
-                    fields
-                        .iter()
-                        .map(|v| v.snapshot(limits, depth + 1))
-                        .collect()
-                })
-                .transpose()?,
-        })
-    }
-    fn join(&self, other: &Self, limits: &mut Limits, depth: usize) -> Result<Self, Unknown> {
-        limits.step(1)?;
-        if depth >= 128 {
-            return Err(Unknown::ConditionDepthLimit);
+            };
+            Ok(Value {
+                unbounded_integer: node.unbounded_integer,
+                pointer_target,
+                pointer_origins,
+                projection: None,
+                immutable_projection: None,
+                polynomial: None,
+                evidence: node.evidence.clone(),
+                range,
+                scalar,
+                condition,
+                aggregate_kind: node.aggregate_kind,
+                nominal_type: node.nominal_type.clone(),
+                fields: None,
+            })
         }
-        for alias in [&self.immutable_projection, &other.immutable_projection] {
-            if let Some((_, projection)) = alias {
-                limits.step(projection.path.fields.len().saturating_add(1))?;
+
+        let root = snapshot_leaf(self, limits, depth)?;
+        let Some(children) = self.fields.as_deref() else {
+            return Ok(root);
+        };
+        let mut stack = vec![Frame {
+            partial: root,
+            children,
+            next: 0,
+            built: Vec::with_capacity(children.len()),
+            depth,
+        }];
+        while let Some(top) = stack.last_mut() {
+            if let Some(child) = top.children.get(top.next) {
+                top.next += 1;
+                let child_depth = top.depth + 1;
+                let leaf = snapshot_leaf(child, limits, child_depth)?;
+                if let Some(grand_children) = child.fields.as_deref() {
+                    stack.push(Frame {
+                        partial: leaf,
+                        children: grand_children,
+                        next: 0,
+                        built: Vec::with_capacity(grand_children.len()),
+                        depth: child_depth,
+                    });
+                } else {
+                    top.built.push(leaf);
+                }
+            } else {
+                let mut done = stack.pop().expect("snapshot frame");
+                done.partial.fields = Some(done.built);
+                if let Some(parent) = stack.last_mut() {
+                    parent.built.push(done.partial);
+                } else {
+                    return Ok(done.partial);
+                }
             }
         }
-        Ok(Self {
-            unbounded_integer: self.unbounded_integer && other.unbounded_integer,
-            pointer_target: {
-                let left = self.copy_pointer_target(limits)?;
-                let right = other.copy_pointer_target(limits)?;
-                match (left, right) {
+        unreachable!("snapshot loop always returns when root frame completes")
+    }
+    fn join(&self, other: &Self, limits: &mut Limits, depth: usize) -> Result<Self, Unknown> {
+        struct Frame<'a> {
+            partial: Value,
+            left: &'a [Value],
+            right: &'a [Value],
+            next: usize,
+            built: Vec<Value>,
+            depth: usize,
+        }
+
+        fn join_node<'a>(
+            left: &'a Value,
+            right: &'a Value,
+            limits: &mut Limits,
+            depth: usize,
+        ) -> Result<(Value, Option<(&'a [Value], &'a [Value])>), Unknown> {
+            limits.step(1)?;
+            if depth >= 128 {
+                return Err(Unknown::ConditionDepthLimit);
+            }
+            for alias in [&left.immutable_projection, &right.immutable_projection] {
+                if let Some((_, projection)) = alias {
+                    limits.step(projection.path.fields.len().saturating_add(1))?;
+                }
+            }
+            let pointer_target = {
+                let l = left.copy_pointer_target(limits)?;
+                let r = right.copy_pointer_target(limits)?;
+                match (l, r) {
                     (Some((a, mut targets)), Some((b, other))) if a == b => {
                         for target in other {
                             insert_pointer_target(
@@ -5979,10 +6287,10 @@ impl Value {
                     }
                     _ => None,
                 }
-            },
-            pointer_origins: match (
-                self.copy_pointer_origins(limits)?,
-                other.copy_pointer_origins(limits)?,
+            };
+            let pointer_origins = match (
+                left.copy_pointer_origins(limits)?,
+                right.copy_pointer_origins(limits)?,
             ) {
                 (Some((a, mut targets)), Some((b, others))) if a == b => {
                     for target in others {
@@ -5991,54 +6299,94 @@ impl Value {
                     Some((a, targets))
                 }
                 _ => None,
-            },
-            projection: None,
-            immutable_projection: if self.immutable_projection == other.immutable_projection {
-                self.immutable_projection.clone()
-            } else {
-                None
-            },
-            polynomial: None,
-            evidence: None,
-            range: match (&self.range, &other.range) {
+            };
+            let range = match (&left.range, &right.range) {
                 (Some(a), Some(b)) => Some(hull(a, b, limits)?),
                 _ => None,
-            },
-            scalar: None,
-            condition: match (&self.condition, &other.condition) {
-                (Some(Condition::Bool(a)), Some(Condition::Bool(b))) if a == b => {
-                    Some(Condition::Bool(*a))
-                }
+            };
+            let same_shape = left.aggregate_kind == right.aggregate_kind
+                && left.nominal_type == right.nominal_type;
+            let value = Value {
+                unbounded_integer: left.unbounded_integer && right.unbounded_integer,
+                pointer_target,
+                pointer_origins,
+                projection: None,
+                immutable_projection: if left.immutable_projection == right.immutable_projection {
+                    left.immutable_projection.clone()
+                } else {
+                    None
+                },
+                polynomial: None,
+                evidence: None,
+                range,
+                scalar: None,
+                condition: match (&left.condition, &right.condition) {
+                    (Some(Condition::Bool(a)), Some(Condition::Bool(b))) if a == b => {
+                        Some(Condition::Bool(*a))
+                    }
+                    _ => None,
+                },
+                nominal_type: if left.nominal_type == right.nominal_type {
+                    left.nominal_type.clone()
+                } else {
+                    None
+                },
+                aggregate_kind: if same_shape {
+                    left.aggregate_kind
+                } else {
+                    None
+                },
+                fields: None,
+            };
+            let children = match (left.fields.as_deref(), right.fields.as_deref()) {
+                (Some(a), Some(b)) if a.len() == b.len() && same_shape => Some((a, b)),
                 _ => None,
-            },
-            nominal_type: if self.nominal_type == other.nominal_type {
-                self.nominal_type.clone()
-            } else {
-                None
-            },
-            aggregate_kind: if self.aggregate_kind == other.aggregate_kind
-                && self.nominal_type == other.nominal_type
-            {
-                self.aggregate_kind
-            } else {
-                None
-            },
-            fields: match (&self.fields, &other.fields) {
-                (Some(a), Some(b))
-                    if a.len() == b.len()
-                        && self.aggregate_kind == other.aggregate_kind
-                        && self.nominal_type == other.nominal_type =>
-                {
-                    Some(
-                        a.iter()
-                            .zip(b)
-                            .map(|(a, b)| a.join(b, limits, depth + 1))
-                            .collect::<Result<_, _>>()?,
-                    )
+            };
+            Ok((value, children))
+        }
+
+        let (root, children) = join_node(self, other, limits, depth)?;
+        let Some((left, right)) = children else {
+            return Ok(root);
+        };
+        let mut stack = vec![Frame {
+            partial: root,
+            left,
+            right,
+            next: 0,
+            built: Vec::with_capacity(left.len()),
+            depth,
+        }];
+        while let Some(top) = stack.last_mut() {
+            if top.next < top.left.len() {
+                let index = top.next;
+                top.next += 1;
+                let child_depth = top.depth + 1;
+                let (node, grand_children) =
+                    join_node(&top.left[index], &top.right[index], limits, child_depth)?;
+                if let Some((a, b)) = grand_children {
+                    stack.push(Frame {
+                        partial: node,
+                        left: a,
+                        right: b,
+                        next: 0,
+                        built: Vec::with_capacity(a.len()),
+                        depth: child_depth,
+                    });
+                } else {
+                    top.built.push(node);
                 }
-                _ => None,
-            },
-        })
+            } else {
+                let mut done = stack.pop().expect("join frame");
+                done.partial.fields = Some(done.built);
+                if let Some(parent) = stack.last_mut() {
+                    parent.built.push(done.partial);
+                } else {
+                    return Ok(done.partial);
+                }
+            }
+        }
+        unreachable!("join loop always returns when root frame completes")
     }
 }
 fn insert_pointer_origin(
@@ -6713,6 +7061,7 @@ mod memory_summary_cache_tests {
             next_frame: 1,
             imports: None,
             memory_summaries: Default::default(),
+            failed_memory_summaries: Default::default(),
             exit_contract: None,
             assuming_postcondition: false,
             next_field: 0,
@@ -6720,8 +7069,10 @@ mod memory_summary_cache_tests {
             associated_scalars: Vec::new(),
             limits: &mut limits,
             package: Some(&package),
+            declaration_source: None,
+            method_callees: Default::default(),
             associated_world: None,
-            declarations: crate::declarations::Metadata::new(Some(&package)),
+            declarations: std::rc::Rc::new(crate::declarations::Metadata::new(Some(&package))),
             points: vec![],
             collect_points: true,
             failure_source: None,
@@ -6751,6 +7102,233 @@ mod memory_summary_cache_tests {
         };
         assert!(walker.call_summary(&incompatible).is_none());
         assert!(walker.call_summary(&callee).is_some());
+    }
+
+    #[test]
+    fn repeated_failed_summary_at_same_or_smaller_allowance_skips_recomputation() {
+        let declaration = nir::DeclarationId {
+            package: 0,
+            local: 1,
+        };
+        let unit = || Expr {
+            source: SourceRange { start: 0, end: 1 },
+            ty: Term::Primitive(nir::Primitive::Void),
+            kind: K::Unit,
+        };
+        let signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(unit().ty),
+        };
+        let package = nir::program::Package {
+            functions: vec![Function {
+                interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
+                    phase: nir::program::FunctionPhase::Runtime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    declaration,
+                    name: "work".into(),
+                    signature: signature.clone(),
+                    parameters: vec![],
+                    defaults: vec![],
+                },
+                body: Expr {
+                    kind: K::Block {
+                        statements: (0..100).map(|_| unit()).collect(),
+                        result: Some(Box::new(unit())),
+                    },
+                    ..unit()
+                },
+            }],
+            ..Default::default()
+        };
+        let callee = Expr {
+            ty: signature,
+            kind: K::Function(declaration),
+            ..unit()
+        };
+        let mut limits = Limits::default();
+        limits.arithmetic.steps = 200;
+        let mut walker = Walker {
+            addressed_locals: BTreeSet::new(),
+            handler_unstable_locals: None,
+            written_locals: BTreeSet::new(),
+            type_context: crate::ptc::Context::with_scope(vec![]),
+            input_frames: vec![],
+            next_frame: 1,
+            imports: None,
+            memory_summaries: Default::default(),
+            failed_memory_summaries: Default::default(),
+            exit_contract: None,
+            assuming_postcondition: false,
+            next_field: 0,
+            captured_values: BTreeMap::new(),
+            associated_scalars: Vec::new(),
+            limits: &mut limits,
+            package: Some(&package),
+            declaration_source: None,
+            method_callees: Default::default(),
+            associated_world: None,
+            declarations: std::rc::Rc::new(crate::declarations::Metadata::new(Some(&package))),
+            points: vec![],
+            collect_points: true,
+            failure_source: None,
+            closure_context: vec![],
+            single_pass_exits: BTreeMap::new(),
+        };
+        assert!(walker.call_summary(&callee).is_none());
+        let first_cost = 200 - walker.limits.arithmetic.steps;
+        assert!(first_cost > 20);
+
+        walker.limits.arithmetic.steps = 200;
+        assert!(walker.call_summary(&callee).is_none());
+        let retry_cost = 200 - walker.limits.arithmetic.steps;
+        assert!(
+            retry_cost <= 5,
+            "expected memoized failure to skip inference (first_cost={first_cost}, retry_cost={retry_cost})"
+        );
+
+        walker.limits.arithmetic.steps = 100_000;
+        let summary = walker.call_summary(&callee).expect("larger budget retries");
+        assert!(summary.accesses.is_empty());
+    }
+
+    #[test]
+    fn caller_inference_caches_shared_helper_summaries_across_repeated_calls() {
+        let helper_declaration = nir::DeclarationId {
+            package: 0,
+            local: 1,
+        };
+        let caller_declaration = nir::DeclarationId {
+            package: 0,
+            local: 2,
+        };
+        let unit = || Expr {
+            source: SourceRange { start: 0, end: 1 },
+            ty: Term::Primitive(nir::Primitive::Void),
+            kind: K::Unit,
+        };
+        let signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(unit().ty),
+        };
+        let function_decl = |declaration, name: &str| nir::program::FunctionDeclaration {
+            source: nir::program::SourceRange { start: 0, end: 0 },
+            phase: nir::program::FunctionPhase::Runtime,
+            inline: false,
+            pure: false,
+            is_unsafe: false,
+            preconditions: vec![],
+            postconditions: vec![],
+            result_binding: None,
+            result_type_binder: None,
+            result_guarantees: vec![],
+            entry_snapshots: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration,
+            name: name.into(),
+            signature: signature.clone(),
+            parameters: vec![],
+            defaults: vec![],
+        };
+        let helper_callee = Expr {
+            ty: signature.clone(),
+            kind: K::Function(helper_declaration),
+            ..unit()
+        };
+        let call_helper = || Expr {
+            ty: Term::Primitive(nir::Primitive::Void),
+            kind: K::Call {
+                callee: Box::new(helper_callee.clone()),
+                arguments: vec![],
+                parameter_bindings: vec![],
+            },
+            ..unit()
+        };
+        let caller_callee = Expr {
+            ty: signature.clone(),
+            kind: K::Function(caller_declaration),
+            ..unit()
+        };
+        let package = nir::program::Package {
+            functions: vec![
+                Function {
+                    interface: function_decl(helper_declaration, "helper"),
+                    body: Expr {
+                        kind: K::Block {
+                            statements: (0..100).map(|_| unit()).collect(),
+                            result: Some(Box::new(unit())),
+                        },
+                        ..unit()
+                    },
+                },
+                Function {
+                    interface: function_decl(caller_declaration, "caller"),
+                    body: Expr {
+                        kind: K::Block {
+                            statements: vec![call_helper(), call_helper()],
+                            result: Some(Box::new(unit())),
+                        },
+                        ..unit()
+                    },
+                },
+            ],
+            ..Default::default()
+        };
+        let mut limits = Limits::default();
+        limits.arithmetic.steps = 100_000;
+        let mut walker = Walker {
+            addressed_locals: BTreeSet::new(),
+            handler_unstable_locals: None,
+            written_locals: BTreeSet::new(),
+            type_context: crate::ptc::Context::with_scope(vec![]),
+            input_frames: vec![],
+            next_frame: 1,
+            imports: None,
+            memory_summaries: Default::default(),
+            failed_memory_summaries: Default::default(),
+            exit_contract: None,
+            assuming_postcondition: false,
+            next_field: 0,
+            captured_values: BTreeMap::new(),
+            associated_scalars: Vec::new(),
+            limits: &mut limits,
+            package: Some(&package),
+            declaration_source: None,
+            method_callees: Default::default(),
+            associated_world: None,
+            declarations: std::rc::Rc::new(crate::declarations::Metadata::new(Some(&package))),
+            points: vec![],
+            collect_points: true,
+            failure_source: None,
+            closure_context: vec![],
+            single_pass_exits: BTreeMap::new(),
+        };
+        let caller_summary = walker
+            .call_summary(&caller_callee)
+            .expect("caller summary succeeds");
+        assert!(caller_summary.accesses.is_empty());
+        assert_eq!(walker.memory_summaries.len(), 2);
+
+        // With too little fuel to re-infer `helper`, calling `call_summary(&helper_callee)`
+        // must hit the cache populated while analyzing `caller`.
+        walker.limits.arithmetic.steps = 200;
+        let helper_summary = walker
+            .call_summary(&helper_callee)
+            .expect("shared helper cached from caller inference");
+        assert!(helper_summary.accesses.is_empty());
     }
 }
 
@@ -6830,6 +7408,7 @@ mod conditional_origin_tests {
             next_frame: 1,
             imports: None,
             memory_summaries: Default::default(),
+            failed_memory_summaries: Default::default(),
             exit_contract: None,
             assuming_postcondition: false,
             next_field: 0,
@@ -6837,8 +7416,10 @@ mod conditional_origin_tests {
             associated_scalars: vec![],
             limits: &mut limits,
             package: None,
+            declaration_source: None,
+            method_callees: Default::default(),
             associated_world: None,
-            declarations: crate::declarations::Metadata::new(None),
+            declarations: std::rc::Rc::new(crate::declarations::Metadata::new(None)),
             points: vec![],
             collect_points: true,
             failure_source: None,
@@ -7309,6 +7890,7 @@ mod tuple_storage_tests {
                 next_frame: 1,
                 imports: None,
                 memory_summaries: Default::default(),
+                failed_memory_summaries: Default::default(),
                 exit_contract: None,
                 assuming_postcondition: false,
                 next_field: 0,
@@ -7316,8 +7898,10 @@ mod tuple_storage_tests {
                 associated_scalars: vec![],
                 limits: &mut limits,
                 package: Some(&package),
+                declaration_source: None,
+                method_callees: Default::default(),
                 associated_world: None,
-                declarations: crate::declarations::Metadata::new(Some(&package)),
+                declarations: std::rc::Rc::new(crate::declarations::Metadata::new(Some(&package))),
                 points: vec![],
                 collect_points: true,
                 failure_source: None,

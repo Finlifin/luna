@@ -2101,11 +2101,26 @@ impl fmt::Display for EffectResultInput {
     }
 }
 
+enum SummaryCacheStorage<'a> {
+    Owned(super::memory::SummaryCache),
+    Borrowed(&'a mut super::memory::SummaryCache),
+}
+impl SummaryCacheStorage<'_> {
+    fn as_mut(&mut self) -> &mut super::memory::SummaryCache {
+        match self {
+            Self::Owned(cache) => cache,
+            Self::Borrowed(cache) => cache,
+        }
+    }
+}
+
 struct Analyzer<'a, F, G> {
     // Captured in this analysis's immutable cleanup world; never grants Copy.
     trivial_cleanup_types: std::collections::HashSet<Term>,
     cleanup: Option<&'a mut dyn CleanupPolicy>,
     package: Option<&'a Package>,
+    text_provenance: super::memory::TextProvenance,
+    memory_summaries: SummaryCacheStorage<'a>,
     exit_contract: Option<&'a Function>,
     handler_result: Option<Term>,
     effect_return_enabled: bool,
@@ -2115,6 +2130,7 @@ struct Analyzer<'a, F, G> {
     effect_result_inputs: Vec<EffectResultInput>,
     handler_completions: Vec<std::sync::Arc<HandlerReturnValue>>,
     declarations: std::rc::Rc<super::declarations::Metadata<'a>>,
+    declaration_source: Option<::materialization::DeclarationSource<'a>>,
     rejection: super::rejection::Cache<'a>,
     delivery: F,
     shape: G,
@@ -2123,7 +2139,7 @@ struct Analyzer<'a, F, G> {
     candidate_observations: Option<Report>,
     observation_region: bool,
     observation_locals: BTreeSet<PlaceId>,
-    method_callees: super::memory::MethodCallees,
+    method_callees: super::memory::MethodCalleesStorage<'a>,
     persistent_roots: BTreeSet<PlaceId>,
     captured_roots: BTreeSet<PlaceId>,
     defer_unknown_calls: bool,
@@ -2141,6 +2157,39 @@ struct Analyzer<'a, F, G> {
 impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shape, String>>
     Analyzer<'a, F, G>
 {
+    fn select_method_callee(&mut self, callee: &Expr, source: SourceRange) -> Result<Expr, Error> {
+        self.select_method_callee_mode(callee, false, source)
+    }
+    fn select_method_callee_behavior(
+        &mut self,
+        callee: &Expr,
+        source: SourceRange,
+    ) -> Result<Expr, Error> {
+        self.select_method_callee_mode(callee, true, source)
+    }
+    fn select_method_callee_mode(
+        &mut self,
+        callee: &Expr,
+        behavior_only: bool,
+        source: SourceRange,
+    ) -> Result<Expr, Error> {
+        let package = self
+            .package
+            .ok_or_else(|| error(source, "method selection requires a package"))?;
+        let mut domains = None;
+        self.method_callees
+            .as_mut()
+            .select_with_context(
+                package,
+                callee,
+                self.declaration_source,
+                Some(self.declarations.as_ref()),
+                &mut domains,
+                &mut self.fuel,
+                behavior_only,
+            )
+            .map_err(|reason| error(source, reason))
+    }
     fn call_may_reject(&mut self, callee: &Expr) -> Result<bool, &'static str> {
         let policy = &mut self.cleanup;
         self.rejection
@@ -2174,11 +2223,68 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+    fn pointer_input_layout(
+        &mut self,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<Vec<super::memory::PointerInputLeaf>, Error> {
+        super::memory::pointer_input_layout_for(
+            self.package,
+            ty,
+            self.text_provenance,
+            &mut self.fuel,
+        )
+        .map_err(|reason| error(source, reason))
+    }
+    fn readable_representation(&mut self, ty: &Term, source: SourceRange) -> Result<bool, Error> {
+        super::memory::readable_representation_for(
+            self.package,
+            ty,
+            self.text_provenance,
+            &mut self.fuel,
+        )
+        .map_err(|reason| error(source, reason))
+    }
+    fn copy_readable_representation(
+        &mut self,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<bool, Error> {
+        super::memory::copy_readable_representation_for(
+            self.package,
+            ty,
+            self.text_provenance,
+            &mut self.fuel,
+        )
+        .map_err(|reason| error(source, reason))
+    }
+    #[allow(dead_code)]
+    fn capture_pointer_replacement_layout(
+        &mut self,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<bool, Error> {
+        super::memory::capture_pointer_replacement_layout_for(
+            self.package,
+            ty,
+            self.text_provenance,
+            &mut self.fuel,
+        )
+        .map_err(|reason| error(source, reason))
+    }
+    #[allow(dead_code)]
+    fn require_pointer_free_owned(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
+        super::memory::require_pointer_free_owned_for(
+            self.package,
+            ty,
+            self.text_provenance,
+            &mut self.fuel,
+            0,
+        )
+        .map_err(|reason| error(source, reason))
+    }
     fn check_observation_cleanup(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
-        let pointer_bearing =
-            !super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
-                .map_err(|e| error(source, e))?
-                .is_empty();
+        let pointer_bearing = !self.pointer_input_layout(ty, source)?.is_empty();
         let policy = self.cleanup.as_mut().ok_or_else(|| {
             error(
                 source,
@@ -4469,11 +4575,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     let Some(package) = self.package else {
                         return Ok(None);
                     };
-                    match super::memory::returned_capture_invariant(
+                    match super::memory::returned_capture_invariant_with_provenance(
                         package,
                         definition,
                         known,
                         prepared_captures,
+                        self.text_provenance,
+                        Some(self.memory_summaries.as_mut()),
                         &mut self.fuel,
                     ) {
                         Ok(value) => Some(value),
@@ -4712,16 +4820,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let mut fields = vec![];
         if let Term::Function { parameters, .. } = function.signature.callable_signature() {
             for (slot, parameter) in parameters.iter().enumerate() {
-                if parameter.sort == nir::Sort::Type
-                    && parameter.ty == Term::Primitive(nir::Primitive::Type)
+                if parameter.sort != nir::Sort::Runtime
+                    && matches!(
+                        parameter.ty,
+                        Term::Primitive(nir::Primitive::Type) | Term::ClosureContextType
+                    )
                 {
                     continue;
                 }
 
-                for leaf in
-                    super::memory::pointer_input_layout(self.package, &parameter.ty, &mut self.fuel)
-                        .map_err(|reason| error(source, reason))?
-                {
+                for leaf in self.pointer_input_layout(&parameter.ty, source)? {
                     let path = leaf.input_fields;
                     let pointee = leaf.pointee;
                     if !path.is_empty() {
@@ -4779,6 +4887,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             borrowed_code,
             &self.trivial_cleanup_types,
             Some(self.declarations.clone()),
+            self.text_provenance,
+            Some(self.memory_summaries.as_mut()),
+            self.declaration_source,
+            Some(self.method_callees.as_mut()),
+            Some(self.rejection.memo_mut()),
         )?;
         self.fuel = self
             .fuel
@@ -4824,13 +4937,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         let selected;
         let callee = if matches!(callee.kind, K::TraitMethod { .. }) {
-            let package = self
+            let _ = self
                 .package
                 .ok_or_else(|| error(source, "method invocation requires a package"))?;
-            selected = self
-                .method_callees
-                .select_behavior(package, callee, &mut self.fuel)
-                .map_err(|reason| error(source, reason))?;
+            selected = self.select_method_callee_behavior(callee, source)?;
             &selected
         } else {
             callee
@@ -4968,12 +5078,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     // Cleanup needs result tag facts even when affine captures
                     // prevent recovering an invocable code candidate. Keep this
                     // evidence independent from Copy-based code reconstruction.
-                    let layout = super::memory::pointer_input_layout(
-                        self.package,
-                        result_ty,
-                        &mut self.fuel,
-                    )
-                    .map_err(|reason| error(source, reason))?;
+                    let layout = self.pointer_input_layout(result_ty, source)?;
                     let mut domains =
                         copy_enum_domains(&flow.value_variants, &mut self.fuel, source)?;
                     let mut consistent = true;
@@ -5022,9 +5127,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         // Recover pointer layouts only with complete origins for
                         // every possible leaf. Ownership requires Copy and stable
                         // code; this flag never grants pointee validity by itself.
-                        let layout =
-                            super::memory::pointer_input_layout(self.package, &ty, &mut self.fuel)
-                                .map_err(|reason| error(source, reason))?;
+                        let layout = self.pointer_input_layout(&ty, source)?;
                         let mut pointer_contract = true;
                         let mut absent_pointer_paths = vec![];
                         for leaf in &layout {
@@ -5486,8 +5589,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .map_err(|reason| error(source, reason))?
                 .is_none()
         {
-            super::memory::pointer_input_layout(self.package, result, &mut self.fuel)
-                .map_err(|reason| error(source, reason))?
+            self.pointer_input_layout(result, source)?
                 .into_iter()
                 .map(|leaf| (leaf.input_fields.clone(), leaf))
                 .collect()
@@ -5515,13 +5617,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if let K::Closure { captures, .. } = &callable.definition.kind {
             for capture in captures {
                 if self.package.is_some() && self.storage_inputs_are_closed(&capture.ty, source)? {
-                    memory |= !super::memory::pointer_input_layout(
-                        self.package,
-                        &capture.ty,
-                        &mut self.fuel,
-                    )
-                    .map_err(|reason| error(source, reason))?
-                    .is_empty();
+                    memory |= !self.pointer_input_layout(&capture.ty, source)?.is_empty();
                 }
             }
         }
@@ -5891,12 +5987,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 // asking for their layout here would prematurely require a
                 // concrete instantiation without adding any memory evidence.
                 let layout = if symbolic.values().any(|targets| !targets.is_empty()) {
-                    super::memory::pointer_input_layout(
-                        this.package,
-                        &argument.value.ty,
-                        &mut this.fuel,
-                    )
-                    .map_err(|reason| error(source, reason))?
+                    this.pointer_input_layout(&argument.value.ty, source)?
                 } else {
                     vec![]
                 };
@@ -6063,9 +6154,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 )? {
                     continue;
                 }
-                let layout =
-                    super::memory::pointer_input_layout(self.package, &capture.ty, &mut self.fuel)
-                        .map_err(|e| error(source, e))?;
+                let layout = self.pointer_input_layout(&capture.ty, source)?;
                 let subjects: Vec<_> = layout
                     .into_iter()
                     .filter(|leaf| leaf.storage_fields == slot.fields)
@@ -7048,7 +7137,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
             return Ok(true);
         }
-        Ok(nir::program::scalar_observation_shape(ty))
+        Ok(nir::program::scalar_observation_shape(ty)
+            || (self.text_provenance == super::memory::TextProvenance::VerifiedByRegionAnalysis
+                && *ty == Term::Primitive(nir::Primitive::Str)))
     }
     fn observe_associated_value(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
         // Selection/initialization is comptime work. An unresolved identity is
@@ -7056,7 +7147,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         // callable environment. Scalar Copy results need no such runtime state.
         nir::type_computations::charge_term(ty, &mut self.fuel)
             .map_err(|_| error(source, "associated value observation budget exhausted"))?;
-        if !nir::program::scalar_observation_shape_in_package(self.package, ty)
+        let text_verified = self.text_provenance
+            == super::memory::TextProvenance::VerifiedByRegionAnalysis
+            && *ty == Term::Primitive(nir::Primitive::Str);
+        if (!nir::program::scalar_observation_shape_in_package(self.package, ty) && !text_verified)
             || (self.delivery)(ty).map_err(|reason| error(source, reason))? != Delivery::Copy
         {
             return Err(error(
@@ -7118,6 +7212,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(
             nir::program::scalar_observation_shape_in_package(self.package, ty)
+                || (self.text_provenance
+                    == super::memory::TextProvenance::VerifiedByRegionAnalysis
+                    && *ty == Term::Primitive(nir::Primitive::Str))
                 || matches!(ty, Term::Function { .. } | Term::UnsafeFunction(_))
                     && (self.delivery)(ty).map_err(|e| error(source, e))? == Delivery::Copy,
         )
@@ -7137,8 +7234,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.fuel -= 1;
         match &expr.kind {
             K::ReadPointer(pointer) => {
-                if !super::memory::readable_representation(self.package, &expr.ty, &mut self.fuel)
-                    .map_err(|e| error(expr.source, e))?
+                if !super::memory::readable_representation_for(
+                    self.package,
+                    &expr.ty,
+                    self.text_provenance,
+                    &mut self.fuel,
+                )
+                .map_err(|e| error(expr.source, e))?
                     || (self.delivery)(&expr.ty).map_err(|e| error(expr.source, e))?
                         != Delivery::Copy
                 {
@@ -7182,8 +7284,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         // premises. Ordinary call preparation separately maps every access to
         // the actual arguments; these roots never supply caller validity or
         // assert that two input pointers cannot alias.
-        let layout = super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
-            .map_err(|reason| error(source, reason))?;
+        let layout = self.pointer_input_layout(ty, source)?;
         for leaf in layout {
             let local = self.next_borrowed_pointer;
             self.next_borrowed_pointer = local
@@ -7965,9 +8066,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     "guard arguments need scalar, Copy code, or private owned inputs",
                 ));
             }
-            if !super::memory::copy_readable_representation(self.package, &expr.ty, &mut self.fuel)
-                .map_err(|reason| error(expr.source, reason))?
-            {
+            if !self.copy_readable_representation(&expr.ty, expr.source)? {
                 return Err(error(
                     expr.source,
                     "guard argument lacks a readable owned representation",
@@ -8039,9 +8138,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     "guard call result needs failure-path resource transfer",
                 ));
             }
-            if !super::memory::copy_readable_representation(self.package, &expr.ty, &mut self.fuel)
-                .map_err(|reason| error(source, reason))?
-            {
+            if !self.copy_readable_representation(&expr.ty, source)? {
                 return Err(error(
                     source,
                     "guard result lacks a readable owned representation",
@@ -8064,15 +8161,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             if matches!(callee.kind, K::Function(_) | K::FunctionInstance { .. }) {
                 vec![callee]
             } else if matches!(callee.kind, K::TraitMethod { .. }) {
-                let package = self
+                let _ = self
                     .package
                     .ok_or_else(|| error(source, "guard method observation requires a package"))?;
                 // Selection retains the interface checks: method_callee refuses
                 // contracts that have not yet been composed into its footprint.
-                selected = self
-                    .method_callees
-                    .select(package, callee, &mut self.fuel)
-                    .map_err(|reason| error(source, reason))?;
+                selected = self.select_method_callee(callee, source)?;
                 vec![&selected]
             } else {
                 if !self.observation_value_type(&callee.ty, source)? {
@@ -8105,13 +8199,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             };
         let mut observes_pointers = matches!(expr.ty, Term::Pointer(_));
         for argument in arguments {
-            observes_pointers |= !super::memory::pointer_input_layout(
-                self.package,
-                &argument.value.ty,
-                &mut self.fuel,
-            )
-            .map_err(|reason| error(source, reason))?
-            .is_empty();
+            observes_pointers |= !self
+                .pointer_input_layout(&argument.value.ty, source)?
+                .is_empty();
         }
         for target in targets {
             if !matches!(target.kind, K::Function(_) | K::FunctionInstance { .. }) {
@@ -9179,8 +9269,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     && self.storage_inputs_are_closed(ty, source)?
                 {
                     Some(
-                        super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
-                            .map_err(|reason| error(source, reason))?
+                        self.pointer_input_layout(ty, source)?
                             .into_iter()
                             .map(|leaf| leaf.storage_fields)
                             .collect::<BTreeSet<_>>(),
@@ -9585,8 +9674,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if let Ok(present) = state.may_be_present(&slot) {
             return Ok(present);
         }
-        let layout = super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
-            .map_err(|e| error(source, e))?;
+        let layout = self.pointer_input_layout(ty, source)?;
         for leaf in layout {
             if leaf.storage_fields != fields {
                 continue;
@@ -10461,7 +10549,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             } => (*declaration, arguments.as_slice()),
             _ => return Err("memory callee must identify a function".into()),
         };
-        infer_callable_memory_with_borrowed(
+        infer_callable_memory_with_borrowed_full_context(
             self.package.ok_or("memory summary requires a package")?,
             declaration,
             arguments,
@@ -10473,6 +10561,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .as_mut()
                 .map(|cleanup| &mut **cleanup as &mut dyn CleanupPolicy),
             include_cleanup,
+            self.declaration_source,
+            Some(self.method_callees.as_mut()),
+            Some(self.declarations.as_ref()),
+            self.text_provenance,
+            (!include_cleanup).then_some(self.memory_summaries.as_mut()),
             &mut self.fuel,
             source,
         )
@@ -10498,13 +10591,18 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             } => (*declaration, arguments.as_slice()),
             _ => return Err("memory callee must identify a function".into()),
         };
-        super::memory::infer_with_effect_inputs(
+        super::memory::infer_with_effect_inputs_full_context(
             self.package.ok_or("memory summary requires a package")?,
             id,
             arguments,
             inputs,
             code_inputs,
             &self.effect_memory_inputs,
+            self.declaration_source,
+            Some(self.method_callees.as_mut()),
+            Some(self.declarations.as_ref()),
+            self.text_provenance,
+            Some(self.memory_summaries.as_mut()),
             &mut self.fuel,
         )
     }
@@ -10672,8 +10770,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if actual.is_empty() {
             return Ok(targets);
         }
-        let paths = super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
-            .map_err(|reason| error(source, reason))?;
+        let paths = self.pointer_input_layout(ty, source)?;
         for leaf in paths {
             let input = leaf.input_fields;
             let storage = leaf.storage_fields.clone();
@@ -10732,8 +10829,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         require_present: bool,
         source: SourceRange,
     ) -> Result<ValueOrigins, Error> {
-        let layout = super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
-            .map_err(|reason| error(source, reason))?;
+        let layout = self.pointer_input_layout(ty, source)?;
         let mut inputs = ValueOrigins::new();
         for leaf in layout {
             self.fuel = self
@@ -10834,8 +10930,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if origins.is_empty() && domains.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let layout = super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
-            .map_err(|reason| error(source, reason))?;
+        let layout = self.pointer_input_layout(ty, source)?;
         origins::bind_input_origins(&layout, origins, domains, &mut self.fuel, source)
     }
     fn guarded_memory_projection(
@@ -11221,8 +11316,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             {
                 vec![(vec![], pointee)]
             } else {
-                super::memory::pointer_input_layout(self.package, &argument.ty, &mut self.fuel)
-                    .map_err(|e| error(source, e))?
+                self.pointer_input_layout(&argument.ty, source)?
                     .into_iter()
                     .map(|leaf| (leaf.input_fields, leaf.pointee))
                     .collect()
@@ -11321,13 +11415,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     > {
         let selected;
         let callee = if matches!(callee.kind, K::TraitMethod { .. }) {
-            let package = self
+            let _ = self
                 .package
                 .ok_or_else(|| error(source, "method memory analysis requires a package"))?;
-            selected = self
-                .method_callees
-                .select(package, callee, &mut self.fuel)
-                .map_err(|reason| error(source, reason))?;
+            selected = self.select_method_callee(callee, source)?;
             &selected
         } else {
             callee
@@ -11475,12 +11566,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         &flow.value_variants,
                         source,
                     )?;
-                    let layout = super::memory::pointer_input_layout(
-                        this.package,
-                        &argument.value.ty,
-                        &mut this.fuel,
-                    )
-                    .map_err(|reason| error(source, reason))?;
+                    let layout = this.pointer_input_layout(&argument.value.ty, source)?;
                     for leaf in &layout {
                         if let Some(actual) = symbolic.get_mut(&leaf.input_fields) {
                             if !actual.is_empty() {
@@ -11735,15 +11821,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let storage_paths = if summary.pointer_fields.is_empty() {
             BTreeMap::new()
         } else {
-            super::memory::pointer_input_layout(
-                self.package,
-                completion_type(result),
-                &mut self.fuel,
-            )
-            .map_err(|reason| error(source, reason))?
-            .into_iter()
-            .map(|leaf| (leaf.input_fields.clone(), leaf))
-            .collect()
+            self.pointer_input_layout(completion_type(result), source)?
+                .into_iter()
+                .map(|leaf| (leaf.input_fields.clone(), leaf))
+                .collect()
         };
         let mut result_guards = ValuePointerGuards::new();
         for (path, results) in &summary.pointer_fields {
@@ -11940,9 +12021,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow: &mut Flow,
         source: SourceRange,
     ) -> Result<(), Error> {
-        let layout =
-            super::memory::pointer_input_layout(self.package, completion_type(ty), &mut self.fuel)
-                .map_err(|reason| error(source, reason))?;
+        let layout = self.pointer_input_layout(completion_type(ty), source)?;
         for leaf in layout {
             let Some(targets) = origins.get(&leaf.storage_fields) else {
                 continue;
@@ -12036,10 +12115,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return Ok(joined);
         }
         let layout = match domains {
-            Some((ty, _, _)) => {
-                super::memory::pointer_input_layout(self.package, ty, &mut self.fuel)
-                    .map_err(|reason| error(source, reason))?
-            }
+            Some((ty, _, _)) => self.pointer_input_layout(ty, source)?,
             None => vec![],
         };
         for (own, own_origins, other, other_origins, other_domains) in [
@@ -12333,8 +12409,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         let targets = targets
             .ok_or_else(|| error(expr.source, "aggregate read needs established storage"))?;
-        if !super::memory::copy_readable_representation(self.package, &expr.ty, &mut self.fuel)
-            .map_err(|reason| error(expr.source, reason))?
+        if !self.copy_readable_representation(&expr.ty, expr.source)?
             || (self.delivery)(&expr.ty).map_err(|reason| error(expr.source, reason))?
                 != Delivery::Copy
         {
@@ -12343,8 +12418,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 "aggregate pointer read requires checked Copy permission",
             ));
         }
-        let layout = super::memory::pointer_input_layout(self.package, &expr.ty, &mut self.fuel)
-            .map_err(|reason| error(expr.source, reason))?;
+        let layout = self.pointer_input_layout(&expr.ty, expr.source)?;
         let mut merged: Option<(
             ValueOrigins,
             ValuePointerGuards,
@@ -12514,10 +12588,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             && matches!(expr.ty.callable_signature(), Term::Function { parameters, .. }
                 if parameters.iter().all(|parameter| parameter.sort == nir::Sort::Runtime))
         {
-            let selected = self
-                .method_callees
-                .select(self.package.unwrap(), expr, &mut self.fuel)
-                .map_err(|reason| error(expr.source, reason))?;
+            let selected = self.select_method_callee(expr, expr.source)?;
             return self.evaluate_value_origins(&selected, flow, depth + 1);
         }
         let place_guards = self.value_pointer_guards(expr, flow, expr.source)?;
@@ -12633,13 +12704,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         // discard the returned field map.
         let selected;
         let callee = if matches!(callee.kind, K::TraitMethod { .. }) {
-            let package = self
+            let _ = self
                 .package
                 .ok_or_else(|| error(expr.source, "method memory analysis requires a package"))?;
-            selected = self
-                .method_callees
-                .select(package, callee, &mut self.fuel)
-                .map_err(|reason| error(expr.source, reason))?;
+            selected = self.select_method_callee(callee, expr.source)?;
             &selected
         } else {
             callee
@@ -13343,14 +13411,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let replacement = pointer_depth.and_then(|depth| origins.remove(&vec![0; depth]));
         if flow.live {
             let aggregate_layout = if pointer_depth.is_none() {
-                super::memory::pointer_input_layout(self.package, &value.ty, &mut self.fuel)
-                    .map_err(|reason| error(source, reason))?
+                self.pointer_input_layout(&value.ty, source)?
             } else {
                 vec![]
             };
-            if !super::memory::copy_readable_representation(self.package, &value.ty, &mut self.fuel)
-                .map_err(|reason| error(source, reason))?
-            {
+            if !self.copy_readable_representation(&value.ty, source)? {
                 return Err(error(
                     source,
                     "pointer write requires a memory transfer contract",
@@ -13625,9 +13690,15 @@ fn analyze_with_shapes<'a>(
         &[],
         &Default::default(),
         None,
+        super::memory::TextProvenance::Unchecked,
+        None,
+        None,
+        None,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn analyze_with_shapes_and_borrowed_code<'a>(
     package: Option<&'a Package>,
     function: &'a Function,
@@ -13644,6 +13715,11 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
     borrowed_code: &[BorrowedCode],
     trivial_cleanup_types: &std::collections::HashSet<Term>,
     declarations: Option<std::rc::Rc<super::declarations::Metadata<'a>>>,
+    text_provenance: super::memory::TextProvenance,
+    memory_summaries: Option<&'a mut super::memory::SummaryCache>,
+    declaration_source: Option<::materialization::DeclarationSource<'a>>,
+    method_callees: Option<&'a mut super::memory::MethodCallees>,
+    rejection_memo: Option<&'a mut super::rejection::Memo>,
 ) -> Result<Report, Error> {
     // Callers supply many distinct closure types. Keep the large recursive
     // analyzer shared instead of monomorphizing it for every policy closure.
@@ -13670,6 +13746,11 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         trivial_cleanup_types: trivial_cleanup_types.clone(),
         cleanup,
         package,
+        text_provenance,
+        memory_summaries: memory_summaries.map_or_else(
+            || SummaryCacheStorage::Owned(Default::default()),
+            SummaryCacheStorage::Borrowed,
+        ),
         exit_contract: Some(function),
         handler_result: None,
         effect_return_enabled: false,
@@ -13678,8 +13759,12 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         effect_memory_inputs,
         effect_result_inputs,
         handler_completions: vec![],
-        rejection: super::rejection::Cache::with_declarations(declarations.clone()),
+        rejection: super::rejection::Cache::with_declarations_and_memo(
+            declarations.clone(),
+            rejection_memo,
+        ),
         declarations,
+        declaration_source,
         delivery,
         shape,
         fuel,
@@ -13687,7 +13772,10 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         candidate_observations: None,
         observation_region: false,
         observation_locals: BTreeSet::new(),
-        method_callees: Default::default(),
+        method_callees: method_callees.map_or_else(
+            || super::memory::MethodCalleesStorage::Owned(Default::default()),
+            super::memory::MethodCalleesStorage::Borrowed,
+        ),
         persistent_roots: BTreeSet::new(),
         captured_roots: BTreeSet::new(),
         defer_unknown_calls: false,
@@ -13903,9 +13991,13 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         let parameter = parameters
             .get(premise.parameter)
             .ok_or_else(|| error(source, "borrowed field parameter is missing"))?;
-        let leaves =
-            super::memory::pointer_input_layout(package, &parameter.ty, &mut analyzer.fuel)
-                .map_err(|reason| error(source, reason))?;
+        let leaves = super::memory::pointer_input_layout_for(
+            package,
+            &parameter.ty,
+            analyzer.text_provenance,
+            &mut analyzer.fuel,
+        )
+        .map_err(|reason| error(source, reason))?;
         if !leaves
             .iter()
             .any(|leaf| leaf.input_fields == premise.fields && leaf.pointee == premise.pointee)
@@ -14228,6 +14320,7 @@ pub fn analyze_in_package_with_field_context<'a>(
         &[],
     )
 }
+#[allow(clippy::too_many_arguments)]
 pub fn analyze_in_package_with_borrowed_code_context<'a>(
     package: &'a Package,
     function: &'a Function,
@@ -14240,6 +14333,39 @@ pub fn analyze_in_package_with_borrowed_code_context<'a>(
     effects: Vec<EffectResultInput>,
     borrowed_fields: &[BorrowedField],
     borrowed_code: &[BorrowedCode],
+) -> Result<Report, Error> {
+    analyze_in_package_with_borrowed_code_and_text_context(
+        package,
+        function,
+        delivery,
+        fuel,
+        cleanup,
+        borrowed_parameters,
+        callable_parameters,
+        enum_parameters,
+        effects,
+        borrowed_fields,
+        borrowed_code,
+        super::memory::TextProvenance::Unchecked,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn analyze_in_package_with_borrowed_code_and_text_context<'a>(
+    package: &'a Package,
+    function: &'a Function,
+    delivery: impl FnMut(&Term) -> Result<Delivery, String>,
+    fuel: usize,
+    cleanup: Option<&'a mut dyn CleanupPolicy>,
+    borrowed_parameters: &[(usize, Term)],
+    callable_parameters: &[CallableParameter],
+    enum_parameters: &[EnumParameter],
+    effects: Vec<EffectResultInput>,
+    borrowed_fields: &[BorrowedField],
+    borrowed_code: &[BorrowedCode],
+    text_provenance: super::memory::TextProvenance,
+    memory_summaries: Option<&'a mut super::memory::SummaryCache>,
 ) -> Result<Report, Error> {
     let mut shape_fuel = fuel;
     analyze_with_shapes_and_borrowed_code(
@@ -14258,6 +14384,52 @@ pub fn analyze_in_package_with_borrowed_code_context<'a>(
         borrowed_code,
         &Default::default(),
         None,
+        text_provenance,
+        memory_summaries,
+        None,
+        None,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn analyze_in_package_with_session<'a, 's>(
+    session: &'s mut crate::PackageSession<'a>,
+    function: &'s Function,
+    delivery: impl FnMut(&Term) -> Result<Delivery, String>,
+    fuel: usize,
+    cleanup: Option<&'s mut dyn CleanupPolicy>,
+    borrowed_parameters: &[(usize, Term)],
+    callable_parameters: &[CallableParameter],
+    enum_parameters: &[EnumParameter],
+    effects: Vec<EffectResultInput>,
+    borrowed_fields: &[BorrowedField],
+    borrowed_code: &[BorrowedCode],
+    text_provenance: super::memory::TextProvenance,
+) -> Result<Report, Error> {
+    let package = session.package;
+    let mut shape_fuel = fuel;
+    analyze_with_shapes_and_borrowed_code(
+        Some(package),
+        function,
+        delivery,
+        |ty| ownership_shape(package, ty, &mut shape_fuel, 0),
+        fuel,
+        cleanup,
+        borrowed_parameters,
+        callable_parameters,
+        enum_parameters,
+        vec![],
+        effects,
+        borrowed_fields,
+        borrowed_code,
+        &Default::default(),
+        Some(session.declarations.clone()),
+        text_provenance,
+        Some(&mut session.summaries),
+        session.source,
+        Some(&mut session.methods),
+        Some(&mut session.rejection),
     )
 }
 
@@ -14298,6 +14470,11 @@ pub(crate) fn analyze_with_declarations<'a>(
         &[],
         &Default::default(),
         Some(declarations),
+        super::memory::TextProvenance::Unchecked,
+        None,
+        None,
+        None,
+        None,
     )
 }
 
@@ -14791,6 +14968,7 @@ pub fn infer_callable_memory_with_borrowed_context(
     )
 }
 /// Preserve the caller's independently selected complete-layout cleanup policy.
+#[allow(clippy::too_many_arguments)]
 pub fn infer_callable_memory_with_borrowed_cleanup_context(
     package: &Package,
     declaration: nir::DeclarationId,
@@ -14803,6 +14981,39 @@ pub fn infer_callable_memory_with_borrowed_cleanup_context(
     fuel: &mut usize,
     source: SourceRange,
 ) -> Result<super::memory::Summary, String> {
+    infer_callable_memory_with_borrowed_cleanup_and_text_context(
+        package,
+        declaration,
+        arguments,
+        inputs,
+        enums,
+        effects,
+        borrowed,
+        cleanup,
+        super::memory::TextProvenance::Unchecked,
+        None,
+        fuel,
+        source,
+    )
+}
+
+/// Preserve the caller's independently selected complete-layout cleanup policy
+/// alongside package-verified text-region provenance and summary reuse.
+#[allow(clippy::too_many_arguments)]
+pub fn infer_callable_memory_with_borrowed_cleanup_and_text_context<'a>(
+    package: &Package,
+    declaration: nir::DeclarationId,
+    arguments: &[Term],
+    inputs: &[CallableParameter],
+    enums: &[EnumParameter],
+    effects: &[EffectResultInput],
+    borrowed: &[BorrowedCode],
+    cleanup: Option<&'a mut dyn CleanupPolicy>,
+    text_provenance: super::memory::TextProvenance,
+    memory_summaries: Option<&'a mut super::memory::SummaryCache>,
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<super::memory::Summary, String> {
     let mut memory_inputs = Vec::new();
     for input in effects {
         memory_inputs.push(
@@ -14811,7 +15022,7 @@ pub fn infer_callable_memory_with_borrowed_cleanup_context(
                 .map_err(|e| e.to_string())?,
         );
     }
-    infer_callable_memory_with_borrowed(
+    infer_callable_memory_with_borrowed_cached(
         package,
         declaration,
         arguments,
@@ -14821,6 +15032,51 @@ pub fn infer_callable_memory_with_borrowed_cleanup_context(
         borrowed,
         cleanup,
         false,
+        None,
+        text_provenance,
+        memory_summaries,
+        fuel,
+        source,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn infer_callable_memory_with_session<'a, 's>(
+    session: &'s mut crate::PackageSession<'a>,
+    declaration: nir::DeclarationId,
+    arguments: &[Term],
+    inputs: &[CallableParameter],
+    enums: &[EnumParameter],
+    effects: &[EffectResultInput],
+    borrowed: &[BorrowedCode],
+    cleanup: Option<&'s mut dyn CleanupPolicy>,
+    text_provenance: super::memory::TextProvenance,
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<super::memory::Summary, String> {
+    let mut memory_inputs = Vec::new();
+    for input in effects {
+        memory_inputs.push(
+            input
+                .memory_input(fuel, source)
+                .map_err(|e| e.to_string())?,
+        );
+    }
+    infer_callable_memory_with_borrowed_full_context(
+        session.package,
+        declaration,
+        arguments,
+        inputs,
+        enums,
+        &memory_inputs,
+        borrowed,
+        cleanup,
+        false,
+        session.source,
+        Some(&mut session.methods),
+        Some(session.declarations.as_ref()),
+        text_provenance,
+        Some(&mut session.summaries),
         fuel,
         source,
     )
@@ -14848,6 +15104,7 @@ fn infer_callable_memory_with_effects(
         source,
     )
 }
+#[allow(clippy::too_many_arguments)]
 fn infer_callable_memory_with_borrowed(
     package: &Package,
     declaration: nir::DeclarationId,
@@ -14861,6 +15118,79 @@ fn infer_callable_memory_with_borrowed(
     fuel: &mut usize,
     source: SourceRange,
 ) -> Result<super::memory::Summary, String> {
+    infer_callable_memory_with_borrowed_cached(
+        package,
+        declaration,
+        arguments,
+        inputs,
+        enums,
+        effects,
+        borrowed,
+        cleanup,
+        include_cleanup,
+        None,
+        super::memory::TextProvenance::Unchecked,
+        None,
+        fuel,
+        source,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+fn infer_callable_memory_with_borrowed_cached<'b>(
+    package: &Package,
+    declaration: nir::DeclarationId,
+    arguments: &[Term],
+    inputs: &[CallableParameter],
+    enums: &[EnumParameter],
+    effects: &[super::memory::EffectInput],
+    borrowed: &[BorrowedCode],
+    cleanup: Option<&'b mut dyn CleanupPolicy>,
+    include_cleanup: bool,
+    declarations: Option<&'b super::declarations::Metadata<'b>>,
+    text_provenance: super::memory::TextProvenance,
+    summary_cache: Option<&'b mut super::memory::SummaryCache>,
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<super::memory::Summary, String> {
+    infer_callable_memory_with_borrowed_full_context(
+        package,
+        declaration,
+        arguments,
+        inputs,
+        enums,
+        effects,
+        borrowed,
+        cleanup,
+        include_cleanup,
+        None,
+        None,
+        declarations,
+        text_provenance,
+        summary_cache,
+        fuel,
+        source,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_callable_memory_with_borrowed_full_context<'b>(
+    package: &Package,
+    declaration: nir::DeclarationId,
+    arguments: &[Term],
+    inputs: &[CallableParameter],
+    enums: &[EnumParameter],
+    effects: &[super::memory::EffectInput],
+    borrowed: &[BorrowedCode],
+    cleanup: Option<&'b mut dyn CleanupPolicy>,
+    include_cleanup: bool,
+    declaration_source: Option<::materialization::DeclarationSource<'b>>,
+    method_callees: Option<&'b mut super::memory::MethodCallees>,
+    declarations: Option<&'b super::declarations::Metadata<'b>>,
+    text_provenance: super::memory::TextProvenance,
+    summary_cache: Option<&'b mut super::memory::SummaryCache>,
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<super::memory::Summary, String> {
     let (function, body_arguments) = package
         .runtime_body(declaration, arguments)
         .ok_or("memory function is missing")?;
@@ -14868,7 +15198,13 @@ fn infer_callable_memory_with_borrowed(
     for argument in arguments {
         super::memory::bound_type(argument, fuel)?;
     }
-    let domains = super::memory::memory_domains(package, &function.type_parameters, fuel)?;
+    let domains = if let Some(declarations) = declarations {
+        declarations
+            .parameter_domains(&function.type_parameters, fuel)
+            .map_err(|e| e.to_string())?
+    } else {
+        super::memory::memory_domains(package, &function.type_parameters, fuel)?
+    };
     let substitution = nir::DeclarationSubstitution::bounded(
         &function.type_parameters,
         &domains,
@@ -14956,7 +15292,7 @@ fn infer_callable_memory_with_borrowed(
     let borrowed =
         borrowed_memory_inputs(Some(package), borrowed, fuel, source).map_err(|e| e.to_string())?;
     if !borrowed.is_empty() || (include_cleanup && cleanup.is_some()) {
-        return super::memory::infer_with_borrowed_callable_inputs_and_cleanup(
+        return super::memory::infer_with_borrowed_callable_inputs_and_cleanup_full_context(
             package,
             declaration,
             arguments,
@@ -14965,16 +15301,26 @@ fn infer_callable_memory_with_borrowed(
             effects,
             &borrowed,
             cleanup,
+            declaration_source,
+            method_callees,
+            declarations,
+            text_provenance,
+            summary_cache,
             fuel,
         );
     }
-    super::memory::infer_with_effect_inputs(
+    super::memory::infer_with_effect_inputs_full_context(
         package,
         declaration,
         arguments,
         &named,
         &code,
         effects,
+        declaration_source,
+        method_callees,
+        declarations,
+        text_provenance,
+        summary_cache,
         fuel,
     )
 }

@@ -27,14 +27,13 @@ fn show(value: u32) -> !std.io.Error void {
 开放定义从待算结果的共同返回头取得元组遍历依据。字段上的 `inline if`
 在 Display 成立的分支中检查方法调用，实例按实际字段类型展开。
 
-`println` 按格式写出文本和字段，再写一个换行。当前实例在 runtime 顺序读取格式串字节；
-写入失败立即返回，并保留已经输出的前缀。`print` 输出原文，`eprint`/`eprintln` 输出到 stderr。
-`print_value`/`println_value` 调用builtin 的 runtime `Display.write(self, output)`，output 为泛型 writer 的借用。
-标准输出入口返回 `!std.io.Error`，使用后缀 `!` 传播；Display 本身保留实际 writer 的关联错误类型。
-协议与标量实现在 builtin/protocols/formatting，std.fmt 只再导出同一 Display。
+`println`/`eprintln`/`print`/`eprint` 与泛型 `write_fmt<W :- ByteWriter>`、`format`、`format_into` 按格式写出文本与字段；其中 `println`/`eprintln` 末尾附加换行。
+当前实例按字节或字面片段顺序输出；写入失败立即返回，并保留已经输出的前缀。
+`format` 分配并构建拥有型 `std.string.String`，`format_into` 将格式化结果追加到既有 `*String`，两者均返回 `!std.mem.AllocError`。
+`print_value`/`println_value` 调用 builtin 的 runtime `Display.write(self, output)`，output 为泛型 writer 的借用。
+标准输出入口返回 `!std.io.Error`，使用后缀 `!` 传播；`write_fmt` 与 `Display` 保留实际 writer 的关联错误类型。
+协议与标量/`char`/`str` 实现在 builtin/protocols/formatting，`String` 实现在 `std.string_impl`，`std.fmt` 再导出同一 `Display`。
 
-当前支持 bool、机器有符号/无符号整数的十进制输出，包括 i128 最小值、u128
-最大值。负数先在自己的有符号域取得安全幅值，再转到无符号域，避免窄整数
-零扩展造成负数输出错误。没有借用开发用 S-expression 结果打印器。
+当前支持 bool、机器有符号/无符号整数（含 i128 最小值与 u128 最大值）、Unicode 标量 `char`、`str` 与拥有型 `std.string.String` 的格式化输出。没有借用开发用 S-expression 结果打印器。
 
-尚未实现宽度、精度、浮点以及运行时 str 或 String 的 Display。
+尚未实现宽度、精度与浮点格式化。

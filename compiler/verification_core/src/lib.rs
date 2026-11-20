@@ -496,13 +496,7 @@ impl Facts {
         let known = self.known_condition(condition, limits)?;
         let known = match known {
             Some(value) => Some(value),
-            None if matches!(
-                (condition, truth),
-                (Condition::And(..), true) | (Condition::Or(..), false)
-            ) =>
-            {
-                None
-            }
+            None if matches!(condition, Condition::And(..) | Condition::Or(..)) => None,
             None => match condition.truth_by_enclosure(self, limits, 0) {
                 Ok(value) => value,
                 Err(Unknown::MissingBound(_)) => None,
@@ -517,12 +511,93 @@ impl Facts {
             }
             return Ok(());
         }
+        let had_retained = !self.conditions.is_empty();
         let mut next = self.fork(limits)?;
-        next.assume_inner(condition, truth, 0, limits)?;
+        next.assume_inner_mode(condition, truth, 0, limits, true)?;
         next.remember_condition(condition, truth, limits)?;
-        next.propagate_retained_conditions(limits)?;
+        if had_retained || next.conditions.len() > 1 {
+            next.propagate_retained_conditions(limits)?;
+        }
         *self = next;
         Ok(())
+    }
+
+    pub(crate) fn inequalities_mention(&self, value: ValueId) -> bool {
+        if self.inequalities.is_empty() {
+            return false;
+        }
+        (&self.inequalities)
+            .into_iter()
+            .any(|row| row.terms.keys().flatten().any(|id| *id == value))
+    }
+
+    fn inequalities_mention_place(&self, place: PlaceId) -> bool {
+        if self.inequalities.is_empty() {
+            return false;
+        }
+        (&self.inequalities)
+            .into_iter()
+            .any(|row| row.terms.keys().flatten().any(|id| id.place == place))
+    }
+
+    fn conditions_mention_place(
+        &self,
+        place: PlaceId,
+        limits: &mut Limits,
+    ) -> Result<bool, Unknown> {
+        for (condition, _) in &self.conditions {
+            if condition_mentions_place(condition, place, 0, limits)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn can_skip_independent_disjunction(
+        &self,
+        disjuncts: &[(&Condition, bool)],
+        limits: &mut Limits,
+    ) -> Result<bool, Unknown> {
+        if disjuncts.len() < 2 {
+            return Ok(false);
+        }
+        let mut counts: BTreeMap<PlaceId, usize> = BTreeMap::new();
+        for (disjunct, _) in disjuncts {
+            collect_condition_places(disjunct, 0, limits, &mut counts)?;
+        }
+        let mut first_place: Option<PlaceId> = None;
+        for &(disjunct, enclosure_unknown_bounded) in disjuncts {
+            if !enclosure_unknown_bounded {
+                continue;
+            }
+            let mut inner = disjunct;
+            while let Condition::Not(next) = inner {
+                limits.step(1)?;
+                inner = next;
+            }
+            let Condition::Compare { value, .. } = inner else {
+                continue;
+            };
+            if self.value(value.place) != Some(*value) {
+                continue;
+            }
+            if counts.get(&value.place).copied() != Some(1) {
+                continue;
+            }
+            if self.inequalities_mention_place(value.place)
+                || self.conditions_mention_place(value.place, limits)?
+            {
+                continue;
+            }
+            if let Some(prev) = first_place {
+                if prev != value.place {
+                    return Ok(true);
+                }
+            } else {
+                first_place = Some(value.place);
+            }
+        }
+        Ok(false)
     }
 
     fn assume_inner(
@@ -541,7 +616,7 @@ impl Facts {
         truth: bool,
         depth: usize,
         limits: &mut Limits,
-        replay: bool,
+        skip_known: bool,
     ) -> Result<(), Unknown> {
         limits.step(1)?;
         if depth >= 128 {
@@ -556,11 +631,11 @@ impl Facts {
         // transaction, so failure cannot publish a partial conjunction.
         if let Condition::And(a, b) | Condition::Or(a, b) = condition {
             if matches!(condition, Condition::And(..)) == truth {
-                self.assume_inner_mode(a, truth, depth + 1, limits, replay)?;
-                return self.assume_inner_mode(b, truth, depth + 1, limits, replay);
+                self.assume_inner_mode(a, truth, depth + 1, limits, false)?;
+                return self.assume_inner_mode(b, truth, depth + 1, limits, false);
             }
         }
-        if let Some(known) = if replay {
+        if let Some(known) = if skip_known {
             None
         } else {
             self.known_condition(condition, limits)?
@@ -571,63 +646,103 @@ impl Facts {
             return Ok(());
         }
         // Interval truth can eliminate inactive disjuncts before allocating
-        // their fork/join states. This is especially important for tag-qualified
-        // payload contracts, whose other variants are impossible in this arm.
-        match condition.truth_by_enclosure(self, limits, depth) {
-            Ok(Some(actual)) => {
-                self.reachable &= actual == truth;
-                return Ok(());
-            }
-            Ok(None) | Err(Unknown::MissingBound(_)) => {}
-            Err(error) => return Err(error),
-        }
-        if let Condition::And(a, b) | Condition::Or(a, b) = condition {
-            let identity = matches!(condition, Condition::And(..));
-            for (operand, remainder) in [(a.as_ref(), b.as_ref()), (b.as_ref(), a.as_ref())] {
-                match operand.truth_by_enclosure(self, limits, depth + 1) {
-                    Ok(Some(actual)) if actual == identity => {
-                        // Conditions are mathematical, already-evaluated facts.
-                        // Discarding a neutral known operand cannot reorder a
-                        // source effect, and avoids an impossible fork/join.
-                        return self.assume_inner(remainder, truth, depth + 1, limits);
-                    }
-                    Ok(_) | Err(Unknown::MissingBound(_)) => {}
-                    Err(error) => return Err(error),
+        // their fork/join states. Disjunctions perform this in one linear pass
+        // below so deep left-associated chains avoid quadratic re-traversal.
+        if !matches!(condition, Condition::And(..) | Condition::Or(..)) {
+            match condition.truth_by_enclosure(self, limits, depth) {
+                Ok(Some(actual)) => {
+                    self.reachable &= actual == truth;
+                    return Ok(());
                 }
+                Ok(None) | Err(Unknown::MissingBound(_)) => {}
+                Err(error) => return Err(error),
             }
         }
+        let mut needs_propagation = true;
         match condition {
             Condition::Bool(value) => {
                 if *value != truth {
                     self.reachable = false;
                 }
+                needs_propagation = false;
             }
             Condition::Compare {
                 value,
                 relation,
                 constant,
-            } => self.assume_comparison(*value, *relation, constant, truth, limits)?,
+            } => {
+                self.assume_comparison(*value, *relation, constant, truth, limits)?;
+                needs_propagation = self.inequalities_mention(*value);
+            }
             Condition::PolynomialCompare {
                 left,
                 relation,
                 right,
             } => self.establish_relation(left, *relation, right, truth, limits)?,
-            Condition::Not(inner) => self.assume_inner(inner, !truth, depth + 1, limits)?,
-            Condition::And(a, b) | Condition::Or(a, b) => {
-                let sequential = matches!(condition, Condition::And(..)) == truth;
-                if sequential {
-                    self.assume_inner(a, truth, depth + 1, limits)?;
-                    self.assume_inner(b, truth, depth + 1, limits)?;
+            Condition::Not(inner) => {
+                self.assume_inner(inner, !truth, depth + 1, limits)?;
+                needs_propagation = false;
+            }
+            Condition::And(..) | Condition::Or(..) => {
+                let mut disjuncts = Vec::new();
+                collect_disjuncts(condition, truth, depth, limits, &mut disjuncts)?;
+                let mut surviving: Vec<(&Condition, bool)> = Vec::new();
+                for disjunct in disjuncts {
+                    match disjunct.truth_by_enclosure(self, limits, depth + 1) {
+                        Ok(Some(actual)) if actual == truth => return Ok(()),
+                        Ok(Some(_)) => {}
+                        Ok(None) => surviving.push((disjunct, true)),
+                        Err(Unknown::MissingBound(_)) => surviving.push((disjunct, false)),
+                        Err(error) => return Err(error),
+                    }
+                }
+                if surviving.is_empty() {
+                    self.reachable = false;
+                    return Ok(());
+                }
+                if surviving.len() == 1 {
+                    return self.assume_inner(surviving[0].0, truth, depth + 1, limits);
+                }
+                if self.can_skip_independent_disjunction(&surviving, limits)? {
+                    needs_propagation = false;
                 } else {
-                    let mut short_circuit = self.fork(limits)?;
-                    short_circuit.assume_inner(a, truth, depth + 1, limits)?;
-                    self.assume_inner(a, !truth, depth + 1, limits)?;
-                    self.assume_inner(b, truth, depth + 1, limits)?;
-                    *self = self.join(&short_circuit, limits)?;
+                    let mut remainder = self.fork(limits)?;
+                    let mut joined: Option<Facts> = None;
+                    for (index, (disjunct, _)) in surviving.iter().enumerate() {
+                        if !remainder.reachable {
+                            break;
+                        }
+                        if index + 1 == surviving.len() {
+                            remainder.assume_inner(disjunct, truth, depth + 1, limits)?;
+                            if remainder.reachable {
+                                joined = Some(match joined {
+                                    Some(previous) => previous.join(&remainder, limits)?,
+                                    None => remainder,
+                                });
+                            }
+                            break;
+                        }
+                        let mut branch = remainder.fork(limits)?;
+                        branch.assume_inner(disjunct, truth, depth + 1, limits)?;
+                        if branch.reachable {
+                            joined = Some(match joined {
+                                Some(previous) => previous.join(&branch, limits)?,
+                                None => branch,
+                            });
+                        }
+                        remainder.assume_inner(disjunct, !truth, depth + 1, limits)?;
+                    }
+                    match joined {
+                        Some(result) => *self = result,
+                        None => self.reachable = false,
+                    }
                 }
             }
         }
-        self.propagate_relations(limits)
+        if needs_propagation {
+            self.propagate_relations(limits)?;
+        }
+        Ok(())
     }
 
     pub fn fresh_version(&self) -> Result<u64, Unknown> {
@@ -1239,6 +1354,107 @@ pub fn constant_integer_difference(
         .map(|n| Some(n.unwrap_or_else(Integer::zero)))
 }
 
+fn collect_disjuncts<'a>(
+    condition: &'a Condition,
+    truth: bool,
+    depth: usize,
+    limits: &mut Limits,
+    out: &mut Vec<&'a Condition>,
+) -> Result<(), Unknown> {
+    limits.step(1)?;
+    if depth >= 128 {
+        return Err(Unknown::ConditionDepthLimit);
+    }
+    match condition {
+        Condition::Or(a, b) if truth => {
+            collect_disjuncts(a, truth, depth + 1, limits, out)?;
+            collect_disjuncts(b, truth, depth + 1, limits, out)
+        }
+        Condition::And(a, b) if !truth => {
+            collect_disjuncts(a, truth, depth + 1, limits, out)?;
+            collect_disjuncts(b, truth, depth + 1, limits, out)
+        }
+        _ => {
+            out.push(condition);
+            Ok(())
+        }
+    }
+}
+
+fn polynomial_mentions_place(
+    poly: &Polynomial,
+    place: PlaceId,
+    limits: &mut Limits,
+) -> Result<bool, Unknown> {
+    for factors in poly.terms.keys() {
+        limits.step(1)?;
+        if factors.iter().any(|id| id.place == place) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn condition_mentions_place(
+    condition: &Condition,
+    place: PlaceId,
+    depth: usize,
+    limits: &mut Limits,
+) -> Result<bool, Unknown> {
+    limits.step(1)?;
+    if depth >= 128 {
+        return Err(Unknown::ConditionDepthLimit);
+    }
+    match condition {
+        Condition::Bool(_) => Ok(false),
+        Condition::Compare { value, .. } => Ok(value.place == place),
+        Condition::PolynomialCompare { left, right, .. } => {
+            Ok(polynomial_mentions_place(left, place, limits)?
+                || polynomial_mentions_place(right, place, limits)?)
+        }
+        Condition::Not(inner) => condition_mentions_place(inner, place, depth + 1, limits),
+        Condition::And(a, b) | Condition::Or(a, b) => {
+            Ok(condition_mentions_place(a, place, depth + 1, limits)?
+                || condition_mentions_place(b, place, depth + 1, limits)?)
+        }
+    }
+}
+
+fn collect_condition_places(
+    condition: &Condition,
+    depth: usize,
+    limits: &mut Limits,
+    out: &mut BTreeMap<PlaceId, usize>,
+) -> Result<(), Unknown> {
+    limits.step(1)?;
+    if depth >= 128 {
+        return Err(Unknown::ConditionDepthLimit);
+    }
+    match condition {
+        Condition::Bool(_) => Ok(()),
+        Condition::Compare { value, .. } => {
+            *out.entry(value.place).or_default() += 1;
+            Ok(())
+        }
+        Condition::PolynomialCompare { left, right, .. } => {
+            for poly in [left, right] {
+                for factors in poly.terms.keys() {
+                    limits.step(1)?;
+                    for id in factors {
+                        *out.entry(id.place).or_default() += 1;
+                    }
+                }
+            }
+            Ok(())
+        }
+        Condition::Not(inner) => collect_condition_places(inner, depth + 1, limits, out),
+        Condition::And(a, b) | Condition::Or(a, b) => {
+            collect_condition_places(a, depth + 1, limits, out)?;
+            collect_condition_places(b, depth + 1, limits, out)
+        }
+    }
+}
+
 #[cfg(test)]
 mod constant_assumption_tests {
     use super::*;
@@ -1285,6 +1501,255 @@ mod constant_assumption_tests {
             .assume(&Condition::Bool(true), true, &mut limits)
             .unwrap();
         assert!(!facts.is_reachable());
+    }
+}
+
+#[cfg(test)]
+mod disjunction_complexity_tests {
+    use super::*;
+
+    #[test]
+    fn flattened_disjunction_avoids_exponential_splitting_and_preserves_short_circuit() {
+        let mut setup = Limits::default();
+        let mut facts = Facts::default();
+        let start = facts
+            .assign(
+                PlaceId { owner: 1, local: 0 },
+                Interval::machine(64, false, &mut setup).unwrap(),
+            )
+            .unwrap();
+        let len = facts
+            .assign(
+                PlaceId { owner: 1, local: 1 },
+                Interval::machine(64, false, &mut setup).unwrap(),
+            )
+            .unwrap();
+        let b0 = facts
+            .assign(
+                PlaceId { owner: 1, local: 2 },
+                Interval::machine(8, false, &mut setup).unwrap(),
+            )
+            .unwrap();
+        let b1 = facts
+            .assign(
+                PlaceId { owner: 1, local: 3 },
+                Interval::machine(8, false, &mut setup).unwrap(),
+            )
+            .unwrap();
+        let b2 = facts
+            .assign(
+                PlaceId { owner: 1, local: 4 },
+                Interval::machine(8, false, &mut setup).unwrap(),
+            )
+            .unwrap();
+        let b3 = facts
+            .assign(
+                PlaceId { owner: 1, local: 5 },
+                Interval::machine(8, false, &mut setup).unwrap(),
+            )
+            .unwrap();
+        // Establish unrelated difference relations: start < len and len - start >= 4.
+        let start_poly = Polynomial::variable(start, &mut setup).unwrap();
+        let len_poly = Polynomial::variable(len, &mut setup).unwrap();
+        facts
+            .assume(
+                &Condition::PolynomialCompare {
+                    left: start_poly.clone(),
+                    relation: Comparison::Less,
+                    right: len_poly.clone(),
+                },
+                true,
+                &mut setup,
+            )
+            .unwrap();
+        let diff = len_poly.subtract(&start_poly, &mut setup).unwrap();
+        facts
+            .assume(
+                &Condition::PolynomialCompare {
+                    left: diff,
+                    relation: Comparison::GreaterEqual,
+                    right: Polynomial::constant(Integer::from_u128(4), &mut setup).unwrap(),
+                },
+                true,
+                &mut setup,
+            )
+            .unwrap();
+        assert!(facts.value(b0.place) == Some(b0));
+
+        // 6-way left-associated disjunction: b1 < 128 || b1 > 191 || b2 < 128 || ...
+        let mut disj = Condition::Or(
+            Box::new(Condition::Compare {
+                value: b1,
+                relation: Comparison::Less,
+                constant: Integer::from_u128(128),
+            }),
+            Box::new(Condition::Compare {
+                value: b1,
+                relation: Comparison::Greater,
+                constant: Integer::from_u128(191),
+            }),
+        );
+        for val in [b2, b3] {
+            disj = Condition::Or(
+                Box::new(disj),
+                Box::new(Condition::Compare {
+                    value: val,
+                    relation: Comparison::Less,
+                    constant: Integer::from_u128(128),
+                }),
+            );
+            disj = Condition::Or(
+                Box::new(disj),
+                Box::new(Condition::Compare {
+                    value: val,
+                    relation: Comparison::Greater,
+                    constant: Integer::from_u128(191),
+                }),
+            );
+        }
+
+        let mut yes = facts.fork(&mut setup).unwrap();
+        let mut yes_limits = Limits::default();
+        yes_limits.arithmetic.steps = 100_000;
+        yes.assume(&disj, true, &mut yes_limits).unwrap();
+        assert!(yes.is_reachable());
+
+        let mut no = facts.fork(&mut setup).unwrap();
+        let mut no_limits = Limits::default();
+        no_limits.arithmetic.steps = 100_000;
+        no.assume(&disj, false, &mut no_limits).unwrap();
+        assert!(no.is_reachable());
+        for val in [b1, b2, b3] {
+            let bound = no.bound(val, &mut setup).unwrap();
+            assert_eq!(bound.lower, Integer::from_u128(128));
+            assert_eq!(bound.upper, Integer::from_u128(191));
+        }
+
+        // Verify left-to-right short-circuiting when a prefix disjunct is false.
+        let mut sc = Facts::default();
+        let x = sc
+            .assign(
+                PlaceId { owner: 1, local: 9 },
+                Interval::new(Integer::from_u128(10), Integer::from_u128(255), &mut setup).unwrap(),
+            )
+            .unwrap();
+        let cond = Condition::Or(
+            Box::new(Condition::Compare {
+                value: x,
+                relation: Comparison::Less,
+                constant: Integer::from_u128(10),
+            }),
+            Box::new(Condition::Compare {
+                value: x,
+                relation: Comparison::Greater,
+                constant: Integer::from_u128(20),
+            }),
+        );
+        sc.assume(&cond, true, &mut setup).unwrap();
+        let bound = sc.bound(x, &mut setup).unwrap();
+        assert_eq!(bound.lower, Integer::from_u128(21));
+        assert_eq!(bound.upper, Integer::from_u128(255));
+    }
+
+    #[test]
+    fn independent_disjuncts_shortcut_avoids_quadratic_joins_and_preserves_tightening_when_needed()
+    {
+        let mut setup = Limits::default();
+        let mut facts = Facts::default();
+        let mut vars = Vec::new();
+        for idx in 0..20u32 {
+            vars.push(
+                facts
+                    .assign(
+                        PlaceId {
+                            owner: 2,
+                            local: idx,
+                        },
+                        Interval::machine(16, false, &mut setup).unwrap(),
+                    )
+                    .unwrap(),
+            );
+        }
+        let mut conj = Condition::Compare {
+            value: vars[0],
+            relation: Comparison::Greater,
+            constant: Integer::from_u128(10),
+        };
+        for &v in &vars[1..] {
+            conj = Condition::And(
+                Box::new(conj),
+                Box::new(Condition::Compare {
+                    value: v,
+                    relation: Comparison::Greater,
+                    constant: Integer::from_u128(10),
+                }),
+            );
+        }
+        // Negating a 20-way conjunction of independent bounded variables must finish in small budget
+        // and still retain the disjunction for later unit propagation.
+        let mut small = Limits::default();
+        small.arithmetic.steps = 1_500;
+        let mut branch = facts.fork(&mut setup).unwrap();
+        branch.assume(&conj, false, &mut small).unwrap();
+        assert!(branch.is_reachable());
+        assert!(branch.conditions.len() == 1);
+
+        // When only ONE disjunct is satisfiable (others are false on their intervals),
+        // the shortcut must NOT apply and the surviving disjunct must still tighten.
+        let impossible = Condition::Compare {
+            value: vars[0],
+            relation: Comparison::Greater,
+            constant: Integer::from_u128(100_000),
+        };
+        let surviving = Condition::Compare {
+            value: vars[1],
+            relation: Comparison::Equal,
+            constant: Integer::from_u128(42),
+        };
+        let mixed = Condition::Or(Box::new(impossible), Box::new(surviving));
+        let mut single = facts.fork(&mut setup).unwrap();
+        single.assume(&mixed, true, &mut setup).unwrap();
+        let bound = single.bound(vars[1], &mut setup).unwrap();
+        assert_eq!(bound.lower, Integer::from_u128(42));
+        assert_eq!(bound.upper, Integer::from_u128(42));
+
+        // When variables are constrained in `inequalities`, relational propagation must still run.
+        let p0 = Polynomial::variable(vars[0], &mut setup).unwrap();
+        let p1 = Polynomial::variable(vars[1], &mut setup).unwrap();
+        let diff = p0.subtract(&p1, &mut setup).unwrap();
+        let zero = Polynomial::constant(Integer::zero(), &mut setup).unwrap();
+        let mut rel = facts.fork(&mut setup).unwrap();
+        rel.assume(
+            &Condition::PolynomialCompare {
+                left: diff,
+                relation: Comparison::Equal,
+                right: zero,
+            },
+            true,
+            &mut setup,
+        )
+        .unwrap();
+        let rel_disj = Condition::Or(
+            Box::new(Condition::Compare {
+                value: vars[0],
+                relation: Comparison::Less,
+                constant: Integer::from_u128(5),
+            }),
+            Box::new(Condition::Compare {
+                value: vars[1],
+                relation: Comparison::Less,
+                constant: Integer::from_u128(5),
+            }),
+        );
+        rel.assume(&rel_disj, true, &mut setup).unwrap();
+        assert_eq!(
+            rel.bound(vars[0], &mut setup).unwrap().upper,
+            Integer::from_u128(4)
+        );
+        assert_eq!(
+            rel.bound(vars[1], &mut setup).unwrap().upper,
+            Integer::from_u128(4)
+        );
     }
 }
 

@@ -141,6 +141,7 @@ const try_isize_to_i16_operation: fn(isize) -> ?i16 = .try_integer_convert'built
 const try_isize_to_i32_operation: fn(isize) -> ?i32 = .try_integer_convert'builtin;
 const try_isize_to_i64_operation: fn(isize) -> ?i64 = .try_integer_convert'builtin;
 const try_isize_to_i128_operation: fn(isize) -> ?i128 = .try_integer_convert'builtin;
+const try_u32_to_char_operation: fn(u32) -> ?char = .try_integer_convert'builtin;
 
 {-
     Select compiler operation identities as explicit comptime inputs. The public
@@ -697,4 +698,8 @@ pub fn try_isize_to_i64(value: isize) -> ?i64 {
 
 pub fn try_isize_to_i128(value: isize) -> ?i128 {
     invoke_one(try_isize_to_i128_operation, value)
+}
+
+pub fn try_u32_to_char(value: u32) -> ?char {
+    invoke_one(try_u32_to_char_operation, value)
 }

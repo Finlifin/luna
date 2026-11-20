@@ -398,26 +398,51 @@ fn text_hashes_and_equality_observe_complete_utf8_contents() {
 
 #[test]
 fn string_hash_does_not_bypass_resource_provenance_checks() {
-    for body in ["fn run()->u64 {let value:str=\"foobar\";value.as(Hash).hash()}"] {
-        let package = support::compile(&source(body));
-        let protocol = |name: &str| {
-            package
-                .traits
-                .iter()
-                .find(|item| item.name == name)
-                .unwrap()
-                .declaration
-        };
-        let error = luna::host::llvm_ir_with_protocols(
-            &package,
+    let package = support::compile(&source(
+        "fn verify() {let value:str=\"foobar\";let expected=\"foobar\".as(Hash).hash();let actual=value.as(Hash).hash();assumes actual == expected;}",
+    ));
+    let protocol = |name: &str| {
+        package
+            .traits
+            .iter()
+            .find(|item| item.name == name)
+            .unwrap()
+            .declaration
+    };
+    let ir = luna::host::llvm_ir_with_protocols(
+        &package,
+        "verify",
+        1_000_000,
+        protocol("Copy"),
+        protocol("Drop"),
+    )
+    .unwrap();
+    luna::host::Toolchain::default()
+        .execute_test(&ir, std::time::Duration::from_secs(5))
+        .unwrap();
+
+    let err = elaboration::verification::memory::pointer_input_layout(
+        None,
+        &nir::Term::Primitive(nir::Primitive::Str),
+        &mut 10_000,
+    )
+    .unwrap_err();
+    assert!(err.contains("string-view memory provenance"), "{err}");
+
+    let escaping = support::compile(&source(
+        "fn leak()->*str {let local=\"foobar\";local.ref}
+         fn run()->u64 {let _=leak();0}",
+    ));
+    assert!(
+        luna::host::llvm_ir_with_protocols(
+            &escaping,
             "run",
             1_000_000,
             protocol("Copy"),
             protocol("Drop"),
         )
-        .unwrap_err();
-        assert!(error.contains("string-view memory provenance"), "{error}");
-    }
+        .is_err()
+    );
 }
 
 #[test]

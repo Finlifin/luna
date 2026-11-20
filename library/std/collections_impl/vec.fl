@@ -1,0 +1,719 @@
+use builtin.fmt.ByteWriter;
+use mem_impl.allocator.{AllocError, Allocator, RawBlock, ReallocError, SystemAllocator}
+use mem_impl.layout.Layout;
+
+{-
+    Growable heap-allocated contiguous sequence Vec<T> and its consuming
+    iterator VecIter<T>.
+
+    Vec<T> is affine (Once) and drops every initialized element in forward order
+    before releasing its RawBlock. Zero-sized elements never allocate OS memory
+    while still tracking element count and running T's Drop on destruction or
+    removal.
+-}
+pub struct Vec where T {
+    raw_addr: usize,
+    raw_len: usize,
+    raw_cap: usize,
+}
+
+fn retire_value(value: T) where T {}
+
+fn elem_stride() -> ?usize where T {
+    let size = Type.size_of(T);
+    if size == 0 {
+        return 0;
+    }
+    let align = Type.align_of(T);
+    builtin.mem.align_up_usize(size, align)
+}
+
+fn slot_address(base: usize, index: usize) -> usize where T {
+    let stride = elem_stride<T>() match {
+        value? => value,
+        null => return Type.align_of(T),
+    }
+    if stride == 0 {
+        return Type.align_of(T);
+    }
+    let offset = builtin.mem.checked_mul_usize(index, stride) match {
+        value? => value,
+        null => return 0,
+    }
+    builtin.mem.checked_add_usize(base, offset) match {
+        addr? => addr,
+        null => 0,
+    }
+}
+
+fn buffer_layout(cap: usize) -> ?Layout where T {
+    let count_u64 = builtin.compiler.try_usize_to_u64(cap) match {
+        value? => value,
+        null => return null,
+    }
+    let layout = Layout.array<T>(count_u64) match {
+        value? => value,
+        null => return null,
+    }
+    let _ = layout.byte_size_usize() match {
+        value? => value,
+        null => return null,
+    }
+    layout
+}
+
+fn dealloc_vec_buffer(addr: usize, cap: usize) where T {
+    if Type.size_of(T) == 0 or cap == 0 or addr == 0 {
+        return;
+    }
+    let layout = buffer_layout<T>(cap) match {
+        value? => value,
+        null => return,
+    }
+    let alloc = SystemAllocator {}
+    unsafe {
+        alloc
+            .as(Allocator)
+            .deallocate(RawBlock.from_raw_parts(addr, layout));
+    }
+}
+
+fn map_realloc_error(err: ReallocError) -> AllocError {
+    err match {
+        .out_of_memory => AllocError.out_of_memory,
+        .invalid_layout => AllocError.invalid_layout,
+    }
+}
+
+impl Drop for Vec<T> where T {
+    fn drop(*self) {
+        let len = self.raw_len.*;
+        let cap = self.raw_cap.*;
+        let addr = self.raw_addr.*;
+        self.raw_len.* = 0;
+        self.raw_cap.* = 0;
+        self.raw_addr.* = 0;
+        var i: usize = 0;
+        while i < len {
+            let elem = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr, i)) }
+            retire_value(elem);
+            i = i + 1;
+        }
+        dealloc_vec_buffer<T>(addr, cap);
+    }
+}
+
+impl Vec<T> where T {
+    pub pure fn new() -> Self {
+        Vec<T> {
+            raw_addr: 0,
+            raw_len: 0,
+            raw_cap: 0,
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> !AllocError Self {
+        if capacity == 0 {
+            return Vec<T>.new();
+        }
+        if Type.size_of(T) == 0 {
+            let _ = Layout.of<T>() match {
+                found? => found,
+                null => return error AllocError.invalid_layout,
+            }
+            return Vec<T>.new();
+        }
+        let layout = buffer_layout<T>(capacity) match {
+            found? => found,
+            null => return error AllocError.invalid_layout,
+        }
+        let alloc = SystemAllocator {}
+        let block = alloc.as(Allocator).allocate(layout)!;
+        Vec<T> {
+            raw_addr: block.address(),
+            raw_len: 0,
+            raw_cap: capacity,
+        }
+    }
+
+    pub fn len(*self) -> usize {
+        self.raw_len.*
+    }
+
+    pub fn capacity(*self) -> usize {
+        if Type.size_of(T) == 0 {
+            return builtin.mem.usize_max();
+        }
+        self.raw_cap.*
+    }
+
+    pub fn is_empty(*self) -> bool {
+        self.raw_len.* == 0
+    }
+
+    pub fn as_addr(*self) -> usize {
+        if Type.size_of(T) == 0 {
+            return Type.align_of(T);
+        }
+        self.raw_addr.*
+    }
+
+    pub fn reserve(*self, additional: usize) -> !AllocError void {
+        let len = self.raw_len.*;
+        let required = builtin.mem.checked_add_usize(len, additional) match {
+            value? => value,
+            null => return error AllocError.invalid_layout,
+        }
+        if Type.size_of(T) == 0 {
+            let _ = Layout.of<T>() match {
+                found? => found,
+                null => return error AllocError.invalid_layout,
+            }
+            return;
+        }
+        let cap = self.raw_cap.*;
+        if required <= cap {
+            return;
+        }
+        let min_cap: usize = if Type.size_of(T) == 1 { 8 } else { 4 }
+        let doubled = if cap == 0 {
+            min_cap
+        } else {
+            builtin.mem.checked_mul_usize(cap, 2) match {
+                value? => value,
+                null => required,
+            }
+        }
+        let target_cap = if doubled > required {
+            doubled
+        } else {
+            required
+        }
+        let target_cap = if target_cap < min_cap {
+            min_cap
+        } else {
+            target_cap
+        }
+        let new_layout = buffer_layout<T>(target_cap) match {
+            found? => found,
+            null => return error AllocError.invalid_layout,
+        }
+        let alloc = SystemAllocator {}
+        if cap == 0 {
+            let block = alloc.as(Allocator).allocate(new_layout)!;
+            self.raw_addr.* = block.address();
+            self.raw_cap.* = target_cap;
+        } else {
+            let old_layout = buffer_layout<T>(cap) match {
+                found? => found,
+                null => return error AllocError.invalid_layout,
+            }
+            let old_block = RawBlock.from_raw_parts(self.raw_addr.*, old_layout);
+            let new_block = unsafe { alloc.as(Allocator).reallocate(old_block, new_layout) } match {
+                block! => block,
+                error reason => return error map_realloc_error(reason),
+            }
+            self.raw_addr.* = new_block.address();
+            self.raw_cap.* = target_cap;
+        }
+    }
+
+    pub fn shrink_to_fit(*self) -> !AllocError void {
+        if Type.size_of(T) == 0 {
+            return;
+        }
+        let len = self.raw_len.*;
+        let cap = self.raw_cap.*;
+        if cap <= len {
+            return;
+        }
+        let addr = self.raw_addr.*;
+        if len == 0 {
+            dealloc_vec_buffer<T>(addr, cap);
+            self.raw_addr.* = 0;
+            self.raw_cap.* = 0;
+            return;
+        }
+        let old_layout = buffer_layout<T>(cap) match {
+            found? => found,
+            null => return error AllocError.invalid_layout,
+        }
+        let new_layout = buffer_layout<T>(len) match {
+            found? => found,
+            null => return error AllocError.invalid_layout,
+        }
+        let alloc = SystemAllocator {}
+        let new_block = unsafe {
+            alloc
+                .as(Allocator)
+                .reallocate(RawBlock.from_raw_parts(addr, old_layout), new_layout)
+        } match {
+            block! => block,
+            error reason => return error map_realloc_error(reason),
+        }
+        self.raw_addr.* = new_block.address();
+        self.raw_cap.* = len;
+    }
+
+    pub fn push(*self, value: T) -> !AllocError void {
+        let len = self.raw_len.*;
+        let next_len = builtin.mem.checked_add_usize(len, 1) match {
+            v? => v,
+            null => return error AllocError.invalid_layout,
+        }
+        self.reserve(1)!;
+        let addr = self.raw_addr.*;
+        unsafe {
+            builtin.mem.raw_write<T>(slot_address<T>(addr, len), value);
+        }
+        self.raw_len.* = next_len;
+    }
+
+    pub fn pop(*self) -> ?T {
+        let len = self.raw_len.*;
+        if len == 0 {
+            return null;
+        }
+        let last_index = len - 1;
+        let addr = self.raw_addr.*;
+        self.raw_len.* = last_index;
+        unsafe {
+            builtin.mem.raw_read<T>(slot_address<T>(addr, last_index))
+        }
+    }
+
+    pub fn insert(*self, index: usize, value: T) -> !AllocError bool {
+        let len = self.raw_len.*;
+        if index > len {
+            retire_value(value);
+            return false;
+        }
+        let next_len = builtin.mem.checked_add_usize(len, 1) match {
+            v? => v,
+            null => return error AllocError.invalid_layout,
+        }
+        self.reserve(1)!;
+        let addr = self.raw_addr.*;
+        if Type.size_of(T) != 0 and index < len {
+            let stride = elem_stride<T>() match {
+                s? => s,
+                null => return error AllocError.invalid_layout,
+            }
+            let tail_count = len - index;
+            let bytes = builtin.mem.checked_mul_usize(tail_count, stride) match {
+                b? => b,
+                null => return error AllocError.invalid_layout,
+            }
+            let src = slot_address<T>(addr, index);
+            let dst = slot_address<T>(addr, index + 1);
+            unsafe {
+                builtin.mem.copy_bytes(dst, src, bytes);
+            }
+        }
+        unsafe {
+            builtin
+                .mem
+                .raw_write<T>(slot_address<T>(addr, index), value);
+        }
+        self.raw_len.* = next_len;
+        true
+    }
+
+    pub fn remove(*self, index: usize) -> ?T {
+        let len = self.raw_len.*;
+        if index >= len {
+            return null;
+        }
+        let addr = self.raw_addr.*;
+        let value = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr, index)) }
+        let new_len = len - 1;
+        if Type.size_of(T) != 0 and index < new_len {
+            let stride = elem_stride<T>() match {
+                s? => s,
+                null => return value,
+            }
+            let tail_count = new_len - index;
+            let bytes = builtin.mem.checked_mul_usize(tail_count, stride) match {
+                b? => b,
+                null => return value,
+            }
+            let dst = slot_address<T>(addr, index);
+            let src = slot_address<T>(addr, index + 1);
+            unsafe {
+                builtin.mem.copy_bytes(dst, src, bytes);
+            }
+        }
+        self.raw_len.* = new_len;
+        value
+    }
+
+    pub fn swap_remove(*self, index: usize) -> ?T {
+        let len = self.raw_len.*;
+        if index >= len {
+            return null;
+        }
+        let last_index = len - 1;
+        let addr = self.raw_addr.*;
+        let removed = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr, index)) }
+        if index != last_index and Type.size_of(T) != 0 {
+            let tail = unsafe {
+                builtin.mem.raw_read<T>(slot_address<T>(addr, last_index))
+            }
+            unsafe {
+                builtin.mem.raw_write<T>(slot_address<T>(addr, index), tail);
+            }
+        }
+        self.raw_len.* = last_index;
+        removed
+    }
+
+    pub fn swap(*self, a: usize, b: usize) -> bool {
+        let len = self.raw_len.*;
+        if a >= len or b >= len {
+            return false;
+        }
+        if a == b {
+            return true;
+        }
+        if Type.size_of(T) != 0 {
+            let base = self.raw_addr.*;
+            let addr_a = slot_address<T>(base, a);
+            let addr_b = slot_address<T>(base, b);
+            let va = unsafe { builtin.mem.raw_read<T>(addr_a) }
+            let vb = unsafe { builtin.mem.raw_read<T>(addr_b) }
+            unsafe {
+                builtin.mem.raw_write<T>(addr_a, vb);
+                builtin.mem.raw_write<T>(addr_b, va);
+            }
+        }
+        true
+    }
+
+    pub fn replace(*self, index: usize, value: T) -> ?T {
+        let len = self.raw_len.*;
+        if index >= len {
+            retire_value(value);
+            return null;
+        }
+        let slot = slot_address<T>(self.raw_addr.*, index);
+        let old = unsafe { builtin.mem.raw_read<T>(slot) }
+        unsafe {
+            builtin.mem.raw_write<T>(slot, value);
+        }
+        old
+    }
+
+    pub fn set(*self, index: usize, value: T) -> bool {
+        let len = self.raw_len.*;
+        if index >= len {
+            retire_value(value);
+            return false;
+        }
+        let slot = slot_address<T>(self.raw_addr.*, index);
+        let old = unsafe { builtin.mem.raw_read<T>(slot) }
+        unsafe {
+            builtin.mem.raw_write<T>(slot, value);
+        }
+        retire_value(old);
+        true
+    }
+
+    pub fn truncate(*self, new_len: usize) {
+        let len = self.raw_len.*;
+        if new_len >= len {
+            return;
+        }
+        let addr = self.raw_addr.*;
+        self.raw_len.* = new_len;
+        var i = new_len;
+        while i < len {
+            let elem = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr, i)) }
+            retire_value(elem);
+            i = i + 1;
+        }
+    }
+
+    pub fn clear(*self) {
+        self.truncate(0);
+    }
+
+    pub fn reverse(*self) {
+        let len = self.raw_len.*;
+        if len <= 1 or Type.size_of(T) == 0 {
+            return;
+        }
+        var lo: usize = 0;
+        var hi: usize = len - 1;
+        let base = self.raw_addr.*;
+        while lo < hi {
+            let addr_lo = slot_address<T>(base, lo);
+            let addr_hi = slot_address<T>(base, hi);
+            let left = unsafe { builtin.mem.raw_read<T>(addr_lo) }
+            let right = unsafe { builtin.mem.raw_read<T>(addr_hi) }
+            unsafe {
+                builtin.mem.raw_write<T>(addr_lo, right);
+                builtin.mem.raw_write<T>(addr_hi, left);
+            }
+            lo = lo + 1;
+            hi = hi - 1;
+        }
+    }
+
+    pub fn append(*self, other: *Self) -> !AllocError void {
+        let other_len = other.raw_len.*;
+        if other_len == 0 {
+            return;
+        }
+        let self_len = self.raw_len.*;
+        let next_len = builtin.mem.checked_add_usize(self_len, other_len) match {
+            v? => v,
+            null => return error AllocError.invalid_layout,
+        }
+        self.reserve(other_len)!;
+        if Type.size_of(T) != 0 {
+            let stride = elem_stride<T>() match {
+                s? => s,
+                null => return error AllocError.invalid_layout,
+            }
+            let bytes = builtin.mem.checked_mul_usize(other_len, stride) match {
+                b? => b,
+                null => return error AllocError.invalid_layout,
+            }
+            let dst = slot_address<T>(self.raw_addr.*, self_len);
+            let src = slot_address<T>(other.raw_addr.*, 0);
+            unsafe {
+                builtin.mem.copy_bytes_nonoverlapping(dst, src, bytes);
+            }
+        }
+        other.raw_len.* = 0;
+        self.raw_len.* = next_len;
+    }
+
+    pub fn with_ref(*self, index: usize, f: %c fn(*T) -> R) -> ?R where R, c: Type.vars.Closure {
+        let len = self.raw_len.*;
+        if index >= len {
+            return null;
+        }
+        let addr = slot_address<T>(self.raw_addr.*, index);
+        var elem = unsafe { builtin.mem.raw_read<T>(addr) }
+        let result = f(elem.ref);
+        unsafe {
+            builtin.mem.raw_write<T>(addr, elem);
+        }
+        result
+    }
+
+    pub fn for_each_ref(*self, f: %c fn(*T)) where c: Type.vars.Closure {
+        let len = self.raw_len.*;
+        let base = self.raw_addr.*;
+        var i: usize = 0;
+        while i < len {
+            let addr = slot_address<T>(base, i);
+            var elem = unsafe { builtin.mem.raw_read<T>(addr) }
+            f(elem.ref);
+            unsafe {
+                builtin.mem.raw_write<T>(addr, elem);
+            }
+            i = i + 1;
+        }
+    }
+
+    pub fn try_for_each_ref(
+        *self,
+        f: %c fn(*T) -> !E void,
+    ) -> !E void where E, c: Type.vars.Closure {
+        let len = self.raw_len.*;
+        let base = self.raw_addr.*;
+        var i: usize = 0;
+        while i < len {
+            let addr = slot_address<T>(base, i);
+            var elem = unsafe { builtin.mem.raw_read<T>(addr) }
+            let res = f(elem.ref);
+            unsafe {
+                builtin.mem.raw_write<T>(addr, elem);
+            }
+            res!;
+            i = i + 1;
+        }
+    }
+}
+
+impl Vec<T> where T :- Copy {
+    pub fn get(*self, index: usize) -> ?T {
+        let len = self.raw_len.*;
+        if index >= len {
+            return null;
+        }
+        unsafe {
+            builtin
+                .mem
+                .raw_read<T>(slot_address<T>(self.raw_addr.*, index))
+        }
+    }
+
+    pub fn first(*self) -> ?T {
+        self.get(0)
+    }
+
+    pub fn last(*self) -> ?T {
+        let len = self.raw_len.*;
+        if len == 0 {
+            return null;
+        }
+        self.get(len - 1)
+    }
+}
+
+impl Vec<T> where T :- Copy + Eq {
+    pub fn contains(*self, needle: T) -> bool {
+        let len = self.raw_len.*;
+        let base = self.raw_addr.*;
+        var i: usize = 0;
+        while i < len {
+            let item = unsafe { builtin.mem.raw_read<T>(slot_address<T>(base, i)) }
+            if item.as(Eq).eq(needle) {
+                return true;
+            }
+            i = i + 1;
+        }
+        false
+    }
+}
+
+impl Vec<T> where T :- Clone {
+    pub fn try_clone(*self) -> !AllocError Self {
+        let len = self.raw_len.*;
+        var out = Vec<T>.with_capacity(len)!;
+        let base = self.raw_addr.*;
+        var i: usize = 0;
+        while i < len {
+            let addr = slot_address<T>(base, i);
+            var elem = unsafe { builtin.mem.raw_read<T>(addr) }
+            let copied = elem.as(Clone).clone();
+            unsafe {
+                builtin.mem.raw_write<T>(addr, elem);
+            }
+            out.ref.push(copied)!;
+            i = i + 1;
+        }
+        out
+    }
+}
+
+pub struct VecIter where T {
+    raw_addr: usize,
+    raw_head: usize,
+    raw_len: usize,
+    raw_cap: usize,
+}
+
+impl Drop for VecIter<T> where T {
+    fn drop(*self) {
+        var i = self.raw_head.*;
+        let len = self.raw_len.*;
+        let cap = self.raw_cap.*;
+        let addr = self.raw_addr.*;
+        self.raw_head.* = len;
+        self.raw_len.* = 0;
+        self.raw_cap.* = 0;
+        self.raw_addr.* = 0;
+        while i < len {
+            let elem = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr, i)) }
+            retire_value(elem);
+            i = i + 1;
+        }
+        dealloc_vec_buffer<T>(addr, cap);
+    }
+}
+
+impl Iterator for VecIter<T> where T {
+    assoc Item: Type = T;
+
+    inline fn iterate(self) -> #emit_item<T> void {
+        var iter = self;
+        let len = iter.raw_len;
+        let addr = iter.raw_addr;
+        while true {
+            let index = iter.raw_head;
+            if index >= len {
+                break;
+            }
+            iter.raw_head = index + 1;
+            let elem = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr, index)) }
+            emit_item<T>(elem)#;
+        }
+    }
+}
+
+impl IntoIterator for Vec<T> where T {
+    assoc Iter: Type = VecIter<T>;
+
+    fn into_iter(self) -> VecIter<T> {
+        var this = self;
+        let addr = this.raw_addr;
+        let len = this.raw_len;
+        let cap = this.raw_cap;
+        this.raw_addr = 0;
+        this.raw_len = 0;
+        this.raw_cap = 0;
+        VecIter<T> {
+            raw_addr: addr,
+            raw_head: 0,
+            raw_len: len,
+            raw_cap: cap,
+        }
+    }
+}
+
+impl Eq for Vec<T> where T :- Eq {
+    fn eq(self, other: Self) -> bool {
+        var a = self.into_iter();
+        var b = other.into_iter();
+        let len = a.raw_len;
+        if len != b.raw_len {
+            return false;
+        }
+        let addr_a = a.raw_addr;
+        let addr_b = b.raw_addr;
+        while true {
+            let i = a.raw_head;
+            if i >= len {
+                break;
+            }
+            a.raw_head = i + 1;
+            b.raw_head = i + 1;
+            let left = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr_a, i)) }
+            let right = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr_b, i)) }
+            if not left.as(Eq).eq(right) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl ByteWriter for Vec<u8> {
+    assoc Error: Type = AllocError;
+
+    fn write_byte(*self, byte: u8) -> !AllocError void {
+        self.push(byte)
+    }
+
+    fn write_str(*self, text: str) -> !AllocError void {
+        let len = builtin.compiler.str_byte_length(text);
+        let len_usize = builtin.compiler.try_u64_to_usize(len) match {
+            value? => value,
+            null => return error AllocError.invalid_layout,
+        }
+        self.reserve(len_usize)!;
+        var index: u64 = 0;
+        while index < len {
+            let byte = builtin.compiler.str_byte(text, index) match {
+                found? => found,
+                null => break,
+            }
+            self.push(byte)!;
+            index = index + 1;
+        }
+    }
+}

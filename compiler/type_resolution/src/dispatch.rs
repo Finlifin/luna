@@ -10,7 +10,9 @@ use nir::value_admission::Error as AdmissionError;
 use nir::{DeclarationId as Id, Term, program as n};
 use std::{collections::HashMap, sync::Arc};
 mod catalog;
-pub use catalog::{ClosedDeclarations, DeclarationSnapshot, DeclarationSource, MemberDataSource};
+pub use catalog::{
+    BorrowedCatalog, ClosedDeclarations, DeclarationSnapshot, DeclarationSource, MemberDataSource,
+};
 mod inputs;
 mod methods;
 
@@ -39,7 +41,7 @@ impl<'a> DeclarationScope<'a> {
         member: Id,
     ) -> Option<&'a nir::associated_initializers::AssociatedInitializer> {
         match self.source {
-            DeclarationSource::Borrowed(_) => None,
+            DeclarationSource::Borrowed(_) | DeclarationSource::Prepared(_) => None,
             DeclarationSource::Snapshot(snapshot) => {
                 snapshot.member_programs().get(&owner)?.get(&member)
             }
@@ -75,7 +77,7 @@ impl<'a> DeclarationWorld<'a> {
         Self::from_source_metered(DeclarationSource::Borrowed(package), budget, context)
     }
 
-    fn from_source_metered(
+    pub fn from_source_metered(
         source: DeclarationSource<'a>,
         budget: &mut Budget,
         context: Option<(&Context, &[n::TraitRequirement])>,

@@ -503,6 +503,7 @@ struct Planner<'a, 'w> {
     retired: Vec<Place>,
     variant_layouts: std::collections::BTreeMap<Place, super::access::VariantLayout>,
     missing_runtime_instances: Option<&'a mut Vec<RequiredDropInstance>>,
+    access_context: Option<super::access::AccessContext<'a>>,
 }
 impl Planner<'_, '_> {
     fn shape(&mut self, binding: &AcquiredCleanup, depth: usize) -> Result<Shape, String> {
@@ -746,7 +747,7 @@ impl Planner<'_, '_> {
                     } else {
                         state
                     };
-                    let access = super::access::check_access_with_layout(
+                    let access = super::access::check_access_with_context(
                         self.package,
                         self.world,
                         selected,
@@ -754,6 +755,7 @@ impl Planner<'_, '_> {
                         &tree.place,
                         self.pointers,
                         &self.variant_layouts,
+                        self.access_context.as_mut(),
                         self.fuel,
                     )
                     .map_err(|e| {
@@ -896,21 +898,23 @@ fn plan_cleanup_with_domains(
     fuel: &mut usize,
 ) -> Result<CleanupPlan, String> {
     plan_cleanup_with_domains_internal(
-        package, world, acquired, state, receiver, variants, domains, pointers, None, fuel,
+        package, world, acquired, state, receiver, variants, domains, pointers, None, None, fuel,
     )
 }
 
-fn plan_cleanup_with_domains_internal(
-    package: &Package,
-    world: &World<'_>,
-    acquired: &AcquiredCleanup,
-    state: &State,
-    receiver: &Place,
-    variants: &[VariantSelection],
-    domains: &BTreeMap<Vec<usize>, BTreeSet<usize>>,
-    pointers: Option<PointerMemory<'_>>,
-    missing_runtime_instances: Option<&mut Vec<RequiredDropInstance>>,
-    fuel: &mut usize,
+#[allow(clippy::too_many_arguments)]
+fn plan_cleanup_with_domains_internal<'a, 'w>(
+    package: &'a Package,
+    world: &'a World<'w>,
+    acquired: &'a AcquiredCleanup,
+    state: &'a State,
+    receiver: &'a Place,
+    variants: &'a [VariantSelection],
+    domains: &'a BTreeMap<Vec<usize>, BTreeSet<usize>>,
+    pointers: Option<PointerMemory<'a>>,
+    missing_runtime_instances: Option<&'a mut Vec<RequiredDropInstance>>,
+    access_context: Option<super::access::AccessContext<'a>>,
+    fuel: &'a mut usize,
 ) -> Result<CleanupPlan, String> {
     step(fuel, 0)?;
     let mut seen = BTreeSet::new();
@@ -1039,6 +1043,7 @@ fn plan_cleanup_with_domains_internal(
             retired: vec![],
             variant_layouts: Default::default(),
             missing_runtime_instances,
+            access_context,
         }
         .visit(acquired, state, tree, 0, &mut steps)?;
     }
@@ -1054,6 +1059,11 @@ fn plan_cleanup_with_domains_internal(
 /// Field moves reuse their parent's captured subtree. This arena contains no
 /// runtime environment values and cannot cross implementation worlds.
 pub struct CleanupSession<'a, 'w> {
+    declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
+    source: Option<::materialization::DeclarationSource<'a>>,
+    methods: crate::memory::MethodCallees,
+    summaries: crate::memory::SummaryCache,
+    text_provenance: crate::memory::TextProvenance,
     package: &'a Package,
     world: &'a World<'w>,
     protocol: DeclarationId,
@@ -1082,7 +1092,45 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
         protocol: DeclarationId,
         budget: Budget,
     ) -> Self {
+        Self::with_declarations(
+            std::rc::Rc::new(crate::declarations::Metadata::new(Some(package))),
+            world,
+            protocol,
+            budget,
+        )
+    }
+    pub(crate) fn with_declarations(
+        declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
+        world: &'a World<'w>,
+        protocol: DeclarationId,
+        budget: Budget,
+    ) -> Self {
+        Self::with_context(
+            declarations,
+            None,
+            Default::default(),
+            world,
+            protocol,
+            budget,
+        )
+    }
+    pub(crate) fn with_context(
+        declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
+        source: Option<::materialization::DeclarationSource<'a>>,
+        methods: crate::memory::MethodCallees,
+        world: &'a World<'w>,
+        protocol: DeclarationId,
+        budget: Budget,
+    ) -> Self {
+        let package = declarations
+            .package()
+            .expect("cleanup session requires package metadata");
         Self {
+            declarations,
+            source,
+            methods,
+            summaries: Default::default(),
+            text_provenance: crate::memory::TextProvenance::Unchecked,
             package,
             world,
             protocol,
@@ -1104,11 +1152,18 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
         self.require_runtime_instances = true;
         self
     }
+    pub fn with_text_provenance(mut self, text_provenance: crate::memory::TextProvenance) -> Self {
+        self.text_provenance = text_provenance;
+        self
+    }
     pub fn missing_runtime_instances(&self) -> &[RequiredDropInstance] {
         &self.missing_runtime_instances
     }
     pub fn into_missing_runtime_instances(self) -> Vec<RequiredDropInstance> {
         self.missing_runtime_instances
+    }
+    pub fn take_missing_runtime_instances(&mut self) -> Vec<RequiredDropInstance> {
+        std::mem::take(&mut self.missing_runtime_instances)
     }
     fn find<'b>(
         &'b self,
@@ -1297,9 +1352,23 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             // which the structural rejection scan intentionally leaves unknown.
             // If retirement is its only uncertainty, inspect nested cleanup
             // against this same captured implementation world.
-            let mut rejection = crate::rejection::Cache::new(Some(package));
+            let mut rejection =
+                crate::rejection::Cache::with_declarations(self.declarations.clone());
+            let source = self.source;
+            let declarations = self.declarations.clone();
+            let text_provenance = self.text_provenance;
             for (method, arguments, _) in methods {
-                let summary = crate::memory::infer_in_package(package, method, &arguments, fuel)?;
+                let summary = crate::memory::infer_in_package_with_full_context(
+                    package,
+                    method,
+                    &arguments,
+                    text_provenance,
+                    source,
+                    Some(&mut self.methods),
+                    Some(declarations.as_ref()),
+                    &mut self.summaries,
+                    fuel,
+                )?;
                 if summary.may_reject
                     && rejection
                         .function_may_reject_with_cleanup(
@@ -1403,6 +1472,13 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
     ) -> Result<CleanupPlan, String> {
         let binding = Self::find_in_bindings(&self.bindings, &self.binding_paths, ty, fuel)?
             .ok_or("cleanup responsibility has no acquired binding")?;
+        let access_context = super::access::AccessContext {
+            declarations: self.declarations.as_ref(),
+            source: self.source,
+            methods: &mut self.methods,
+            summaries: &mut self.summaries,
+            text_provenance: self.text_provenance,
+        };
         plan_cleanup_with_domains_internal(
             self.package,
             self.world,
@@ -1414,6 +1490,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             pointers,
             self.require_runtime_instances
                 .then_some(&mut self.missing_runtime_instances),
+            Some(access_context),
             fuel,
         )
     }

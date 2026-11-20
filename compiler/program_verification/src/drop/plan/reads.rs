@@ -326,13 +326,16 @@ impl CleanupSession<'_, '_> {
                     return Ok(None);
                 }
             }
+            let declarations = self.declarations.clone();
+            let source = self.source;
+            let text_provenance = self.text_provenance;
             for reader in &mut readers {
                 let projection =
                     memory::project_owned_storage(Some(package), ty, &reader.receiver_path, fuel)?;
                 if projection.ty != reader.receiver_type {
                     return Err("cleanup reader path disagrees with acquired layout".into());
                 }
-                let summary = memory::infer_with_borrowed_callable_inputs_and_cleanup(
+                let summary = memory::infer_with_borrowed_callable_inputs_and_cleanup_full_context(
                     package,
                     reader.method.body,
                     &reader.method.arguments,
@@ -341,6 +344,11 @@ impl CleanupSession<'_, '_> {
                     &[],
                     &BTreeMap::new(),
                     Some(self),
+                    source,
+                    None,
+                    Some(declarations.as_ref()),
+                    text_provenance,
+                    None,
                     fuel,
                 );
                 let Ok(summary) = summary else {
@@ -359,7 +367,8 @@ impl CleanupSession<'_, '_> {
                     return Ok(None);
                 }
                 if summary.may_reject {
-                    let mut rejection = crate::rejection::Cache::new(Some(package));
+                    let mut rejection =
+                        crate::rejection::Cache::with_declarations(self.declarations.clone());
                     if rejection
                         .function_may_reject_with_cleanup(
                             reader.method.body,

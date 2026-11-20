@@ -29,7 +29,7 @@ use nir::{DeclarationId as Id, Term};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use type_resolution::dispatch::DeclarationWorld;
 pub use type_resolution::dispatch::{
-    ClosedDeclarations, DeclarationSnapshot, DeclarationSource, MemberDataSource,
+    BorrowedCatalog, ClosedDeclarations, DeclarationSnapshot, DeclarationSource, MemberDataSource,
 };
 
 // Interface defaults use interface parameter identities, independently of the
@@ -197,9 +197,17 @@ pub fn resolve_method_instance(
     callee: &n::Expr,
     fuel: &mut usize,
 ) -> Result<n::MethodInstance, String> {
+    resolve_method_instance_in_source(DeclarationSource::Borrowed(package), callee, fuel)
+}
+
+pub fn resolve_method_instance_in_source(
+    source: DeclarationSource<'_>,
+    callee: &n::Expr,
+    fuel: &mut usize,
+) -> Result<n::MethodInstance, String> {
     let mut selected = None;
     let result = build(
-        DeclarationSource::Borrowed(package),
+        source,
         Budget {
             steps: *fuel,
             ..Budget::default()
@@ -289,9 +297,19 @@ pub fn resolve_quote_method_instance(
     callee: &n::Expr,
     fuel: &mut usize,
 ) -> Result<n::MethodInstance, String> {
+    resolve_quote_method_instance_in_source(DeclarationSource::Borrowed(package), callee, fuel)
+}
+
+/// Select a quote body using a shared declaration source without enqueueing it
+/// as an executable function.
+pub fn resolve_quote_method_instance_in_source(
+    source: DeclarationSource<'_>,
+    callee: &n::Expr,
+    fuel: &mut usize,
+) -> Result<n::MethodInstance, String> {
     let mut selected = None;
     let result = build(
-        DeclarationSource::Borrowed(package),
+        source,
         Budget {
             steps: *fuel,
             ..Budget::default()
