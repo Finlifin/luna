@@ -5,11 +5,13 @@
 
 | 入口 | 当前内容 |
 | --- | --- |
-| `std.collections` | `Vec<T, .A, .allocator>`、`VecDeque<T, .A, .allocator>`、`HashMap<K, V, .A, .allocator>`、`HashSet<T, .A, .allocator>` 与消费迭代器（运行时依赖 allocator、零存储开销、ZST 支持、`Once`/`Drop`、`Clone`/`Eq`/`IntoIterator`/`Iterator`、`ByteWriter`/`Write`） |
-| `std.string` | `String<.A, .allocator>`、`Utf8Err`（RFC 3629 UTF-8 校验与 `from_utf8_lossy`、`Drop`、`Display`/跨 allocator `equals`/`cmp_ref`/`push_string`） |
+| `std.collections` | `Vec<T, .A, .allocator>`、`VecDeque<T, .A, .allocator>`、`HashMap<K, V, .A, .allocator>`、`HashSet<T, .A, .allocator>` 与消费迭代器（运行时依赖 allocator、零存储开销、ZST 支持、`Once`/`Drop`、`Clone`/`Eq`/`Debug`/`IntoIterator`/`Iterator`、`ByteWriter`/`Write`） |
+| `std.string` | `String<.A, .allocator>`、`Utf8Err`（RFC 3629 UTF-8 校验与 `from_utf8_lossy`、`Drop`、`Display`/`Debug`/跨 allocator `equals`/`cmp_ref`/`push_string`） |
 | `std.io` | `Reader`、`Write`、`ByteWriter`、`Stdin`（`stdin`）、`Cursor`、`BufReader`、`BufWriter`、`Writer`（stdout/stderr）、完整文本与字节缓冲读写（`write_all`、`write_all_raw`、`write_bytes`、`write_string`、`read_into`/`read_exact`/`read_to_end`/`read_to_string`/`read_until`/`read_line`）、`read_byte`、`IoErr` |
-| `std.fmt` | 泛型 allocator 化的 `format<.A, .allocator>`、`format_into`、`write_fmt<W :- ByteWriter>`、`print`/`println`、`eprint`/`eprintln`、`Display`（含 `bool`/整数/`char`/`str`/`String`） |
-| `std.fs` | 仿射 `File`、打开/创建、读写（`Reader`/`Write`/`ByteWriter` 与固有 `read_byte`/`write_bytes`/`write_string`）、显式关闭、`Drop`、删除文件 |
+| `std.fmt` | 泛型 allocator 化的 `format<.A, .allocator>`、`format_debug<.A, .allocator>`、`format_into`、`write_fmt<W :- ByteWriter>`、`print`/`println`、`eprint`/`eprintln`、`Display`（含 `bool`/整数/`char`/`str`/`String`）与 `Debug`（含基础类型、容器与错误类型） |
+| `std.fs` | 仿射 `File`、打开/创建、读写（`Reader`/`Write`/`ByteWriter` 与固有 `read_byte`/`write_bytes`/`write_string`）、显式关闭、`Drop`、删除文件及一次性辅助 `read`/`read_to_string`/`write_str`/`write_bytes` |
+| `std.time` | `Duration`（`ZERO`、`NANOS_PER_SEC` 等常量、纳秒归一化、`checked_*`/`saturating_*` 运算与 `Copy`/`Clone`/`Eq`/`Ord`/`Hash`/`Debug`） |
+| `std.process` | `id()`、`ExitCode`（`SUCCESS`/`FAILURE`/`from_u8`/`as_u8`/`is_success` 及 `Copy`/`Clone`/`Eq`/`Debug`） |
 | `std.mem` | `AllocErr`/`ReallocErr`、`RawBlock`、`Allocator`、`SystemAllocator`（`GLOBAL`）、`DefaultAllocator`、`FixedBufferAllocator`、`ArenaAllocator`、`Box<T, .A, .allocator>` 与 `Layout` |
 | `std.os.linux` | 原始系统调用包装，负 errno 结果 |
 | `std.os.unix` | Linux 上的错误转换、EINTR 重试、EOF 转换与原始缓冲区读写 |

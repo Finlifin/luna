@@ -3,9 +3,9 @@ use collections_impl.vec.Vec;
 use io_impl.errors.{IoErr, check}
 use io_impl.reader.Reader;
 use io_impl.writer.Write;
-use mem_impl.allocator.Allocator;
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
 use std.os.{linux, unix}
-use string_impl.string.String;
+use string_impl.string.{String, Utf8Err}
 
 {- File owns one descriptor. Drop closes it once; close reports errors and
    retires ownership even on failure. Borrowed operations cannot export a
@@ -91,6 +91,53 @@ impl File {
 
 pub fn remove_file(comptime path: str) -> !IoErr void {
     let result = check(linux.unlink<path>())!;
+}
+
+pub fn read(
+    comptime path: str,
+) -> ![IoErr, AllocErr] Vec<u8, .A = A, .allocator = allocator>
+where
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    var file = File.open<path>()!;
+    var out = Vec<u8, .A = A, .allocator = allocator>.new();
+    let _ = file.ref.as(Reader).read_to_end(out.ref)!;
+    file.close()!;
+    out
+}
+
+pub fn read_to_string(
+    comptime path: str,
+) -> ![IoErr, AllocErr, Utf8Err] String<.A = A, .allocator = allocator>
+where
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    let bytes = read<.A = A, .allocator = allocator>(path)!;
+    String<.A = A, .allocator = allocator>.from_utf8(bytes)!
+}
+
+pub fn write_str(comptime path: str, text: str) -> !IoErr void {
+    var file = File.create<path>()!;
+    file.ref.as(ByteWriter).write_str(text)!;
+    file.close()
+}
+
+pub fn write_bytes(
+    comptime path: str,
+    bytes: *Vec<u8, .A = A, .allocator = allocator>,
+) -> !IoErr void
+where
+    A: Type,
+    requires A :- Allocator,
+    quote allocator: lift *A,
+{
+    var file = File.create<path>()!;
+    file.ref.write_bytes(bytes)!;
+    file.close()
 }
 
 impl ByteWriter for File {

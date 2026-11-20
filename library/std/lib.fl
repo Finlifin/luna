@@ -7,7 +7,9 @@ use fs_impl.file;
 use io_impl.{buffered, errors, reader, writer}
 use mem_impl.{allocator, arena, boxed, layout}
 use platform.{linux as linux_impl, unix as unix_impl}
+use process_impl.process as process_mod;
 use string_impl.string as string_mod;
+use time_impl.duration;
 
 pub mod os {
     pub mod linux {
@@ -29,7 +31,15 @@ pub mod io {
 }
 
 pub mod fs {
-    pub use file.{File, remove_file}
+    pub use file.{File, read, read_to_string, remove_file, write_bytes, write_str}
+}
+
+pub mod time {
+    pub use duration.*;
+}
+
+pub mod process {
+    pub use process_mod.*;
 }
 
 pub mod mem {

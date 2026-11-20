@@ -1,5 +1,6 @@
 use bindings.Object;
 use builtin.{Integer, Symbol, bool}
+use meta.List;
 
 {-
     An immutable snapshot of the source package's host pipeline target. These
@@ -12,6 +13,32 @@ pub struct Target {
     features: TargetFeatures,
 }
 
+impl Target {
+    pub pure comptime fn is_64_bit(self) -> bool {
+        self.pointer_bits == 64
+    }
+
+    pub pure comptime fn is_32_bit(self) -> bool {
+        self.pointer_bits == 32
+    }
+
+    pub pure comptime fn pointer_bytes(self) -> Integer {
+        self.pointer_bits.div_euclid(8)
+    }
+
+    pub pure comptime fn is_arch(self, expected: Symbol) -> bool {
+        self.arch == expected
+    }
+
+    pub pure comptime fn is_os(self, expected: Symbol) -> bool {
+        self.os == expected
+    }
+
+    pub pure comptime fn has_feature(self, name: Symbol) -> bool {
+        self.features.is_enabled(name)
+    }
+}
+
 pub struct TargetFeatures {
     entries: Object,
 }
@@ -20,6 +47,18 @@ impl TargetFeatures {
     -- Missing is null; an explicitly disabled feature is false?.
     pub pure comptime fn get(self, name: Symbol) -> ?bool {
         self.entries.get<bool>(name)
+    }
+
+    pub pure comptime fn is_enabled(self, name: Symbol) -> bool {
+        self.get(name) matches true?
+    }
+
+    pub pure comptime fn is_disabled(self, name: Symbol) -> bool {
+        self.get(name) matches false?
+    }
+
+    pub pure comptime fn keys(self) -> List<Symbol> {
+        self.entries.keys()
     }
 }
 

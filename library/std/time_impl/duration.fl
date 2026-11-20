@@ -1,0 +1,341 @@
+use builtin.fmt.{ByteWriter, Debug, Display}
+
+{-
+    Span of time represented as whole seconds (`raw_secs: u64`) and fractional
+    nanoseconds (`raw_nanos: u32 < 1_000_000_000`). Value type implementing
+    `Copy`, `Clone`, `Eq`, `Ord`, `Hash`, `Debug`, and `Splice`.
+-}
+pub struct Duration {
+    raw_secs: u64,
+    raw_nanos: u32,
+}
+
+pub const NANOS_PER_SEC: u64 = 1000000000;
+
+pub const NANOS_PER_MILLI: u32 = 1000000;
+
+pub const NANOS_PER_MICRO: u32 = 1000;
+
+pub const MILLIS_PER_SEC: u64 = 1000;
+
+pub const MICROS_PER_SEC: u64 = 1000000;
+
+pub const ZERO: Duration = Duration {
+    raw_secs: 0,
+    raw_nanos: 0,
+};
+
+pure fn fnv_mix_byte(state: u64, byte: u8) -> u64 {
+    let bits = state'bitvec;
+    let widened = byte'bitvec.as(u64);
+    let input = widened'bitvec;
+    let mixed = ((bits and not input) or (not bits and input)).as(u128);
+    if mixed > 18446744073709551615 {
+        return 0;
+    }
+    let product = mixed * 1099511628211;
+    product'bitvec[0..64].as(u64)
+}
+
+pure fn fnv_mix_u64(state: u64, value: u64) -> u64 {
+    var mixed = state;
+    mixed = fnv_mix_byte(mixed, value'bitvec[0..8].as(u8));
+    mixed = fnv_mix_byte(mixed, value'bitvec[8..16].as(u8));
+    mixed = fnv_mix_byte(mixed, value'bitvec[16..24].as(u8));
+    mixed = fnv_mix_byte(mixed, value'bitvec[24..32].as(u8));
+    mixed = fnv_mix_byte(mixed, value'bitvec[32..40].as(u8));
+    mixed = fnv_mix_byte(mixed, value'bitvec[40..48].as(u8));
+    mixed = fnv_mix_byte(mixed, value'bitvec[48..56].as(u8));
+    mixed = fnv_mix_byte(mixed, value'bitvec[56..64].as(u8));
+    mixed
+}
+
+pure fn fnv_mix_u32(state: u64, value: u32) -> u64 {
+    var mixed = state;
+    mixed = fnv_mix_byte(mixed, value'bitvec[0..8].as(u8));
+    mixed = fnv_mix_byte(mixed, value'bitvec[8..16].as(u8));
+    mixed = fnv_mix_byte(mixed, value'bitvec[16..24].as(u8));
+    mixed = fnv_mix_byte(mixed, value'bitvec[24..32].as(u8));
+    mixed
+}
+
+impl Duration {
+    pub pure fn new(secs: u64, nanos: u32) -> ?Duration {
+        let nanos_u64 = nanos'bitvec.as(u64);
+        let extra_secs = nanos_u64 / 1000000000;
+        let rem_nanos_u64 = nanos_u64 % 1000000000;
+        let rem_nanos = rem_nanos_u64'bitvec[0..32].as(u32);
+        if extra_secs > 18446744073709551615 - secs {
+            return null;
+        }
+        Duration {
+            raw_secs: secs + extra_secs,
+            raw_nanos: rem_nanos,
+        }
+    }
+
+    pub pure fn from_secs(secs: u64) -> Duration {
+        Duration {
+            raw_secs: secs,
+            raw_nanos: 0,
+        }
+    }
+
+    pub pure fn from_millis(millis: u64) -> Duration {
+        let secs = millis / 1000;
+        let rem = millis % 1000;
+        let safe_rem: u64 = if rem < 1000 { rem } else { 0 };
+        let nanos = safe_rem * 1000000;
+        Duration {
+            raw_secs: secs,
+            raw_nanos: nanos'bitvec[0..32].as(u32),
+        }
+    }
+
+    pub pure fn from_micros(micros: u64) -> Duration {
+        let secs = micros / 1000000;
+        let rem = micros % 1000000;
+        let safe_rem: u64 = if rem < 1000000 { rem } else { 0 };
+        let nanos = safe_rem * 1000;
+        Duration {
+            raw_secs: secs,
+            raw_nanos: nanos'bitvec[0..32].as(u32),
+        }
+    }
+
+    pub pure fn from_nanos(nanos: u64) -> Duration {
+        let secs = nanos / 1000000000;
+        let rem = nanos % 1000000000;
+        Duration {
+            raw_secs: secs,
+            raw_nanos: rem'bitvec[0..32].as(u32),
+        }
+    }
+
+    pub pure fn is_zero(self) -> bool {
+        self.raw_secs == 0 and self.raw_nanos == 0
+    }
+
+    pub pure fn as_secs(self) -> u64 {
+        self.raw_secs
+    }
+
+    pub pure fn subsec_millis(self) -> u32 {
+        self.raw_nanos / 1000000
+    }
+
+    pub pure fn subsec_micros(self) -> u32 {
+        self.raw_nanos / 1000
+    }
+
+    pub pure fn subsec_nanos(self) -> u32 {
+        self.raw_nanos
+    }
+
+    pub pure fn as_millis(self) -> u128 {
+        let secs = self.raw_secs'bitvec.as(u128);
+        let safe_secs: u128 = if secs <= 18446744073709551615 {
+            secs
+        } else {
+            18446744073709551615
+        };
+        let sub = (self.raw_nanos / 1000000)'bitvec.as(u128);
+        let safe_sub: u128 = if sub <= 4295 { sub } else { 4295 };
+        safe_secs * 1000 + safe_sub
+    }
+
+    pub pure fn as_micros(self) -> u128 {
+        let secs = self.raw_secs'bitvec.as(u128);
+        let safe_secs: u128 = if secs <= 18446744073709551615 {
+            secs
+        } else {
+            18446744073709551615
+        };
+        let sub = (self.raw_nanos / 1000)'bitvec.as(u128);
+        let safe_sub: u128 = if sub <= 4294968 { sub } else { 4294968 };
+        safe_secs * 1000000 + safe_sub
+    }
+
+    pub pure fn as_nanos(self) -> u128 {
+        let secs = self.raw_secs'bitvec.as(u128);
+        let safe_secs: u128 = if secs <= 18446744073709551615 {
+            secs
+        } else {
+            18446744073709551615
+        };
+        let sub = self.raw_nanos'bitvec.as(u128);
+        let safe_sub: u128 = if sub <= 4294967295 {
+            sub
+        } else {
+            4294967295
+        };
+        safe_secs * 1000000000 + safe_sub
+    }
+
+    pub pure fn checked_add(self, rhs: Duration) -> ?Duration {
+        let left_nanos = self.raw_nanos'bitvec.as(u64);
+        let right_nanos = rhs.raw_nanos'bitvec.as(u64);
+        if left_nanos > 4294967295 or right_nanos > 4294967295 {
+            return null;
+        }
+        let total_nanos = left_nanos + right_nanos;
+        let carry = total_nanos / 1000000000;
+        let rem_nanos_u64 = total_nanos % 1000000000;
+        let rem_nanos = rem_nanos_u64'bitvec[0..32].as(u32);
+        if carry > 18446744073709551615 - self.raw_secs {
+            return null;
+        }
+        let partial_secs = self.raw_secs + carry;
+        if rhs.raw_secs > 18446744073709551615 - partial_secs {
+            return null;
+        }
+        Duration {
+            raw_secs: partial_secs + rhs.raw_secs,
+            raw_nanos: rem_nanos,
+        }
+    }
+
+    pub pure fn checked_sub(self, rhs: Duration) -> ?Duration {
+        let left_nanos = self.as_nanos();
+        let right_nanos = rhs.as_nanos();
+        if left_nanos < right_nanos {
+            return null;
+        }
+        let diff = left_nanos - right_nanos;
+        let secs = diff / 1000000000;
+        let rem = diff % 1000000000;
+        if secs > 18446744073709551615 {
+            return null;
+        }
+        Duration {
+            raw_secs: secs'bitvec[0..64].as(u64),
+            raw_nanos: rem'bitvec[0..32].as(u32),
+        }
+    }
+
+    pub pure fn checked_mul(self, rhs: u32) -> ?Duration {
+        let base_nanos = self.as_nanos();
+        if base_nanos > 18446744073709551619294967295 {
+            return null;
+        }
+        let factor = rhs'bitvec.as(u128);
+        if factor > 4294967295 {
+            return null;
+        }
+        let total = base_nanos * factor;
+        let secs = total / 1000000000;
+        let rem = total % 1000000000;
+        if secs > 18446744073709551615 {
+            return null;
+        }
+        Duration {
+            raw_secs: secs'bitvec[0..64].as(u64),
+            raw_nanos: rem'bitvec[0..32].as(u32),
+        }
+    }
+
+    pub pure fn checked_div(self, rhs: u32) -> ?Duration {
+        if rhs == 0 {
+            return null;
+        }
+        let divisor = rhs'bitvec.as(u128);
+        if divisor == 0 {
+            return null;
+        }
+        let q = self.as_nanos() / divisor;
+        let secs = q / 1000000000;
+        let rem = q % 1000000000;
+        if secs > 18446744073709551615 {
+            return null;
+        }
+        Duration {
+            raw_secs: secs'bitvec[0..64].as(u64),
+            raw_nanos: rem'bitvec[0..32].as(u32),
+        }
+    }
+
+    pub pure fn saturating_add(self, rhs: Duration) -> Duration {
+        self.checked_add(rhs) match {
+            sum? => sum,
+            null =>
+                Duration {
+                    raw_secs: 18446744073709551615,
+                    raw_nanos: 999999999,
+                },
+        }
+    }
+
+    pub pure fn saturating_sub(self, rhs: Duration) -> Duration {
+        self.checked_sub(rhs) match {
+            diff? => diff,
+            null =>
+                Duration {
+                    raw_secs: 0,
+                    raw_nanos: 0,
+                },
+        }
+    }
+}
+
+impl Splice for Duration {
+    assoc RuntimeTarget: Type = Duration;
+
+    fn splice(comptime data: Duration) -> Duration {
+        Duration {
+            raw_secs: data.raw_secs,
+            raw_nanos: data.raw_nanos,
+        }
+    }
+}
+
+impl Clone for Duration {
+    fn clone(*self) -> Self {
+        Duration {
+            raw_secs: self.raw_secs.*,
+            raw_nanos: self.raw_nanos.*,
+        }
+    }
+}
+
+impl Copy for Duration {}
+
+impl Eq for Duration {
+    fn eq(self, other: Self) -> bool {
+        self.raw_secs == other.raw_secs and self.raw_nanos == other.raw_nanos
+    }
+}
+
+impl Ord for Duration {
+    fn cmp(self, other: Self) -> Order {
+        if self.raw_secs < other.raw_secs {
+            return .less;
+        }
+        if self.raw_secs > other.raw_secs {
+            return .greater;
+        }
+        if self.raw_nanos < other.raw_nanos {
+            return .less;
+        }
+        if self.raw_nanos > other.raw_nanos {
+            return .greater;
+        }
+        .equal
+    }
+}
+
+impl Hash for Duration {
+    fn hash(self) -> u64 {
+        let state = fnv_mix_u64(14695981039346656037, self.raw_secs);
+        fnv_mix_u32(state, self.raw_nanos)
+    }
+}
+
+impl Debug for Duration {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("Duration { secs: ")!;
+        self.raw_secs.*.as(Display).write(output)!;
+        output.write_str(", nanos: ")!;
+        self.raw_nanos.*.as(Display).write(output)!;
+        output.write_str(" }")
+    }
+}

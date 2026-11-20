@@ -1,0 +1,71 @@
+use builtin.fmt.{ByteWriter, Debug, Display}
+use std.os.unix;
+
+{- Return the OS process identifier of the current process. -}
+pub fn id() -> u32 {
+    let raw = unix.getpid();
+    if raw < 0 {
+        return 0;
+    }
+    if raw > 4294967295 {
+        return 4294967295;
+    }
+    raw'bitvec[0..32].as(u32)
+}
+
+{- Status code value for process termination reporting. -}
+pub struct ExitCode {
+    raw_code: u8,
+}
+
+pub const SUCCESS: ExitCode = ExitCode { raw_code: 0 };
+
+pub const FAILURE: ExitCode = ExitCode { raw_code: 1 };
+
+impl ExitCode {
+    pub pure fn from_u8(code: u8) -> ExitCode {
+        ExitCode { raw_code: code }
+    }
+
+    pub pure fn as_u8(self) -> u8 {
+        self.raw_code
+    }
+
+    pub pure fn is_success(self) -> bool {
+        self.raw_code == 0
+    }
+}
+
+impl Clone for ExitCode {
+    fn clone(*self) -> Self {
+        ExitCode {
+            raw_code: self.raw_code.*,
+        }
+    }
+}
+
+impl Copy for ExitCode {}
+
+impl Eq for ExitCode {
+    fn eq(self, other: Self) -> bool {
+        self.raw_code == other.raw_code
+    }
+}
+
+impl Debug for ExitCode {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("ExitCode(")!;
+        self.raw_code.*.as(Display).write(output)!;
+        output.write_byte(41)
+    }
+}
+
+impl Splice for ExitCode {
+    assoc RuntimeTarget: Type = ExitCode;
+
+    fn splice(comptime data: ExitCode) -> ExitCode {
+        ExitCode {
+            raw_code: data.raw_code,
+        }
+    }
+}

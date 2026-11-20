@@ -1,3 +1,4 @@
+use builtin.fmt.{ByteWriter, Debug}
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
 use mem_impl.layout.Layout;
 
@@ -1128,5 +1129,100 @@ where
             raw_cursor: 0,
             raw_cap: cap,
         }
+    }
+}
+
+impl HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K :- Debug,
+    V,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn write_debug_keys(
+        *self,
+        output: *W,
+    ) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_byte(123)!;
+        let addr = self.raw_addr.*;
+        let cap = self.raw_cap.*;
+        if addr != 0 and cap != 0 {
+            table_layout<K, V>(cap) match {
+                tl? => {
+                    var i: usize = 0;
+                    var wrote = false;
+                    while i < cap {
+                        let st = unsafe { builtin.mem.raw_read<u8>(state_addr(addr, i)) }
+                        if st == STATE_FULL {
+                            if wrote {
+                                output.write_str(", ")!;
+                            }
+                            let k_slot = key_addr<K>(addr, tl, i);
+                            var k = unsafe { builtin.mem.raw_read<K>(k_slot) }
+                            let k_res = k.ref.as(Debug).write_debug(output);
+                            unsafe {
+                                builtin.mem.raw_write<K>(k_slot, k);
+                            }
+                            k_res!;
+                            wrote = true;
+                        }
+                        i = i + 1;
+                    }
+                },
+                null => {},
+            }
+        }
+        output.write_byte(125)
+    }
+}
+
+impl Debug for HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K :- Debug,
+    V :- Debug,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_byte(123)!;
+        let addr = self.raw_addr.*;
+        let cap = self.raw_cap.*;
+        if addr != 0 and cap != 0 {
+            table_layout<K, V>(cap) match {
+                tl? => {
+                    var i: usize = 0;
+                    var wrote = false;
+                    while i < cap {
+                        let st = unsafe { builtin.mem.raw_read<u8>(state_addr(addr, i)) }
+                        if st == STATE_FULL {
+                            if wrote {
+                                output.write_str(", ")!;
+                            }
+                            let k_slot = key_addr<K>(addr, tl, i);
+                            var k = unsafe { builtin.mem.raw_read<K>(k_slot) }
+                            let k_res = k.ref.as(Debug).write_debug(output);
+                            unsafe {
+                                builtin.mem.raw_write<K>(k_slot, k);
+                            }
+                            k_res!;
+                            output.write_str(": ")!;
+                            let v_slot = val_addr<V>(addr, tl, i);
+                            var v = unsafe { builtin.mem.raw_read<V>(v_slot) }
+                            let v_res = v.ref.as(Debug).write_debug(output);
+                            unsafe {
+                                builtin.mem.raw_write<V>(v_slot, v);
+                            }
+                            v_res!;
+                            wrote = true;
+                        }
+                        i = i + 1;
+                    }
+                },
+                null => {},
+            }
+        }
+        output.write_byte(125)
     }
 }

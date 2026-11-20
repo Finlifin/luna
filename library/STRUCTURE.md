@@ -10,7 +10,7 @@
 | meta | `data/`、`definitions/`、`numeric/` | `reflection/`、`ast/`、`macros/`、`code/`、`types/`、`compilation/`、`runtime/`、`diagnostics/` |
 | attrs | `calling_convention/`、`staging/` | `layout/`、`effects/`、`compilation/`、`derivation/`、`quote_fn_template/` |
 | build | `info/` | `package/`、`targets/`、`tasks/`、`generated/`、`util/` |
-| std | 根与显式 prelude、`io_impl/`、`fmt_impl/`、`fs_impl/`、`mem_impl/`、`platform/` | allocator、String、完整格式计划、`collections/`、`runtime/`、`process/`、`time/`、`sync/` |
+| std | 根与显式 prelude、`io_impl/`、`fmt_impl/`、`fs_impl/`、`mem_impl/`、`collections_impl/`、`string_impl/`、`time_impl/`、`process_impl/`、`platform/` | `runtime/`、`sync/`（含高级构建/时钟/进程扩展） |
 | verification | 包根与空 prelude | 高级程序验证库暂缓，见该包 README |
 
 ## 公开入口与实现路径

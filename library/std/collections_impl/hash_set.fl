@@ -1,3 +1,4 @@
+use builtin.fmt.{ByteWriter, Debug}
 use collections_impl.hash_map.{HashMap, HashMapIter}
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
 
@@ -183,5 +184,17 @@ where
         HashSetIter<T, .A = A, .allocator = alloc> {
             raw_iter: self.raw_map.into_iter(),
         }
+    }
+}
+
+impl Debug for HashSet<T, .A = A, .allocator = alloc>
+where
+    T :- Debug,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.raw_map.write_debug_keys(output)
     }
 }

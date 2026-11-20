@@ -123,3 +123,9 @@ Rust 包编译请求可通过 `Request::metadata` 安装输入，完整请求缓
 [元数据传输](../../development/metadata-wire.md)。按观察字段选择性复用和构建脚本
 工具尚未接通；直接使用 Protocols 的外部驱动
 仍需维护自己的缓存键。参见[构建快照](../../development/build-context.md)。
+
+`Target`、`TargetFeatures` 与 `MetadataFeatures` 另提供只读快照辅助方法：
+`Target.{is_64_bit, is_32_bit, pointer_bytes, is_arch, is_os, has_feature}`、
+`TargetFeatures.{is_enabled, is_disabled, keys}` 以及
+`MetadataFeatures.{has, keys}`。它们直接基于调用方已取得的目标或元数据快照计算，
+保持原有包归属与特征观察语义。

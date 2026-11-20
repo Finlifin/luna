@@ -1,5 +1,6 @@
 use bindings.Object;
-use builtin.{Symbol, Type}
+use builtin.{Symbol, Type, bool}
+use meta.List;
 
 pub struct PackageMetadata {
     features: MetadataFeatures,
@@ -13,6 +14,14 @@ impl MetadataFeatures {
     -- Missing fields and mismatched domains return null.
     pub pure comptime fn get(self, name: Symbol, comptime T: Type) -> ?T {
         self.entries.get<T>(name)
+    }
+
+    pub pure comptime fn has(self, name: Symbol) -> bool {
+        self.entries.has_key(name)
+    }
+
+    pub pure comptime fn keys(self) -> List<Symbol> {
+        self.entries.keys()
     }
 }
 
