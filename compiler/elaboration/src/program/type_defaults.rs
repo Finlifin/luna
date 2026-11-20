@@ -2,11 +2,15 @@
 use super::*;
 use comptime_interpretor::Value;
 
-pub(super) type FunctionTypePlan = (
-    Vec<DeclarationId>,
-    Vec<Term>,
-    Vec<(usize, Vec<DeclarationId>)>,
-);
+#[derive(Clone)]
+pub(super) struct PendingClause<'hir> {
+    pub slot: usize,
+    pub binder: DeclarationId,
+    pub dependencies: Vec<DeclarationId>,
+    pub explicit: Option<&'hir Expr<'hir>>,
+}
+
+pub(super) type FunctionTypePlan<'hir> = (Vec<DeclarationId>, Vec<Term>, Vec<PendingClause<'hir>>);
 
 impl<'h> Checker<'_, 'h> {
     /// Packet layout is independent of its element domains. Keep unresolved
@@ -456,7 +460,7 @@ impl<'h> Checker<'_, 'h> {
         owner: OwnerId,
         known: &[Term],
         span: Span,
-    ) -> Result<FunctionTypePlan, Error> {
+    ) -> Result<FunctionTypePlan<'static>, Error> {
         let parameters = self.type_parameters[&owner].clone();
         if known.len() > parameters.len() {
             return Err(error(span, "too many fixed generic call arguments"));
@@ -487,7 +491,7 @@ impl<'h> Checker<'_, 'h> {
         owner: OwnerId,
         binder: &nir::DeclarationParameter,
         clause: Option<(usize, &hir::clause::ClauseParam<'_>)>,
-        plan: &mut FunctionTypePlan,
+        plan: &mut FunctionTypePlan<'_>,
         span: Span,
     ) -> Result<(), Error> {
         let (inferred, inputs, pending) = plan;
@@ -503,7 +507,12 @@ impl<'h> Checker<'_, 'h> {
                 inputs.push(self.type_clause_default(owner, slot, inputs, None, span)?);
                 return Ok(());
             }
-            pending.push((inputs.len(), dependencies));
+            pending.push(PendingClause {
+                slot: inputs.len(),
+                binder: binder.declaration,
+                dependencies,
+                explicit: None,
+            });
         }
         inferred.push(binder.declaration);
         inputs.push(Term::Rigid {
@@ -578,6 +587,12 @@ impl<'h> Checker<'_, 'h> {
                 let source_inputs = self.expression_declaration_dependencies(owner, value)?;
                 let mut dependencies = BTreeSet::new();
                 for id in source_inputs {
+                    // To supply a read value the VM also needs its domain.
+                    // Its rigid identity alone does not encode that domain.
+                    if let Some(ty) = self.trait_input_domain(id) {
+                        let ty = self.substituted_trait_domain(&ty, span)?;
+                        dependencies.extend(self.term_declaration_inputs(&ty, span)?);
+                    }
                     if let Some(actual) = self.alias_substitution.get(&id).cloned() {
                         dependencies.extend(self.term_declaration_inputs(&actual, span)?);
                     } else {
@@ -620,7 +635,7 @@ impl<'h> Checker<'_, 'h> {
         owner: OwnerId,
         parameters: &[DeclarationId],
         template: &[Term],
-        pending: &[(usize, Vec<DeclarationId>)],
+        pending: &[PendingClause<'_>],
         resolved: &mut BTreeMap<usize, Term>,
         candidate: &mut crate::calls::CallCandidate,
         span: Span,
@@ -643,17 +658,19 @@ impl<'h> Checker<'_, 'h> {
         if !resolved.is_empty() {
             self.refine_default_call_views(candidate, span)?;
         }
-        for (slot, dependencies) in pending {
-            if resolved.contains_key(slot) {
+        for clause in pending {
+            let slot = clause.slot;
+            if resolved.contains_key(&slot) {
                 continue;
             }
             let mut substitutions = Vec::new();
             let mut available = Vec::new();
             let mut ready = true;
-            for dependency in dependencies {
-                if pending.iter().any(|(other, _)| {
-                    pending_binder(*other) == *dependency && !resolved.contains_key(other)
-                }) {
+            for dependency in &clause.dependencies {
+                if pending
+                    .iter()
+                    .any(|other| other.binder == *dependency && !resolved.contains_key(&other.slot))
+                {
                     ready = false;
                     break;
                 }
@@ -672,19 +689,27 @@ impl<'h> Checker<'_, 'h> {
             if !ready {
                 continue;
             }
-            let inputs = template[..*slot]
-                .iter()
-                .map(|ty| self.instantiate_input_types(ty, &substitutions, &available, span))
-                .collect::<Result<Vec<_>, _>>()?;
-            let value = self.type_clause_default(owner, *slot - inherited, &inputs, None, span)?;
+            let value = if let Some(source) = clause.explicit {
+                let domain = self.lexical_input_domains[&clause.binder].clone();
+                let domain =
+                    self.instantiate_input_types(&domain, &substitutions, &available, source.span)?;
+                let domain = self.callable_input_view(&domain, source.span)?;
+                self.normal_value_argument(source, &domain)?
+            } else {
+                let inputs = template[..slot]
+                    .iter()
+                    .map(|ty| self.instantiate_input_types(ty, &substitutions, &available, span))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.type_clause_default(owner, slot - inherited, &inputs, None, span)?
+            };
             let index = parameters
                 .iter()
-                .position(|id| *id == pending_binder(*slot))
+                .position(|id| *id == clause.binder)
                 .unwrap();
             candidate
                 .constrain_type_argument(index, &value, crate::ptc::Budget::default())
                 .map_err(|e| call_inference_error(span, e))?;
-            resolved.insert(*slot, value);
+            resolved.insert(slot, value);
             // Settling a default can expose associated types in parameter and
             // result contexts. Refresh their evidence before checking delayed
             // arguments or finishing this candidate, including on retries.

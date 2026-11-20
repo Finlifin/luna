@@ -5846,7 +5846,7 @@ impl Checker<'_, '_> {
         depth: usize,
         signature: &Term,
         constrained: bool,
-        plan: type_defaults::FunctionTypePlan,
+        plan: type_defaults::FunctionTypePlan<'_>,
     ) -> Result<D, Error> {
         let result_context = self
             .structural_result_context
@@ -6097,15 +6097,15 @@ impl Checker<'_, '_> {
             // Cycles and unrelated phantom binders cannot seed this closure.
             loop {
                 let mut progress = false;
-                for (slot, dependencies) in &pending_defaults {
+                for clause in &pending_defaults {
                     self.required_steps = self
                         .required_steps
-                        .checked_sub(1 + dependencies.len() as u64)
+                        .checked_sub(1 + clause.dependencies.len() as u64)
                         .ok_or_else(|| {
                             error(expr.span, "generic default dependency budget exhausted")
                         })?;
-                    if dependencies.iter().all(|id| supported.contains(id)) {
-                        progress |= supported.insert(all_generic[*slot]);
+                    if clause.dependencies.iter().all(|id| supported.contains(id)) {
+                        progress |= supported.insert(clause.binder);
                     }
                 }
                 if !progress {
@@ -6521,7 +6521,7 @@ impl Checker<'_, '_> {
         args: &[Arg<'_>],
         expected: Option<&Term>,
         mut description: Option<(&mut BTreeMap<n::LocalId, D>, Option<&D>, usize)>,
-        plan: type_defaults::FunctionTypePlan,
+        plan: type_defaults::FunctionTypePlan<'_>,
     ) -> Result<OpenClauseInference, Error> {
         self.check_open_interface_dependency(owner)?;
         let mut definition = self.open_functions[&owner].clone();
@@ -7234,15 +7234,15 @@ impl Checker<'_, '_> {
                     // unrelated phantom parameters or dependency cycles.
                     loop {
                         let mut added = false;
-                        for (slot, dependencies) in &pending {
+                        for clause in &pending {
                             self.required_steps = self
                                 .required_steps
-                                .checked_sub(1 + dependencies.len() as u64)
+                                .checked_sub(1 + clause.dependencies.len() as u64)
                                 .ok_or_else(|| {
                                     error(expr.span, "generic default dependency budget exhausted")
                                 })?;
-                            if dependencies.iter().all(|id| supported.contains(id)) {
-                                added |= supported.insert(all[*slot]);
+                            if clause.dependencies.iter().all(|id| supported.contains(id)) {
+                                added |= supported.insert(clause.binder);
                             }
                         }
                         if !added {

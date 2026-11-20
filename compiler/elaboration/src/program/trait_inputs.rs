@@ -473,12 +473,12 @@ impl Checker<'_, '_> {
 
     /// A direct invocation can solve missing mandatory slots from its ordinary
     /// arguments. A standalone specialization still needs a complete telescope.
-    pub(super) fn with_partial_named_call_plan<R>(
+    pub(super) fn with_partial_named_call_plan<'src, R>(
         &mut self,
         owner: OwnerId,
-        args: &[Arg<'_>],
+        args: &[Arg<'src>],
         span: Span,
-        finish: impl FnOnce(&mut Self, type_defaults::FunctionTypePlan) -> Result<R, Error>,
+        finish: impl FnOnce(&mut Self, type_defaults::FunctionTypePlan<'src>) -> Result<R, Error>,
     ) -> Result<Option<R>, Error> {
         if !args.iter().any(|arg| matches!(arg, Arg::Named(..)))
             || self.clause_collector(owner).is_some()
@@ -527,17 +527,59 @@ impl Checker<'_, '_> {
         result.map(Some)
     }
 
-    fn prepare_clause_arguments(
+    fn call_clause_binder(
         &mut self,
         owner: OwnerId,
-        args: &[Arg<'_>],
+        domain: Term,
+        locals: &mut Vec<DeclarationId>,
+        span: Span,
+    ) -> Result<nir::DeclarationParameter, Error> {
+        let binder = nir::DeclarationParameter {
+            declaration: self.fresh_type_binder(owner, span)?.declaration,
+            sort: Sort::of_comptime_domain(&domain),
+        };
+        locals.push(binder.declaration);
+        self.lexical_input_domains
+            .insert(binder.declaration, domain);
+        Ok(binder)
+    }
+
+    // Only built-in literals and their closed structural composition have no
+    // producer to run or binding to capture before the destination is known.
+    fn is_closed_clause_literal(&mut self, source: &Expr<'_>) -> Result<bool, Error> {
+        let mut pending = vec![source];
+        while let Some(expr) = pending.pop() {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(expr.span, "clause literal inspection budget exhausted"))?;
+            match &expr.kind {
+                H::Lit(_) | H::Unit | H::Null => {}
+                H::Unary(UnOp::Neg, _) if is_numeric_literal(expr) => {}
+                H::Tuple(items) | H::List(items) => pending.extend(items.iter()),
+                H::Block(block) if block.stmts.is_empty() => pending.extend(block.expr),
+                H::If(condition, yes, no) if yes.stmts.is_empty() => {
+                    pending.push(condition);
+                    pending.extend(yes.expr);
+                    pending.extend(*no);
+                }
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    fn prepare_clause_arguments<'src>(
+        &mut self,
+        owner: OwnerId,
+        args: &[Arg<'src>],
         subject: Option<&Term>,
         span: Span,
         domains: &[Term],
         defaults: Option<&BTreeMap<DeclarationId, std::sync::Arc<Term>>>,
         prefix: Vec<Term>,
         mut inference_locals: Option<&mut Vec<DeclarationId>>,
-    ) -> Result<type_defaults::FunctionTypePlan, Error> {
+    ) -> Result<type_defaults::FunctionTypePlan<'src>, Error> {
         let clauses = self.type_clause_params(owner);
         let all_parameters = self.type_parameters[&owner].clone();
         if all_parameters.len() != prefix.len() + clauses.len()
@@ -734,19 +776,16 @@ impl Checker<'_, '_> {
             .is_empty();
             let domain =
                 self.supplied_trait_domain(owner, domain, &supplied, &prefix, subject, value.span)?;
-            // Bare numeric literals have intrinsic conversion only: no call,
-            // capture, or user literal protocol can execute here. Keep their
-            // spelling until the domain is known instead of fixing Integer or
-            // Float prematurely. Suffixed literals and general expressions
-            // still follow source-order required invocation below.
-            if unresolved_domain && is_numeric_literal(value) {
-                pending_literals[slot] = Some(value);
-                continue;
-            }
             if unresolved_domain
                 && (clauses[slot].kind.is_quote() || matches!(domain, Term::Lift(_)))
             {
                 pending_runtime[slot] = Some(value);
+                continue;
+            }
+            // A closed literal expression can receive its context after earlier
+            // slots settle. Producers with observable evaluation stay in source order.
+            if unresolved_domain && self.is_closed_clause_literal(value)? {
+                pending_literals[slot] = Some(value);
                 continue;
             }
             supplied[slot] = Some(if unresolved_domain {
@@ -853,8 +892,35 @@ impl Checker<'_, '_> {
                     value
                 } else if let Some(literal) = pending_literals[slot] {
                     let domain = self.substituted_trait_domain(&domains[slot], literal.span)?;
-                    caller_scope
-                        .with_caller(self, |this| this.normal_value_argument(literal, &domain))?
+                    let dependencies = self.term_declaration_inputs(&domain, literal.span)?;
+                    let waiting: Vec<_> = plan
+                        .0
+                        .iter()
+                        .copied()
+                        .filter(|id| dependencies.contains(id))
+                        .collect();
+                    if let Some(locals) = inference_locals
+                        .as_deref_mut()
+                        .filter(|_| !waiting.is_empty())
+                    {
+                        let binder =
+                            self.call_clause_binder(owner, domain, locals, literal.span)?;
+                        plan.2.push(type_defaults::PendingClause {
+                            slot: plan.1.len(),
+                            binder: binder.declaration,
+                            dependencies: waiting,
+                            explicit: Some(literal),
+                        });
+                        plan.0.push(binder.declaration);
+                        Term::Rigid {
+                            declaration: binder.declaration,
+                            sort: binder.sort,
+                        }
+                    } else {
+                        caller_scope.with_caller(self, |this| {
+                            this.normal_value_argument(literal, &domain)
+                        })?
+                    }
                 } else if let Some(runtime_expr) = pending_runtime[slot] {
                     let domain =
                         self.substituted_trait_domain(&domains[slot], runtime_expr.span)?;
@@ -866,13 +932,7 @@ impl Checker<'_, '_> {
                     // slot. An explicit argument may refer to the very same
                     // declaration in a recursive caller.
                     let domain = self.substituted_trait_domain(&domains[slot], span)?;
-                    let binder = nir::DeclarationParameter {
-                        declaration: self.fresh_type_binder(owner, span)?.declaration,
-                        sort: Sort::of_comptime_domain(&domain),
-                    };
-                    locals.push(binder.declaration);
-                    self.lexical_input_domains
-                        .insert(binder.declaration, domain);
+                    let binder = self.call_clause_binder(owner, domain, locals, span)?;
                     caller_scope.with_caller(self, |this| {
                         this.plan_omitted_function_clause(
                             owner,

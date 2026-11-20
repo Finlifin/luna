@@ -5879,7 +5879,7 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
         prefix: Vec<n::Expr>,
-        plan: type_defaults::FunctionTypePlan,
+        plan: type_defaults::FunctionTypePlan<'_>,
         selected_method: Option<interfaces::SelectedMethod>,
     ) -> Result<n::Expr, Error> {
         if self.is_quote_function(owner) {

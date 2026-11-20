@@ -154,3 +154,32 @@ fn open_calls_infer_missing_clauses_alongside_explicit_overrides() {
     "#;
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn named_clause_literals_wait_for_their_inferred_domain() {
+    let source = r#"
+        fn present(value: T) -> bool
+        where T, .tag: ?T = null, .flag: bool = tag matches _?
+        {
+            flag
+        }
+
+        fn tagged(value: T, comptime keep: bool) -> bool
+        where T, .tag: ?T = null
+        {
+            inline if keep { tag matches _? } else { false }
+        }
+
+        fn run() -> bool {
+            let byte: u8 = 1;
+            not present<.tag = null>(byte)
+                and present<.tag = 255>(byte)
+                and not present<.tag = if true { null } else { 1 }>(byte)
+                and tagged<.tag = 7>(byte, true)
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let invalid = source.replace("else { 1 }", "else { 256 }");
+    let error = sysroot::compile(&invalid).unwrap_err();
+    assert!(error.contains("does not fit"), "{error}");
+}

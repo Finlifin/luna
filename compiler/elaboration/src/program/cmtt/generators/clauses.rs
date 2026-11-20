@@ -32,7 +32,7 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         parameters: &[DeclarationId],
         plan: &mut [Term],
-        pending: &[(usize, Vec<DeclarationId>)],
+        pending: &[type_defaults::PendingClause<'_>],
         deferred: &[usize],
         completed: &mut CompletedDefaults,
         base: &crate::calls::Scheme,

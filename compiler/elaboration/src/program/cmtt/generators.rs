@@ -73,7 +73,7 @@ type GeneratorEntryData = BTreeMap<n::LocalId, (n::Expr, Option<GeneratorCell>)>
 pub(in crate::program::cmtt) type GeneratorTypePlan = (
     Vec<DeclarationId>,
     Vec<Term>,
-    Vec<(usize, Vec<DeclarationId>)>,
+    Vec<type_defaults::PendingClause<'static>>,
     Vec<usize>,
 );
 
