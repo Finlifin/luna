@@ -1,6 +1,53 @@
 //! Source trait input domains and declaration-ordered supplied/default indices.
 use super::*;
 
+#[derive(Clone)]
+pub(super) enum ExplicitClause<'hir> {
+    Literal(&'hir Expr<'hir>),
+    Computed { value: Box<n::Expr>, span: Span },
+}
+
+impl ExplicitClause<'_> {
+    fn computed(value: Term, actual: Term, span: Span) -> Self {
+        let kind = if actual == p(P::Type) {
+            K::TypeValue(value)
+        } else {
+            K::ComptimeValue(value)
+        };
+        Self::Computed {
+            value: Box::new(n::Expr {
+                source: source(span),
+                ty: actual,
+                kind,
+            }),
+            span,
+        }
+    }
+
+    pub(super) fn span(&self) -> Span {
+        match self {
+            Self::Literal(source) => source.span,
+            Self::Computed { span, .. } => *span,
+        }
+    }
+
+    pub(super) fn admit(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        domain: &Term,
+    ) -> Result<Term, Error> {
+        match self {
+            Self::Literal(source) => checker.normal_value_argument(source, domain),
+            Self::Computed { value, span } => {
+                let value = checker.deliver_computed_value(value, domain, *span)?;
+                checker
+                    .checked_normal_input_in(&value, &BTreeMap::new(), *span)?
+                    .ok_or_else(|| error(*span, "converted clause value has no normal identity"))
+            }
+        }
+    }
+}
+
 impl Checker<'_, '_> {
     pub(super) fn trait_domains(&mut self, owner: OwnerId) -> Result<Vec<Term>, Error> {
         let span = self
@@ -590,8 +637,7 @@ impl Checker<'_, '_> {
         let parameters = all_parameters[prefix.len()..].to_vec();
         let domains = &domains[prefix.len()..];
         let mut supplied: Vec<Option<Term>> = vec![None; clauses.len()];
-        let mut pending_domains = vec![None; clauses.len()];
-        let mut pending_literals = vec![None; clauses.len()];
+        let mut pending_explicit = vec![None; clauses.len()];
         let mut pending_runtime = vec![None; clauses.len()];
         let mut positional = 0;
         // Explicit inputs run in caller/source order. Defaults run afterwards
@@ -705,7 +751,7 @@ impl Checker<'_, '_> {
                             return Err(error(value.span, "trait argument count mismatch"));
                         }
                         if supplied[slot].is_some()
-                            || pending_literals[slot].is_some()
+                            || pending_explicit[slot].is_some()
                             || pending_runtime[slot].is_some()
                         {
                             return Err(error(value.span, "duplicate trait argument"));
@@ -721,8 +767,29 @@ impl Checker<'_, '_> {
                             }
                             element => self.required_normal_term(element, value.span)?,
                         };
-                        supplied[slot] = Some(element);
-                        pending_domains[slot] = Some((actual, value.span));
+                        let field = ExplicitClause::computed(element, actual, value.span);
+                        let waiting = input_observation::pending_domain_inputs(
+                            &domains[slot],
+                            parameters
+                                .iter()
+                                .zip(&supplied)
+                                .map(|(id, value)| (*id, value.is_some())),
+                            &mut self.required_steps,
+                            value.span,
+                        )?;
+                        if waiting.is_empty() {
+                            let domain = self.supplied_trait_domain(
+                                owner,
+                                &domains[slot],
+                                &supplied,
+                                &prefix,
+                                subject,
+                                value.span,
+                            )?;
+                            supplied[slot] = Some(field.admit(self, &domain)?);
+                        } else {
+                            pending_explicit[slot] = Some(field);
+                        }
                     }
                     continue;
                 }
@@ -756,7 +823,7 @@ impl Checker<'_, '_> {
                 .get(slot)
                 .ok_or_else(|| error(span, "trait argument count mismatch"))?;
             if supplied[slot].is_some()
-                || pending_literals[slot].is_some()
+                || pending_explicit[slot].is_some()
                 || pending_runtime[slot].is_some()
             {
                 return Err(error(span, "duplicate trait argument"));
@@ -785,10 +852,10 @@ impl Checker<'_, '_> {
             // A closed literal expression can receive its context after earlier
             // slots settle. Producers with observable evaluation stay in source order.
             if unresolved_domain && self.is_closed_clause_literal(value)? {
-                pending_literals[slot] = Some(value);
+                pending_explicit[slot] = Some(ExplicitClause::Literal(value));
                 continue;
             }
-            supplied[slot] = Some(if unresolved_domain {
+            if unresolved_domain {
                 // Preserve source-order invocation when an earlier declaration
                 // slot is supplied later (or by a default). The expression's
                 // own checked type is retained for the final domain check.
@@ -798,22 +865,21 @@ impl Checker<'_, '_> {
                 } else {
                     None
                 };
-                if let Some(actual) = symbolic_domain {
+                let (input, actual) = if let Some(actual) = symbolic_domain {
                     // A caller clause is already a stable symbolic input.
                     // Keep it symbolic while the callee's domain awaits an
                     // earlier default; no invocation can supply its local yet.
                     let actual = self.substituted_trait_domain(&actual, value.span)?;
                     let input = self.normal_value_argument(value, &actual)?;
-                    pending_domains[slot] = Some((actual, value.span));
-                    input
+                    (input, actual)
                 } else {
                     let (computed, actual) = self.required_typed_expression(value, None)?;
-                    pending_domains[slot] = Some((actual, value.span));
-                    self.required_normal_term(computed, value.span)?
-                }
+                    (self.required_normal_term(computed, value.span)?, actual)
+                };
+                pending_explicit[slot] = Some(ExplicitClause::computed(input, actual, value.span));
             } else {
-                self.normal_value_argument(value, &domain)?
-            });
+                supplied[slot] = Some(self.normal_value_argument(value, &domain)?);
+            }
         }
         struct CallerScope {
             owner: Option<OwnerId>,
@@ -882,17 +948,11 @@ impl Checker<'_, '_> {
             let mut plan = (Vec::new(), prefix, Vec::new());
             for (slot, supplied) in supplied.into_iter().enumerate() {
                 let value = if let Some(value) = supplied {
-                    if let Some((actual, value_span)) = &pending_domains[slot] {
-                        let domain = self.substituted_trait_domain(&domains[slot], *value_span)?;
-                        // Explicit expressions belong to the caller, including
-                        // its type equalities, aliases, and signature owner.
-                        caller_scope
-                            .with_caller(self, |this| this.require(actual, &domain, *value_span))?;
-                    }
                     value
-                } else if let Some(literal) = pending_literals[slot] {
-                    let domain = self.substituted_trait_domain(&domains[slot], literal.span)?;
-                    let dependencies = self.term_declaration_inputs(&domain, literal.span)?;
+                } else if let Some(explicit) = pending_explicit[slot].take() {
+                    let span = explicit.span();
+                    let domain = self.substituted_trait_domain(&domains[slot], span)?;
+                    let dependencies = self.term_declaration_inputs(&domain, span)?;
                     let waiting: Vec<_> = plan
                         .0
                         .iter()
@@ -903,13 +963,12 @@ impl Checker<'_, '_> {
                         .as_deref_mut()
                         .filter(|_| !waiting.is_empty())
                     {
-                        let binder =
-                            self.call_clause_binder(owner, domain, locals, literal.span)?;
+                        let binder = self.call_clause_binder(owner, domain, locals, span)?;
                         plan.2.push(type_defaults::PendingClause {
                             slot: plan.1.len(),
                             binder: binder.declaration,
                             dependencies: waiting,
-                            explicit: Some(literal),
+                            explicit: Some(explicit),
                         });
                         plan.0.push(binder.declaration);
                         Term::Rigid {
@@ -917,9 +976,7 @@ impl Checker<'_, '_> {
                             sort: binder.sort,
                         }
                     } else {
-                        caller_scope.with_caller(self, |this| {
-                            this.normal_value_argument(literal, &domain)
-                        })?
+                        caller_scope.with_caller(self, |this| explicit.admit(this, &domain))?
                     }
                 } else if let Some(runtime_expr) = pending_runtime[slot] {
                     let domain =

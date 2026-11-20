@@ -183,3 +183,42 @@ fn named_clause_literals_wait_for_their_inferred_domain() {
     let error = sysroot::compile(&invalid).unwrap_err();
     assert!(error.contains("does not fit"), "{error}");
 }
+
+#[test]
+fn computed_clause_operands_keep_their_value_until_delivery() {
+    let source = r#"
+        enum TestErr { Missing }
+        comptime fn make() -> u8 { 42 }
+        comptime fn absent() -> ?u8 { null }
+        comptime fn fail() -> !TestErr u8 { error TestErr.Missing }
+
+        fn present(value: T) -> bool where T, .tag: ?T = null { tag matches _? }
+        fn failed(value: T) -> bool
+        where T, .out: !TestErr T = error TestErr.Missing
+        {
+            out matches error _
+        }
+
+        fn forward(value: U) -> bool
+        where U, .outer: !TestErr U = error TestErr.Missing
+        {
+            failed<.out = outer>(value)
+        }
+
+        fn run() -> bool {
+            let byte: u8 = 1;
+            present<.tag = make()>(byte)
+                and not present<.tag = absent()>(byte)
+                and not failed<.out = make()>(byte)
+                and failed<.out = fail()>(byte)
+                and forward(byte)
+                and not forward<.outer = make()>(byte)
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let error = sysroot::compile(&source.replace("make() -> u8", "make() -> u16")).unwrap_err();
+    assert!(
+        error.contains("expected (primitive u8), found (primitive u16)"),
+        "{error}"
+    );
+}

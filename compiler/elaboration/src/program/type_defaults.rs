@@ -7,7 +7,7 @@ pub(super) struct PendingClause<'hir> {
     pub slot: usize,
     pub binder: DeclarationId,
     pub dependencies: Vec<DeclarationId>,
-    pub explicit: Option<&'hir Expr<'hir>>,
+    pub explicit: Option<trait_inputs::ExplicitClause<'hir>>,
 }
 
 pub(super) type FunctionTypePlan<'hir> = (Vec<DeclarationId>, Vec<Term>, Vec<PendingClause<'hir>>);
@@ -689,12 +689,17 @@ impl<'h> Checker<'_, 'h> {
             if !ready {
                 continue;
             }
-            let value = if let Some(source) = clause.explicit {
-                let domain = self.lexical_input_domains[&clause.binder].clone();
+            let value = if let Some(source) = &clause.explicit {
+                let span = source.span();
+                let domain = declaration_inputs::copy_input_domain(
+                    &self.lexical_input_domains[&clause.binder],
+                    &mut self.required_steps,
+                    span,
+                )?;
                 let domain =
-                    self.instantiate_input_types(&domain, &substitutions, &available, source.span)?;
-                let domain = self.callable_input_view(&domain, source.span)?;
-                self.normal_value_argument(source, &domain)?
+                    self.instantiate_input_types(&domain, &substitutions, &available, span)?;
+                let domain = self.callable_input_view(&domain, span)?;
+                source.admit(self, &domain)?
             } else {
                 let inputs = template[..slot]
                     .iter()

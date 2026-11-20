@@ -7156,7 +7156,7 @@ impl Checker<'_, '_> {
         let mut layers = Vec::new();
         let mut inner = target.clone();
         for _ in 0..128 {
-            if self.require(&value.ty, &inner, span).is_ok() {
+            let Err(mismatch) = self.require(&value.ty, &inner, span) else {
                 for ty in layers.into_iter().rev() {
                     value = n::Expr {
                         source: source(span),
@@ -7165,10 +7165,12 @@ impl Checker<'_, '_> {
                     };
                 }
                 return Ok(value);
-            }
-            let payload = self.optional_payload(&inner, span)?;
+            };
+            let Term::Optional(payload) = self.type_identity_view(&inner, span)? else {
+                return Err(mismatch);
+            };
             layers.push(inner);
-            inner = payload;
+            inner = *payload;
         }
         Err(error(span, "optional injection depth exhausted"))
     }
