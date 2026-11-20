@@ -1996,10 +1996,13 @@ impl Checker<'_, '_> {
             let mut locals = BTreeMap::new();
             let mut default_types = BTreeMap::new();
             let mut default_dependencies = BTreeMap::new();
+            let mut suspended_facts = BTreeMap::new();
             for (slot, (parameter, (sort, annotation))) in
                 sig.params.iter().zip(&definition.parameters).enumerate()
             {
-                this.check_suspended_annotation(annotation, sig, &mut locals)?;
+                if let Some(facts) = this.check_suspended_annotation(annotation, sig, &mut locals)? {
+                    suspended_facts.insert(slot, facts);
+                }
                 let description = annotation.description();
                 if let TyParamKind::Optional(_, _, default) = parameter.ty.kind {
                     let mut default_locals = locals.clone();
@@ -2095,58 +2098,27 @@ impl Checker<'_, '_> {
             // Defaults are suppliers. Their checks must not borrow a premise
             // that only holds after binding the parameter at function entry.
             for (parameter, (_, annotation)) in sig.params.iter().zip(&definition.parameters) {
-                match annotation {
+                let facts = match annotation {
                     Annotation::Description(description @ n::DescriptionLiteral::Refined(_)) => {
                         let subject = this.assume_parameter_refinement(
-                            parameter.hir_id,
-                            description,
-                            parameter.span,
+                            parameter.hir_id, description, parameter.span,
                         )?;
                         this.locals.insert(local(parameter.hir_id), subject.clone());
                         locals.insert(local(parameter.hir_id), D::Known(subject));
+                        continue;
                     }
-                    Annotation::Pending(prepared) => {
-                        if let Some((binder, guarantees)) = prepared
-                            .direct_call_result_guarantees(&mut this.required_steps, parameter.span)?
-                        {
-                            let subject = this.assume_deferred_result_guarantees(
-                                parameter.hir_id,
-                                binder,
-                                &guarantees,
-                                parameter.span,
-                            )?;
-                            this.locals.insert(local(parameter.hir_id), subject.clone());
-                            locals.insert(local(parameter.hir_id), D::Known(subject));
-                        }
-                    }
-                    Annotation::Suspended { owner: sig_owner, slot } => {
-                        if let Some(source_ty) = annotations::annotation_source(sig, *slot)
-                            && let H::Defer(inner) = &source_ty.kind
-                            && let H::Application(callee, _) = &inner.kind
-                            && let H::ResolvedDef { def_id, .. } = &callee.kind
-                            && let Some(callee_owner) = this.package.definition_owner(*def_id)
-                            && callee_owner != *sig_owner
-                        {
-                            this.ensure_contract(callee_owner, parameter.span)?;
-                            if this
-                                .type_parameters
-                                .get(&callee_owner)
-                                .is_none_or(Vec::is_empty)
-                                && let Some((binder, guarantees)) =
-                                    this.result_guarantees.get(&callee_owner).cloned()
-                            {
-                                let subject = this.assume_deferred_result_guarantees(
-                                    parameter.hir_id,
-                                    binder,
-                                    &guarantees,
-                                    parameter.span,
-                                )?;
-                                this.locals.insert(local(parameter.hir_id), subject.clone());
-                                locals.insert(local(parameter.hir_id), D::Known(subject));
-                            }
-                        }
-                    }
-                    _ => {}
+                    Annotation::Pending(prepared) => prepared.direct_call_result_guarantees(
+                        &mut this.required_steps, parameter.span,
+                    )?,
+                    Annotation::Suspended { slot, .. } => suspended_facts.remove(slot),
+                    _ => None,
+                };
+                if let Some((binder, guarantees)) = facts {
+                    let subject = this.assume_deferred_result_guarantees(
+                        parameter.hir_id, binder, &guarantees, parameter.span,
+                    )?;
+                    this.locals.insert(local(parameter.hir_id), subject.clone());
+                    locals.insert(local(parameter.hir_id), D::Known(subject));
                 }
             }
             this.check_suspended_annotation(&definition.result, sig, &mut locals)?;

@@ -300,6 +300,30 @@ pub(super) enum CallableClauseView<'v> {
 }
 
 impl<'v> CallableClauseView<'v> {
+    pub(super) fn direct_call(
+        mut value: &'v n::Expr,
+        fuel: &mut usize,
+    ) -> Result<Option<(DeclarationId, Self)>, String> {
+        loop {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("result contract lookup budget exhausted")?;
+            match &value.kind {
+                K::Return(Some(inner)) => value = inner,
+                K::Block {
+                    statements,
+                    result: Some(inner),
+                }
+                | K::CallPreparation {
+                    statements,
+                    result: Some(inner),
+                } if statements.is_empty() => value = inner,
+                K::Call { callee, .. } => return Ok(Self::direct(callee)),
+                _ => return Ok(None),
+            }
+        }
+    }
+
     pub(super) fn direct(callee: &'v n::Expr) -> Option<(DeclarationId, Self)> {
         Some(match &callee.kind {
             K::Function(id) => (*id, Self::Fixed(&[])),

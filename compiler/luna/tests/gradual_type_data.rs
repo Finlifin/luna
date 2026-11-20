@@ -563,3 +563,48 @@ fn type_producer_contracts_specialize_observed_value_clauses() {
         "{error}"
     );
 }
+
+#[test]
+fn suspended_producer_contracts_reach_comptime_and_pending_parameter_bodies() {
+    let producer = r#"
+        pure comptime fn Shape(T: Type) -> R: Type
+        where one: bool, ensures Type.predicates.is_tuple(R)
+        {
+            if one { Tuple<T> } else { Tuple<T, T> }
+        }
+
+        pure comptime fn Domain(flag: bool) -> Type { if flag { Type } else { bool } }
+
+    "#;
+    let comptime_consumer = r#"
+        comptime fn count(T: Type, ...fields: defer Shape<true>(T)) -> u8 {
+            var n: u8 = 0;
+            inline for _ in fields'tuple_enumerate { assumes n < 255; n = n + 1; };
+            n
+        }
+    "#;
+    let dependent_consumer = r#"
+        fn later(comptime flag: bool, comptime T: defer Domain(flag), ...fields: defer Shape<false>(T)) -> u8 {
+            var n: u8 = 0;
+            inline for _ in fields'tuple_enumerate { assumes n < 255; n = n + 1; };
+            n
+        }
+    "#;
+    let entry = r#"
+        fn run() -> bool {
+            const first = count(bool, false);
+            first == 1 and later(true, bool, true, false) == 2
+        }
+    "#;
+    let valid = [producer, comptime_consumer, dependent_consumer, entry].concat();
+    assert_eq!(support::run(&valid), Value::Bool(true));
+
+    let undocumented = producer.replace(", ensures Type.predicates.is_tuple(R)", "");
+    for consumer in [comptime_consumer, dependent_consumer] {
+        let error = support::compile(&format!("{undocumented}{consumer}")).unwrap_err();
+        assert!(
+            error.contains("tuple_enumerate requires a proven tuple"),
+            "{error}"
+        );
+    }
+}

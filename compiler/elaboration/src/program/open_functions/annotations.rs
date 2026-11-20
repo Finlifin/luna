@@ -89,9 +89,9 @@ impl Checker<'_, '_> {
         annotation: &Annotation,
         sig: &hir::item::FnSig<'_>,
         locals: &mut BTreeMap<n::LocalId, D>,
-    ) -> Result<(), Error> {
-        let Annotation::Suspended { slot, .. } = annotation else {
-            return Ok(());
+    ) -> Result<Option<(DeclarationId, Vec<n::TypePredicate>)>, Error> {
+        let Annotation::Suspended { slot, owner } = annotation else {
+            return Ok(None);
         };
         let source = annotation_source(sig, *slot)
             .ok_or_else(|| error(sig.span, "missing suspended annotation"))?;
@@ -107,7 +107,7 @@ impl Checker<'_, '_> {
             .filter_map(|(binding, domain)| matches!(domain, D::Unknown).then_some(*binding))
             .collect();
         let pending_domain = self.annotation_may_use_pending_inputs(value, &pending_inputs)?;
-        self.with_staged_input(true, |this| {
+        let checked = self.with_staged_input(true, |this| {
             if pending_domain {
                 return this
                     .describe_open_expression(
@@ -117,11 +117,52 @@ impl Checker<'_, '_> {
                         Some(&D::Known(p(P::Type))),
                         0,
                     )
-                    .map(|_| ());
+                    .map(|_| None);
             }
             let value = this.elaborate_known_region(value, Some(&D::Known(p(P::Type))))?;
-            this.check_open_fragment(&value, source.span, true)
-        })
+            this.check_open_fragment(&value, source.span, true)?;
+            Ok(Some(value))
+        })?;
+        if *slot == sig.params.len() {
+            return Ok(None);
+        }
+        let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let facts = (|| {
+            let target = if let Some(checked) = &checked {
+                CallableClauseView::direct_call(checked, &mut fuel)?.and_then(|(id, operands)| {
+                    self.source_declarations
+                        .owner(id)
+                        .map(|owner| (owner, Some(operands)))
+                })
+            } else if let H::Application(callee, _) = &value.kind {
+                // Description checking has resolved and checked this call. It
+                // did not deliver an operand packet. Never repeat a supplier
+                // to obtain evidence after that check.
+                let head = match &callee.kind {
+                    H::NFApplication(head, _) => *head,
+                    _ => callee,
+                };
+                match head.kind {
+                    H::ResolvedDef { def_id, .. } => self
+                        .package
+                        .definition_owner(def_id)
+                        .map(|owner| (owner, None)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            let Some((target, operands)) = target else {
+                return Ok(None);
+            };
+            if target == *owner {
+                return Ok(None);
+            }
+            self.source_result_facts(target, operands, &[], &mut fuel)
+        })();
+        self.required_steps -= (before - fuel) as u64;
+        facts.map_err(|e| error(source.span, e))
     }
 
     pub(in crate::program) fn signature_annotation(

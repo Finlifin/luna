@@ -446,7 +446,7 @@ fn observe_inputs(
 }
 
 /// Check that every free input of a stored predicate is its subject.
-pub(crate) fn closed_refinement(
+pub fn closed_refinement(
     predicate: &n::TypePredicate,
     binder: crate::DeclarationParameter,
     steps: &mut u64,

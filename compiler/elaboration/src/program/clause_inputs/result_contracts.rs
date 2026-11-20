@@ -91,6 +91,62 @@ impl<'arg, 'domain> ResultClauses<'arg, 'domain> {
     }
 }
 
+impl Checker<'_, '_> {
+    /// The checked call may still lack operand identities in an open
+    /// description. Only facts closed over the published result survive then.
+    pub(in crate::program) fn source_result_facts(
+        &self,
+        owner: OwnerId,
+        operands: Option<CallableClauseView<'_>>,
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Option<(DeclarationId, Vec<n::TypePredicate>)>, String> {
+        let Some((binder, guarantees)) = self.result_guarantees.get(&owner) else {
+            return Ok(None);
+        };
+        let mut facts = Vec::new();
+        if let Some(operands) = operands {
+            let parameters = self
+                .type_parameters
+                .get(&owner)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            let mut domains = Vec::new();
+            for id in parameters {
+                let domain = self
+                    .observe_input_domain(*id, || {
+                        *fuel = fuel
+                            .checked_sub(1)
+                            .ok_or(nir::type_computations::Error::Budget)?;
+                        Ok(())
+                    })
+                    .map_err(|e| e.to_string())?;
+                domains.push(domain.unwrap_or(&Term::Primitive(P::Type)));
+            }
+            let clauses = ResultClauses::new(parameters, &domains, operands, fuel)?;
+            for guarantee in guarantees {
+                if let Some(fact) = clauses.specialize(guarantee, frames, fuel)? {
+                    facts.push(fact);
+                }
+            }
+        } else {
+            let subject = nir::DeclarationParameter {
+                declaration: *binder,
+                sort: Sort::Type,
+            };
+            for guarantee in guarantees {
+                let mut steps = *fuel as u64;
+                let closed = nir::copy_budget::closed_refinement(guarantee, subject, &mut steps);
+                *fuel = steps as usize;
+                if closed.map_err(|e| format!("{e:?}"))? {
+                    facts.push(guarantee.clone());
+                }
+            }
+        }
+        Ok((!facts.is_empty()).then_some((*binder, facts)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

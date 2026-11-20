@@ -1554,44 +1554,21 @@ impl Checker<'_, '_> {
                 };
                 if let Some((id, operands)) = CallableClauseView::direct(callee)
                     && let Some(owner) = self.source_declarations.owner(id)
-                    && let Some((callee_binder, callee_guarantees)) =
-                        self.result_guarantees.get(&owner)
                 {
                     let frames = self.call_input_frames();
                     let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                     let before = fuel;
                     let checked = (|| -> Result<(), Error> {
-                        let parameters = self
-                            .type_parameters
-                            .get(&owner)
-                            .map(Vec::as_slice)
-                            .unwrap_or(&[]);
-                        let mut domains = Vec::new();
-                        for id in parameters {
-                            let domain = self
-                                .observe_input_domain(*id, || {
-                                    fuel = fuel
-                                        .checked_sub(1)
-                                        .ok_or(nir::type_computations::Error::Budget)?;
-                                    Ok(())
-                                })
-                                .map_err(|e| error(span, e.to_string()))?;
-                            domains.push(domain.unwrap_or(&Term::Primitive(P::Type)));
-                        }
-                        let clauses = clause_inputs::ResultClauses::new(
-                            parameters, &domains, operands, &mut fuel,
-                        )
-                        .map_err(|e| error(span, e))?;
-                        for guarantee in callee_guarantees {
-                            let Some(mut pred) = clauses
-                                .specialize(guarantee, &frames, &mut fuel)
-                                .map_err(|e| error(span, e))?
-                            else {
-                                continue;
-                            };
-                            if *callee_binder != binder {
+                        let Some((callee_binder, facts)) = self
+                            .source_result_facts(owner, Some(operands), &frames, &mut fuel)
+                            .map_err(|e| error(span, e))?
+                        else {
+                            return Ok(());
+                        };
+                        for mut pred in facts {
+                            if callee_binder != binder {
                                 let sub = nir::DeclarationSubstitution::bounded(
-                                    std::slice::from_ref(callee_binder),
+                                    std::slice::from_ref(&callee_binder),
                                     &[p(P::Type)],
                                     std::slice::from_ref(&subject_term),
                                     &frames,

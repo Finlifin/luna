@@ -34,28 +34,7 @@ impl PreparedRequired {
         let Some(entry) = lookup(self.entry, fuel)? else {
             return Ok(None);
         };
-        let mut expr = &entry.body;
-        loop {
-            *fuel = fuel
-                .checked_sub(1)
-                .ok_or("result contract lookup budget exhausted")?;
-            match &expr.kind {
-                K::Return(Some(inner)) => expr = inner,
-                K::Block {
-                    statements,
-                    result: Some(inner),
-                }
-                | K::CallPreparation {
-                    statements,
-                    result: Some(inner),
-                } if statements.is_empty() => expr = inner,
-                _ => break,
-            }
-        }
-        let K::Call { callee, .. } = &expr.kind else {
-            return Ok(None);
-        };
-        let Some((id, operands)) = CallableClauseView::direct(callee) else {
+        let Some((id, operands)) = CallableClauseView::direct_call(&entry.body, fuel)? else {
             return Ok(None);
         };
         let Some(target) = lookup(id, fuel)? else {
