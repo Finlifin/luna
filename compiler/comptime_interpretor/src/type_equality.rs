@@ -132,105 +132,13 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<Value, Error> {
         if let Value::Description(ref data) = operand {
-            if !self.admits_description(data) {
-                return Err(self.failure(ErrorKind::Type, Some(source)));
-            }
-            let Some(world) = self.declaration_world else {
-                return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
-            };
-            let before = self.budget.steps;
-            let subject = world
-                .refinements
-                .subject(data, &mut self.budget.steps)
-                .map_err(|_| {
-                    self.failure(
-                        if self.budget.steps == 0 && before > 0 {
-                            ErrorKind::StepsExhausted
-                        } else {
-                            ErrorKind::Type
-                        },
-                        Some(source),
-                    )
-                })?;
-            let subject_id =
-                self.query_admission(Some(source), |_, fuel| Ok(subject.fresh_subject_id(fuel)?))?;
-            let subject_term = Term::Rigid {
-                declaration: subject_id,
-                sort: nir::Sort::Type,
-            };
-            let mut premises = Vec::new();
-            if let Some(app) = subject.application
-                && self
-                    .normal_forms
-                    .get(&app.head())
-                    .is_some_and(|m| m.role == nir::normal_forms::Role::Tuple)
-            {
-                premises.push(nir::program::TypePredicate::Kind(
-                    subject_term.clone(),
-                    nir::TypeKind::Tuple,
-                ));
-            }
-            for req in subject.requirements() {
-                let instantiated = self.query_admission(Some(source), |_, fuel| {
-                    Ok(req.instantiate(&subject_term, &[], fuel)?)
-                })?;
-                premises.push(instantiated);
-            }
-            let mut conjunctions: Vec<&nir::program::TypePredicate> = premises.iter().collect();
-            while let Some(premise) = conjunctions.pop() {
-                self.tick(Some(source))?;
-                match premise {
-                    nir::program::TypePredicate::And(parts) => {
-                        conjunctions.extend(parts.iter());
-                    }
-                    nir::program::TypePredicate::Kind(s, k) if s == &subject_term => {
-                        if let Some(result) = k.consequence(true, kind) {
-                            return Ok(Value::Bool(result));
-                        }
-                    }
-                    nir::program::TypePredicate::Not(inner) => {
-                        if let nir::program::TypePredicate::Kind(s, k) = inner.as_ref()
-                            && s == &subject_term
-                            && let Some(result) = k.consequence(false, kind)
-                        {
-                            return Ok(Value::Bool(result));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let target = nir::program::TypePredicate::Kind(subject_term, kind);
-            let implies = |consequent: nir::program::TypePredicate| {
-                if premises.is_empty() {
-                    consequent
-                } else {
-                    nir::program::TypePredicate::Or(vec![
-                        nir::program::TypePredicate::Not(Box::new(
-                            nir::program::TypePredicate::And(premises.clone()),
-                        )),
-                        consequent,
-                    ])
-                }
-            };
-            let pos = implies(target.clone());
-            self.tick(Some(source))?;
-            if pos.trivial_truth() == Some(true)
-                || premises.iter().any(|p| p == &target)
-                || self
-                    .solve_type_predicate(&pos)
-                    .map_err(|k| self.failure(k, Some(source)))?
-                    == ContractOutcome::Satisfied
-            {
+            use nir::program::TypePredicate as P;
+            let mut evidence = self.description_evidence(data, None, source)?;
+            let target = P::Kind(evidence.subject.clone(), kind);
+            if evidence.entails(self, target.clone(), source)? {
                 return Ok(Value::Bool(true));
             }
-            let neg = implies(nir::program::TypePredicate::Not(Box::new(target)));
-            self.tick(Some(source))?;
-            if neg.trivial_truth() == Some(true)
-                || self
-                    .solve_type_predicate(&neg)
-                    .map_err(|k| self.failure(k, Some(source)))?
-                    == ContractOutcome::Satisfied
-            {
+            if evidence.entails(self, P::Not(Box::new(target)), source)? {
                 return Ok(Value::Bool(false));
             }
             return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));

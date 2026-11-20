@@ -197,171 +197,75 @@ impl<'a> Interpreter<'a> {
         let Some(binder) = result_type_binder else {
             return Err(self.failure(ErrorKind::ProgramContractRejected, Some(source)));
         };
-        match value {
-            Value::Type(actual_ty) => {
-                self.check_type_description(actual_ty, Some(source))?;
-                let binder_ids = [binder];
-                let binder_domains = [Term::Primitive(Primitive::Type)];
-                let actual_args = [actual_ty.clone()];
-                let empty_frames: [Vec<nir::Sort>; 0] = [];
-                for guarantee in guarantees {
-                    let mut predicate = if let Some(substitution) = substitution {
-                        self.query_admission(Some(source), |_, fuel| {
-                            Ok(substitution.instantiate_predicate_bounded(guarantee, fuel)?)
-                        })?
-                    } else {
-                        guarantee.clone()
-                    };
-                    if let Some(scope) = type_scope {
-                        self.bind_invocation_contract(&mut predicate, scope, source, 0)?;
-                    }
-                    let instantiated = self.query_admission(Some(source), |_, fuel| {
-                        let substitution = nir::DeclarationSubstitution::bounded(
-                            &binder_ids,
-                            &binder_domains,
-                            &actual_args,
-                            &empty_frames,
-                            fuel,
-                        )?;
-                        Ok(substitution.instantiate_predicate_bounded(&predicate, fuel)?)
-                    })?;
-                    let outcome = match instantiated.trivial_truth() {
-                        Some(true) => ContractOutcome::Satisfied,
-                        Some(false) => ContractOutcome::Rejected,
-                        None => self
-                            .solve_type_predicate(&instantiated)
-                            .map_err(|kind| self.failure(kind, Some(source)))?,
-                    };
-                    if outcome != ContractOutcome::Satisfied {
-                        return Err(self.failure(ErrorKind::ProgramContractRejected, Some(source)));
-                    }
-                }
-                Ok(())
+        enum ResultSubject<'a> {
+            Exact(nir::DeclarationSubstitution<'a>),
+            Gradual(crate::description_evidence::DescriptionEvidence),
+        }
+        let ids = [binder];
+        let domains = [Term::Primitive(Primitive::Type)];
+        let exact = |vm: &mut Self, ty| {
+            vm.query_admission(Some(source), |_, fuel| {
+                Ok(ResultSubject::Exact(nir::DeclarationSubstitution::bounded(
+                    &ids,
+                    &domains,
+                    std::slice::from_ref(ty),
+                    &[],
+                    fuel,
+                )?))
+            })
+        };
+        let rigid;
+        let mut subject = match value {
+            Value::Type(ty) => {
+                self.check_type_description(ty, Some(source))?;
+                exact(self, ty)?
             }
             Value::TypeParameter(id) if self.abstract_type_parameters.contains(id) => {
-                let actual_ty = Term::Rigid {
+                rigid = Term::Rigid {
                     declaration: *id,
                     sort: nir::Sort::Type,
                 };
-                let binder_ids = [binder];
-                let binder_domains = [Term::Primitive(Primitive::Type)];
-                let actual_args = [actual_ty];
-                let empty_frames: [Vec<nir::Sort>; 0] = [];
-                for guarantee in guarantees {
-                    let mut predicate = if let Some(substitution) = substitution {
-                        self.query_admission(Some(source), |_, fuel| {
-                            Ok(substitution.instantiate_predicate_bounded(guarantee, fuel)?)
-                        })?
-                    } else {
-                        guarantee.clone()
-                    };
-                    if let Some(scope) = type_scope {
-                        self.bind_invocation_contract(&mut predicate, scope, source, 0)?;
-                    }
-                    let instantiated = self.query_admission(Some(source), |_, fuel| {
-                        let substitution = nir::DeclarationSubstitution::bounded(
-                            &binder_ids,
-                            &binder_domains,
-                            &actual_args,
-                            &empty_frames,
-                            fuel,
-                        )?;
-                        Ok(substitution.instantiate_predicate_bounded(&predicate, fuel)?)
-                    })?;
-                    let outcome = match instantiated.trivial_truth() {
-                        Some(true) => ContractOutcome::Satisfied,
-                        Some(false) => ContractOutcome::Rejected,
-                        None => self
-                            .solve_type_predicate(&instantiated)
-                            .map_err(|kind| self.failure(kind, Some(source)))?,
-                    };
-                    if outcome != ContractOutcome::Satisfied {
-                        return Err(self.failure(ErrorKind::ProgramContractRejected, Some(source)));
-                    }
-                }
-                Ok(())
+                exact(self, &rigid)?
             }
             Value::Description(data) => {
-                if !self.admits_description(data) {
-                    return Err(self.failure(ErrorKind::ProgramContractRejected, Some(source)));
-                }
-                let Some(world) = self.declaration_world else {
-                    return Err(self.failure(ErrorKind::ProgramContractRejected, Some(source)));
-                };
-                let subject_term = Term::Rigid {
-                    declaration: binder,
-                    sort: nir::Sort::Type,
-                };
-                let before = self.budget.steps;
-                let subject = world
-                    .refinements
-                    .subject(data, &mut self.budget.steps)
-                    .map_err(|_| {
-                        self.failure(
-                            if self.budget.steps == 0 && before > 0 {
-                                ErrorKind::StepsExhausted
-                            } else {
-                                ErrorKind::Type
-                            },
-                            Some(source),
-                        )
-                    })?;
-                let mut premises = Vec::new();
-                if let Some(app) = subject.application
-                    && self
-                        .normal_forms
-                        .get(&app.head())
-                        .is_some_and(|m| m.role == nir::normal_forms::Role::Tuple)
-                {
-                    premises.push(nir::program::TypePredicate::Kind(
-                        subject_term.clone(),
-                        nir::TypeKind::Tuple,
-                    ));
-                }
-                for req in subject.requirements() {
-                    let instantiated = self.query_admission(Some(source), |_, fuel| {
-                        Ok(req.instantiate(&subject_term, &[], fuel)?)
-                    })?;
-                    premises.push(instantiated);
-                }
-                for guarantee in guarantees {
-                    let mut predicate = if let Some(substitution) = substitution {
-                        self.query_admission(Some(source), |_, fuel| {
-                            Ok(substitution.instantiate_predicate_bounded(guarantee, fuel)?)
-                        })?
-                    } else {
-                        guarantee.clone()
-                    };
-                    if let Some(scope) = type_scope {
-                        self.bind_invocation_contract(&mut predicate, scope, source, 0)?;
-                    }
-                    if premises.iter().any(|p| p == &predicate) {
-                        continue;
-                    }
-                    let goal = if premises.is_empty() {
-                        predicate
-                    } else {
-                        nir::program::TypePredicate::Or(vec![
-                            nir::program::TypePredicate::Not(Box::new(
-                                nir::program::TypePredicate::And(premises.clone()),
-                            )),
-                            predicate,
-                        ])
-                    };
-                    let outcome = match goal.trivial_truth() {
-                        Some(true) => ContractOutcome::Satisfied,
-                        Some(false) => ContractOutcome::Rejected,
-                        None => self
-                            .solve_type_predicate(&goal)
-                            .map_err(|kind| self.failure(kind, Some(source)))?,
-                    };
-                    if outcome != ContractOutcome::Satisfied {
-                        return Err(self.failure(ErrorKind::ProgramContractRejected, Some(source)));
-                    }
-                }
-                Ok(())
+                ResultSubject::Gradual(self.description_evidence(data, Some(binder), source)?)
             }
-            _ => Err(self.failure(ErrorKind::ProgramContractRejected, Some(source))),
+            _ => return Err(self.failure(ErrorKind::ProgramContractRejected, Some(source))),
+        };
+        for guarantee in guarantees {
+            let mut predicate = if let Some(inputs) = substitution {
+                self.query_admission(Some(source), |_, fuel| {
+                    Ok(inputs.instantiate_predicate_bounded(guarantee, fuel)?)
+                })?
+            } else {
+                self.charge_copy_work(Some(source), |fuel| {
+                    nir::copy_budget::charge_predicate_substitution(guarantee, &[], &[], fuel)
+                })?;
+                guarantee.clone()
+            };
+            if let Some(scope) = type_scope {
+                self.bind_invocation_contract(&mut predicate, scope, source, 0)?;
+            }
+            let established = match &mut subject {
+                ResultSubject::Gradual(proof) => proof.entails(self, predicate, source)?,
+                ResultSubject::Exact(result) => {
+                    let goal = self.query_admission(Some(source), |_, fuel| {
+                        Ok(result.instantiate_predicate_bounded(&predicate, fuel)?)
+                    })?;
+                    match goal.trivial_truth() {
+                        Some(truth) => truth,
+                        None => {
+                            self.solve_type_predicate(&goal)
+                                .map_err(|kind| self.failure(kind, Some(source)))?
+                                == ContractOutcome::Satisfied
+                        }
+                    }
+                }
+            };
+            if !established {
+                return Err(self.failure(ErrorKind::ProgramContractRejected, Some(source)));
+            }
         }
+        Ok(())
     }
 }

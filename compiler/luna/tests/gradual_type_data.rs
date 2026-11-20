@@ -476,3 +476,25 @@ fn checked_result_guarantees_include_refined_literals_on_each_return_path() {
         "{error}"
     );
 }
+
+#[test]
+fn a_returned_signed_description_establishes_integer_without_selecting_a_width() {
+    let source = r#"
+        typealias Signed = refines { Type.predicates.is_signed_integer(Itself) } Any;
+        pure comptime fn Domain() -> R: Type
+        where ensures Type.predicates.is_integer(R)
+        {
+            Signed
+        }
+        fn accept(value: defer Domain()) -> bool { true }
+        fn run() -> bool {
+            let small: i8 = 1;
+            let wide: i64 = 2;
+            accept(small) and accept(wide)
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    let invalid = source.replace("let wide: i64", "let wide: u64");
+    let error = support::compile(&invalid).unwrap_err();
+    assert!(error.contains("refinement requirement"), "{error}");
+}

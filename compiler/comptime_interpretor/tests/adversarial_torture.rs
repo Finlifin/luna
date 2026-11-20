@@ -184,6 +184,75 @@ fn type_kind_over_description_literal_matches_between_bytecode_and_tree() {
 }
 
 #[test]
+fn returned_descriptions_prove_only_their_entailed_kind_guarantees() {
+    let mut package = Package::default();
+    let result_id = decl(8);
+    let result = Term::Rigid {
+        declaration: result_id,
+        sort: Sort::Type,
+    };
+    let binder = DeclarationParameter {
+        declaration: decl(9),
+        sort: Sort::Type,
+    };
+    let itself = Term::Rigid {
+        declaration: binder.declaration,
+        sort: Sort::Type,
+    };
+    let mut steps = 10_000;
+    let mut description = |requirement| {
+        package
+            .refinements
+            .publish(
+                DescriptionLiteral::Any,
+                binder,
+                requirement,
+                SRC,
+                &mut steps,
+            )
+            .unwrap()
+    };
+    let boolean = TypePredicate::Kind(itself.clone(), TypeKind::Boolean);
+    let integer = TypePredicate::Kind(itself, TypeKind::SignedInteger);
+    let unrelated = description(boolean.clone());
+    let either = description(TypePredicate::Or(vec![integer.clone(), boolean]));
+    let signed = description(TypePredicate::And(vec![TypePredicate::Bool(true), integer]));
+    let arg = local(0);
+    let mut producer = comptime_fn(
+        decl(1),
+        vec![(
+            arg,
+            Parameter {
+                sort: Sort::Runtime,
+                ty: p(P::Type),
+            },
+        )],
+        p(P::Type),
+        expr(p(P::Type), K::Local(arg)),
+    );
+    producer.result_type_binder = Some(result_id);
+    producer.result_guarantees = vec![
+        TypePredicate::Kind(result.clone(), TypeKind::Integer),
+        TypePredicate::Not(Box::new(TypePredicate::Kind(result, TypeKind::Boolean))),
+    ];
+    package.functions.push(producer);
+    for make in [Interpreter::for_comptime, Interpreter::for_comptime_tree] {
+        let mut vm = make(&package, Budget::default()).unwrap();
+        for rejected in [&unrelated, &either, &DescriptionLiteral::Any] {
+            let actual = vm.invoke(decl(1), vec![Value::Description(rejected.clone())]);
+            assert_eq!(
+                actual.map_err(|error| error.kind),
+                Err(ErrorKind::ProgramContractRejected)
+            );
+        }
+        let actual = vm
+            .invoke(decl(1), vec![Value::Description(signed.clone())])
+            .unwrap();
+        assert_eq!(actual, Value::Description(signed.clone()));
+    }
+}
+
+#[test]
 fn logical_and_or_rejects_bad_rhs_when_not_short_circuited_and_handles_never_lhs() {
     let failing_rhs_fn = comptime_fn(
         decl(4),
