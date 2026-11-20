@@ -224,6 +224,7 @@ pub enum CleanupStep {
     Invoke {
         selected: SelectedDrop,
         access: AccessCheck,
+        env_arguments: Vec<nir::program::Expr>,
     },
     /// Execute exactly one branch selected by the actual value's variant tag.
     SwitchVariant {
@@ -250,7 +251,21 @@ impl fmt::Display for CleanupStep {
                 }
                 f.write_str("))")
             }
-            Self::Invoke { selected, access } => write!(f, "(invoke-drop {selected} {access})"),
+            Self::Invoke {
+                selected,
+                access,
+                env_arguments,
+            } => {
+                write!(f, "(invoke-drop {selected} {access}")?;
+                if !env_arguments.is_empty() {
+                    f.write_str(" (env")?;
+                    for arg in env_arguments {
+                        write!(f, " {arg}")?;
+                    }
+                    f.write_str(")")?;
+                }
+                f.write_str(")")
+            }
             Self::Release { place, ty } => write!(f, "(release-position {place} (type {ty}))"),
             Self::SwitchVariant { place, branches } => {
                 write!(f, "(switch-variant {place} (branches")?;
@@ -425,8 +440,32 @@ pub fn acquire_cleanup(
             Resolution::Assumed { .. } => {
                 return Err("cleanup binding requires concrete implementation evidence".into());
             }
-            Resolution::Selected(s) if !s.capabilities().is_empty() => {
-                return Err("cleanup binding requires runtime environment acquisition".into());
+            Resolution::Selected(s) => {
+                for cap in s.capabilities() {
+                    if world
+                        .given(cap, budget)
+                        .map_err(|e| e.to_string())?
+                        .is_some()
+                    {
+                        return Err("cleanup binding requires concrete capability evidence".into());
+                    }
+                    let instance = nir::program::InterfaceInstance {
+                        declaration: cap.interface,
+                        arguments: cap.interface_arguments.clone(),
+                    };
+                    let resolved = world
+                        .resolve_instance(&instance, &cap.subject, budget)
+                        .map_err(|e| e.to_string())?;
+                    let Selection::Selected(implementation) = resolved.types.selection else {
+                        return Err("cleanup binding requires concrete capability evidence".into());
+                    };
+                    if !matches!(
+                        resolved.qualifications.get(&implementation),
+                        Some(Qualification::Proved(_))
+                    ) {
+                        return Err("cleanup binding requires concrete capability evidence".into());
+                    }
+                }
             }
             _ => (),
         }
@@ -774,9 +813,11 @@ impl Planner<'_, '_> {
                             }
                         }
                     }
+                    let env_arguments = access.env_arguments.clone();
                     let invoke = CleanupStep::Invoke {
                         selected: selected.clone(),
                         access,
+                        env_arguments,
                     };
                     steps.push(if conditional {
                         CleanupStep::IfConstructed {

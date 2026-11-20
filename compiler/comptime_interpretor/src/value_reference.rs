@@ -693,6 +693,7 @@ mod call_tests {
                 env_parameters: vec![],
                 defaults: vec![],
             },
+            runtime_deliveries: Default::default(),
             body: expr(K::Block {
                 statements: vec![Expr {
                     ty: Term::Primitive(Primitive::Void),

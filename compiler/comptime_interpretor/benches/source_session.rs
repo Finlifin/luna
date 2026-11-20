@@ -93,6 +93,7 @@ fn world(count: u32, reads: usize) -> Arc<Package> {
                     result: Some(Box::new(local)),
                 },
             },
+            runtime_deliveries: Default::default(),
         });
         package.traits.push(Trait {
             comptime_only: true,

@@ -247,6 +247,7 @@ fn function() -> nir::program::Function {
             defaults: vec![],
         },
         body: small(),
+        runtime_deliveries: Default::default(),
     }
 }
 

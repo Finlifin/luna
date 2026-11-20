@@ -75,6 +75,7 @@ fn package() -> Package {
                 signature: signature.clone(),
             },
             body: boolean(true),
+            runtime_deliveries: Default::default(),
         })
         .collect();
     Package {

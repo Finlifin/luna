@@ -565,6 +565,7 @@ mod tests {
                     capabilities: vec![],
                     requirements: vec![],
                 },
+                runtime_deliveries: Default::default(),
                 body: Expr {
                     source: SourceRange { start: 1, end: 2 },
                     ty: Term::Primitive(Primitive::Bool),

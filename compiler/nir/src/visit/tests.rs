@@ -174,6 +174,7 @@ fn excluded_function_defaults_leave_the_root_budget_untouched() {
             defaults: vec![(0, expr(K::Tuple(vec![expr(K::Unit); 8]))); WIDTH],
         },
         body: expr(K::Unit),
+        runtime_deliveries: Default::default(),
     };
     expressions_in_scope(&function, &mut 1, |_, _| Ok(())).unwrap();
     assert!(expressions(&function, &mut 8, |_, _| Ok(())).is_err());

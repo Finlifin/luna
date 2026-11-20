@@ -43,6 +43,7 @@ fn main() {
                 ty: boolean,
                 kind: ExprKind::Literal(Literal::Bool(true)),
             },
+            runtime_deliveries: Default::default(),
         };
         let package = Package {
             functions: (0..count)

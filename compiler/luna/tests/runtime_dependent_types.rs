@@ -485,3 +485,360 @@ fn negative_rejections_enforce_runtime_dependent_safety_and_identity() {
     let build = entry_case.build();
     assert!(!build.status.success());
 }
+
+#[test]
+fn global_const_address_identity_and_dependent_quote_defaults() {
+    let source = r#"
+        trait MiniAlloc {
+            fn tag(*self) -> i32;
+        }
+
+        struct DefaultAlloc {
+            pub const GLOBAL: DefaultAlloc = DefaultAlloc {};
+        }
+
+        impl MiniAlloc for DefaultAlloc {
+            fn tag(*self) -> i32 { 7 }
+        }
+
+        impl Splice for DefaultAlloc {
+            assoc RuntimeTarget: Type = DefaultAlloc;
+            fn splice(comptime data: DefaultAlloc) -> DefaultAlloc {
+                DefaultAlloc {}
+            }
+        }
+
+        struct AltAlloc {
+            id: i32,
+        }
+
+        impl MiniAlloc for AltAlloc {
+            fn tag(*self) -> i32 { self.id.* }
+        }
+
+        struct OwnedBox
+        where
+            T,
+            .A: Type = DefaultAlloc,
+            requires A :- MiniAlloc,
+            quote .allocator: lift *A = DefaultAlloc.GLOBAL.ref,
+        {
+            value: T,
+        }
+
+        impl OwnedBox<T, .A = A, .allocator = a>
+        where
+            T,
+            A: Type,
+            requires A :- MiniAlloc,
+            quote a: lift *A,
+        {
+            fn tag(*self) -> i32 {
+                a.as(MiniAlloc).tag()
+            }
+        }
+
+        fn read_box(b: OwnedBox<i32>) -> i32 {
+            let t = b.ref.tag();
+            if b.value >= -1000 and b.value <= 1000 and t >= -1000 and t <= 1000 {
+                b.value + t
+            } else {
+                0
+            }
+        }
+
+        fn read_alt(b: OwnedBox<i32, .A = AltAlloc, .allocator = a>) -> i32
+        where quote a: lift *AltAlloc
+        {
+            let t = b.ref.tag();
+            if b.value >= -1000 and b.value <= 1000 and t >= -1000 and t <= 1000 {
+                b.value + t
+            } else {
+                0
+            }
+        }
+
+        fn run() -> bool {
+            let implicit_all = OwnedBox<i32> { value: 10 };
+            let explicit_alloc = OwnedBox<i32, .A = DefaultAlloc> { value: 20 };
+            let explicit_all =
+                OwnedBox<i32, .A = DefaultAlloc, .allocator = DefaultAlloc.GLOBAL.ref> {
+                    value: 30,
+                };
+
+            var alt = AltAlloc { id: 11 };
+            let alt_box = OwnedBox<i32, .A = AltAlloc, .allocator = alt.ref> { value: 5 };
+
+            let size_ok = Type.size_of(OwnedBox<i32>) == Type.size_of(i32)
+                and Type.size_of(OwnedBox<i32, .A = DefaultAlloc>) == Type.size_of(i32)
+                and Type.size_of(
+                    OwnedBox<i32, .A = DefaultAlloc, .allocator = DefaultAlloc.GLOBAL.ref>,
+                ) == Type.size_of(i32)
+                and Type.size_of(OwnedBox<i32, .A = AltAlloc, .allocator = alt.ref>)
+                    == Type.size_of(i32);
+
+            size_ok
+                and read_box(implicit_all) == 17
+                and read_box(explicit_alloc) == 27
+                and read_box(explicit_all) == 37
+                and read_alt(alt_box) == 16
+        }
+    "#;
+
+    let case = NativeCase::new(source);
+    let build = case.build();
+    assert_success(&build);
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
+fn drop_delivers_global_and_local_stateful_allocator_environments() {
+    let source = r#"
+        trait MiniAlloc {
+            fn on_drop(*self, val: i32);
+        }
+
+        struct DefaultAlloc {
+            pub const GLOBAL: DefaultAlloc = DefaultAlloc {};
+        }
+
+        impl MiniAlloc for DefaultAlloc {
+            fn on_drop(*self, val: i32) {}
+        }
+
+        impl Splice for DefaultAlloc {
+            assoc RuntimeTarget: Type = DefaultAlloc;
+            fn splice(comptime data: DefaultAlloc) -> DefaultAlloc {
+                DefaultAlloc {}
+            }
+        }
+
+        struct CountingAlloc {
+            drops: i32,
+            sum: i32,
+        }
+
+        impl MiniAlloc for CountingAlloc {
+            fn on_drop(*self, val: i32) {
+                if self.drops.* >= 0
+                    and self.drops.* <= 1000
+                    and self.sum.* >= -10000
+                    and self.sum.* <= 10000
+                    and val >= -1000
+                    and val <= 1000
+                {
+                    self.*.drops = self.drops.* + 1;
+                    self.*.sum = self.sum.* + val;
+                }
+            }
+        }
+
+        struct OwnedBox
+        where
+            T,
+            .A: Type = DefaultAlloc,
+            requires A :- MiniAlloc,
+            quote .allocator: lift *A = DefaultAlloc.GLOBAL.ref,
+        {
+            value: i32,
+        }
+
+        impl Drop for OwnedBox<T, .A = A, .allocator = a>
+        where
+            T,
+            A: Type,
+            requires A :- MiniAlloc,
+            quote a: lift *A,
+        {
+            fn drop(*self) {
+                a.as(MiniAlloc).on_drop(self.value.*);
+            }
+        }
+
+        fn make_default_box(v: i32) -> OwnedBox<i32> {
+            OwnedBox<i32> { value: v }
+        }
+
+        fn consume_box(b: OwnedBox<i32, .A = A, .allocator = a>)
+        where
+            A: Type,
+            requires A :- MiniAlloc,
+            quote a: lift *A,
+        {}
+
+        fn run() -> bool {
+            let default_v = do {
+                let d = make_default_box(99);
+                d.value
+            };
+
+            var alloc = CountingAlloc { drops: 0, sum: 0 };
+            let size_ok = Type.size_of(OwnedBox<i32>) == Type.size_of(i32)
+                and Type.size_of(OwnedBox<i32, .A = CountingAlloc, .allocator = alloc.ref>)
+                    == Type.size_of(i32);
+
+            do {
+                let local_box = OwnedBox<i32, .A = CountingAlloc, .allocator = alloc.ref> {
+                    value: 10,
+                };
+            };
+            let after_local_drops = alloc.drops;
+            let after_local_sum = alloc.sum;
+
+            consume_box(OwnedBox<i32, .A = CountingAlloc, .allocator = alloc.ref> { value: 25 });
+
+            size_ok
+                and default_v == 99
+                and after_local_drops == 1
+                and after_local_sum == 10
+                and alloc.drops == 2
+                and alloc.sum == 35
+        }
+    "#;
+
+    let case = NativeCase::new(source);
+    let build = case.build();
+    assert_success(&build);
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
+fn negative_global_const_and_drop_env_safety_rejections() {
+    let assert_rejected = |source: &str, label: &str, needle: &str| {
+        let case = NativeCase::new(source);
+        let build = case.build();
+        assert!(
+            !build.status.success(),
+            "expected build failure for {label}, but succeeded"
+        );
+        let stderr = String::from_utf8_lossy(&build.stderr);
+        assert!(
+            stderr.contains(needle),
+            "expected {needle:?} for {label}, got:\n{stderr}"
+        );
+    };
+
+    // (a) Direct write through a global constant's address.
+    let direct_write_global = r#"
+        struct Counter {
+            count: i32,
+            pub const GLOBAL: Counter = Counter { count: 0 };
+        }
+
+        impl Splice for Counter {
+            assoc RuntimeTarget: Type = Counter;
+            fn splice(comptime data: Counter) -> Counter {
+                Counter { count: data.count }
+            }
+        }
+
+        fn run() -> i32 {
+            let p = Counter.GLOBAL.ref;
+            p.*.count = 1;
+            0
+        }
+    "#;
+    assert_rejected(
+        direct_write_global,
+        "direct write through GLOBAL.ref",
+        "constant",
+    );
+
+    // (b) Drop mutating through a global constant allocator's address.
+    let drop_writes_global = r#"
+        trait MiniAlloc {
+            fn on_drop(*self, val: i32);
+        }
+
+        struct CountingAlloc {
+            drops: i32,
+            pub const GLOBAL: CountingAlloc = CountingAlloc { drops: 0 };
+        }
+
+        impl MiniAlloc for CountingAlloc {
+            fn on_drop(*self, val: i32) {
+                if self.drops.* >= 0 and self.drops.* <= 1000 {
+                    self.*.drops = self.drops.* + 1;
+                }
+            }
+        }
+
+        impl Splice for CountingAlloc {
+            assoc RuntimeTarget: Type = CountingAlloc;
+            fn splice(comptime data: CountingAlloc) -> CountingAlloc {
+                CountingAlloc { drops: data.drops }
+            }
+        }
+
+        struct OwnedBox
+        where
+            .A: Type = CountingAlloc,
+            requires A :- MiniAlloc,
+            quote .allocator: lift *A = CountingAlloc.GLOBAL.ref,
+        {
+            value: i32,
+        }
+
+        impl Drop for OwnedBox<.A = A, .allocator = a>
+        where
+            A: Type,
+            requires A :- MiniAlloc,
+            quote a: lift *A,
+        {
+            fn drop(*self) {
+                a.as(MiniAlloc).on_drop(self.value.*);
+            }
+        }
+
+        fn run() -> i32 {
+            do {
+                let b = OwnedBox { value: 5 };
+            };
+            0
+        }
+    "#;
+    assert_rejected(
+        drop_writes_global,
+        "Drop write through GLOBAL.ref",
+        "constant",
+    );
+
+    // (c) Moving/retiring local allocator before dependent Drop runs.
+    let alloc_moved_before_drop = r#"
+        struct CountingAlloc {
+            drops: i32,
+        }
+
+        fn take_alloc(alloc: CountingAlloc) {}
+
+        struct OwnedBox
+        where quote allocator: lift *CountingAlloc
+        {
+            value: i32,
+        }
+
+        impl Drop for OwnedBox<a>
+        where quote a: lift *CountingAlloc
+        {
+            fn drop(*self) {
+                let _v = a.drops.*;
+            }
+        }
+
+        fn run() -> i32 {
+            var alloc = CountingAlloc { drops: 0 };
+            let b = OwnedBox<alloc.ref> { value: 1 };
+            take_alloc(alloc);
+            b.value
+        }
+    "#;
+    assert_rejected(
+        alloc_moved_before_drop,
+        "allocator moved before dependent Drop",
+        "Drop",
+    );
+}

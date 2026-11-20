@@ -50,6 +50,7 @@ fn function() -> n::Function {
             defaults: vec![],
         },
         body: expr(),
+        runtime_deliveries: Default::default(),
     }
 }
 fn interface() -> n::Trait {

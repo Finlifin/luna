@@ -98,7 +98,16 @@ impl Checker<'_, '_> {
             this.in_code_body = sig.modifiers.is_quote;
             let body = this.function_body(owner, body.value, result)?;
             this.verify_returned_type_guarantees(&body, span)?;
-            Ok(n::Function { interface, body })
+            let runtime_deliveries = this
+                .local_runtime_deliveries
+                .iter()
+                .map(|(id, entry)| (*id, entry.expr.clone()))
+                .collect();
+            Ok(n::Function {
+                interface,
+                body,
+                runtime_deliveries,
+            })
         })
     }
 
@@ -148,6 +157,7 @@ impl Checker<'_, '_> {
                     .insert(*decl_id, (binding, inner_ty.clone()));
                 env_parameters.push(n::RuntimeEnvParameter {
                     declaration: *decl_id,
+                    runtime_id: None,
                     binding,
                     ty: inner_ty,
                 });

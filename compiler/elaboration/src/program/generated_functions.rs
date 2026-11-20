@@ -75,12 +75,21 @@ impl GeneratedFunctions {
         debug_assert!(previous.is_none());
     }
 
-    pub(super) fn finish_body(&mut self, id: DeclarationId, body: n::Expr) {
+    pub(super) fn finish_body(
+        &mut self,
+        id: DeclarationId,
+        body: n::Expr,
+        runtime_deliveries: BTreeMap<nir::RuntimeId, n::Expr>,
+    ) {
         let interface = self
             .checking
             .remove(&id)
             .expect("active instance interface");
-        self.publish(n::Function { interface, body });
+        self.publish(n::Function {
+            interface,
+            body,
+            runtime_deliveries,
+        });
     }
 
     pub(super) fn declaration(&self, id: DeclarationId) -> Option<&n::FunctionDeclaration> {
@@ -202,6 +211,7 @@ mod tests {
                 source: n::SourceRange::generated(retried.local),
                 kind: K::Literal(n::Literal::Bool(true)),
             },
+            BTreeMap::new(),
         );
         assert_eq!(
             generated.declaration(retried),

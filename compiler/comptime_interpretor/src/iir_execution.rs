@@ -512,6 +512,7 @@ mod callable_budget_tests {
                         ty: Term::Primitive(Primitive::Bool),
                         kind: K::Literal(Literal::Bool(true)),
                     },
+                    runtime_deliveries: Default::default(),
                 },
             }],
             ..Default::default()

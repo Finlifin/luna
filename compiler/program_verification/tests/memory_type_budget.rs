@@ -135,6 +135,7 @@ fn infer_in_package_validates_specialized_pending_and_payload_intrinsics() {
                         binding: Some(deferred_sqrt),
                     },
                 },
+                runtime_deliveries: Default::default(),
             },
             Function {
                 interface: FunctionDeclaration {
@@ -178,6 +179,7 @@ fn infer_in_package_validates_specialized_pending_and_payload_intrinsics() {
                         binding: Some(deferred_read),
                     },
                 },
+                runtime_deliveries: Default::default(),
             },
         ],
         ..Default::default()

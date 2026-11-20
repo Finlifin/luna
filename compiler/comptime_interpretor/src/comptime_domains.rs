@@ -184,6 +184,7 @@ mod tests {
                     ty: Term::Primitive(Primitive::Bool),
                     kind: K::Literal(nir::program::Literal::Bool(true)),
                 },
+                runtime_deliveries: Default::default(),
             }],
             ..Default::default()
         }

@@ -523,9 +523,6 @@ impl Checker<'_, '_> {
         complete: bool,
     ) -> Result<(), Error> {
         let subjects = parameter_capability_subjects(parameters)?;
-        if subjects.is_empty() {
-            return Ok(());
-        }
         let mut pending = Vec::new();
         for (subject, bound) in &subjects {
             let atom = Expr {
@@ -551,6 +548,9 @@ impl Checker<'_, '_> {
             if let hir::clause::ClauseConstraintKind::Requires(value) = &constraint.kind {
                 signature_capability_atoms(value, &mut pending, 0)?;
             }
+        }
+        if pending.is_empty() {
+            return Ok(());
         }
         self.ready_signature_capabilities_with_clauses(owner, &mut pending, complete, true)
     }

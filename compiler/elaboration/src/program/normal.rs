@@ -496,6 +496,10 @@ impl Checker<'_, '_> {
                 "diverging expression cannot satisfy a runtime quote dependency",
             ));
         }
+        if let K::ConstAddress { declaration, .. } = &checked.kind {
+            let id = self.intern_const_address_runtime_id(*declaration, checked, value.span)?;
+            return Ok(Term::Runtime(id));
+        }
         let (origin, checked_epoch) = self.extract_local_runtime_origin(&checked);
         if let Some(&existing) = self.local_runtime_origin_ids.get(&origin) {
             return Ok(Term::Runtime(existing));

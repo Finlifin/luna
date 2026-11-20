@@ -43,6 +43,7 @@ fn package() -> Arc<Package> {
                     capabilities: vec![],
                 },
                 body: flag(true),
+                runtime_deliveries: Default::default(),
             })
             .collect(),
         ..Default::default()

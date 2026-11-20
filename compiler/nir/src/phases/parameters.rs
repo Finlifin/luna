@@ -194,6 +194,7 @@ mod tests {
                 ty,
                 kind: ExprKind::Literal(crate::program::Literal::Bool(true)),
             },
+            runtime_deliveries: Default::default(),
         }
     }
 

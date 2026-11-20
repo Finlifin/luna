@@ -78,6 +78,7 @@ fn function(local: u32, body: Expr) -> Function {
             },
         },
         body,
+        runtime_deliveries: Default::default(),
     }
 }
 fn package() -> Package {

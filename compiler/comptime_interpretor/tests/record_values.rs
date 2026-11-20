@@ -60,6 +60,7 @@ fn identity(ty: Term) -> Package {
                 kind: K::Local(binding),
                 source: SourceRange { start: 1, end: 2 },
             },
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     }

@@ -264,6 +264,39 @@ impl<'a> PhaseContext<'a> {
             if self.inspect(CallableProgram::function(function), fuel)? {
                 machine_owners.functions.insert(function.declaration);
             }
+            if !function.runtime_deliveries.is_empty() {
+                if function.phase != Phase::Runtime {
+                    return Err(Error::invalid(
+                        function.source,
+                        "runtime deliveries require a runtime function",
+                    ));
+                }
+                *fuel = fuel
+                    .checked_sub(function.runtime_deliveries.len())
+                    .ok_or_else(|| {
+                        Error::budget(
+                            function.source,
+                            "runtime delivery inspection budget exhausted",
+                        )
+                    })?;
+                for (id, expr) in &function.runtime_deliveries {
+                    if !self.package.runtime_domains.contains_key(id) {
+                        return Err(Error::invalid(
+                            expr.source,
+                            "function runtime delivery lacks a runtime domain",
+                        ));
+                    }
+                    let mut delivery_program = CallableProgram::framed_body(
+                        expr,
+                        &function.signature,
+                        Phase::Runtime,
+                        &function.parameters,
+                        &function.type_parameters,
+                    );
+                    delivery_program.parts.is_unsafe = function.is_unsafe;
+                    self.inspect(delivery_program, fuel)?;
+                }
+            }
         }
         for method in self
             .package
@@ -341,6 +374,48 @@ impl<'a> PhaseContext<'a> {
                 scope
                     .check_runtime(inner, fuel)
                     .map_err(|failure| Error::storage(SourceRange { start: 0, end: 0 }, failure))?;
+            }
+        }
+        if !self.package.global_runtime_deliveries.is_empty() {
+            *fuel = fuel
+                .checked_sub(self.package.global_runtime_deliveries.len())
+                .ok_or_else(|| {
+                    Error::budget(
+                        SourceRange { start: 0, end: 0 },
+                        "global runtime delivery inspection budget exhausted",
+                    )
+                })?;
+            for (id, expr) in &self.package.global_runtime_deliveries {
+                if !self.package.runtime_domains.contains_key(id) {
+                    return Err(Error::invalid(
+                        expr.source,
+                        "global runtime delivery lacks a runtime domain",
+                    ));
+                }
+                let free = crate::free_bindings::collect(expr, fuel).map_err(|_| {
+                    Error::budget(
+                        expr.source,
+                        "global runtime delivery capture inspection budget exhausted",
+                    )
+                })?;
+                if !free.is_empty() {
+                    return Err(Error::invalid(
+                        expr.source,
+                        "global runtime delivery cannot capture local bindings",
+                    ));
+                }
+                self.storage_queries
+                    .scope(&[], fuel)
+                    .and_then(|mut scope| scope.check_runtime(&expr.ty, fuel))
+                    .map_err(|failure| Error::storage(expr.source, failure))?;
+                let signature = Term::Function {
+                    parameters: vec![],
+                    result: Box::new(expr.ty.clone()),
+                };
+                self.inspect(
+                    CallableProgram::framed_body(expr, &signature, Phase::Runtime, &[], &[]),
+                    fuel,
+                )?;
             }
         }
         Ok(machine_owners)
@@ -635,6 +710,7 @@ impl<'a> PhaseContext<'a> {
                         && matches!(
                             expr.kind,
                             K::AddressOf(_)
+                                | K::ConstAddress { .. }
                                 | K::ReadPointer(_)
                                 | K::WritePointer { .. }
                                 | K::PointerField { .. }
@@ -654,6 +730,21 @@ impl<'a> PhaseContext<'a> {
                     if let K::UnsafeScope(body) = &expr.kind {
                         if body.ty != expr.ty {
                             return Err(error("unsafe scope changes its body type"));
+                        }
+                    }
+                    if let K::ConstAddress { value, .. } = &expr.kind {
+                        let free = crate::free_bindings::collect(value, inspection_fuel).map_err(
+                            |_| {
+                                Error::budget(
+                                    value.source,
+                                    "const-address capture inspection budget exhausted",
+                                )
+                            },
+                        )?;
+                        if !free.is_empty() {
+                            return Err(error(
+                                "const-address value cannot depend on local bindings",
+                            ));
                         }
                     }
                     if let K::AddressOf(place) = &expr.kind {
@@ -1523,6 +1614,7 @@ impl<'a> PhaseContext<'a> {
                             work.push(Work::Expr(value, false, true), inspection_fuel)?;
                         }
                         K::AddressOf(value)
+                        | K::ConstAddress { value, .. }
                         | K::ReadPointer(value)
                         | K::PointerAnonymousField { pointer: value, .. }
                         | K::PointerField { pointer: value, .. }

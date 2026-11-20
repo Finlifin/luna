@@ -77,6 +77,7 @@ impl Checker<'_, '_> {
                     entry_snapshots: vec![],
                 },
                 body,
+                runtime_deliveries: Default::default(),
             });
         }
         Ok(Some(n::Expr {

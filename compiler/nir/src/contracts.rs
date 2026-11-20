@@ -308,6 +308,7 @@ pub fn remap_predicate_metered(
             | K::Unit => {}
             K::ReadPointer(v)
             | K::AddressOf(v)
+            | K::ConstAddress { value: v, .. }
             | K::PointerField { pointer: v, .. }
             | K::PointerAnonymousField { pointer: v, .. }
             | K::Not(v)

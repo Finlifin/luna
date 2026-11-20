@@ -337,6 +337,7 @@ impl Analyzer<'_, '_, '_, '_> {
             | K::IntegerNegate(value)
             | K::FloatNegate(value)
             | K::AddressOf(value)
+            | K::ConstAddress { value, .. }
             | K::ReadPointer(value)
             | K::BitConvert(value)
             | K::Snapshot(value)

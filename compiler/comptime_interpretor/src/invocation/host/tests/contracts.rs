@@ -56,6 +56,7 @@ fn package(returned: bool) -> Package {
                 defaults: vec![],
             },
             body,
+            runtime_deliveries: Default::default(),
         }],
         ..Package::default()
     }

@@ -29,6 +29,7 @@ pub(super) fn validate(
     let mut roots = vec![&function.body];
     roots.extend(&function.preconditions);
     roots.extend(&function.postconditions);
+    roots.extend(function.runtime_deliveries.values());
     for (index, value) in &function.defaults {
         let parameter = parameters
             .get(*index)

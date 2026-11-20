@@ -58,6 +58,7 @@ fn package(left: u128, in_default: bool) -> Package {
                 requirements: vec![],
                 capabilities: vec![],
             },
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     }

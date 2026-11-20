@@ -95,6 +95,7 @@ mod tests {
                 ty: Term::Primitive(P::Void),
                 kind: K::Unit,
             },
+            runtime_deliveries: Default::default(),
         };
         let graph = iir::Package {
             functions: vec![iir::FunctionInstance {
@@ -110,6 +111,7 @@ mod tests {
                 path: vec![],
                 subject: byte,
                 method: key.clone(),
+                env_arguments: vec![],
             }],
         };
         let schedule = |at, boundary, target| FunctionSchedule {

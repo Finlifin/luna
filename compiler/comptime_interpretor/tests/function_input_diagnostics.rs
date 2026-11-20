@@ -54,6 +54,7 @@ fn world() -> Package {
                 ty: boolean(),
                 kind: ExprKind::Literal(Literal::Bool(true)),
             },
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     }

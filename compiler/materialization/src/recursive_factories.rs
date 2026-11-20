@@ -230,7 +230,10 @@ impl Builder<'_> {
                             blocked.insert(*binding);
                         }
                     }
-                    if matches!(expr.kind, K::AddressOf(_) | K::Closure { .. }) {
+                    if matches!(
+                        expr.kind,
+                        K::AddressOf(_) | K::ConstAddress { .. } | K::Closure { .. }
+                    ) {
                         blocked.extend(nir::free_bindings::collect(expr, fuel)?);
                     }
                     Ok(())
@@ -421,7 +424,10 @@ impl Builder<'_> {
                 for predicate in &mut function.postconditions {
                     let mut valid = true;
                     iir::visit::expression_pruned(predicate, &mut self.fuel, |expr, fuel| {
-                        if matches!(expr.kind, K::Closure { .. } | K::AddressOf(_)) {
+                        if matches!(
+                            expr.kind,
+                            K::Closure { .. } | K::AddressOf(_) | K::ConstAddress { .. }
+                        ) {
                             valid &= !nir::free_bindings::collect(expr, fuel)?.contains(&binding);
                             return Ok(false);
                         }

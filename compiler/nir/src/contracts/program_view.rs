@@ -128,7 +128,7 @@ impl<'a> CallableProgram<'a> {
         )
     }
 
-    fn framed_body(
+    pub(crate) fn framed_body(
         body: &'a Expr,
         signature: &'a Term,
         phase: FunctionPhase,
@@ -420,7 +420,11 @@ mod tests {
             },
             ..flag(0)
         };
-        let mut function = Function { interface, body };
+        let mut function = Function {
+            interface,
+            body,
+            runtime_deliveries: Default::default(),
+        };
         function.defaults = vec![(0, function.body.clone())];
         let substitution =
             crate::DeclarationSubstitution::bounded(&[], &[], &[], &[], &mut 100).unwrap();
@@ -460,6 +464,7 @@ mod tests {
         let mut function = Function {
             interface,
             body: flag(30),
+            runtime_deliveries: Default::default(),
         };
         function.defaults = vec![(0, flag(40))];
         let view = CallableProgram::function(&function);

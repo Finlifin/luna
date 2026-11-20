@@ -85,7 +85,9 @@ pub(super) fn analyze(
                         }
                     }
                 }
-                K::AddressOf(_) => unavailable.extend(nir::free_bindings::collect(expr, fuel)?),
+                K::AddressOf(_) | K::ConstAddress { .. } => {
+                    unavailable.extend(nir::free_bindings::collect(expr, fuel)?)
+                }
                 _ => {}
             }
             Ok(true)

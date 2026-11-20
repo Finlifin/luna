@@ -2606,6 +2606,16 @@ impl<'a> Interpreter<'a> {
             K::Not(..) => self.eval_not(expr, environment),
             K::And(..) | K::Or(..) => self.eval_and(expr, environment),
             K::Call { .. } => self.eval_call(expr, environment),
+            K::ConstAddress { .. } => {
+                return Err(self.failure(
+                    if self.comptime_only {
+                        ErrorKind::PhaseMismatch
+                    } else {
+                        ErrorKind::Unsupported
+                    },
+                    Some(expr.source),
+                ));
+            }
         }
     }
     #[inline(never)]

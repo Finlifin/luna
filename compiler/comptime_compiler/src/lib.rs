@@ -3245,6 +3245,7 @@ fn compile_root<'a>(
                     | K::EffectComputation { .. }
                     | K::EffectRequest { .. }
                     | K::StagedValue(_)
+                    | K::ConstAddress { .. }
                     | K::TemplateEqual(..) => return Err(Error::Unsupported(source)),
                 }
             }

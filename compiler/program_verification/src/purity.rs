@@ -255,6 +255,7 @@ mod behavior_code_snapshot_tests {
                 },
             },
             body,
+            runtime_deliveries: Default::default(),
         };
         let producer_function = function(producer, code(good));
         let produced = n::Expr {
@@ -932,6 +933,7 @@ impl<'a> Analysis<'a> {
                 },
             },
             body: value.clone(),
+            runtime_deliveries: Default::default(),
         };
         let previous_scope = std::mem::replace(&mut self.resource_scope, true);
         let valid = self.expression(value, &mut free.clone(), false, 0);
@@ -1935,6 +1937,12 @@ impl<'a> Analysis<'a> {
             K::AddressOf(place) if !self.finite => {
                 self.private_owned_place(place, private)
                     && self.expression(place, private, returns, depth + 1)
+            }
+            K::ConstAddress { value, .. } => {
+                nir::free_bindings::collect(value, &mut self.fuel)
+                    .ok()
+                    .is_some_and(|free| free.is_empty())
+                    && self.expression(value, private, returns, depth + 1)
             }
             K::WritePointer {
                 pointer,
@@ -4684,6 +4692,7 @@ mod resource_world_tests {
                     ty: p(P::Bool),
                     kind: K::Literal(n::Literal::Bool(true)),
                 },
+                runtime_deliveries: Default::default(),
             });
         }
         package
@@ -4987,6 +4996,7 @@ mod resource_world_tests {
                     ty: p(P::Bool),
                     kind: K::Literal(n::Literal::Bool(true)),
                 },
+                runtime_deliveries: Default::default(),
             });
         }
         validate_runtime_promises(&package, &protocols).unwrap();
@@ -5050,6 +5060,7 @@ mod resource_world_tests {
                     parameter_bindings: vec![],
                 },
             },
+            runtime_deliveries: Default::default(),
         });
         let err = validate_runtime_promises(&package, &protocols).unwrap_err();
         assert!(err.message.contains("invalid_tail"), "{err}");

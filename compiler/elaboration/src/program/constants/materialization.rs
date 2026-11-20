@@ -176,6 +176,7 @@ impl Checker<'_, '_> {
                     defaults: vec![],
                 },
                 body: expression.clone(),
+                runtime_deliveries: Default::default(),
             });
             return Ok((
                 expression,

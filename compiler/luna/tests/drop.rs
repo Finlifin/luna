@@ -16449,6 +16449,7 @@ fn indirect_drop_access_checks_every_pointer_alternative_and_snapshot() {
                     enum_domains: &BTreeMap::new(),
                     pointer_conditions: &BTreeMap::new(),
                     retired,
+                    env: None,
                 }),
                 fuel,
             )

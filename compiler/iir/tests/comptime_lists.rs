@@ -520,6 +520,7 @@ fn graph_for_list(body: Expr) -> iir::Package {
                     entry_snapshots: vec![],
                 },
                 body,
+                runtime_deliveries: Default::default(),
             },
         }],
         ..Default::default()

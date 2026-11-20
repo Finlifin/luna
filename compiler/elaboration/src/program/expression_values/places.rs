@@ -29,6 +29,70 @@ impl Checker<'_, '_> {
         }
     }
 
+    fn try_const_address(
+        &mut self,
+        inner: &Expr<'_>,
+        ref_span: Span,
+        expected: Option<&Term>,
+    ) -> Result<Option<n::Expr>, Error> {
+        if !self.runtime_value_context() {
+            return Ok(None);
+        }
+        let (owner, value) = match inner.kind {
+            H::ResolvedDef { def_id, .. } => {
+                let Some(owner) = self.package.definition_owner(def_id) else {
+                    return Ok(None);
+                };
+                if !self
+                    .package
+                    .item(owner)
+                    .is_some_and(|item| matches!(item.kind, ItemKind::Const(..)))
+                    || self.is_build_context(owner)
+                {
+                    return Ok(None);
+                }
+                (owner, self.splice_constant(inner, owner, None)?)
+            }
+            H::Projection(..) => {
+                let Some(owner) = self.projected_constant_owner(inner)? else {
+                    return Ok(None);
+                };
+                if self.is_build_context(owner) {
+                    return Ok(None);
+                }
+                (owner, self.expr(inner, None)?)
+            }
+            _ => return Ok(None),
+        };
+        let mut work = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = work;
+        let free = nir::free_bindings::collect(&value, &mut work);
+        self.required_steps = self.required_steps.saturating_sub((before - work) as u64);
+        let free = free.map_err(|reason| error(ref_span, reason.to_string()))?;
+        if !free.is_empty() {
+            return Err(error(
+                ref_span,
+                "cannot take the address of a constant expression with local dependencies",
+            ));
+        }
+        let decl = declaration(self.package, &self.package_identities, owner);
+        let result = n::Expr {
+            ty: Term::Pointer(Box::new(value.ty.clone())),
+            source: source(ref_span),
+            kind: K::ConstAddress {
+                declaration: decl,
+                value: Box::new(value),
+            },
+        };
+        if let Some(message) = n::pointer_operation_error_in(&result, self.target) {
+            return Err(error(ref_span, message));
+        }
+        if let Some(expected) = expected {
+            self.require(&result.ty, expected, ref_span)?;
+        }
+        Ok(Some(result))
+    }
+
     #[inline(never)]
     pub(super) fn places_value_expression(
         &mut self,
@@ -52,6 +116,9 @@ impl Checker<'_, '_> {
                         self.require(&pointer.ty, expected, expr.span)?;
                     }
                     return Ok(pointer);
+                }
+                if let Some(const_address) = self.try_const_address(inner, expr.span, expected)? {
+                    return Ok(const_address);
                 }
                 let place = self.expr(inner, None)?;
                 let result = n::Expr {

@@ -483,6 +483,7 @@ mod tests {
                 guard: None,
                 otherwise: None,
             }),
+            runtime_deliveries: Default::default(),
         }
     }
 

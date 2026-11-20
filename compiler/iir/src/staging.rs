@@ -1245,6 +1245,7 @@ fn forwarding_writes(
                     }
                 }
             }
+            K::ConstAddress { .. } => {}
             _ => {}
         }
         Ok(true)

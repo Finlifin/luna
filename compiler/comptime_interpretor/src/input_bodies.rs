@@ -250,6 +250,7 @@ mod tests {
                     requirements: vec![],
                     capabilities: vec![],
                 },
+                runtime_deliveries: Default::default(),
                 body: Expr {
                     source: result.source,
                     ty: result.ty.clone(),

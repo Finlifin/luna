@@ -31,7 +31,7 @@ impl Checker<'_, '_> {
         }
         let mut domains = Vec::new();
         for clause in self.type_clause_params(owner).iter() {
-            domains.push(match clause.kind {
+            domains.push(match *clause.kind.unquoted() {
                 hir::clause::ClauseParamKind::Positional(_, ty)
                 | hir::clause::ClauseParamKind::Optional(_, ty, _)
                 | hir::clause::ClauseParamKind::Varadic(_, ty) => self.type_expr(ty)?,
@@ -318,15 +318,7 @@ impl Checker<'_, '_> {
             for (slot, clause) in clauses.iter().enumerate() {
                 if let hir::clause::ClauseParamKind::Optional(_, _, value) = clause.kind.unquoted()
                 {
-                    let contextual = if matches!(
-                        this.package.item(owner).map(|item| &item.kind),
-                        Some(
-                            ItemKind::Struct(_)
-                                | ItemKind::Enum(_)
-                                | ItemKind::Newtype(..)
-                                | ItemKind::TypeAlias(..)
-                        )
-                    ) {
+                    let mut domain_has_rigid = || -> Result<bool, Error> {
                         let mut fuel = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
                         let before = fuel;
                         let result = nir::type_computations::has_rigid_parameters_bounded(
@@ -339,20 +331,42 @@ impl Checker<'_, '_> {
                                 value.span,
                                 format!("default input domain inspection failed: {error}"),
                             )
-                        })?
+                        })
+                    };
+                    let contextual = if matches!(
+                        this.package.item(owner).map(|item| &item.kind),
+                        Some(
+                            ItemKind::Struct(_)
+                                | ItemKind::Enum(_)
+                                | ItemKind::Newtype(..)
+                                | ItemKind::TypeAlias(..)
+                        )
+                    ) {
+                        domain_has_rigid()?
                     } else {
                         false
                     };
                     if let Term::Lift(inner) = &domains[slot] {
+                        let expected_lift = if domain_has_rigid()? {
+                            None
+                        } else {
+                            Some(inner.as_ref())
+                        };
                         let saved_required =
                             std::mem::replace(&mut this.in_required_comptime, false);
                         let saved_staged = std::mem::replace(&mut this.in_staged_input, false);
                         let saved_locals = std::mem::take(&mut this.locals);
-                        let checked = this.expr(value, Some(inner));
+                        let checked = this.expr(value, expected_lift);
                         this.locals = saved_locals;
                         this.in_staged_input = saved_staged;
                         this.in_required_comptime = saved_required;
-                        checked?;
+                        let checked = checked?;
+                        if is_never(&checked.ty) {
+                            return Err(super::error(
+                                value.span,
+                                "diverging default cannot satisfy a runtime quote dependency",
+                            ));
+                        }
                     } else if contextual {
                         this.dependent_normal_argument(value, 0)?;
                     } else {

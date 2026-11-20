@@ -841,6 +841,7 @@ mod tests {
                     defaults: vec![],
                 },
                 body,
+                runtime_deliveries: Default::default(),
             }],
             ..Default::default()
         };

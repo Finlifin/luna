@@ -690,6 +690,7 @@ fn walk_mut(
                     | K::CheckPredicate(value)
                     | K::BitSlice { value, .. }
                     | K::AddressOf(value)
+                    | K::ConstAddress { value, .. }
                     | K::ReadPointer(value)
                     | K::PointerAnonymousField { pointer: value, .. }
                     | K::PointerField { pointer: value, .. }

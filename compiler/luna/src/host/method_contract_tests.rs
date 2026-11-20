@@ -790,6 +790,7 @@ fn interface_exit_cleanup_owns_only_the_pending_result() {
                                     nir::Primitive::U32,
                                 ))),
                                 method: release.clone(),
+                                env_arguments: vec![],
                             }],
                         },
                     }],

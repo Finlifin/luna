@@ -90,6 +90,7 @@ pub fn llvm_ir_discarding_result(
                 result: Box::new(Term::Primitive(Primitive::Void)),
             },
         },
+        runtime_deliveries: Default::default(),
         body: Expr {
             source: SourceRange { start: 0, end: 2 },
             ty: body_type.clone(),

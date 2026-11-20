@@ -2394,6 +2394,7 @@ impl Query<'_, '_, '_, '_> {
             }
             K::Local { .. } => self.transfer_local(expr, locals, returned, next),
             K::AddressOf { .. } => self.transfer_address_of(expr, locals, returned, next),
+            K::ConstAddress { .. } => Ok(empty),
             K::PointerField { .. } | K::PointerAnonymousField { .. } => {
                 self.transfer_pointer_field(expr, locals, returned, next)
             }
@@ -2586,10 +2587,12 @@ mod tests {
                 Function {
                     interface: fn_decl(comptime_str_fn, "ct_str", vec![], vec![], str_ty.clone()),
                     body: expr(str_ty.clone(), K::ComptimeValue(str_ty.clone())),
+                    runtime_deliveries: Default::default(),
                 },
                 Function {
                     interface: fn_decl(comptime_fn_fn, "ct_fn", vec![], vec![], fn_ty.clone()),
                     body: expr(fn_ty.clone(), K::ComptimeValue(fn_ty.clone())),
+                    runtime_deliveries: Default::default(),
                 },
                 Function {
                     interface: fn_decl(
@@ -2677,6 +2680,7 @@ mod tests {
                             ))),
                         },
                     ),
+                    runtime_deliveries: Default::default(),
                 },
             ],
             ..Default::default()
@@ -2751,6 +2755,7 @@ mod tests {
                             K::Local(p0),
                         ))),
                     ),
+                    runtime_deliveries: Default::default(),
                 },
                 Function {
                     interface: fn_decl(local_u8_fn, "addr_u8", vec![], vec![], u8_ty.clone()),
@@ -2773,6 +2778,7 @@ mod tests {
                             ))),
                         },
                     ),
+                    runtime_deliveries: Default::default(),
                 },
                 Function {
                     interface: fn_decl(
@@ -2789,6 +2795,7 @@ mod tests {
                             K::Local(p0),
                         ))),
                     ),
+                    runtime_deliveries: Default::default(),
                 },
                 Function {
                     interface: fn_decl(
@@ -2812,6 +2819,7 @@ mod tests {
                             },
                         ))),
                     ),
+                    runtime_deliveries: Default::default(),
                 },
                 Function {
                     interface: fn_decl(
@@ -2835,6 +2843,7 @@ mod tests {
                             },
                         ))),
                     ),
+                    runtime_deliveries: Default::default(),
                 },
             ],
             ..Default::default()
@@ -2906,6 +2915,7 @@ mod tests {
                         inputs: vec![expr(usize_ty, K::Unit)],
                     },
                 ),
+                runtime_deliveries: Default::default(),
             }],
             ..Default::default()
         };
@@ -3035,6 +3045,7 @@ mod tests {
                             result: Some(Box::new(expr(str_ty.clone(), K::Local(s_local)))),
                         },
                     ),
+                    runtime_deliveries: Default::default(),
                 },
                 Function {
                     interface: fn_decl(
@@ -3058,6 +3069,7 @@ mod tests {
                             outer: vec![],
                         },
                     ),
+                    runtime_deliveries: Default::default(),
                 },
                 Function {
                     interface: fn_decl(
@@ -3080,6 +3092,7 @@ mod tests {
                             arguments: vec![],
                         },
                     ),
+                    runtime_deliveries: Default::default(),
                 },
             ],
             ..Default::default()
@@ -3135,6 +3148,7 @@ mod tests {
                             body: Box::new(expr(void_ty.clone(), K::Unit)),
                         },
                     ),
+                    runtime_deliveries: Default::default(),
                 },
                 Function {
                     interface: fn_decl(
@@ -3151,6 +3165,7 @@ mod tests {
                             body: Box::new(expr(str_ty.clone(), K::Tuple(vec![]))),
                         },
                     ),
+                    runtime_deliveries: Default::default(),
                 },
             ],
             ..Default::default()

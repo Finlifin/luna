@@ -6,17 +6,18 @@ use super::*;
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeEnvParameter {
     pub declaration: DeclarationId,
+    pub runtime_id: Option<crate::RuntimeId>,
     pub binding: LocalId,
     pub ty: Term,
 }
 
 impl fmt::Display for RuntimeEnvParameter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "(env-param (declaration {}) (binding {}) (type {}))",
-            self.declaration, self.binding, self.ty
-        )
+        write!(f, "(env-param (declaration {})", self.declaration)?;
+        if let Some(id) = self.runtime_id {
+            write!(f, " (runtime-id {id})")?;
+        }
+        write!(f, " (binding {}) (type {}))", self.binding, self.ty)
     }
 }
 
@@ -99,8 +100,21 @@ impl FunctionDeclaration {
                 .env_parameters
                 .iter()
                 .map(|env| {
-                    Ok(RuntimeEnvParameter {
+                    let substituted = substitution.term(&Term::Rigid {
                         declaration: env.declaration,
+                        sort: crate::Sort::Runtime,
+                    })?;
+                    let (declaration, runtime_id) = match substituted {
+                        Term::Runtime(id) => (env.declaration, Some(id)),
+                        Term::Rigid {
+                            declaration: next,
+                            sort: crate::Sort::Runtime,
+                        } => (next, env.runtime_id),
+                        _ => (env.declaration, env.runtime_id),
+                    };
+                    Ok(RuntimeEnvParameter {
+                        declaration,
+                        runtime_id,
                         binding: env.binding,
                         ty: substitution.term(&env.ty)?,
                     })
@@ -190,6 +204,7 @@ impl fmt::Display for DefinitionRegion {
 pub struct Function {
     pub interface: FunctionDeclaration,
     pub body: Expr,
+    pub runtime_deliveries: std::collections::BTreeMap<crate::RuntimeId, Expr>,
 }
 
 // Existing field projections remain borrowed views of the single interface;
@@ -217,6 +232,11 @@ impl Function {
         Ok(Self {
             interface: self.interface.with_parameter_substitution(&substitution)?,
             body: self.body.with_parameter_substitution(&substitution)?,
+            runtime_deliveries: self
+                .runtime_deliveries
+                .iter()
+                .map(|(id, expr)| Ok((*id, expr.with_parameter_substitution(&substitution)?)))
+                .collect::<Result<_, crate::TypeError>>()?,
         })
     }
 
@@ -300,8 +320,21 @@ impl Function {
                         .env_parameters
                         .iter()
                         .map(|env| {
-                            Ok(RuntimeEnvParameter {
+                            let substituted = scoped.instantiate(&Term::Rigid {
                                 declaration: env.declaration,
+                                sort: crate::Sort::Runtime,
+                            })?;
+                            let (declaration, runtime_id) = match substituted {
+                                Term::Runtime(id) => (env.declaration, Some(id)),
+                                Term::Rigid {
+                                    declaration: next,
+                                    sort: crate::Sort::Runtime,
+                                } => (next, env.runtime_id),
+                                _ => (env.declaration, env.runtime_id),
+                            };
+                            Ok(RuntimeEnvParameter {
+                                declaration,
+                                runtime_id,
                                 binding: env.binding,
                                 ty: scoped.instantiate(&env.ty)?,
                             })
@@ -340,6 +373,11 @@ impl Function {
                         .collect::<Result<_, _>>()?,
                 },
                 body: expression(&self.body)?,
+                runtime_deliveries: self
+                    .runtime_deliveries
+                    .iter()
+                    .map(|(id, value)| expression(value).map(|value| (*id, value)))
+                    .collect::<Result<_, _>>()?,
             })
         })();
         specialized.map_err(crate::type_computations::Error::Scope)
@@ -432,6 +470,13 @@ impl fmt::Display for Function {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(function ")?;
         self.interface.fmt_fields(f)?;
+        if !self.runtime_deliveries.is_empty() {
+            f.write_str(" (runtime-deliveries")?;
+            for (runtime, expr) in &self.runtime_deliveries {
+                write!(f, " (delivery {runtime} {expr})")?;
+            }
+            f.write_str(")")?;
+        }
         write!(f, " (body {}))", self.body)
     }
 }

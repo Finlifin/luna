@@ -96,6 +96,7 @@ fn base_package(element: Primitive) -> Package {
                     result: None,
                 },
             },
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     }

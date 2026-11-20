@@ -341,6 +341,7 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
                     ty: list.clone(),
                     kind: completed_list(vec![]),
                 },
+                runtime_deliveries: Default::default(),
             },
         }],
         ..Default::default()
@@ -761,6 +762,7 @@ fn captured_comptime_values_must_materialize_before_iir_validation() {
                     ty: boolean,
                     kind: K::ComptimeValue(Term::Bool(true)),
                 },
+                runtime_deliveries: Default::default(),
             },
         }],
         ..Default::default()

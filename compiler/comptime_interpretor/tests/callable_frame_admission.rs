@@ -55,6 +55,7 @@ fn function() -> Function {
             capabilities: vec![],
         },
         body: local(1),
+        runtime_deliveries: Default::default(),
     }
 }
 fn package() -> Package {

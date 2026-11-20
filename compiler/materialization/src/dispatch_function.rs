@@ -74,6 +74,7 @@ impl Builder<'_> {
             .chain(&function.preconditions)
             .chain(&function.postconditions)
             .chain(function.defaults.iter().map(|(_, supplier)| supplier))
+            .chain(function.runtime_deliveries.values())
         {
             let expr = projection
                 .instantiate_expression_bounded(expr, &mut self.fuel)

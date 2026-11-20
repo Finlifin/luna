@@ -322,7 +322,11 @@ impl Interpreter<'_> {
                     path,
                     subject,
                     method,
+                    env_arguments,
                 } => {
+                    if !env_arguments.is_empty() {
+                        return Err(self.failure(ErrorKind::InvalidCallPlan, None));
+                    }
                     let path: Vec<_> = base.iter().chain(path).copied().collect();
                     self.cleanup_path_work(&path)?;
                     let pointer = storage

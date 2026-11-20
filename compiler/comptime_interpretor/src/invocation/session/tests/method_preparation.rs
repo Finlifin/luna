@@ -139,6 +139,7 @@ fn function(declaration: u32, result: Term, body: Expr) -> Function {
             },
         },
         body,
+        runtime_deliveries: Default::default(),
     }
 }
 

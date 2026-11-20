@@ -93,6 +93,7 @@ fn fixture(domain: Term, argument: Term) -> n::Package {
                 ty: boolean(),
                 kind: n::ExprKind::Literal(n::Literal::Bool(true)),
             },
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     }
@@ -514,6 +515,7 @@ fn staged_associated_fixture(second_associated_on_body: bool) -> n::Package {
                     capabilities: vec![],
                 },
                 body: expr(n::ExprKind::Literal(n::Literal::Bool(true)), boolean()),
+                runtime_deliveries: Default::default(),
             },
             n::Function {
                 interface: n::FunctionDeclaration {
@@ -567,6 +569,7 @@ fn staged_associated_fixture(second_associated_on_body: bool) -> n::Package {
                     },
                     boolean(),
                 ),
+                runtime_deliveries: Default::default(),
             },
         ],
         ..Default::default()
@@ -771,6 +774,7 @@ fn staged_callable_with_dependent_and_closed_associated_types_retains_only_close
                 capabilities: vec![],
             },
             body: expr(n::ExprKind::Literal(n::Literal::Bool(true)), boolean()),
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     };

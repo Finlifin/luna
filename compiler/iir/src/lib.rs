@@ -182,6 +182,9 @@ pub struct Package {
     /// Explicitly supplied external runtime identities. Availability is not an
     /// ownership/lifetime proof; responsible resource passes retain that duty.
     pub runtime_bindings: BTreeSet<RuntimeId>,
+    /// Package-level canonical runtime environment deliveries (e.g. global const
+    /// addresses keyed by their `RuntimeId`).
+    pub global_runtime_deliveries: std::collections::BTreeMap<RuntimeId, nir::program::Expr>,
 }
 impl Package {
     pub fn template_method_type(
@@ -341,6 +344,115 @@ impl Package {
             }
         };
         use nir::program::ExprKind as K;
+        let validate_expr_node = |expr: &nir::program::Expr,
+                                  phase: nir::program::FunctionPhase,
+                                  direct_callees: &mut HashSet<usize>,
+                                  fuel: &mut usize|
+         -> Result<(), String> {
+            if matches!(
+                expr.kind,
+                K::Literal(
+                    nir::program::Literal::PendingFloat { .. }
+                        | nir::program::Literal::PendingInteger { .. }
+                )
+            ) {
+                return Err("IIR contains an unformed float or integer literal".into());
+            }
+
+            self.validate_expression_types_in(&links, expr, fuel)?;
+            if let K::TemplateEqual(left, right) = &expr.kind {
+                let identity_operand = |value: &nir::program::Expr| {
+                    matches!(
+                        value.kind,
+                        K::Local(_)
+                            | K::Function(_)
+                            | K::FunctionInstance { .. }
+                            | K::TraitMethod { .. }
+                    )
+                };
+                if phase != nir::program::FunctionPhase::Runtime
+                    || expr.ty != Term::Primitive(nir::Primitive::Bool)
+                    || left.ty != right.ty
+                    || !identity_operand(left)
+                    || !identity_operand(right)
+                    || !self
+                        .templates
+                        .iter()
+                        .any(|table| table.logical_type() == &left.ty)
+                {
+                    return Err(
+                        "IIR template comparison requires stored callable identities".into(),
+                    );
+                }
+            }
+            if phase == nir::program::FunctionPhase::Runtime {
+                if matches!(expr.kind, K::ComptimeIntegerConvert(_)) {
+                    return Err("IIR requires comptime integer conversion completion".into());
+                }
+                if let K::Call { callee, .. } = &expr.kind {
+                    if !callee.ty.is_comptime_callable()
+                        && matches!(callee.ty.callable_signature(), Term::Function { parameters, .. }
+                            if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))
+                    {
+                        return Err("IIR runtime call retains staged inputs".into());
+                    }
+                }
+            }
+            if let Some(message) = nir::program::pointer_operation_error_in(expr, self.target) {
+                return Err(message.into());
+            }
+            if let K::Call { callee, .. } = &expr.kind {
+                direct_callees.insert(std::ptr::from_ref(callee.as_ref()) as usize);
+            }
+            let is_direct_callee = direct_callees.remove(&(std::ptr::from_ref(expr) as usize));
+            callables.validate_reference(
+                expr,
+                phase == nir::program::FunctionPhase::Comptime,
+                is_direct_callee,
+                fuel,
+            )?;
+            match &expr.kind {
+                K::StagedValue(_) => {
+                    return Err("IIR retains an unbound staged value".into());
+                }
+                K::ComptimeValue(_) => {
+                    return Err("IIR requires captured comptime value materialization".into());
+                }
+                K::BuildMetadata { .. } if phase != nir::program::FunctionPhase::Comptime => {
+                    return Err("IIR runtime body retains package metadata query".into());
+                }
+                K::AssociatedValue { .. } => {
+                    return Err("IIR requires associated value selection".into());
+                }
+                K::ConstAddress { value, .. } => {
+                    if !nir::free_bindings::collect(value, fuel)?.is_empty() {
+                        return Err("IIR constant address retains free local bindings".into());
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        };
+        for (id, expr) in &self.global_runtime_deliveries {
+            if !self.runtime_bindings.contains(id) {
+                return Err(format!(
+                    "IIR global runtime delivery references unknown runtime binding {id}"
+                ));
+            }
+            if !nir::free_bindings::collect(expr, fuel)?.is_empty() {
+                return Err("IIR global runtime delivery retains free local bindings".into());
+            }
+            self.validate_type(&links, &expr.ty, fuel)?;
+            let mut direct_callees = HashSet::new();
+            visit::expression(expr, fuel, |node, fuel| {
+                validate_expr_node(
+                    node,
+                    nir::program::FunctionPhase::Runtime,
+                    &mut direct_callees,
+                    fuel,
+                )
+            })?;
+        }
         for instance in &self.functions {
             self.validate_type(&links, &instance.function.signature, fuel)?;
             for env in &instance.function.env_parameters {
@@ -372,88 +484,27 @@ impl Package {
             for argument in instance.key.arguments.iter() {
                 self.validate_type(&links, argument, fuel)?;
             }
+            for (id, expr) in &instance.function.runtime_deliveries {
+                if !self.runtime_bindings.contains(id) {
+                    return Err(format!(
+                        "IIR function {} delivery references unknown runtime binding {id}",
+                        instance.key
+                    ));
+                }
+                self.validate_type(&links, &expr.ty, fuel)?;
+                let mut direct_callees = HashSet::new();
+                visit::expression(expr, fuel, |node, fuel| {
+                    validate_expr_node(
+                        node,
+                        nir::program::FunctionPhase::Runtime,
+                        &mut direct_callees,
+                        fuel,
+                    )
+                })?;
+            }
             let mut direct_callees = HashSet::new();
             visit::expressions(&instance.function, fuel, |expr, fuel| {
-                if matches!(
-                    expr.kind,
-                    K::Literal(
-                        nir::program::Literal::PendingFloat { .. }
-                            | nir::program::Literal::PendingInteger { .. }
-                    )
-                ) {
-                    return Err("IIR contains an unformed float or integer literal".into());
-                }
-
-                self.validate_expression_types_in(&links, expr, fuel)?;
-                if let K::TemplateEqual(left, right) = &expr.kind {
-                    let identity_operand = |value: &nir::program::Expr| {
-                        matches!(
-                            value.kind,
-                            K::Local(_)
-                                | K::Function(_)
-                                | K::FunctionInstance { .. }
-                                | K::TraitMethod { .. }
-                        )
-                    };
-                    if instance.function.phase != nir::program::FunctionPhase::Runtime
-                        || expr.ty != Term::Primitive(nir::Primitive::Bool)
-                        || left.ty != right.ty
-                        || !identity_operand(left)
-                        || !identity_operand(right)
-                        || !self
-                            .templates
-                            .iter()
-                            .any(|table| table.logical_type() == &left.ty)
-                    {
-                        return Err(
-                            "IIR template comparison requires stored callable identities".into(),
-                        );
-                    }
-                }
-                if instance.function.phase == nir::program::FunctionPhase::Runtime {
-                    if matches!(expr.kind, K::ComptimeIntegerConvert(_)) {
-                        return Err("IIR requires comptime integer conversion completion".into());
-                    }
-                    if let K::Call { callee, .. } = &expr.kind {
-                        if !callee.ty.is_comptime_callable()
-                            && matches!(callee.ty.callable_signature(), Term::Function { parameters, .. }
-                                if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))
-                        {
-                            return Err("IIR runtime call retains staged inputs".into());
-                        }
-                    }
-                }
-                if let Some(message) = nir::program::pointer_operation_error_in(expr, self.target) {
-                    return Err(message.into());
-                }
-                if let K::Call { callee, .. } = &expr.kind {
-                    direct_callees.insert(std::ptr::from_ref(callee.as_ref()) as usize);
-                }
-                let is_direct_callee = direct_callees.remove(&(std::ptr::from_ref(expr) as usize));
-                callables.validate_reference(
-                    expr,
-                    instance.function.phase == nir::program::FunctionPhase::Comptime,
-                    is_direct_callee,
-                    fuel,
-                )?;
-                match &expr.kind {
-                    K::StagedValue(_) => {
-                        return Err("IIR retains an unbound staged value".into());
-                    }
-                    K::ComptimeValue(_) => {
-                        return Err("IIR requires captured comptime value materialization".into());
-                    }
-                    K::BuildMetadata { .. }
-                        if instance.function.phase != nir::program::FunctionPhase::Comptime =>
-                    {
-                        return Err("IIR runtime body retains package metadata query".into());
-                    }
-                    K::AssociatedValue { .. } => {
-                        return Err("IIR requires associated value selection".into());
-                    }
-                    _ => {}
-                }
-                Ok(())
+                validate_expr_node(expr, instance.function.phase, &mut direct_callees, fuel)
             })?;
             effects::validate(self, &links, &instance.function, fuel)?;
         }
@@ -695,6 +746,13 @@ impl fmt::Display for Package {
             write!(f, " (runtime {} {})", binding.instance, binding.local)?;
         }
         f.write_str(")")?;
+        if !self.global_runtime_deliveries.is_empty() {
+            f.write_str(" (global-runtime-deliveries")?;
+            for (id, expr) in &self.global_runtime_deliveries {
+                write!(f, " (delivery {id} {expr})")?;
+            }
+            f.write_str(")")?;
+        }
         if let Some(target) = self.target {
             write!(f, " {target}")?;
         }

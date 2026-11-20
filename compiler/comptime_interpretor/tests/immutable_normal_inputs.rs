@@ -43,6 +43,7 @@ fn function(local: u32, parameters: Vec<LocalId>, body: Expr) -> Function {
             defaults: vec![],
         },
         body,
+        runtime_deliveries: Default::default(),
     }
 }
 fn callable() -> Term {

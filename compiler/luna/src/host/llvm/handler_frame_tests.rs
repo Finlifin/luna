@@ -52,6 +52,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
             ty: Term::Primitive(P::Void),
             kind: K::Unit,
         },
+        runtime_deliveries: Default::default(),
     };
     let graph = iir::Package {
         functions: vec![iir::FunctionInstance {
@@ -67,6 +68,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
             path: vec![],
             subject: byte,
             method: key.clone(),
+            env_arguments: vec![],
         }],
     };
     let schedule = |at, boundary, target| FunctionSchedule {

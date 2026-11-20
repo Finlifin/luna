@@ -1941,6 +1941,7 @@ impl Checker<'_, '_> {
                 | K::BitUpdate { place, .. } => {
                     invalidated.insert(place.root);
                 }
+                K::ConstAddress { .. } => {}
                 K::AddressOf(value) => {
                     let mut root = value.as_ref();
                     while let K::Field { value, .. } | K::AnonymousField { value, .. } = &root.kind

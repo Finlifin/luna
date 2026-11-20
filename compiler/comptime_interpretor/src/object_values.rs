@@ -228,6 +228,7 @@ fn identity_package() -> Package {
                 source: SourceRange { start: 0, end: 1 },
                 kind: K::Local(local),
             },
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     }

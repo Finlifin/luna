@@ -2119,6 +2119,11 @@ struct Analyzer<'a, F, G> {
     trivial_cleanup_types: std::collections::HashSet<Term>,
     cleanup: Option<&'a mut dyn CleanupPolicy>,
     package: Option<&'a Package>,
+    function_env_parameters: &'a [nir::program::RuntimeEnvParameter],
+    function_runtime_deliveries: &'a BTreeMap<nir::RuntimeId, Expr>,
+    global_runtime_deliveries: Option<&'a BTreeMap<nir::RuntimeId, Expr>>,
+    function_source: SourceRange,
+    const_globals: BTreeMap<PlaceId, Term>,
     text_provenance: super::memory::TextProvenance,
     memory_summaries: SummaryCacheStorage<'a>,
     exit_contract: Option<&'a Function>,
@@ -2157,6 +2162,81 @@ struct Analyzer<'a, F, G> {
 impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shape, String>>
     Analyzer<'a, F, G>
 {
+    fn drop_env_context(&self) -> super::drop::DropEnvContext<'a> {
+        static EMPTY_DELIVERIES: BTreeMap<nir::RuntimeId, Expr> = BTreeMap::new();
+        super::drop::DropEnvContext {
+            env_parameters: self.function_env_parameters,
+            runtime_deliveries: self.function_runtime_deliveries,
+            global_runtime_deliveries: self
+                .global_runtime_deliveries
+                .or_else(|| {
+                    self.package
+                        .map(|package| &package.global_runtime_deliveries)
+                })
+                .unwrap_or(&EMPTY_DELIVERIES),
+            fallback_source: self.function_source,
+        }
+    }
+
+    fn check_const_global_writes(
+        &self,
+        targets: &BTreeSet<Place>,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if targets
+            .iter()
+            .any(|slot| crate::is_const_global_place(slot.root))
+        {
+            return Err(error(
+                source,
+                "cannot write through a pointer to a global constant",
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_const_global(
+        &mut self,
+        flow: &mut Flow,
+        declaration: nir::DeclarationId,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let id = crate::const_global_place(declaration);
+        if flow.types.contains_key(&id) {
+            return Ok(());
+        }
+        let shape = (self.shape)(ty).map_err(|e| error(source, e))?;
+        flow.state
+            .declare(id, &shape, true, &mut self.fuel)
+            .map_err(|e| error(source, format!("cannot establish global constant: {e:?}")))?;
+        flow.types.insert(id, ty.clone());
+        Ok(())
+    }
+
+    fn predeclare_const_globals(
+        &mut self,
+        flow: &mut Flow,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let entries: Vec<_> = self
+            .const_globals
+            .iter()
+            .map(|(&id, ty)| (id, ty.clone()))
+            .collect();
+        for (id, ty) in entries {
+            if flow.types.contains_key(&id) {
+                continue;
+            }
+            let shape = (self.shape)(&ty).map_err(|e| error(source, e))?;
+            flow.state
+                .declare(id, &shape, true, &mut self.fuel)
+                .map_err(|e| error(source, format!("cannot establish global constant: {e:?}")))?;
+            flow.types.insert(id, ty);
+        }
+        Ok(())
+    }
+
     fn select_method_callee(&mut self, callee: &Expr, source: SourceRange) -> Result<Expr, Error> {
         self.select_method_callee_mode(callee, false, source)
     }
@@ -2916,7 +2996,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             borrowed_scope: flow.borrowed_scope,
             ..Flow::default()
         };
+        self.predeclare_const_globals(&mut snapshot, source)?;
         self.prepare_cleanup_origins(&mut snapshot, place.root, ty, source)?;
+        let env = self.drop_env_context();
         let plan = self
             .cleanup
             .as_mut()
@@ -2932,6 +3014,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     enum_domains: &snapshot.enum_domains,
                     pointer_conditions: &snapshot.pointer_guards,
                     retired,
+                    env: Some(env),
                 }),
                 &mut self.fuel,
             )
@@ -3118,6 +3201,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 enum_domains: &flow.enum_domains,
                 pointer_conditions: &flow.pointer_guards,
                 retired: &possible_retired,
+                env: Some(self.drop_env_context()),
             },
             &variants,
             &domains,
@@ -4353,6 +4437,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             live: true,
             ..Default::default()
         };
+        self.predeclare_const_globals(&mut frame, source)?;
         self.pending_frame(source, |this| {
             for argument in arguments {
                 let mut origins = BTreeMap::new();
@@ -4900,6 +4985,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             self.declaration_source,
             Some(self.method_callees.as_mut()),
             Some(self.rejection.memo_mut()),
+            self.global_runtime_deliveries,
         )?;
         self.fuel = self
             .fuel
@@ -6329,6 +6415,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             live: true,
             ..Default::default()
         };
+        self.predeclare_const_globals(&mut inner, source)?;
         let mut capture_roots = BTreeSet::new();
         let mut borrowed_roots = BTreeMap::new();
         for fields in argument_pointers.values() {
@@ -7381,6 +7468,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 live: true,
                 ..Default::default()
             };
+            self.predeclare_const_globals(&mut frame, source)?;
             let mut seen = BTreeSet::new();
             let mut last_default = None;
             let mut inputs = vec![];
@@ -7754,7 +7842,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     result_code = callable_source(expr, flow, &mut self.fuel)?;
                 }
             }
-            K::AddressOf(_) => {
+            K::AddressOf(_) | K::ConstAddress { .. } => {
                 for target in self.pointer_target(expr, flow, depth + 1)? {
                     flow.state.require_place(&target).map_err(|reason| {
                         error(
@@ -11479,6 +11567,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             live: true,
             ..Default::default()
         };
+        self.predeclare_const_globals(&mut frame, source)?;
         let mut frame_targets = BTreeMap::new();
         self.pending_frame(source, |this| {
             for argument in arguments {
@@ -11954,6 +12043,21 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             K::AddressOf(place) => expression_place(place)
                 .map(|place| BTreeSet::from([place]))
                 .ok_or_else(|| error(expr.source, "pointer address requires a known local place")),
+            K::ConstAddress { declaration, value } => {
+                if !nir::free_bindings::collect(value, &mut self.fuel)
+                    .map_err(|reason| error(expr.source, reason.to_string()))?
+                    .is_empty()
+                {
+                    return Err(error(
+                        expr.source,
+                        "constant address retains free local bindings",
+                    ));
+                }
+                Ok(BTreeSet::from([Place {
+                    root: crate::const_global_place(*declaration),
+                    fields: vec![],
+                }]))
+            }
             K::Local(_) | K::AnonymousField { .. } | K::Field { .. } => {
                 let slot = expression_place(expr)
                     .ok_or_else(|| error(expr.source, "pointer value requires a local place"))?;
@@ -13497,6 +13601,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         let target =
             target.ok_or_else(|| error(source, "pointer target provenance is not established"))?;
+        self.check_const_global_writes(&target, source)?;
         self.check_observation_write_targets(&target, source)?;
         let pointer_depth =
             super::memory::pointer_representation(self.package, &value.ty, &mut self.fuel)
@@ -13790,6 +13895,7 @@ fn analyze_with_shapes<'a>(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -13815,6 +13921,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
     declaration_source: Option<::materialization::DeclarationSource<'a>>,
     method_callees: Option<&'a mut super::memory::MethodCallees>,
     rejection_memo: Option<&'a mut super::rejection::Memo>,
+    global_runtime_deliveries: Option<&'a BTreeMap<nir::RuntimeId, Expr>>,
 ) -> Result<Report, Error> {
     // Callers supply many distinct closure types. Keep the large recursive
     // analyzer shared instead of monomorphizing it for every policy closure.
@@ -13835,12 +13942,21 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
     for input in &effect_result_inputs {
         effect_memory_inputs.push(input.memory_input(&mut fuel, source)?);
     }
+    let effective_global_deliveries = global_runtime_deliveries
+        .or_else(|| package.map(|package| &package.global_runtime_deliveries));
+    let const_globals =
+        collect_const_globals(function, effective_global_deliveries, &mut fuel, source)?;
     let declarations = declarations
         .unwrap_or_else(|| std::rc::Rc::new(super::declarations::Metadata::new(package)));
     let mut analyzer = Analyzer {
         trivial_cleanup_types: trivial_cleanup_types.clone(),
         cleanup,
         package,
+        function_env_parameters: &function.env_parameters,
+        function_runtime_deliveries: &function.runtime_deliveries,
+        global_runtime_deliveries,
+        function_source: source,
+        const_globals,
         text_provenance,
         memory_summaries: memory_summaries.map_or_else(
             || SummaryCacheStorage::Owned(Default::default()),
@@ -13898,12 +14014,13 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
     if parameters.len() != function.parameters.len() {
         return Err(error(source, "parameter signature mismatch"));
     }
-    for (parameter, signature) in function.parameters.iter().zip(parameters) {
-        analyzer.declare(&mut flow, *parameter, &signature.ty, source)?;
-    }
     for env in &function.env_parameters {
         analyzer.declare(&mut flow, env.binding, &env.ty, source)?;
     }
+    for (parameter, signature) in function.parameters.iter().zip(parameters) {
+        analyzer.declare(&mut flow, *parameter, &signature.ty, source)?;
+    }
+    analyzer.predeclare_const_globals(&mut flow, source)?;
     let slot_binding_ty = |slot: usize| -> Option<(LocalId, &Term)> {
         if slot < parameters.len() {
             Some((function.parameters[slot], &parameters[slot].ty))
@@ -14486,6 +14603,7 @@ pub fn analyze_in_package_with_borrowed_code_and_text_context<'a>(
         None,
         None,
         None,
+        None,
     )
 }
 
@@ -14527,6 +14645,7 @@ pub fn analyze_in_package_with_session<'a, 's>(
         session.source,
         Some(&mut session.methods),
         Some(&mut session.rejection),
+        session.global_runtime_deliveries,
     )
 }
 
@@ -14572,7 +14691,45 @@ pub(crate) fn analyze_with_declarations<'a>(
         None,
         None,
         None,
+        None,
     )
+}
+
+fn collect_const_globals(
+    function: &Function,
+    global_deliveries: Option<&BTreeMap<nir::RuntimeId, Expr>>,
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<BTreeMap<PlaceId, Term>, Error> {
+    let mut consts: BTreeMap<PlaceId, Term> = BTreeMap::new();
+    let mut record = |node: &Expr, fuel: &mut usize| -> Result<(), String> {
+        if let K::ConstAddress { declaration, value } = &node.kind {
+            if !nir::free_bindings::collect(value, fuel)
+                .map_err(|e| e.to_string())?
+                .is_empty()
+            {
+                return Err("constant address retains free local bindings".into());
+            }
+            let id = crate::const_global_place(*declaration);
+            if let Some(existing) = consts.get(&id) {
+                if existing != &value.ty {
+                    return Err("conflicting constant address types for declaration".into());
+                }
+            } else {
+                consts.insert(id, value.ty.clone());
+            }
+        }
+        Ok(())
+    };
+    nir::visit::expressions(function, fuel, &mut record).map_err(|e| error(source, e))?;
+    for expr in function
+        .runtime_deliveries
+        .values()
+        .chain(global_deliveries.into_iter().flat_map(|m| m.values()))
+    {
+        nir::visit::expression(expr, fuel, &mut record).map_err(|e| error(source, e))?;
+    }
+    Ok(consts)
 }
 
 fn ownership_shape(
@@ -16916,6 +17073,7 @@ mod record_shape_tests {
                     }),
                 },
             },
+            runtime_deliveries: Default::default(),
         });
         // Unit-level checked evidence exercises the bridge independently of
         // source installer derivation, which remains a separate prerequisite.

@@ -287,6 +287,7 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::NominalType { .. }
         | K::CheckTypeAlias { .. }
         | K::AddressOf(_)
+        | K::ConstAddress { .. }
         | K::ReadPointer(_)
         | K::PointerAnonymousField { .. }
         | K::PointerField { .. }

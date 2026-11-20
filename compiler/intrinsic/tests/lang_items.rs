@@ -390,6 +390,7 @@ fn a_function_named_tuple_does_not_supply_a_pure_normal_form_head() {
             kind: ExprKind::TypeValue(Term::Primitive(Primitive::Bool)),
             source: SourceRange { start: 0, end: 0 },
         },
+        runtime_deliveries: Default::default(),
     };
     let mut package = Package {
         functions: vec![function],

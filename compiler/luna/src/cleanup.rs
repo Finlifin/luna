@@ -110,7 +110,11 @@ fn lower(
                 path: relative(place)?,
                 steps: lower(steps, receiver, roots, receivers, fuel, depth + 1)?,
             },
-            CleanupStep::Invoke { selected, access } => {
+            CleanupStep::Invoke {
+                selected,
+                access,
+                env_arguments,
+            } => {
                 let method = iir::InstanceKey {
                     declaration: selected.method.body,
                     arguments: selected.method.arguments.clone().into(),
@@ -129,6 +133,7 @@ fn lower(
                     path: relative(&access.receiver)?,
                     subject: selected.subject.clone(),
                     method,
+                    env_arguments: env_arguments.clone(),
                 }
             }
             CleanupStep::Release { place, ty } => iir::cleanup::Step::Release {
@@ -511,7 +516,8 @@ fn prepare_source_impl(
             elaboration::materialization::DeclarationSource::Prepared(&dispatch_catalog);
         let mut verification_session = elaboration::verification::PackageSession::new(package)
             .with_source(dispatch_source)
-            .with_dispatch(&graph.dispatch);
+            .with_dispatch(&graph.dispatch)
+            .with_global_runtime_deliveries(&graph.global_runtime_deliveries);
         let text_provenance = if graph_uses_text(&graph, fuel)? {
             let shape = (graph.functions.len(), roots.len());
             if verified_text_shape != Some(shape) {
@@ -582,6 +588,17 @@ fn prepare_source_impl(
             let mut independent_report = None;
             if let Some((_, subject)) = receivers.iter().find(|(key, _)| key == &instance.key) {
                 borrows.push((0, subject.clone()));
+                for (offset, env) in function.env_parameters.iter().enumerate() {
+                    if let Some((_, env_subject)) =
+                        elaboration::verification::memory::pointer_representation(
+                            Some(package),
+                            &env.ty,
+                            fuel,
+                        )?
+                    {
+                        borrows.push((1 + offset, env_subject));
+                    }
+                }
             } else if instance.key != entry {
                 let nir::Term::Function { parameters, .. } =
                     function.signature.callable_signature()

@@ -5918,6 +5918,7 @@ impl Walker<'_> {
     ) -> Result<Value, Reason> {
         match &expr.kind {
             K::AddressOf(_)
+            | K::ConstAddress { .. }
             | K::PointerField { .. }
             | K::PointerAnonymousField { .. }
             | K::ReadPointer(_) => self.pointer_read_expression(expr, state, depth),
@@ -7206,6 +7207,7 @@ mod memory_summary_cache_tests {
                     },
                     ..unit()
                 },
+                runtime_deliveries: Default::default(),
             }],
             ..Default::default()
         };
@@ -7314,6 +7316,7 @@ mod memory_summary_cache_tests {
                     },
                     ..unit()
                 },
+                runtime_deliveries: Default::default(),
             }],
             ..Default::default()
         };
@@ -7440,6 +7443,7 @@ mod memory_summary_cache_tests {
                         },
                         ..unit()
                     },
+                    runtime_deliveries: Default::default(),
                 },
                 Function {
                     interface: function_decl(caller_declaration, "caller"),
@@ -7450,6 +7454,7 @@ mod memory_summary_cache_tests {
                         },
                         ..unit()
                     },
+                    runtime_deliveries: Default::default(),
                 },
             ],
             ..Default::default()
@@ -8448,6 +8453,7 @@ mod single_pass_loop_tests {
                 capabilities: vec![],
             },
             body,
+            runtime_deliveries: Default::default(),
         };
         analyze(&make_fn(outer_loop), &mut Limits::default()).unwrap();
 

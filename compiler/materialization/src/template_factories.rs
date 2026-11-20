@@ -107,7 +107,10 @@ impl Builder<'_> {
         if let Some(binding) = function.result_binding {
             for predicate in &function.postconditions {
                 iir::visit::expression_pruned(predicate, &mut self.fuel, |expr, fuel| {
-                    if matches!(expr.kind, K::Closure { .. } | K::AddressOf(_)) {
+                    if matches!(
+                        expr.kind,
+                        K::Closure { .. } | K::AddressOf(_) | K::ConstAddress { .. }
+                    ) {
                         supported &= !nir::free_bindings::collect(expr, fuel)?.contains(&binding);
                         return Ok(false);
                     }

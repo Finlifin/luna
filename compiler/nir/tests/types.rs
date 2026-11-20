@@ -2067,6 +2067,7 @@ fn function_specialization_covers_contracts_defaults_and_preserves_local_identit
             }],
             requirements: vec![TypePredicate::Equal(ty.clone(), ty)],
         },
+        runtime_deliveries: Default::default(),
     };
     let original = template.clone();
     let specialized = template

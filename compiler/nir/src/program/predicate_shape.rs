@@ -149,6 +149,7 @@ fn predicate_shape(
                 pending.push(value);
             }
             ExprKind::AddressOf(value)
+            | ExprKind::ConstAddress { value, .. }
             | ExprKind::PointerField { pointer: value, .. }
             | ExprKind::PointerAnonymousField { pointer: value, .. } => {
                 charge_type(&value.ty, remaining)?;

@@ -72,6 +72,7 @@ fn package() -> Package {
                     env_parameters: vec![],
                     defaults: vec![],
                 },
+                runtime_deliveries: Default::default(),
             }
         })
         .collect();

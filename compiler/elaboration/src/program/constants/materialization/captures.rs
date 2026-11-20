@@ -178,6 +178,7 @@ impl Checker<'_, '_> {
                         &mut fuel,
                         |expr, _| {
                             match &expr.kind {
+                                K::ConstAddress { .. } => {}
                                 K::AddressOf(place) => {
                                     let mut root = place.as_ref();
                                     while let K::Field { value, .. }

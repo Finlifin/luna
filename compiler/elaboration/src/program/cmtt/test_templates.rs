@@ -69,6 +69,7 @@ impl Checker<'_, '_> {
                     result_guarantees: vec![],
                 },
                 body: value,
+                runtime_deliveries: Default::default(),
             });
         }
         output.tests.clear();

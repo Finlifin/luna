@@ -42,6 +42,7 @@ fn function(local: u32, body: Expr, result: Term) -> Function {
             defaults: vec![],
         },
         body,
+        runtime_deliveries: Default::default(),
     }
 }
 fn call(local: u32) -> Expr {

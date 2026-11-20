@@ -76,7 +76,7 @@ pub(super) fn lower(
     iir::visit::expression_pruned(expression, fuel, |expr, fuel| {
         if matches!(
             expr.kind,
-            K::AddressOf(_) | K::Closure { .. } | K::TemplateEqual(..)
+            K::AddressOf(_) | K::ConstAddress { .. } | K::Closure { .. } | K::TemplateEqual(..)
         ) {
             excluded.extend(nir::free_bindings::collect(expr, fuel)?);
             return Ok(false);
@@ -186,7 +186,10 @@ pub(super) fn lower(
     }
     let tag_type = Term::Primitive(nir::Primitive::U64);
     iir::visit::expression_mut_pruned(expression, fuel, |expr, fuel| {
-        if matches!(expr.kind, K::Closure { .. } | K::AddressOf(_)) {
+        if matches!(
+            expr.kind,
+            K::Closure { .. } | K::AddressOf(_) | K::ConstAddress { .. }
+        ) {
             return Ok(false);
         }
         match &mut expr.kind {

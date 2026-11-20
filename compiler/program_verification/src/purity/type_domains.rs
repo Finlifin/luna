@@ -292,6 +292,7 @@ mod tests {
                     ty: p(P::Bool),
                     kind: K::Literal(n::Literal::Bool(true)),
                 },
+                runtime_deliveries: Default::default(),
             },
             ty,
         )

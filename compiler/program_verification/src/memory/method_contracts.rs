@@ -167,11 +167,29 @@ pub fn prepare_method_invocation(
         )
         .map_err(|error| error.to_string())?;
         for env in &body.env_parameters {
+            let substituted = body_substitution
+                .instantiate_bounded(
+                    &Term::Rigid {
+                        declaration: env.declaration,
+                        sort: nir::Sort::Runtime,
+                    },
+                    fuel,
+                )
+                .map_err(|error| error.to_string())?;
+            let (declaration, runtime_id) = match substituted {
+                Term::Runtime(id) => (env.declaration, Some(id)),
+                Term::Rigid {
+                    declaration: next,
+                    sort: nir::Sort::Runtime,
+                } => (next, env.runtime_id),
+                _ => (env.declaration, env.runtime_id),
+            };
             let ty = body_substitution
                 .instantiate_bounded(&env.ty, fuel)
                 .map_err(|error| error.to_string())?;
             env_parameters.push(nir::program::RuntimeEnvParameter {
-                declaration: env.declaration,
+                declaration,
+                runtime_id,
                 binding: env.binding,
                 ty: ty.clone(),
             });
@@ -313,6 +331,7 @@ pub fn prepare_method_invocation(
         function: Function {
             interface: composed,
             body,
+            runtime_deliveries: Default::default(),
         },
     })
 }

@@ -66,6 +66,7 @@ mod tests {
             budget,
             instances: None,
             runtime_bindings: BTreeSet::new(),
+            global_runtime_deliveries: BTreeMap::new(),
             nominals: vec![],
             interface_contracts: vec![],
             effect_contracts: vec![],
@@ -120,6 +121,7 @@ mod tests {
                 ty: boolean.clone(),
                 kind: K::Literal(n::Literal::Bool(true)),
             },
+            runtime_deliveries: Default::default(),
         };
         let callee = n::Expr {
             source,

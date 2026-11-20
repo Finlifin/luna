@@ -218,6 +218,7 @@ fn fixture() -> (n::Package, iir::InstanceKey) {
             source: n::SourceRange { start: 1, end: 2 },
             kind: n::ExprKind::Literal(n::Literal::Bool(true)),
         },
+        runtime_deliveries: Default::default(),
     };
     (
         n::Package {

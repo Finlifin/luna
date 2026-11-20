@@ -78,6 +78,7 @@ fn package() -> Package {
                     result: Box::new(ty(P::Type)),
                 },
             },
+            runtime_deliveries: Default::default(),
             body: Expr {
                 ty: ty(P::Type),
                 source,

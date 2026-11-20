@@ -66,6 +66,7 @@ fn package() -> Package {
                 ty: boolean(),
                 kind: K::Local(binding),
             },
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     }

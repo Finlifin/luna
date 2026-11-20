@@ -53,6 +53,7 @@ fn captured_integer_facts_check_domains_budgets_and_symbolic_inputs() {
                     _ => Literal::UnsignedInteger(1),
                 }))),
             }),
+            runtime_deliveries: Default::default(),
         }
     };
     for (primitive, value, accepted) in [
@@ -218,6 +219,7 @@ fn checked_nonzero_division_preserves_both_signs_and_machine_obligations() {
                 },
                 ty.clone(),
             ),
+            runtime_deliveries: Default::default(),
         }
     };
     for op in [IntegerOp::DivideTrunc, IntegerOp::RemainderTrunc] {

@@ -45,6 +45,7 @@ pub enum Step {
         path: Vec<usize>,
         subject: Term,
         method: InstanceKey,
+        env_arguments: Vec<nir::program::Expr>,
     },
     Switch {
         path: Vec<usize>,
@@ -88,10 +89,19 @@ impl fmt::Display for Step {
                 path: indices,
                 subject,
                 method,
+                env_arguments,
             } => {
                 f.write_str("(cleanup-invoke ")?;
                 path(f, indices)?;
-                write!(f, " (subject {subject}) {method})")
+                write!(f, " (subject {subject}) {method}")?;
+                if !env_arguments.is_empty() {
+                    f.write_str(" (env")?;
+                    for arg in env_arguments {
+                        write!(f, " {arg}")?;
+                    }
+                    f.write_str(")")?;
+                }
+                f.write_str(")")
             }
             Self::Release { path: indices, ty } => {
                 f.write_str("(cleanup-release ")?;

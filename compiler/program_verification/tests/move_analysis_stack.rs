@@ -69,6 +69,7 @@ fn nested_bindings(layers: u32) -> Function {
             requirements: vec![],
         },
         body,
+        runtime_deliveries: Default::default(),
     }
 }
 

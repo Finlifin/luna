@@ -1554,6 +1554,7 @@ fn elaborate_candidate<'a, 'h>(
     // Definition-side witnesses are analysis-only, including suppliers whose
     // inline alternatives must be checked before their inputs are supplied.
     output.runtime_domains = checker.runtime_domains.clone();
+    output.global_runtime_deliveries = checker.global_runtime_deliveries.clone();
     let runtime_count = output.functions.len();
     output
         .functions
@@ -1580,6 +1581,7 @@ fn elaborate_candidate<'a, 'h>(
         &mut checker.required_steps,
     )?;
     output.runtime_domains = checker.runtime_domains.clone();
+    output.global_runtime_deliveries = checker.global_runtime_deliveries.clone();
     output.quote_identity_cursor = checker.next_temporary_binding;
     output.definition_identity_cursor = checker.definition_identities.next();
     if output
@@ -2230,6 +2232,10 @@ enum GlobalRuntimeOrigin {
         param: DeclarationId,
         prefix_args: Vec<Term>,
     },
+    ConstAddress {
+        declaration: DeclarationId,
+        ty: Term,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -2453,6 +2459,25 @@ impl Checker<'_, '_> {
         Ok(id)
     }
 
+    fn intern_const_address_runtime_id(
+        &mut self,
+        declaration: DeclarationId,
+        checked: n::Expr,
+        span: Span,
+    ) -> Result<nir::RuntimeId, Error> {
+        let key = GlobalRuntimeOrigin::ConstAddress {
+            declaration,
+            ty: checked.ty.clone(),
+        };
+        if let Some(&existing) = self.global_runtime_origin_ids.get(&key) {
+            return Ok(existing);
+        }
+        let id = self.intern_runtime_id(Term::Lift(Box::new(checked.ty.clone())), span)?;
+        self.global_runtime_origin_ids.insert(key, id);
+        self.global_runtime_deliveries.insert(id, checked);
+        Ok(id)
+    }
+
     fn default_runtime_argument(
         &mut self,
         owner: OwnerId,
@@ -2493,9 +2518,14 @@ impl Checker<'_, '_> {
                 "diverging default cannot satisfy a runtime quote dependency",
             ));
         }
-        let id = self.intern_runtime_id(Term::Lift(Box::new(checked.ty.clone())), span)?;
+        let id = if let K::ConstAddress { declaration, .. } = &checked.kind {
+            self.intern_const_address_runtime_id(*declaration, checked, span)?
+        } else {
+            let id = self.intern_runtime_id(Term::Lift(Box::new(checked.ty.clone())), span)?;
+            self.global_runtime_deliveries.insert(id, checked);
+            id
+        };
         self.global_runtime_origin_ids.insert(key, id);
-        self.global_runtime_deliveries.insert(id, checked);
         Ok(Term::Runtime(id))
     }
 
@@ -3013,6 +3043,11 @@ impl Checker<'_, '_> {
                             self.type_parameters.insert(owner, type_parameters.clone());
                         }
                         self.type_parameters.get_mut(&owner).unwrap().push(id);
+                    } else if sort == Sort::Type {
+                        let entry = self.type_parameters.entry(owner).or_default();
+                        if !entry.contains(&id) {
+                            entry.push(id);
+                        }
                     }
                     type_parameters.push(id);
                 }
@@ -7020,6 +7055,7 @@ impl Checker<'_, '_> {
                         | K::Break(_)
                         | K::Continue(_)
                         | K::AddressOf(_)
+                        | K::ConstAddress { .. }
                         | K::ReadPointer(_)
                         | K::WritePointer { .. }
                         | K::BitWritePointer { .. }

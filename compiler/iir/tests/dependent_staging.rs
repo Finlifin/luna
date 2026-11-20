@@ -85,6 +85,7 @@ fn dependent_inputs_rebind_body_contracts_defaults_and_trait_arguments() {
             entry_snapshots: vec![],
             type_parameters: vec![],
         },
+        runtime_deliveries: Default::default(),
     };
     let original = template.clone();
     let inputs = vec![
@@ -179,6 +180,7 @@ fn dependent_default_values_receive_concrete_types_before_evaluation_or_runtime_
                 type_parameters: vec![],
             },
             body: expr(K::Local(id(2)), t.clone()),
+            runtime_deliveries: Default::default(),
         };
         let values = [
             expr(K::TypeValue(p(Primitive::Bool)), p(Primitive::Type)),
@@ -332,6 +334,7 @@ fn dependent_defaults_do_not_recharge_unrelated_completed_payloads() {
             type_parameters: vec![],
         },
         body: expr(K::Local(*bindings.last().unwrap()), t),
+        runtime_deliveries: Default::default(),
     };
     let payload = "x".repeat(8192);
     let mut arguments = vec![
@@ -466,6 +469,7 @@ fn dependent_type_value_domains_rebind_body_and_contracts_compositionally() {
             entry_snapshots: vec![],
             type_parameters: vec![],
         },
+        runtime_deliveries: Default::default(),
     };
     let input_type = expr(K::TypeValue(p(Primitive::Type)), p(Primitive::Type));
     let input_value = expr(K::TypeValue(p(Primitive::Bool)), p(Primitive::Type));

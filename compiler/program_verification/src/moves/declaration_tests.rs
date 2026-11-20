@@ -46,6 +46,7 @@ fn function(local: u32, body: Expr) -> Function {
             defaults: vec![],
         },
         body,
+        runtime_deliveries: Default::default(),
     }
 }
 fn reference(local: u32, result: Term, arguments: Vec<Term>) -> Expr {

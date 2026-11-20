@@ -89,6 +89,7 @@ fn display_conditions(
 enum PointerRoot {
     Parameter(usize),
     Local { binding: LocalId, storage: usize },
+    ConstGlobal(DeclarationId),
 }
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct PointerPlace {
@@ -200,6 +201,7 @@ impl fmt::Display for PointerPlace {
             PointerRoot::Local { binding, storage } => {
                 write!(f, "(local (binding {binding}) (storage {storage}))")?
             }
+            PointerRoot::ConstGlobal(declaration) => write!(f, "(const-global {declaration})")?,
         }
         f.write_str(")")?;
         if !self.input_fields.is_empty() {
@@ -4641,6 +4643,21 @@ impl<'a> Infer<'a, '_> {
             K::AddressOf(value) => Ok(Some(BTreeSet::from(
                 [self.local_address(value, depth + 1)?],
             ))),
+            K::ConstAddress { declaration, value } => {
+                if !nir::free_bindings::collect(value, self.fuel)
+                    .map_err(|e| e.to_string())?
+                    .is_empty()
+                {
+                    return Err("constant address retains free local bindings".into());
+                }
+                Ok(Some(BTreeSet::from([PointerPlace {
+                    root: PointerRoot::ConstGlobal(*declaration),
+                    input_fields: vec![],
+                    through: vec![],
+                    conditions: BTreeMap::new(),
+                    fields: vec![],
+                }])))
+            }
             K::Local(id) => {
                 // Charge before copying potentially large alternatives.
                 if let Some(Some(targets)) = self.environment.pointers.get(id) {
@@ -4867,6 +4884,12 @@ impl<'a> Infer<'a, '_> {
         self.target_work(&targets)?;
         for target in targets {
             bound_type(&ty, self.fuel)?;
+            if matches!(target.root, PointerRoot::ConstGlobal(_)) {
+                if write {
+                    return Err("cannot write through a pointer to a global constant".into());
+                }
+                continue;
+            }
             if let PointerRoot::Local { binding, storage } = target.root {
                 if !target.through.is_empty() {
                     return Err("local pointer-slot loads require a storage contract".into());
@@ -5358,7 +5381,7 @@ impl<'a> Infer<'a, '_> {
             {
                 self.check_guard(condition, depth + 1)
             }
-            K::AddressOf(place) => {
+            K::AddressOf(place) | K::ConstAddress { value: place, .. } => {
                 if let Some(reason) = nir::program::pointer_operation_error_in(
                     expr,
                     self.package.and_then(|package| package.target),
@@ -6209,6 +6232,15 @@ impl<'a> Infer<'a, '_> {
         match &expr.kind {
             K::AddressOf(value) => {
                 self.local_address(value, depth + 1)?;
+            }
+            K::ConstAddress { value, .. } => {
+                if !nir::free_bindings::collect(value, self.fuel)
+                    .map_err(|e| e.to_string())?
+                    .is_empty()
+                {
+                    return Err("constant address retains free local bindings".into());
+                }
+                self.walk(value, depth + 1)?;
             }
             K::Intrinsic {
                 tag,
@@ -8315,16 +8347,25 @@ pub fn infer_with_code_inputs(
 fn validate_cleanup_access(
     package: &Package,
     signature: &Term,
+    env_parameters: &[nir::program::RuntimeEnvParameter],
     access: &nir::program::RuntimeCleanupAccess,
     fuel: &mut usize,
 ) -> Result<(), String> {
     let Term::Function { parameters, .. } = signature.callable_signature() else {
         return Err("cleanup footprint lacks a callable signature".into());
     };
-    let parameter = parameters
-        .get(access.parameter)
-        .ok_or("cleanup footprint parameter is missing")?;
-    let input = owned_path_type(Some(package), &parameter.ty, &access.input_fields, fuel)?;
+    let parameter_ty = if let Some(parameter) = parameters.get(access.parameter) {
+        &parameter.ty
+    } else if let Some(env) = access
+        .parameter
+        .checked_sub(parameters.len())
+        .and_then(|offset| env_parameters.get(offset))
+    {
+        &env.ty
+    } else {
+        return Err("cleanup footprint parameter is missing".into());
+    };
+    let input = owned_path_type(Some(package), parameter_ty, &access.input_fields, fuel)?;
     let (_, ty) = pointer_representation(Some(package), &input, fuel)?
         .ok_or("cleanup footprint input is not a pointer")?;
     let mut traversal = StorageTraversal::new(Some(package), &ty, &[], fuel)?;
@@ -8743,7 +8784,13 @@ fn finish_instance_summary(
                 .checked_sub(cost)
                 .ok_or("cleanup footprint import budget exhausted")?;
             bound_type(&access.ty, fuel)?;
-            validate_cleanup_access(package, &summary.signature, access, fuel)?;
+            validate_cleanup_access(
+                package,
+                &summary.signature,
+                &instance.function.env_parameters,
+                access,
+                fuel,
+            )?;
             summary.accesses.push(Access {
                 target: ParameterPlace {
                     parameter: access.parameter,
@@ -10179,6 +10226,7 @@ fn validate_capture_storage_except_for(
                         return Err("addressing captured pointer storage requires an environment memory contract".into());
                     }
                 }
+                K::ConstAddress { .. } => {}
                 K::Closure { captures, .. } => {
                     // A nested body uses private capture cells; initializers
                     // still execute against the current environment.

@@ -741,6 +741,7 @@ fn selected_associated_body_observes_its_domain_once_before_execution() {
             ty: type_type.clone(),
             kind: K::TypeValue(Term::Primitive(Primitive::Bool)),
         },
+        runtime_deliveries: Default::default(),
     };
     let callable = function.callable_type();
     let package = Package {

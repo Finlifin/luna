@@ -533,6 +533,7 @@ fn scan<'a>(
                 | K::Discard(value)
                 | K::BitSlice { value, .. }
                 | K::AddressOf(value)
+                | K::ConstAddress { value, .. }
                 | K::ReadPointer(value)
                 | K::PointerAnonymousField { pointer: value, .. }
                 | K::PointerField { pointer: value, .. }
@@ -671,6 +672,7 @@ mod tests {
                 defaults: vec![],
             },
             body,
+            runtime_deliveries: Default::default(),
         }
     }
     #[test]

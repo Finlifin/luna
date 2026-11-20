@@ -52,6 +52,7 @@ fn function(local: u32, phase: Phase, inputs: &[Sort]) -> Function {
             requirements: vec![],
         },
         body: flag(K::Literal(Literal::Bool(true))),
+        runtime_deliveries: Default::default(),
     }
 }
 
@@ -2370,4 +2371,79 @@ fn runtime_domains_validate_lift_and_runtime_storage_and_format() {
             .message
             .contains("comptime-only")
     );
+}
+
+#[test]
+fn const_address_and_runtime_deliveries_validate_phase_and_captures() {
+    let decl = DeclarationId {
+        package: 1,
+        local: 77,
+    };
+    let bool_ty = Term::Primitive(Primitive::Bool);
+    let ptr_bool = Term::Pointer(Box::new(bool_ty.clone()));
+    let const_expr = Expr {
+        kind: K::ConstAddress {
+            declaration: decl,
+            value: Box::new(flag(K::Literal(Literal::Bool(true)))),
+        },
+        ty: ptr_bool.clone(),
+        source: SourceRange { start: 1, end: 2 },
+    };
+    assert!(
+        const_expr
+            .to_string()
+            .contains("(const-address (declaration (declaration (package 1) (local 77)))"),
+        "{const_expr}"
+    );
+    let mut rt_fn = function(10, Phase::Runtime, &[]);
+    rt_fn.body = const_expr.clone();
+    let rt_id = nir::RuntimeId {
+        instance: 0,
+        local: 3,
+    };
+    rt_fn.runtime_deliveries.insert(rt_id, const_expr.clone());
+    let mut package = Package {
+        functions: vec![rt_fn],
+        ..Default::default()
+    };
+    package
+        .runtime_domains
+        .insert(rt_id, Term::Lift(Box::new(ptr_bool.clone())));
+    package
+        .global_runtime_deliveries
+        .insert(rt_id, const_expr.clone());
+    assert!(package.to_string().contains("(runtime-deliveries "));
+    assert!(package.to_string().contains("(global-runtime-deliveries "));
+    nir::phases::validate(&package).unwrap();
+
+    // Comptime use of ConstAddress is rejected.
+    let mut ct_fn = function(11, Phase::Comptime, &[]);
+    ct_fn.body = const_expr.clone();
+    let mut bad_ct = package.clone();
+    bad_ct.functions.push(ct_fn);
+    assert!(nir::phases::validate(&bad_ct).is_err());
+
+    // Local binding inside ConstAddress is rejected.
+    let mut captured_pkg = package.clone();
+    captured_pkg.functions[0].body = Expr {
+        kind: K::ConstAddress {
+            declaration: decl,
+            value: Box::new(flag(K::Local(LocalId { owner: 9, index: 0 }))),
+        },
+        ty: ptr_bool.clone(),
+        source: SourceRange { start: 1, end: 2 },
+    };
+    assert!(nir::phases::validate(&captured_pkg).is_err());
+
+    // Local binding inside global_runtime_deliveries is rejected.
+    let mut captured_global = package;
+    captured_global.global_runtime_deliveries.insert(
+        rt_id,
+        Expr {
+            kind: K::AddressOf(Box::new(flag(K::Local(LocalId { owner: 9, index: 0 })))),
+            ty: ptr_bool,
+            source: SourceRange { start: 1, end: 2 },
+        },
+    );
+    assert!(nir::phases::validate(&captured_global).is_err());
 }

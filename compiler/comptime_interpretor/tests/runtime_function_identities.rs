@@ -58,6 +58,7 @@ fn package() -> Package {
                     arguments: vec![Term::Primitive(Primitive::Bool)],
                 },
             },
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     }

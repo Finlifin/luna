@@ -27,6 +27,7 @@ fn private_storage_roots(body: &Expr, fuel: &mut usize) -> Result<BTreeSet<Local
                 collect_pattern_storage(pattern, &mut candidates, &mut exposed, fuel)?;
             }
             K::AddressOf(value) => expose(value, fuel)?,
+            K::ConstAddress { .. } => {}
             K::Closure { captures, .. } => {
                 for capture in captures {
                     *fuel = fuel
@@ -207,6 +208,9 @@ impl Infer<'_, '_> {
         };
         let mut joined = None;
         for target in targets {
+            if matches!(target.root, PointerRoot::ConstGlobal(_)) {
+                return Err("cannot write through a pointer to a global constant".into());
+            }
             let PointerRoot::Local { binding, storage } = target.root else {
                 return Err("external code store requires a callable transition contract".into());
             };
@@ -286,6 +290,9 @@ impl Infer<'_, '_> {
         let exact = targets.len() == 1;
         let values = values.ok_or("local pointer store has unknown value provenance")?;
         for target in targets {
+            if matches!(target.root, PointerRoot::ConstGlobal(_)) {
+                return Err("cannot write through a pointer to a global constant".into());
+            }
             let PointerRoot::Local { binding, storage } = target.root else {
                 return Err("pointer store or owned write requires a richer contract".into());
             };

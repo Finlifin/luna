@@ -136,6 +136,7 @@ fn nonterminating_private_loop_is_p4_but_not_a_stable_default() {
                 defaults: vec![],
             },
             body: body.clone(),
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     };

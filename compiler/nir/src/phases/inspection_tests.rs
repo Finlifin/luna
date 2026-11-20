@@ -37,6 +37,7 @@ fn function(local: u32, phase: Phase) -> Function {
             capabilities: vec![],
         },
         body: flag(),
+        runtime_deliveries: Default::default(),
     }
 }
 fn run(package: &Package, fuel: &mut usize) -> Result<BTreeSet<crate::DeclarationId>, Error> {

@@ -14,6 +14,14 @@ pub(super) struct VariantLayout {
     pub fields: Vec<Term>,
 }
 
+#[derive(Clone, Copy)]
+pub struct DropEnvContext<'a> {
+    pub env_parameters: &'a [nir::program::RuntimeEnvParameter],
+    pub runtime_deliveries: &'a BTreeMap<nir::RuntimeId, nir::program::Expr>,
+    pub global_runtime_deliveries: &'a BTreeMap<nir::RuntimeId, nir::program::Expr>,
+    pub fallback_source: nir::program::SourceRange,
+}
+
 /// Borrowed evidence for one cleanup instant, not a persistent certificate.
 /// Every alternative in a stored pointer must satisfy the access obligation.
 #[derive(Clone, Copy)]
@@ -25,6 +33,8 @@ pub struct PointerMemory<'a> {
     pub pointer_conditions: &'a BTreeMap<Place, BTreeMap<Place, Vec<(Vec<usize>, usize)>>>,
     /// Positions already destroyed earlier in this cleanup sequence.
     pub retired: &'a [Place],
+    /// Enclosing function's runtime environment context for delivering Drop env arguments.
+    pub env: Option<DropEnvContext<'a>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -34,6 +44,8 @@ pub struct AccessCheck {
     pub footprint: memory::Summary,
     /// Resolved places in the same order as footprint.accesses.
     pub targets: Vec<BTreeSet<Place>>,
+    /// Delivered runtime environment expressions matching `selected.env_requirements`.
+    pub env_arguments: Vec<nir::program::Expr>,
 }
 impl fmt::Display for AccessCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -49,7 +61,15 @@ impl fmt::Display for AccessCheck {
             }
             f.write_str(")")?;
         }
-        f.write_str("))")
+        f.write_str(")")?;
+        if !self.env_arguments.is_empty() {
+            f.write_str(" (env")?;
+            for arg in &self.env_arguments {
+                write!(f, " {arg}")?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(")")
     }
 }
 
@@ -222,6 +242,104 @@ pub(super) fn check_access_with_context(
     if function.parameters != selected.parameters || program != selected.program {
         return Err("captured Drop body contract changed".into());
     }
+    let mut expected_env = Vec::with_capacity(function.env_parameters.len());
+    for env in &function.env_parameters {
+        let substituted = substitution
+            .instantiate_bounded(
+                &Term::Rigid {
+                    declaration: env.declaration,
+                    sort: Sort::Runtime,
+                },
+                fuel,
+            )
+            .map_err(|e| e.to_string())?;
+        let (declaration, runtime_id) = match substituted {
+            Term::Runtime(id) => (env.declaration, Some(id)),
+            Term::Rigid {
+                declaration: next,
+                sort: Sort::Runtime,
+            } => (next, env.runtime_id),
+            _ => return Err("captured Drop environment parameter disagrees with body".into()),
+        };
+        let ty = substitution
+            .instantiate_bounded(&env.ty, fuel)
+            .map_err(|e| e.to_string())?;
+        expected_env.push(DropEnvRequirement {
+            declaration,
+            runtime_id,
+            binding: env.binding,
+            ty,
+        });
+    }
+    if expected_env != selected.env_requirements {
+        return Err("captured Drop body environment contract changed".into());
+    }
+    let mut env_arguments = Vec::with_capacity(selected.env_requirements.len());
+    let mut resolved_envs: Vec<(BTreeSet<Place>, Term)> =
+        Vec::with_capacity(selected.env_requirements.len());
+    if !selected.env_requirements.is_empty() {
+        let pointers_ctx =
+            pointers.ok_or("Drop runtime environment access requires a memory snapshot")?;
+        let env_ctx = pointers_ctx
+            .env
+            .ok_or("Drop runtime environment requires an active call-site environment context")?;
+        for req in &selected.env_requirements {
+            charge(fuel, 1)?;
+            let delivered = env_ctx
+                .env_parameters
+                .iter()
+                .find(|ep| match (req.runtime_id, ep.runtime_id) {
+                    (Some(req_id), Some(ep_id)) => req_id == ep_id,
+                    (None, _) => ep.declaration == req.declaration,
+                    (Some(_), None) => false,
+                })
+                .map(|ep| nir::program::Expr {
+                    source: env_ctx.fallback_source,
+                    ty: ep.ty.clone(),
+                    kind: nir::program::ExprKind::Local(ep.binding),
+                })
+                .or_else(|| {
+                    req.runtime_id.and_then(|id| {
+                        env_ctx
+                            .runtime_deliveries
+                            .get(&id)
+                            .or_else(|| env_ctx.global_runtime_deliveries.get(&id))
+                            .cloned()
+                    })
+                })
+                .ok_or("Drop runtime environment argument is not deliverable in this scope")?;
+            if delivered.ty != req.ty {
+                return Err(
+                    "Drop runtime environment argument type disagrees with requirement".into(),
+                );
+            }
+            if let Some(message) =
+                nir::program::pointer_operation_error_in(&delivered, package.target)
+            {
+                return Err(message.into());
+            }
+            match &req.ty {
+                Term::Pointer(pointee) => {
+                    let targets = resolve_env_pointer_targets(
+                        package,
+                        &delivered,
+                        pointee,
+                        state,
+                        pointers_ctx,
+                        variant_layouts,
+                        fuel,
+                    )?;
+                    resolved_envs.push((targets, (**pointee).clone()));
+                }
+                _ => {
+                    return Err(
+                        "Drop runtime environment value must currently be a lifted pointer".into(),
+                    );
+                }
+            }
+            env_arguments.push(delivered);
+        }
+    }
     let constructed = state
         .cleanup_tree(receiver, fuel)
         .map_err(|error| format!("Drop receiver state: {error:?}"))?
@@ -281,11 +399,16 @@ pub(super) fn check_access_with_context(
                 "Drop receiver footprint cannot originate in a by-value input field".into(),
             );
         }
-        if access.target.parameter != 0 {
-            return Err("Drop access targets a non-receiver parameter".into());
-        }
-        let mut targets = BTreeSet::from([receiver.clone()]);
-        let mut ty = selected.subject.clone();
+        let (mut targets, mut ty) = if access.target.parameter == 0 {
+            (BTreeSet::from([receiver.clone()]), selected.subject.clone())
+        } else {
+            let Some((env_targets, env_pointee_ty)) =
+                resolved_envs.get(access.target.parameter - 1)
+            else {
+                return Err("Drop access targets an unavailable parameter".into());
+            };
+            (env_targets.clone(), env_pointee_ty.clone())
+        };
         for (stage, fields) in access.target.through.iter().enumerate() {
             let guards = access
                 .target
@@ -385,6 +508,17 @@ pub(super) fn check_access_with_context(
         }
         for target in &targets {
             charge(fuel, target.fields.len().saturating_add(1))?;
+            if crate::is_const_global_place(target.root) {
+                if access.write {
+                    return Err("Drop cannot write through a pointer to a global constant".into());
+                }
+                continue;
+            }
+            if access.write {
+                if let Some(pointers) = pointers {
+                    check_retired(pointers.retired, target, fuel)?;
+                }
+            }
             let checked = if !guards.is_empty() {
                 // The typed projection checked its whole containing enum.
                 Ok(())
@@ -416,7 +550,136 @@ pub(super) fn check_access_with_context(
         constructed,
         footprint,
         targets: resolved,
+        env_arguments,
     })
+}
+
+fn address_place(mut expr: &nir::program::Expr, fuel: &mut usize) -> Result<Place, String> {
+    use nir::program::ExprKind as K;
+    let mut fields = Vec::new();
+    loop {
+        charge(fuel, 1)?;
+        match &expr.kind {
+            K::Local(binding) => {
+                fields.reverse();
+                return Ok(Place {
+                    root: PlaceId {
+                        owner: u64::from(binding.owner),
+                        local: binding.index,
+                    },
+                    fields,
+                });
+            }
+            K::Field { value, index, .. } | K::AnonymousField { value, index, .. } => {
+                fields.push(*index);
+                expr = value;
+            }
+            _ => {
+                return Err(
+                    "Drop runtime environment address expression requires a local place".into(),
+                );
+            }
+        }
+    }
+}
+
+fn resolve_env_pointer_targets(
+    package: &Package,
+    delivered: &nir::program::Expr,
+    pointee: &Term,
+    state: &State,
+    pointers: PointerMemory<'_>,
+    variant_layouts: &BTreeMap<Place, VariantLayout>,
+    fuel: &mut usize,
+) -> Result<BTreeSet<Place>, String> {
+    use nir::program::ExprKind as K;
+    match &delivered.kind {
+        K::ConstAddress { declaration, value } => {
+            if &value.ty != pointee {
+                return Err(
+                    "Drop runtime environment constant address disagrees with pointee type".into(),
+                );
+            }
+            if !nir::free_bindings::collect(value, fuel)
+                .map_err(|e| e.to_string())?
+                .is_empty()
+            {
+                return Err(
+                    "Drop runtime environment constant address retains free local bindings".into(),
+                );
+            }
+            Ok(BTreeSet::from([Place {
+                root: crate::const_global_place(*declaration),
+                fields: vec![],
+            }]))
+        }
+        K::AddressOf(place_expr) => {
+            let place = address_place(place_expr, fuel)?;
+            check_retired(pointers.retired, &place, fuel)?;
+            state.require_present(&place).map_err(|e| {
+                format!("Drop runtime environment target {place} is unavailable: {e:?}")
+            })?;
+            if place_type(package, pointers.types, &place, variant_layouts, fuel)? != *pointee {
+                return Err(
+                    "Drop runtime environment pointer target type disagrees with pointee".into(),
+                );
+            }
+            Ok(BTreeSet::from([place]))
+        }
+        K::Local(binding) => {
+            let slot_place = Place {
+                root: PlaceId {
+                    owner: u64::from(binding.owner),
+                    local: binding.index,
+                },
+                fields: vec![],
+            };
+            check_retired(pointers.retired, &slot_place, fuel)?;
+            state.require_present(&slot_place).map_err(|e| {
+                format!(
+                    "Drop runtime environment binding {slot_place} is unavailable: {e:?}"
+                )
+            })?;
+            let values = pointers
+                .slots
+                .get(&slot_place)
+                .filter(|values| !values.is_empty())
+                .ok_or("Drop runtime environment pointer binding lacks target provenance")?;
+            for target in values {
+                charge(fuel, target.fields.len().saturating_add(1))?;
+                if crate::is_const_global_place(target.root) {
+                    if pointers.types.contains_key(&target.root)
+                        && place_type(package, pointers.types, target, variant_layouts, fuel)?
+                            != *pointee
+                    {
+                        return Err(
+                            "Drop runtime environment constant target type disagrees with pointee"
+                                .into(),
+                        );
+                    }
+                } else {
+                    check_retired(pointers.retired, target, fuel)?;
+                    state.require_present(target).map_err(|e| {
+                        format!(
+                            "Drop runtime environment target {target} is unavailable: {e:?}"
+                        )
+                    })?;
+                    if place_type(package, pointers.types, target, variant_layouts, fuel)?
+                        != *pointee
+                    {
+                        return Err(
+                            "Drop runtime environment pointer target type disagrees with pointee"
+                                .into(),
+                        );
+                    }
+                }
+            }
+            Ok(values.clone())
+        }
+        _ => Err(
+            "Drop runtime environment delivery requires a local binding, local address, or constant address".into(),
+        ),
+    }
 }
 
 fn enclosing_variant_conditions(

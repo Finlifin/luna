@@ -42,6 +42,7 @@ fn package(width: usize) -> Package {
                 requirements: vec![],
                 capabilities: vec![],
             },
+            runtime_deliveries: Default::default(),
             body: Expr {
                 kind: ExprKind::Block {
                     statements: vec![flag(); width],

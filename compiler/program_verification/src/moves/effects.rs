@@ -1585,6 +1585,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     live: true,
                     ..Default::default()
                 };
+                self.predeclare_const_globals(&mut frame, arm.body.source)?;
                 // Shared captures are observed at request time, not copied at
                 // installation. They remain owned by the installing scope.
                 let checked = self.in_temporary_scope(

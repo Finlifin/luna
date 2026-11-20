@@ -34,6 +34,18 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     .require_place(&target)
                     .map_err(|e| error(source, format!("address target unavailable: {e:?}")))?;
             }
+            K::ConstAddress { declaration, value } => {
+                if !nir::free_bindings::collect(value, &mut self.fuel)
+                    .map_err(|reason| error(source, reason.to_string()))?
+                    .is_empty()
+                {
+                    return Err(error(
+                        source,
+                        "constant address retains free local bindings",
+                    ));
+                }
+                self.ensure_const_global(flow, *declaration, &value.ty, source)?;
+            }
             K::PointerAnonymousField { .. } | K::PointerField { .. } => {
                 self.evaluate_pointer_value(expr, flow, depth + 1)?;
             }
@@ -318,6 +330,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     live: true,
                     ..Default::default()
                 };
+                self.predeclare_const_globals(&mut inner, source)?;
                 self.pending_frame(source, |this| {
                     for (slot, (capture, expected)) in
                         captures.iter().zip(expected_captures).enumerate()
@@ -1132,6 +1145,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         let targets = target.ok_or_else(|| {
                             error(source, "pointer target provenance is not established")
                         })?;
+                        this.check_const_global_writes(&targets, source)?;
                         this.check_observation_write_targets(&targets, source)?;
                         for input in selections
                             .iter()
@@ -1341,6 +1355,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                                     enum_domains: &flow.enum_domains,
                                     pointer_conditions: &flow.pointer_guards,
                                     retired: &[],
+                                    env: Some(this.drop_env_context()),
                                 },
                                 &variants,
                                 &domains,

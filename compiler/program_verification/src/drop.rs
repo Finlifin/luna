@@ -16,6 +16,23 @@ use std::fmt;
 mod evidence;
 pub use evidence::SelectionEvidence;
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct DropEnvRequirement {
+    pub declaration: DeclarationId,
+    pub runtime_id: Option<nir::RuntimeId>,
+    pub binding: LocalId,
+    pub ty: Term,
+}
+impl fmt::Display for DropEnvRequirement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(drop-env (declaration {})", self.declaration)?;
+        if let Some(id) = self.runtime_id {
+            write!(f, " (runtime-id {id})")?;
+        }
+        write!(f, " (binding {}) (type {}))", self.binding, self.ty)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SelectedDrop {
     pub protocol: DeclarationId,
@@ -25,6 +42,7 @@ pub struct SelectedDrop {
     pub method: MethodInstance,
     pub contract: MethodContract,
     pub parameters: Vec<LocalId>,
+    pub env_requirements: Vec<DropEnvRequirement>,
     pub program: ProgramContract,
     /// Concrete type capabilities, not captured runtime handler/allocator values.
     capabilities: Vec<TraitRequirement>,
@@ -71,6 +89,12 @@ impl fmt::Display for SelectedDrop {
         )?;
         for parameter in &self.parameters {
             write!(f, " {parameter}")?;
+        }
+        if !self.env_requirements.is_empty() {
+            f.write_str(") (env-requirements")?;
+            for env in &self.env_requirements {
+                write!(f, " {env}")?;
+            }
         }
         write!(f, ") {} (capabilities", self.program)?;
         for capability in &self.capabilities {
@@ -364,7 +388,6 @@ pub fn select(
     if function.phase != FunctionPhase::Runtime
         || actual != signature(subject.clone())
         || function.parameters.len() != 1
-        || !function.env_parameters.is_empty()
         || !function.defaults.is_empty()
     {
         return Err("Drop selected body does not implement runtime fn drop(*self) -> void".into());
@@ -380,6 +403,39 @@ pub fn select(
         &mut preparation_fuel,
     )
     .map_err(|e| e.to_string())?;
+    let mut env_requirements = Vec::with_capacity(function.env_parameters.len());
+    for env in &function.env_parameters {
+        let substituted = scoped
+            .instantiate_bounded(
+                &Term::Rigid {
+                    declaration: env.declaration,
+                    sort: Sort::Runtime,
+                },
+                &mut preparation_fuel,
+            )
+            .map_err(|e| e.to_string())?;
+        let (declaration, runtime_id) = match substituted {
+            Term::Runtime(id) => (env.declaration, Some(id)),
+            Term::Rigid {
+                declaration: next,
+                sort: Sort::Runtime,
+            } => (next, env.runtime_id),
+            _ => {
+                return Err(
+                    "Drop environment parameter did not instantiate to a runtime identity".into(),
+                );
+            }
+        };
+        let ty = scoped
+            .instantiate_bounded(&env.ty, &mut preparation_fuel)
+            .map_err(|e| e.to_string())?;
+        env_requirements.push(DropEnvRequirement {
+            declaration,
+            runtime_id,
+            binding: env.binding,
+            ty,
+        });
+    }
     for requirement in &function.requirements {
         let requirement = scoped
             .instantiate_predicate_bounded(requirement, &mut preparation_fuel)
@@ -434,6 +490,7 @@ pub fn select(
         },
         contract,
         parameters: function.parameters.clone(),
+        env_requirements,
         program,
         capabilities,
         evidence: SelectionEvidence::capture(protocol, subject, resolution, &mut preparation_fuel)?,
@@ -441,7 +498,9 @@ pub fn select(
 }
 
 mod access;
-pub use access::{AccessCheck, PointerMemory, check_access, check_access_with_memory};
+pub use access::{
+    AccessCheck, DropEnvContext, PointerMemory, check_access, check_access_with_memory,
+};
 
 mod plan;
 pub use plan::{

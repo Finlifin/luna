@@ -995,6 +995,7 @@ impl Emitter<'_> {
                 self.record(expr.source, fields, &expr.ty, depth)
             }
             K::AddressOf(place) => self.address(place, depth),
+            K::ConstAddress { declaration, value } => self.const_address(*declaration, value),
             K::Unit => Ok(Value::unit()),
             K::LetPattern {
                 pattern,
@@ -2985,7 +2986,11 @@ pub(super) fn validate_cleanup(
                             function.instance
                         ));
                     }
-                    Step::Invoke { .. } => {}
+                    Step::Invoke { env_arguments, .. } => {
+                        for env_arg in env_arguments {
+                            representations.push(&env_arg.ty);
+                        }
+                    }
                 }
             }
             representations.push(&program.ty);

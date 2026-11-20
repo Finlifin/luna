@@ -26,7 +26,7 @@ mod expansion;
 pub use expansion::Expansion;
 use nir::program::{self as n, ExprKind as K, Pattern as P};
 use nir::{DeclarationId as Id, Term};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use type_resolution::dispatch::DeclarationWorld;
 pub use type_resolution::dispatch::{
     BorrowedCatalog, ClosedDeclarations, DeclarationSnapshot, DeclarationSource, MemberDataSource,
@@ -123,6 +123,7 @@ struct Builder<'a> {
     budget: Budget,
     instances: Option<Vec<iir::FunctionInstance>>,
     runtime_bindings: BTreeSet<nir::RuntimeId>,
+    global_runtime_deliveries: BTreeMap<nir::RuntimeId, n::Expr>,
     nominals: Vec<iir::NominalInstance>,
     interface_contracts: Vec<iir::InterfaceContract>,
     effect_contracts: Vec<iir::effects::Contract>,
@@ -498,6 +499,7 @@ impl<'a> InstantiationSession<'a> {
             expansion_sources,
             effect_contracts,
             callable_identities,
+            global_runtime_deliveries,
             frozen_methods,
             mut type_cores,
             remaining: mut publication_fuel,
@@ -541,6 +543,7 @@ impl<'a> InstantiationSession<'a> {
             templates,
             dispatch,
             runtime_bindings,
+            global_runtime_deliveries,
             nominals,
             interfaces,
             normal_forms,
@@ -590,6 +593,7 @@ struct BuildResult {
     effect_contracts: Vec<iir::effects::Contract>,
     frozen_methods: Vec<n::Expr>,
     callable_identities: Vec<iir::CallableIdentity>,
+    global_runtime_deliveries: BTreeMap<nir::RuntimeId, n::Expr>,
     type_cores: nir::TypeInterner,
 }
 
@@ -705,6 +709,7 @@ fn build(
         budget,
         instances: matches!(roots, Roots::Iir(_)).then(Vec::new),
         runtime_bindings,
+        global_runtime_deliveries: BTreeMap::new(),
         nominals: vec![],
         interface_contracts: vec![],
         effect_contracts: vec![],
@@ -829,6 +834,20 @@ fn build(
             }
         }
     }
+    if builder.instances.is_some() {
+        for (&id, expr) in &package.global_runtime_deliveries {
+            builder.tick(0)?;
+            let mut remaining = u64::try_from(builder.fuel).unwrap_or(u64::MAX);
+            nir::copy_budget::charge_expression(expr, &mut remaining).map_err(|reason| {
+                format!("global runtime delivery copy budget exhausted: {reason:?}")
+            })?;
+            builder.fuel = usize::try_from(remaining).unwrap_or(usize::MAX);
+            let mut expr = expr.clone();
+            builder.normalize_expression(&mut expr)?;
+            builder.expr(&expr, 0, false)?;
+            builder.global_runtime_deliveries.insert(id, expr);
+        }
+    }
     while let Some(task) = builder.queue.pop_front() {
         builder.tick(0)?;
         match task {
@@ -871,6 +890,7 @@ fn build(
         effect_contracts: builder.effect_contracts,
         frozen_methods: builder.frozen_methods,
         callable_identities: builder.callable_identities,
+        global_runtime_deliveries: builder.global_runtime_deliveries,
         type_cores: builder.type_cores,
     })
 }
@@ -1016,6 +1036,9 @@ impl Builder<'_> {
         {
             self.normalize_expression(expression)?;
         }
+        for expression in function.runtime_deliveries.values_mut() {
+            self.normalize_expression(expression)?;
+        }
         function.type_parameters.clear();
         // Interface and body predicates may substitute the same staged
         // input expression. Each predicate executes at a distinct boundary,
@@ -1060,6 +1083,9 @@ impl Builder<'_> {
             .chain(function.interface.defaults.iter().map(|(_, e)| e))
         {
             self.expr(expression, 0, comptime)?;
+        }
+        for expression in function.runtime_deliveries.values() {
+            self.expr(expression, 0, false)?;
         }
         self.instances
             .as_mut()
@@ -3049,6 +3075,7 @@ impl Builder<'_> {
                 | K::CheckPredicate(value)
                 | K::BitSlice { value, .. }
                 | K::AddressOf(value)
+                | K::ConstAddress { value, .. }
                 | K::ReadPointer(value)
                 | K::PointerAnonymousField { pointer: value, .. }
                 | K::PointerField { pointer: value, .. }
@@ -3523,6 +3550,7 @@ impl Builder<'_> {
             | K::CheckPredicate(value)
             | K::BitSlice { value, .. }
             | K::AddressOf(value)
+            | K::ConstAddress { value, .. }
             | K::ReadPointer(value)
             | K::PointerAnonymousField { pointer: value, .. }
             | K::PointerField { pointer: value, .. }

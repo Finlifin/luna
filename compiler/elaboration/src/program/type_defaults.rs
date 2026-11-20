@@ -559,14 +559,32 @@ impl<'h> Checker<'_, 'h> {
                 }
             }
             if let Term::Lift(inner) = &domain {
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let has_rigid =
+                    nir::type_computations::has_rigid_parameters_bounded(&domain, &mut fuel);
+                self.required_steps -= (before - fuel) as u64;
+                let has_rigid = has_rigid.map_err(|failure| {
+                    error(
+                        value.span,
+                        format!("default input domain inspection failed: {failure}"),
+                    )
+                })?;
+                let expected_lift = (!has_rigid).then_some(inner.as_ref());
                 let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
                 let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
                 let saved_locals = std::mem::take(&mut self.locals);
-                let checked = self.expr(value, Some(inner));
+                let checked = self.expr(value, expected_lift);
                 self.locals = saved_locals;
                 self.in_staged_input = saved_staged;
                 self.in_required_comptime = saved_required;
-                checked?;
+                let checked = checked?;
+                if is_never(&checked.ty) {
+                    return Err(error(
+                        value.span,
+                        "diverging default cannot satisfy a runtime quote dependency",
+                    ));
+                }
                 return Ok(Vec::new());
             }
             let checked = self.expr(value, Some(&domain))?;

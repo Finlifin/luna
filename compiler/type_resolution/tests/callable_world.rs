@@ -53,6 +53,7 @@ fn function(local: u32) -> Function {
             ty: boolean(),
             kind: ExprKind::Local(binding),
         },
+        runtime_deliveries: Default::default(),
     }
 }
 fn package(noise: u32) -> Package {

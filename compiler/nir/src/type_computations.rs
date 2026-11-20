@@ -155,6 +155,7 @@ fn entry_with_bound_locals(
             defaults: vec![],
         },
         body,
+        runtime_deliveries: Default::default(),
     })
 }
 impl std::error::Error for Error {}

@@ -38,6 +38,7 @@ fn source() -> n::Package {
                 ty: boolean,
                 kind: K::Literal(n::Literal::Bool(true)),
             },
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     }

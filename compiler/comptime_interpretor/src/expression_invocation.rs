@@ -150,6 +150,7 @@ mod tests {
                 capabilities: vec![],
             },
             body: flag(true),
+            runtime_deliveries: Default::default(),
         }
     }
 

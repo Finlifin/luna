@@ -2310,7 +2310,10 @@ impl Checker<'_, '_> {
                 nir::visit::expression_pruned(root, &mut fuel, |expr, _| {
                     may_change_schema |= matches!(
                         expr.kind,
-                        K::AddressOf(_) | K::Assign { .. } | K::Call { .. }
+                        K::AddressOf(_)
+                            | K::ConstAddress { .. }
+                            | K::Assign { .. }
+                            | K::Call { .. }
                     );
                     if let K::Call {
                         callee,

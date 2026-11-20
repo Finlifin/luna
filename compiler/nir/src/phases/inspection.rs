@@ -256,6 +256,7 @@ mod tests {
                 kind: K::Local(parameter),
                 ..flag()
             },
+            runtime_deliveries: Default::default(),
         }
     }
     fn call(function: &Function) -> Expr {

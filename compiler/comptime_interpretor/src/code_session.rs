@@ -532,6 +532,7 @@ mod tests {
                     defaults: vec![],
                 },
                 body: body.clone(),
+                runtime_deliveries: Default::default(),
             }],
             ..Default::default()
         });

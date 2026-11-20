@@ -62,6 +62,7 @@ fn function(preconditions: Vec<Expr>, postconditions: Vec<Expr>) -> Function {
             capabilities: vec![],
         },
         body: expr(K::Unit, Primitive::Void),
+        runtime_deliveries: Default::default(),
     }
 }
 

@@ -46,6 +46,7 @@ fn function(body: Expr) -> Function {
             },
         },
         body,
+        runtime_deliveries: Default::default(),
     }
 }
 

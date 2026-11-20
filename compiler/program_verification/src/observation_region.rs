@@ -253,6 +253,7 @@ pub(super) fn check(
             | K::Field { .. }
             | K::AnonymousField { .. }
             | K::AddressOf(_)
+            | K::ConstAddress { .. }
             | K::ReadPointer(_)
             | K::PointerField { .. }
             | K::PointerAnonymousField { .. }

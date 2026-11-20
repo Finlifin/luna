@@ -152,6 +152,7 @@ fn env_parameters_and_call_env_arguments_substitute_and_display() {
     header.phase = FunctionPhase::Runtime;
     header.env_parameters.push(RuntimeEnvParameter {
         declaration: id(4),
+        runtime_id: None,
         binding: binding(4),
         ty: Term::Pointer(Box::new(generic())),
     });
@@ -172,9 +173,45 @@ fn env_parameters_and_call_env_arguments_substitute_and_display() {
         instantiated.env_parameters,
         vec![RuntimeEnvParameter {
             declaration: id(4),
+            runtime_id: None,
             binding: binding(4),
             ty: Term::Pointer(Box::new(concrete.clone())),
         }]
+    );
+
+    let rt_id = nir::RuntimeId {
+        instance: 2,
+        local: 9,
+    };
+    let with_runtime_id = header
+        .instantiate_parameters(
+            &[
+                DeclarationParameter {
+                    declaration: id(2),
+                    sort: Sort::Type,
+                },
+                DeclarationParameter {
+                    declaration: id(4),
+                    sort: Sort::Runtime,
+                },
+            ],
+            &[concrete.clone(), Term::Runtime(rt_id)],
+        )
+        .unwrap();
+    assert_eq!(
+        with_runtime_id.env_parameters,
+        vec![RuntimeEnvParameter {
+            declaration: id(4),
+            runtime_id: Some(rt_id),
+            binding: binding(4),
+            ty: Term::Pointer(Box::new(concrete.clone())),
+        }]
+    );
+    assert!(
+        with_runtime_id
+            .to_string()
+            .contains("(runtime-id (runtime (instance 2) (local 9)))"),
+        "{with_runtime_id}"
     );
 
     let env_arg = expression(

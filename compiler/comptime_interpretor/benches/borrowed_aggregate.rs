@@ -75,6 +75,7 @@ fn main() {
                         ty: boolean,
                         kind: K::Literal(nir::program::Literal::Bool(true)),
                     },
+                    runtime_deliveries: Default::default(),
                 }],
                 ..Default::default()
             };

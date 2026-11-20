@@ -110,6 +110,7 @@ fn fixture(arity: usize, repeats: usize) -> Package {
                 },
             },
             body,
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     }

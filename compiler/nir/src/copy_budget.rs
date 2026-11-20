@@ -626,6 +626,13 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                 0
             }
             Node::Function(function) => {
+                charge_width(steps, function.runtime_deliveries.len())?;
+                work.extend(
+                    function
+                        .runtime_deliveries
+                        .values()
+                        .map(|expr| (Node::Expr(expr), depth)),
+                );
                 work.push((Node::Expr(&function.body), depth));
                 work.push((Node::FunctionDeclaration(&function.interface), depth));
                 0
@@ -1000,6 +1007,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     | K::OptionalType(value)
                     | K::PointerType(value)
                     | K::AddressOf(value)
+                    | K::ConstAddress { value, .. }
                     | K::ReadPointer(value)
                     | K::ListLength(value)
                     | K::NewtypeRepresentation(value)

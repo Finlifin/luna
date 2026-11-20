@@ -154,6 +154,7 @@ impl Walker<'_> {
                         })?
                         .map(|target| (state.frame, vec![target]));
             }
+            K::ConstAddress { .. } => {}
             K::PointerField {
                 pointer,
                 declaration,
@@ -805,6 +806,7 @@ mod tests {
                 },
                 void,
             ),
+            runtime_deliveries: Default::default(),
         }
     }
 

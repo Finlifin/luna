@@ -2096,6 +2096,7 @@ impl Checker<'_, '_> {
                                 .unwrap_or_default(),
                         },
                         body: behavior,
+                        runtime_deliveries: Default::default(),
                     });
                 }
                 Ok(())
@@ -7853,12 +7854,19 @@ impl Checker<'_, '_> {
                 .package
                 .body(*body)
                 .ok_or_else(|| error(span, "missing open function body"))?;
-            this.function_body(owner, body.value, result)
+            let body = this.function_body(owner, body.value, result)?;
+            let runtime_deliveries = this
+                .local_runtime_deliveries
+                .iter()
+                .map(|(id, entry)| (*id, entry.expr.clone()))
+                .collect();
+            Ok((body, runtime_deliveries))
         });
         self.open_instantiation_depth -= 1;
         match body {
-            Ok(body) => {
-                self.generated_functions.finish_body(id, body);
+            Ok((body, runtime_deliveries)) => {
+                self.generated_functions
+                    .finish_body(id, body, runtime_deliveries);
                 Ok(id)
             }
             Err(failure) => {

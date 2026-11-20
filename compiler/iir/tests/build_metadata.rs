@@ -63,6 +63,7 @@ fn graph() -> Package {
                         ],
                     },
                 ),
+                runtime_deliveries: Default::default(),
             },
         }],
         ..Default::default()

@@ -40,6 +40,7 @@ fn function() -> Function {
             source: SourceRange { start: 0, end: 1 },
             kind: ExprKind::Local(LocalId { owner: 1, index: 0 }),
         },
+        runtime_deliveries: Default::default(),
     }
 }
 

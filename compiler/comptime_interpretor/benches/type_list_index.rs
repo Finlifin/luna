@@ -140,6 +140,7 @@ fn package(length: usize, reads: usize, mode: &str) -> Package {
                     result: Some(Box::new(read)),
                 },
             },
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     }

@@ -70,6 +70,7 @@ fn source() -> Arc<Package> {
                 capabilities: vec![premise(1)],
             },
             body: flag(),
+            runtime_deliveries: Default::default(),
         }],
         normal_forms: vec![nir::normal_forms::Head {
             declaration: id(4),

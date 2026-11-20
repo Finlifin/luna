@@ -227,6 +227,7 @@ pub(crate) fn prepare_runtime_entry<'a>(
             },
         },
         body: call,
+        runtime_deliveries: Default::default(),
     };
     let mut owned = package.clone();
     owned.functions.push(wrapper);

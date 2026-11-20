@@ -137,6 +137,7 @@ fn package(reads: usize, mode: &str, query: Option<ObjectQueryKind>, reference: 
                     result: Some(Box::new(read)),
                 },
             },
+            runtime_deliveries: Default::default(),
         }],
         ..Default::default()
     };

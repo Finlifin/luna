@@ -265,6 +265,7 @@ mod frame_tests {
                 ty: Term::Primitive(Primitive::Bool),
                 kind: K::Literal(Literal::Bool(true)),
             },
+            runtime_deliveries: Default::default(),
         };
         let output = function.callable_type();
         let package = Package {
@@ -444,6 +445,7 @@ mod frame_tests {
                 ty: Term::Primitive(Primitive::Bool),
                 kind: K::Literal(Literal::Bool(true)),
             },
+            runtime_deliveries: Default::default(),
         };
         let output = function.callable_type();
         let package = Package {
@@ -610,6 +612,7 @@ mod frame_tests {
                     requirements: vec![],
                     capabilities: vec![],
                 },
+                runtime_deliveries: Default::default(),
                 body: Expr {
                     source,
                     ty: output.ty.clone(),

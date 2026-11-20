@@ -1301,6 +1301,11 @@ pub enum ExprKind {
     PointerType(Box<Expr>),
     /// Address a checked local/field place without delivering its contents.
     AddressOf(Box<Expr>),
+    /// Address immutable global static storage holding a constant value.
+    ConstAddress {
+        declaration: DeclarationId,
+        value: Box<Expr>,
+    },
     ReadPointer(Box<Expr>),
     PointerAnonymousField {
         pointer: Box<Expr>,
@@ -2068,6 +2073,7 @@ pub struct Package {
     pub definition_attributes: std::collections::BTreeMap<DeclarationId, Term>,
     pub attributes_evaluating: bool,
     pub runtime_domains: std::collections::BTreeMap<crate::RuntimeId, Term>,
+    pub global_runtime_deliveries: std::collections::BTreeMap<crate::RuntimeId, Expr>,
 }
 
 /// Acquired cleanup accesses, expressed relative to one residual invocation's inputs.
@@ -3494,6 +3500,9 @@ impl fmt::Display for ExprKind {
                 write!(f, "(type-layout {query} (operand {operand}))")
             }
             Self::AddressOf(place) => write!(f, "(address-of (place {place}))"),
+            Self::ConstAddress { declaration, value } => {
+                write!(f, "(const-address (declaration {declaration}) {value})")
+            }
             Self::ReadPointer(pointer) => write!(f, "(read-pointer (pointer {pointer}))"),
             Self::PointerAnonymousField {
                 pointer,
@@ -3683,6 +3692,13 @@ impl fmt::Display for Package {
             }
             f.write_str(")")?;
         }
+        if !self.global_runtime_deliveries.is_empty() {
+            f.write_str("\n (global-runtime-deliveries")?;
+            for (runtime, expr) in &self.global_runtime_deliveries {
+                write!(f, " (delivery {runtime} {expr})")?;
+            }
+            f.write_str(")")?;
+        }
         f.write_str(")\n")
     }
 }
@@ -3853,6 +3869,7 @@ impl Expr {
                     | ExprKind::CheckPredicate(_)
                     | ExprKind::BitSlice { .. }
                     | ExprKind::AddressOf(_)
+                    | ExprKind::ConstAddress { .. }
                     | ExprKind::ReadPointer(_)
                     | ExprKind::PointerAnonymousField { .. }
                     | ExprKind::PointerField { .. }
@@ -3964,6 +3981,7 @@ impl Expr {
                 | ExprKind::CheckPredicate(value)
                 | ExprKind::BitSlice { value, .. }
                 | ExprKind::AddressOf(value)
+                | ExprKind::ConstAddress { value, .. }
                 | ExprKind::ReadPointer(value)
                 | ExprKind::PointerAnonymousField { pointer: value, .. }
                 | ExprKind::PointerField { pointer: value, .. }
@@ -4406,6 +4424,7 @@ impl Expr {
             | ExprKind::CheckPredicate(value)
             | ExprKind::BitSlice { value, .. }
             | ExprKind::AddressOf(value)
+            | ExprKind::ConstAddress { value, .. }
             | ExprKind::ReadPointer(value)
             | ExprKind::PointerAnonymousField { pointer: value, .. }
             | ExprKind::PointerField { pointer: value, .. }
@@ -4981,6 +5000,11 @@ pub fn pointer_operation_error_in(
 ) -> Option<&'static str> {
     use ExprKind as K;
     match &expr.kind {
+        K::ConstAddress { value, .. } => {
+            if expr.ty != Term::Pointer(Box::new(value.ty.clone())) {
+                return Some("const-address type disagrees with pointee");
+            }
+        }
         K::AddressOf(place) => {
             if expr.ty != Term::Pointer(Box::new(place.ty.clone())) {
                 return Some("address-of result does not match its place type");

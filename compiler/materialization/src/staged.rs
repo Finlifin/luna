@@ -655,7 +655,11 @@ pub(super) fn forward_template_aliases(
     iir::visit::expression_pruned(expression, fuel, |expr, fuel| {
         if matches!(
             expr.kind,
-            K::Assign { .. } | K::AddressOf(_) | K::Closure { .. } | K::TemplateEqual(..)
+            K::Assign { .. }
+                | K::AddressOf(_)
+                | K::ConstAddress { .. }
+                | K::Closure { .. }
+                | K::TemplateEqual(..)
         ) {
             unavailable.extend(nir::free_bindings::collect(expr, fuel)?);
             return Ok(false);

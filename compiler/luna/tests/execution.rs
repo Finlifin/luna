@@ -11842,6 +11842,7 @@ fn parameterized_interface_package() -> Package {
             ty: rigid(12),
             kind: K::Local(parameter),
         },
+        runtime_deliveries: Default::default(),
     });
     for (serial, primitive, literal, name) in [
         (0, P::Bool, n::Literal::Bool(true), "bool_entry"),
@@ -11888,6 +11889,7 @@ fn parameterized_interface_package() -> Package {
                     result: Box::new(ty.clone()),
                 },
             },
+            runtime_deliveries: Default::default(),
             body: n::Expr {
                 source,
                 ty: ty.clone(),

@@ -486,6 +486,7 @@ mod tests {
                 source: SourceRange { start: 0, end: 1 },
                 kind: K::Literal(Literal::Bool(true)),
             },
+            runtime_deliveries: Default::default(),
         }
     }
 

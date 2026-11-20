@@ -1311,6 +1311,7 @@ impl Emitter<'_> {
                 method,
                 subject,
                 path,
+                env_arguments,
             } = step
             else {
                 continue;
@@ -1344,6 +1345,30 @@ impl Emitter<'_> {
                     "host destructor ABI requires a subject pointer and void result".into(),
                 );
             }
+            if env_arguments.len() != function.function.env_parameters.len() {
+                return Err("host destructor runtime environment argument count mismatch".into());
+            }
+            let mut call_args = vec![format!("ptr {}", slot.pointer)];
+            for (env_arg, env_param) in env_arguments
+                .iter()
+                .zip(function.function.env_parameters.iter())
+            {
+                let expected_ty = repr(self.graph, &env_param.ty, true)?;
+                if repr(self.graph, &env_arg.ty, true)? != expected_ty {
+                    return Err(
+                        "host destructor runtime environment representation mismatch".into(),
+                    );
+                }
+                let val = self.eval_cleanup_env(env_arg, 0)?;
+                if val.ty != expected_ty {
+                    return Err(
+                        "host destructor runtime environment value representation mismatch".into(),
+                    );
+                }
+                if val.ty != Ty::Unit {
+                    call_args.push(format!("{} {}", val.ty.llvm(), val.text));
+                }
+            }
             // Cleanup is a separate invocation while an outer return may be
             // pending. Its own effectful work must not consume that request.
             let pending_return = if self.failure_result.is_some() {
@@ -1360,7 +1385,10 @@ impl Emitter<'_> {
                 // destructor call (standalone emitter fixtures may supply stubs).
                 select_schedule(schedule, method, self.fuel)?;
             }
-            self.line(format!("call void @flurry_{index}(ptr {})", slot.pointer));
+            self.line(format!(
+                "call void @flurry_{index}({})",
+                call_args.join(", ")
+            ));
             if let Some(saved) = pending_return {
                 let pending =
                     self.instruction(Ty::Pointer, "load ptr, ptr @flurry_effect_control".into());
@@ -1379,6 +1407,86 @@ impl Emitter<'_> {
             }
         }
         Ok(())
+    }
+
+    fn eval_cleanup_env(&mut self, expr: &Expr, depth: usize) -> Result<Value, String> {
+        if depth >= 128 {
+            return Err("host cleanup environment nesting budget exhausted".into());
+        }
+        *self.fuel = self
+            .fuel
+            .checked_sub(1)
+            .ok_or("host cleanup environment budget exhausted")?;
+        match &expr.kind {
+            K::Local(binding) => {
+                let slot = self
+                    .locals
+                    .get(binding)
+                    .cloned()
+                    .ok_or("host cleanup environment local binding missing")?;
+                Ok(self.load(&slot))
+            }
+            K::AddressOf(place) => self.address_pure(place, depth + 1),
+            K::ConstAddress { declaration, value } => self.const_address(*declaration, value),
+            K::PointerField { pointer, index, .. }
+            | K::PointerAnonymousField { pointer, index, .. } => {
+                let base = self.eval_cleanup_env(pointer, depth + 1)?;
+                self.project_pointer(base, *index, pointers::pointee(&pointer.ty)?)
+            }
+            K::Field { value, index, .. } | K::AnonymousField { value, index, .. } => {
+                let base = self.eval_cleanup_env(value, depth + 1)?;
+                self.record_field(&base, *index)
+            }
+            K::ReadPointer(pointer) => {
+                let unaligned = self.is_packed_pointer_field(pointer);
+                let ptr = self.eval_cleanup_env(pointer, depth + 1)?;
+                let mut slot = self.pointer_slot(&ptr, &expr.ty)?;
+                if unaligned {
+                    slot.align = Some(1);
+                }
+                Ok(self.load(&slot))
+            }
+            K::Literal(literal) => {
+                let ty = repr(self.graph, &expr.ty, self.checked)?;
+                self.literal(literal, ty)
+            }
+            K::Unit => Ok(Value::unit()),
+            K::NewtypeConvert(inner) | K::UnsafeScope(inner) | K::Snapshot(inner) => {
+                self.eval_cleanup_env(inner, depth + 1)
+            }
+            _ => Err("host cleanup environment argument requires a pure expression".into()),
+        }
+    }
+
+    fn address_pure(&mut self, place: &Expr, depth: usize) -> Result<Value, String> {
+        if !self.checked {
+            return Err("host data pointers require paired Copy/Drop resource verification".into());
+        }
+        if depth >= 128 {
+            return Err("host pointer path budget exhausted".into());
+        }
+        *self.fuel = self
+            .fuel
+            .checked_sub(1)
+            .ok_or("host pointer path budget exhausted")?;
+        match &place.kind {
+            K::Local(binding) => {
+                let slot = self
+                    .locals
+                    .get(binding)
+                    .ok_or("host address binding missing")?;
+                Ok(Value {
+                    ty: Ty::Pointer,
+                    text: slot.pointer.clone(),
+                })
+            }
+            K::AnonymousField { value, index, .. } | K::Field { value, index, .. } => {
+                let base = self.address_pure(value, depth + 1)?;
+                self.project_pointer(base, *index, &value.ty)
+            }
+            K::ReadPointer(pointer) => self.eval_cleanup_env(pointer, depth + 1),
+            _ => Err("host address requires a supported local or field place".into()),
+        }
     }
 }
 
@@ -1545,7 +1653,12 @@ fn admit_steps(
             // Release is logical ownership bookkeeping, not a memory access;
             // e.g. a newtype field can be erased from the target layout.
             Step::Release { .. } => {}
-            Step::Invoke { path, subject, .. } => {
+            Step::Invoke {
+                path,
+                subject,
+                method,
+                env_arguments,
+            } => {
                 let Some((actual, at)) = cleanup_projection(graph, logical, ty, path, tags) else {
                     return false;
                 };
@@ -1553,6 +1666,26 @@ fn admit_steps(
                     || repr(graph, subject, true).ok().as_ref() != Some(&at)
                 {
                     return false;
+                }
+                for env_arg in env_arguments {
+                    if repr(graph, &env_arg.ty, true).is_err() {
+                        return false;
+                    }
+                }
+                if let Some(target) = graph.function(method) {
+                    if env_arguments.len() != target.function.env_parameters.len() {
+                        return false;
+                    }
+                    for (env_arg, env_param) in env_arguments
+                        .iter()
+                        .zip(target.function.env_parameters.iter())
+                    {
+                        if repr(graph, &env_arg.ty, true).ok()
+                            != repr(graph, &env_param.ty, true).ok()
+                        {
+                            return false;
+                        }
+                    }
                 }
             }
             Step::IfConstructed { path, steps } => {
@@ -1687,6 +1820,7 @@ mod tests {
                 method: method.clone(),
                 subject,
                 path: vec![0],
+                env_arguments: vec![],
             }];
             assert_eq!(
                 admit_steps(
@@ -2184,6 +2318,7 @@ mod tests {
                 defaults: vec![],
             },
             body: call(discard.clone()),
+            runtime_deliveries: Default::default(),
         };
         let mut graph = iir::Package {
             functions: vec![iir::FunctionInstance {

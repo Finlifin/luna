@@ -77,6 +77,7 @@ pub(super) fn charge_world_tables(
         newtypes,
         alias_contracts,
         enums,
+        global_runtime_deliveries,
     } = package;
     let cost = [
         builtin_implementation_packages.len(),
@@ -99,6 +100,7 @@ pub(super) fn charge_world_tables(
         newtypes.len(),
         alias_contracts.len(),
         enums.len(),
+        global_runtime_deliveries.len(),
     ]
     .into_iter()
     .try_fold(1u64, |sum, count| {

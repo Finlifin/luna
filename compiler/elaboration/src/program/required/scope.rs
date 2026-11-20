@@ -142,6 +142,7 @@ mod tests {
                 ty: p(P::Bool),
                 kind: K::ComptimeValue(value(2)),
             },
+            runtime_deliveries: Default::default(),
         }
     }
 
