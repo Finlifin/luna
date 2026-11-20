@@ -1481,6 +1481,7 @@ impl Checker<'_, '_> {
         owners: impl IntoIterator<Item = OwnerId>,
     ) -> Result<(), Error> {
         let mut callers: BTreeMap<OwnerId, BTreeSet<OwnerId>> = BTreeMap::new();
+        let mut needs_instance = BTreeSet::new();
         for owner in owners {
             if self.open_functions.contains_key(&owner)
                 || self.self_containers.contains_key(&owner)
@@ -1555,6 +1556,7 @@ impl Checker<'_, '_> {
                 })?;
             }
             let mut routed_calls = Vec::new();
+            let mut clause_dependencies = BTreeSet::new();
             for (target, callee, arguments, span, extended) in calls {
                 let mut inputs = self.expression_free_local_dependencies(owner, &callee)?;
                 // Only forwarding into a staged slot postpones type formation.
@@ -1563,6 +1565,16 @@ impl Checker<'_, '_> {
                 if let Some(ItemKind::Fn(target_sig, _) | ItemKind::FnDeclaration(target_sig)) =
                     self.package.item(target).map(|item| &item.kind)
                 {
+                    // Forming a runtime function instance consumes its written
+                    // clauses even when every ordinary parameter has a fixed type.
+                    // The direct declaration head contributes no local reads.
+                    if matches!(callee.kind, H::NFApplication(..))
+                        && !target_sig.modifiers.is_comptime
+                        && !target_sig.modifiers.is_normal_form_head
+                        && !target_sig.modifiers.is_quote
+                    {
+                        clause_dependencies.extend(inputs.iter().copied());
+                    }
                     // Colon properties belong to the collection entrance, not
                     // named parameter slots. Normalize their dependency route
                     // before looking for forwarded staged inputs.
@@ -1748,34 +1760,37 @@ impl Checker<'_, '_> {
                     callers.entry(target).or_default().insert(owner);
                 }
             }
-        }
-        let mut pending: Vec<_> = self.open_functions.keys().copied().collect();
-        while let Some(target) = pending.pop() {
-            for owner in callers.remove(&target).unwrap_or_default() {
-                self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
-                    error(
-                        self.package.item(owner).unwrap().span,
-                        "staged body propagation budget exhausted",
-                    )
-                })?;
-                if self.open_functions.contains_key(&owner) {
-                    continue;
-                }
-                let signature = self.signatures[&owner].clone();
-                let Term::Function { parameters, result } = signature else {
-                    continue;
-                };
-                self.register_open_function(
-                    owner,
-                    parameters
-                        .into_iter()
-                        .map(|parameter| (parameter.sort, Annotation::Known(parameter.ty)))
-                        .collect(),
-                    Annotation::Known(*result),
-                    self.package.item(owner).unwrap().span,
-                )?;
-                pending.push(owner);
+            if !clause_dependencies.is_disjoint(&staged) {
+                needs_instance.insert(owner);
             }
+        }
+        for target in self.open_functions.keys() {
+            needs_instance.extend(callers.remove(target).unwrap_or_default());
+        }
+        while let Some(owner) = needs_instance.pop_first() {
+            self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
+                error(
+                    self.package.item(owner).unwrap().span,
+                    "staged body propagation budget exhausted",
+                )
+            })?;
+            if self.open_functions.contains_key(&owner) {
+                continue;
+            }
+            let signature = self.signatures[&owner].clone();
+            let Term::Function { parameters, result } = signature else {
+                continue;
+            };
+            self.register_open_function(
+                owner,
+                parameters
+                    .into_iter()
+                    .map(|parameter| (parameter.sort, Annotation::Known(parameter.ty)))
+                    .collect(),
+                Annotation::Known(*result),
+                self.package.item(owner).unwrap().span,
+            )?;
+            needs_instance.extend(callers.remove(&owner).unwrap_or_default());
         }
         Ok(())
     }

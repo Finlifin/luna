@@ -37,7 +37,13 @@ impl<'hir> Selection<'hir> {
                 || checker.checking_open_behavior
                 || checker.in_unselected_inline)
         {
-            return Ok(Some(ExplicitClause::Contextual(source)));
+            // The partial call plan can settle after describe_generic_call
+            // has left the explicit-operand scope.
+            return Ok(Some(if checker.describing_open_call {
+                ExplicitClause::OpenDescription(source)
+            } else {
+                ExplicitClause::Contextual(source)
+            }));
         }
         let comptime_interpretor::Value::Integer(index) =
             checker.required_value(selector, P::Integer)?

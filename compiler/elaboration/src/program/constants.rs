@@ -2277,6 +2277,8 @@ impl Checker<'_, '_> {
                 | K::AnonymousRecord { fields: values }
                 | K::Variant { fields: values, .. } => pending.extend(values),
                 K::Not(value)
+                | K::OptionalPresent(value)
+                | K::OptionalType(value)
                 | K::UnsafeScope(value)
                 | K::Discard(value)
                 | K::RequirePredicate(value)
@@ -2460,7 +2462,7 @@ impl Checker<'_, '_> {
                         pending.extend(argument.expressions());
                     }
                 }
-                K::Literal(_) | K::Unit => {}
+                K::Literal(_) | K::Unit | K::OptionalAbsent => {}
                 _ => {
                     structural = false;
                     break;

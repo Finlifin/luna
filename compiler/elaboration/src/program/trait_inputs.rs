@@ -6,6 +6,7 @@ mod selection;
 #[derive(Clone)]
 pub(super) enum ExplicitClause<'hir> {
     Contextual(&'hir Expr<'hir>),
+    OpenDescription(&'hir Expr<'hir>),
     Selection(selection::Selection<'hir>),
     Computed { value: Box<n::Expr>, span: Span },
 }
@@ -29,7 +30,7 @@ impl ExplicitClause<'_> {
 
     pub(super) fn span(&self) -> Span {
         match self {
-            Self::Contextual(source) => source.span,
+            Self::Contextual(source) | Self::OpenDescription(source) => source.span,
             Self::Selection(selection) => selection.span(),
             Self::Computed { span, .. } => *span,
         }
@@ -42,6 +43,12 @@ impl ExplicitClause<'_> {
     ) -> Result<Term, Error> {
         match self {
             Self::Contextual(source) => checker.normal_value_argument(source, domain),
+            Self::OpenDescription(source) => {
+                let saved = std::mem::replace(&mut checker.describing_open_call, true);
+                let description = checker.normal_value_argument(source, domain);
+                checker.describing_open_call = saved;
+                description
+            }
             Self::Selection(selection) => selection.admit(checker, domain),
             Self::Computed { value, span } => {
                 let value = checker.deliver_computed_value(value, domain, *span)?;

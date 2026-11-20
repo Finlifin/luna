@@ -283,3 +283,32 @@ fn contextual_clause_control_runs_in_order_before_ordinary_type_inference() {
             .contains("does not fit")
     );
 }
+
+#[test]
+fn runtime_wrappers_specialize_clause_operands_from_staged_parameters() {
+    let source = r#"
+        fn outer(value: u8, comptime flag: bool) -> bool { nested(value, flag) }
+        fn nested(value: u8, comptime flag: bool) -> bool {
+            let alias = flag;
+            present<.tag = if choose(alias) { null } else { 42 }>(value)
+        }
+        fn explicit(value: u8, comptime flag: bool) -> bool {
+            present<u8, .tag = if choose(flag) { null } else { 42 }>(value)
+        }
+        comptime fn choose(value: bool) -> bool { value }
+        fn present(value: T) -> bool where T, .tag: ?T = null { tag matches _? }
+        fn run() -> bool {
+            let byte: u8 = 0;
+            not outer(byte, true) and outer(byte, false)
+                and not explicit(byte, true) and explicit(byte, false)
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    for (from, to, diagnostic) in [
+        ("choose(alias)", "choose(value == 0)", "runtime"),
+        ("else { 42 }", "else { 256 }", "does not fit"),
+    ] {
+        let error = sysroot::compile(&source.replace(from, to)).unwrap_err();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}
