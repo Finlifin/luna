@@ -3,6 +3,7 @@ use super::*;
 fn id(local: u32) -> nir::DeclarationId {
     nir::DeclarationId { package: 1, local }
 }
+
 fn boolean(value: bool) -> Expr {
     Expr {
         source: SourceRange { start: 10, end: 20 },
@@ -10,6 +11,7 @@ fn boolean(value: bool) -> Expr {
         kind: ExprKind::Literal(Literal::Bool(value)),
     }
 }
+
 fn package() -> Package {
     let signature = Term::Function {
         parameters: vec![],
@@ -306,4 +308,36 @@ fn implication_rejects_execution_only_bindings_and_defaults() {
             .expect("implication must be rejected");
         assert_eq!(error.reason, flow::Reason::InvalidSignature);
     }
+}
+
+#[test]
+fn inheritance_scales_linearly_across_large_packages() {
+    let mut candidate = package();
+    let template_func = candidate.functions[0].clone();
+    let template_impl = candidate.implementations[0].clone();
+    for offset in 0..400u32 {
+        let fn_a = id(1000 + offset * 2);
+        let fn_b = id(1001 + offset * 2);
+        let mut func_a = template_func.clone();
+        func_a.interface.declaration = fn_a;
+        func_a.interface.name = format!("extra_method_2_{offset}");
+        let mut func_b = template_func.clone();
+        func_b.interface.declaration = fn_b;
+        func_b.interface.name = format!("extra_method_3_{offset}");
+        candidate.functions.push(func_a);
+        candidate.functions.push(func_b);
+
+        let mut extra_impl = template_impl.clone();
+        extra_impl.declaration = id(5000 + offset);
+        extra_impl.methods = vec![("method_2".into(), fn_a), ("method_3".into(), fn_b)];
+        candidate.implementations.push(extra_impl);
+    }
+
+    let mut next = 100;
+    let mut limits = Limits::default();
+    limits.arithmetic.steps = 100_000;
+    inherit_with_limits(&mut candidate, &mut next, &mut limits).unwrap();
+    assert!(next > 100);
+    assert_eq!(candidate.functions.last().unwrap().preconditions.len(), 1);
+    assert_eq!(candidate.functions.last().unwrap().postconditions.len(), 1);
 }

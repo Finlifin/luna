@@ -1,9 +1,10 @@
 //! Trait program-contract replacement; no obligation here is a type proposition.
 #[cfg(test)]
 mod tests;
+
 use super::{Limits, flow};
 use nir::{Primitive, Term, contracts::remap_predicate_metered, program::*};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn failure(source: SourceRange, message: &'static str) -> flow::Error {
     flow::Error {
@@ -11,6 +12,7 @@ fn failure(source: SourceRange, message: &'static str) -> flow::Error {
         reason: flow::Reason::Phase(message),
     }
 }
+
 fn fresh(next: &mut u32, source: SourceRange) -> Result<LocalId, flow::Error> {
     let index = *next;
     *next = index
@@ -21,18 +23,21 @@ fn fresh(next: &mut u32, source: SourceRange) -> Result<LocalId, flow::Error> {
         index,
     })
 }
+
 fn budget(source: SourceRange) -> flow::Error {
     flow::Error {
         source,
         reason: flow::Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into()),
     }
 }
+
 fn preparation(source: SourceRange, error: nir::type_computations::Error) -> flow::Error {
     match error {
         nir::type_computations::Error::Budget => budget(source),
         _ => failure(source, "invalid contract declaration substitution"),
     }
 }
+
 fn copy_declaration(
     value: &FunctionDeclaration,
     source: SourceRange,
@@ -41,17 +46,20 @@ fn copy_declaration(
     nir::copy_budget::clone_function_declaration(value, &mut limits.arithmetic.steps)
         .map_err(|_| budget(source))
 }
+
 fn copy_expression(value: &Expr, limits: &mut Limits) -> Result<Expr, flow::Error> {
     nir::copy_budget::charge_substitution(value, &[], &[], &mut limits.arithmetic.steps)
         .map_err(|_| budget(value.source))?;
     Ok(value.clone())
 }
+
 fn copy_expressions(values: &[Expr], limits: &mut Limits) -> Result<Vec<Expr>, flow::Error> {
     values
         .iter()
         .map(|value| copy_expression(value, limits))
         .collect()
 }
+
 fn remap(
     values: &mut [Expr],
     bindings: &BTreeMap<LocalId, LocalId>,
@@ -79,6 +87,7 @@ struct Overlay<'a> {
     originals: Vec<(usize, FunctionDeclaration)>,
     committed: bool,
 }
+
 impl Drop for Overlay<'_> {
     fn drop(&mut self) {
         if !self.committed {
@@ -151,6 +160,50 @@ fn prepare(
             .get(id)
             .map_or(nir::Sort::Type, nir::Sort::of_comptime_domain),
     };
+    limits
+        .step(
+            package
+                .traits
+                .len()
+                .saturating_add(package.runtime_function_identities.len())
+                .saturating_add(package.functions.len())
+                .saturating_add(package.method_links.len())
+                .saturating_add(1),
+        )
+        .map_err(|_| budget(source))?;
+    let mut traits_by_id = BTreeMap::new();
+    let mut trait_methods = BTreeMap::new();
+    for definition in &package.traits {
+        if let std::collections::btree_map::Entry::Vacant(slot) =
+            traits_by_id.entry(definition.declaration)
+        {
+            slot.insert(definition);
+            limits
+                .step(definition.methods.len().saturating_add(1))
+                .map_err(|_| budget(source))?;
+            for method in &definition.methods {
+                trait_methods
+                    .entry((definition.declaration, method.name.as_str()))
+                    .or_insert(method);
+            }
+        }
+    }
+    let runtime_identities: BTreeSet<_> = package
+        .runtime_function_identities
+        .iter()
+        .map(|identity| identity.declaration)
+        .collect();
+    let mut function_indices = BTreeMap::new();
+    for (index, function) in package.functions.iter().enumerate() {
+        function_indices
+            .entry(function.declaration)
+            .or_insert(index);
+    }
+    let method_links: BTreeSet<_> = package
+        .method_links
+        .iter()
+        .map(|link| link.declaration)
+        .collect();
     let mut drafts = BTreeMap::new();
     let mut obligations = Vec::new();
     for implementation in &package.implementations {
@@ -158,27 +211,17 @@ fn prepare(
         let Some(interface) = implementation.interface else {
             continue;
         };
-        limits
-            .step(package.traits.len())
-            .map_err(|_| budget(source))?;
-        let definition = package
-            .traits
-            .iter()
-            .find(|t| t.declaration == interface)
-            .ok_or_else(|| {
-                failure(
-                    SourceRange { start: 0, end: 0 },
-                    "trait contract is missing",
-                )
-            })?;
+        let definition = traits_by_id.get(&interface).copied().ok_or_else(|| {
+            failure(
+                SourceRange { start: 0, end: 0 },
+                "trait contract is missing",
+            )
+        })?;
         for (name, body) in &implementation.methods {
-            limits
-                .step(definition.methods.len().saturating_add(1))
-                .map_err(|_| budget(source))?;
-            let method = definition
-                .methods
-                .iter()
-                .find(|m| m.name == *name)
+            limits.step(1).map_err(|_| budget(source))?;
+            let method = trait_methods
+                .get(&(interface, name.as_str()))
+                .copied()
                 .ok_or_else(|| {
                     failure(
                         SourceRange { start: 0, end: 0 },
@@ -188,22 +231,10 @@ fn prepare(
             if method.default == Some(*body) {
                 continue;
             }
-            limits
-                .step(
-                    package
-                        .runtime_function_identities
-                        .len()
-                        .saturating_add(package.functions.len())
-                        .saturating_add(package.method_links.len()),
-                )
-                .map_err(|_| budget(source))?;
             // A required-invocation snapshot may carry only the identity of a
             // runtime method. It cannot invoke the body; the complete package
             // still performs inheritance and body verification later.
-            if package
-                .runtime_function_identities
-                .iter()
-                .any(|identity| identity.declaration == *body)
+            if runtime_identities.contains(body)
                 && !method.signature.is_comptime_callable()
                 && (method.program.preconditions.is_empty()
                     || matches!(method.signature.callable_signature(), Ok(Term::Function { parameters, .. })
@@ -211,18 +242,10 @@ fn prepare(
             {
                 continue;
             }
-            let Some(index) = package
-                .functions
-                .iter()
-                .position(|f| f.declaration == *body)
-            else {
+            let Some(index) = function_indices.get(body).copied() else {
                 // In a required snapshot this slot can name a declaration whose
                 // body belongs to a different receiver. Full source checks it.
-                if package
-                    .method_links
-                    .iter()
-                    .any(|link| link.declaration == *body)
-                {
+                if method_links.contains(body) {
                     continue;
                 }
                 return Err(failure(
