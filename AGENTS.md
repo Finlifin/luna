@@ -8,6 +8,7 @@
 
 - **最重要的开发原则：拒绝追逐短期测试通过率。** 以作者确认的语言设计、通用机制和长期架构正确性为交付目标。测试用于验证这些契约，不能反过来定义语言；禁止为了让现有用例变绿而增加针对具体库定义或语法形状的特判、削弱检查、绕过未实现的基础能力，或修改预期把实现偏差固化成规范。发现基础机制缺失时，应补齐通用能力并验证其真实接线与跨场景行为；尚未完成就如实报告，不用测试数量、局部通过率或占位实现冒充进展。此原则不免除必要的回归验证，也不授权忽略真实失败。
 - **实现任何语言内容之前，必须先想清楚它在最终 Flurry 中的位置。** 依据作者确认的设计与正式文档，明确它解决的问题、完整语义和边界、所属层次，以及与类型系统、elaboration、comptime/runtime、资源与效应、库接口和后续编译阶段中相关部分的交互；再决定数据表示、检查职责和实现路径。实现必须推进最终语言的通用机制，不能从当前代码、某个报错或几个测试倒推出设计，不能把临时载体、局部特判或阶段性缺口固化成语言规则。分阶段交付时，必须清楚说明本阶段在完整设计中的位置、尚缺的接线与后续演进路径；已有实现若偏离这一定位，应修正架构，不继续叠补丁。此要求是实施前的设计判断，不要求恢复文档问答循环或为常规实现反复请求作者审阅。
+- **六个内置包（`builtin`、`meta`、`build`、`attrs`、`std`、`verification`）必须按最终设计中的 Flurry 来编写，以此反向驱动 Flurry 编译器的开发。** 编写任何内置包时，必须按作者确认的最终语言设计、范式与规范，尽情使用最终 Flurry 中应完备的特性（如运行时依赖类型的 allocator 范式、带默认值的可选子句参数、错误行与 `catch`、代数效应与 direct passing、模式匹配与视图、occurrence typing / `inline when`、派生与属性、类型反射与元编程等），将暴露出的缺口直接转化为通用编译器能力的开发任务。**严禁为了“当前编译器能编过／跑通”而编写阉割版、妥协版或偏离设计范式的内置包代码**（例如在容器中硬编码全局 `SystemAllocator` 替代运行时依赖 allocator 参数、用变通命名掩盖语法缺口等），那样没有意义。
 - 用户本轮与先前明确决定优先；在已授权范围内完成实现、检查和修复，不为常规实现选择反复请求确认。
 - 语义依据依次为作者确认、现行正式 docs、history 中已确认结论。proposal_trace、prompt.fl 和 OLD-2024 是历史意向；源码用于了解现状，不是语义权威。
 - tutorial（包括 `flurry_tutorial/`）是 AI 生成的教学材料，不是权威资料，不属于语言语义与设计的依据。其说明和示例必须按上述权威来源核对；不得据此补定语言语义、修改实现契约或测试预期。发生冲突时应修正 tutorial，而不能反向修改语言规则来迎合教程。
@@ -78,6 +79,7 @@ Limitations:
 
 ### 内置包持续开发
 
+- **按最终语言设计编写六个内置包**：`builtin`、`meta`、`build`、`attrs`、`std`、`verification` 都必须按照最终设计中的 Flurry 编写，尽情使用最终 Flurry 的完整设计特性，以此反推并驱动编译器通用能力的补齐与完善；不得为了让当前尚不完备的编译器“能编过／能跑通”而削足适履，把妥协实现或偏离范式的写法放进任何内置包。
 - 为某个类型准备的方法默认定义在该类型的固有 `impl` 中，通过类型或接收者调用，不堆积为带类型名前缀的自由函数，也不为单阶段方法另造承载 trait。作者已确认：同一个类型同时存在于 runtime 与 comptime、两阶段需要同名方法时，分别通过 runtime trait 与 `pure comptime trait` 的实现提供；comptime 上下文优先选择后者。此规则包括可选类型、错误限定类型及 str，不限于前两者，也不添加 `comptime_` 前缀。
 - 对编译器 builtin 类型，`builtin`、`meta`、`build`、`attrs`、`std`、`verification` 六个内置包都可以为其编写 `impl`（包括固有方法和 trait 实现），不受孤儿规则限制，不要求类型或 trait 归当前包所有。该豁免不自动扩展到用户包或非 builtin 类型，也不免除重复／冲突实现及其他语义检查；目标类型仍通过已有具名绑定引用。
 - 内置包是完成 Flurry 的主线交付，不能长期只推进编译器而搁置库实现，也不能等编译器全部完成后才补库。持续推进 `builtin`、`meta`、`build`、`attrs`、`std` 的实际能力；`verification` 按作者此前决定暂缓高级内容，但保留接口与依赖边界。
@@ -98,6 +100,8 @@ Limitations:
 ## 5. 不得破坏的语义边界
 
 - Flurry 没有 Option 和 Result。可选类型与错误结果遵循语言自己的语义和 ABI，不引入同名标准库枚举，也不在 prelude 中导出它们。现存同名库文件与绑定属于待纠正的实现，不构成语义依据；此规则不限制编译器内部使用 Rust 的 Option/Result。
+- **错误类型与错误枚举规范**：按 `docs/grammar/index.md` 与 `docs/algebraic-effect-and-delimited-continuation/error-handling.md`，错误类型名必须为 `PascalCase` 且以 `Err` 结尾（如 `IoErr`、`AllocErr`、`ReallocErr`、`FormatErr`、`Utf8Err`），错误枚举的变体必须为 `PascalCase`（如 `OutOfMemory`、`InvalidLayout`、`WriteZero`）；普通枚举变体仍使用 `snake_case`。
+- **Allocator 设计范式**：`Box`、`Vec`、`String` 等分配型容器必须采用 Flurry 设计的运行时依赖类型 allocator 范式（通过可选默认类型参数与 `quote` 运行时依赖参数携带 allocator，例如 `where ..., .A: Type = std.mem.DefaultAllocator, quote .allocator: lift *A = std.mem.DefaultAllocator.default` / `lift A`，默认全局 allocator 不增加容器本体存储开销，自定义 allocator 按运行时身份区分类型并通过环境交付计划传递给方法与 `Drop`），禁止在容器内部硬编码全局 `SystemAllocator` 或用妥协方案替代该范式。
 - Flurry 源码、公开接口、驱动选择器和示例中的路径统一用点分隔，不使用双冒号路径。Rust 实现本身仍遵循 Rust 语法。
 - 除 std 外，builtin、meta、build、attrs、verification 的 prelude 默认导入，使用普通通配解析与声明身份去重；不向提供者自身注入自己的 prelude。std.prelude 需要显式导入。
 - str 位于 builtin，String 位于 std；内存相关模块使用 mem 命名。
