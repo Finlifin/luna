@@ -11,13 +11,9 @@ pub const IMPLICIT_RUNTIME_ENV_OWNER: u32 = u32::MAX - 1;
 pub fn implicit_runtime_env_ids(
     runtime_domains: &std::collections::BTreeMap<crate::RuntimeId, Term>,
     globals: &std::collections::BTreeMap<crate::RuntimeId, Expr>,
-    arguments: &[Term],
+    mut ids: std::collections::BTreeSet<crate::RuntimeId>,
     bound: impl IntoIterator<Item = crate::RuntimeId>,
 ) -> Result<std::collections::BTreeSet<crate::RuntimeId>, &'static str> {
-    let mut ids = std::collections::BTreeSet::new();
-    for argument in arguments {
-        ids.extend(argument.runtime_dependencies());
-    }
     for id in bound {
         ids.remove(&id);
     }
@@ -38,10 +34,14 @@ pub fn implicit_runtime_env_parameters(
     arguments: &[Term],
     existing: &[RuntimeEnvParameter],
 ) -> Result<Vec<RuntimeEnvParameter>, &'static str> {
+    let mut dependencies = std::collections::BTreeSet::new();
+    for arg in arguments {
+        crate::types::collect_runtime_dependencies(arg, &mut dependencies);
+    }
     let ids = implicit_runtime_env_ids(
         runtime_domains,
         global_runtime_deliveries,
-        arguments,
+        dependencies,
         existing.iter().filter_map(|env| env.runtime_id),
     )?;
     let mut extra = Vec::with_capacity(ids.len());

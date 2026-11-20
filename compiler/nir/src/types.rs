@@ -2057,7 +2057,7 @@ impl TypeRef {
     }
 }
 
-fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
+pub(crate) fn collect_runtime_dependencies(term: &Term, result: &mut BTreeSet<RuntimeId>) {
     for node in term.structural_terms() {
         if let Term::Runtime(id) = node {
             result.insert(*id);

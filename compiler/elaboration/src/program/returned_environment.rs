@@ -24,8 +24,8 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<BTreeSet<nir::RuntimeId>, Error> {
         nominal_fields::metered(&mut self.required_steps, |fuel| {
-            nir::type_computations::charge_term(ty, fuel)?;
-            Ok(ty.runtime_dependencies())
+            nir::type_computations::runtime_dependencies_bounded(std::slice::from_ref(ty), fuel)
+                .map(|dependencies| dependencies.ids)
         })
         .map_err(|e| error(span, e.to_string()))
     }

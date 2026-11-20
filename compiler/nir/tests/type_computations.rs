@@ -36,6 +36,42 @@ fn frozen_types(fields: Vec<nir::Term>) -> nir::Term {
 }
 
 #[test]
+fn runtime_dependencies_distinguish_free_inputs_from_nested_callable_binders() {
+    use nir::type_computations::runtime_dependencies_bounded;
+    let id = nir::RuntimeId {
+        instance: 0,
+        local: 77,
+    };
+    let nested = |depth| {
+        let inner = Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Bound {
+                depth,
+                index: 0,
+                sort: Sort::Type,
+            }),
+        };
+        Term::Function {
+            parameters: vec![nir::Parameter {
+                ty: Term::Primitive(Primitive::Type),
+                sort: Sort::Type,
+            }],
+            result: Box::new(inner),
+        }
+    };
+    for (depth, open) in [(1, false), (2, true)] {
+        let arguments = [Term::Runtime(id), nested(depth), Term::Runtime(id)];
+        let dependencies = runtime_dependencies_bounded(&arguments, &mut 128).unwrap();
+        assert_eq!(dependencies.ids, [id].into());
+        assert_eq!(dependencies.may_change, open);
+        assert!(matches!(
+            runtime_dependencies_bounded(&arguments, &mut 2),
+            Err(Error::Budget)
+        ));
+    }
+}
+
+#[test]
 fn residual_list_capture_retains_nested_domains_bindings_and_effect_boundaries() {
     use nir::program::{CallArgument, Expr, ExprKind as K, Literal, LocalId, SourceRange};
     let source = SourceRange { start: 1, end: 2 };

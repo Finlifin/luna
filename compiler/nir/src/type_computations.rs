@@ -599,20 +599,36 @@ pub fn contains_associated_projection(
     Ok(found)
 }
 
-/// Can specialization still change the set of local runtime identities in this
-/// argument? An unresolved binder or projection can introduce or merge slots.
-pub fn runtime_dependencies_may_change(root: &Term, fuel: &mut usize) -> Result<bool, Error> {
-    let mut open = false;
-    visit_expanded_term(root, fuel, 128, &BTreeMap::new(), &mut |term| {
-        open |= matches!(
-            term,
-            Term::Rigid { .. }
-                | Term::Bound { .. }
-                | Term::Hole { .. }
-                | Term::AssociatedType { .. }
-        );
-    })?;
-    Ok(open)
+/// Runtime identities retained by the arguments at this use site. Specialization
+/// can change their ABI order if any input still depends on the enclosing scope.
+pub struct RuntimeDependencies {
+    pub ids: BTreeSet<crate::RuntimeId>,
+    pub may_change: bool,
+}
+
+pub fn runtime_dependencies_bounded(
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<RuntimeDependencies, Error> {
+    let mut dependencies = RuntimeDependencies {
+        ids: BTreeSet::new(),
+        may_change: false,
+    };
+    for arg in arguments {
+        visit_expansion(arg, fuel, 128, &|_| None, &mut |term, nesting| match term {
+            Term::Runtime(id) => {
+                dependencies.ids.insert(*id);
+            }
+            // A nested callable owns these inner frames even when supplied as
+            // a type argument. Only free references can gain new identities.
+            Term::Bound { depth, .. } => dependencies.may_change |= *depth >= nesting,
+            Term::Rigid { .. } | Term::Hole { .. } | Term::AssociatedType { .. } => {
+                dependencies.may_change = true;
+            }
+            _ => {}
+        })?;
+    }
+    Ok(dependencies)
 }
 
 /// Inspect open declaration inputs without cloning the type or unfolding heads.

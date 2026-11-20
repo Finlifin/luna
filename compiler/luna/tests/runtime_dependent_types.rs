@@ -1216,7 +1216,7 @@ fn generic_calls_inside_closures_deliver_the_environment_of_the_inferred_type() 
         struct Cell { value: i32 }
         fn read(p: *Cell) -> i32 { p.value.* }
         enum View where quote src: lift *Cell, quote .snapshot: lift i32 = read(src) { empty, }
-        fn relay(v: T) -> T where T { v }
+        fn relay(v: T) -> T where F, T { v }
         fn check(v: View<p, .snapshot = n>) -> bool
         where quote p: lift *Cell, quote n: lift i32
         {
@@ -1225,7 +1225,10 @@ fn generic_calls_inside_closures_deliver_the_environment_of_the_inferred_type() 
         fn run() -> bool {
             var cell = Cell { value: 7 };
             let v = View<cell.ref>.empty;
-            let call = || { let nested = || relay(v); nested() };
+            let call = || {
+                let nested = || relay<fn(comptime U: Type, value: U) -> U>(v);
+                nested()
+            };
             cell.value = 42;
             check(call())
         }
