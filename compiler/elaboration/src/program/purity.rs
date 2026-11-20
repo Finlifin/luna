@@ -20,6 +20,47 @@ fn diagnostic(failure: purity::Error) -> Error {
         incompatible_context: false,
     }
 }
+/// Open witnesses have their own declarations. A closed source and its
+/// residual share an identity, so check both worlds without duplicate IDs.
+/// The executable package is restored on success and on diagnostic return.
+pub(super) fn with_definition_bodies(
+    package: &mut n::Package,
+    witnesses: &mut Vec<n::Function>,
+    mut check: impl FnMut(&n::Package) -> Result<(), Error>,
+) -> Result<(), Error> {
+    if witnesses.is_empty() {
+        return check(package);
+    }
+    let initial = package.functions.len();
+    let slots: std::collections::BTreeMap<_, _> = package
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(index, function)| (function.declaration, index))
+        .collect();
+    let mut overlays = Vec::new();
+    for witness in witnesses.drain(..) {
+        if let Some(&index) = slots.get(&witness.declaration) {
+            overlays.push((index, witness));
+        } else {
+            package.functions.push(witness);
+        }
+    }
+    let mut result = check(package);
+    if result.is_ok() && !overlays.is_empty() {
+        for (index, body) in &mut overlays {
+            std::mem::swap(&mut package.functions[*index], body);
+        }
+        result = check(package);
+        for (index, body) in &mut overlays {
+            std::mem::swap(&mut package.functions[*index], body);
+        }
+    }
+    witnesses.extend(package.functions.drain(initial..));
+    witnesses.extend(overlays.into_iter().map(|(_, witness)| witness));
+    result
+}
+
 pub(super) fn validate_runtime_promises(
     package: &n::Package,
     identities: &Protocols,

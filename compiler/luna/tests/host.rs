@@ -17231,6 +17231,84 @@ fn conditional_const_exit_keeps_independent_continuations_checked() {
 }
 
 #[test]
+fn closed_conditional_const_keeps_callable_identity_and_selected_cleanup() {
+    let source = r#"
+        struct Watch { seen: *bool }
+        impl Retire for Watch { fn drop(*self) { self.seen.*.* = true; } }
+        comptime fn checked(value: bool) -> bool { assumes value; true }
+
+        pure fn yes(value: bool) -> bool { value }
+        pure fn no(value: bool) -> bool { not value }
+        pure fn choose(value: bool) -> bool {
+            const found if found = false else { return value; };
+            const answer = checked(found);
+            const call = if answer { yes } else { no };
+            call(value)
+        }
+
+        fn nested(seen: *bool) -> bool {
+            let watch = Watch { seen: seen };
+            do { const true = false else { return true; }; };
+            const answer = checked(false);
+            answer
+        }
+
+        fn run() -> bool {
+            var dropped = false;
+            let call: fn(bool) -> bool = choose;
+            call(true) and not call(false) and nested(dropped.ref) and dropped
+        }
+    "#;
+    let work = Work::new(&format!("{RESOURCE_HEADER} {source}"));
+    success(&resource_build(&work));
+    let output = work.execute();
+    success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
+fn closed_conditional_const_checks_source_and_possible_continuations() {
+    for (body, diagnostic) in [
+        (
+            "const found if found=false else {return true;}; const y=checked(value); y",
+            "runtime parameter",
+        ),
+        (
+            "const found if found=false else {return true;}; let bad:bool=42; bad",
+            "integer runtime proxy",
+        ),
+        (
+            "if value {const true=false else {return true;};}; const y=checked(false); y",
+            "ProgramContractRejected",
+        ),
+        (
+            "return true; const true=false else {return true;}; const y=checked(false); y",
+            "ProgramContractRejected",
+        ),
+    ] {
+        let source = format!(
+            "comptime fn checked(v:bool)->bool {{assumes v;true}} fn run(value:bool)->bool {{{body}}}"
+        );
+        let output = Work::new(&source).build();
+        assert!(!output.status.success());
+        let message = String::from_utf8_lossy(&output.stderr);
+        assert!(message.contains(diagnostic), "{body}: {message}");
+    }
+
+    for conditional in [
+        "const found if found=false else {return true;}; value.* = false; found",
+        "const found if found=true else {value.* = false;return true;}; found",
+    ] {
+        let source = format!(
+            "pure fn pick(value:*bool)->bool {{{conditional}}} fn run()->bool {{var x=true;pick(x.ref)}}"
+        );
+        let output = Work::new(&source).build();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("lacks P4 evidence"));
+    }
+}
+
+#[test]
 fn conditional_local_constants_failure_preserves_runtime_cleanup() {
     let source = format!(
         "{RESOURCE_HEADER} struct Watch {{target:*bool}} impl Retire for Watch {{fn drop(*self) {{self.target.*.* = true;}}}} fn run()->bool {{var seen=false;while true {{let watch=Watch {{target:seen.ref}};const true=false else {{break;}};}};seen}}"

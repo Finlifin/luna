@@ -86,6 +86,7 @@ impl Checker<'_, '_> {
         let saved_staged_locals_members = std::mem::take(&mut self.open_member_locals);
         let saved_captures = std::mem::take(&mut self.captures);
         let saved_control = std::mem::take(&mut self.control);
+        let saved_loop_transfers = std::mem::take(&mut self.open_loop_transfers);
         let saved_immutable = std::mem::take(&mut self.immutable);
         let saved_context = std::mem::take(&mut self.context);
         let saved_contract = std::mem::replace(&mut self.checking_contract, false);
@@ -135,6 +136,7 @@ impl Checker<'_, '_> {
         self.open_member_locals = saved_staged_locals_members;
         self.captures = saved_captures;
         self.control = saved_control;
+        self.open_loop_transfers = saved_loop_transfers;
         self.immutable = saved_immutable;
         self.context = saved_context;
         self.checking_contract = saved_contract;

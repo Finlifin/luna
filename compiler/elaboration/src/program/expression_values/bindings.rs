@@ -88,6 +88,14 @@ impl Checker<'_, '_> {
                     }
                 }
                 if let Some(Some(value)) = self.generator_data.get(&id) {
+                    let value = if self.checking_open_behavior && self.runtime_value_context() {
+                        self.definition_refinements
+                            .behavior_values
+                            .get(&id)
+                            .unwrap_or(value)
+                    } else {
+                        value
+                    };
                     constants::charge_copy(value, &mut self.required_steps, expr.span)?;
                     let mut value = value.clone();
                     if matches!(value.kind, K::Block { .. }) {

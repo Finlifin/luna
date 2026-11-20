@@ -23,6 +23,8 @@ impl std::fmt::Display for Disposition {
 /// values with new identities. Work is charged before snapshotting; restoration
 /// consumes prepaid work, and never refunds checking/invocation fuel.
 struct StorageCheckpoint {
+    behavior_inputs: LocalBindings<Term>,
+    behavior_values: LocalBindings<n::Expr>,
     data: BTreeMap<n::LocalId, Option<n::Expr>>,
     cells: BTreeMap<n::LocalId, (n::Expr, GeneratorCell)>,
     graph: Option<comptime_interpretor::OwnedGraphCheckpoint>,
@@ -67,6 +69,8 @@ impl StorageCheckpoint {
             )
         };
         Ok(Self {
+            behavior_inputs: checker.ordinary_behavior_inputs.clone(),
+            behavior_values: checker.definition_refinements.behavior_values.clone(),
             data: checker.generator_data.clone(),
             cells: checker.generator_cells.clone(),
             graph,
@@ -75,6 +79,8 @@ impl StorageCheckpoint {
 
     fn restore(self, checker: &mut Checker<'_, '_>, span: Span) -> Result<(), Error> {
         let restored = self.graph.map_or(Ok(()), |graph| graph.restore());
+        checker.ordinary_behavior_inputs = self.behavior_inputs;
+        checker.definition_refinements.behavior_values = self.behavior_values;
         checker.generator_data = self.data;
         checker.generator_cells = self.cells;
         restored.map_err(|failure| {
@@ -95,6 +101,14 @@ impl std::fmt::Display for StorageCheckpoint {
                 write!(f, " {value}")?;
             }
             f.write_str(")")?;
+        }
+        f.write_str(") (behavior-inputs")?;
+        for (binding, ty) in &self.behavior_inputs {
+            write!(f, " (binding {binding} {ty})")?;
+        }
+        f.write_str(") (behavior-values")?;
+        for (binding, value) in &self.behavior_values {
+            write!(f, " (binding {binding} {value})")?;
         }
         f.write_str(") (cells")?;
         for (binding, (snapshot, _)) in &self.cells {
@@ -462,6 +476,8 @@ mod tests {
             lexical,
             retained,
             storage: StorageCheckpoint {
+                behavior_inputs: LocalBindings::default(),
+                behavior_values: LocalBindings::default(),
                 data: BTreeMap::new(),
                 cells: BTreeMap::new(),
                 graph: None,

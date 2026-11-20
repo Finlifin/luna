@@ -2,14 +2,16 @@
 //! Retain their declaration context, never a caller's later assumptions.
 use super::*;
 
-/// Skolem subjects and premises exist only while checking an open definition.
+/// Definition evidence belongs to the lexical declaration being checked.
 #[derive(Default)]
 pub(super) struct DefinitionRefinements {
     pub(super) subjects: BTreeMap<n::LocalId, nir::DeclarationParameter>,
     pub(super) requirements: Vec<n::TypePredicate>,
+    pub(super) closed_source_body: bool,
     pub(super) block_contains_conditional_const: bool,
     pub(super) regions: open_functions::CheckedRegions,
     pub(super) tuple_elements: Vec<DeclarationId>,
+    pub(super) behavior_values: LocalBindings<n::Expr>,
     pub(super) staged_values: Vec<(DeclarationId, Term)>,
 }
 

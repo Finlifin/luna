@@ -81,33 +81,31 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        let definition = &self.open_functions[&owner];
         let mut parameters = Vec::new();
         let mut bindings = Vec::new();
-        let mut mapping = vec![None; definition.parameters.len()];
-        for (slot, (parameter, (sort, annotation))) in
-            sig.params.iter().zip(&definition.parameters).enumerate()
-        {
+        let mut mapping = vec![None; sig.params.len()];
+        let domains = self
+            .declaration_input_domains(owner)
+            .ok_or_else(|| error(span, "definition fragment has no declaration telescope"))?;
+        for (slot, (parameter, (sort, domain))) in sig.params.iter().zip(domains).enumerate() {
             // A staged fragment of a runtime function cannot read runtime
             // inputs (checked above), nor store them as synthetic comptime
             // arguments merely because they occur in the enclosing signature.
-            if self.in_staged_input && !sig.modifiers.is_comptime && *sort == Sort::Runtime {
+            if self.in_staged_input && !sig.modifiers.is_comptime && sort == Sort::Runtime {
                 continue;
             }
-            let domain = match annotation {
-                Annotation::Known(ty) => Some(ty.clone()),
-                _ => self
-                    .definition_refinements
+            let domain = domain.cloned().or_else(|| {
+                self.definition_refinements
                     .subjects
                     .get(&local(parameter.hir_id))
                     .map(|binder| Term::Rigid {
                         declaration: binder.declaration,
                         sort: binder.sort,
-                    }),
-            };
+                    })
+            });
             if let Some(ty) = domain {
-                mapping[slot] = Some((parameters.len(), *sort));
-                parameters.push(Parameter { sort: *sort, ty });
+                mapping[slot] = Some((parameters.len(), sort));
+                parameters.push(Parameter { sort, ty });
                 bindings.push(local(parameter.hir_id));
             }
         }

@@ -72,19 +72,27 @@ impl Checker<'_, '_> {
             };
             return DomainSource::Borrowed(InputDomains::Formed(parameters.iter()));
         }
-        if let Some(definition) = owner.and_then(|owner| self.open_functions.get(&owner)) {
-            return DomainSource::Borrowed(definition.input_domain_refs());
+        DomainSource::Borrowed(
+            owner
+                .and_then(|owner| self.declaration_input_domains(owner))
+                .unwrap_or_else(|| InputDomains::Formed([].iter())),
+        )
+    }
+
+    /// A definition fragment uses its declaration's full telescope. A caller's
+    /// selected instance or the prefix being checked for a default is separate.
+    pub(super) fn declaration_input_domains(&self, owner: OwnerId) -> Option<InputDomains<'_>> {
+        if let Some(definition) = self.open_functions.get(&owner) {
+            return Some(definition.input_domain_refs());
         }
-        let signature = owner.and_then(|owner| {
-            self.signatures
-                .get(&owner)
-                .or_else(|| self.interface_signatures.get(&owner))
-        });
-        DomainSource::Borrowed(match signature {
-            Some(Term::Function { parameters, .. }) => InputDomains::Formed(parameters.iter()),
-            None => InputDomains::Formed([].iter()),
-            Some(_) => unreachable!("declaration has a function telescope"),
-        })
+        let signature = self
+            .signatures
+            .get(&owner)
+            .or_else(|| self.interface_signatures.get(&owner))?;
+        let Term::Function { parameters, .. } = signature else {
+            unreachable!("declaration has a function telescope")
+        };
+        Some(InputDomains::Formed(parameters.iter()))
     }
 
     pub(super) fn lexical_input_domains(&self) -> InputDomains<'_> {

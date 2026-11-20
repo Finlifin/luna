@@ -542,6 +542,7 @@ fn elaborate_in_mode(
         signatures: BTreeMap::new(),
         open_functions: BTreeMap::new(),
         active_open_definitions: BTreeSet::new(),
+        closed_const_regions: BTreeMap::new(),
         open_instantiation_depth: 0,
         open_instance: None,
         open_instance_capabilities: None,
@@ -552,7 +553,7 @@ fn elaborate_in_mode(
         default_behavior_functions: BTreeSet::new(),
         describing_open_spread: false,
         describing_open_call: false,
-        ordinary_behavior_inputs: BTreeMap::new(),
+        ordinary_behavior_inputs: LocalBindings::default(),
         open_loop_transfers: BTreeMap::new(),
         pending_default_stability: Vec::new(),
         pending_predicate_stability: Vec::new(),
@@ -1582,23 +1583,22 @@ fn elaborate_candidate<'a, 'h>(
     // inline alternatives must be checked before their inputs are supplied.
     output.runtime_domains = checker.runtime_domains.clone();
     output.global_runtime_deliveries = checker.global_runtime_deliveries.clone();
-    let runtime_count = output.functions.len();
-    output
-        .functions
-        .append(&mut checker.ordinary_behavior_functions);
-    let defaults_result = purity::validate_defaults(
-        &output,
-        &checker.pending_default_stability,
-        &checker.protocols,
-    );
-    let predicates_result = purity::validate_predicates(
-        &output,
-        &checker.pending_predicate_stability,
-        &checker.protocols,
-    );
-    checker.ordinary_behavior_functions = output.functions.split_off(runtime_count);
-    defaults_result?;
-    predicates_result?;
+    purity::with_definition_bodies(
+        &mut output,
+        &mut checker.ordinary_behavior_functions,
+        |output| {
+            purity::validate_defaults(
+                output,
+                &checker.pending_default_stability,
+                &checker.protocols,
+            )?;
+            purity::validate_predicates(
+                output,
+                &checker.pending_predicate_stability,
+                &checker.protocols,
+            )
+        },
+    )?;
     cmtt::expand_quote_functions(
         &mut output,
         package,
@@ -1635,13 +1635,11 @@ fn elaborate_candidate<'a, 'h>(
     }
     // Ordinary behavior witnesses cover all inline branches but are not
     // executable artifacts: their comptime inputs remain abstract.
-    let runtime_count = output.functions.len();
-    output
-        .functions
-        .append(&mut checker.ordinary_behavior_functions);
-    let purity_result = purity::validate_runtime_promises(&output, &checker.protocols);
-    output.functions.truncate(runtime_count);
-    purity_result?;
+    purity::with_definition_bodies(
+        &mut output,
+        &mut checker.ordinary_behavior_functions,
+        |output| purity::validate_runtime_promises(output, &checker.protocols),
+    )?;
     crate::verification::flow::validate_machine_operations(&output).map_err(|mut failure| {
         failure.source = failure
             .source
@@ -2319,6 +2317,7 @@ struct Checker<'a, 'h> {
     signatures: BTreeMap<OwnerId, Term>,
     open_functions: BTreeMap<OwnerId, open_functions::Definition>,
     active_open_definitions: BTreeSet<OwnerId>,
+    closed_const_regions: BTreeMap<OwnerId, open_functions::CheckedRegions>,
     open_instantiation_depth: usize,
     open_instance: Option<std::sync::Arc<generated_functions::InstanceKey>>,
     open_instance_capabilities: Option<Vec<n::TraitRequirement>>,
@@ -2329,7 +2328,7 @@ struct Checker<'a, 'h> {
     default_behavior_functions: BTreeSet<OwnerId>,
     describing_open_spread: bool,
     describing_open_call: bool,
-    ordinary_behavior_inputs: BTreeMap<n::LocalId, Term>,
+    ordinary_behavior_inputs: LocalBindings<Term>,
     open_loop_transfers: BTreeMap<n::LocalId, open_functions::LoopTransfers>,
     pending_default_stability: Vec<purity::StableObservation>,
     pending_predicate_stability: Vec<purity::StableObservation>,

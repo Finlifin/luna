@@ -189,14 +189,21 @@ impl<'h, T: Tail> Progress<'h, T> {
         // A successful const binding yields void. Its diverging result is
         // the selected failure branch, which supplies no success bindings.
         let direct_const = matches!(statement.kind, H::Let(binding) if binding.comptime && binding.otherwise.is_some());
-        let selected_exit = !self.diverges
-            && is_never(&value.ty)
-            && (child_exit || direct_const && checker.runtime_value_context())
-            && checker
-                .open_instance
-                .as_ref()
-                .and_then(|instance| checker.open_functions.get(&instance.owner))
-                .is_some_and(|definition| definition.checked_const_continuation(self.block.hir_id));
+        let runtime_const = direct_const && checker.runtime_value_context();
+        let selected = !self.diverges && is_never(&value.ty) && (child_exit || runtime_const);
+        // A pure declaration promises its whole ordinary body, even when the
+        // successful selection would otherwise erase an impure failure arm.
+        let check_behavior = runtime_const
+            && checker.definition_refinements.closed_source_body
+            && checker.signature_owner.is_some_and(|owner| {
+                matches!(
+                    checker.package.item(owner).map(|item| &item.kind),
+                    Some(ItemKind::Fn(sig, _)) if sig.modifiers.is_pure
+                )
+            });
+        let certified = (selected || check_behavior)
+            && checker.checked_const_continuation(self.block.hir_id)?;
+        let selected_exit = selected && certified;
         self.statements.push(value);
         self.next_statement += 1;
         self.diverges = diverges;

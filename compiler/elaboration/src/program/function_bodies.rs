@@ -100,6 +100,10 @@ impl Checker<'_, '_> {
                 this.in_required_comptime = false;
                 this.in_staged_input = false;
             }
+            this.definition_refinements.closed_source_body = interface.phase
+                == n::FunctionPhase::Runtime
+                && !sig.modifiers.is_quote
+                && !this.open_functions.contains_key(&owner);
             let body = this.function_body(owner, body.value, result)?;
             this.verify_returned_type_guarantees(&body, span)?;
             if matches!(request, SourceBody::Package)

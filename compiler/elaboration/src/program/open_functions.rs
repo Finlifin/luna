@@ -11,6 +11,7 @@ pub(super) use annotations::Annotation;
 use annotations::annotation_source;
 
 mod annotations;
+mod behavior_values;
 mod fragments;
 mod inline_evidence;
 mod inputs;
@@ -173,6 +174,17 @@ pub(super) struct Definition {
 }
 
 impl Definition {
+    fn new(parameters: Vec<(Sort, Annotation)>, result: Annotation) -> Self {
+        Self {
+            parameters,
+            result,
+            default_types: BTreeMap::new(),
+            default_dependencies: BTreeMap::new(),
+            regions: CheckedRegions::default(),
+            checked: false,
+        }
+    }
+
     pub(super) fn checked_empty_iteration(&self, site: hir::HirId) -> bool {
         self.checked && self.regions.tuple_loops.contains(&local(site))
     }
@@ -1791,22 +1803,13 @@ impl Checker<'_, '_> {
                 ));
             }
         }
-        self.open_functions.insert(
-            owner,
-            Definition {
-                parameters,
-                result,
-                default_types: BTreeMap::new(),
-                default_dependencies: BTreeMap::new(),
-                regions: CheckedRegions::default(),
-                checked: false,
-            },
-        );
+        self.open_functions
+            .insert(owner, Definition::new(parameters, result));
         Ok(())
     }
 
     pub(super) fn check_open_definition(&mut self, owner: OwnerId) -> Result<(), Error> {
-        let definition = self.open_functions[&owner].clone();
+        let definition = &self.open_functions[&owner];
         let needs_default_behavior = self.default_behavior_functions.contains(&owner)
             && !self.ordinary_behavior_functions.iter().any(|function| {
                 function.declaration == declaration(self.package, &self.package_identities, owner)
@@ -1814,6 +1817,69 @@ impl Checker<'_, '_> {
         if definition.checked && !needs_default_behavior {
             return Ok(());
         }
+        let definition = self.check_definition_source(owner, definition.clone())?;
+        self.open_functions.insert(owner, definition);
+        Ok(())
+    }
+
+    /// Only certified regions may omit a success continuation. A closed
+    /// source function retains its ordinary ABI and declaration identity. Its
+    /// first selected failure (or ordinary purity obligation) requests the
+    /// same formal check as an open body.
+    pub(super) fn checked_const_continuation(&mut self, block: hir::HirId) -> Result<bool, Error> {
+        if let Some(instance) = &self.open_instance {
+            return Ok(self
+                .open_functions
+                .get(&instance.owner)
+                .is_some_and(|definition| definition.checked_const_continuation(block)));
+        }
+        // Nested code and lambdas have their own captures and return target.
+        if self.in_code_body || !self.captures.is_empty() {
+            return Ok(false);
+        }
+        let Some(owner) = self
+            .signature_owner
+            .filter(|_| self.definition_refinements.closed_source_body)
+        else {
+            return Ok(false);
+        };
+        if !self.closed_const_regions.contains_key(&owner) {
+            let Term::Function { parameters, result } = self
+                .declared_signature(owner)
+                .ok_or_else(|| {
+                    error(
+                        self.package.item(owner).unwrap().span,
+                        "missing closed source signature",
+                    )
+                })?
+                .into_owned()
+            else {
+                unreachable!("formed source function signature")
+            };
+            let definition = Definition::new(
+                parameters
+                    .into_iter()
+                    .map(|p| (p.sort, Annotation::Known(p.ty)))
+                    .collect(),
+                Annotation::Known(*result),
+            );
+            // An independent declaration check must not use evidence learned
+            // from the selected branch, including entry values and loop exits.
+            let definition = self.in_formal_declaration(owner, |this| {
+                this.check_definition_source(owner, definition)
+            })?;
+            self.closed_const_regions.insert(owner, definition.regions);
+        }
+        Ok(self.closed_const_regions[&owner]
+            .const_continuation_blocks
+            .contains(&local(block)))
+    }
+
+    fn check_definition_source(
+        &mut self,
+        owner: OwnerId,
+        mut definition: Definition,
+    ) -> Result<Definition, Error> {
         let span = self.package.item(owner).unwrap().span;
         self.ensure_contract(owner, span)?;
         if self.active_open_definitions.len() >= 64 || !self.active_open_definitions.insert(owner) {
@@ -2182,12 +2248,11 @@ impl Checker<'_, '_> {
         });
         self.active_open_definitions.remove(&owner);
         let (default_types, default_dependencies, regions) = checked?;
-        let definition = self.open_functions.get_mut(&owner).unwrap();
         definition.default_types = default_types;
         definition.default_dependencies = default_dependencies;
         definition.regions = regions;
         definition.checked = true;
-        Ok(())
+        Ok(definition)
     }
 
     fn require_description(
@@ -3843,6 +3908,7 @@ impl Checker<'_, '_> {
             self.with_staged_input(true, |this| {
                 this.check_open_fragment(&expression, decl.span, false)
             })?;
+            self.retain_behavior_value(binding, &expression, decl.span)?;
             self.generator_data.insert(binding, Some(expression));
             self.open_staged_locals.insert(binding);
         }
