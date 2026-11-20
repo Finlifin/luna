@@ -497,68 +497,7 @@ impl Checker<'_, '_> {
                 "diverging expression cannot satisfy a runtime quote dependency",
             ));
         }
-        if let K::ConstAddress { declaration, .. } = &checked.kind {
-            let id = self.intern_const_address_runtime_id(*declaration, checked, value.span)?;
-            return Ok(Term::Runtime(id));
-        }
-        let (origin, checked_epoch) = self.extract_local_runtime_origin(&checked);
-        if let Some(&existing) = self.local_runtime_origin_ids.get(&origin) {
-            return Ok(Term::Runtime(existing));
-        }
-        let domain = Term::Lift(Box::new(checked.ty.clone()));
-        let id = self.intern_runtime_id(domain, value.span)?;
-        self.local_runtime_origin_ids.insert(origin, id);
-        self.local_runtime_deliveries.insert(
-            id,
-            LocalRuntimeDelivery {
-                expr: checked,
-                checked_epoch,
-            },
-        );
-        Ok(Term::Runtime(id))
-    }
-
-    fn extract_local_runtime_origin(
-        &mut self,
-        expr: &n::Expr,
-    ) -> (LocalRuntimeOrigin, Option<(n::LocalId, u64)>) {
-        match &expr.kind {
-            K::AddressOf(place) => {
-                let mut cursor = place.as_ref();
-                let mut fields = Vec::new();
-                loop {
-                    match &cursor.kind {
-                        K::Field { value, index, .. } => {
-                            fields.push(*index);
-                            cursor = value;
-                        }
-                        K::Local(base) => {
-                            fields.reverse();
-                            return (
-                                LocalRuntimeOrigin::AddressOf {
-                                    base: *base,
-                                    fields,
-                                },
-                                None,
-                            );
-                        }
-                        _ => break,
-                    }
-                }
-            }
-            K::Local(binding) => {
-                let epoch = self.local_write_versions.get(binding).copied().unwrap_or(0);
-                return (
-                    LocalRuntimeOrigin::LocalValue {
-                        binding: *binding,
-                        epoch,
-                    },
-                    Some((*binding, epoch)),
-                );
-            }
-            _ => {}
-        }
-        (LocalRuntimeOrigin::Ephemeral(self.next_runtime_id), None)
+        self.intern_runtime_operand(checked, value.span)
     }
 }
 

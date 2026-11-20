@@ -520,44 +520,6 @@ impl<'h> Checker<'_, 'h> {
         })
     }
 
-    /// Validate the provider in its declaration telescope. Only a use of the
-    /// default needs to allocate an identity for a newly produced operand.
-    pub(super) fn check_runtime_default(
-        &mut self,
-        value: &Expr<'_>,
-        inner: &Term,
-    ) -> Result<(), Error> {
-        let expected = (!self.default_domain_has_rigid(inner, value.span)?).then_some(inner);
-        if self.forward_runtime_dependency(value, expected)?.is_some() {
-            return Ok(());
-        }
-        self.runtime_default_operand(value, expected).map(|_| ())
-    }
-
-    pub(super) fn runtime_default_operand(
-        &mut self,
-        value: &Expr<'_>,
-        expected: Option<&Term>,
-    ) -> Result<n::Expr, Error> {
-        let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
-        let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_active_env = std::mem::take(&mut self.active_env_parameters);
-        let checked = self.expr(value, expected);
-        self.active_env_parameters = saved_active_env;
-        self.locals = saved_locals;
-        self.in_staged_input = saved_staged;
-        self.in_required_comptime = saved_required;
-        let checked = checked?;
-        if is_never(&checked.ty) {
-            return Err(error(
-                value.span,
-                "diverging default cannot satisfy a runtime quote dependency",
-            ));
-        }
-        Ok(checked)
-    }
-
     fn function_default_dependencies(
         &mut self,
         owner: OwnerId,
@@ -613,7 +575,7 @@ impl<'h> Checker<'_, 'h> {
                 }
             }
             if let Term::Lift(inner) = &domain {
-                self.check_runtime_default(value, inner)?;
+                self.check_runtime_default(owner, value, inner)?;
                 return Ok(Vec::new());
             }
             let checked = self.expr(value, Some(&domain))?;

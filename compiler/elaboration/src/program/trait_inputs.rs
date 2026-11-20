@@ -325,7 +325,7 @@ impl Checker<'_, '_> {
                 if let hir::clause::ClauseParamKind::Optional(_, _, value) = clause.kind.unquoted()
                 {
                     if let Term::Lift(inner) = &domains[slot] {
-                        this.check_runtime_default(value, inner)?;
+                        this.check_runtime_default(owner, value, inner)?;
                     } else if matches!(
                         this.package.item(owner).map(|item| &item.kind),
                         Some(

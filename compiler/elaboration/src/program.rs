@@ -70,6 +70,8 @@ mod normal;
 mod open_functions;
 mod operators;
 mod pattern_checking;
+mod runtime_defaults;
+mod runtime_origins;
 
 use pattern_checking::*;
 
@@ -2273,6 +2275,7 @@ enum GlobalRuntimeOrigin {
     ConstAddress {
         declaration: DeclarationId,
         ty: Term,
+        fields: Vec<usize>,
     },
 }
 
@@ -2285,6 +2288,7 @@ enum LocalRuntimeOrigin {
     LocalValue {
         binding: n::LocalId,
         epoch: u64,
+        fields: Vec<usize>,
     },
     Ephemeral(u32),
 }
@@ -2499,64 +2503,6 @@ impl Checker<'_, '_> {
         Ok(id)
     }
 
-    fn intern_const_address_runtime_id(
-        &mut self,
-        declaration: DeclarationId,
-        checked: n::Expr,
-        span: Span,
-    ) -> Result<nir::RuntimeId, Error> {
-        let key = GlobalRuntimeOrigin::ConstAddress {
-            declaration,
-            ty: checked.ty.clone(),
-        };
-        if let Some(&existing) = self.global_runtime_origin_ids.get(&key) {
-            return Ok(existing);
-        }
-        let id = self.intern_runtime_id(Term::Lift(Box::new(checked.ty.clone())), span)?;
-        self.global_runtime_origin_ids.insert(key, id);
-        self.global_runtime_deliveries.insert(id, checked);
-        Ok(id)
-    }
-
-    pub(super) fn default_runtime_argument(
-        &mut self,
-        owner: OwnerId,
-        param: DeclarationId,
-        prefix_args: &[Term],
-        value: &Expr<'_>,
-        domain: &Term,
-        span: Span,
-    ) -> Result<Term, Error> {
-        let Term::Lift(expected_inner) = domain else {
-            return Err(error(
-                span,
-                "runtime default requires a lift dependency domain",
-            ));
-        };
-        if let Some(identity) = self.forward_runtime_dependency(value, Some(expected_inner))? {
-            return Ok(identity);
-        }
-        let key = GlobalRuntimeOrigin::DefaultParam {
-            owner,
-            param,
-            prefix_args: prefix_args.to_vec(),
-        };
-        if let Some(&existing) = self.global_runtime_origin_ids.get(&key) {
-            return Ok(Term::Runtime(existing));
-        }
-        let expected_inner = self.callable_input_view(expected_inner, value.span)?;
-        let checked = self.runtime_default_operand(value, Some(&expected_inner))?;
-        let id = if let K::ConstAddress { declaration, .. } = &checked.kind {
-            self.intern_const_address_runtime_id(*declaration, checked, span)?
-        } else {
-            let id = self.intern_runtime_id(Term::Lift(Box::new(checked.ty.clone())), span)?;
-            self.global_runtime_deliveries.insert(id, checked);
-            id
-        };
-        self.global_runtime_origin_ids.insert(key, id);
-        Ok(Term::Runtime(id))
-    }
-
     fn record_runtime_expr_captures(&mut self, expr: &n::Expr, span: Span) -> Result<(), Error> {
         let mut work = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = work;
@@ -2631,10 +2577,12 @@ impl Checker<'_, '_> {
                             ));
                         }
                     }
+                    constants::charge_copy(&entry.expr, &mut self.required_steps, span)?;
                     let cloned = entry.expr.clone();
                     self.record_runtime_expr_captures(&cloned, span)?;
                     cloned
                 } else if let Some(global_expr) = self.global_runtime_deliveries.get(id) {
+                    constants::charge_copy(global_expr, &mut self.required_steps, span)?;
                     global_expr.clone()
                 } else {
                     return Err(error(

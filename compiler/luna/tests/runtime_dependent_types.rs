@@ -560,6 +560,93 @@ fn forwarded_quote_defaults_check_the_instantiated_payload_domain() {
 }
 
 #[test]
+fn projected_quote_defaults_keep_the_field_and_storage_identity() {
+    let source = r#"
+        struct Cell {
+            first: i32,
+            second: i32,
+            pub const GLOBAL: Cell = Cell { first: 97, second: 7 };
+        }
+
+        impl Splice for Cell {
+            assoc RuntimeTarget: Type = Cell;
+            fn splice(comptime data: Cell) -> Cell {
+                Cell { first: data.first, second: data.second }
+            }
+        }
+
+        struct View
+        where quote src: lift *Cell, quote .field: lift *i32 = src.first
+        {}
+
+        fn read_view(v: View<src, .field = field>) -> i32
+        where quote src: lift *Cell, quote field: lift *i32
+        {
+            field.*
+        }
+
+        fn projected() -> i32
+        where quote src: lift *Cell, quote .field: lift *i32 = src.first
+        {
+            field.*
+        }
+
+        fn forward() -> i32 where quote src: lift *Cell {
+            projected<src>()
+        }
+
+        fn run() -> bool {
+            var a = Cell { first: 17, second: 32 };
+            var b = Cell { first: 42, second: 17 };
+            let left = View<a.ref> {};
+            let right = View<b.ref> {};
+            let global = View<Cell.GLOBAL.ref> {};
+            read_view<a.ref, a.first.ref>(left) == 17
+                and read_view<b.ref, b.first.ref>(right) == 42
+                and read_view<Cell.GLOBAL.ref, Cell.GLOBAL.ref.first>(global) == 97
+                and forward<a.ref>() == 17 and projected<b.ref>() == 42
+        }
+    "#;
+    let case = NativeCase::new(source);
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+
+    for other in ["a.second.ref", "b.first.ref"] {
+        let error =
+            support::compile(&source.replace("a.first.ref>(left)", &format!("{other}>(left)")))
+                .unwrap_err();
+        assert!(error.contains("type mismatch"), "{error}");
+    }
+}
+
+#[test]
+fn projected_pointer_dependency_expires_when_its_binding_changes() {
+    let source = r#"
+        struct Cell { first: i32 }
+        struct Field where quote field: lift *i32 {}
+        impl Field<field> where quote field: lift *i32 {
+            fn read(self) -> i32 { field.* }
+        }
+
+        fn run() -> bool {
+            var a = Cell { first: 17 };
+            var b = Cell { first: 42 };
+            var p = a.ref;
+            let captured = Field<p.first> {};
+            p = b.ref;
+            captured.read() == 17
+        }
+    "#;
+    let error = support::compile(source).unwrap_err();
+    assert!(
+        error.contains("runtime dependency binding was modified after capture"),
+        "{error}"
+    );
+}
+
+#[test]
 fn global_const_address_identity_and_dependent_quote_defaults() {
     let source = r#"
         trait MiniAlloc {
