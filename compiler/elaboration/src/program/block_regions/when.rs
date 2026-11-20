@@ -16,6 +16,8 @@ enum State {
 struct Ordinary {
     branch_type: Option<Term>,
     fallback: bool,
+    reaches_next_arm: bool,
+    selected_exit: bool,
     selection: Option<usize>,
     suppressed: bool,
     comptime: bool,
@@ -120,6 +122,8 @@ impl<'h> Frame<'h> {
         let ordinary = Ordinary {
             branch_type: fallback.and_then(|_| destination.expected().cloned()),
             fallback: fallback.is_some(),
+            reaches_next_arm: true,
+            selected_exit: false,
             selection: checker
                 .inline_selection
                 .filter(|(id, _)| *id == source.hir_id)
@@ -218,7 +222,10 @@ impl<'h> Frame<'h> {
                 }
             }
             (State::Condition, Some(value)) => {
-                if let Some(ordinary) = &self.ordinary {
+                if let Some(ordinary) = &mut self.ordinary {
+                    if ordinary.reaches_next_arm && ordinary.selection.is_none() {
+                        ordinary.selected_exit |= value.selected_exit();
+                    }
                     checker.in_required_comptime = ordinary.comptime;
                     checker.in_code_body = ordinary.in_code_body;
                 }
@@ -228,6 +235,11 @@ impl<'h> Frame<'h> {
             (State::Body(condition), Some(value)) => {
                 let arm = &self.arms[self.branches.len()];
                 let body = if let Some(ordinary) = &mut self.ordinary {
+                    ordinary.observe_arm(
+                        self.branches.len(),
+                        condition.as_ref(),
+                        value.selected_exit(),
+                    );
                     let mut body = value.ordinary(arm.body.span)?;
                     if ordinary.branch_type.is_none() && !is_never(&body.ty) {
                         ordinary.branch_type = Some(body.ty.clone());
@@ -481,7 +493,9 @@ impl<'h> Frame<'h> {
         } else {
             value
         };
-        Ok(Step::Completed(CheckedBlock::Ordinary(value)))
+        Ok(Step::Completed(
+            CheckedBlock::Ordinary(value).with_selected_exit(ordinary.selected_exit),
+        ))
     }
 
     fn leave_branch(&mut self, checker: &mut Checker<'_, '_>) {
@@ -509,12 +523,28 @@ impl<'h> Frame<'h> {
     }
 }
 
+impl Ordinary {
+    fn observe_arm(&mut self, index: usize, condition: Option<&n::Expr>, body_exit: bool) {
+        if let Some(selected) = self.selection {
+            self.selected_exit |= selected == index && body_exit;
+        } else if self.reaches_next_arm {
+            if condition.is_some_and(|expr| is_never(&expr.ty)) {
+                self.reaches_next_arm = false;
+                return;
+            }
+            let choice = condition.map_or(Some(true), control::boolean);
+            self.selected_exit |= choice != Some(false) && body_exit;
+            self.reaches_next_arm = choice != Some(true);
+        }
+    }
+}
+
 impl std::fmt::Display for Ordinary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(when-delivery (fallback {}) (suppressed {}) (branch-type",
-            self.fallback, self.suppressed
+            "(when-delivery (fallback {}) (reaches-next-arm {}) (selected-exit {}) (suppressed {}) (branch-type",
+            self.fallback, self.reaches_next_arm, self.selected_exit, self.suppressed
         )?;
         if let Some(ty) = &self.branch_type {
             write!(f, " {ty}")?;
@@ -607,6 +637,8 @@ mod tests {
         let delivery = Ordinary {
             branch_type: Some(p(P::Bool)),
             fallback: true,
+            reaches_next_arm: false,
+            selected_exit: true,
             selection: Some(2),
             suppressed: false,
             comptime: false,
@@ -616,7 +648,7 @@ mod tests {
         };
         assert_eq!(
             delivery.to_string(),
-            "(when-delivery (fallback true) (suppressed false) (branch-type (primitive bool)) (selection 2) (callee) (preserve-effect true))"
+            "(when-delivery (fallback true) (reaches-next-arm false) (selected-exit true) (suppressed false) (branch-type (primitive bool)) (selection 2) (callee) (preserve-effect true))"
         );
     }
 

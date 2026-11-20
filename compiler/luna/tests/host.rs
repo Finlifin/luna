@@ -17089,10 +17089,43 @@ fn conditional_const_exit_joins_only_reachable_if_paths() {
 }
 
 #[test]
+fn conditional_const_exit_joins_ordered_when_conditions_and_bodies() {
+    let source = r#"
+        comptime fn checked(v: bool) -> bool { assumes v; true }
+        fn choose(comptime flag: bool, side: bool) -> bool {
+            when {
+                side => { const found if found = flag else { return true; }; },
+                else => { return false; },
+            };
+            const answer = checked(flag);
+            answer
+        }
+        fn condition(comptime flag: bool, early: bool) -> bool {
+            when {
+                early => { return false; },
+                do { const v if v = flag else { return true; }; v } => {},
+            };
+            const answer = checked(flag);
+            answer
+        }
+        fn run() -> bool {
+            choose(true, true) and not choose(true, false)
+                and choose(false, true) and not choose(false, false)
+                and condition(true, false) and condition(false, false)
+                and not condition(false, true)
+        }
+    "#;
+    native(source, "(bool true)\n");
+}
+
+#[test]
 fn conditional_const_exit_keeps_independent_continuations_checked() {
     for statement in [
         "do { return true; const found if found = flag else { return false; }; };",
         "if enabled { const found if found = flag else { return true; }; };",
+        "when { enabled => { const v if v = flag else { return true; }; }, };",
+        "when { false => { const v if v = flag else { return true; }; }, else => { return true; }, };",
+        "when { true => { return true; }, do {const v if v=flag else {return false;};v} => {}, };",
         "if false { const found if found = flag else { return true; }; } else { return true; };",
         "if true { return true; } else { const found if found = flag else { return true; }; };",
     ] {

@@ -149,6 +149,12 @@ enum OpenClauseInference {
     Pending(D),
 }
 
+/// Completion and truth known without invoking a definition's staged inputs.
+struct OpenCondition {
+    diverges: bool,
+    choice: Option<bool>,
+}
+
 /// Source regions whose ordinary checks are complete before specialization.
 #[derive(Clone, Default)]
 pub(super) struct CheckedRegions {
@@ -3211,17 +3217,12 @@ impl Checker<'_, '_> {
                     || self
                         .inline_selection
                         .is_some_and(|(id, _)| id == expr.hir_id);
-                let condition_ty = self.with_staged_input(staged, |this| {
-                    this.describe_open_expression(condition, locals, returns, None, depth + 1)
+                let OpenCondition {
+                    diverges: condition_exits,
+                    choice,
+                } = self.with_staged_input(staged, |this| {
+                    this.describe_open_boolean(condition, locals, returns, depth + 1)
                 })?;
-                let D::Known(condition_ty) = condition_ty else {
-                    return Err(error(
-                        condition.span,
-                        "an unknown domain supplies no evidence for a boolean condition",
-                    ));
-                };
-                self.require_expression(&condition_ty, &p(P::Bool), condition.span)?;
-                let choice = control::source_boolean(condition, &mut self.required_steps, 0);
                 self.required_steps = self
                     .required_steps
                     .checked_sub((self.open_loop_transfers.len() as u64).saturating_mul(4))
@@ -3256,7 +3257,7 @@ impl Checker<'_, '_> {
                 };
                 let no_transfers =
                     std::mem::replace(&mut self.open_loop_transfers, condition_transfers);
-                if !is_never(&condition_ty) {
+                if !condition_exits {
                     for (id, found) in &mut self.open_loop_transfers {
                         if choice != Some(false) {
                             found.include(yes_transfers[id]);
@@ -3266,7 +3267,7 @@ impl Checker<'_, '_> {
                         }
                     }
                 }
-                let diverges = is_never(&condition_ty)
+                let diverges = condition_exits
                     || match choice {
                         Some(true) => matches!(&yes, D::Known(ty) if is_never(ty)),
                         Some(false) => matches!(&no, D::Known(ty) if is_never(ty)),
@@ -3962,6 +3963,34 @@ impl Checker<'_, '_> {
         }
     }
 
+    fn describe_open_boolean(
+        &mut self,
+        condition: &Expr<'_>,
+        locals: &mut BTreeMap<n::LocalId, D>,
+        returns: Option<&D>,
+        depth: usize,
+    ) -> Result<OpenCondition, Error> {
+        let expected = p(P::Bool);
+        let D::Known(ty) = self.describe_open_expression(
+            condition,
+            locals,
+            returns,
+            Some(&D::Known(expected.clone())),
+            depth,
+        )?
+        else {
+            return Err(error(
+                condition.span,
+                "an unknown domain supplies no evidence for a boolean condition",
+            ));
+        };
+        self.require_expression(&ty, &expected, condition.span)?;
+        Ok(OpenCondition {
+            diverges: is_never(&ty),
+            choice: control::source_boolean(condition, &mut self.required_steps, 0),
+        })
+    }
+
     fn describe_open_when(
         &mut self,
         expr: &Expr<'_>,
@@ -3999,6 +4028,7 @@ impl Checker<'_, '_> {
                     })?;
                 let transfers_before = self.open_loop_transfers.clone();
                 let mut arm_predicate: Option<(n::TypePredicate, crate::ptc::Formula)> = None;
+                let mut condition_evidence = None;
                 let condition = match arm.cond {
                     Some(hir_cond) => {
                         // Only the selector inherits the inline stage. Its
@@ -4011,16 +4041,17 @@ impl Checker<'_, '_> {
                                 .validate_formula(&fact, &mut crate::ptc::Budget::default())
                                 .map_err(|e| error(hir_cond.span, e.to_string()))?;
                             arm_predicate = Some((predicate, fact));
-                            Some(n::Expr {
-                                source: source(hir_cond.span),
-                                ty: p(P::Bool),
-                                kind: K::Local(local(hir_cond.hir_id)),
+                            Some(OpenCondition {
+                                diverges: false,
+                                choice: None,
                             })
+                        } else if !self.open_condition_has_type_evidence(hir_cond, 0) {
+                            Some(self.with_staged_input(staged, |this| {
+                                this.describe_open_boolean(hir_cond, locals, returns, depth + 1)
+                            })?)
                         } else {
                             let checked = self.with_staged_input(staged, |this| {
-                                let saved_unselected = if staged
-                                    && this.open_condition_has_type_evidence(hir_cond, 0)
-                                {
+                                let saved_unselected = if staged {
                                     Some(std::mem::replace(&mut this.in_unselected_inline, true))
                                 } else {
                                     None
@@ -4033,7 +4064,12 @@ impl Checker<'_, '_> {
                                 this.check_open_fragment(&checked, hir_cond.span, false)?;
                                 Ok::<_, Error>(checked)
                             })?;
-                            Some(checked)
+                            let description = OpenCondition {
+                                diverges: is_never(&checked.ty),
+                                choice: control::boolean(&checked),
+                            };
+                            condition_evidence = Some(checked);
+                            Some(description)
                         }
                     }
                     None => None,
@@ -4048,7 +4084,7 @@ impl Checker<'_, '_> {
                         self.definition_refinements
                             .requirements
                             .push(predicate.clone());
-                    } else if let Some(checked_cond) = &condition {
+                    } else if let Some(checked_cond) = &condition_evidence {
                         self.assume_source_type_condition(
                             arm.cond,
                             checked_cond,
@@ -4073,17 +4109,15 @@ impl Checker<'_, '_> {
                     self.open_loop_transfers = transfers_before;
                 } else {
                     match condition.as_ref() {
-                        Some(condition) if is_never(&condition.ty) => {
+                        Some(condition) if condition.diverges => {
                             self.open_loop_transfers = condition_transfers;
                             reachable = false;
                         }
-                        Some(condition) if control::boolean(condition) == Some(false) => {
+                        Some(condition) if condition.choice == Some(false) => {
                             self.open_loop_transfers = condition_transfers;
                         }
                         None => reachable = false,
-                        Some(condition) if control::boolean(condition) == Some(true) => {
-                            reachable = false
-                        }
+                        Some(condition) if condition.choice == Some(true) => reachable = false,
                         _ => {}
                     }
                 }
@@ -4095,7 +4129,7 @@ impl Checker<'_, '_> {
                     self.definition_refinements
                         .requirements
                         .push(n::TypePredicate::Not(Box::new(predicate)));
-                } else if let Some(checked_cond) = &condition {
+                } else if let Some(checked_cond) = &condition_evidence {
                     self.assume_source_type_condition(
                         arm.cond,
                         checked_cond,
@@ -4119,12 +4153,14 @@ impl Checker<'_, '_> {
                 }
                 result = match condition {
                     None => body,
-                    Some(condition) if is_never(&condition.ty) => D::Known(p(P::Never)),
+                    Some(condition) if condition.diverges => D::Known(p(P::Never)),
                     Some(condition) => {
                         let diverges = match (&body, &result) {
-                            (D::Known(yes), D::Known(no)) => {
-                                control::conditional_never(&condition, yes, no)
-                            }
+                            (D::Known(yes), D::Known(no)) => match condition.choice {
+                                Some(true) => is_never(yes),
+                                Some(false) => is_never(no),
+                                None => is_never(yes) && is_never(no),
+                            },
                             _ => false,
                         };
                         let joined = match (&body, &result) {
