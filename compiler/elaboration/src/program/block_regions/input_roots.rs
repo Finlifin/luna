@@ -22,7 +22,9 @@ impl<'h, C: Completion> Root<'h> for preparation::Frame<'h, C> {
     ) -> Result<Poll<Request<'h>, C::Output>, Error> {
         if let Some(value) = returned {
             let value = match value {
-                CheckedBlock::Ordinary(value) => n::NormalFormArgument::Value(value),
+                CheckedBlock::Ordinary(value) | CheckedBlock::SelectedExit(value) => {
+                    n::NormalFormArgument::Value(value)
+                }
                 CheckedBlock::Contextual(value) => value,
             };
             self.accept(checker, Ok(value))?;
@@ -109,7 +111,8 @@ impl dependent_inputs::tasks::Frame {
     ) -> Result<Poll<Request<'h>, dependent_inputs::PreparedInputs, required::Invocation>, Error>
     {
         let next = if let Some(returned) = returned {
-            let CheckedBlock::Ordinary(value) = returned else {
+            let (CheckedBlock::Ordinary(value) | CheckedBlock::SelectedExit(value)) = returned
+            else {
                 unreachable!("dependent input requested an ordinary expression")
             };
             self.accept(checker, value, site)?

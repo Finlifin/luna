@@ -7,6 +7,7 @@ use super::*;
 pub(super) struct DefinitionRefinements {
     pub(super) subjects: BTreeMap<n::LocalId, nir::DeclarationParameter>,
     pub(super) requirements: Vec<n::TypePredicate>,
+    pub(super) block_contains_conditional_const: bool,
     pub(super) regions: open_functions::CheckedRegions,
     pub(super) tuple_elements: Vec<DeclarationId>,
     pub(super) staged_values: Vec<(DeclarationId, Term)>,

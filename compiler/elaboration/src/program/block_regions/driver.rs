@@ -73,24 +73,22 @@ impl BlockFrame<'_> {
         value: destinations::CheckedTail,
     ) -> Result<CheckedBlock, Error> {
         let destination = self.progress.tail.clone();
+        let selected = matches!(self.progress.phase, Phase::SelectedExit);
         let result = self.progress.finish(checker, value);
         self.scope.leave(checker);
         if let Some(boundary) = self.boundary {
             boundary.leave(checker);
             let value = result?.ordinary(boundary.span)?;
-            if boundary.partial_input {
-                return destination
-                    .deliver_input(checker, value, boundary.span)
-                    .map(CheckedBlock::Ordinary);
-            }
-            if !boundary.preserve_effect {
-                return checker
-                    .run_computation(value, destination.expected(), boundary.span)
-                    .map(CheckedBlock::Ordinary);
-            }
-            return Ok(CheckedBlock::Ordinary(value));
+            let value = if boundary.partial_input {
+                destination.deliver_input(checker, value, boundary.span)?
+            } else if !boundary.preserve_effect {
+                checker.run_computation(value, destination.expected(), boundary.span)?
+            } else {
+                value
+            };
+            return Ok(CheckedBlock::Ordinary(value).with_selected_exit(selected));
         }
-        result
+        result.map(|value| value.with_selected_exit(selected))
     }
     fn unwind(self, checker: &mut Checker<'_, '_>) {
         self.scope.leave(checker);
@@ -250,20 +248,29 @@ impl<'h> BlockFrame<'h> {
         if let Some(value) = returned {
             return match self.progress.phase {
                 Phase::Child => {
-                    self.progress
-                        .accept(checker, value.ordinary(self.progress.block.span)?)?;
+                    let selected = value.selected_exit();
+                    let mut value = value.ordinary(self.progress.block.span)?;
+                    let statement = &self.progress.block.stmts[self.progress.next_statement];
+                    if matches!(statement.kind, H::Semi(_)) {
+                        value = checker.finish_semicolon(statement, None, value)?;
+                    }
+                    self.progress.accept(checker, value, selected)?;
                     Ok(Step::Continue)
                 }
-                Phase::TailChild => self
-                    .progress
-                    .tail
-                    .complete(
-                        checker,
-                        &self.progress.block,
-                        self.progress.diverges,
-                        Some(value),
-                    )
-                    .map(Step::Tail),
+                Phase::TailChild => {
+                    if value.selected_exit() && !self.progress.diverges {
+                        self.progress.phase = Phase::SelectedExit;
+                    }
+                    self.progress
+                        .tail
+                        .complete(
+                            checker,
+                            &self.progress.block,
+                            self.progress.diverges,
+                            Some(value),
+                        )
+                        .map(Step::Tail)
+                }
                 _ => Err(error(
                     self.progress.block.span,
                     "block received an unsolicited child",
@@ -277,15 +284,23 @@ impl<'h> BlockFrame<'h> {
                         .required_steps
                         .checked_sub(1)
                         .ok_or_else(|| error(statement.span, "block checking budget exhausted"))?;
+                    // Discard is sequenced after its operand, so keep the operand
+                    // in this region until it delivers its completion evidence.
+                    let operand = if let H::Semi(inner) = statement.kind {
+                        checker.preserve_effect_value = false;
+                        checker.allow_packed_pointer_projection = false;
+                        inner
+                    } else {
+                        statement
+                    };
                     Ok(Step::Child(Request::expression(
-                        statement,
+                        operand,
                         statement_destination.clone(),
                     )))
                 }
                 None => Ok(Step::Continue),
             },
             Phase::SelectedExit => {
-                self.progress.phase = Phase::TailChild;
                 self.progress
                     .tail
                     .complete(checker, &self.progress.block, true, None)

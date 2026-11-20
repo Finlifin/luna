@@ -17036,6 +17036,56 @@ fn conditional_const_failure_skips_success_invocations_after_runtime_transfers()
 }
 
 #[test]
+fn conditional_const_exit_survives_nested_block_delivery() {
+    let source = r#"
+        comptime fn checked(value: bool) -> bool { assumes value; true }
+        fn configured(comptime flag: bool, fallback: bool) -> bool {
+            var visited = false;
+            do {
+                visited = true;
+                do {
+                    const found if found = flag else { return visited and fallback; };
+                    const from_binding = checked(found);
+                }
+            };
+            const answer = checked(flag);
+            visited and answer
+        }
+        fn run() -> bool {
+            configured(true, false) and not configured(false, false) and configured(false, true)
+        }
+    "#;
+    native(source, "(bool true)\n");
+}
+
+#[test]
+fn conditional_const_exit_keeps_independent_continuations_checked() {
+    for statement in [
+        "do { return true; const found if found = flag else { return false; }; };",
+        "if enabled { const found if found = flag else { return true; }; };",
+    ] {
+        let source = format!(
+            r#"
+            comptime fn checked(value: bool) -> bool {{ assumes value; true }}
+            fn configured(comptime flag: bool, enabled: bool) -> bool {{
+                {statement}
+                const answer = checked(flag);
+                answer
+            }}
+            fn run() -> bool {{ configured(false, true) }}
+            "#
+        );
+        let output = Work::new(&source).build();
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "accepted {statement}");
+        assert!(
+            diagnostic.contains("ProgramContractRejected"),
+            "{statement}: {diagnostic}"
+        );
+    }
+}
+
+#[test]
 fn conditional_local_constants_failure_preserves_runtime_cleanup() {
     let source = format!(
         "{RESOURCE_HEADER} struct Watch {{target:*bool}} impl Retire for Watch {{fn drop(*self) {{self.target.*.* = true;}}}} fn run()->bool {{var seen=false;while true {{let watch=Watch {{target:seen.ref}};const true=false else {{break;}};}};seen}}"

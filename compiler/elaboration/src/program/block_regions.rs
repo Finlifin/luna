@@ -148,7 +148,12 @@ impl<'h, T: Tail> Progress<'h, T> {
         Ok(next)
     }
 
-    fn accept(&mut self, checker: &mut Checker<'_, '_>, mut value: n::Expr) -> Result<(), Error> {
+    fn accept(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        mut value: n::Expr,
+        child_exit: bool,
+    ) -> Result<(), Error> {
         if !matches!(self.phase, Phase::Child) {
             return Err(error(self.block.span, "block has no pending child result"));
         }
@@ -183,12 +188,15 @@ impl<'h, T: Tail> Progress<'h, T> {
         }
         // A successful const binding yields void. Its diverging result is
         // the selected failure branch, which supplies no success bindings.
-        let selected_exit = is_never(&value.ty)
+        let direct_const = matches!(statement.kind, H::Let(binding) if binding.comptime && binding.otherwise.is_some());
+        let selected_exit = !self.diverges
+            && is_never(&value.ty)
+            && (child_exit || direct_const && checker.runtime_value_context())
             && checker
                 .open_instance
                 .as_ref()
                 .and_then(|instance| checker.open_functions.get(&instance.owner))
-                .is_some_and(|definition| definition.checked_const_continuation(statement.hir_id));
+                .is_some_and(|definition| definition.checked_const_continuation(self.block.hir_id));
         self.statements.push(value);
         self.next_statement += 1;
         self.diverges = diverges;
@@ -213,7 +221,7 @@ impl<'h, T: Tail> Progress<'h, T> {
         checker: &mut Checker<'_, '_>,
         checked: T::Checked,
     ) -> Result<T::Output, Error> {
-        if !matches!(self.phase, Phase::TailChild) {
+        if !matches!(self.phase, Phase::TailChild | Phase::SelectedExit) {
             return Err(error(self.block.span, "block has no pending tail result"));
         }
         let mut fuel = usize::try_from(checker.required_steps).unwrap_or(usize::MAX);

@@ -60,6 +60,8 @@ impl std::fmt::Display for OrdinaryDestination {
 
 pub(super) enum CheckedBlock {
     Ordinary(n::Expr),
+    /// A definition-checked success continuation has no instance on this path.
+    SelectedExit(n::Expr),
     Contextual(n::NormalFormArgument),
 }
 
@@ -69,9 +71,20 @@ pub(super) enum CheckedTail {
 }
 
 impl CheckedBlock {
+    pub(super) fn selected_exit(&self) -> bool {
+        matches!(self, Self::SelectedExit(_))
+    }
+
+    pub(super) fn with_selected_exit(self, selected: bool) -> Self {
+        match self {
+            Self::Ordinary(value) if selected && is_never(&value.ty) => Self::SelectedExit(value),
+            other => other,
+        }
+    }
+
     pub(super) fn ordinary(self, span: Span) -> Result<n::Expr, Error> {
         match self {
-            Self::Ordinary(value) => Ok(value),
+            Self::Ordinary(value) | Self::SelectedExit(value) => Ok(value),
             Self::Contextual(_) => Err(error(span, "block requires an ordinary child result")),
         }
     }
@@ -79,7 +92,9 @@ impl CheckedBlock {
     pub(super) fn contextual(self, span: Span) -> Result<n::NormalFormArgument, Error> {
         match self {
             Self::Contextual(value) => Ok(value),
-            Self::Ordinary(_) => Err(error(span, "block requires a contextual child result")),
+            Self::Ordinary(_) | Self::SelectedExit(_) => {
+                Err(error(span, "block requires a contextual child result"))
+            }
         }
     }
 }
@@ -349,6 +364,7 @@ impl std::fmt::Display for CheckedBlock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Ordinary(value) => write!(f, "(ordinary-block-result {value})"),
+            Self::SelectedExit(value) => write!(f, "(selected-exit {value})"),
             Self::Contextual(value) => write!(f, "(contextual-block-result {value})"),
         }
     }

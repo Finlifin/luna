@@ -241,10 +241,9 @@ impl<'h> Frame<'h> {
                     CheckedBlock::Ordinary(yes) if self.partial_input && !is_never(&yes.ty) => self
                         .destination
                         .with_expected(checker, Some(&yes.ty), self.source.span)?,
-                    CheckedBlock::Ordinary(yes) => {
-                        self.destination
-                            .following_branch(checker, &yes.ty, self.source.span)?
-                    }
+                    CheckedBlock::Ordinary(yes) | CheckedBlock::SelectedExit(yes) => self
+                        .destination
+                        .following_branch(checker, &yes.ty, self.source.span)?,
                     CheckedBlock::Contextual(_) => self.destination.clone(),
                 };
                 self.enter_branch(checker, &condition, false, Some(no.hir_id))?;

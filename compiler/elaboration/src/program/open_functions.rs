@@ -153,7 +153,7 @@ enum OpenClauseInference {
 #[derive(Clone, Default)]
 pub(super) struct CheckedRegions {
     tuple_loops: BTreeSet<n::LocalId>,
-    conditional_constants: BTreeSet<n::LocalId>,
+    const_continuation_blocks: BTreeSet<n::LocalId>,
 }
 
 #[derive(Clone)]
@@ -172,7 +172,11 @@ impl Definition {
     }
 
     pub(super) fn checked_const_continuation(&self, site: hir::HirId) -> bool {
-        self.checked && self.regions.conditional_constants.contains(&local(site))
+        self.checked
+            && self
+                .regions
+                .const_continuation_blocks
+                .contains(&local(site))
     }
 
     pub(super) fn input_domain_refs(&self) -> lexical_domains::InputDomains<'_> {
@@ -2340,6 +2344,8 @@ impl Checker<'_, '_> {
         let saved_context = self.context.clone();
         let saved_req_len = self.definition_refinements.requirements.len();
         let saved_generator_data = self.generator_data.clone();
+        let outer_conditional =
+            std::mem::take(&mut self.definition_refinements.block_contains_conditional_const);
         let result = (|| {
             let mut completing = true;
             for statement in block.stmts {
@@ -2348,12 +2354,7 @@ impl Checker<'_, '_> {
                 })?;
                 if matches!(statement.kind, H::Let(binding) if binding.comptime && binding.otherwise.is_some())
                 {
-                    // Only a completed definition publishes these sites. Its
-                    // success continuation is checked with the pattern bindings.
-                    self.definition_refinements
-                        .regions
-                        .conditional_constants
-                        .insert(local(statement.hir_id));
+                    self.definition_refinements.block_contains_conditional_const = true;
                 }
                 completing &= !matches!(ty, D::Known(ref ty) if is_never(ty));
                 if completing {
@@ -2373,6 +2374,18 @@ impl Checker<'_, '_> {
                 Ok(D::Known(p(P::Never)))
             }
         })();
+        // An instance may omit a continuation only in a block whose source
+        // was described with the success bindings. Retain just the enclosing
+        // blocks of conditional declarations, including their checked tails.
+        let checked =
+            result.is_ok() && self.definition_refinements.block_contains_conditional_const;
+        if checked {
+            self.definition_refinements
+                .regions
+                .const_continuation_blocks
+                .insert(local(block.hir_id));
+        }
+        self.definition_refinements.block_contains_conditional_const = outer_conditional || checked;
         *locals = saved;
         self.locals = saved_known;
         self.open_staged_locals = saved_staged_locals;

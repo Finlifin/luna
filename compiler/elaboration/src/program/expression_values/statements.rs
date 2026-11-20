@@ -32,6 +32,25 @@ impl Checker<'_, '_> {
         })
     }
 
+    pub(in crate::program) fn finish_semicolon(
+        &mut self,
+        expr: &Expr<'_>,
+        expected: Option<&Term>,
+        value: n::Expr,
+    ) -> Result<n::Expr, Error> {
+        let ty = p(if is_never(&value.ty) {
+            P::Never
+        } else {
+            P::Void
+        });
+        let mut discard =
+            self.finish_value_expression(expr, expected, ty, K::Discard(Box::new(value)))?;
+        if !discard.shares_discard_temporary_boundary() {
+            discard.source = self.generated_expression_source(discard.source, expr.span)?;
+        }
+        Ok(discard)
+    }
+
     #[inline(never)]
     pub(super) fn control_value_expression(
         &mut self,
@@ -42,17 +61,7 @@ impl Checker<'_, '_> {
         let (ty, kind) = match &expr.kind {
             H::Semi(inner) => {
                 let value = self.expr(inner, None)?;
-                let ty = if is_never(&value.ty) {
-                    p(P::Never)
-                } else {
-                    p(P::Void)
-                };
-                let mut discard =
-                    self.finish_value_expression(expr, expected, ty, K::Discard(Box::new(value)))?;
-                if !discard.shares_discard_temporary_boundary() {
-                    discard.source = self.generated_expression_source(discard.source, expr.span)?;
-                }
-                return Ok(discard);
+                return self.finish_semicolon(expr, expected, value);
             }
             H::For {..} => return self.iterator_loop(expr, expected),
             H::Loop(block) => {
