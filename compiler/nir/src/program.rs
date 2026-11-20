@@ -1702,8 +1702,8 @@ impl fmt::Display for CallArgument {
 pub struct Capture {
     pub binding: LocalId,
     pub ty: Term,
-    /// None reads the lexical binding. Some restores a completed captured
-    /// value, without looking up or overwriting a caller-local binding.
+    /// None reads the lexical binding. Some evaluates an initializer in the
+    /// enclosing scope and binds its result inside the closure.
     pub value: Option<Box<Expr>>,
 }
 

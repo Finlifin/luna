@@ -2210,6 +2210,8 @@ fn match_default_strategy_term(
 
 #[derive(Clone)]
 struct CaptureFrame {
+    site: n::LocalId,
+    addresses: BTreeMap<nir::RuntimeId, n::LocalId>,
     comptime: bool,
     outer: BTreeSet<n::LocalId>,
     values: Vec<n::Capture>,
@@ -2288,13 +2290,23 @@ enum GlobalRuntimeOrigin {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum LocalRuntimeOrigin {
-    AddressOf { base: n::LocalId },
-    LocalValue { binding: n::LocalId, epoch: u64 },
-    Ephemeral { occurrence: u32, site: n::LocalId },
+    AddressOf {
+        base: n::LocalId,
+        closure: Option<n::LocalId>,
+    },
+    LocalValue {
+        binding: n::LocalId,
+        epoch: u64,
+    },
+    Ephemeral {
+        occurrence: u32,
+        site: n::LocalId,
+    },
 }
 
 #[derive(Clone, Debug)]
 struct LocalRuntimeDelivery {
+    address_owner: Option<n::LocalId>,
     producer_site: Option<n::LocalId>,
     expr: n::Expr,
     checked_epoch: Option<(n::LocalId, u64)>,
@@ -2586,9 +2598,9 @@ impl Checker<'_, '_> {
                         }
                     }
                     constants::charge_copy(&entry.expr, &mut self.required_steps, span)?;
-                    let cloned = entry.expr.clone();
-                    self.record_runtime_expr_captures(&cloned, span)?;
-                    cloned
+                    let owner = entry.address_owner;
+                    let operand = entry.expr.clone();
+                    self.capture_runtime_operand(*id, owner, operand, span)?
                 } else if let Some(global_expr) = self.global_runtime_deliveries.get(id) {
                     constants::charge_copy(global_expr, &mut self.required_steps, span)?;
                     global_expr.clone()
@@ -6573,6 +6585,8 @@ impl Checker<'_, '_> {
             outer.extend(self.input_facts.values.keys().copied());
         }
         self.captures.push(CaptureFrame {
+            site: local(expr.hir_id),
+            addresses: BTreeMap::new(),
             comptime,
             outer,
             values: Vec::new(),

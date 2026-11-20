@@ -53,7 +53,10 @@ impl Checker<'_, '_> {
                 }
                 K::Local(binding) => {
                     let origin = if address {
-                        LocalRuntimeOrigin::AddressOf { base: *binding }
+                        LocalRuntimeOrigin::AddressOf {
+                            base: *binding,
+                            closure: self.captures.last().map(|frame| frame.site),
+                        }
                     } else {
                         LocalRuntimeOrigin::LocalValue {
                             binding: *binding,
@@ -191,15 +194,103 @@ impl Checker<'_, '_> {
             LocalRuntimeOrigin::Ephemeral { site, .. } => Some(*site),
             _ => None,
         };
+        let address_owner = match &origin {
+            LocalRuntimeOrigin::AddressOf { closure, .. } => *closure,
+            _ => None,
+        };
         self.local_runtime_origins.ids.insert(origin, id);
         self.local_runtime_deliveries.insert(
             id,
             LocalRuntimeDelivery {
+                address_owner,
                 producer_site,
                 expr,
                 checked_epoch,
             },
         );
         Ok(Term::Runtime(id))
+    }
+
+    /// A previously formed address crosses the first closure boundary as a
+    /// pointer value. Recomputing it in the body would address a captured copy.
+    pub(super) fn capture_runtime_operand(
+        &mut self,
+        id: nir::RuntimeId,
+        owner: Option<n::LocalId>,
+        operand: n::Expr,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let base = match &operand.kind {
+            K::AddressOf(place) => match place.kind {
+                K::Local(binding) => Some(binding),
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(base) = base else {
+            self.record_runtime_expr_captures(&operand, span)?;
+            return Ok(operand);
+        };
+        self.required_steps = self
+            .required_steps
+            .checked_sub(self.captures.len() as u64)
+            .ok_or_else(|| error(span, "runtime address capture budget exhausted"))?;
+        let first = match owner {
+            None => 0,
+            Some(owner) => {
+                self.captures
+                    .iter()
+                    .rposition(|frame| frame.site == owner)
+                    .ok_or_else(|| {
+                        error(
+                            span,
+                            "runtime address belongs to a closure that is no longer in scope",
+                        )
+                    })?
+                    + 1
+            }
+        };
+        if first == self.captures.len() {
+            self.record_runtime_expr_captures(&operand, span)?;
+            return Ok(operand);
+        }
+        if !self.locals.contains_key(&base) || !self.captures[first].outer.contains(&base) {
+            return Err(error(
+                span,
+                "runtime address refers to storage that is no longer in scope",
+            ));
+        }
+        let ty =
+            declaration_inputs::copy_input_domain(&operand.ty, &mut self.required_steps, span)?;
+        let binding = match self.captures[first].addresses.get(&id) {
+            Some(binding) => *binding,
+            None => {
+                let binding = self.spread_binding(span)?;
+                let frame = &mut self.captures[first];
+                frame.addresses.insert(id, binding);
+                frame.values.push(n::Capture {
+                    binding,
+                    ty: ty.clone(),
+                    value: Some(Box::new(operand)),
+                });
+                binding
+            }
+        };
+        for frame in &mut self.captures[first + 1..] {
+            if let std::collections::btree_map::Entry::Vacant(entry) = frame.addresses.entry(id) {
+                entry.insert(binding);
+                frame.values.push(n::Capture {
+                    binding,
+                    ty: declaration_inputs::copy_input_domain(&ty, &mut self.required_steps, span)?,
+                    value: None,
+                });
+            }
+        }
+        self.locals.insert(binding, ty.clone());
+        Ok(n::Expr {
+            ty,
+            source: source(span),
+            kind: K::Local(binding),
+        })
     }
 }

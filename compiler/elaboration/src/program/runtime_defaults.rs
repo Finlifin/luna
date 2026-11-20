@@ -302,6 +302,7 @@ impl Checker<'_, '_> {
         self.local_runtime_deliveries.insert(
             id,
             LocalRuntimeDelivery {
+                address_owner: None,
                 producer_site: None,
                 checked_epoch: None,
                 expr: n::Expr {

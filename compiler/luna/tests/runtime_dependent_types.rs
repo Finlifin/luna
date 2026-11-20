@@ -1148,6 +1148,68 @@ fn explicit_function_type_inputs_run_between_the_receiver_and_arguments() {
 }
 
 #[test]
+fn closures_keep_prior_storage_addresses_and_own_their_by_value_captures() {
+    let definitions = r#"
+        enum View where quote address: lift *i32 { empty, }
+        fn read(v: View<p>) -> i32 where quote p: lift *i32 { p.* }
+        fn same(a: View<p>, b: View<p>) -> i32 where quote p: lift *i32 { p.* }
+    "#;
+    let case = NativeCase::new(&format!(
+        r#"{definitions}
+        fn run() -> bool {{
+            var cell: i32 = 7;
+            let v = View<cell.ref>.empty;
+            let w = View<cell.ref>.empty;
+            let observe = || {{
+                let snapshot = cell;
+                let nested = || read(v);
+                snapshot == 7 and nested() == 42 and read(w) == 42
+            }};
+            cell = 42;
+            observe()
+        }}
+    "#
+    ));
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+
+    let distinct = format!(
+        r#"{definitions}
+        fn run() -> i32 {{
+            var cell: i32 = 7;
+            let outside = View<cell.ref>.empty;
+            let f = || same(outside, View<cell.ref>.empty);
+            f()
+        }}
+    "#
+    );
+    assert!(
+        support::compile(&distinct)
+            .unwrap_err()
+            .contains("not entailed")
+    );
+
+    let expired = NativeCase::new(&format!(
+        r#"{definitions}
+        fn run() -> i32 {{
+            let f = do {{
+                var cell: i32 = 7;
+                let v = View<cell.ref>.empty;
+                || read(v)
+            }};
+            f()
+        }}
+    "#
+    ));
+    let output = expired.build();
+    assert!(!output.status.success());
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    assert!(diagnostic.contains("escaping provenance"), "{diagnostic}");
+}
+
+#[test]
 fn computed_default_identities_are_per_acquisition_and_cannot_export_dead_storage() {
     let definitions = r#"
         struct Pair { first: i32 }

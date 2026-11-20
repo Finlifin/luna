@@ -8027,6 +8027,7 @@ impl Checker<'_, '_> {
                     this.local_runtime_deliveries.insert(
                         rt_id,
                         LocalRuntimeDelivery {
+                            address_owner: None,
                             producer_site: None,
                             expr: n::Expr {
                                 source: source(span),
