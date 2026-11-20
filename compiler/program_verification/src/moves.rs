@@ -2378,6 +2378,178 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         Ok(())
     }
 
+    pub(super) fn predeclare_function_env_parameters(
+        &mut self,
+        frame: &mut Flow,
+        outer: &Flow,
+        remap_borrowed_roots: bool,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let env_parameters = self.function_env_parameters;
+        let mut remapped_roots: BTreeMap<PlaceId, PlaceId> = BTreeMap::new();
+        let mut imported_owners = BTreeSet::new();
+        let mut pending = Vec::new();
+        for env in env_parameters {
+            let id = root(env.binding);
+            if frame.types.contains_key(&id) {
+                continue;
+            }
+            let Some(ty) = outer.types.get(&id) else {
+                continue;
+            };
+            if outer
+                .state
+                .require_place(&Place {
+                    root: id,
+                    fields: vec![],
+                })
+                .is_err()
+            {
+                continue;
+            }
+            // Enclosing runtime environment parameters belong to the outer function frame:
+            // preserve their state for pointer/drop lookups without adding them to
+            // this sub-frame's own cleanup ownership order.
+            frame
+                .state
+                .import_position(
+                    id,
+                    &outer.state,
+                    &Place {
+                        root: id,
+                        fields: vec![],
+                    },
+                    &mut self.fuel,
+                )
+                .map_err(|reason| error(source, format!("runtime env import: {reason:?}")))?;
+            frame.types.insert(id, ty.clone());
+            frame.stable_handler_slots.insert(id);
+            pending.push((id, id));
+        }
+        while let Some((outer_owner, frame_owner)) = pending.pop() {
+            if !imported_owners.insert(outer_owner) {
+                continue;
+            }
+            let first = Place {
+                root: outer_owner,
+                fields: vec![],
+            };
+            let entries: Vec<_> = outer
+                .pointers
+                .range(first..)
+                .take_while(|(slot, _)| slot.root == outer_owner)
+                .map(|(slot, targets)| (slot.clone(), targets.clone()))
+                .collect();
+            for (slot, targets) in entries {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(slot.fields.len().saturating_add(1))
+                    .ok_or_else(|| error(source, "runtime env pointer import budget exhausted"))?;
+                self.pointer_work(&targets, source)?;
+                let mut imported_targets = BTreeSet::new();
+                let mut target_remap = BTreeMap::new();
+                for target in &targets {
+                    if crate::is_const_global_place(target.root) {
+                        imported_targets.insert(target.clone());
+                        continue;
+                    }
+                    let Some(target_ty) = outer.types.get(&target.root) else {
+                        imported_targets.insert(target.clone());
+                        continue;
+                    };
+                    if outer
+                        .state
+                        .require_place(&Place {
+                            root: target.root,
+                            fields: vec![],
+                        })
+                        .is_err()
+                    {
+                        imported_targets.insert(target.clone());
+                        continue;
+                    }
+                    let dest_root = if remap_borrowed_roots
+                        && matches!(
+                            target.root.owner,
+                            x if x == u64::MAX - 1 || x == u64::MAX - 2 || x == u64::MAX - 4
+                        ) {
+                        if let Some(&mapped) = remapped_roots.get(&target.root) {
+                            mapped
+                        } else {
+                            let mapped = loop {
+                                let local = self.next_borrowed_pointer;
+                                self.next_borrowed_pointer =
+                                    local.checked_add(1).ok_or_else(|| {
+                                        error(source, "runtime env borrowed identity exhausted")
+                                    })?;
+                                self.fuel = self.fuel.checked_sub(1).ok_or_else(|| {
+                                    error(source, "runtime env borrowed budget exhausted")
+                                })?;
+                                let candidate = PlaceId {
+                                    owner: u64::MAX - 4,
+                                    local,
+                                };
+                                if !frame.types.contains_key(&candidate) {
+                                    break candidate;
+                                }
+                            };
+                            remapped_roots.insert(target.root, mapped);
+                            mapped
+                        }
+                    } else {
+                        target.root
+                    };
+                    if !frame.types.contains_key(&dest_root) {
+                        frame
+                            .state
+                            .import_position(
+                                dest_root,
+                                &outer.state,
+                                &Place {
+                                    root: target.root,
+                                    fields: vec![],
+                                },
+                                &mut self.fuel,
+                            )
+                            .map_err(|reason| {
+                                error(source, format!("runtime env target import: {reason:?}"))
+                            })?;
+                        frame.types.insert(dest_root, target_ty.clone());
+                        if outer.effect_borrows.contains(&target.root) {
+                            frame.effect_borrows.insert(dest_root);
+                        }
+                        pending.push((target.root, dest_root));
+                    }
+                    let mapped = Place {
+                        root: dest_root,
+                        fields: target.fields.clone(),
+                    };
+                    target_remap.insert(target.clone(), mapped.clone());
+                    imported_targets.insert(mapped);
+                }
+                let frame_slot = Place {
+                    root: frame_owner,
+                    fields: slot.fields.clone(),
+                };
+                frame.pointers.insert(frame_slot.clone(), imported_targets);
+                if let Some(qualified) = outer.pointer_guards.get(&slot) {
+                    let mut retained = PointerTargetGuards::new();
+                    for (target, guards) in qualified {
+                        self.charge_pointer_conditions(guards, source)?;
+                        if targets.contains(target) {
+                            let mapped_target = target_remap.get(target).unwrap_or(target);
+                            retained.insert(mapped_target.clone(), guards.clone());
+                        }
+                    }
+                    if !retained.is_empty() {
+                        frame.pointer_guards.insert(frame_slot, retained);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn select_method_callee(&mut self, callee: &Expr, source: SourceRange) -> Result<Expr, Error> {
         self.select_method_callee_mode(callee, false, source)
     }
@@ -4741,6 +4913,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             ..Default::default()
         };
         self.predeclare_const_globals(&mut frame, source)?;
+        self.predeclare_function_env_parameters(&mut frame, flow, false, source)?;
         self.pending_frame(source, |this| {
             for argument in arguments {
                 let mut origins = BTreeMap::new();
@@ -7085,6 +7258,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 )?;
             }
         }
+        self.predeclare_function_env_parameters(&mut inner, flow, true, source)?;
         let effect_inputs = self.effect_inputs_for(&callable.definition.ty, source)?;
         let memory_inputs = self.copy_effect_memory_inputs(source)?;
         self.conditional_handler_borrows(&mut inner, &borrowed_roots, source)?;
@@ -7894,6 +8068,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 ..Default::default()
             };
             self.predeclare_const_globals(&mut frame, source)?;
+            self.predeclare_function_env_parameters(&mut frame, flow, false, source)?;
             let mut seen = BTreeSet::new();
             let mut last_default = None;
             let mut inputs = vec![];
@@ -12036,6 +12211,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             ..Default::default()
         };
         self.predeclare_const_globals(&mut frame, source)?;
+        self.predeclare_function_env_parameters(&mut frame, flow, false, source)?;
         let mut frame_targets = BTreeMap::new();
         self.pending_frame(source, |this| {
             for argument in arguments {
@@ -18552,5 +18728,256 @@ mod return_result_cache_tests {
         )
         .unwrap();
         assert!(rec_session.return_results.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod env_parameter_frame_tests {
+    use super::*;
+
+    fn test_delivery(_: &Term) -> Result<Delivery, String> {
+        Ok(Delivery::Copy)
+    }
+
+    fn test_shape(_: &Term) -> Result<Shape, String> {
+        Ok(Shape::Value)
+    }
+
+    fn test_analyzer<'a>(
+        env_parameters: &'a [nir::program::RuntimeEnvParameter],
+        deliveries: &'a BTreeMap<nir::RuntimeId, Expr>,
+        declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
+    ) -> Analyzer<'a, fn(&Term) -> Result<Delivery, String>, fn(&Term) -> Result<Shape, String>>
+    {
+        Analyzer {
+            trivial_cleanup_types: Default::default(),
+            cleanup: None,
+            package: None,
+            function_env_parameters: env_parameters,
+            function_runtime_deliveries: deliveries,
+            global_runtime_deliveries: None,
+            function_source: SourceRange { start: 0, end: 1 },
+            const_globals: BTreeMap::new(),
+            text_provenance: crate::memory::TextProvenance::Unchecked,
+            memory_summaries: SummaryCacheStorage::Owned(Default::default()),
+            return_results: ReturnResultCacheStorage::Owned(Default::default()),
+            return_cycle_hit: false,
+            exit_contract: None,
+            handler_result: None,
+            effect_return_enabled: false,
+            effect_return_values: vec![],
+            effect_loop_targets: BTreeSet::new(),
+            effect_memory_inputs: vec![],
+            effect_result_inputs: vec![],
+            handler_completions: vec![],
+            declarations: declarations.clone(),
+            declaration_source: None,
+            rejection: crate::rejection::Cache::with_declarations(declarations),
+            delivery: test_delivery,
+            shape: test_shape,
+            fuel: 10_000,
+            report: Report::default(),
+            candidate_observations: None,
+            observation_region: false,
+            observation_locals: BTreeSet::new(),
+            method_callees: Default::default(),
+            persistent_roots: BTreeSet::new(),
+            captured_roots: BTreeSet::new(),
+            defer_unknown_calls: false,
+            return_stack: vec![],
+            next_generation: 0,
+            next_borrowed_pointer: 0,
+            next_borrowed_scope: 1,
+            borrowed_pointees: BTreeMap::new(),
+            temporary_scope: TemporaryScope {
+                source: SourceRange { start: 0, end: 1 },
+                boundary: TemporaryBoundary::FunctionResult,
+            },
+            temporary_scope_id: 0,
+            next_sequence: 1,
+            loops: vec![],
+            pending: vec![],
+        }
+    }
+
+    #[test]
+    fn imports_enclosing_env_parameters_and_preserves_ownership_and_collisions() {
+        let source = SourceRange { start: 0, end: 1 };
+        let u64_ty = Term::Primitive(nir::Primitive::U64);
+        let bool_ty = Term::Primitive(nir::Primitive::Bool);
+        let ptr_u64 = Term::Pointer(Box::new(u64_ty.clone()));
+        let env_live = LocalId {
+            owner: nir::program::IMPLICIT_RUNTIME_ENV_OWNER,
+            index: 4,
+        };
+        let env_captured = LocalId {
+            owner: nir::program::IMPLICIT_RUNTIME_ENV_OWNER,
+            index: 5,
+        };
+        let env_moved = LocalId {
+            owner: nir::program::IMPLICIT_RUNTIME_ENV_OWNER,
+            index: 6,
+        };
+        let env_retired = LocalId {
+            owner: nir::program::IMPLICIT_RUNTIME_ENV_OWNER,
+            index: 7,
+        };
+        let env_params = vec![
+            nir::program::RuntimeEnvParameter {
+                declaration: nir::DeclarationId {
+                    package: nir::program::IMPLICIT_RUNTIME_ENV_PACKAGE,
+                    local: 4,
+                },
+                runtime_id: None,
+                binding: env_live,
+                ty: ptr_u64.clone(),
+            },
+            nir::program::RuntimeEnvParameter {
+                declaration: nir::DeclarationId {
+                    package: nir::program::IMPLICIT_RUNTIME_ENV_PACKAGE,
+                    local: 5,
+                },
+                runtime_id: None,
+                binding: env_captured,
+                ty: bool_ty.clone(),
+            },
+            nir::program::RuntimeEnvParameter {
+                declaration: nir::DeclarationId {
+                    package: nir::program::IMPLICIT_RUNTIME_ENV_PACKAGE,
+                    local: 6,
+                },
+                runtime_id: None,
+                binding: env_moved,
+                ty: u64_ty.clone(),
+            },
+            nir::program::RuntimeEnvParameter {
+                declaration: nir::DeclarationId {
+                    package: nir::program::IMPLICIT_RUNTIME_ENV_PACKAGE,
+                    local: 7,
+                },
+                runtime_id: None,
+                binding: env_retired,
+                ty: u64_ty.clone(),
+            },
+        ];
+        let deliveries = BTreeMap::new();
+        let declarations = std::rc::Rc::new(crate::declarations::Metadata::new(None));
+        let mut analyzer = test_analyzer(&env_params, &deliveries, declarations);
+
+        let borrowed_target = PlaceId {
+            owner: u64::MAX - 1,
+            local: 0,
+        };
+        let mut outer = Flow::default();
+        for (id, ty, present) in [
+            (root(env_live), &ptr_u64, true),
+            (root(env_captured), &bool_ty, true),
+            (root(env_moved), &u64_ty, false),
+            (borrowed_target, &u64_ty, true),
+        ] {
+            outer
+                .state
+                .declare(id, &Shape::Value, present, &mut analyzer.fuel)
+                .unwrap();
+            outer.types.insert(id, ty.clone());
+        }
+        outer.effect_borrows.insert(borrowed_target);
+        let live_slot = Place {
+            root: root(env_live),
+            fields: vec![],
+        };
+        let borrowed_place = Place {
+            root: borrowed_target,
+            fields: vec![],
+        };
+        outer
+            .pointers
+            .insert(live_slot.clone(), BTreeSet::from([borrowed_place.clone()]));
+        outer.pointer_guards.insert(
+            live_slot.clone(),
+            BTreeMap::from([(borrowed_place.clone(), vec![(vec![0], 1)])]),
+        );
+
+        // Handler arm sub-frame (`remap_borrowed_roots = false`): keeps outer PlaceIds
+        // without inserting env/target into frame.roots or frame.order, and preserves
+        // explicit captures, moved states, and retired absences.
+        let mut handler_frame = Flow::default();
+        handler_frame
+            .state
+            .declare(root(env_captured), &Shape::Value, true, &mut analyzer.fuel)
+            .unwrap();
+        handler_frame
+            .types
+            .insert(root(env_captured), bool_ty.clone());
+        handler_frame.roots.insert(root(env_captured));
+        handler_frame.order.push(root(env_captured));
+
+        analyzer
+            .predeclare_function_env_parameters(&mut handler_frame, &outer, false, source)
+            .unwrap();
+
+        assert!(handler_frame.state.require_present(&live_slot).is_ok());
+        assert!(handler_frame.state.require_present(&borrowed_place).is_ok());
+        assert_eq!(
+            handler_frame.pointers.get(&live_slot),
+            Some(&BTreeSet::from([borrowed_place.clone()]))
+        );
+        assert!(handler_frame.effect_borrows.contains(&borrowed_target));
+        assert!(handler_frame.stable_handler_slots.contains(&root(env_live)));
+        assert_eq!(
+            handler_frame
+                .pointer_guards
+                .get(&live_slot)
+                .and_then(|entries| entries.get(&borrowed_place)),
+            Some(&vec![(vec![0], 1)])
+        );
+        assert!(!handler_frame.roots.contains(&root(env_live)));
+        assert!(!handler_frame.roots.contains(&borrowed_target));
+        assert_eq!(handler_frame.order, vec![root(env_captured)]);
+        assert!(
+            handler_frame
+                .state
+                .require_present(&Place {
+                    root: root(env_moved),
+                    fields: vec![],
+                })
+                .is_err()
+        );
+        assert!(!handler_frame.types.contains_key(&root(env_retired)));
+
+        // Closure sub-frame (`remap_borrowed_roots = true`): avoids colliding when
+        // `(u64::MAX - 1, 0)` is already bound to a different type in `frame`.
+        let mut closure_frame = Flow::default();
+        closure_frame
+            .state
+            .declare(borrowed_target, &Shape::Value, true, &mut analyzer.fuel)
+            .unwrap();
+        closure_frame.types.insert(borrowed_target, bool_ty);
+
+        analyzer
+            .predeclare_function_env_parameters(&mut closure_frame, &outer, true, source)
+            .unwrap();
+
+        assert_eq!(
+            closure_frame.types.get(&borrowed_target),
+            Some(&Term::Primitive(nir::Primitive::Bool))
+        );
+        let mapped_place = closure_frame
+            .pointers
+            .get(&live_slot)
+            .and_then(|targets| targets.iter().next())
+            .expect("remapped env target");
+        assert_eq!(mapped_place.root.owner, u64::MAX - 4);
+        assert_eq!(closure_frame.types.get(&mapped_place.root), Some(&u64_ty));
+        assert!(closure_frame.effect_borrows.contains(&mapped_place.root));
+        assert!(closure_frame.state.require_present(mapped_place).is_ok());
+        assert!(!closure_frame.roots.contains(&mapped_place.root));
+        assert_eq!(
+            closure_frame
+                .pointer_guards
+                .get(&live_slot)
+                .and_then(|entries| entries.get(mapped_place)),
+            Some(&vec![(vec![0], 1)])
+        );
     }
 }

@@ -286,6 +286,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         }
         Ok(())
     }
+
     #[inline(never)]
     fn expr_closure(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
         let source = expr.source;
@@ -583,6 +584,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 // Analyze a possible invocation independently from construction.
                 // Its surviving environment remains stored; return only cleans
                 // invocation-local responsibilities, never retained captures.
+                self.predeclare_function_env_parameters(&mut inner, flow, true, source)?;
                 self.conditional_handler_borrows(&mut inner, &borrowed_roots, source)?;
                 let outer_report = std::mem::take(&mut self.report);
                 // Formation uses the same conditional provenance as invocation.
@@ -656,6 +658,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         }
         Ok(())
     }
+
     #[inline(never)]
     fn expr_call(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
         let source = expr.source;
@@ -1033,6 +1036,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         }
         Ok(())
     }
+
     #[inline(never)]
     fn expr_read_pointer(
         &mut self,
@@ -1103,6 +1107,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         }
         Ok(())
     }
+
     #[inline(never)]
     fn expr_bit_write_pointer(
         &mut self,
@@ -1172,6 +1177,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         }
         Ok(())
     }
+
     #[inline(never)]
     fn expr_bit_assign(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
         let source = expr.source;
@@ -1275,6 +1281,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         }
         Ok(())
     }
+
     #[inline(never)]
     fn expr_assign(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
         let source = expr.source;
@@ -1408,6 +1415,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         }
         Ok(())
     }
+
     #[inline(never)]
     fn expr_return(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
         let source = expr.source;

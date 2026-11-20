@@ -1831,6 +1831,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 Ok(())
                             }).map_err(|reason| error(installation, reason))?;
                         }
+                        this.predeclare_function_env_parameters(
+                            frame,
+                            outer,
+                            false,
+                            arm.body.source,
+                        )?;
                         frame.memory_exposed |= !pointer_captures.is_empty();
                         let (pattern, mut guards) = outer_guards(&arm.pattern);
                         guards.extend(arm.guard.as_ref());
