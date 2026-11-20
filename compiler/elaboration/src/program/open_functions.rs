@@ -1473,6 +1473,24 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
+    fn is_runtime_specialization(&self, expression: &Expr<'_>) -> bool {
+        let H::NFApplication(head, _) = expression.kind else {
+            return false;
+        };
+        let H::ResolvedDef { def_id, .. } = head.kind else {
+            return false;
+        };
+        let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = self
+            .package
+            .definition_owner(def_id)
+            .and_then(|owner| self.package.item(owner))
+            .map(|item| &item.kind)
+        else {
+            return false;
+        };
+        !sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head && !sig.modifiers.is_quote
+    }
+
     // A fixed outer signature can still contain a call whose domain needs a
     // forwarded staged input. Propagate that requirement through direct calls
     // before checking bodies, independently of declaration order.
@@ -1513,6 +1531,7 @@ impl Checker<'_, '_> {
                 .body(*body)
                 .ok_or_else(|| error(sig.span, "missing staged function body"))?;
             let mut calls = Vec::new();
+            let mut clause_dependencies = BTreeSet::new();
             let mut aliases = Vec::new();
             for root in
                 std::iter::once(body.value).chain(sig.params.iter().filter_map(|parameter| {
@@ -1529,6 +1548,12 @@ impl Checker<'_, '_> {
                                 aliases.push((pattern_binding_ids(&binding.pattern), init.clone()));
                             }
                         }
+                    }
+                    if this.is_runtime_specialization(expression) {
+                        // Returning a specialized function or binding it locally
+                        // forms the same instance as using it directly in a call.
+                        clause_dependencies
+                            .extend(this.expression_free_local_dependencies(owner, expression)?);
                     }
                     let (callee, arguments) = match &expression.kind {
                         H::Application(callee, arguments)
@@ -1556,25 +1581,18 @@ impl Checker<'_, '_> {
                 })?;
             }
             let mut routed_calls = Vec::new();
-            let mut clause_dependencies = BTreeSet::new();
             for (target, callee, arguments, span, extended) in calls {
-                let mut inputs = self.expression_free_local_dependencies(owner, &callee)?;
+                let mut inputs = if self.is_runtime_specialization(&callee) {
+                    BTreeSet::new()
+                } else {
+                    self.expression_free_local_dependencies(owner, &callee)?
+                };
                 // Only forwarding into a staged slot postpones type formation.
                 // Supplying a known staged value as an ordinary runtime input
                 // must not turn an otherwise closed function into a template.
                 if let Some(ItemKind::Fn(target_sig, _) | ItemKind::FnDeclaration(target_sig)) =
                     self.package.item(target).map(|item| &item.kind)
                 {
-                    // Forming a runtime function instance consumes its written
-                    // clauses even when every ordinary parameter has a fixed type.
-                    // The direct declaration head contributes no local reads.
-                    if matches!(callee.kind, H::NFApplication(..))
-                        && !target_sig.modifiers.is_comptime
-                        && !target_sig.modifiers.is_normal_form_head
-                        && !target_sig.modifiers.is_quote
-                    {
-                        clause_dependencies.extend(inputs.iter().copied());
-                    }
                     // Colon properties belong to the collection entrance, not
                     // named parameter slots. Normalize their dependency route
                     // before looking for forwarded staged inputs.

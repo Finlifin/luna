@@ -312,3 +312,21 @@ fn runtime_wrappers_specialize_clause_operands_from_staged_parameters() {
         assert!(error.contains(diagnostic), "{error}");
     }
 }
+
+#[test]
+fn a_returned_specialization_retains_its_own_clause_inputs() {
+    let source = r#"
+        fn present(value: T) -> bool where T, .tag: ?T = null { tag matches _? }
+        comptime fn choose(flag: bool) -> bool { flag }
+        fn select(comptime flag: bool) -> fn(value: u8) -> bool {
+            present<u8, .tag = if choose(flag) { null } else { 42 }>
+        }
+        fn run() -> bool {
+            let byte: u8 = 0;
+            let empty = select(true);
+            let full = select(false);
+            not empty(byte) and full(byte) and not empty(byte)
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
