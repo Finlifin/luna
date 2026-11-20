@@ -1015,6 +1015,28 @@ impl Checker<'_, '_> {
         result.map(Some)
     }
 
+    fn nominal_receiver_tail<'e>(
+        &mut self,
+        mut value: &'e n::Expr,
+        span: Span,
+    ) -> Result<&'e n::Expr, Error> {
+        while let K::Block {
+            result: Some(inner),
+            ..
+        }
+        | K::CheckTypeAlias {
+            body: Some(inner), ..
+        } = &value.kind
+        {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(span, "nominal receiver inspection budget exhausted"))?;
+            value = inner;
+        }
+        Ok(value)
+    }
+
     fn expose_nominal_inputs(
         &mut self,
         owner: OwnerId,
@@ -1026,20 +1048,7 @@ impl Checker<'_, '_> {
         // Preserve already completed Type inputs while still evaluating and
         // checking the entire parent constructor exactly once.
         let mut known = BTreeMap::new();
-        let mut root = &value;
-        loop {
-            root = match &root.kind {
-                K::Block {
-                    result: Some(result),
-                    ..
-                } => result,
-                K::CheckTypeAlias {
-                    body: Some(body), ..
-                } => body,
-                _ => break,
-            };
-        }
-        match &root.kind {
+        match &self.nominal_receiver_tail(&value, span)?.kind {
             K::NominalType {
                 arguments: inputs, ..
             } => {
@@ -1049,7 +1058,7 @@ impl Checker<'_, '_> {
                         ..
                     }) = input
                     {
-                        known.insert(index, self.copy_alias_type(ty, span)?);
+                        known.insert(index, ty);
                     }
                 }
             }
@@ -1058,43 +1067,83 @@ impl Checker<'_, '_> {
                 arguments: inputs,
             }) if *nominal_id == parent => {
                 for (index, ty) in inputs.iter().enumerate() {
-                    known.insert(index, self.copy_alias_type(ty, span)?);
+                    known.insert(index, ty);
                 }
             }
             _ => {}
         }
         let mut parameter_ids = self.type_parameters[&owner].clone();
         parameter_ids.extend(self.nominal_captures(owner, span)?);
-        let binders = self.input_binders(&parameter_ids);
-        let known_binders = known
-            .keys()
-            .map(|index| binders[*index])
-            .collect::<Vec<_>>();
-        let known_types = known
+        if parameter_ids.len() != domains.len() || known.keys().any(|slot| *slot >= domains.len()) {
+            return Err(error(span, "type member container argument count mismatch"));
+        }
+        // All field domains share the same declaration telescope. Its inputs
+        // may still refer to slots of the current invocation.
+        let ids: Vec<_> = known.keys().map(|slot| parameter_ids[*slot]).collect();
+        let templates: Vec<_> = known.keys().map(|slot| &domains[*slot]).collect();
+        let values = known
             .values()
-            .map(|ty| self.copy_alias_type(ty, span))
+            .map(|value| self.copy_alias_type(value, span))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut arguments = Vec::new();
-        let mut fields = Vec::new();
-        for (index, domain) in domains.into_iter().enumerate() {
-            let domain =
-                self.instantiate_trait_domain(&domain, &known_binders, &known_types, span)?;
-            let binding = self.spread_binding(span)?;
-            self.locals.insert(binding, domain.clone());
-            let kind = match known.remove(&index) {
-                Some(value) if domain == p(P::Type) => K::TypeValue(value),
-                Some(value) => K::ComptimeValue(value),
-                None => K::Local(binding),
+        let frames = self.call_input_frames();
+        let domains = nominal_fields::metered(&mut self.required_steps, |fuel| {
+            let substitution = nir::DeclarationSubstitution::bounded_domains(
+                &ids,
+                &templates,
+                &values,
+                nir::DeclarationInputScope::Caller(&frames),
+                fuel,
+            )?;
+            domains
+                .iter()
+                .map(|domain| substitution.instantiate_bounded(domain, fuel))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|failure| error(span, failure.to_string()))?;
+
+        let mut arguments = Vec::with_capacity(domains.len());
+        let mut fields = Vec::with_capacity(domains.len());
+        let mut unpack = false;
+        for (index, domain) in domains.iter().enumerate() {
+            let domain = self.callable_input_view(domain, span)?;
+            let (kind, field) = match known.remove(&index) {
+                Some(value) if domain == p(P::Type) => (
+                    K::TypeValue(self.copy_alias_type(value, span)?),
+                    n::Pattern::Wild,
+                ),
+                Some(value)
+                    if value.sort() == Sort::ComptimeValue
+                        && self.term_substitution_inputs(value, span)?.is_empty() =>
+                {
+                    (
+                        K::ComptimeValue(self.copy_alias_type(value, span)?),
+                        n::Pattern::Wild,
+                    )
+                }
+                _ => {
+                    // The field value arrives with the receiver. Keep the
+                    // executable binding until the caller supplies its slots.
+                    let binding = self.spread_binding(span)?;
+                    self.locals.insert(binding, domain.clone());
+                    unpack = true;
+                    (
+                        K::Local(binding),
+                        n::Pattern::Binding {
+                            binding,
+                            inner: Box::new(n::Pattern::Wild),
+                        },
+                    )
+                }
             };
             arguments.push(n::Expr {
                 source: source(span),
                 ty: domain,
                 kind,
             });
-            fields.push(n::Pattern::Binding {
-                binding,
-                inner: Box::new(n::Pattern::Wild),
-            });
+            fields.push(field);
+        }
+        if !unpack {
+            return Ok((value, arguments));
         }
         let binding = self.spread_binding(span)?;
         self.locals.insert(binding, p(P::Type));
@@ -1148,7 +1197,7 @@ impl Checker<'_, '_> {
         &mut self,
         base: &Expr<'_>,
     ) -> Result<Option<(DeclarationId, n::Expr, Vec<n::Expr>)>, Error> {
-        let mut value = if self.completed_type_call(base)?
+        let value = if self.completed_type_call(base)?
             || (matches!(
                 base.kind,
                 H::Block(_) | H::If(..) | H::When(_) | H::Match(..)
@@ -1168,78 +1217,16 @@ impl Checker<'_, '_> {
         if value.ty != p(P::Type) && !is_never(&value.ty) {
             return Ok(None);
         }
-        let ty = value.ty.clone();
-        let mut statements = Vec::new();
-        loop {
-            match value.kind {
-                K::Block {
-                    statements: prefix,
-                    result: Some(result),
-                } => {
-                    statements.extend(prefix);
-                    value = *result;
-                }
-                _ => break,
-            }
-        }
-        let mut terminal = &value;
-        loop {
-            terminal = match &terminal.kind {
-                K::Block {
-                    result: Some(result),
-                    ..
-                } => result,
-                K::CheckTypeAlias {
-                    body: Some(body), ..
-                } => body,
-                _ => break,
-            };
-        }
-        if let K::NominalType {
-            declaration: parent,
-            ..
-        } = &terminal.kind
-        {
-            let parent = *parent;
-            let owner = self
-                .source_declarations
-                .owner(parent)
-                .ok_or_else(|| error(base.span, "nominal container declaration is missing"))?;
-            let value = n::Expr {
-                source: source(base.span),
-                ty,
-                kind: K::Block {
-                    statements,
-                    result: Some(Box::new(value)),
-                },
-            };
-            let (instance, arguments) = self.expose_nominal_inputs(owner, value, base.span)?;
-            return Ok(Some((parent, instance, arguments)));
-        }
-        let K::TypeValue(Term::Nominal {
-            declaration: parent,
-            arguments,
-        }) = &value.kind
-        else {
-            return Ok(None);
+        let parent = match &self.nominal_receiver_tail(&value, base.span)?.kind {
+            K::NominalType { declaration, .. }
+            | K::TypeValue(Term::Nominal { declaration, .. }) => *declaration,
+            _ => return Ok(None),
         };
-        let parent = *parent;
-        let arguments = arguments
-            .iter()
-            .map(|argument| n::Expr {
-                source: value.source,
-                ty: p(P::Type),
-                kind: K::TypeValue(argument.clone()),
-            })
-            .collect();
-        let instance = n::Expr {
-            source: source(base.span),
-            ty,
-            kind: K::Block {
-                statements,
-                result: Some(Box::new(value)),
-            },
-        };
+        let owner = self
+            .source_declarations
+            .owner(parent)
+            .ok_or_else(|| error(base.span, "nominal container declaration is missing"))?;
+        let (instance, arguments) = self.expose_nominal_inputs(owner, value, base.span)?;
         Ok(Some((parent, instance, arguments)))
     }
 

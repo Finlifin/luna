@@ -17419,6 +17419,7 @@ fn local_type_members_preserve_value_parameter_domains() {
     for body in [
         "struct Holder where flag:bool {pub const FLAG=flag;} fn configured(comptime flag:bool)->bool {const Container=Holder<true>;const result=Container.FLAG;result and flag}",
         "struct Outer where flag:bool {pub struct Inner {pub const FLAG=flag;}} fn configured(comptime flag:bool)->bool {const Container=Outer<flag>;const result=Container.Inner.FLAG;result}",
+        "struct Outer where T, flag:T {pub struct Inner {pub const FLAG:T=flag;}} fn configured(comptime flag:bool)->bool {const Container=Outer<bool,flag>;const Member=Container.Inner;const result=Member.FLAG;result}",
         "struct Outer where flag:bool {pub struct Inner where invert:bool {pub const FLAG=flag != invert;}} fn configured(comptime flag:bool)->bool {const Container=Outer<flag>;const result=Container.Inner<false>.FLAG;result}",
         "struct Holder where flag:bool {pub const FLAG=flag;} comptime fn Make(flag:bool)->.Type'builtin {Holder<flag>} fn configured(flag:bool)->bool {const Container=Make(true);const result=Container.FLAG;result and flag}",
     ] {
