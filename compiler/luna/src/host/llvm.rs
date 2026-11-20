@@ -1236,17 +1236,18 @@ impl Emitter<'_> {
         else {
             unreachable!()
         };
-        if !env_arguments.is_empty() {
-            return Err(
-                "LLVM lowering does not yet support runtime environment call arguments".into(),
-            );
-        }
         // The target expression runs once, before any argument effects.
         let function = self.expr(callee, depth)?;
         if self.terminated {
             return Ok(Value::unit());
         }
         if matches!(function.ty, Ty::Closure(_)) {
+            if !env_arguments.is_empty() {
+                return Err(
+                    "LLVM lowering does not support runtime environment arguments on closures"
+                        .into(),
+                );
+            }
             if self.checked && !self.has_checked_closure_call(expr.source)? {
                 // This invocation has no acquired resource frame within
                 // an otherwise checked parent. Keep the syntactic arm,
@@ -1261,6 +1262,11 @@ impl Emitter<'_> {
             self.check_closure_receiver(callee, arguments)?;
         }
         let (function, environment) = self.closure_callee(callee, function)?;
+        if !env_arguments.is_empty() && environment.is_some() {
+            return Err(
+                "LLVM lowering does not support runtime environment arguments on closures".into(),
+            );
+        }
         let function = self.specialize_closure_call(expr.source, function)?;
         let function = self.specialize_named_call(expr.source, function)?;
         let Term::Function { parameters, result } = callee.ty.callable_signature() else {
@@ -1303,6 +1309,17 @@ impl Emitter<'_> {
             *cell = Some(value);
         }
         self.locals = caller;
+        let mut env_values = Vec::with_capacity(env_arguments.len());
+        for env_arg in env_arguments {
+            let value = self.expr(env_arg, depth)?;
+            if self.terminated {
+                return Ok(Value::unit());
+            }
+            if value.ty != repr(self.graph, &env_arg.ty, self.checked)? {
+                return Err("host call runtime environment representation mismatch".into());
+            }
+            env_values.push(value);
+        }
         let method_frame = self.method_entry(callee, &values, expr.source, depth)?;
         let mut args = environment
             .into_iter()
@@ -1315,6 +1332,11 @@ impl Emitter<'_> {
             {
                 return Err("host call input representation mismatch".into());
             }
+            if value.ty != Ty::Unit {
+                args.push(format!("{} {}", value.ty.llvm(), value.text));
+            }
+        }
+        for value in env_values {
             if value.ty != Ty::Unit {
                 args.push(format!("{} {}", value.ty.llvm(), value.text));
             }
@@ -2393,12 +2415,6 @@ pub(super) fn emit_with_result_output(
     let mut bodies = Vec::new();
     for (index, instance) in graph.functions.iter().enumerate() {
         let f = &instance.function;
-        if !f.env_parameters.is_empty() {
-            return Err(format!(
-                "LLVM lowering does not yet support runtime environment parameters in `{}`",
-                f.name
-            ));
-        }
         bodies.push((
             format!("flurry_{index}"),
             &f.signature,
@@ -2561,6 +2577,21 @@ pub(super) fn emit_with_result_output(
                 },
             )?;
         }
+        if let Some(f) = metadata {
+            for (i, env) in f.env_parameters.iter().enumerate() {
+                let ty = repr(graph, &env.ty, checked)?;
+                if ty != Ty::Unit {
+                    inputs.push(format!("{} %env{i}", ty.llvm()));
+                }
+                e.bind(
+                    env.binding,
+                    &Value {
+                        ty,
+                        text: format!("%env{i}"),
+                    },
+                )?;
+            }
+        }
         e.bind_effect_parameters(&contracts, effect_row, &mut inputs)?;
         if let Some(f) = metadata {
             for snapshot in &f.entry_snapshots {
@@ -2602,7 +2633,10 @@ pub(super) fn emit_with_result_output(
     let Term::Function { parameters, result } = &graph.functions[root].function.signature else {
         unreachable!()
     };
-    if !parameters.is_empty() || !effects::row_result(result).0.is_empty() {
+    if !parameters.is_empty()
+        || !graph.functions[root].function.env_parameters.is_empty()
+        || !effects::row_result(result).0.is_empty()
+    {
         return Err("host entry requires a no-argument, effect-free wrapper".into());
     }
     let never_returns = **result == Term::Primitive(P::Never);

@@ -1495,19 +1495,20 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         ));
                     }
                 }
-                let parameter_summary = super::super::memory::direct_handler_accesses_with_code_for(
-                    self.package,
-                    handler,
-                    arm,
-                    &captures,
-                    &capture_memory_named,
-                    &capture_memory_code,
-                    &self.effect_memory_inputs,
-                    effect_row,
-                    self.text_provenance,
-                    &mut self.fuel,
-                )
-                .map_err(|reason| error(installation, reason))?;
+                let parameter_summary =
+                    super::super::memory::direct_handler_accesses_with_code_for(
+                        self.package,
+                        handler,
+                        arm,
+                        &captures,
+                        &capture_memory_named,
+                        &capture_memory_code,
+                        &self.effect_memory_inputs,
+                        effect_row,
+                        self.text_provenance,
+                        &mut self.fuel,
+                    )
+                    .map_err(|reason| error(installation, reason))?;
                 let mut aggregate_borrow = false;
                 for targets in pointer_captures.values() {
                     for target in targets {

@@ -12,7 +12,10 @@ pub mod template_storage;
 pub mod visit;
 use nir::program::{DispatchInstance, Function};
 use nir::{DeclarationId, RuntimeId, Term};
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeSet, HashSet},
+    fmt,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct InstanceKey {
@@ -284,10 +287,17 @@ impl Package {
                 }
                 let program = nir::contracts::CallableProgram::method(method)
                     .map_err(|error| error.to_string())?;
+                let mut direct_callees = HashSet::new();
                 visit::program_expressions(program, fuel, |expr, fuel| {
+                    if let nir::program::ExprKind::Call { callee, .. } = &expr.kind {
+                        direct_callees.insert(std::ptr::from_ref(callee.as_ref()) as usize);
+                    }
+                    let is_direct_callee =
+                        direct_callees.remove(&(std::ptr::from_ref(expr) as usize));
                     callables.validate_reference(
                         expr,
                         method.signature.is_comptime_callable(),
+                        is_direct_callee,
                         fuel,
                     )?;
                     self.validate_expression_types_in(&links, expr, fuel)
@@ -362,6 +372,7 @@ impl Package {
             for argument in instance.key.arguments.iter() {
                 self.validate_type(&links, argument, fuel)?;
             }
+            let mut direct_callees = HashSet::new();
             visit::expressions(&instance.function, fuel, |expr, fuel| {
                 if matches!(
                     expr.kind,
@@ -415,9 +426,14 @@ impl Package {
                 if let Some(message) = nir::program::pointer_operation_error_in(expr, self.target) {
                     return Err(message.into());
                 }
+                if let K::Call { callee, .. } = &expr.kind {
+                    direct_callees.insert(std::ptr::from_ref(callee.as_ref()) as usize);
+                }
+                let is_direct_callee = direct_callees.remove(&(std::ptr::from_ref(expr) as usize));
                 callables.validate_reference(
                     expr,
                     instance.function.phase == nir::program::FunctionPhase::Comptime,
+                    is_direct_callee,
                     fuel,
                 )?;
                 match &expr.kind {

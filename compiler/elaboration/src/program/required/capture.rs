@@ -93,11 +93,7 @@ impl<'v> Entry<'v> {
 }
 
 fn staged_sort(domain: &Term) -> Sort {
-    if *domain == p(P::Type) {
-        Sort::Type
-    } else {
-        Sort::ComptimeValue
-    }
+    Sort::of_comptime_domain(domain)
 }
 
 impl Checker<'_, '_> {

@@ -833,9 +833,6 @@ where
     if parameters.len() != function.parameters.len() {
         return Err(error(Reason::InvalidSignature));
     }
-    if !function.env_parameters.is_empty() {
-        return Err(error(Reason::Unsupported));
-    }
     let mut state = State {
         target: package.and_then(|package| package.target),
         frame: 0,
@@ -893,6 +890,39 @@ where
             &mut state,
             *binding,
             view.as_ref().unwrap_or(&ty.ty),
+            None,
+            limits,
+        )
+        .map_err(|e| error(Reason::Unknown(e)))?;
+    }
+    for env in function.env_parameters {
+        let mut view = None;
+        if matches!(
+            env.ty,
+            Term::Bound { .. }
+                | Term::Rigid { .. }
+                | Term::NormalForm { .. }
+                | Term::AssociatedType { .. }
+                | Term::Hole { .. }
+        ) {
+            let (resolved, used) = type_context.structural_view_metered(
+                &env.ty,
+                crate::ptc::Budget {
+                    steps: limits.arithmetic.steps.min(4096),
+                    ..Default::default()
+                },
+            );
+            limits.step(used).map_err(|e| error(Reason::Unknown(e)))?;
+            view = resolved
+                .ok()
+                .flatten()
+                .map(|(ty, _)| ty)
+                .filter(|ty| matches!(ty, Term::Primitive(_)));
+        }
+        bind(
+            &mut state,
+            env.binding,
+            view.as_ref().unwrap_or(&env.ty),
             None,
             limits,
         )
@@ -2135,6 +2165,7 @@ impl Walker<'_> {
         &mut self,
         callee: &Expr,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         bindings: &[LocalId],
         evaluated: Option<&BTreeMap<usize, Option<Vec<nir::program::Place>>>>,
         input_fields: Option<&InputPointerPlaces>,
@@ -2362,6 +2393,26 @@ impl Walker<'_> {
                     prepared.push((*binding, argument.value.ty.clone(), argument.parameter));
                 }
             }
+            for (offset, env_arg) in env_arguments.iter().enumerate() {
+                fuel = fuel.checked_sub(1)?;
+                let slot = parameters.len() + offset;
+                let actual = if let Some(evaluated) = evaluated {
+                    let target = evaluated.get(&slot)?;
+                    if let Some(targets) = target {
+                        for target in targets {
+                            fuel = fuel.checked_sub(target.fields.len().saturating_add(1))?;
+                        }
+                        Some(targets.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    direct_pointer_place(env_arg, &mut fuel)
+                        .ok()?
+                        .map(|target| vec![target])
+                };
+                targets.insert(slot, actual);
+            }
             collect(
                 &summary.accesses,
                 &targets,
@@ -2403,6 +2454,7 @@ impl Walker<'_> {
             self.call_memory_plan(
                 callee,
                 arguments,
+                env_arguments,
                 bindings,
                 evaluated,
                 input_fields,
@@ -2619,6 +2671,7 @@ impl Walker<'_> {
                     .call_memory_plan(
                         callee,
                         arguments,
+                        env_arguments,
                         parameter_bindings,
                         Some(&origins),
                         Some(&inputs),
@@ -3006,6 +3059,7 @@ impl Walker<'_> {
                     .call_memory_plan(
                         callee,
                         arguments,
+                        env_arguments,
                         parameter_bindings,
                         Some(&origins),
                         Some(&inputs),
@@ -3114,12 +3168,6 @@ impl Walker<'_> {
                             parameter_bindings,
                             env_arguments,
                         } => {
-                            if !env_arguments.is_empty() {
-                                return Err(
-                                    "loop invariant scan does not yet support runtime environment arguments"
-                                        .into(),
-                                );
-                            }
                             if self.call_summary(callee).is_none() {
                                 invalidates_external_reads = true;
                                 unknown_write = true;
@@ -3143,6 +3191,16 @@ impl Walker<'_> {
                                         .map_err(|_| "loop origin budget exhausted")?;
                                     origins.insert(argument.parameter, targets);
                                 }
+                                let ordinary_count = match callee.ty.callable_signature() {
+                                    Term::Function { parameters, .. } => parameters.len(),
+                                    _ => parameter_bindings.len(),
+                                };
+                                for (offset, env_arg) in env_arguments.iter().enumerate() {
+                                    let targets = self
+                                        .invariant_pointer_targets(env_arg, state, &changed, 0)
+                                        .map_err(|_| "loop origin budget exhausted")?;
+                                    origins.insert(ordinary_count + offset, targets);
+                                }
                                 let inputs = self
                                     .invariant_input_places(
                                         callee,
@@ -3156,6 +3214,7 @@ impl Walker<'_> {
                                 let mut plan = self.call_memory_plan(
                                     callee,
                                     arguments,
+                                    env_arguments,
                                     parameter_bindings,
                                     Some(&origins),
                                     Some(&inputs),
@@ -3591,6 +3650,7 @@ impl Walker<'_> {
         expr: &Expr,
         callee: &Expr,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         parameter_bindings: &[nir::program::LocalId],
         state: &mut State,
         depth: usize,
@@ -4179,6 +4239,82 @@ impl Walker<'_> {
                 return Err(Reason::InvalidSignature);
             }
         }
+        let ordinary_count = match callee.ty.callable_signature() {
+            Term::Function { parameters, .. } => parameters.len(),
+            _ => parameter_bindings.len(),
+        };
+        for (offset, env_arg) in env_arguments.iter().enumerate() {
+            if !state.facts.is_reachable() {
+                break;
+            }
+            let slot = ordinary_count + offset;
+            let value = self.child(env_arg, state, depth)?;
+            if let Some(summary) = self.call_summary(callee) {
+                for target in summary
+                    .accesses
+                    .iter()
+                    .map(|access| &access.target)
+                    .chain(summary.result_targets.iter().flatten())
+                    .chain(
+                        summary
+                            .pointer_fields
+                            .values()
+                            .filter_map(|targets| targets.as_ref())
+                            .flatten(),
+                    )
+                {
+                    self.limits.step(1)?;
+                    if target.parameter != slot {
+                        continue;
+                    }
+                    self.limits
+                        .step(target.input_fields.len().saturating_add(1))?;
+                    let mut leaf = Some(&value);
+                    for index in &target.input_fields {
+                        self.limits.step(1)?;
+                        leaf = leaf.and_then(|value| value.fields.as_ref()?.get(*index));
+                    }
+                    if let Some(leaf) = leaf {
+                        if let Some((_, places)) = leaf
+                            .copy_pointer_target(self.limits)?
+                            .filter(|(frame, _)| *frame == state.frame)
+                        {
+                            returned_places.insert((slot, target.input_fields.clone()), places);
+                        }
+                    }
+                    if let Some(paths) =
+                        self.pointer_input_origins(&value, &target.input_fields, state)?
+                    {
+                        returned_addresses.insert((slot, target.input_fields.clone()), paths);
+                    }
+                }
+            }
+            let target = value
+                .copy_pointer_target(self.limits)?
+                .filter(|(frame, _)| *frame == state.frame)
+                .map(|(_, target)| target);
+            evaluated_targets.insert(slot, target);
+            if let Some(address) = self.external_read_path(env_arg)? {
+                if stable_postcondition_parameters {
+                    if let Some(version) = state.facts.value(address.root) {
+                        self.limits.step(address.fields.len().saturating_add(1))?;
+                        evaluated_addresses.insert(slot, (address.clone(), version));
+                    }
+                }
+                let mut observations = Vec::new();
+                for (path, observation) in &state.reads {
+                    self.limits.step(path.fields.len().saturating_add(1))?;
+                    if path.root == address.root && path.fields.starts_with(&address.fields) {
+                        observations.push((
+                            path.fields[address.fields.len()..].to_vec(),
+                            path.clone(),
+                            observation.clone(),
+                        ));
+                    }
+                }
+                observed_inputs.insert(slot, observations);
+            }
+        }
         if state.facts.is_reachable()
             && stable_defaults
             && (!preconditions.is_empty() || readonly_postconditions)
@@ -4426,6 +4562,7 @@ impl Walker<'_> {
             let mut plan = self.call_memory_plan(
                 callee,
                 arguments,
+                env_arguments,
                 parameter_bindings,
                 Some(&evaluated_targets),
                 Some(&returned_places),
@@ -5588,12 +5725,15 @@ impl Walker<'_> {
                 arguments,
                 parameter_bindings,
                 env_arguments,
-            } => {
-                if !env_arguments.is_empty() {
-                    return Err(Reason::Unsupported);
-                }
-                self.call_expression(expr, callee, arguments, parameter_bindings, state, depth)
-            }
+            } => self.call_expression(
+                expr,
+                callee,
+                arguments,
+                env_arguments,
+                parameter_bindings,
+                state,
+                depth,
+            ),
             K::Snapshot(value) => self.child(value, state, depth),
             _ => unreachable!(),
         }

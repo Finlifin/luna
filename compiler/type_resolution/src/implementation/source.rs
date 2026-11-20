@@ -50,6 +50,9 @@ impl Index {
         for (id, domain) in domains {
             index.register_parameter_domain_metered(id, domain, &mut budget.steps)?;
         }
+        for (runtime, domain) in &package.runtime_domains {
+            index.register_runtime_domain_metered(*runtime, domain.clone(), &mut budget.steps)?;
+        }
         Ok(index)
     }
 }

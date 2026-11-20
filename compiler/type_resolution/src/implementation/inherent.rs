@@ -92,6 +92,14 @@ impl InherentIndex {
         self.index.register_parameter_domain(declaration, domain)
     }
 
+    pub fn register_runtime_domain(
+        &mut self,
+        runtime: nir::RuntimeId,
+        domain: Term,
+    ) -> Result<(), String> {
+        self.index.register_runtime_domain(runtime, domain)
+    }
+
     pub fn insert(&mut self, head: InherentHead, budget: Budget) -> Result<(), Error> {
         self.check_ownership(&head.subject, head.declaration.package)?;
         if head.members.len() > budget.steps {

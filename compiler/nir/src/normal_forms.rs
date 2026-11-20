@@ -296,6 +296,15 @@ pub fn supported_input_type_in_scope(
         *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
         match ty {
             Term::ClosureContextType => {}
+            Term::Lift(inner) if depth == 0 => {
+                if inner
+                    .structural_terms()
+                    .any(|term| matches!(term, Term::Lift(_)))
+                    || !nominal_domain_scope(inner, &mut visible, fuel)?
+                {
+                    return Ok(false);
+                }
+            }
             Term::Optional(payload) => {
                 if payload.as_ref() != &Term::Primitive(Primitive::Never) {
                     work.push((payload, depth + 1));
@@ -582,7 +591,7 @@ impl Head {
                     if input.kind == Kind::Type {
                         Sort::Type
                     } else {
-                        Sort::ComptimeValue
+                        Sort::of_comptime_domain(&input.ty)
                     },
                     &input.ty,
                 )

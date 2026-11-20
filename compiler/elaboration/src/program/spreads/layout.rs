@@ -418,7 +418,10 @@ impl Checker<'_, '_> {
             let (slot, value) = match argument {
                 Arg::Positional(value) => {
                     while positional < clauses.len()
-                        && matches!(clauses[positional].kind, ClauseParamKind::Optional(..))
+                        && matches!(
+                            clauses[positional].kind.unquoted(),
+                            ClauseParamKind::Optional(..)
+                        )
                     {
                         *fuel = fuel.checked_sub(1).ok_or_else(exhausted)?;
                         positional += 1;
@@ -431,7 +434,7 @@ impl Checker<'_, '_> {
                     *fuel = fuel.checked_sub(clauses.len()).ok_or_else(exhausted)?;
                     let Some(slot) = clauses.iter().position(|clause| {
                         clause.name.name == name.name
-                            && matches!(clause.kind, ClauseParamKind::Optional(..))
+                            && matches!(clause.kind.unquoted(), ClauseParamKind::Optional(..))
                     }) else {
                         return Ok(None);
                     };

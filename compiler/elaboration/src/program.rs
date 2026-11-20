@@ -662,6 +662,14 @@ fn elaborate_in_mode(
         field_defaults: SourceBindings::default(),
         active_defaults: BTreeSet::new(),
         immutable: BTreeSet::new(),
+        next_runtime_id: 1,
+        runtime_domains: BTreeMap::new(),
+        global_runtime_origin_ids: std::collections::HashMap::new(),
+        global_runtime_deliveries: BTreeMap::new(),
+        local_runtime_origin_ids: BTreeMap::new(),
+        local_runtime_deliveries: BTreeMap::new(),
+        local_write_versions: BTreeMap::new(),
+        active_env_parameters: BTreeMap::new(),
     };
     // Account even on unwinding, then preserve the original panic. Candidate
     // state remains private; this does not recover or reuse a panicking checker.
@@ -711,7 +719,7 @@ fn elaborate_candidate<'a, 'h>(
         };
         let parameters = clauses
             .iter()
-            .filter_map(|p| match p.kind {
+            .filter_map(|p| match *p.kind.unquoted() {
                 hir::clause::ClauseParamKind::Type(_)
                 | hir::clause::ClauseParamKind::TraitBound(..)
                 | hir::clause::ClauseParamKind::Optional(..) => {
@@ -771,6 +779,8 @@ fn elaborate_candidate<'a, 'h>(
             let mut parameters = Vec::new();
             let mut trait_domains = Vec::new();
             for parameter in clauses {
+                let is_quote = parameter.kind.is_quote();
+                let unquoted = parameter.kind.unquoted();
                 let trait_domain = if matches!(
                     info.node.expect_item().kind,
                     ItemKind::Trait(_)
@@ -783,7 +793,7 @@ fn elaborate_candidate<'a, 'h>(
                         | ItemKind::Derive(_)
                         | ItemKind::EffectGroup(_)
                 ) {
-                    match parameter.kind {
+                    match *unquoted {
                         hir::clause::ClauseParamKind::Positional(_, ty)
                         | hir::clause::ClauseParamKind::Optional(_, ty, _)
                         | hir::clause::ClauseParamKind::Varadic(_, ty) => {
@@ -795,10 +805,41 @@ fn elaborate_candidate<'a, 'h>(
                     None
                 };
                 if let Some(domain) = &trait_domain {
+                    if is_quote {
+                        if !matches!(
+                            info.node.expect_item().kind,
+                            ItemKind::Struct(_)
+                                | ItemKind::Enum(_)
+                                | ItemKind::Newtype(..)
+                                | ItemKind::TypeAlias(..)
+                                | ItemKind::Trait(_)
+                                | ItemKind::Impl(_)
+                        ) || !matches!(
+                            unquoted,
+                            hir::clause::ClauseParamKind::Positional(..)
+                                | hir::clause::ClauseParamKind::Optional(..)
+                        ) {
+                            return Err(error(
+                                parameter.span,
+                                "quote clause parameter is only supported on runtime nominal, alias, trait, or impl positional/optional clauses",
+                            ));
+                        }
+                        if !matches!(domain, Term::Lift(_)) {
+                            return Err(error(
+                                parameter.span,
+                                "quote clause parameter requires a lift type domain",
+                            ));
+                        }
+                    } else if matches!(domain, Term::Lift(_)) {
+                        return Err(error(
+                            parameter.span,
+                            "lift type domain requires a quote clause parameter",
+                        ));
+                    }
                     trait_domains.push(domain.clone());
                 }
-                let optional_type_parameter =
-                    if let hir::clause::ClauseParamKind::Optional(_, ty, _) = parameter.kind {
+                let optional_type_parameter = !is_quote
+                    && if let hir::clause::ClauseParamKind::Optional(_, ty, _) = *unquoted {
                         matches!(
                             info.node.expect_item().kind,
                             ItemKind::Trait(_)
@@ -810,8 +851,8 @@ fn elaborate_candidate<'a, 'h>(
                     } else {
                         false
                     };
-                let explicit_type_parameter =
-                    if let hir::clause::ClauseParamKind::Positional(_, ty) = parameter.kind {
+                let explicit_type_parameter = !is_quote
+                    && if let hir::clause::ClauseParamKind::Positional(_, ty) = *unquoted {
                         checker.type_expr(ty)? == p(P::Type)
                     } else {
                         false
@@ -820,13 +861,13 @@ fn elaborate_candidate<'a, 'h>(
                     && !optional_type_parameter
                     && !(trait_domain.is_some()
                         && matches!(
-                            parameter.kind,
+                            *unquoted,
                             hir::clause::ClauseParamKind::Positional(..)
                                 | hir::clause::ClauseParamKind::Optional(..)
                                 | hir::clause::ClauseParamKind::Varadic(..)
                         ))
                     && !matches!(
-                        parameter.kind,
+                        *unquoted,
                         hir::clause::ClauseParamKind::Type(_)
                             | hir::clause::ClauseParamKind::TraitBound(..)
                     )
@@ -869,6 +910,23 @@ fn elaborate_candidate<'a, 'h>(
             checker.type_parameters.insert(owner, parameters);
             if !trait_domains.is_empty() {
                 checker.trait_parameter_types.insert(owner, trait_domains);
+            }
+            if matches!(
+                info.node.expect_item().kind,
+                ItemKind::Struct(_) | ItemKind::Enum(_)
+            ) {
+                let self_ty = checker.nominal_self_type(owner);
+                checker.self_types.insert(owner, self_ty.clone());
+                let nested = match &info.node.expect_item().kind {
+                    ItemKind::Struct(def) => &def.nested_items,
+                    ItemKind::Enum(def) => &def.nested_items,
+                    _ => unreachable!(),
+                };
+                for member in nested {
+                    if checker.self_types.contains_key(member) {
+                        checker.self_types.insert(*member, self_ty.clone());
+                    }
+                }
             }
             checker.capabilities.insert(owner, capabilities);
             // An earlier required computation may already have requested the
@@ -1495,6 +1553,7 @@ fn elaborate_candidate<'a, 'h>(
         })?;
     // Definition-side witnesses are analysis-only, including suppliers whose
     // inline alternatives must be checked before their inputs are supplied.
+    output.runtime_domains = checker.runtime_domains.clone();
     let runtime_count = output.functions.len();
     output
         .functions
@@ -1520,6 +1579,7 @@ fn elaborate_candidate<'a, 'h>(
         &mut checker.next_temporary_binding,
         &mut checker.required_steps,
     )?;
+    output.runtime_domains = checker.runtime_domains.clone();
     output.quote_identity_cursor = checker.next_temporary_binding;
     output.definition_identity_cursor = checker.definition_identities.next();
     if output
@@ -2163,6 +2223,34 @@ enum CallUse {
     DefinitionBehavior,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum GlobalRuntimeOrigin {
+    DefaultParam {
+        owner: OwnerId,
+        param: DeclarationId,
+        prefix_args: Vec<Term>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum LocalRuntimeOrigin {
+    AddressOf {
+        base: n::LocalId,
+        fields: Vec<usize>,
+    },
+    LocalValue {
+        binding: n::LocalId,
+        epoch: u64,
+    },
+    Ephemeral(u32),
+}
+
+#[derive(Clone, Debug)]
+struct LocalRuntimeDelivery {
+    expr: n::Expr,
+    checked_epoch: Option<(n::LocalId, u64)>,
+}
+
 struct Checker<'a, 'h> {
     source_declarations: source_declarations::SourceDeclarations<'a, 'h>,
     definition_identities: crate::definitions::DefinitionIdentities,
@@ -2336,8 +2424,304 @@ struct Checker<'a, 'h> {
     field_defaults: SourceBindings<n::Expr>,
     active_defaults: BTreeSet<(OwnerId, Option<usize>, usize)>,
     immutable: BTreeSet<n::LocalId>,
+    next_runtime_id: u32,
+    runtime_domains: BTreeMap<nir::RuntimeId, Term>,
+    global_runtime_origin_ids: std::collections::HashMap<GlobalRuntimeOrigin, nir::RuntimeId>,
+    global_runtime_deliveries: BTreeMap<nir::RuntimeId, n::Expr>,
+    local_runtime_origin_ids: BTreeMap<LocalRuntimeOrigin, nir::RuntimeId>,
+    local_runtime_deliveries: BTreeMap<nir::RuntimeId, LocalRuntimeDelivery>,
+    local_write_versions: BTreeMap<n::LocalId, u64>,
+    active_env_parameters: BTreeMap<DeclarationId, (n::LocalId, Term)>,
 }
 impl Checker<'_, '_> {
+    fn intern_runtime_id(&mut self, domain: Term, span: Span) -> Result<nir::RuntimeId, Error> {
+        let local_id = self.next_runtime_id;
+        self.next_runtime_id = local_id
+            .checked_add(1)
+            .ok_or_else(|| error(span, "runtime dependency identity space exhausted"))?;
+        let id = nir::RuntimeId {
+            instance: 0,
+            local: local_id,
+        };
+        self.implementation_index
+            .register_runtime_domain(id, domain.clone())
+            .map_err(|message| error(span, message))?;
+        self.inherent_index
+            .register_runtime_domain(id, domain.clone())
+            .map_err(|message| error(span, message))?;
+        self.runtime_domains.insert(id, domain);
+        Ok(id)
+    }
+
+    fn default_runtime_argument(
+        &mut self,
+        owner: OwnerId,
+        param: DeclarationId,
+        prefix_args: &[Term],
+        value: &Expr<'_>,
+        domain: &Term,
+        span: Span,
+    ) -> Result<Term, Error> {
+        let Term::Lift(expected_inner) = domain else {
+            return Err(error(
+                span,
+                "runtime default requires a lift dependency domain",
+            ));
+        };
+        let key = GlobalRuntimeOrigin::DefaultParam {
+            owner,
+            param,
+            prefix_args: prefix_args.to_vec(),
+        };
+        if let Some(&existing) = self.global_runtime_origin_ids.get(&key) {
+            return Ok(Term::Runtime(existing));
+        }
+        let expected_inner = self.callable_input_view(expected_inner, value.span)?;
+        let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
+        let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_active_env = std::mem::take(&mut self.active_env_parameters);
+        let checked = self.expr(value, Some(&expected_inner));
+        self.active_env_parameters = saved_active_env;
+        self.locals = saved_locals;
+        self.in_staged_input = saved_staged;
+        self.in_required_comptime = saved_required;
+        let checked = checked?;
+        if is_never(&checked.ty) {
+            return Err(error(
+                value.span,
+                "diverging default cannot satisfy a runtime quote dependency",
+            ));
+        }
+        let id = self.intern_runtime_id(Term::Lift(Box::new(checked.ty.clone())), span)?;
+        self.global_runtime_origin_ids.insert(key, id);
+        self.global_runtime_deliveries.insert(id, checked);
+        Ok(Term::Runtime(id))
+    }
+
+    fn record_runtime_expr_captures(&mut self, expr: &n::Expr, span: Span) -> Result<(), Error> {
+        let mut work = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = work;
+        let free = nir::free_bindings::collect(expr, &mut work);
+        self.required_steps = self.required_steps.saturating_sub((before - work) as u64);
+        let free = free.map_err(|reason| error(span, reason.to_string()))?;
+        for binding in free {
+            let Some(ty) = self.locals.get(&binding).cloned() else {
+                return Err(error(
+                    span,
+                    "runtime dependency refers to a local binding that is no longer in scope",
+                ));
+            };
+            for frame in &mut self.captures {
+                if frame.outer.contains(&binding)
+                    && !frame
+                        .values
+                        .iter()
+                        .any(|capture| capture.binding == binding)
+                {
+                    frame.values.push(n::Capture {
+                        value: None,
+                        binding,
+                        ty: ty.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn deliver_runtime_dependency(
+        &mut self,
+        term: &Term,
+        expected_inner: &Term,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        match term {
+            Term::Rigid {
+                declaration,
+                sort: Sort::Runtime,
+            } => {
+                let Some((binding, inner_ty)) =
+                    self.active_env_parameters.get(declaration).cloned()
+                else {
+                    return Err(error(
+                        span,
+                        "runtime quote dependency is not available in this function scope",
+                    ));
+                };
+                self.require_expression(&inner_ty, expected_inner, span)?;
+                let expr = n::Expr {
+                    source: source(span),
+                    ty: inner_ty,
+                    kind: K::Local(binding),
+                };
+                self.record_runtime_expr_captures(&expr, span)?;
+                Ok(expr)
+            }
+            Term::Runtime(id) => {
+                let mut delivered = if let Some(entry) = self.local_runtime_deliveries.get(id) {
+                    if let Some((binding, epoch)) = entry.checked_epoch {
+                        let current = self
+                            .local_write_versions
+                            .get(&binding)
+                            .copied()
+                            .unwrap_or(0);
+                        if current != epoch {
+                            return Err(error(
+                                span,
+                                "runtime dependency binding was modified after capture",
+                            ));
+                        }
+                    }
+                    let cloned = entry.expr.clone();
+                    self.record_runtime_expr_captures(&cloned, span)?;
+                    cloned
+                } else if let Some(global_expr) = self.global_runtime_deliveries.get(id) {
+                    global_expr.clone()
+                } else {
+                    return Err(error(
+                        span,
+                        "runtime dependency is not deliverable in this scope",
+                    ));
+                };
+                self.require_expression(&delivered.ty, expected_inner, span)?;
+                delivered.source = source(span);
+                Ok(delivered)
+            }
+            _ => Err(error(span, "invalid runtime dependency argument")),
+        }
+    }
+
+    fn deliver_owner_env_arguments(
+        &mut self,
+        owner: OwnerId,
+        args: &[Term],
+        span: Span,
+    ) -> Result<Vec<n::Expr>, Error> {
+        let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+            self.package.item(owner).map(|item| &item.kind)
+        else {
+            return Ok(vec![]);
+        };
+        if function_bodies::phase(&sig.modifiers) != n::FunctionPhase::Runtime
+            || sig.modifiers.is_normal_form_head
+        {
+            return Ok(vec![]);
+        }
+        self.ensure_signature(owner, span)?;
+        let params = self
+            .type_parameters
+            .get(&owner)
+            .cloned()
+            .unwrap_or_default();
+        if params.is_empty() {
+            return Ok(vec![]);
+        }
+        let domains = self.trait_domains(owner)?;
+        if params.len() != args.len() || domains.len() != params.len() {
+            if domains.iter().any(|d| matches!(d, Term::Lift(_))) {
+                return Err(error(span, "runtime environment argument arity mismatch"));
+            }
+            return Ok(vec![]);
+        }
+        let frames = self.call_input_frames();
+        let mut env_args = Vec::new();
+        for (slot, (domain, arg)) in domains.iter().zip(args).enumerate() {
+            let Term::Lift(inner) = domain else {
+                continue;
+            };
+            let instantiated_inner = self.instantiate_input_types_in_scope(
+                inner,
+                &params[..slot],
+                &args[..slot],
+                &frames,
+                span,
+            )?;
+            let instantiated_inner = self.callable_input_view(&instantiated_inner, span)?;
+            env_args.push(self.deliver_runtime_dependency(arg, &instantiated_inner, span)?);
+        }
+        Ok(env_args)
+    }
+
+    fn call_env_arguments(&mut self, callee: &n::Expr, span: Span) -> Result<Vec<n::Expr>, Error> {
+        match &callee.kind {
+            K::Function(decl_id) => {
+                let Some(owner) = self.source_declarations.owner(*decl_id) else {
+                    return Ok(vec![]);
+                };
+                self.deliver_owner_env_arguments(owner, &[], span)
+            }
+            K::FunctionInstance {
+                declaration: decl_id,
+                arguments,
+            } => {
+                let Some(owner) = self.source_declarations.owner(*decl_id) else {
+                    return Ok(vec![]);
+                };
+                self.deliver_owner_env_arguments(owner, arguments, span)
+            }
+            K::TraitMethod {
+                interface,
+                interface_arguments,
+                subject,
+                member,
+                method_arguments,
+            } => {
+                let instance = n::InterfaceInstance {
+                    declaration: *interface,
+                    arguments: interface_arguments.clone(),
+                };
+                if let Ok(resolution) =
+                    self.resolve_trait_capability(&instance, subject, crate::ptc::Budget::default())
+                    && let crate::implementation::Selection::Selected(impl_id) =
+                        resolution.selection
+                    && let Some(crate::implementation::TypeAssessment::Applicable(evidence)) =
+                        resolution.assessments.get(&impl_id)
+                {
+                    let implementation =
+                        &self.checked_implementations[self.implementation_positions[&impl_id]];
+                    let contract = self
+                        .checked_traits
+                        .by_id(*interface)
+                        .and_then(|t| t.methods.iter().find(|m| m.declaration == *member))
+                        .ok_or_else(|| error(span, "missing trait method contract"))?;
+                    let body = implementation
+                        .methods
+                        .iter()
+                        .find(|(method, _)| *method == contract.name)
+                        .map(|(_, body)| *body)
+                        .ok_or_else(|| error(span, "unknown trait method implementation"))?;
+                    let Some(impl_owner) = self.source_declarations.owner(body) else {
+                        return Err(error(span, "missing trait method owner"));
+                    };
+                    let args = if self.self_containers.contains_key(&impl_owner) {
+                        evidence
+                            .type_arguments
+                            .iter()
+                            .cloned()
+                            .chain(method_arguments.iter().cloned())
+                            .collect::<Vec<_>>()
+                    } else {
+                        std::iter::once(subject.clone())
+                            .chain(interface_arguments.iter().cloned())
+                            .chain(method_arguments.iter().cloned())
+                            .collect::<Vec<_>>()
+                    };
+                    return self.deliver_owner_env_arguments(impl_owner, &args, span);
+                }
+                let Some(contract_owner) = self.source_declarations.owner(*member) else {
+                    return Ok(vec![]);
+                };
+                let args: Vec<_> = std::iter::once(subject.clone())
+                    .chain(interface_arguments.iter().cloned())
+                    .chain(method_arguments.iter().cloned())
+                    .collect();
+                self.deliver_owner_env_arguments(contract_owner, &args, span)
+            }
+            _ => Ok(vec![]),
+        }
+    }
+
     fn integer_layout(&self, primitive: P) -> Option<(bool, u32)> {
         self.target.map_or_else(
             || primitive.fixed_integer_layout(),
@@ -2503,50 +2887,110 @@ impl Checker<'_, '_> {
                 required::signature_capability_atoms(&atom, &mut pending_capabilities, 0)?;
             }
             let inherited = type_parameters.len();
+            if (sig.modifiers.is_comptime
+                || sig.modifiers.is_normal_form_head
+                || sig.modifiers.is_quote
+                || sig.modifiers.is_function_template
+                || matches!(item.kind, ItemKind::Effect(..)))
+                && type_parameters[..inherited].iter().any(|id| {
+                    self.trait_input_domain(*id)
+                        .is_some_and(|domain| matches!(domain, Term::Lift(_)))
+                })
+            {
+                return Err(error(
+                    item.span,
+                    "comptime, normal-form, quote, template, or effect functions cannot inherit quote runtime dependencies",
+                ));
+            }
             let mut local_sorts = BTreeMap::new();
             self.normal_input_prefixes.entry(owner).or_default();
             for (slot, parameter) in sig.clause_params.iter().enumerate() {
                 use hir::clause::ClauseParamKind as Clause;
                 self.ready_signature_capabilities(owner, &mut pending_capabilities, false)?;
-                let domain = match parameter.kind {
-                    Clause::Type(_) | Clause::TraitBound(..) => p(P::Type),
-                    Clause::Varadic(_, declared) => {
-                        let domain = self.type_expr(declared)?;
-                        if self.list_element_type(&domain).is_none() {
-                            return Err(error(
-                                parameter.span,
-                                "variadic clause input requires a bound meta.List<T>",
-                            ));
-                        }
-                        if slot + 1 != sig.clause_params.len() {
-                            return Err(error(
-                                parameter.span,
-                                "variadic clause input must be the final parameter",
-                            ));
-                        }
-                        domain
-                    }
-                    Clause::Positional(_, declared) | Clause::Optional(_, declared, _) => {
-                        let domain = self.type_expr(declared)?;
-                        if !self.normal_input_domain_supported(
-                            &domain,
-                            &type_parameters[..inherited],
-                            &local_sorts,
-                            parameter.span,
-                        )? {
-                            return Err(error(
-                                parameter.span,
-                                "normal-form parameter type is not yet supported",
-                            ));
-                        }
-                        domain
-                    }
-                    Clause::Quote(_) => {
+                let is_quote = parameter.kind.is_quote();
+                let unquoted = parameter.kind.unquoted();
+                let domain = if is_quote {
+                    if matches!(item.kind, ItemKind::Effect(..))
+                        || sig.modifiers.is_comptime
+                        || sig.modifiers.is_normal_form_head
+                        || sig.modifiers.is_quote
+                        || sig.modifiers.is_function_template
+                    {
                         return Err(error(
                             parameter.span,
-                            "comptime/generic/contract clause kind is not implemented",
+                            "quote clause parameter is only supported on ordinary runtime functions",
                         ));
                     }
+                    let (Clause::Positional(_, declared) | Clause::Optional(_, declared, _)) =
+                        *unquoted
+                    else {
+                        return Err(error(
+                            parameter.span,
+                            "quote clause parameter must be positional or optional",
+                        ));
+                    };
+                    let domain = self.type_expr(declared)?;
+                    if !matches!(domain, Term::Lift(_)) {
+                        return Err(error(
+                            parameter.span,
+                            "quote clause parameter requires a lift type domain",
+                        ));
+                    }
+                    if !self.normal_input_domain_supported(
+                        &domain,
+                        &type_parameters[..inherited],
+                        &local_sorts,
+                        parameter.span,
+                    )? {
+                        return Err(error(
+                            parameter.span,
+                            "quote clause parameter type is not yet supported",
+                        ));
+                    }
+                    domain
+                } else {
+                    let domain = match *unquoted {
+                        Clause::Type(_) | Clause::TraitBound(..) => p(P::Type),
+                        Clause::Varadic(_, declared) => {
+                            let domain = self.type_expr(declared)?;
+                            if self.list_element_type(&domain).is_none() {
+                                return Err(error(
+                                    parameter.span,
+                                    "variadic clause input requires a bound meta.List<T>",
+                                ));
+                            }
+                            if slot + 1 != sig.clause_params.len() {
+                                return Err(error(
+                                    parameter.span,
+                                    "variadic clause input must be the final parameter",
+                                ));
+                            }
+                            domain
+                        }
+                        Clause::Positional(_, declared) | Clause::Optional(_, declared, _) => {
+                            let domain = self.type_expr(declared)?;
+                            if !self.normal_input_domain_supported(
+                                &domain,
+                                &type_parameters[..inherited],
+                                &local_sorts,
+                                parameter.span,
+                            )? {
+                                return Err(error(
+                                    parameter.span,
+                                    "normal-form parameter type is not yet supported",
+                                ));
+                            }
+                            domain
+                        }
+                        Clause::Quote(_) => unreachable!(),
+                    };
+                    if matches!(domain, Term::Lift(_)) {
+                        return Err(error(
+                            parameter.span,
+                            "lift type domain requires a quote clause parameter",
+                        ));
+                    }
+                    domain
                 };
                 let definition = parameter
                     .definition
@@ -2989,11 +3433,7 @@ impl Checker<'_, '_> {
                 &supplied,
                 expr.span,
             )?;
-            let sort = if domain == p(P::Type) {
-                Sort::Type
-            } else {
-                Sort::ComptimeValue
-            };
+            let sort = Sort::of_comptime_domain(&domain);
             let value = match context {
                 crate::calls::InputContext::Nominal {
                     declaration,
@@ -4498,14 +4938,10 @@ impl Checker<'_, '_> {
                     .iter()
                     .map(|id| Term::Rigid {
                         declaration: *id,
-                        sort: if self
+                        sort: self
                             .trait_input_domain(*id)
-                            .is_some_and(|ty| ty != p(P::Type))
-                        {
-                            Sort::ComptimeValue
-                        } else {
-                            Sort::Type
-                        },
+                            .as_ref()
+                            .map_or(Sort::Type, Sort::of_comptime_domain),
                     })
                     .collect(),
             });
@@ -5005,6 +5441,16 @@ impl Checker<'_, '_> {
             ));
         }
         if !allow_optional {
+            if self
+                .trait_domains(owner)?
+                .iter()
+                .any(|domain| matches!(domain, Term::Lift(_)))
+            {
+                return Err(error(
+                    expr.span,
+                    "functions with quote runtime dependencies cannot be taken as bare function values",
+                ));
+            }
             if let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
                 self.package.item(owner).map(|item| &item.kind)
             {
@@ -5079,6 +5525,16 @@ impl Checker<'_, '_> {
         view: Option<&n::Expr>,
     ) -> Result<n::Expr, Error> {
         self.ensure_signature(owner, expr.span)?;
+        if self
+            .trait_domains(owner)?
+            .iter()
+            .any(|domain| matches!(domain, Term::Lift(_)))
+        {
+            return Err(error(
+                expr.span,
+                "functions with quote runtime dependencies cannot be taken as bare function values",
+            ));
+        }
         let (generic_parameters, template, pending_defaults) =
             self.function_type_plan(owner, &fixed, expr.span)?;
         if generic_parameters.is_empty() {
@@ -6036,29 +6492,31 @@ impl Checker<'_, '_> {
         } else {
             self.callable_input_view(&instance.result, expr.span)?
         };
+        let callee_expr = n::Expr {
+            ty: self.callable_type(
+                owner,
+                self.instantiate_input_types_in_scope(
+                    &signature,
+                    &parameters,
+                    &instance.type_arguments,
+                    &caller_frames,
+                    expr.span,
+                )?,
+            ),
+            source: source(expr.span),
+            kind: K::FunctionInstance {
+                declaration: declaration(self.package, &self.package_identities, owner),
+                arguments: full_arguments,
+            },
+        };
+        let env_arguments = self.call_env_arguments(&callee_expr, expr.span)?;
         let call = n::Expr {
             ty,
             source: source(expr.span),
             kind: K::Call {
-                callee: Box::new(n::Expr {
-                    ty: self.callable_type(
-                        owner,
-                        self.instantiate_input_types_in_scope(
-                            &signature,
-                            &parameters,
-                            &instance.type_arguments,
-                            &caller_frames,
-                            expr.span,
-                        )?,
-                    ),
-                    source: source(expr.span),
-                    kind: K::FunctionInstance {
-                        declaration: declaration(self.package, &self.package_identities, owner),
-                        arguments: full_arguments,
-                    },
-                }),
+                callee: Box::new(callee_expr),
                 arguments,
-                env_arguments: vec![],
+                env_arguments,
                 parameter_bindings: declarations
                     .iter()
                     .map(|param| local(param.hir_id))

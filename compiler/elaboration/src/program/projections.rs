@@ -1316,7 +1316,12 @@ impl Checker<'_, '_> {
         let count = self
             .type_clause_params(owner)
             .iter()
-            .filter(|clause| !matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
+            .filter(|clause| {
+                !matches!(
+                    clause.kind.unquoted(),
+                    hir::clause::ClauseParamKind::Optional(..)
+                )
+            })
             .count();
         let domains = self.trait_domains(owner)?;
         let mixed = domains.iter().any(|domain| *domain != p(P::Type));

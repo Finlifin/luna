@@ -83,14 +83,10 @@ impl Checker<'_, '_> {
             .iter()
             .map(|id| nir::DeclarationParameter {
                 declaration: *id,
-                sort: if self
+                sort: self
                     .trait_input_domain(*id)
-                    .is_some_and(|ty| ty != p(P::Type))
-                {
-                    Sort::ComptimeValue
-                } else {
-                    Sort::Type
-                },
+                    .as_ref()
+                    .map_or(Sort::Type, Sort::of_comptime_domain),
             })
             .collect()
     }
@@ -309,7 +305,7 @@ impl Checker<'_, '_> {
             for parameter in this.nominal_captures(owner, this.package.item(owner).unwrap().span)? {
                 if let Some(domain) = this
                     .trait_input_domain(parameter)
-                    .filter(|ty| *ty != p(P::Type))
+                    .filter(|ty| Sort::of_comptime_domain(ty) == Sort::ComptimeValue)
                 {
                     this.install_abstract_clause_input(
                         parameter,
@@ -320,7 +316,8 @@ impl Checker<'_, '_> {
             }
             this.forbidden_default_inputs.extend(&parameters);
             for (slot, clause) in clauses.iter().enumerate() {
-                if let hir::clause::ClauseParamKind::Optional(_, _, value) = clause.kind {
+                if let hir::clause::ClauseParamKind::Optional(_, _, value) = clause.kind.unquoted()
+                {
                     let contextual = if matches!(
                         this.package.item(owner).map(|item| &item.kind),
                         Some(
@@ -346,14 +343,24 @@ impl Checker<'_, '_> {
                     } else {
                         false
                     };
-                    if contextual {
+                    if let Term::Lift(inner) = &domains[slot] {
+                        let saved_required =
+                            std::mem::replace(&mut this.in_required_comptime, false);
+                        let saved_staged = std::mem::replace(&mut this.in_staged_input, false);
+                        let saved_locals = std::mem::take(&mut this.locals);
+                        let checked = this.expr(value, Some(inner));
+                        this.locals = saved_locals;
+                        this.in_staged_input = saved_staged;
+                        this.in_required_comptime = saved_required;
+                        checked?;
+                    } else if contextual {
                         this.dependent_normal_argument(value, 0)?;
                     } else {
                         this.expr(value, Some(&domains[slot]))?;
                     }
                 }
                 this.forbidden_default_inputs.remove(&parameters[slot]);
-                if domains[slot] != p(P::Type) {
+                if Sort::of_comptime_domain(&domains[slot]) == Sort::ComptimeValue {
                     this.install_abstract_clause_input(
                         parameters[slot],
                         &domains[slot],
@@ -490,6 +497,7 @@ impl Checker<'_, '_> {
         let mut supplied: Vec<Option<Term>> = vec![None; clauses.len()];
         let mut pending_domains = vec![None; clauses.len()];
         let mut pending_literals = vec![None; clauses.len()];
+        let mut pending_runtime = vec![None; clauses.len()];
         let mut positional = 0;
         // Explicit inputs run in caller/source order. Defaults run afterwards
         // in the definition environment; no caller name becomes a default.
@@ -519,7 +527,7 @@ impl Checker<'_, '_> {
                     let remaining_slots: Vec<_> = (positional..clauses.len())
                         .filter(|slot| {
                             !matches!(
-                                clauses[*slot].kind,
+                                clauses[*slot].kind.unquoted(),
                                 hir::clause::ClauseParamKind::Optional(..)
                             )
                         })
@@ -590,7 +598,7 @@ impl Checker<'_, '_> {
                     for (actual, element) in fields.into_iter().zip(values) {
                         while positional < clauses.len()
                             && matches!(
-                                clauses[positional].kind,
+                                clauses[positional].kind.unquoted(),
                                 hir::clause::ClauseParamKind::Optional(..)
                             )
                         {
@@ -601,7 +609,10 @@ impl Checker<'_, '_> {
                         if slot >= clauses.len() {
                             return Err(error(value.span, "trait argument count mismatch"));
                         }
-                        if supplied[slot].is_some() || pending_literals[slot].is_some() {
+                        if supplied[slot].is_some()
+                            || pending_literals[slot].is_some()
+                            || pending_runtime[slot].is_some()
+                        {
                             return Err(error(value.span, "duplicate trait argument"));
                         }
                         let element = match element {
@@ -627,13 +638,16 @@ impl Checker<'_, '_> {
                     .iter()
                     .position(|clause| {
                         clause.name.name == name.name
-                            && matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..))
+                            && matches!(
+                                clause.kind.unquoted(),
+                                hir::clause::ClauseParamKind::Optional(..)
+                            )
                     })
                     .ok_or_else(|| error(span, "unknown named trait argument"))?
             } else {
                 while positional < clauses.len()
                     && matches!(
-                        clauses[positional].kind,
+                        clauses[positional].kind.unquoted(),
                         hir::clause::ClauseParamKind::Optional(..)
                     )
                 {
@@ -646,7 +660,10 @@ impl Checker<'_, '_> {
             let domain = domains
                 .get(slot)
                 .ok_or_else(|| error(span, "trait argument count mismatch"))?;
-            if supplied[slot].is_some() || pending_literals[slot].is_some() {
+            if supplied[slot].is_some()
+                || pending_literals[slot].is_some()
+                || pending_runtime[slot].is_some()
+            {
                 return Err(error(span, "duplicate trait argument"));
             }
             // A supplied value is checked in the caller environment, against
@@ -671,6 +688,12 @@ impl Checker<'_, '_> {
             // still follow source-order required invocation below.
             if unresolved_domain && is_numeric_literal(value) {
                 pending_literals[slot] = Some(value);
+                continue;
+            }
+            if unresolved_domain
+                && (clauses[slot].kind.is_quote() || matches!(domain, Term::Lift(_)))
+            {
+                pending_runtime[slot] = Some(value);
                 continue;
             }
             supplied[slot] = Some(if unresolved_domain {
@@ -755,8 +778,17 @@ impl Checker<'_, '_> {
                     let checked = self.normal_value_argument(literal, &domain);
                     self.context = definition_context;
                     checked?
+                } else if let Some(runtime_expr) = pending_runtime[slot] {
+                    let domain =
+                        self.substituted_trait_domain(&domains[slot], runtime_expr.span)?;
+                    let definition_context =
+                        std::mem::replace(&mut self.context, saved_context.clone());
+                    let checked = self.normal_value_argument(runtime_expr, &domain);
+                    self.context = definition_context;
+                    checked?
                 } else {
-                    let hir::clause::ClauseParamKind::Optional(_, _, value) = clauses[slot].kind
+                    let hir::clause::ClauseParamKind::Optional(_, _, value) =
+                        *clauses[slot].kind.unquoted()
                     else {
                         return Err(error(span, "trait argument count mismatch"));
                     };
@@ -769,7 +801,23 @@ impl Checker<'_, '_> {
                         .extend(parameters[slot..].iter().copied());
                     let result = (|| {
                         let domain = self.substituted_trait_domain(&domains[slot], value.span)?;
-                        self.normal_value_argument(value, &domain)
+                        if matches!(domain, Term::Lift(_)) {
+                            let prefix_args: Vec<_> = subject
+                                .cloned()
+                                .into_iter()
+                                .chain(arguments.iter().cloned())
+                                .collect();
+                            self.default_runtime_argument(
+                                owner,
+                                parameters[slot],
+                                &prefix_args,
+                                value,
+                                &domain,
+                                span,
+                            )
+                        } else {
+                            self.normal_value_argument(value, &domain)
+                        }
                     })();
                     self.forbidden_default_inputs = saved_forbidden.clone();
                     self.active_type_defaults.remove(&(owner, slot));

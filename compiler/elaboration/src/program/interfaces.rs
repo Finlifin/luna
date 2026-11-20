@@ -136,14 +136,10 @@ impl Checker<'_, '_> {
                     .iter()
                     .map(|parameter| Term::Rigid {
                         declaration: *parameter,
-                        sort: if self
+                        sort: self
                             .trait_input_domain(*parameter)
-                            .is_some_and(|ty| ty != p(P::Type))
-                        {
-                            Sort::ComptimeValue
-                        } else {
-                            Sort::Type
-                        },
+                            .as_ref()
+                            .map_or(Sort::Type, Sort::of_comptime_domain),
                     })
                     .collect(),
             };
@@ -733,30 +729,17 @@ impl Checker<'_, '_> {
                                 .into_iter()
                                 .chain(contract.type_parameters.iter().enumerate().map(
                                     |(slot, id)| {
+                                        let domain = contract
+                                            .signature
+                                            .clause_domains()
+                                            .and_then(|domains| domains.get(slot))
+                                            .cloned()
+                                            .or_else(|| self.trait_input_domain(*id));
                                         nir::DeclarationParameter {
                                             declaration: *id,
-                                            sort: match &contract.signature {
-                                                signature
-                                                    if signature
-                                                        .clause_domains()
-                                                        .and_then(|domains| domains.get(slot))
-                                                        .is_some_and(|domain| {
-                                                            *domain != p(P::Type)
-                                                        }) =>
-                                                {
-                                                    Sort::ComptimeValue
-                                                }
-                                                _ => {
-                                                    if self
-                                                        .trait_input_domain(*id)
-                                                        .is_some_and(|domain| domain != p(P::Type))
-                                                    {
-                                                        Sort::ComptimeValue
-                                                    } else {
-                                                        Sort::Type
-                                                    }
-                                                }
-                                            },
+                                            sort: domain
+                                                .as_ref()
+                                                .map_or(Sort::Type, Sort::of_comptime_domain),
                                         }
                                     },
                                 ))
@@ -764,28 +747,17 @@ impl Checker<'_, '_> {
                         let substitution_arguments: Vec<_> = std::iter::once(subject.clone())
                             .chain(interface_arguments.iter().cloned())
                             .chain(actual.type_parameters.iter().enumerate().map(|(slot, id)| {
+                                let domain = actual
+                                    .signature
+                                    .clause_domains()
+                                    .and_then(|domains| domains.get(slot))
+                                    .cloned()
+                                    .or_else(|| self.trait_input_domain(*id));
                                 Term::Rigid {
                                     declaration: *id,
-                                    sort: match &actual.signature {
-                                        signature
-                                            if signature
-                                                .clause_domains()
-                                                .and_then(|domains| domains.get(slot))
-                                                .is_some_and(|domain| *domain != p(P::Type)) =>
-                                        {
-                                            Sort::ComptimeValue
-                                        }
-                                        _ => {
-                                            if self
-                                                .trait_input_domain(*id)
-                                                .is_some_and(|domain| domain != p(P::Type))
-                                            {
-                                                Sort::ComptimeValue
-                                            } else {
-                                                Sort::Type
-                                            }
-                                        }
-                                    },
+                                    sort: domain
+                                        .as_ref()
+                                        .map_or(Sort::Type, Sort::of_comptime_domain),
                                 }
                             }))
                             .collect();
@@ -3216,6 +3188,21 @@ impl Checker<'_, '_> {
             subject,
             method_arguments,
         };
+        let refreshed_callee = callee.clone();
+        let refreshed_env = self.call_env_arguments(&refreshed_callee, expr.span)?;
+        fn prepared_env_arguments(call: &mut n::Expr) -> Option<&mut Vec<n::Expr>> {
+            match &mut call.kind {
+                K::Call { env_arguments, .. } => Some(env_arguments),
+                K::CallPreparation {
+                    result: Some(result),
+                    ..
+                } => prepared_env_arguments(result),
+                _ => None,
+            }
+        }
+        *prepared_env_arguments(&mut call)
+            .ok_or_else(|| error(expr.span, "generic method preparation lacks a call"))? =
+            refreshed_env;
         Ok(call)
     }
 }

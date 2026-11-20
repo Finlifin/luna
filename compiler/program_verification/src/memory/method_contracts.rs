@@ -137,7 +137,7 @@ pub fn prepare_method_invocation(
     else {
         return Err("composed memory summary lacks a selected instance".into());
     };
-    let (body, _) = package
+    let (body, body_arguments) = package
         .runtime_body(*declaration, arguments)
         .ok_or("composed memory summary lacks its body")?;
     // Build only the invocation frame. The concrete implementation remains in
@@ -151,8 +151,36 @@ pub fn prepare_method_invocation(
         )
         .ok_or("composed memory frame budget exhausted")?;
     bound_type(selected.ty.callable_signature(), fuel)?;
+    let mut env_parameters = Vec::with_capacity(body.env_parameters.len());
+    let mut env_arguments = Vec::with_capacity(body.env_parameters.len());
     if !body.env_parameters.is_empty() {
-        return Err("method contracts do not yet support runtime environment parameters".into());
+        let body_domains = memory_domains(package, &body.type_parameters, fuel)?;
+        for ty in body_arguments {
+            bound_type(ty, fuel)?;
+        }
+        let body_substitution = nir::DeclarationSubstitution::bounded(
+            &body.type_parameters,
+            &body_domains,
+            body_arguments,
+            &[],
+            fuel,
+        )
+        .map_err(|error| error.to_string())?;
+        for env in &body.env_parameters {
+            let ty = body_substitution
+                .instantiate_bounded(&env.ty, fuel)
+                .map_err(|error| error.to_string())?;
+            env_parameters.push(nir::program::RuntimeEnvParameter {
+                declaration: env.declaration,
+                binding: env.binding,
+                ty: ty.clone(),
+            });
+            env_arguments.push(Expr {
+                source: callee.source,
+                ty,
+                kind: K::Local(env.binding),
+            });
+        }
     }
     let mut composed = nir::program::FunctionDeclaration {
         source: callee.source,
@@ -173,7 +201,7 @@ pub fn prepare_method_invocation(
         name: body.name.clone(),
         signature: selected.ty.callable_signature().clone(),
         parameters: body.parameters.clone(),
-        env_parameters: vec![],
+        env_parameters,
         defaults: vec![],
     };
 
@@ -264,7 +292,7 @@ pub fn prepare_method_invocation(
         kind: K::Call {
             callee: Box::new(selected.clone()),
             arguments: call_arguments,
-            env_arguments: vec![],
+            env_arguments,
             parameter_bindings: composed.parameters.clone(),
         },
     };

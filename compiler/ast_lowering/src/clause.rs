@@ -74,7 +74,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 });
                 continue;
             }
-            if kind == NodeKind::QuoteDeclClause {
+            if matches!(kind, NodeKind::QuoteDeclClause | NodeKind::QuoteParam) {
                 let mut inner = self.lower_clauses_inner(&[children[0]], None, true);
                 if inner.params.len() != 1 || !inner.constraints.is_empty() {
                     self.emit_unsupported_clause("quote requires a declaration parameter", span);

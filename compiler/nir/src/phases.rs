@@ -318,6 +318,31 @@ impl<'a> PhaseContext<'a> {
                 }
             }
         }
+        if !self.package.runtime_domains.is_empty() {
+            *fuel = fuel
+                .checked_sub(self.package.runtime_domains.len())
+                .ok_or_else(|| {
+                    Error::budget(
+                        SourceRange { start: 0, end: 0 },
+                        "runtime domain validation budget exhausted",
+                    )
+                })?;
+            let mut scope = self
+                .storage_queries
+                .scope(&[], fuel)
+                .map_err(|failure| Error::storage(SourceRange { start: 0, end: 0 }, failure))?;
+            for domain in self.package.runtime_domains.values() {
+                let Term::Lift(inner) = domain else {
+                    return Err(Error::invalid(
+                        SourceRange { start: 0, end: 0 },
+                        "runtime dependency domain must be a lift type",
+                    ));
+                };
+                scope
+                    .check_runtime(inner, fuel)
+                    .map_err(|failure| Error::storage(SourceRange { start: 0, end: 0 }, failure))?;
+            }
+        }
         Ok(machine_owners)
     }
 

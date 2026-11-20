@@ -610,11 +610,7 @@ impl Checker<'_, '_> {
                 } else {
                     Term::Rigid {
                         declaration: id,
-                        sort: if domain == p(P::Type) {
-                            Sort::Type
-                        } else {
-                            Sort::ComptimeValue
-                        },
+                        sort: Sort::of_comptime_domain(&domain),
                     }
                 };
                 return Ok(Some((symbol, domain)));

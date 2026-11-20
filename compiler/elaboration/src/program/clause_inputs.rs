@@ -8,8 +8,14 @@ pub(super) fn entries(
     clauses
         .iter()
         .map(|clause| {
-            let optional = matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..));
-            let variadic = matches!(clause.kind, hir::clause::ClauseParamKind::Varadic(..));
+            let optional = matches!(
+                clause.kind.unquoted(),
+                hir::clause::ClauseParamKind::Optional(..)
+            );
+            let variadic = matches!(
+                clause.kind.unquoted(),
+                hir::clause::ClauseParamKind::Varadic(..)
+            );
             input_routing::Entry {
                 name: (optional || variadic).then_some(clause.name.name),
                 optional,

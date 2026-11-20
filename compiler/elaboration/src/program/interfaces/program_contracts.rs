@@ -44,7 +44,7 @@ impl Checker<'_, '_> {
         let mut clauses = BTreeMap::new();
         if parameters
             .iter()
-            .any(|parameter| parameter.sort == Sort::ComptimeValue)
+            .any(|parameter| parameter.sort != Sort::Type)
         {
             for (owner, _) in self.package.owners() {
                 self.required_steps = self
@@ -70,16 +70,14 @@ impl Checker<'_, '_> {
         }
         let mut values = BTreeMap::new();
         for (parameter, argument) in parameters.iter().zip(arguments) {
-            if parameter.sort != Sort::ComptimeValue {
+            if parameter.sort == Sort::Type {
                 continue;
             }
             let binding = *clauses
                 .get(&parameter.declaration)
                 .ok_or_else(|| error(span, "code contract value binding is unavailable"))?;
-            if let Term::Rigid {
-                declaration,
-                sort: Sort::ComptimeValue,
-            } = argument
+            if let Term::Rigid { declaration, sort } = argument
+                && *sort == parameter.sort
             {
                 bindings.insert(
                     binding,

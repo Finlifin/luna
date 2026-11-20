@@ -26,6 +26,20 @@ pub enum ClauseParamKind<'hir> {
     Quote(Box<ClauseParamKind<'hir>>),
 }
 
+impl<'hir> ClauseParamKind<'hir> {
+    pub fn is_quote(&self) -> bool {
+        matches!(self, Self::Quote(_))
+    }
+
+    pub fn unquoted(&self) -> &Self {
+        let mut cursor = self;
+        while let Self::Quote(inner) = cursor {
+            cursor = inner;
+        }
+        cursor
+    }
+}
+
 /// A where-clause constraint on a definition.
 ///
 /// Analogous to rustc's `WherePredicate`, but also covers Flurry-specific

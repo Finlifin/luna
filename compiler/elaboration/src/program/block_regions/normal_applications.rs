@@ -85,11 +85,7 @@ impl<'h> Frame<'h> {
             .map(|(id, _, domain)| {
                 Ok((
                     *id,
-                    if *domain == p(P::Type) {
-                        Sort::Type
-                    } else {
-                        Sort::ComptimeValue
-                    },
+                    Sort::of_comptime_domain(domain),
                     declaration_inputs::copy_input_domain(
                         domain,
                         &mut checker.required_steps,

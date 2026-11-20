@@ -484,6 +484,8 @@ impl<'a> InstantiationSession<'a> {
             // construction fails. No instance graph or caller evidence is retained.
             self.phase_checked = true;
         }
+        let mut runtime_bindings = runtime_bindings;
+        runtime_bindings.extend(package.runtime_domains.keys().copied());
         construction_budget.steps = construction_budget
             .steps
             .checked_sub(runtime_bindings.len())
@@ -589,6 +591,33 @@ struct BuildResult {
     frozen_methods: Vec<n::Expr>,
     callable_identities: Vec<iir::CallableIdentity>,
     type_cores: nir::TypeInterner,
+}
+
+fn declared_runtime_domain(
+    world: &DeclarationWorld<'_>,
+    argument: &Term,
+    domain: &Term,
+    fuel: &mut usize,
+) -> bool {
+    if nir::type_computations::charge_term(domain, fuel).is_err() {
+        return false;
+    }
+    match argument {
+        Term::Runtime(id) => world
+            .index()
+            .runtime_domains()
+            .get(id)
+            .is_some_and(|declared| declared == domain),
+        Term::Rigid {
+            declaration,
+            sort: nir::Sort::Runtime,
+        } => world
+            .index()
+            .parameter_domains()
+            .get(declaration)
+            .is_some_and(|declared| declared == domain),
+        _ => false,
+    }
 }
 
 struct DispatchContext<'a> {
@@ -928,12 +957,6 @@ impl Builder<'_> {
             self.world
                 .instantiate_function(f, &arguments, &mut self.fuel)?
         };
-        if !function.env_parameters.is_empty() {
-            return Err(format!(
-                "function `{}` has runtime environment parameters requiring Stage G1b materialization",
-                function.name
-            ));
-        }
         if function.phase == n::FunctionPhase::Comptime
             && matches!(function.signature.callable_signature(), Term::Function { parameters, .. }
                 if parameters.iter().any(|parameter| parameter.sort != nir::Sort::Runtime))
@@ -946,6 +969,11 @@ impl Builder<'_> {
         function.signature = self.normalized_type(&function.signature)?;
         iir::completed_type(&function.signature, &self.runtime_bindings, &mut self.fuel)?;
         self.queue.push_back(Task::Type(function.signature.clone()));
+        for env in &mut function.env_parameters {
+            env.ty = self.normalized_type(&env.ty)?;
+            iir::completed_type(&env.ty, &self.runtime_bindings, &mut self.fuel)?;
+            self.queue.push_back(Task::Type(env.ty.clone()));
+        }
         for requirement in &mut function.requirements {
             *requirement = self.normalized_predicate(requirement, 0)?;
             self.tick(0)?;
@@ -1883,12 +1911,6 @@ impl Builder<'_> {
             env_arguments,
         } = &mut expression.kind
         {
-            if !env_arguments.is_empty() {
-                return Err(
-                    "runtime environment call arguments require Stage G1b materialization support"
-                        .into(),
-                );
-            }
             if let K::TraitMethod {
                 interface,
                 interface_arguments,
@@ -1901,6 +1923,12 @@ impl Builder<'_> {
                     || matches!(callee.ty.callable_signature(),Term::Function {parameters,..}
                         if parameters.iter().any(|p|p.sort!=nir::Sort::Runtime))
                 {
+                    if !env_arguments.is_empty() {
+                        return Err(
+                            "staged trait method calls with runtime environment arguments are not yet supported"
+                                .into(),
+                        );
+                    }
                     let instance = n::InterfaceInstance {
                         declaration: *interface,
                         arguments: interface_arguments.clone(),
@@ -2108,6 +2136,12 @@ impl Builder<'_> {
             let mut bound =
                 self.world
                     .instantiate_function(template, &arguments, &mut self.fuel)?;
+            if !bound.env_parameters.is_empty() {
+                return Err(
+                    "staged or inline functions with runtime environment parameters are not yet supported"
+                        .into(),
+                );
+            }
             bound.type_parameters.clear();
             if let Some((requirements, capabilities, program)) = entry_contract {
                 Self::merge_entry_contract(&mut bound, requirements, capabilities, program);
@@ -2127,6 +2161,11 @@ impl Builder<'_> {
         let mut template = self
             .world
             .instantiate_function(template, &arguments, &mut self.fuel)?;
+        if !template.env_parameters.is_empty() {
+            return Err(
+                "staged functions with runtime environment parameters are not yet supported".into(),
+            );
+        }
         template.type_parameters.clear();
         if let Some((requirements, capabilities, program)) = entry_contract {
             Self::merge_entry_contract(&mut template, requirements, capabilities, program);
@@ -2614,24 +2653,23 @@ impl Builder<'_> {
                     .find(|s| s.declaration == *declaration)
                 {
                     if self.instances.is_some() {
+                        let world = &self.world;
+                        let package = self.package;
                         nir::validate_declaration_arguments_with_collections_in(
                             &s.type_parameters,
                             &s.parameter_types,
                             arguments,
                             &mut self.fuel,
                             |ty, variant, fuel| {
-                                nir::normal_forms::query_value_fields(
-                                    self.package,
-                                    ty,
-                                    variant,
-                                    fuel,
-                                )
+                                nir::normal_forms::query_value_fields(package, ty, variant, fuel)
                             },
-                            |_, _, _| false,
+                            |argument, domain, fuel| {
+                                declared_runtime_domain(world, argument, domain, fuel)
+                            },
                             |domain, fuel| {
-                                nir::normal_forms::list_element_budgeted(self.package, domain, fuel)
+                                nir::normal_forms::list_element_budgeted(package, domain, fuel)
                             },
-                            self.package.target,
+                            package.target,
                         )?;
                     }
                     let substitution = nir::DeclarationSubstitution::bounded(
@@ -2689,24 +2727,23 @@ impl Builder<'_> {
                     .find(|e| e.declaration == *declaration)
                 {
                     if self.instances.is_some() {
+                        let world = &self.world;
+                        let package = self.package;
                         nir::validate_declaration_arguments_with_collections_in(
                             &e.type_parameters,
                             &e.parameter_types,
                             arguments,
                             &mut self.fuel,
                             |ty, variant, fuel| {
-                                nir::normal_forms::query_value_fields(
-                                    self.package,
-                                    ty,
-                                    variant,
-                                    fuel,
-                                )
+                                nir::normal_forms::query_value_fields(package, ty, variant, fuel)
                             },
-                            |_, _, _| false,
+                            |argument, domain, fuel| {
+                                declared_runtime_domain(world, argument, domain, fuel)
+                            },
                             |domain, fuel| {
-                                nir::normal_forms::list_element_budgeted(self.package, domain, fuel)
+                                nir::normal_forms::list_element_budgeted(package, domain, fuel)
                             },
-                            self.package.target,
+                            package.target,
                         )?;
                     }
                     let substitution = nir::DeclarationSubstitution::bounded(
@@ -2770,22 +2807,21 @@ impl Builder<'_> {
                     // value admission belongs to concrete materialization, as
                     // for struct and enum; invocation checks scoped evidence.
                     if self.instances.is_some() {
+                        let world = &self.world;
+                        let package = self.package;
                         n.validate_completed_arguments_with_collections_in(
                             arguments,
                             &mut self.fuel,
                             |ty, variant, fuel| {
-                                nir::normal_forms::query_value_fields(
-                                    self.package,
-                                    ty,
-                                    variant,
-                                    fuel,
-                                )
+                                nir::normal_forms::query_value_fields(package, ty, variant, fuel)
                             },
-                            |_, _, _| false,
+                            |argument, domain, fuel| {
+                                declared_runtime_domain(world, argument, domain, fuel)
+                            },
                             |domain, fuel| {
-                                nir::normal_forms::list_element_budgeted(self.package, domain, fuel)
+                                nir::normal_forms::list_element_budgeted(package, domain, fuel)
                             },
-                            self.package.target,
+                            package.target,
                         )?;
                     }
                     let substitution = nir::DeclarationSubstitution::bounded(

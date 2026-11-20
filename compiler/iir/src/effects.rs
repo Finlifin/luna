@@ -220,6 +220,9 @@ pub(crate) fn validate(
     fuel: &mut usize,
 ) -> Result<(), String> {
     data_type(package, &function.signature, fuel, 0)?;
+    for env in &function.env_parameters {
+        data_type(package, &env.ty, fuel, 0)?;
+    }
     let Term::Function { result, .. } = function.signature.callable_signature() else {
         return Err("IIR effect function signature missing".into());
     };

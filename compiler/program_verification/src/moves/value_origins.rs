@@ -172,8 +172,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 arguments,
                 parameter_bindings,
                 env_arguments,
-            } if env_arguments.is_empty()
-                && self.package.is_some()
+            } if self.package.is_some()
                 && matches!(
                     completion_type(&expr.ty),
                     Term::Tuple(_)
@@ -198,6 +197,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     expr,
                     callee,
                     arguments,
+                    env_arguments,
                     parameter_bindings,
                     flow,
                     depth,

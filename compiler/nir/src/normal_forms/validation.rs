@@ -117,6 +117,11 @@ pub fn validate_in(package: &Package, fuel: &mut usize) -> Result<(), Validation
                     types.push(parameter.declaration);
                 }
                 Kind::Value => {
+                    if matches!(&parameter.ty, Term::Lift(_)) {
+                        return Err(Invalid(
+                            "normal-form head cannot accept a runtime lift domain",
+                        ));
+                    }
                     let supported = supported_input_type_in_scope(
                         &parameter.ty,
                         |id, sort, _| Ok(prior.get(&id) == Some(&sort)),
@@ -148,7 +153,7 @@ pub fn validate_in(package: &Package, fuel: &mut usize) -> Result<(), Validation
                 if parameter.kind == Kind::Type {
                     Sort::Type
                 } else {
-                    Sort::ComptimeValue
+                    Sort::of_comptime_domain(&parameter.ty)
                 },
             );
         }

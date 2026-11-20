@@ -336,6 +336,15 @@ fn packages() -> Vec<(&'static str, n::Package)> {
             signature: Term::Tuple(vec![boolean(); 2048]),
         });
     cases.push(("runtime identity signatures", package));
+    let mut package = n::Package::default();
+    package.runtime_domains.insert(
+        crate::RuntimeId {
+            instance: 1,
+            local: 0,
+        },
+        Term::Lift(Box::new(Term::Tuple(vec![boolean(); 2048]))),
+    );
+    cases.push(("runtime dependency domains", package));
     cases
 }
 

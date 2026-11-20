@@ -306,12 +306,6 @@ impl Analyzer<'_, '_, '_, '_> {
                 env_arguments,
                 ..
             } => {
-                if !env_arguments.is_empty() {
-                    return Err(
-                        "effect usage analysis does not yet support runtime environment call arguments"
-                            .into(),
-                    );
-                }
                 let mut paths = self.sequence(
                     std::iter::once(callee.as_ref())
                         .chain(arguments.iter().map(|a| &a.value))
@@ -504,12 +498,6 @@ impl Analyzer<'_, '_, '_, '_> {
                 env_arguments,
                 ..
             } => {
-                if !env_arguments.is_empty() {
-                    return Err(
-                        "effect usage analysis does not yet support runtime environment call arguments"
-                            .into(),
-                    );
-                }
                 let mut paths = self.sequence(
                     std::iter::once(callee.as_ref())
                         .chain(arguments.iter().map(|a| &a.value))

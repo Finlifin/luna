@@ -128,11 +128,7 @@ impl Checker<'_, '_> {
             declaration_inputs::copy_input_domain(domain, &mut self.required_steps, expr.span)?;
         let symbol = Term::Rigid {
             declaration: *declaration,
-            sort: if ty == type_domain {
-                Sort::Type
-            } else {
-                Sort::ComptimeValue
-            },
+            sort: Sort::of_comptime_domain(&ty),
         };
         if let Some(expected) = expected {
             self.require_expression(&ty, expected, expr.span)?;

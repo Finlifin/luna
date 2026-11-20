@@ -1730,3 +1730,45 @@ fn a_callable_value_in_an_opaque_domain_exposes_its_captures_but_not_its_identit
     assert!(!visible(&domain(Term::Value { store: 1, index: 0 }), None));
     assert!(visible(&domain(Term::Bool(true)), None));
 }
+
+#[test]
+fn lift_domains_are_accepted_only_at_top_level_and_preserve_runtime_sorts() {
+    let ptr_bool = Term::Pointer(Box::new(primitive(P::Bool)));
+    let lift_ptr = Term::Lift(Box::new(ptr_bool.clone()));
+    assert!(supported_input_type(&lift_ptr, &[]));
+
+    let nested_lift = Term::Lift(Box::new(lift_ptr.clone()));
+    assert!(!supported_input_type(&nested_lift, &[]));
+    assert!(!supported_input_type(
+        &Term::Optional(Box::new(lift_ptr.clone())),
+        &[]
+    ));
+    assert!(!supported_input_type(&Term::Tuple(vec![lift_ptr]), &[]));
+
+    let lift_dep = Term::Lift(Box::new(Term::Pointer(Box::new(Term::Nominal {
+        declaration: id(50),
+        arguments: vec![Term::Rigid {
+            declaration: id(4),
+            sort: Sort::Runtime,
+        }],
+    }))));
+    let prior_check = |sort: Option<Sort>| {
+        nir::normal_forms::supported_input_type_in_scope(
+            &lift_dep,
+            |key, actual_sort, _| {
+                assert_eq!(key, id(4));
+                Ok(sort == Some(actual_sort))
+            },
+            |_| false,
+            |_| false,
+            |nominal_id| nominal_id == id(50),
+            None,
+            &mut 256,
+        )
+        .unwrap()
+    };
+    assert!(prior_check(Some(Sort::Runtime)));
+    assert!(!prior_check(Some(Sort::ComptimeValue)));
+    assert!(!prior_check(Some(Sort::Type)));
+    assert!(!prior_check(None));
+}

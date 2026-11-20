@@ -175,3 +175,35 @@ fn domain_shape_reports_resources_separately_and_uses_the_given_allowance() {
         true
     );
 }
+
+#[test]
+fn normal_form_heads_reject_runtime_lift_domains_and_structs_accept_them() {
+    let lift_ptr = Term::Lift(Box::new(Term::Pointer(Box::new(Term::Primitive(
+        Primitive::U32,
+    )))));
+    let nf_package = Package {
+        normal_forms: vec![opaque(20, lift_ptr.clone())],
+        ..Default::default()
+    };
+    assert_eq!(
+        normal_forms::validate_in(&nf_package, &mut 10_000),
+        Err(normal_forms::ValidationError::Invalid(
+            "normal-form head cannot accept a runtime lift domain"
+        ))
+    );
+
+    let struct_package = Package {
+        structs: vec![nir::program::Struct {
+            declaration: id(30),
+            name: "Sensor".into(),
+            type_parameters: vec![id(31)],
+            parameter_types: vec![lift_ptr],
+            fields: vec![("value".into(), Term::Primitive(Primitive::U32))],
+            requirements: vec![],
+            capabilities: vec![],
+            packed: false,
+        }],
+        ..Default::default()
+    };
+    normal_forms::validate_in(&struct_package, &mut 10_000).unwrap();
+}

@@ -28,14 +28,17 @@ impl Term {
                 && matches!(
                     value,
                     Self::Rigid {
-                        sort: Sort::ComptimeValue,
+                        sort: Sort::ComptimeValue | Sort::Runtime,
                         ..
                     }
                 )
             {
                 continue;
             }
-            if value.scalar_index_domain().is_some() || (depth > 0 && value.sort() == Sort::Type) {
+            if matches!(value, Self::Runtime(_))
+                || value.scalar_index_domain().is_some()
+                || (depth > 0 && value.sort() == Sort::Type)
+            {
                 continue;
             }
             match value {
@@ -165,10 +168,11 @@ impl Term {
             } else if left == right
                 && matches!(
                     left,
-                    Self::Rigid {
-                        sort: Sort::ComptimeValue,
-                        ..
-                    }
+                    Self::Runtime(_)
+                        | Self::Rigid {
+                            sort: Sort::ComptimeValue | Sort::Runtime,
+                            ..
+                        }
                 )
             {
                 continue;
@@ -290,6 +294,11 @@ impl Term {
                     if a.scalar_index_domain().is_some() && b.scalar_index_domain().is_some() =>
                 {
                     if a != b {
+                        return Ok(true);
+                    }
+                }
+                (Self::Runtime(left), Self::Runtime(right)) => {
+                    if left != right {
                         return Ok(true);
                     }
                 }
@@ -738,6 +747,14 @@ impl Trait {
                 value if value.scalar_index_domain().is_some() => {
                     Term::Primitive(value.scalar_index_domain().unwrap())
                 }
+                Term::Runtime(id) => layouts
+                    .and_then(|package| package.runtime_domains.get(id))
+                    .cloned()
+                    .ok_or_else(|| {
+                        AdmissionError::from(
+                            "trait runtime argument requires declared domain evidence",
+                        )
+                    })?,
                 Term::Rigid {
                     declaration,
                     sort: Sort::ComptimeValue | Sort::Runtime,

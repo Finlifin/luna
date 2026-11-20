@@ -78,16 +78,11 @@ pub fn lower_method_call_cleanup(
         callee,
         arguments,
         parameter_bindings,
-        env_arguments,
+        ..
     } = &call.kind
     else {
         return Err("interface cleanup requires a call expression".into());
     };
-    if !env_arguments.is_empty() {
-        return Err(
-            "method cleanup does not yet support runtime environment call arguments".into(),
-        );
-    }
     nir::copy_budget::charge_substitution(callee, &[], &[], fuel)
         .map_err(|_| "interface cleanup identity budget exhausted")?;
     if callee.kind != evidence.invocation.callee.kind || callee.ty != evidence.invocation.callee.ty

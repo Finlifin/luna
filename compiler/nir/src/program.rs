@@ -2067,6 +2067,7 @@ pub struct Package {
     pub enums: Vec<Enum>,
     pub definition_attributes: std::collections::BTreeMap<DeclarationId, Term>,
     pub attributes_evaluating: bool,
+    pub runtime_domains: std::collections::BTreeMap<crate::RuntimeId, Term>,
 }
 
 /// Acquired cleanup accesses, expressed relative to one residual invocation's inputs.
@@ -3672,6 +3673,13 @@ impl fmt::Display for Package {
             f.write_str("\n (definition-attributes")?;
             for (declaration, object) in &self.definition_attributes {
                 write!(f, " (entry {declaration} {object})")?;
+            }
+            f.write_str(")")?;
+        }
+        if !self.runtime_domains.is_empty() {
+            f.write_str("\n (runtime-domains")?;
+            for (runtime, domain) in &self.runtime_domains {
+                write!(f, " (runtime-domain {runtime} {domain})")?;
             }
             f.write_str(")")?;
         }

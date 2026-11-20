@@ -244,6 +244,9 @@ impl Checker<'_, '_> {
         if *ty == p(P::Type) {
             return self.type_expr(value);
         }
+        if let Term::Lift(expected_inner) = ty {
+            return self.runtime_lift_argument(value, expected_inner);
+        }
         if let H::ResolvedLocal(_, id) = value.kind
             && let Some(input) = self.callable_type_input_expression(value, local(id), Some(ty))?
         {
@@ -381,6 +384,177 @@ impl Checker<'_, '_> {
         let result = self.required_expression(value, Some(ty))?;
         self.required_normal_term(result, value.span)
     }
+
+    fn runtime_lift_argument(
+        &mut self,
+        value: &Expr<'_>,
+        expected_inner: &Term,
+    ) -> Result<Term, Error> {
+        if let H::ResolvedClauseParam(_, id) = value.kind {
+            let declaration = self.visible_clause_input(id, value.span)?;
+            if let Some(substituted) = self.alias_substitution.shared(&declaration).cloned() {
+                let substituted = self.copy_alias_type(&substituted, value.span)?;
+                match &substituted {
+                    Term::Runtime(runtime_id) => {
+                        let Some(Term::Lift(actual_inner)) =
+                            self.runtime_domains.get(runtime_id).cloned()
+                        else {
+                            return Err(error(
+                                value.span,
+                                "substituted runtime dependency domain is missing",
+                            ));
+                        };
+                        self.require(&actual_inner, expected_inner, value.span)?;
+                        return Ok(substituted);
+                    }
+                    Term::Rigid {
+                        declaration: forwarded_decl,
+                        sort: Sort::Runtime,
+                    } => {
+                        let Some(Term::Lift(actual_inner)) =
+                            self.trait_input_domain(*forwarded_decl).or_else(|| {
+                                self.active_env_parameters
+                                    .get(forwarded_decl)
+                                    .map(|(_, ty)| Term::Lift(Box::new(ty.clone())))
+                            })
+                        else {
+                            return Err(error(
+                                value.span,
+                                "forwarded runtime dependency domain is missing",
+                            ));
+                        };
+                        let actual_inner =
+                            self.substituted_trait_domain(&actual_inner, value.span)?;
+                        self.require(&actual_inner, expected_inner, value.span)?;
+                        return Ok(substituted);
+                    }
+                    _ => {
+                        return Err(error(
+                            value.span,
+                            "expected runtime quote dependency substitution",
+                        ));
+                    }
+                }
+            }
+            let declared_domain = self
+                .active_env_parameters
+                .get(&declaration)
+                .map(|(_, ty)| Term::Lift(Box::new(ty.clone())))
+                .or_else(|| self.trait_input_domain(declaration))
+                .or_else(|| self.nominal_input_prefixes.get(&declaration).cloned())
+                .or_else(|| {
+                    self.normal_input_prefixes
+                        .values()
+                        .flatten()
+                        .find(|(id, _, _)| *id == declaration)
+                        .map(|(_, _, domain)| domain.clone())
+                });
+            let Some(Term::Lift(actual_inner)) = declared_domain else {
+                return Err(error(
+                    value.span,
+                    "quote runtime parameter expected a lift dependency, not a comptime input",
+                ));
+            };
+            let actual_inner = self.substituted_trait_domain(&actual_inner, value.span)?;
+            self.require(&actual_inner, expected_inner, value.span)?;
+            return Ok(Term::Rigid {
+                declaration,
+                sort: Sort::Runtime,
+            });
+        }
+        let in_runtime_body = !self.observing_type
+            && !self.checking_contract
+            && self.captures.last().is_none_or(|frame| !frame.comptime)
+            && (self.in_code_body
+                || self.signature_owner.is_some_and(|owner| {
+                    !self.active_signatures.contains(&owner)
+                        && self.package.item(owner).is_some_and(|item| {
+                            matches!(
+                                &item.kind,
+                                ItemKind::Fn(sig, _)
+                                    if !sig.modifiers.is_comptime
+                                        && !sig.modifiers.is_normal_form_head
+                            )
+                        })
+                }));
+        if !in_runtime_body {
+            return Err(error(
+                value.span,
+                "runtime quote argument requires a runtime function body or enclosing quote parameter",
+            ));
+        }
+        let expected_inner = self.callable_input_view(expected_inner, value.span)?;
+        let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
+        let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
+        let checked = self.expr(value, Some(&expected_inner));
+        self.in_staged_input = saved_staged;
+        self.in_required_comptime = saved_required;
+        let checked = checked?;
+        if is_never(&checked.ty) {
+            return Err(error(
+                value.span,
+                "diverging expression cannot satisfy a runtime quote dependency",
+            ));
+        }
+        let (origin, checked_epoch) = self.extract_local_runtime_origin(&checked);
+        if let Some(&existing) = self.local_runtime_origin_ids.get(&origin) {
+            return Ok(Term::Runtime(existing));
+        }
+        let domain = Term::Lift(Box::new(checked.ty.clone()));
+        let id = self.intern_runtime_id(domain, value.span)?;
+        self.local_runtime_origin_ids.insert(origin, id);
+        self.local_runtime_deliveries.insert(
+            id,
+            LocalRuntimeDelivery {
+                expr: checked,
+                checked_epoch,
+            },
+        );
+        Ok(Term::Runtime(id))
+    }
+
+    fn extract_local_runtime_origin(
+        &mut self,
+        expr: &n::Expr,
+    ) -> (LocalRuntimeOrigin, Option<(n::LocalId, u64)>) {
+        match &expr.kind {
+            K::AddressOf(place) => {
+                let mut cursor = place.as_ref();
+                let mut fields = Vec::new();
+                loop {
+                    match &cursor.kind {
+                        K::Field { value, index, .. } => {
+                            fields.push(*index);
+                            cursor = value;
+                        }
+                        K::Local(base) => {
+                            fields.reverse();
+                            return (
+                                LocalRuntimeOrigin::AddressOf {
+                                    base: *base,
+                                    fields,
+                                },
+                                None,
+                            );
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            K::Local(binding) => {
+                let epoch = self.local_write_versions.get(binding).copied().unwrap_or(0);
+                return (
+                    LocalRuntimeOrigin::LocalValue {
+                        binding: *binding,
+                        epoch,
+                    },
+                    Some((*binding, epoch)),
+                );
+            }
+            _ => {}
+        }
+        (LocalRuntimeOrigin::Ephemeral(self.next_runtime_id), None)
+    }
 }
 
 impl Checker<'_, '_> {
@@ -514,15 +688,7 @@ impl Checker<'_, '_> {
         let mut fuel = before;
         let signature = nir::normal_forms::callable_type_from_declarations(
             inputs.iter().map(|(declaration, _, domain)| {
-                (
-                    *declaration,
-                    if *domain == p(P::Type) {
-                        Sort::Type
-                    } else {
-                        Sort::ComptimeValue
-                    },
-                    domain,
-                )
+                (*declaration, Sort::of_comptime_domain(domain), domain)
             }),
             collector,
             &mut fuel,
@@ -1478,13 +1644,13 @@ impl Checker<'_, '_> {
                     .normal_parameters
                     .get(&self.signature_owner.ok_or(Failure::Unavailable)?)
                     .ok_or(Failure::Unavailable)?;
-                let (declaration, _, _) = parameters
+                let (declaration, _, domain) = parameters
                     .iter()
                     .find(|(_, local, _)| local == binding)
                     .ok_or(Failure::Unavailable)?;
                 Ok(Term::Rigid {
                     declaration: *declaration,
-                    sort: Sort::ComptimeValue,
+                    sort: Sort::of_comptime_domain(domain),
                 })
             }
             _ => Err(Failure::Unavailable),
@@ -1668,11 +1834,7 @@ fn take_known_list_elements(
         _ => return Err(Failure::Unavailable),
     };
     budget.consume(fields.len())?;
-    let sort = if *element == p(P::Type) {
-        Sort::Type
-    } else {
-        Sort::ComptimeValue
-    };
+    let sort = Sort::of_comptime_domain(element);
     fields
         .iter()
         .all(|field| field.sort() == sort)
@@ -2633,7 +2795,10 @@ mod tests {
 impl Checker<'_, '_> {
     pub(super) fn check_normal_defaults(&mut self, owner: OwnerId) -> Result<(), Error> {
         for (slot, clause) in self.type_clause_params(owner).iter().enumerate() {
-            if matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)) {
+            if matches!(
+                clause.kind.unquoted(),
+                hir::clause::ClauseParamKind::Optional(..)
+            ) {
                 self.checked_normal_default(owner, slot)?;
             }
         }
@@ -2649,7 +2814,8 @@ impl Checker<'_, '_> {
         slot: usize,
     ) -> Result<n::Expr, Error> {
         let clauses = self.type_clause_params(owner);
-        let hir::clause::ClauseParamKind::Optional(_, _, value) = clauses[slot].kind else {
+        let hir::clause::ClauseParamKind::Optional(_, _, value) = clauses[slot].kind.unquoted()
+        else {
             return Err(error(
                 clauses[slot].span,
                 "normal-form input has no default",

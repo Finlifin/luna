@@ -4315,6 +4315,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         &mut self,
         callee: &Expr,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         bindings: &[LocalId],
         flow: &mut Flow,
         source: SourceRange,
@@ -4424,6 +4425,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     domains,
                     source,
                 )?;
+            }
+            for (offset, env_arg) in env_arguments.iter().enumerate() {
+                let origins = this.evaluate_value_origins(env_arg, flow, depth + 1)?;
+                if !flow.live {
+                    return Ok(());
+                }
+                this.remember_pending_origins(env_arg, parameters.len() + offset, flow, origins)?;
             }
             this.check_interface_preparation(callee, flow, source)
         })?;
@@ -8120,12 +8128,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         else {
             return Err(error(source, "guard call checker requires a call"));
         };
-        if !env_arguments.is_empty() {
-            return Err(error(
-                source,
-                "guard calls do not yet support runtime environment arguments",
-            ));
-        }
         // A checked region may transfer its private owners. Defaults observe
         // only the prepared frame; the outer observation still protects every
         // caller resource. Owned results require captured cleanup evidence.
@@ -8177,6 +8179,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 selected = self.select_method_callee(callee, source)?;
                 vec![&selected]
             } else {
+                if !env_arguments.is_empty() {
+                    return Err(error(
+                        source,
+                        "guard calls do not yet support runtime environment arguments",
+                    ));
+                }
                 if !self.observation_value_type(&callee.ty, source)? {
                     return Err(error(
                         source,
@@ -8210,6 +8218,18 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             observes_pointers |= !self
                 .pointer_input_layout(&argument.value.ty, source)?
                 .is_empty();
+        }
+        for env_arg in env_arguments {
+            if !self.observation_value_type(&env_arg.ty, source)?
+                && !matches!(env_arg.ty, Term::Pointer(_))
+            {
+                return Err(error(
+                    source,
+                    "guard call runtime environment argument needs observation semantics",
+                ));
+            }
+            self.check_guard_observation(env_arg, flow, depth + 1)?;
+            observes_pointers |= !self.pointer_input_layout(&env_arg.ty, source)?.is_empty();
         }
         for target in targets {
             if !matches!(target.kind, K::Function(_) | K::FunctionInstance { .. }) {
@@ -10262,6 +10282,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let (result, summary, origins, guards) = self.memory_call(
             &target,
             arguments,
+            &[],
             bindings,
             &callable.alternatives,
             &mut prepared_callables,
@@ -11409,6 +11430,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         &mut self,
         callee: &Expr,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         bindings: &[LocalId],
         alternatives: &[Expr],
         prepared_callables: &mut Vec<CallableParameter>,
@@ -11707,6 +11729,26 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     }
                 }
                 prepared.push((binding, ty.clone(), argument.parameter));
+            }
+            for (offset, env_arg) in env_arguments.iter().enumerate() {
+                let slot = parameters.len() + offset;
+                let origins = this.evaluate_value_origins(env_arg, flow, depth + 1)?;
+                let mut symbolic =
+                    this.memory_input_targets(&env_arg.ty, &origins, &flow.value_variants, source)?;
+                let layout = this.pointer_input_layout(&env_arg.ty, source)?;
+                for leaf in &layout {
+                    if let Some(actual) = symbolic.get_mut(&leaf.input_fields) {
+                        if !actual.is_empty() {
+                            *actual =
+                                this.guarded_request_targets(env_arg, leaf, actual, flow, true)?;
+                        }
+                    }
+                }
+                targets.insert(slot, symbolic);
+                if !flow.live {
+                    return Ok(());
+                }
+                this.remember_pending_origins(env_arg, slot, flow, origins)?;
             }
             Ok(())
         })?;
@@ -12707,6 +12749,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         expr: &Expr,
         callee: &Expr,
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         parameter_bindings: &[LocalId],
         flow: &mut Flow,
         depth: usize,
@@ -12729,6 +12772,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             callee.kind,
             K::Local(_) | K::Function(_) | K::FunctionInstance { .. }
         ) {
+            if !env_arguments.is_empty() {
+                return Err(error(
+                    expr.source,
+                    "move analysis does not yet support runtime environment call arguments",
+                ));
+            }
             return self
                 .call_temporary_with_origins(
                     expr,
@@ -12741,6 +12790,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .map(|(_, origins, guards)| (origins, guards));
         }
         if matches!(callee.kind, K::Local(_)) {
+            if !env_arguments.is_empty() {
+                return Err(error(
+                    expr.source,
+                    "move analysis does not yet support runtime environment call arguments",
+                ));
+            }
             // Resolve identity before arguments while retaining the observed code slot.
             if let Some(resolved) = self.indirect_named_call(expr, flow) {
                 self.observe_named_callee(callee, flow)?;
@@ -12802,6 +12857,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let (_, _, origins, guards) = self.memory_call(
             callee,
             arguments,
+            env_arguments,
             parameter_bindings,
             &[],
             &mut prepared_callables,
@@ -13094,12 +13150,6 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     parameter_bindings,
                     env_arguments,
                 } => {
-                    if !env_arguments.is_empty() {
-                        return Err(error(
-                            expr.source,
-                            "move analysis does not yet support runtime environment call arguments",
-                        ));
-                    }
                     if !matches!(
                         callee.kind,
                         K::Local(_)
@@ -13107,6 +13157,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             | K::FunctionInstance { .. }
                             | K::TraitMethod { .. }
                     ) {
+                        if !env_arguments.is_empty() {
+                            return Err(error(
+                                expr.source,
+                                "move analysis does not yet support runtime environment call arguments",
+                            ));
+                        }
                         return self.call_temporary(
                             expr,
                             callee,
@@ -13123,6 +13179,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             .filter(|c| !c.alternatives.is_empty())
                             .cloned()
                     {
+                        if !env_arguments.is_empty() {
+                            return Err(error(
+                                expr.source,
+                                "move analysis does not yet support runtime environment call arguments",
+                            ));
+                        }
                         self.observe_named_callee(callee, flow)?;
                         if !flow.live {
                             return Ok(None);
@@ -13143,6 +13205,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             .filter(|c| matches!(c.definition.kind, K::Closure { .. }))
                             .cloned()
                     {
+                        if !env_arguments.is_empty() {
+                            return Err(error(
+                                expr.source,
+                                "move analysis does not yet support runtime environment call arguments",
+                            ));
+                        }
                         return self.call_closure(
                             root(binding),
                             &callable,
@@ -13153,6 +13221,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         );
                     }
                     if let Some(resolved) = self.indirect_named_call(expr, flow) {
+                        if !env_arguments.is_empty() {
+                            return Err(error(
+                                expr.source,
+                                "move analysis does not yet support runtime environment call arguments",
+                            ));
+                        }
                         self.observe_named_callee(callee, flow)?;
                         if !flow.live {
                             return Ok(None);
@@ -13165,6 +13239,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     let (result, _, _, _) = self.memory_call(
                         callee,
                         arguments,
+                        env_arguments,
                         parameter_bindings,
                         &[],
                         &mut prepared_callables,
@@ -13823,15 +13898,22 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
     if parameters.len() != function.parameters.len() {
         return Err(error(source, "parameter signature mismatch"));
     }
-    if !function.env_parameters.is_empty() {
-        return Err(error(
-            source,
-            "runtime environment parameters require Stage G1b move analysis support",
-        ));
-    }
     for (parameter, signature) in function.parameters.iter().zip(parameters) {
         analyzer.declare(&mut flow, *parameter, &signature.ty, source)?;
     }
+    for env in &function.env_parameters {
+        analyzer.declare(&mut flow, env.binding, &env.ty, source)?;
+    }
+    let slot_binding_ty = |slot: usize| -> Option<(LocalId, &Term)> {
+        if slot < parameters.len() {
+            Some((function.parameters[slot], &parameters[slot].ty))
+        } else {
+            function
+                .env_parameters
+                .get(slot - parameters.len())
+                .map(|env| (env.binding, &env.ty))
+        }
+    };
     let mut callable_slots = BTreeSet::new();
     for input in callable_parameters {
         analyzer.fuel = analyzer
@@ -13841,9 +13923,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         if !callable_slots.insert((input.parameter, input.fields.clone())) {
             return Err(error(source, "duplicate callable parameter"));
         }
-        let binding = function
-            .parameters
-            .get(input.parameter)
+        let (binding, param_ty) = slot_binding_ty(input.parameter)
             .ok_or_else(|| error(source, "callable parameter is missing"))?;
         let callable = import_callable_evidence(
             analyzer.package,
@@ -13854,7 +13934,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
             &input.choices,
             &owned_field_type(
                 analyzer.package,
-                &parameters[input.parameter].ty,
+                param_ty,
                 &input.fields,
                 &mut analyzer.fuel,
                 source,
@@ -13863,12 +13943,12 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
             0,
         )?;
         if input.fields.is_empty() {
-            analyzer.store_callable(&mut flow, root(*binding), callable, source)?;
+            analyzer.store_callable(&mut flow, root(binding), callable, source)?;
         } else {
             analyzer.install_callable_fields(
                 &mut flow,
                 &Place {
-                    root: root(*binding),
+                    root: root(binding),
                     fields: input.fields.clone(),
                 },
                 BTreeMap::from([(vec![], callable)]),
@@ -13882,16 +13962,14 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         if !enum_slots.insert(input.parameter) {
             return Err(error(source, "duplicate enum parameter"));
         }
-        let binding = function
-            .parameters
-            .get(input.parameter)
+        let (binding, param_ty) = slot_binding_ty(input.parameter)
             .ok_or_else(|| error(source, "enum parameter is missing"))?;
         if input.domains.is_empty() {
             return Err(error(source, "empty enum parameter premise"));
         }
         validate_enum_domains(
             analyzer.package,
-            &parameters[input.parameter].ty,
+            param_ty,
             &input.domains,
             &mut analyzer.fuel,
             source,
@@ -13900,7 +13978,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         analyzer.install_enum_domains(
             &mut flow,
             &Place {
-                root: root(*binding),
+                root: root(binding),
                 fields: vec![],
             },
             domains,
@@ -13936,16 +14014,11 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
             .report
             .borrowed_parameters
             .push((*slot, subject.clone()));
-        let binding = function
-            .parameters
-            .get(*slot)
-            .ok_or_else(|| error(source, "borrowed parameter is missing"))?;
-        let representation = super::memory::pointer_representation(
-            analyzer.package,
-            &parameters[*slot].ty,
-            &mut analyzer.fuel,
-        )
-        .map_err(|reason| error(source, reason))?;
+        let (binding, param_ty) =
+            slot_binding_ty(*slot).ok_or_else(|| error(source, "borrowed parameter is missing"))?;
+        let representation =
+            super::memory::pointer_representation(analyzer.package, param_ty, &mut analyzer.fuel)
+                .map_err(|reason| error(source, reason))?;
         let Some((pointer_depth, actual)) = representation else {
             return Err(error(
                 source,
@@ -13980,7 +14053,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         flow.types.insert(pointee, subject.clone());
         flow.pointers.insert(
             Place {
-                root: root(*binding),
+                root: root(binding),
                 fields: vec![0; pointer_depth],
             },
             BTreeSet::from([Place {
@@ -14014,12 +14087,11 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         {
             return Err(error(source, "duplicate or empty borrowed field premise"));
         }
-        let parameter = parameters
-            .get(premise.parameter)
+        let (binding, param_ty) = slot_binding_ty(premise.parameter)
             .ok_or_else(|| error(source, "borrowed field parameter is missing"))?;
         let leaves = super::memory::pointer_input_layout_for(
             package,
-            &parameter.ty,
+            param_ty,
             analyzer.text_provenance,
             &mut analyzer.fuel,
         )
@@ -14033,11 +14105,10 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
                 "borrowed field pointee disagrees with parameter layout",
             ));
         }
-        let binding = function.parameters[premise.parameter];
         let roots = analyzer.declare_input_field_borrows(
             &mut flow,
             binding,
-            &parameter.ty,
+            param_ty,
             &BTreeMap::from([(premise.fields.clone(), BTreeSet::new())]),
             source,
         )?;

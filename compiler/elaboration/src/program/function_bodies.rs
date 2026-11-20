@@ -131,6 +131,28 @@ impl Checker<'_, '_> {
                 self.locals.insert(*binding, ty.clone());
             }
         }
+        let mut env_parameters = Vec::new();
+        let decl_phase = phase(&sig.modifiers);
+        if decl_phase == n::FunctionPhase::Runtime && !sig.modifiers.is_normal_form_head {
+            let type_params = self.type_parameters[&owner].clone();
+            let domains = self.trait_domains(owner)?;
+            for (decl_id, domain) in type_params.iter().zip(&domains) {
+                let Term::Lift(inner) = domain else {
+                    continue;
+                };
+                let inner_ty = self.callable_input_view(inner, span)?;
+                let binding = self.spread_binding(span)?;
+                self.locals.insert(binding, inner_ty.clone());
+                self.immutable.insert(binding);
+                self.active_env_parameters
+                    .insert(*decl_id, (binding, inner_ty.clone()));
+                env_parameters.push(n::RuntimeEnvParameter {
+                    declaration: *decl_id,
+                    binding,
+                    ty: inner_ty,
+                });
+            }
+        }
         self.control.result = Some((**result).clone());
         let preconditions = self.program_preconditions(owner)?;
         let result_binding = sig.return_binding.map(local);
@@ -149,7 +171,7 @@ impl Checker<'_, '_> {
             source: source(item.span),
             declaration: declaration(self.package, &self.package_identities, owner),
             name: item.ident.name.as_str().into(),
-            phase: phase(&sig.modifiers),
+            phase: decl_phase,
             inline: sig.modifiers.is_inline,
             pure: sig.modifiers.is_pure,
             is_unsafe: sig.modifiers.is_unsafe,
@@ -174,7 +196,7 @@ impl Checker<'_, '_> {
                     .map(|parameter| local(parameter.hir_id))
                     .collect()
             },
-            env_parameters: vec![],
+            env_parameters,
             defaults: vec![],
             signature,
         })

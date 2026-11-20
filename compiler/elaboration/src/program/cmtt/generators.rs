@@ -365,11 +365,7 @@ impl Checker<'_, '_> {
                             *id,
                             Term::Rigid {
                                 declaration: *id,
-                                sort: if *domain == p(P::Type) {
-                                    Sort::Type
-                                } else {
-                                    Sort::ComptimeValue
-                                },
+                                sort: Sort::of_comptime_domain(domain),
                             },
                         )
                     })

@@ -33,7 +33,7 @@ impl ValueScope {
         *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
         let Term::Rigid {
             declaration,
-            sort: Sort::ComptimeValue,
+            sort: sort @ (Sort::ComptimeValue | Sort::Runtime),
         } = value
         else {
             return Ok(false);
@@ -43,7 +43,7 @@ impl ValueScope {
         };
         nir::type_computations::charge_term(expected, fuel)?;
         nir::type_computations::charge_term(domain, fuel)?;
-        Ok(expected == domain)
+        Ok(expected == domain && Sort::of_comptime_domain(expected) == *sort)
     }
 }
 
@@ -60,7 +60,17 @@ impl Builder<'_> {
                 subject,
                 arguments,
                 budget,
-                &mut |value, domain, fuel| self.value_scope.admits(value, domain, fuel),
+                &mut |value, domain, fuel| {
+                    if let Term::Runtime(id) = value {
+                        nir::type_computations::charge_term(domain, fuel)?;
+                        return Ok(self
+                            .package
+                            .runtime_domains
+                            .get(id)
+                            .is_some_and(|declared| declared == domain));
+                    }
+                    self.value_scope.admits(value, domain, fuel)
+                },
             )
         })
         .map_err(String::from)

@@ -102,6 +102,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         enums,
         definition_attributes,
         attributes_evaluating,
+        runtime_domains,
     } = package;
     let mut meter = Meter {
         fuel,
@@ -216,6 +217,10 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     for term in definition_attributes.values() {
         meter.node(Node::Type(term))?;
     }
+    meter.width(runtime_domains.len())?;
+    for term in runtime_domains.values() {
+        meter.node(Node::Type(term))?;
+    }
     // No clone above this point. Failure leaves the caller's source untouched
     // and cannot expose a partially captured declaration world.
     Ok(n::Package {
@@ -245,6 +250,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         enums: enums.clone(),
         definition_attributes: definition_attributes.clone(),
         attributes_evaluating: *attributes_evaluating,
+        runtime_domains: runtime_domains.clone(),
     })
 }
 

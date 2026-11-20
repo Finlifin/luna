@@ -31,7 +31,7 @@ pub fn llvm_ir_discarding_result(
     let Term::Function { parameters, result } = &original.signature else {
         return Err("discard entry is not callable".into());
     };
-    if !parameters.is_empty() {
+    if !parameters.is_empty() || !original.env_parameters.is_empty() {
         return Err("discard entry requires a zero-input call plan".into());
     }
     let mut declaration = DeclarationId {

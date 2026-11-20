@@ -502,6 +502,25 @@ impl ImplementationHead {
         domains: &BTreeMap<DeclarationId, Term>,
         layouts: Option<&nir::program::Package>,
     ) -> Result<nir::program::InterfaceInstance, TypeAssessment> {
+        self.infer_interface_from_subject_with_runtime_domains_metered(
+            subject,
+            context,
+            budget,
+            domains,
+            &BTreeMap::new(),
+            layouts,
+        )
+    }
+
+    pub fn infer_interface_from_subject_with_runtime_domains_metered(
+        &self,
+        subject: &Term,
+        context: &Context,
+        budget: &mut Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+        runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
+        layouts: Option<&nir::program::Package>,
+    ) -> Result<nir::program::InterfaceInstance, TypeAssessment> {
         let interface = self.interface.ok_or_else(|| {
             TypeAssessment::Pending("interface discovery requires a fixed trait head".into())
         })?;
@@ -542,7 +561,7 @@ impl ImplementationHead {
                 ..*budget
             },
             domains,
-            &BTreeMap::new(),
+            runtime_domains,
             layouts,
         )?;
         let computation = |error: nir::type_computations::Error| match error {

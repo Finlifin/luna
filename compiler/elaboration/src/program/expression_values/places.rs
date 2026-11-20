@@ -271,6 +271,8 @@ impl Checker<'_, '_> {
                         field.span,
                     )?;
                 }
+                let version = self.local_write_versions.entry(binding).or_insert(0);
+                *version = version.saturating_add(1);
                 if bit_assignment {
                     let storage_type = self.structural_type(&ty, target.span)?;
                     let width = match storage_type {

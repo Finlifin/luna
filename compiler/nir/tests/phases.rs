@@ -2323,3 +2323,51 @@ fn alias_guard_uses_admitted_dependencies_inside_callable_instances() {
         "invalid alias formation guard inputs"
     );
 }
+
+#[test]
+fn runtime_domains_validate_lift_and_runtime_storage_and_format() {
+    let mut package = Package::default();
+    package.runtime_domains.insert(
+        nir::RuntimeId {
+            instance: 1,
+            local: 7,
+        },
+        Term::Lift(Box::new(Term::Pointer(Box::new(Term::Primitive(
+            Primitive::Bool,
+        ))))),
+    );
+    assert!(
+        package.to_string().contains(
+            "(runtime-domains (runtime-domain (runtime (instance 1) (local 7)) (lift (pointer (primitive bool)))))"
+        )
+    );
+    nir::phases::validate(&package).unwrap();
+
+    let mut non_lift = Package::default();
+    non_lift.runtime_domains.insert(
+        nir::RuntimeId {
+            instance: 1,
+            local: 8,
+        },
+        Term::Primitive(Primitive::Bool),
+    );
+    assert_eq!(
+        nir::phases::validate(&non_lift).unwrap_err().message,
+        "runtime dependency domain must be a lift type"
+    );
+
+    let mut comptime_inner = Package::default();
+    comptime_inner.runtime_domains.insert(
+        nir::RuntimeId {
+            instance: 1,
+            local: 9,
+        },
+        Term::Lift(Box::new(Term::Primitive(Primitive::Type))),
+    );
+    assert!(
+        nir::phases::validate(&comptime_inner)
+            .unwrap_err()
+            .message
+            .contains("comptime-only")
+    );
+}

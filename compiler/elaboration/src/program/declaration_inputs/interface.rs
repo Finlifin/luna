@@ -50,7 +50,7 @@ impl<'h> Interface<'h> {
             defaults: clauses
                 .iter()
                 .enumerate()
-                .map(|(slot, clause)| match clause.kind {
+                .map(|(slot, clause)| match *clause.kind.unquoted() {
                     hir::clause::ClauseParamKind::Optional(_, _, expression) => {
                         Some(DefaultSource {
                             owner,

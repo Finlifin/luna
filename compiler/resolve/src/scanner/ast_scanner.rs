@@ -711,7 +711,10 @@ impl<'a> AstScanner<'a> {
         let mut seen = std::collections::HashSet::new();
         for &outer in clauses {
             let mut clause = outer;
-            while self.ast.get_node_kind(clause) == Some(NodeKind::QuoteDeclClause) {
+            while matches!(
+                self.ast.get_node_kind(clause),
+                Some(NodeKind::QuoteDeclClause | NodeKind::QuoteParam)
+            ) {
                 clause = self.ast.get_children(clause)[0];
             }
             let Some(kind) = self.ast.get_node_kind(clause) else {

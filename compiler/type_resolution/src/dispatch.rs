@@ -363,7 +363,25 @@ impl<'a> DeclarationWorld<'a> {
                     fuel,
                 )
             },
-            declared: &mut |_, _, _| Ok(false),
+            declared: &mut |argument, domain, fuel| {
+                nir::type_computations::charge_term(domain, fuel)?;
+                match argument {
+                    Term::Runtime(id) => Ok(self
+                        .index()
+                        .runtime_domains()
+                        .get(id)
+                        .is_some_and(|declared| declared == domain)),
+                    Term::Rigid {
+                        declaration,
+                        sort: nir::Sort::Runtime,
+                    } => Ok(self
+                        .index()
+                        .parameter_domains()
+                        .get(declaration)
+                        .is_some_and(|declared| declared == domain)),
+                    _ => Ok(false),
+                }
+            },
             collection: &mut |domain, fuel| {
                 let Term::NormalForm { head, .. } = domain else {
                     return Ok(None);

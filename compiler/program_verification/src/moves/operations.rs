@@ -653,13 +653,8 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 parameter_bindings,
                 env_arguments,
             } => {
-                if !env_arguments.is_empty() {
-                    return Err(error(
-                        source,
-                        "move analysis does not yet support runtime environment call arguments",
-                    ));
-                }
-                if self.defer_unknown_calls
+                if env_arguments.is_empty()
+                    && self.defer_unknown_calls
                     && !matches!(callee.kind, K::Local(_))
                     && expression_place(callee).is_some()
                     && callable_source(callee, flow, &mut self.fuel)?.is_none()
@@ -684,6 +679,12 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         | K::FunctionInstance { .. }
                         | K::TraitMethod { .. }
                 ) {
+                    if !env_arguments.is_empty() {
+                        return Err(error(
+                            source,
+                            "move analysis does not yet support runtime environment arguments on temporary calls",
+                        ));
+                    }
                     return self
                         .call_temporary(
                             expr,
@@ -702,6 +703,12 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         .filter(|c| !c.alternatives.is_empty())
                         .cloned()
                 {
+                    if !env_arguments.is_empty() {
+                        return Err(error(
+                            source,
+                            "move analysis does not yet support runtime environment arguments on local callable candidates",
+                        ));
+                    }
                     self.observe_named_callee(callee, flow)?;
                     if !flow.live {
                         return Ok(());
@@ -718,6 +725,12 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         .map(|_| ());
                 }
                 if let Some(resolved) = self.indirect_named_call(expr, flow) {
+                    if !env_arguments.is_empty() {
+                        return Err(error(
+                            source,
+                            "move analysis does not yet support runtime environment arguments on indirect named calls",
+                        ));
+                    }
                     self.observe_named_callee(callee, flow)?;
                     if !flow.live {
                         return Ok(());
@@ -731,17 +744,23 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         .filter(|c| matches!(c.definition.kind, K::Closure { .. }))
                         .cloned()
                 {
+                    if !env_arguments.is_empty() {
+                        return Err(error(
+                            source,
+                            "move analysis does not yet support runtime environment arguments on closures",
+                        ));
+                    }
                     return self
                         .call_closure(root(binding), &callable, arguments, flow, source, depth + 1)
                         .map(|_| ());
                 }
                 let mut pointer_arguments = false;
-                for argument in arguments {
+                for argument in arguments.iter().map(|a| &a.value).chain(env_arguments) {
                     // An opaque aggregate local may already carry pointers even
                     // when evaluating it contains no address-taking expression.
                     if self.package.is_some()
                         && !matches!(
-                            argument.value.ty,
+                            argument.ty,
                             Term::Function { .. }
                                 | Term::UnsafeFunction(_)
                                 | Term::Closure { .. }
@@ -751,31 +770,26 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                                 | Term::Runtime(_)
                                 | Term::AssociatedType { .. }
                         )
-                        && self.storage_inputs_are_closed(&argument.value.ty, source)?
+                        && self.storage_inputs_are_closed(&argument.ty, source)?
                     {
-                        pointer_arguments |= !self
-                            .pointer_input_layout(&argument.value.ty, source)?
-                            .is_empty();
+                        pointer_arguments |=
+                            !self.pointer_input_layout(&argument.ty, source)?.is_empty();
                     }
                     // A pointer constructed inside a record/block is just as
                     // observable as a pointer-valued root argument. Inspect
                     // evaluation structure without evaluating it twice or
                     // treating deferred closure bodies as argument effects.
-                    nir::visit::expression_in_scope(
-                        &argument.value,
-                        &mut self.fuel,
-                        |node, fuel| {
-                            if !pointer_arguments {
-                                pointer_arguments = crate::memory::pointer_representation(
-                                    self.package,
-                                    &node.ty,
-                                    fuel,
-                                )?
-                                .is_some();
-                            }
-                            Ok(())
-                        },
-                    )
+                    nir::visit::expression_in_scope(argument, &mut self.fuel, |node, fuel| {
+                        if !pointer_arguments {
+                            pointer_arguments = crate::memory::pointer_representation(
+                                self.package,
+                                &node.ty,
+                                fuel,
+                            )?
+                            .is_some();
+                        }
+                        Ok(())
+                    })
                     .map_err(|reason| error(source, reason))?;
                 }
                 if matches!(callee.kind, K::TraitMethod { .. })
@@ -791,7 +805,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         kind: K::Call {
                             callee: Box::new(selected),
                             arguments: arguments.clone(),
-                            env_arguments: vec![],
+                            env_arguments: env_arguments.clone(),
                             parameter_bindings: parameter_bindings.clone(),
                         },
                     };
@@ -806,6 +820,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                             .memory_call(
                                 callee,
                                 arguments,
+                                env_arguments,
                                 parameter_bindings,
                                 &[],
                                 &mut prepared_callables,
@@ -832,7 +847,8 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         return Ok(());
                     }
                 }
-                if self.defer_unknown_calls
+                if env_arguments.is_empty()
+                    && self.defer_unknown_calls
                     && matches!(callee.kind, K::Local(_))
                     && matches!(
                         callee.ty.callable_signature(),
@@ -862,6 +878,12 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 }
                 if let K::Local(binding) = &callee.kind {
                     if let Some(definition) = flow.callables.get(&root(*binding)).cloned() {
+                        if !env_arguments.is_empty() {
+                            return Err(error(
+                                source,
+                                "move analysis does not yet support runtime environment arguments on closures",
+                            ));
+                        }
                         return self
                             .call_closure(
                                 root(*binding),
@@ -904,6 +926,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     self.prepare_defaults(
                         callee,
                         arguments,
+                        env_arguments,
                         parameter_bindings,
                         flow,
                         source,
@@ -912,6 +935,9 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 } else {
                     let mut callables = vec![];
                     let mut enums = vec![];
+                    let Term::Function { parameters, .. } = callee.ty.callable_signature() else {
+                        return Err(error(source, "call lacks a callable signature"));
+                    };
                     self.pending_frame(source, |this| {
                         for argument in arguments {
                             let callable = callable_source(&argument.value, flow, &mut this.fuel)?;
@@ -952,6 +978,18 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                                     callables.push(input);
                                 }
                             }
+                        }
+                        for (offset, env_arg) in env_arguments.iter().enumerate() {
+                            let origins = this.evaluate_value_origins(env_arg, flow, depth + 1)?;
+                            if !flow.live {
+                                return Ok(());
+                            }
+                            this.remember_pending_origins(
+                                env_arg,
+                                parameters.len() + offset,
+                                flow,
+                                origins,
+                            )?;
                         }
                         this.check_interface_preparation(callee, flow, source)
                     })?;

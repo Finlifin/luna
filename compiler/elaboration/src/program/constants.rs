@@ -2012,17 +2012,17 @@ impl Checker<'_, '_> {
         else {
             return Ok(call);
         };
-        if !env_arguments.is_empty() {
-            return Err(error(
-                source.span,
-                "staged call input preparation does not yet support runtime environment arguments",
-            ));
-        }
         let Term::Function { parameters, .. } = callee.ty.callable_signature() else {
             return Ok(call);
         };
         if !parameters.iter().any(|p| p.sort != Sort::Runtime) {
             return Ok(call);
+        }
+        if !env_arguments.is_empty() {
+            return Err(error(
+                source.span,
+                "staged call input preparation does not yet support runtime environment arguments",
+            ));
         }
         let mut staged_bindings: BTreeSet<_> = self
             .signature_owner

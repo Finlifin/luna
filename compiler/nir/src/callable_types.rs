@@ -44,10 +44,8 @@ pub fn from_outer(
             Ok(Parameter {
                 sort: if !staged {
                     Sort::Runtime
-                } else if *ty == Term::Primitive(Primitive::Type) {
-                    Sort::Type
                 } else {
-                    Sort::ComptimeValue
+                    Sort::of_comptime_domain(ty)
                 },
                 ty: ty.abstract_parameters(&[]).map_err(Error::Scope)?,
             })

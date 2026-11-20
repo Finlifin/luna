@@ -219,16 +219,7 @@ impl<'a> Metadata<'a> {
             *fuel = fuel.checked_sub(domains.len()).ok_or(Error::Budget)?;
             let sorts = domains
                 .iter()
-                .map(|(id, domain)| {
-                    (
-                        *id,
-                        if *domain == Term::Primitive(Primitive::Type) {
-                            Sort::Type
-                        } else {
-                            Sort::ComptimeValue
-                        },
-                    )
-                })
+                .map(|(id, domain)| (*id, Sort::of_comptime_domain(domain)))
                 .collect();
             // Publish only a complete directory. A failed attempt remains
             // retryable and never refunds the work already performed.

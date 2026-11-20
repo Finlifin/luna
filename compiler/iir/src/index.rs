@@ -18,17 +18,61 @@ pub(super) struct CallableLinks<'a> {
 }
 
 impl CallableLinks<'_> {
+    fn resolve_direct_target(&self, expr: &nir::program::Expr) -> Option<&Function> {
+        use nir::program::ExprKind as K;
+        let key = if let Some(key) = expr.named_function() {
+            key
+        } else if let K::TraitMethod {
+            interface,
+            interface_arguments,
+            subject,
+            member,
+            method_arguments,
+        } = &expr.kind
+        {
+            let (_, target) = self.methods.get(&(
+                *interface,
+                interface_arguments.as_slice(),
+                subject,
+                *member,
+                method_arguments.as_slice(),
+            ))?;
+            (target.body, target.arguments.as_slice())
+        } else {
+            return None;
+        };
+        self.functions.get(&key).copied()
+    }
+
     pub(super) fn validate_reference(
         &self,
         expr: &nir::program::Expr,
         comptime: bool,
+        direct_callee: bool,
         fuel: &mut usize,
     ) -> Result<(), String> {
         use nir::program::ExprKind as K;
-        if let K::Call { callee, .. } = &expr.kind
-            && comptime != callee.ty.is_comptime_callable()
+        if let K::Call {
+            callee,
+            env_arguments,
+            ..
+        } = &expr.kind
         {
-            return Err("IIR call target belongs to a different execution phase".into());
+            if comptime != callee.ty.is_comptime_callable() {
+                return Err("IIR call target belongs to a different execution phase".into());
+            }
+            if let Some(target) = self.resolve_direct_target(callee) {
+                if env_arguments.len() != target.env_parameters.len() {
+                    return Err("IIR call runtime environment argument count mismatch".into());
+                }
+                for (argument, parameter) in env_arguments.iter().zip(&target.env_parameters) {
+                    if argument.ty != parameter.ty {
+                        return Err("IIR call runtime environment argument type mismatch".into());
+                    }
+                }
+            } else if !env_arguments.is_empty() {
+                return Err("IIR indirect call cannot pass runtime environment arguments".into());
+            }
         }
         let transport = comptime && !expr.ty.is_comptime_callable();
         let key = if let Some(key) = expr.named_function() {
@@ -92,6 +136,12 @@ impl CallableLinks<'_> {
         }
         if function.is_unsafe != expr.ty.is_unsafe_callable() {
             return Err("IIR callable reference changed unsafe responsibility".into());
+        }
+        if !direct_callee && !function.env_parameters.is_empty() {
+            return Err(
+                "function with runtime environment parameters cannot form a bare function value"
+                    .into(),
+            );
         }
         if transport {
             term(&function.signature, fuel)?;
@@ -214,6 +264,15 @@ impl Package {
                     != function.parameters.len()
             {
                 return Err("IIR function parameter bindings do not match its signature".into());
+            }
+            spend(fuel, function.env_parameters.len())?;
+            let mut bindings: BTreeSet<_> = function.parameters.iter().copied().collect();
+            for env in &function.env_parameters {
+                if !bindings.insert(env.binding) {
+                    return Err(
+                        "IIR function runtime environment binding collides with parameter".into(),
+                    );
+                }
             }
         }
         for root in &self.roots {

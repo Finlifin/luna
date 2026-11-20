@@ -179,6 +179,37 @@ impl Checker<'_, '_> {
                     kind: K::Local(binding),
                 }));
             }
+            if let Some((binding, inner_ty)) = self.active_env_parameters.get(&declaration).cloned()
+            {
+                if self.in_required_comptime || self.in_staged_input {
+                    return Err(error(
+                        expr.span,
+                        "cannot read runtime quote dependency in comptime expression",
+                    ));
+                }
+                if let Some(expected) = expected {
+                    self.require_expression(&inner_ty, expected, expr.span)?;
+                }
+                for frame in &mut self.captures {
+                    if frame.outer.contains(&binding)
+                        && !frame
+                            .values
+                            .iter()
+                            .any(|capture| capture.binding == binding)
+                    {
+                        frame.values.push(n::Capture {
+                            value: None,
+                            binding,
+                            ty: inner_ty.clone(),
+                        });
+                    }
+                }
+                return Ok(Some(n::Expr {
+                    source: source(expr.span),
+                    ty: inner_ty,
+                    kind: K::Local(binding),
+                }));
+            }
             if let Some(domain) = self
                 .trait_input_domain(declaration)
                 .filter(|ty| *ty != p(P::Type))

@@ -25,11 +25,7 @@ impl Checker<'_, '_> {
         for (id, value) in captures {
             let domain = self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type));
             let completed_domain = self.substituted_trait_domain(&domain, span)?;
-            let sort = if completed_domain == p(P::Type) {
-                Sort::Type
-            } else {
-                Sort::ComptimeValue
-            };
+            let sort = Sort::of_comptime_domain(&completed_domain);
             if value.sort() != sort {
                 return Err(error(
                     span,

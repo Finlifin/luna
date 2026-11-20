@@ -592,12 +592,13 @@ impl Solver<'_, '_> {
                 context,
                 &mut search_budget,
                 |head, allowance| {
-                    let assessment = match head.match_types_with_layouts(
+                    let assessment = match head.match_types_with_runtime_domains(
                         subject,
                         &interface.arguments,
                         context,
                         allowance,
                         &index.parameter_domains,
+                        &index.runtime_domains,
                         Some(&index.nominal_layouts),
                     ) {
                         Ok(matched) => {

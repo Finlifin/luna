@@ -182,9 +182,12 @@ impl<'h> Checker<'_, 'h> {
     }
 
     pub(super) fn has_optional_type_clauses(&self, owner: OwnerId) -> bool {
-        self.type_clause_params(owner)
-            .iter()
-            .any(|clause| matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
+        self.type_clause_params(owner).iter().any(|clause| {
+            matches!(
+                clause.kind.unquoted(),
+                hir::clause::ClauseParamKind::Optional(..)
+            )
+        })
     }
 
     /// Build a Type-valued application while retaining computations and their
@@ -467,7 +470,7 @@ impl<'h> Checker<'_, 'h> {
         for index in known.len()..parameters.len() {
             if index >= inherited
                 && matches!(
-                    clauses[index - inherited].kind,
+                    clauses[index - inherited].kind.unquoted(),
                     hir::clause::ClauseParamKind::Optional(..)
                 )
             {
@@ -513,7 +516,9 @@ impl<'h> Checker<'_, 'h> {
             return Ok(Vec::new());
         }
         let clauses = self.type_clause_params(owner);
-        let hir::clause::ClauseParamKind::Optional(_, domain, value) = clauses[slot].kind else {
+        let hir::clause::ClauseParamKind::Optional(_, domain, value) =
+            *clauses[slot].kind.unquoted()
+        else {
             unreachable!()
         };
         if self.active_type_defaults.len() >= 64 || !self.active_type_defaults.insert((owner, slot))
@@ -552,6 +557,17 @@ impl<'h> Checker<'_, 'h> {
                 if !dependencies.is_empty() {
                     return Ok(dependencies.into_iter().collect());
                 }
+            }
+            if let Term::Lift(inner) = &domain {
+                let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
+                let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
+                let saved_locals = std::mem::take(&mut self.locals);
+                let checked = self.expr(value, Some(inner));
+                self.locals = saved_locals;
+                self.in_staged_input = saved_staged;
+                self.in_required_comptime = saved_required;
+                checked?;
+                return Ok(Vec::new());
             }
             let checked = self.expr(value, Some(&domain))?;
             let structural = self
@@ -745,10 +761,12 @@ impl<'h> Checker<'_, 'h> {
     pub(super) fn check_type_defaults(&mut self, owner: OwnerId) -> Result<(), Error> {
         let domains = self.trait_domains(owner)?;
         let clauses = self.type_clause_params(owner);
-        if !clauses
-            .iter()
-            .any(|clause| matches!(clause.kind, hir::clause::ClauseParamKind::Optional(..)))
-        {
+        if !clauses.iter().any(|clause| {
+            matches!(
+                clause.kind.unquoted(),
+                hir::clause::ClauseParamKind::Optional(..)
+            )
+        }) {
             return Ok(());
         }
         let own_start = domains.len().saturating_sub(clauses.len());
@@ -769,7 +787,8 @@ impl<'h> Checker<'_, 'h> {
             this.forbidden_default_inputs
                 .extend(&this.type_parameters[&owner][offset..]);
             for (slot, clause) in clauses.iter().enumerate() {
-                if let hir::clause::ClauseParamKind::Optional(_, _, value) = clause.kind {
+                if let hir::clause::ClauseParamKind::Optional(_, _, value) = clause.kind.unquoted()
+                {
                     let checked = this.expr(value, Some(&p(P::Type)))?;
                     let reads = this.checked_declaration_inputs(&checked, value.span)?;
                     if !reads.is_disjoint(&this.forbidden_default_inputs) {
@@ -796,7 +815,8 @@ impl<'h> Checker<'_, 'h> {
     ) -> Result<Term, Error> {
         let clauses = self.type_clause_params(owner);
         let slot_index = self.type_parameters[&owner].len() - clauses.len() + slot;
-        let hir::clause::ClauseParamKind::Optional(_, ty, value) = clauses[slot].kind else {
+        let hir::clause::ClauseParamKind::Optional(_, ty, value) = *clauses[slot].kind.unquoted()
+        else {
             return Err(error(span, "type argument count mismatch"));
         };
         if self.active_type_defaults.len() >= 64
@@ -842,7 +862,12 @@ impl<'h> Checker<'_, 'h> {
                     .zip(arguments.iter().cloned().map(std::sync::Arc::new)),
             );
             let domain = self.type_expr(ty)?;
-            let default = self.normal_value_argument(value, &domain)?;
+            let default = if matches!(domain, Term::Lift(_)) {
+                let param = self.type_parameters[&owner][slot_index];
+                self.default_runtime_argument(owner, param, &arguments, value, &domain, span)?
+            } else {
+                self.normal_value_argument(value, &domain)?
+            };
             if self.type_parameters[&owner][slot_index..]
                 .iter()
                 .any(|id| default.mentions_rigid(*id))

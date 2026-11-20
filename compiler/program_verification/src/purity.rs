@@ -2225,9 +2225,6 @@ impl<'a> Analysis<'a> {
                 env_arguments,
                 ..
             } => {
-                if !env_arguments.is_empty() {
-                    return false;
-                }
                 // Finite factories may deliver fresh owned values. Their
                 // consumers still need explicit transfer/cleanup permission.
                 let candidates = if matches!(callee.kind, K::TraitMethod { .. }) {
@@ -2291,6 +2288,34 @@ impl<'a> Analysis<'a> {
                             },
                             keys,
                         );
+                    }
+                }
+                if !env_arguments.is_empty() {
+                    let Term::Function { parameters, .. } = callee.ty.callable_signature() else {
+                        return false;
+                    };
+                    for (offset, env_arg) in env_arguments.iter().enumerate() {
+                        if (self.finite && !self.resource_scope && !self.copy_type(&env_arg.ty))
+                            || !self.expression(env_arg, private, returns, depth + 1)
+                        {
+                            return false;
+                        }
+                        for (fields, codes) in self.take_code_fields() {
+                            let Some(keys) = codes
+                                .iter()
+                                .map(|code| self.code_key(code))
+                                .collect::<Option<Vec<_>>>()
+                            else {
+                                return false;
+                            };
+                            inputs.insert(
+                                CallableInput {
+                                    parameter: parameters.len() + offset,
+                                    fields,
+                                },
+                                keys,
+                            );
+                        }
                     }
                 }
                 let mut returned = None;
@@ -4454,9 +4479,6 @@ impl<'a> Analysis<'a> {
         } else {
             function
         };
-        if !function.env_parameters.is_empty() {
-            return false;
-        }
         let Term::Function { parameters, result } = &function.signature else {
             return false;
         };
@@ -4478,23 +4500,40 @@ impl<'a> Analysis<'a> {
             || parameters.iter().any(|parameter| {
                 self.finite && self.protocols.drop.is_none() && !self.copy_type(&parameter.ty)
             })
+            || function
+                .env_parameters
+                .iter()
+                .any(|env| self.finite && self.protocols.drop.is_none() && !self.copy_type(&env.ty))
         {
             return false;
         }
         let saved_callables = std::mem::take(&mut self.callables);
         for (slot, keys) in inputs {
-            let (Some(binding), Some(parameter)) = (
-                function.parameters.get(slot.parameter),
-                parameters.get(slot.parameter),
-            ) else {
+            let (binding, param_ty) = if slot.parameter < parameters.len() {
+                match (
+                    function.parameters.get(slot.parameter),
+                    parameters.get(slot.parameter),
+                ) {
+                    (Some(binding), Some(parameter)) => (*binding, &parameter.ty),
+                    _ => {
+                        self.callables = saved_callables;
+                        return false;
+                    }
+                }
+            } else if let Some(env) = function
+                .env_parameters
+                .get(slot.parameter - parameters.len())
+            {
+                (env.binding, &env.ty)
+            } else {
                 self.callables = saved_callables;
                 return false;
             };
             let place = CallablePlace {
-                binding: *binding,
+                binding,
                 fields: slot.fields.clone(),
             };
-            if !self.install_code_keys(&place, &parameter.ty, keys, function.body.source) {
+            if !self.install_code_keys(&place, param_ty, keys, function.body.source) {
                 self.callables = saved_callables;
                 return false;
             }

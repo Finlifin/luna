@@ -53,6 +53,11 @@ pub(super) fn select_in(
             "'{entry}' requires generic arguments; use a concrete wrapper"
         ));
     }
+    if !function.env_parameters.is_empty() {
+        return Err(format!(
+            "'{entry}' requires runtime environment arguments; use a concrete wrapper"
+        ));
+    }
     spend(fuel, function.parameters.len().saturating_mul(2))?;
     spend(fuel, function.defaults.len())?;
     let mut supplied = vec![None; function.parameters.len()];

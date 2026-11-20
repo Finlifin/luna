@@ -6674,19 +6674,15 @@ impl<'a> Infer<'a, '_> {
                 parameter_bindings,
                 env_arguments,
             } => {
-                if !env_arguments.is_empty() {
-                    return Err(
-                        "memory analysis does not yet support runtime environment call arguments"
-                            .into(),
-                    );
-                }
-                if self.immediate_borrowed_call(
-                    expr,
-                    callee,
-                    arguments,
-                    parameter_bindings,
-                    depth + 1,
-                )? {
+                if env_arguments.is_empty()
+                    && self.immediate_borrowed_call(
+                        expr,
+                        callee,
+                        arguments,
+                        parameter_bindings,
+                        depth + 1,
+                    )?
+                {
                     return Ok(());
                 }
                 let package = self
@@ -6908,6 +6904,29 @@ impl<'a> Infer<'a, '_> {
                             .collect::<BTreeMap<_, _>>(),
                     );
                 }
+                for (offset, env_arg) in env_arguments.iter().enumerate() {
+                    let slot = parameters.len() + offset;
+                    self.walk(env_arg, depth + 1)?;
+                    if super::pattern_facts::cannot_complete(env_arg, self.fuel, 0)? {
+                        return Ok(());
+                    }
+                    let target = if self.local_pointer_value(&env_arg.ty)? {
+                        self.optional_target(env_arg, depth + 1)?
+                    } else {
+                        None
+                    };
+                    let mut fields = self.pointer_fields_for(env_arg)?;
+                    if let Some(target) = target {
+                        fields.insert(vec![], Some(target));
+                    }
+                    targets.insert(
+                        slot,
+                        fields
+                            .into_iter()
+                            .filter_map(|(path, target)| target.map(|target| (path, target)))
+                            .collect::<BTreeMap<_, _>>(),
+                    );
+                }
                 let mut inputs = BTreeMap::new();
                 for (parameter, fields) in &argument_callees {
                     for (path, value) in fields {
@@ -6970,6 +6989,12 @@ impl<'a> Infer<'a, '_> {
                 }
                 let code_inputs = borrow_code_inputs(&prepared);
                 let mut combined: Option<CallFootprint> = None;
+                if !env_arguments.is_empty() && !closures.is_empty() {
+                    return Err(
+                        "memory analysis does not yet support runtime environment arguments on closures"
+                            .into(),
+                    );
+                }
                 let mut next_capture_slot = parameters.len();
                 for (id, closure, captures, prepared_captures, pointer_captures) in closures {
                     let K::Closure {
@@ -9074,11 +9099,6 @@ fn infer_body(
     if parameters.len() != function.parameters.len() {
         return Err("memory summary parameter signature mismatch".into());
     }
-    if !function.env_parameters.is_empty() {
-        return Err(
-            "runtime environment parameters require Stage G1b memory summary support".into(),
-        );
-    }
     for (input, value) in inputs {
         let parameter = parameters
             .get(input.parameter)
@@ -9217,6 +9237,27 @@ fn infer_body(
                 *binding,
                 Some(BTreeSet::from([PointerPlace {
                     root: PointerRoot::Parameter(index),
+                    input_fields: vec![],
+                    through: vec![],
+                    conditions: BTreeMap::new(),
+                    fields: vec![],
+                }])),
+            );
+        }
+    }
+    for (offset, env) in function.env_parameters.iter().enumerate() {
+        let slot = parameters.len() + offset;
+        infer.step(0)?;
+        let env_ty = infer.ty(&env.ty)?;
+        infer.locals.insert(env.binding, env_ty.clone());
+        if !intrinsic_pointer_value(&env_ty) && !infer.local_pointer_value(&env_ty)? {
+            infer.install_input_pointer_fields(env.binding, slot, &env_ty)?;
+        }
+        if infer.local_pointer_value(&env_ty)? {
+            infer.environment.pointers.insert(
+                env.binding,
+                Some(BTreeSet::from([PointerPlace {
+                    root: PointerRoot::Parameter(slot),
                     input_fields: vec![],
                     through: vec![],
                     conditions: BTreeMap::new(),

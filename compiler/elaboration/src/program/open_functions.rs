@@ -317,7 +317,10 @@ impl Checker<'_, '_> {
                 }
                 for (parameter, supplied) in parameters.iter().zip(supplied) {
                     if !supplied
-                        && !matches!(parameter.kind, hir::clause::ClauseParamKind::Optional(..))
+                        && !matches!(
+                            parameter.kind.unquoted(),
+                            hir::clause::ClauseParamKind::Optional(..)
+                        )
                     {
                         return Err(error(expr.span, "missing required type argument"));
                     }

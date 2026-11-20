@@ -1410,19 +1410,18 @@ impl Query<'_, '_, '_, '_> {
         if parameters.len() != body.parameters.len() {
             return Err("text region parameter identity mismatch".into());
         }
-        if !body.env_parameters.is_empty() {
-            return Err(
-                "runtime environment parameters require Stage G1b text region support".into(),
-            );
-        }
         for (parameter, path, callback) in &key.callbacks {
             if !path.is_empty() {
                 continue;
             }
-            let binding = *body
-                .parameters
-                .get(*parameter)
-                .ok_or("text callback parameter is missing")?;
+            let binding = if *parameter < body.parameters.len() {
+                body.parameters[*parameter]
+            } else {
+                body.env_parameters
+                    .get(*parameter - body.parameters.len())
+                    .ok_or("text callback parameter is missing")?
+                    .binding
+            };
             if !self.changed_callables.contains(&binding) {
                 let code = match callback {
                     CallbackKey::Named(callback) => {
@@ -1493,6 +1492,38 @@ impl Query<'_, '_, '_, '_> {
                 }
             }
             locals.insert(*id, regions);
+        }
+        for (offset, env) in body.env_parameters.iter().enumerate() {
+            let parameter = parameters.len() + offset;
+            let mut regions = Regions::new();
+            regions.code = owned_callable_bottom(Some(self.package), &env.ty, self.fuel, true)?
+                .into_keys()
+                .map(|path| (path, None))
+                .collect();
+            for (_, path, code) in key
+                .callbacks
+                .iter()
+                .filter(|(index, _, _)| *index == parameter)
+            {
+                regions.code.insert(path.clone(), Some(code.clone()));
+            }
+            for leaf in borrowed_input_layout(Some(self.package), &env.ty, self.fuel)? {
+                if let BorrowedInputLeaf::Pointer(leaf) = &leaf {
+                    regions.places.insert(leaf.input_fields.clone(), None);
+                }
+                if let BorrowedInputLeaf::Text(leaf) = leaf {
+                    regions.insert(
+                        leaf.input_fields.clone(),
+                        BTreeSet::from([TextRegionOrigin::Parameter {
+                            parameter,
+                            fields: leaf.input_fields,
+                        }]),
+                    );
+                }
+            }
+            if locals.insert(env.binding, regions).is_some() {
+                return Err("text region env parameter identity mismatch".into());
+            }
         }
         for snapshot in &body.entry_snapshots {
             let value = locals
@@ -1792,10 +1823,14 @@ impl Query<'_, '_, '_, '_> {
         // Fresh closure frames must never collide with canonical input roots.
         self.next_storage_frame = self.next_storage_frame.max(scope.frames.len());
         for (parameter, value) in &key.actual {
-            let binding = *body
-                .parameters
-                .get(*parameter)
-                .ok_or("text descriptor parameter is missing")?;
+            let binding = if *parameter < body.parameters.len() {
+                body.parameters[*parameter]
+            } else {
+                body.env_parameters
+                    .get(*parameter - body.parameters.len())
+                    .ok_or("text descriptor parameter is missing")?
+                    .binding
+            };
             charge_regions(value, self.fuel)?;
             if scope.insert(binding, value.clone()).is_some() {
                 return Err("text descriptor parameter identity mismatch".into());
@@ -1946,6 +1981,7 @@ impl Query<'_, '_, '_, '_> {
         &mut self,
         candidates: &[iir::InstanceKey],
         arguments: &[nir::program::CallArgument],
+        env_arguments: &[Expr],
         parameter_bindings: &[LocalId],
         locals: &mut Locals,
         returned: &mut Option<Regions>,
@@ -1958,14 +1994,28 @@ impl Query<'_, '_, '_, '_> {
         let has_defaults = arguments.iter().any(|argument| argument.is_default);
         charge(
             self.fuel,
-            arguments.len().saturating_add(parameter_bindings.len()),
+            arguments
+                .len()
+                .saturating_add(env_arguments.len())
+                .saturating_add(parameter_bindings.len()),
         )?;
+        let ordinary_count = self
+            .package
+            .runtime_body_checked(first.declaration, &first.arguments)?
+            .0
+            .parameters
+            .len();
         for candidate in candidates {
             charge(self.fuel, 1)?;
             let (body, _) = self
                 .package
                 .runtime_body_checked(candidate.declaration, &candidate.arguments)?;
             validate_argument_plan(arguments, parameter_bindings, body.parameters.len())?;
+            if body.parameters.len() != ordinary_count
+                || body.env_parameters.len() != env_arguments.len()
+            {
+                return Err("text region runtime environment arity mismatch".into());
+            }
             if has_defaults && parameter_bindings != &body.parameters {
                 return Err("text default parameter frame does not match callee".into());
             }
@@ -2005,6 +2055,25 @@ impl Query<'_, '_, '_, '_> {
             }
             if actual.insert(argument.parameter, value).is_some() {
                 return Err("duplicate text region call argument".into());
+            }
+        }
+        for (offset, env_arg) in env_arguments.iter().enumerate() {
+            let Some(value) = self.expr(env_arg, locals, returned, depth)? else {
+                return Ok(None);
+            };
+            let callback = self.result_code(&value, env_arg)?;
+            if let Some(code) = &callback {
+                let _ = code;
+            }
+            charge_regions(&value, self.fuel)?;
+            let parameter = ordinary_count + offset;
+            for (path, code) in &value.code {
+                if let Some(code) = code {
+                    callbacks.push((parameter, path.clone(), code.clone()));
+                }
+            }
+            if actual.insert(parameter, value).is_some() {
+                return Err("duplicate text region env call argument".into());
             }
         }
 

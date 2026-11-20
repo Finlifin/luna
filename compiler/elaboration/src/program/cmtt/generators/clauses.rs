@@ -335,11 +335,7 @@ impl Checker<'_, '_> {
                     deferred.push(index);
                     waiting.insert(parameters[index]);
                     inferred.push(parameters[index]);
-                    let sort = if *domain == p(P::Type) {
-                        Sort::Type
-                    } else {
-                        Sort::ComptimeValue
-                    };
+                    let sort = Sort::of_comptime_domain(domain);
                     values.push(Term::Rigid {
                         declaration: parameters[index],
                         sort,
@@ -352,11 +348,7 @@ impl Checker<'_, '_> {
                 waiting.insert(parameters[index]);
                 values.push(Term::Rigid {
                     declaration: parameters[index],
-                    sort: if *domain == p(P::Type) {
-                        Sort::Type
-                    } else {
-                        Sort::ComptimeValue
-                    },
+                    sort: Sort::of_comptime_domain(domain),
                 });
             }
         }

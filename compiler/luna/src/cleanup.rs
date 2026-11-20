@@ -284,6 +284,25 @@ fn field_borrows(
             }
         }
     }
+    for (offset, env) in function.env_parameters.iter().enumerate() {
+        let parameter = parameters.len() + offset;
+        for leaf in elaboration::verification::memory::pointer_input_layout_for(
+            Some(package),
+            &env.ty,
+            text_provenance,
+            fuel,
+        )? {
+            let path = leaf.input_fields;
+            let pointee = leaf.pointee;
+            if !path.is_empty() {
+                fields.push(moves::BorrowedField {
+                    parameter,
+                    fields: path,
+                    pointee,
+                });
+            }
+        }
+    }
     Ok(fields)
 }
 
@@ -580,6 +599,17 @@ fn prepare_source_impl(
                         borrows.push((index, subject));
                     }
                 }
+                for (offset, env) in function.env_parameters.iter().enumerate() {
+                    if let Some((_, subject)) =
+                        elaboration::verification::memory::pointer_representation(
+                            Some(package),
+                            &env.ty,
+                            fuel,
+                        )?
+                    {
+                        borrows.push((parameters.len() + offset, subject));
+                    }
+                }
                 fields = field_borrows(package, function, text_provenance, fuel)?;
                 if !fields.is_empty() {
                     // Moving an aggregate need not borrow its pointees. Try an
@@ -873,17 +903,8 @@ fn prepare_source_impl(
                                 }
                             }
                             K::Call {
-                                callee,
-                                arguments,
-                                env_arguments,
-                                ..
+                                callee, arguments, ..
                             } => {
-                                if !env_arguments.is_empty() {
-                                    return Err(
-                                        "cleanup analysis does not yet support runtime environment call arguments"
-                                            .into(),
-                                    );
-                                }
                                 callee_hooks.push(callee.source);
                                 if !matches!(
                                     callee.kind,
@@ -1083,6 +1104,17 @@ fn prepare_source_impl(
                                 )?
                             {
                                 borrows.push((slot, subject));
+                            }
+                        }
+                        for (offset, env) in child.env_parameters.iter().enumerate() {
+                            if let Some((_, subject)) =
+                                elaboration::verification::memory::pointer_representation(
+                                    Some(package),
+                                    &env.ty,
+                                    fuel,
+                                )?
+                            {
+                                borrows.push((parameters.len() + offset, subject));
                             }
                         }
                     }

@@ -53,6 +53,7 @@ pub(super) fn charge_world_tables(
         refinements: _, // Borrowed immutable registry; no VM index is constructed.
         definition_attributes: _,
         attributes_evaluating: _,
+        runtime_domains: _,
         builtin_implementation_packages,
         target: _,
         tests,

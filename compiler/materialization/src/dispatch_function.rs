@@ -26,9 +26,18 @@ impl Builder<'_> {
         let signature = projection
             .instantiate_closed_signature_bounded(&function.signature, &mut self.fuel)
             .map_err(|e| e.to_string())?;
-        let retained = matches!(signature.callable_signature(), Term::Function { parameters, .. }
-            if parameters.iter().any(|p| p.sort != nir::Sort::Runtime));
+        let retained = matches!(
+            signature.callable_signature(),
+            Term::Function { parameters, .. }
+                if parameters.iter().any(|p| p.sort != nir::Sort::Runtime)
+        );
         self.queue.push_back(Task::Type(signature));
+        for env in &function.env_parameters {
+            let ty = projection
+                .instantiate_bounded(&env.ty, &mut self.fuel)
+                .map_err(|e| e.to_string())?;
+            self.queue.push_back(Task::Type(ty));
+        }
         if retained {
             // Ordinary staged inputs defer dependency selection until invocation.
             // Still check every type operand under this declaration substitution.

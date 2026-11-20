@@ -330,14 +330,10 @@ impl Checker<'_, '_> {
                     .iter()
                     .map(|id| Term::Rigid {
                         declaration: *id,
-                        sort: if self
+                        sort: self
                             .trait_input_domain(*id)
-                            .is_some_and(|ty| ty != p(P::Type))
-                        {
-                            Sort::ComptimeValue
-                        } else {
-                            Sort::Type
-                        },
+                            .as_ref()
+                            .map_or(Sort::Type, Sort::of_comptime_domain),
                     })
                     .collect(),
             })

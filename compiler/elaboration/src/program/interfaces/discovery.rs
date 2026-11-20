@@ -200,13 +200,15 @@ impl Checker<'_, '_> {
                             ..budget
                         };
                         let reserved = allowance.steps;
-                        let inferred = head.infer_interface_from_subject_metered(
-                            subject,
-                            &self.context,
-                            &mut allowance,
-                            self.implementation_index.parameter_domains(),
-                            Some(self.implementation_index.nominal_layouts()),
-                        );
+                        let inferred = head
+                            .infer_interface_from_subject_with_runtime_domains_metered(
+                                subject,
+                                &self.context,
+                                &mut allowance,
+                                self.implementation_index.parameter_domains(),
+                                self.implementation_index.runtime_domains(),
+                                Some(self.implementation_index.nominal_layouts()),
+                            );
                         budget.steps -= reserved - allowance.steps;
                         match inferred {
                             Ok(source) => source,

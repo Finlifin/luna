@@ -769,11 +769,6 @@ impl Query<'_, '_, '_, '_> {
         else {
             unreachable!("checked text transfer variant")
         };
-        if !env_arguments.is_empty() {
-            return Err(
-                "text region transfer does not yet support runtime environment arguments".into(),
-            );
-        }
         let Some(callee_value) = self.expr(callee, locals, returned, next)? else {
             return Ok(None);
         };
@@ -781,6 +776,7 @@ impl Query<'_, '_, '_, '_> {
             return self.named_call(
                 candidates,
                 arguments,
+                env_arguments,
                 parameter_bindings,
                 locals,
                 returned,
@@ -790,6 +786,11 @@ impl Query<'_, '_, '_, '_> {
         if let Some(Some(CallbackKey::ClosureAlternatives(candidates))) =
             callee_value.code.get(&vec![])
         {
+            if !env_arguments.is_empty() {
+                return Err(
+                    "text region closures do not yet support runtime environment arguments".into(),
+                );
+            }
             return self.closed_callback_choices(
                 candidates,
                 &callee_value,
@@ -806,6 +807,11 @@ impl Query<'_, '_, '_, '_> {
             .ok_or("text region call requires a named concrete callee or stable local callable")?;
         let code = resolved.expression.as_ref();
         if matches!(code.kind, K::Closure { .. }) {
+            if !env_arguments.is_empty() {
+                return Err(
+                    "text region closures do not yet support runtime environment arguments".into(),
+                );
+            }
             let id = resolved
                 .closure
                 .ok_or("text closure has no closed identity")?;
@@ -834,6 +840,7 @@ impl Query<'_, '_, '_, '_> {
                 arguments: types.to_vec().into(),
             }],
             arguments,
+            env_arguments,
             parameter_bindings,
             locals,
             returned,

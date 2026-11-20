@@ -147,14 +147,9 @@ fn prepare(
     // below, not this initial classification, admits concrete Type values.
     let rigid = |id: &nir::DeclarationId| Term::Rigid {
         declaration: *id,
-        sort: if domains
+        sort: domains
             .get(id)
-            .is_some_and(|domain| *domain != Term::Primitive(Primitive::Type))
-        {
-            nir::Sort::ComptimeValue
-        } else {
-            nir::Sort::Type
-        },
+            .map_or(nir::Sort::Type, nir::Sort::of_comptime_domain),
     };
     let mut drafts = BTreeMap::new();
     let mut obligations = Vec::new();
@@ -316,12 +311,6 @@ fn prepare(
                     &mut limits.arithmetic.steps,
                 )
                 .map_err(|error| preparation(source, error))?;
-            if !actual.env_parameters.is_empty() {
-                return Err(failure(
-                    source,
-                    "trait program contracts do not yet support runtime environment parameters",
-                ));
-            }
             if method.parameter_bindings.len() != actual.parameters.len() {
                 return Err(failure(source, "trait program contract arity mismatch"));
             }

@@ -608,7 +608,7 @@ impl Checker<'_, '_> {
                                             local: definition.index,
                                         } == *id
                                     }) && matches!(
-                                        parameter.kind,
+                                        parameter.kind.unquoted(),
                                         hir::clause::ClauseParamKind::Type(_)
                                             | hir::clause::ClauseParamKind::TraitBound(..)
                                     )
@@ -1072,7 +1072,7 @@ impl Checker<'_, '_> {
             for id in visible {
                 let Some(domain) = self
                     .trait_input_domain(id)
-                    .filter(|domain| *domain != p(P::Type))
+                    .filter(|domain| Sort::of_comptime_domain(domain) == Sort::ComptimeValue)
                 else {
                     continue;
                 };
@@ -1495,6 +1495,7 @@ impl Checker<'_, '_> {
                 attributes_evaluating: self.evaluating_attributes
                     || (!self.attributes_prepared
                         && !self.package.definition_attributes.is_empty()),
+                runtime_domains: self.runtime_domains.clone(),
                 ..Default::default()
             };
             crate::verification::contracts::inherit(&mut package, &mut self.next_temporary_binding)
@@ -1543,7 +1544,7 @@ impl Checker<'_, '_> {
                 !self.alias_substitution.contains_key(id)
                     && self
                         .trait_input_domain(*id)
-                        .is_none_or(|domain| domain == p(P::Type))
+                        .is_none_or(|domain| Sort::of_comptime_domain(&domain) == Sort::Type)
             });
             abstract_parameters.extend(
                 scoped_parameters
