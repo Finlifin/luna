@@ -119,6 +119,7 @@ fn package(reads: usize, mode: &str, query: Option<ObjectQueryKind>, reference: 
                 result_guarantees: vec![],
                 entry_snapshots: vec![],
                 parameters: vec![binding],
+                env_parameters: vec![],
                 defaults: vec![],
                 signature: Term::Function {
                     parameters: vec![Parameter {
@@ -166,6 +167,7 @@ fn package(reads: usize, mode: &str, query: Option<ObjectQueryKind>, reference: 
                         kind: K::Local(binding),
                     },
                 }],
+                env_arguments: vec![],
                 parameter_bindings: callee.parameters.clone(),
             },
         };

@@ -873,8 +873,17 @@ fn prepare_source_impl(
                                 }
                             }
                             K::Call {
-                                callee, arguments, ..
+                                callee,
+                                arguments,
+                                env_arguments,
+                                ..
                             } => {
+                                if !env_arguments.is_empty() {
+                                    return Err(
+                                        "cleanup analysis does not yet support runtime environment call arguments"
+                                            .into(),
+                                    );
+                                }
                                 callee_hooks.push(callee.source);
                                 if !matches!(
                                     callee.kind,

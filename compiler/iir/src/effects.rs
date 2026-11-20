@@ -171,7 +171,8 @@ fn data_type(package: &Package, ty: &Term, fuel: &mut usize, depth: usize) -> Re
         | Term::ComptimeFunction(inner)
         | Term::NormalFormFunction(inner, _)
         | Term::UnsafeFunction(inner)
-        | Term::Pointer(inner) => data_type(package, inner, fuel, depth + 1)?,
+        | Term::Pointer(inner)
+        | Term::Lift(inner) => data_type(package, inner, fuel, depth + 1)?,
         Term::Tuple(_) | Term::Record(_) => {
             if let Term::Tuple(items) = ty {
                 for item in items {
@@ -638,6 +639,7 @@ fn mapped(
         K::Call {
             callee: target,
             arguments,
+            env_arguments,
             ..
         } => {
             let Term::Function { result, .. } = target.ty.callable_signature() else {
@@ -662,6 +664,19 @@ fn mapped(
                     package,
                     links,
                     &argument.value,
+                    caller,
+                    resume,
+                    runtime,
+                    false,
+                    fuel,
+                    depth + 1,
+                )?;
+            }
+            for env_arg in env_arguments {
+                expression(
+                    package,
+                    links,
+                    env_arg,
                     caller,
                     resume,
                     runtime,

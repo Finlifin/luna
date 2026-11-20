@@ -384,6 +384,34 @@ impl<'a> PhaseContext<'a> {
             .map_err(|failure| Error::storage(function.source, failure))?;
         let frozen = &inspection.frozen;
         let fail = Error::invalid;
+        if !function.env_parameters.is_empty() {
+            if ct {
+                return Err(fail(
+                    function.source,
+                    "runtime environment parameters require a runtime callable",
+                ));
+            }
+            let mut bindings: BTreeSet<crate::program::LocalId> =
+                function.parameters.iter().copied().collect();
+            let mut declarations = BTreeSet::new();
+            for env in function.env_parameters {
+                if !bindings.insert(env.binding) {
+                    return Err(fail(
+                        function.source,
+                        "duplicate runtime environment parameter binding",
+                    ));
+                }
+                if !declarations.insert(env.declaration) {
+                    return Err(fail(
+                        function.source,
+                        "duplicate runtime environment parameter declaration",
+                    ));
+                }
+                storage_scope
+                    .check_runtime(&env.ty, inspection_fuel)
+                    .map_err(|error| Error::storage(function.source, error))?;
+            }
+        }
         let mut work = Worklist::new(function.source);
         work.extend(
             function
@@ -900,7 +928,13 @@ impl<'a> PhaseContext<'a> {
                             callee,
                             arguments,
                             parameter_bindings,
+                            env_arguments,
                         } => {
+                            if ct && !env_arguments.is_empty() {
+                                return Err(error(
+                                    "comptime call cannot pass runtime environment arguments",
+                                ));
+                            }
                             if callee.ty.is_normal_form_callable() {
                                 return Err(error(
                                     "ordinary call cannot invoke a normal-form head",
@@ -1030,6 +1064,9 @@ impl<'a> PhaseContext<'a> {
                                     Work::Expr(&argument.value, false, input_ct),
                                     inspection_fuel,
                                 )?;
+                            }
+                            for env_arg in env_arguments {
+                                work.push(Work::Expr(env_arg, false, false), inspection_fuel)?;
                             }
                         }
                         // Immutable type observations may remain symbolic until
@@ -2029,7 +2066,8 @@ fn comptime_storage_resolved(
         }
         T::Primitive(P::Integer | P::Float | P::Type | P::Object)
         | T::ComptimeFunction(_)
-        | T::NormalFormFunction(..) => {
+        | T::NormalFormFunction(..)
+        | T::Lift(_) => {
             return Ok(true);
         }
         T::NormalForm { head, .. } => {

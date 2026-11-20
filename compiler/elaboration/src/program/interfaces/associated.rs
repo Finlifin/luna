@@ -1083,6 +1083,7 @@ impl Checker<'_, '_> {
                     pending.extend(fields.into_iter().map(|(_, t)| Work::Visit(t, depth + 1)))
                 }
                 Term::Pointer(inner)
+                | Term::Lift(inner)
                 | Term::ComptimeFunction(inner)
                 | Term::NormalFormFunction(inner, _)
                 | Term::UnsafeFunction(inner) => pending.push(Work::Visit(*inner, depth + 1)),

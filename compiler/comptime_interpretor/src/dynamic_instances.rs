@@ -553,6 +553,7 @@ mod tests {
                         result: Box::new(Term::Primitive(Primitive::Bool)),
                     },
                     parameters: vec![],
+                    env_parameters: vec![],
                     type_parameters: vec![parameter],
                     defaults: vec![],
                     preconditions: vec![],

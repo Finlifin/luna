@@ -137,6 +137,7 @@ mod tests {
                     result: Box::new(flag(true).ty),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 type_parameters: vec![],
                 defaults: vec![],
                 preconditions: vec![],
@@ -168,6 +169,7 @@ mod tests {
                     ..flag(true)
                 }),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
             ..flag(true)

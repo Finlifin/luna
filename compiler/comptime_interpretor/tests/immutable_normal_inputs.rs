@@ -39,6 +39,7 @@ fn function(local: u32, parameters: Vec<LocalId>, body: Expr) -> Function {
                 result: Box::new(body.ty.clone()),
             },
             parameters,
+            env_parameters: vec![],
             defaults: vec![],
         },
         body,
@@ -216,6 +217,7 @@ fn metadata_lookup_evaluates_selector_once_and_admits_only_selected_input() {
                     kind: K::Call {
                         parameter_bindings: vec![],
                         arguments: vec![],
+                        env_arguments: vec![],
                         callee: Box::new(Expr {
                             source,
                             ty: Term::Function {
@@ -462,6 +464,7 @@ fn named_comptime_identity_resolves_in_receiving_vm_and_rechecks_contracts() {
                     kind: K::Local(callback),
                 }),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         },

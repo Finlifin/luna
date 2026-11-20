@@ -1842,6 +1842,7 @@ impl<'a> IndexBuilder<'a> {
             | ExprKind::Semi(inner)
             | ExprKind::TyPtr(inner)
             | ExprKind::TyOptional(inner)
+            | ExprKind::LiftType(inner)
             | ExprKind::TakeOld(inner)
             | ExprKind::TakeBitVec(inner)
             | ExprKind::TakeTagName(inner)
@@ -3213,6 +3214,7 @@ pub fn format_expr_compact(expr: &Expr<'_>, source_map: &SourceMap) -> String {
         | ExprKind::UnresolvedIdent(name) => name.as_str().to_owned(),
         ExprKind::TyPtr(inner) => format!("*{}", format_expr_compact(inner, source_map)),
         ExprKind::TyOptional(inner) => format!("?{}", format_expr_compact(inner, source_map)),
+        ExprKind::LiftType(inner) => format!("lift {}", format_expr_compact(inner, source_map)),
         ExprKind::ErrorQualifiedType(err, ok) => format!(
             "!{} {}",
             format_expr_compact(err, source_map),

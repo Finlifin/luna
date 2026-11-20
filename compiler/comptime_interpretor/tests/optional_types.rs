@@ -42,6 +42,7 @@ fn function(local: u32, body: Expr) -> Function {
                 result: Box::new(p(P::Type)),
             },
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
         },
         body,
@@ -120,6 +121,7 @@ fn optional_construction_evaluates_operand_once_and_preserves_nested_opaque_iden
             parameter_bindings: vec![],
             callee: Box::new(expr(signature, K::Function(id(1)))),
             arguments: vec![],
+            env_arguments: vec![],
         },
     );
     let package = Package {

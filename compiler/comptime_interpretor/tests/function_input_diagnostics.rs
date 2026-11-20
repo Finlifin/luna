@@ -46,6 +46,7 @@ fn world() -> Package {
                     result: Box::new(boolean()),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body: Expr {

@@ -82,6 +82,7 @@ fn world(count: u32, reads: usize) -> Arc<Package> {
                 capabilities: vec![],
                 signature: signature.clone(),
                 parameters: vec![binding],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body: Expr {

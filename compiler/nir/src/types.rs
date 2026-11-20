@@ -28,10 +28,10 @@ impl Sort {
     /// Read the sort at this stage of substitution. A dependent domain
     /// can become Type when the call supplies its earlier arguments.
     pub fn of_comptime_domain(domain: &Term) -> Self {
-        if matches!(domain, Term::Primitive(Primitive::Type)) {
-            Self::Type
-        } else {
-            Self::ComptimeValue
+        match domain {
+            Term::Primitive(Primitive::Type) => Self::Type,
+            Term::Lift(_) => Self::Runtime,
+            _ => Self::ComptimeValue,
         }
     }
 }
@@ -216,7 +216,9 @@ impl TypeKind {
             Term::Primitive(Primitive::Unit) => return None, // legacy representation
             Term::Primitive(_) => return Some(false),
             Term::Tuple(_) => Self::Tuple,
-            Term::Optional(_) | Term::ErrorResult { .. } | Term::Record(_) => return Some(false),
+            Term::Optional(_) | Term::Lift(_) | Term::ErrorResult { .. } | Term::Record(_) => {
+                return Some(false);
+            }
             Term::Pointer(_) => Self::Pointer,
             Term::Function { .. }
             | Term::ComptimeFunction(_)
@@ -397,6 +399,9 @@ pub enum Term {
     /// a nominal enum application nor a flattenable error/effect row.
     Optional(Box<Term>),
     Pointer(Box<Term>),
+    /// Lifted comptime-to-runtime domain wrapper. Inhabited by `Sort::Runtime`
+    /// dependency identities rather than runtime values.
+    Lift(Box<Term>),
     /// A comptime callable. Its inner signature must be an ordinary Function.
     ComptimeFunction(Box<Term>),
     /// Opaque normal-form callable. The inner Function owns its dependent
@@ -687,6 +692,7 @@ impl Term {
                 }
                 Self::Optional(inner)
                 | Self::Pointer(inner)
+                | Self::Lift(inner)
                 | Self::ComptimeFunction(inner)
                 | Self::NormalFormFunction(inner, _)
                 | Self::UnsafeFunction(inner) => pending.push(*inner),
@@ -1593,6 +1599,7 @@ impl Term {
             }
             Self::Optional(inner) => Self::Optional(Box::new(inner.rewrite(nesting, leaf)?)),
             Self::Pointer(inner) => Self::Pointer(Box::new(inner.rewrite(nesting, leaf)?)),
+            Self::Lift(inner) => Self::Lift(Box::new(inner.rewrite(nesting, leaf)?)),
             Self::Function { parameters, result } => {
                 let inner = nesting
                     .checked_add(1)
@@ -2320,7 +2327,7 @@ fn validate<'term>(
                 validate(part, holes, frames, allow_free, core)?;
             }
         }
-        Term::Optional(inner) | Term::Pointer(inner) => {
+        Term::Optional(inner) | Term::Pointer(inner) | Term::Lift(inner) => {
             require_sort(inner, Sort::Type)?;
             validate(inner, holes, frames, allow_free, core)?;
         }
@@ -2687,6 +2694,7 @@ impl fmt::Display for Term {
             Self::UnsafeFunction(inner) => write!(f, "(unsafe-function {inner})"),
             Self::Optional(inner) => write!(f, "(optional {inner})"),
             Self::Pointer(inner) => write!(f, "(pointer {inner})"),
+            Self::Lift(inner) => write!(f, "(lift {inner})"),
             Self::Function { parameters, result } => {
                 f.write_str("(function (parameters ")?;
                 list(f, parameters)?;

@@ -153,6 +153,7 @@ fn closure_capture_cells_are_private_and_defaults_keep_the_callee_frame() {
                 is_default: true,
             },
         ],
+        env_arguments: vec![],
     });
     nir::freshening::expression(
         &mut call,

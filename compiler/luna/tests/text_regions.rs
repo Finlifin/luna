@@ -411,6 +411,7 @@ fn default_arguments_use_prepared_parameter_origins() {
                 callee,
                 arguments,
                 parameter_bindings,
+                ..
             } = &mut expr.kind
             {
                 if matches!(callee.kind, K::Function(id) if id == choose.declaration) {
@@ -1532,6 +1533,7 @@ fn default_callbacks_use_prepared_code_and_capture_frames() {
                 callee,
                 arguments,
                 parameter_bindings,
+                ..
             } = &mut expr.kind
             else {
                 return Ok(());
@@ -1588,6 +1590,7 @@ fn default_callbacks_use_prepared_code_and_capture_frames() {
                                 kind: K::Local(target.parameters[0]),
                             },
                         }],
+                        env_arguments: vec![],
                         parameter_bindings: vec![],
                     };
                 }
@@ -2079,6 +2082,7 @@ fn text_defaults_read_prepared_pointer_storage_without_authorizing_writes() {
                 callee,
                 arguments,
                 parameter_bindings,
+                ..
             } = &mut expr.kind
             else {
                 return Ok(());

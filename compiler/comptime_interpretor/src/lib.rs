@@ -4282,10 +4282,14 @@ impl<'a> Interpreter<'a> {
             callee,
             arguments,
             parameter_bindings,
+            env_arguments,
         } = &expr.kind
         else {
             unreachable!("call preparation")
         };
+        if !env_arguments.is_empty() {
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
+        }
         if callee.ty.is_normal_form_callable() {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }

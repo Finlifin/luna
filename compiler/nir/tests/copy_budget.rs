@@ -243,6 +243,7 @@ fn function() -> nir::program::Function {
                 result: Box::new(Term::Primitive(P::Str)),
             },
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
         },
         body: small(),

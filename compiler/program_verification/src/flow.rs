@@ -833,6 +833,9 @@ where
     if parameters.len() != function.parameters.len() {
         return Err(error(Reason::InvalidSignature));
     }
+    if !function.env_parameters.is_empty() {
+        return Err(error(Reason::Unsupported));
+    }
     let mut state = State {
         target: package.and_then(|package| package.target),
         frame: 0,
@@ -2588,8 +2591,11 @@ impl Walker<'_> {
                 callee,
                 arguments,
                 parameter_bindings,
+                env_arguments,
             } => {
-                if !matches!(self.call_preserves_pointer_bindings(callee), Ok(true)) {
+                if !env_arguments.is_empty()
+                    || !matches!(self.call_preserves_pointer_bindings(callee), Ok(true))
+                {
                     return Ok(None);
                 }
                 let mut origins = BTreeMap::new();
@@ -2977,7 +2983,11 @@ impl Walker<'_> {
                 callee,
                 arguments,
                 parameter_bindings,
+                env_arguments,
             } => {
+                if !env_arguments.is_empty() {
+                    return Ok(None);
+                }
                 let mut origins = BTreeMap::new();
                 for argument in arguments.iter().filter(|argument| !argument.is_default) {
                     let targets =
@@ -3102,7 +3112,14 @@ impl Walker<'_> {
                             callee,
                             arguments,
                             parameter_bindings,
+                            env_arguments,
                         } => {
+                            if !env_arguments.is_empty() {
+                                return Err(
+                                    "loop invariant scan does not yet support runtime environment arguments"
+                                        .into(),
+                                );
+                            }
                             if self.call_summary(callee).is_none() {
                                 invalidates_external_reads = true;
                                 unknown_write = true;
@@ -5570,7 +5587,13 @@ impl Walker<'_> {
                 callee,
                 arguments,
                 parameter_bindings,
-            } => self.call_expression(expr, callee, arguments, parameter_bindings, state, depth),
+                env_arguments,
+            } => {
+                if !env_arguments.is_empty() {
+                    return Err(Reason::Unsupported);
+                }
+                self.call_expression(expr, callee, arguments, parameter_bindings, state, depth)
+            }
             K::Snapshot(value) => self.child(value, state, depth),
             _ => unreachable!(),
         }
@@ -7033,6 +7056,7 @@ mod memory_summary_cache_tests {
                     name: "work".into(),
                     signature: signature.clone(),
                     parameters: vec![],
+                    env_parameters: vec![],
                     defaults: vec![],
                 },
                 body: Expr {
@@ -7140,6 +7164,7 @@ mod memory_summary_cache_tests {
                     name: "work".into(),
                     signature: signature.clone(),
                     parameters: vec![],
+                    env_parameters: vec![],
                     defaults: vec![],
                 },
                 body: Expr {
@@ -7241,6 +7266,7 @@ mod memory_summary_cache_tests {
             name: name.into(),
             signature: signature.clone(),
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
         };
         let helper_callee = Expr {
@@ -7253,6 +7279,7 @@ mod memory_summary_cache_tests {
             kind: K::Call {
                 callee: Box::new(helper_callee.clone()),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
             ..unit()
@@ -8262,6 +8289,7 @@ mod single_pass_loop_tests {
                     result: Box::new(Term::Primitive(P::Void)),
                 },
                 parameters: vec![param],
+                env_parameters: vec![],
                 type_parameters: vec![],
                 defaults: vec![],
                 preconditions: vec![expr(

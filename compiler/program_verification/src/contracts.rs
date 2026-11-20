@@ -316,6 +316,12 @@ fn prepare(
                     &mut limits.arithmetic.steps,
                 )
                 .map_err(|error| preparation(source, error))?;
+            if !actual.env_parameters.is_empty() {
+                return Err(failure(
+                    source,
+                    "trait program contracts do not yet support runtime environment parameters",
+                ));
+            }
             if method.parameter_bindings.len() != actual.parameters.len() {
                 return Err(failure(source, "trait program contract arity mismatch"));
             }

@@ -269,6 +269,7 @@ mod tests {
                     is_unsafe: false,
                     type_parameters: vec![id],
                     parameters: vec![],
+                    env_parameters: vec![],
                     defaults: vec![],
                     requirements: vec![n::TypePredicate::Or(vec![
                         n::TypePredicate::Equal(ty.clone(), p(P::F32)),

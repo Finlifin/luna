@@ -9,7 +9,7 @@ use std::sync::Arc;
 mod input_schedule;
 pub use input_schedule::{CheckedInputSchedule, InputPath, InputSchedule, InputStep};
 mod function;
-pub use function::{DefinitionRegion, Function, FunctionDeclaration};
+pub use function::{DefinitionRegion, Function, FunctionDeclaration, RuntimeEnvParameter};
 mod predicate_shape;
 pub use predicate_shape::{PredicateShapeError, checkable_predicate, predicate_call_candidate};
 
@@ -1498,6 +1498,8 @@ pub enum ExprKind {
         /// explicit inputs always use the caller's environment.
         arguments: Vec<CallArgument>,
         parameter_bindings: Vec<LocalId>,
+        /// Caller runtime expressions delivered for `FunctionDeclaration.env_parameters`.
+        env_arguments: Vec<Expr>,
     },
     /// Source-ordered value and runtime position; bounds require program evidence.
     BitIndex(Box<Expr>, Box<Expr>),
@@ -3263,6 +3265,7 @@ impl fmt::Display for ExprKind {
                 callee,
                 arguments,
                 parameter_bindings,
+                env_arguments,
             } => {
                 write!(f, "(call (callee {callee}) (parameter-bindings")?;
                 for binding in parameter_bindings {
@@ -3271,6 +3274,12 @@ impl fmt::Display for ExprKind {
                 f.write_str(") (arguments")?;
                 for x in arguments {
                     write!(f, " {x}")?;
+                }
+                if !env_arguments.is_empty() {
+                    f.write_str(") (env-arguments")?;
+                    for x in env_arguments {
+                        write!(f, " {x}")?;
+                    }
                 }
                 f.write_str("))")
             }
@@ -4034,8 +4043,12 @@ impl Expr {
                     }
                 }
                 ExprKind::Call {
-                    callee, arguments, ..
+                    callee,
+                    arguments,
+                    env_arguments,
+                    ..
                 } => {
+                    work.extend(env_arguments.iter_mut().rev().map(Work::Expr));
                     work.extend(
                         arguments
                             .iter_mut()
@@ -4540,11 +4553,17 @@ impl Expr {
                 }
             }
             ExprKind::Call {
-                callee, arguments, ..
+                callee,
+                arguments,
+                env_arguments,
+                ..
             } => {
                 (callee).rewrite_with(rewriter)?;
                 for arg in arguments {
                     (&mut arg.value).rewrite_with(rewriter)?;
+                }
+                for env_arg in env_arguments {
+                    env_arg.rewrite_with(rewriter)?;
                 }
             }
             ExprKind::Literal(_)

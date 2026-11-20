@@ -366,6 +366,7 @@ pub(super) fn validate(
             Work::Term(
                 Term::Optional(t)
                 | Term::Pointer(t)
+                | Term::Lift(t)
                 | Term::ComptimeFunction(t)
                 | Term::NormalFormFunction(t, _)
                 | Term::UnsafeFunction(t),
@@ -541,6 +542,7 @@ impl ImplementationHead {
                 ..*budget
             },
             domains,
+            &BTreeMap::new(),
             layouts,
         )?;
         let computation = |error: nir::type_computations::Error| match error {
@@ -606,6 +608,27 @@ impl ImplementationHead {
         domains: &BTreeMap<DeclarationId, Term>,
         layouts: Option<&nir::program::Package>,
     ) -> Result<HeadMatch, TypeAssessment> {
+        self.match_types_with_runtime_domains(
+            subject,
+            interface_arguments,
+            context,
+            budget,
+            domains,
+            &BTreeMap::new(),
+            layouts,
+        )
+    }
+
+    pub fn match_types_with_runtime_domains(
+        &self,
+        subject: &Term,
+        interface_arguments: &[Term],
+        context: &Context,
+        budget: Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+        runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
+        layouts: Option<&nir::program::Package>,
+    ) -> Result<HeadMatch, TypeAssessment> {
         if self.interface.is_none() {
             return Err(TypeAssessment::Pending("open trait head".into()));
         }
@@ -615,6 +638,7 @@ impl ImplementationHead {
             context,
             budget,
             domains,
+            runtime_domains,
             layouts,
         )
     }
@@ -645,6 +669,7 @@ impl ImplementationHead {
             context,
             budget,
             &BTreeMap::new(),
+            &BTreeMap::new(),
             None,
         )
     }
@@ -655,6 +680,7 @@ impl ImplementationHead {
         context: &Context,
         budget: Budget,
         domains: &BTreeMap<DeclarationId, Term>,
+        runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
         layouts: Option<&nir::program::Package>,
     ) -> Result<HeadMatch, TypeAssessment> {
         let remaining = match validate(self, subject, interface_arguments, budget) {
@@ -689,10 +715,12 @@ impl ImplementationHead {
                 && !term.is_symbolic_index_value()
                 && !matches!(
                     term,
-                    Term::Rigid {
-                        sort: Sort::ComptimeValue,
-                        ..
-                    } | Term::RecordValue(_)
+                    Term::Runtime(_)
+                        | Term::Rigid {
+                            sort: Sort::ComptimeValue | Sort::Runtime,
+                            ..
+                        }
+                        | Term::RecordValue(_)
                 )
             {
                 return Err(TypeAssessment::Pending(
@@ -750,6 +778,7 @@ impl ImplementationHead {
                         | Term::Record(_)
                         | Term::Optional(_)
                         | Term::Pointer(_)
+                        | Term::Lift(_)
                         | Term::Function { .. }
                         | Term::ComptimeFunction(_)
                         | Term::NormalFormFunction(..)
@@ -834,6 +863,18 @@ impl ImplementationHead {
             .zip(interface_arguments)
             .enumerate()
         {
+            if template.sort() == Sort::Runtime && actual.sort() == Sort::Runtime {
+                if let (Term::Runtime(expected), Term::Runtime(provided)) = (template, actual) {
+                    if expected != provided {
+                        return Err(TypeAssessment::ValueIndexMismatch {
+                            position,
+                            expected: template.clone(),
+                            actual: actual.clone(),
+                        });
+                    }
+                }
+                continue;
+            }
             if template.sort() != Sort::ComptimeValue || actual.sort() != Sort::ComptimeValue {
                 continue;
             }
@@ -854,6 +895,73 @@ impl ImplementationHead {
             .zip(interface_arguments)
             .enumerate()
         {
+            if template.sort() == Sort::Runtime && actual.sort() == Sort::Runtime {
+                match (template, actual) {
+                    (Term::Runtime(expected), Term::Runtime(provided)) if expected == provided => {
+                        continue;
+                    }
+                    (Term::Runtime(_), Term::Runtime(_)) => {
+                        return Err(TypeAssessment::ValueIndexMismatch {
+                            position,
+                            expected: template.clone(),
+                            actual: actual.clone(),
+                        });
+                    }
+                    (
+                        Term::Rigid {
+                            declaration,
+                            sort: Sort::Runtime,
+                        },
+                        _,
+                    ) => {
+                        let Some(input) = parameters
+                            .iter()
+                            .position(|p| p.declaration == *declaration && p.sort == Sort::Runtime)
+                        else {
+                            return Err(TypeAssessment::Pending(
+                                "runtime dependency index identity is unresolved".into(),
+                            ));
+                        };
+                        let bound = match root.freeze(&types[input]) {
+                            Ok(bound) => bound,
+                            Err(_) => {
+                                let I::Meta(variable) = types[input] else {
+                                    unreachable!()
+                                };
+                                root.assign(variable, I::Stable(actual.clone())).map_err(
+                                    |reason| {
+                                        TypeAssessment::Pending(format!(
+                                            "runtime dependency inference: {reason:?}"
+                                        ))
+                                    },
+                                )?;
+                                actual.clone()
+                            }
+                        };
+                        if bound == *actual {
+                            continue;
+                        }
+                        if matches!(
+                            (&bound, actual),
+                            (Term::Runtime(a), Term::Runtime(b)) if a != b
+                        ) {
+                            return Err(TypeAssessment::ValueIndexMismatch {
+                                position,
+                                expected: bound,
+                                actual: actual.clone(),
+                            });
+                        }
+                        return Err(TypeAssessment::Pending(
+                            "rigid runtime dependency identity is unresolved".into(),
+                        ));
+                    }
+                    _ => {
+                        return Err(TypeAssessment::Pending(
+                            "runtime dependency identity is unresolved".into(),
+                        ));
+                    }
+                }
+            }
             if template.sort() == Sort::ComptimeValue
                 && (actual.is_symbolic_index_value()
                     || matches!(actual, Term::Rigid { declaration, sort: Sort::ComptimeValue } if domains.contains_key(declaration)))
@@ -1169,6 +1277,7 @@ impl ImplementationHead {
                 context,
                 inference_budget,
                 domains,
+                runtime_domains,
                 layouts,
             )? {
                 return Ok(matched);
@@ -1192,11 +1301,12 @@ impl ImplementationHead {
             }
         };
         let mut domain_fuel = budget.steps;
-        validate_head_arguments_with_domains(
+        validate_head_arguments_with_runtime_domains(
             &parameters,
             &self.parameter_types,
             &arguments,
             domains,
+            runtime_domains,
             Some((context, budget.max_depth)),
             layouts,
             &mut domain_fuel,
@@ -1422,12 +1532,13 @@ impl Index {
             context,
             budget,
             |head, allowance| {
-                let assessment = match head.match_types_with_layouts(
+                let assessment = match head.match_types_with_runtime_domains(
                     subject,
                     arguments,
                     context,
                     allowance,
                     &self.parameter_domains,
+                    &self.runtime_domains,
                     Some(&self.nominal_layouts),
                 ) {
                     Ok(matched) => {
@@ -1653,6 +1764,29 @@ impl ImplementationHead {
         domains: &BTreeMap<DeclarationId, Term>,
         layouts: Option<&nir::program::Package>,
     ) -> Result<(), EvidenceError> {
+        self.verify_type_evidence_with_runtime_domains(
+            evidence,
+            subject,
+            interface_arguments,
+            context,
+            budget,
+            domains,
+            &BTreeMap::new(),
+            layouts,
+        )
+    }
+
+    pub fn verify_type_evidence_with_runtime_domains(
+        &self,
+        evidence: &TypeEvidence,
+        subject: &Term,
+        interface_arguments: &[Term],
+        context: &Context,
+        budget: Budget,
+        domains: &BTreeMap<DeclarationId, Term>,
+        runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
+        layouts: Option<&nir::program::Package>,
+    ) -> Result<(), EvidenceError> {
         if self.interface.is_none() {
             return Err(crate::ptc::ProofError::Invalid.into());
         }
@@ -1663,6 +1797,7 @@ impl ImplementationHead {
             context,
             budget,
             domains,
+            runtime_domains,
             layouts,
             |proof, budget| context.verify_proof(proof, budget),
         )
@@ -1700,6 +1835,7 @@ impl ImplementationHead {
             context,
             budget,
             &BTreeMap::new(),
+            &BTreeMap::new(),
             None,
             verify_requirement,
         )
@@ -1726,11 +1862,34 @@ fn validate_head_arguments(
         fuel,
     )
 }
+#[cfg(test)]
 fn validate_head_arguments_with_domains(
     binders: &[nir::DeclarationParameter],
     domains: &[Term],
     arguments: &[Term],
     evidence: &BTreeMap<DeclarationId, Term>,
+    context: Option<(&Context, usize)>,
+    layouts: Option<&nir::program::Package>,
+    fuel: &mut usize,
+) -> Result<(), nir::NominalAdmissionError> {
+    validate_head_arguments_with_runtime_domains(
+        binders,
+        domains,
+        arguments,
+        evidence,
+        &BTreeMap::new(),
+        context,
+        layouts,
+        fuel,
+    )
+}
+
+fn validate_head_arguments_with_runtime_domains(
+    binders: &[nir::DeclarationParameter],
+    domains: &[Term],
+    arguments: &[Term],
+    evidence: &BTreeMap<DeclarationId, Term>,
+    runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
     context: Option<(&Context, usize)>,
     layouts: Option<&nir::program::Package>,
     fuel: &mut usize,
@@ -1756,7 +1915,7 @@ fn validate_head_arguments_with_domains(
             }
             continue;
         }
-        if binder.sort == nir::Sort::ComptimeValue
+        if matches!(binder.sort, nir::Sort::ComptimeValue | nir::Sort::Runtime)
             && *argument
                 == (nir::Term::Rigid {
                     declaration: binder.declaration,
@@ -1768,12 +1927,12 @@ fn validate_head_arguments_with_domains(
         }
         if let Term::Rigid {
             declaration,
-            sort: Sort::ComptimeValue,
+            sort: Sort::ComptimeValue | Sort::Runtime,
         } = argument
         {
             if let Some(actual) = evidence.get(declaration) {
                 nir::type_computations::charge_term(actual, fuel)?;
-                if binder.sort == Sort::ComptimeValue
+                if matches!(binder.sort, Sort::ComptimeValue | Sort::Runtime)
                     && (actual == &domain
                         || match context {
                             Some((context, max_depth)) => {
@@ -1788,14 +1947,15 @@ fn validate_head_arguments_with_domains(
             }
         }
         let mut symbolic = |value: &Term, expected: &Term, fuel: &mut usize| {
-            let Term::Rigid {
-                declaration,
-                sort: Sort::ComptimeValue,
-            } = value
-            else {
-                return Ok(false);
+            let actual = match value {
+                Term::Rigid {
+                    declaration,
+                    sort: Sort::ComptimeValue | Sort::Runtime,
+                } => evidence.get(declaration),
+                Term::Runtime(id) => runtime_domains.get(id),
+                _ => return Ok(false),
             };
-            let Some(actual) = evidence.get(declaration) else {
+            let Some(actual) = actual else {
                 return Ok(false);
             };
             nir::type_computations::charge_term(actual, fuel)?;

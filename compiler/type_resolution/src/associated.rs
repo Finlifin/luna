@@ -798,6 +798,7 @@ impl Normalizer<'_, '_, '_> {
             }
             Term::Optional(inner) => Term::Optional(Box::new(self.normalize(inner, depth + 1)?)),
             Term::Pointer(inner) => Term::Pointer(Box::new(self.normalize(inner, depth + 1)?)),
+            Term::Lift(inner) => Term::Lift(Box::new(self.normalize(inner, depth + 1)?)),
             Term::NormalFormFunction(inner, collector) => {
                 Term::NormalFormFunction(Box::new(self.normalize(inner, depth + 1)?), *collector)
             }

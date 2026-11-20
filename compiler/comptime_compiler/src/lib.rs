@@ -1892,8 +1892,9 @@ fn compile_root<'a>(
                         callee,
                         arguments,
                         parameter_bindings,
+                        env_arguments,
                     } => {
-                        if callee.ty.is_normal_form_callable() {
+                        if callee.ty.is_normal_form_callable() || !env_arguments.is_empty() {
                             return Err(Error::InvalidPreparation(source));
                         }
                         *fuel = fuel

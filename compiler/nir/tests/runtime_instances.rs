@@ -32,6 +32,7 @@ fn function() -> Function {
                 result: Box::new(ty.clone()),
             },
             parameters: vec![LocalId { owner: 1, index: 0 }],
+            env_parameters: vec![],
             defaults: vec![],
         },
         body: Expr {

@@ -729,6 +729,7 @@ fn selected_associated_body_observes_its_domain_once_before_execution() {
             result_guarantees: vec![],
             entry_snapshots: vec![],
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
             signature: Term::Function {
                 parameters: vec![],
@@ -770,6 +771,7 @@ fn selected_associated_body_observes_its_domain_once_before_execution() {
                         kind: K::Function(id(9)),
                     }),
                     arguments: vec![],
+                    env_arguments: vec![],
                     parameter_bindings: vec![],
                 },
             }

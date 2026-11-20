@@ -372,6 +372,7 @@ impl Completion<'_> {
             kind: K::Call {
                 callee: Box::new(callee),
                 arguments,
+                env_arguments: vec![],
                 parameter_bindings,
             },
         };

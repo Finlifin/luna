@@ -2154,6 +2154,7 @@ mod tests {
                     is_default: true,
                 }],
                 parameter_bindings: vec![],
+                env_arguments: vec![],
             },
         };
         let function = Function {
@@ -2179,6 +2180,7 @@ mod tests {
                     result: Box::new(unit.ty.clone()),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body: call(discard.clone()),

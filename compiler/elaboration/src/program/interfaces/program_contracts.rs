@@ -152,6 +152,7 @@ impl Checker<'_, '_> {
                     result: Box::new(p(P::Void)),
                 },
                 parameters: inputs.keys().copied().collect(),
+                env_parameters: vec![],
                 preconditions,
                 postconditions: actual.program.preconditions.clone(),
                 result_binding: None,

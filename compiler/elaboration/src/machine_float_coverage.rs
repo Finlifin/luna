@@ -317,7 +317,8 @@ impl Domain {
                 callee,
                 arguments,
                 parameter_bindings,
-            } if expr.ty == boolean => {
+                env_arguments,
+            } if expr.ty == boolean && env_arguments.is_empty() => {
                 // Keep calls opaque to interval evaluation. Projecting their
                 // scalar inputs does not execute or summarize the callee;
                 // only an empty incoming region can skip this node.
@@ -362,6 +363,7 @@ impl Domain {
                         })
                         .collect::<Result<_, ()>>()?,
                     parameter_bindings: parameter_bindings.clone(),
+                    env_arguments: vec![],
                 }
             }
             K::Let { binding, value } => K::Let {
@@ -478,6 +480,7 @@ mod tests {
                         kind: K::Literal(Literal::String("x".repeat(4096))),
                     },
                 }],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         };

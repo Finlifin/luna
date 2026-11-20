@@ -30,6 +30,7 @@ fn package(width: usize) -> Package {
                     result: Box::new(flag().ty),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 type_parameters: vec![],
                 defaults: vec![],
                 preconditions: vec![],

@@ -245,6 +245,7 @@ mod frame_tests {
                 is_unsafe: false,
                 type_parameters: vec![],
                 parameters: vec![],
+                env_parameters: vec![],
                 signature: Term::Function {
                     parameters: vec![],
                     result: Box::new(Term::Primitive(Primitive::Bool)),
@@ -423,6 +424,7 @@ mod frame_tests {
                 name: "not-retained-by-closure".repeat(10_000),
                 type_parameters: vec![parameter],
                 parameters: vec![],
+                env_parameters: vec![],
                 signature: Term::Function {
                     parameters: vec![],
                     result: Box::new(Term::Primitive(Primitive::Bool)),
@@ -586,6 +588,7 @@ mod frame_tests {
                     is_unsafe: false,
                     type_parameters: vec![parameter],
                     parameters: vec![flag],
+                    env_parameters: vec![],
                     signature: Term::Function {
                         parameters: vec![nir::Parameter {
                             sort: nir::Sort::ComptimeValue,

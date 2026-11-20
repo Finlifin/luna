@@ -103,6 +103,7 @@ fn package(element: Primitive, reads: usize, mode: &str) -> Package {
                 result_guarantees: vec![],
                 entry_snapshots: vec![],
                 parameters,
+                env_parameters: vec![],
                 defaults: vec![],
                 signature: Term::Function {
                     parameters: types,

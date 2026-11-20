@@ -11834,6 +11834,7 @@ fn parameterized_interface_package() -> Package {
             requirements: vec![],
             signature: signature(rigid(12)),
             parameters: vec![parameter],
+            env_parameters: vec![],
             defaults: vec![],
         },
         body: n::Expr {
@@ -11880,6 +11881,7 @@ fn parameterized_interface_package() -> Package {
                 capabilities: vec![],
                 requirements: vec![],
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
                 signature: T::Function {
                     parameters: vec![],
@@ -11911,6 +11913,7 @@ fn parameterized_interface_package() -> Package {
                             kind: K::Literal(literal),
                         },
                     }],
+                    env_arguments: vec![],
                     parameter_bindings: vec![],
                 },
             },
@@ -24143,6 +24146,7 @@ fn generic_trait_reference_phase_checks_method_arguments_separately() {
         ty: boolean.clone(),
         kind: ExprKind::Call {
             callee: Box::new(callee),
+            env_arguments: vec![],
             arguments: vec![CallArgument {
                 passing: Default::default(),
                 parameter: 0,
@@ -26329,6 +26333,7 @@ fn comptime_given_premises_discharge_obligations_without_inventing_dispatch() {
                         },
                     }),
                     arguments: vec![],
+                    env_arguments: vec![],
                     parameter_bindings: vec![],
                 },
             };

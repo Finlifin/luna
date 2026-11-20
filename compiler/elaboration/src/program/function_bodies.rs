@@ -174,6 +174,7 @@ impl Checker<'_, '_> {
                     .map(|parameter| local(parameter.hir_id))
                     .collect()
             },
+            env_parameters: vec![],
             defaults: vec![],
             signature,
         })

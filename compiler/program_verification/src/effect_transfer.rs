@@ -218,6 +218,7 @@ mod transfer_tests {
             kind: K::Call {
                 callee: Box::new(guard),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         });
@@ -403,6 +404,7 @@ mod transfer_tests {
                     }),
                 }),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         };

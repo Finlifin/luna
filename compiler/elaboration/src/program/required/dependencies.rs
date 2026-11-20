@@ -439,6 +439,7 @@ mod tests {
                     result: Box::new(p(P::Bool)),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 type_parameters: vec![],
                 defaults: vec![(0, expr(K::Function(id(3))))],
                 preconditions: vec![expr(K::TraitMethod {

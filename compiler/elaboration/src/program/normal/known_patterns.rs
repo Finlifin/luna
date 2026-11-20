@@ -192,6 +192,7 @@ where
                         Pat::TypeTuple(_),
                         Term::Primitive(_)
                         | Term::Pointer(_)
+                        | Term::Lift(_)
                         | Term::Function { .. }
                         | Term::ComptimeFunction(_)
                         | Term::NormalFormFunction(..)
@@ -288,6 +289,7 @@ where
                     | Term::Tuple(_)
                     | Term::Record(_)
                     | Term::Pointer(_)
+                    | Term::Lift(_)
                     | Term::Function { .. }
                     | Term::ComptimeFunction(_)
                     | Term::NormalFormFunction(..)

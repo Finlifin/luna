@@ -36,6 +36,7 @@ fn function(local: u32) -> Function {
             is_unsafe: false,
             type_parameters: vec![],
             parameters: vec![binding],
+            env_parameters: vec![],
             signature: callable(boolean()),
             requirements: vec![],
             capabilities: vec![],

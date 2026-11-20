@@ -887,6 +887,7 @@ fn subterms(term: &Term) -> Vec<&Term> {
         } => items.iter().collect(),
         Term::Optional(inner)
         | Term::Pointer(inner)
+        | Term::Lift(inner)
         | Term::ComptimeFunction(inner)
         | Term::NormalFormFunction(inner, _)
         | Term::UnsafeFunction(inner) => {
@@ -964,6 +965,7 @@ fn has_bound(term: &Term) -> bool {
         } => items.iter().any(has_bound),
         Term::Optional(inner)
         | Term::Pointer(inner)
+        | Term::Lift(inner)
         | Term::ComptimeFunction(inner)
         | Term::NormalFormFunction(inner, _)
         | Term::UnsafeFunction(inner) => has_bound(inner),
@@ -1091,6 +1093,7 @@ enum Head {
     Primitive(Primitive),
     Optional,
     Pointer,
+    Lift,
     ComptimeFunction,
     NormalFormFunction(Option<usize>),
     UnsafeFunction,
@@ -1104,6 +1107,7 @@ fn constructor(term: &Term) -> Option<Head> {
         Term::Primitive(p) if *p != Primitive::Unit => Some(Head::Primitive(*p)),
         Term::Optional(_) => Some(Head::Optional),
         Term::Pointer(_) => Some(Head::Pointer),
+        Term::Lift(_) => Some(Head::Lift),
         Term::ComptimeFunction(_) => Some(Head::ComptimeFunction),
         Term::NormalFormFunction(_, collector) => Some(Head::NormalFormFunction(*collector)),
         Term::UnsafeFunction(_) => Some(Head::UnsafeFunction),
@@ -1129,6 +1133,7 @@ pub fn distinct_outer_type_heads(left: &Term, right: &Term) -> bool {
         Term::Primitive(_)
         | Term::Optional(_)
         | Term::Pointer(_)
+        | Term::Lift(_)
         | Term::ComptimeFunction(_)
         | Term::NormalFormFunction(..)
         | Term::UnsafeFunction(_)
@@ -1904,6 +1909,7 @@ fn rebuild(
         )),
         Term::Optional(t) => Some(Term::Optional(Box::new(child(t)?))),
         Term::Pointer(t) => Some(Term::Pointer(Box::new(child(t)?))),
+        Term::Lift(t) => Some(Term::Lift(Box::new(child(t)?))),
         Term::ComptimeFunction(t) => Some(Term::ComptimeFunction(Box::new(child(t)?))),
         Term::NormalFormFunction(t, collector) => {
             Some(Term::NormalFormFunction(Box::new(child(t)?), *collector))
@@ -2604,5 +2610,59 @@ mod tuple_classification_tests {
             context.prove(Formula::kind(value, TypeKind::Tuple), Budget::default()),
             Outcome::Entailed(_)
         ));
+    }
+
+    #[test]
+    fn distinct_runtime_identities_and_lift_heads_separate_properly() {
+        let box_head = DeclarationId {
+            package: 82,
+            local: 1,
+        };
+        let alloc_head = DeclarationId {
+            package: 82,
+            local: 2,
+        };
+        let alloc_ty = Term::Nominal {
+            declaration: alloc_head,
+            arguments: vec![],
+        };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let runtime_a = Term::Runtime(nir::RuntimeId {
+            instance: 5,
+            local: 1,
+        });
+        let runtime_b = Term::Runtime(nir::RuntimeId {
+            instance: 5,
+            local: 2,
+        });
+        let box_a = Term::Nominal {
+            declaration: box_head,
+            arguments: vec![boolean.clone(), alloc_ty.clone(), runtime_a.clone()],
+        };
+        let box_b = Term::Nominal {
+            declaration: box_head,
+            arguments: vec![boolean.clone(), alloc_ty, runtime_b],
+        };
+        let mut context = Context::default();
+        context.admit_nominal_constructor(box_head);
+
+        let same_goal = Formula::equal(box_a.clone(), box_a.clone());
+        assert!(matches!(
+            context.prove(same_goal, Budget::default()),
+            Outcome::Entailed(_)
+        ));
+        let diff_eq = Formula::equal(box_a.clone(), box_b.clone());
+        assert!(matches!(
+            context.prove(diff_eq.clone(), Budget::default()),
+            Outcome::NotEntailed(_)
+        ));
+        let Outcome::Entailed(proof) = context.prove(diff_eq.negate(), Budget::default()) else {
+            panic!("distinct RuntimeId arguments should entail inequality");
+        };
+        context.verify_proof(&proof, Budget::default()).unwrap();
+
+        let lift_ptr = Term::Lift(Box::new(Term::Pointer(Box::new(boolean.clone()))));
+        let raw_ptr = Term::Pointer(Box::new(boolean));
+        assert!(distinct_outer_type_heads(&lift_ptr, &raw_ptr));
     }
 }

@@ -169,6 +169,7 @@ mod tests {
                     result_guarantees: vec![],
                     entry_snapshots: vec![],
                     parameters: vec![binding],
+                    env_parameters: vec![],
                     defaults: vec![],
                     signature: Term::Function {
                         parameters: vec![nir::Parameter {

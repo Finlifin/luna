@@ -30,6 +30,7 @@ fn package() -> Arc<Package> {
                         result: Box::new(flag(true).ty),
                     },
                     parameters: vec![],
+                    env_parameters: vec![],
                     type_parameters: vec![],
                     defaults: vec![],
                     preconditions: vec![],
@@ -109,6 +110,7 @@ fn fresh_session_vms_reuse_phase_declarations_and_recheck_each_expression() {
                         ..flag(true)
                     }),
                     arguments: vec![],
+                    env_arguments: vec![],
                     parameter_bindings: vec![],
                 },
                 ..flag(true)

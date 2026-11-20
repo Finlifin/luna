@@ -301,10 +301,21 @@ impl Analyzer<'_, '_, '_, '_> {
                 Ok(paths)
             }
             K::Call {
-                callee, arguments, ..
+                callee,
+                arguments,
+                env_arguments,
+                ..
             } => {
+                if !env_arguments.is_empty() {
+                    return Err(
+                        "effect usage analysis does not yet support runtime environment call arguments"
+                            .into(),
+                    );
+                }
                 let mut paths = self.sequence(
-                    std::iter::once(callee.as_ref()).chain(arguments.iter().map(|a| &a.value)),
+                    std::iter::once(callee.as_ref())
+                        .chain(arguments.iter().map(|a| &a.value))
+                        .chain(env_arguments.iter()),
                     n,
                     fuel,
                     depth,
@@ -488,10 +499,21 @@ impl Analyzer<'_, '_, '_, '_> {
                 self.match_control(value, arms, Some(slots), n, fuel, depth + 1)
             }
             K::Call {
-                callee, arguments, ..
+                callee,
+                arguments,
+                env_arguments,
+                ..
             } => {
+                if !env_arguments.is_empty() {
+                    return Err(
+                        "effect usage analysis does not yet support runtime environment call arguments"
+                            .into(),
+                    );
+                }
                 let mut paths = self.sequence(
-                    std::iter::once(callee.as_ref()).chain(arguments.iter().map(|a| &a.value)),
+                    std::iter::once(callee.as_ref())
+                        .chain(arguments.iter().map(|a| &a.value))
+                        .chain(env_arguments.iter()),
                     n,
                     fuel,
                     depth,

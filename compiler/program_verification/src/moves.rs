@@ -5459,6 +5459,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 kind: K::Call {
                     callee: Box::new(target),
                     arguments: arguments.to_vec(),
+                    env_arguments: vec![],
                     parameter_bindings: bindings,
                 },
             };
@@ -8114,10 +8115,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             callee,
             arguments,
             parameter_bindings,
+            env_arguments,
         } = &expr.kind
         else {
             return Err(error(source, "guard call checker requires a call"));
         };
+        if !env_arguments.is_empty() {
+            return Err(error(
+                source,
+                "guard calls do not yet support runtime environment arguments",
+            ));
+        }
         // A checked region may transfer its private owners. Defaults observe
         // only the prepared frame; the outer observation still protects every
         // caller resource. Owned results require captured cleanup evidence.
@@ -10154,10 +10162,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             callee,
             arguments,
             parameter_bindings,
+            env_arguments,
         } = &expr.kind
         else {
             return None;
         };
+        if !env_arguments.is_empty() {
+            return None;
+        }
         let place = expression_place(callee)?;
         let callable = if place.fields.is_empty() {
             flow.callables.get(&place.root)?
@@ -10190,6 +10202,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             kind: K::Call {
                 callee: Box::new(target),
                 arguments: arguments.clone(),
+                env_arguments: vec![],
                 parameter_bindings: bindings,
             },
         })
@@ -13079,7 +13092,14 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     callee,
                     arguments,
                     parameter_bindings,
+                    env_arguments,
                 } => {
+                    if !env_arguments.is_empty() {
+                        return Err(error(
+                            expr.source,
+                            "move analysis does not yet support runtime environment call arguments",
+                        ));
+                    }
                     if !matches!(
                         callee.kind,
                         K::Local(_)
@@ -13802,6 +13822,12 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
     };
     if parameters.len() != function.parameters.len() {
         return Err(error(source, "parameter signature mismatch"));
+    }
+    if !function.env_parameters.is_empty() {
+        return Err(error(
+            source,
+            "runtime environment parameters require Stage G1b move analysis support",
+        ));
     }
     for (parameter, signature) in function.parameters.iter().zip(parameters) {
         analyzer.declare(&mut flow, *parameter, &signature.ty, source)?;
@@ -16790,6 +16816,7 @@ mod record_shape_tests {
                 declaration,
                 name: "subject".into(),
                 parameters: vec![parameter],
+                env_parameters: vec![],
                 defaults: vec![],
                 signature: Term::Function {
                     parameters,

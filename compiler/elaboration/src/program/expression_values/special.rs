@@ -544,6 +544,24 @@ impl Checker<'_, '_> {
                     kind,
                 }));
             }
+            H::LiftType(inner) => {
+                let inner = self.expr(inner, Some(&p(P::Type)))?;
+                let ty = inner.ty.clone();
+                if let Some(expected) = expected {
+                    self.require_expression(&ty, expected, expr.span)?;
+                }
+                let K::TypeValue(value) = inner.kind else {
+                    return Err(error(
+                        expr.span,
+                        "symbolic lift type expressions are not yet implemented",
+                    ));
+                };
+                return Ok(Some(n::Expr {
+                    source: source(expr.span),
+                    ty,
+                    kind: K::TypeValue(Term::Lift(Box::new(value))),
+                }));
+            }
             H::TyClosure(context, body) => {
                 let H::TyClosureEnvironment(bindings) = &context.kind else {
                     return Err(error(

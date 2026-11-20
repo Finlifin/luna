@@ -26,6 +26,7 @@ fn source() -> n::Package {
                 result_guarantees: vec![],
                 entry_snapshots: vec![],
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
                 signature: Term::Function {
                     parameters: vec![],

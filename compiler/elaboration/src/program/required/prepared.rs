@@ -837,6 +837,7 @@ mod tests {
                         result: Box::new(result_type.clone()),
                     },
                     parameters: vec![],
+                    env_parameters: vec![],
                     defaults: vec![],
                 },
                 body,
@@ -2437,6 +2438,7 @@ mod tests {
                     K::Call {
                         callee: Box::new(expr(callback_type.clone(), K::Local(selector))),
                         arguments: vec![],
+                        env_arguments: vec![],
                         parameter_bindings: vec![],
                     },
                 );

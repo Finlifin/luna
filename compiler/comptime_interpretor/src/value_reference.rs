@@ -690,6 +690,7 @@ mod call_tests {
                     result: Box::new(Term::Primitive(Primitive::Bool)),
                 },
                 parameters: vec![binding],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body: expr(K::Block {
@@ -720,6 +721,7 @@ mod call_tests {
                 is_default: false,
                 passing,
             }],
+            env_arguments: vec![],
             parameter_bindings: target.parameters.clone(),
         })
     }

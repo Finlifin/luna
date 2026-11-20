@@ -37,6 +37,7 @@ fn package(body: Expr) -> Package {
                     result: Box::new(body.ty.clone()),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body,

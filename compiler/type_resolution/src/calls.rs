@@ -134,7 +134,7 @@ impl Scheme {
             || self
                 .parameter_sorts
                 .iter()
-                .any(|sort| !matches!(sort, Sort::Type | Sort::ComptimeValue))
+                .any(|sort| !matches!(sort, Sort::Type | Sort::ComptimeValue | Sort::Runtime))
         {
             return Err(Error::InvalidSignature);
         }
@@ -1078,6 +1078,40 @@ impl CallCandidate {
             .get(index)
             .ok_or(Error::TypeArgumentCount)?
             .clone();
+        if self.parameter_sorts.get(index) == Some(&Sort::Runtime) {
+            let mut fuel = budget.steps;
+            nir::type_computations::charge_term(value, &mut fuel)
+                .map_err(|_| Error::Match(MatchError::BudgetExhausted))?;
+            if value.sort() != Sort::Runtime {
+                return Err(Error::InvalidSignature);
+            }
+            let mut engine = self.engine.trial();
+            engine
+                .check_context_type(value)
+                .map_err(Error::Obligations)?;
+            match engine.inspect(&input).map_err(Error::Obligations)? {
+                I::Meta(variable) => engine
+                    .assign(variable, I::Stable(value.clone()))
+                    .map_err(Error::Obligations)?,
+                retained => {
+                    let retained = engine.inspect_type(&retained).map_err(Error::Obligations)?;
+                    nir::type_computations::charge_term(&retained, &mut fuel)
+                        .map_err(|_| Error::Match(MatchError::BudgetExhausted))?;
+                    if retained != *value {
+                        return Err(Error::InvalidSignature);
+                    }
+                }
+            }
+            engine.advance_metered(
+                fuel,
+                &mut Budget {
+                    steps: fuel,
+                    ..budget
+                },
+            );
+            self.engine = engine;
+            return Ok(());
+        }
         if self.parameter_sorts.get(index) == Some(&Sort::ComptimeValue) {
             let mut fuel = budget.steps;
             nir::type_computations::charge_term(value, &mut fuel)

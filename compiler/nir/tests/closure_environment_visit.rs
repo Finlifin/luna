@@ -73,6 +73,7 @@ fn tree() -> Expr {
                 is_default: true,
             }],
             parameter_bindings: vec![],
+            env_arguments: vec![],
         },
     );
     let handler = expr(

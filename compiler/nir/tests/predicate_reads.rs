@@ -76,6 +76,7 @@ fn associated_predicate_operands_do_not_admit_callable_invocation() {
             callee: Box::new(callable),
             arguments: vec![],
             parameter_bindings: vec![],
+            env_arguments: vec![],
         }
     )));
 }
@@ -410,6 +411,7 @@ fn reconstructed_aggregate_predicates_reject_effectful_fields() {
             )),
             arguments: vec![],
             parameter_bindings: vec![],
+            env_arguments: vec![],
         },
     );
     let write = expr(

@@ -46,6 +46,7 @@ fn package(left: u128, in_default: bool) -> Package {
                     result: Box::new(integer(0).ty),
                 },
                 parameters: if in_default { vec![local] } else { vec![] },
+                env_parameters: vec![],
                 type_parameters: vec![],
                 defaults: if in_default { vec![(0, body)] } else { vec![] },
                 preconditions: vec![],
@@ -144,6 +145,7 @@ fn region_calls_use_the_selected_residual_contract_or_the_imported_declaration()
                     kind: ExprKind::Function(id),
                 }),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
             ..integer(0)

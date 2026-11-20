@@ -896,6 +896,7 @@ impl<'a, 'h> Reads<'a, 'h> {
             | H::Semi(value)
             | H::TyPtr(value)
             | H::TyOptional(value)
+            | H::LiftType(value)
             | H::TakeOld(value)
             | H::TakeBitVec(value)
             | H::TakeTagName(value)

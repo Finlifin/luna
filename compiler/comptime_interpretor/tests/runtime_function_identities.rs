@@ -47,6 +47,7 @@ fn package() -> Package {
                 type_parameters: vec![],
                 signature: signature(callable.clone()),
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body: Expr {
@@ -244,6 +245,7 @@ fn an_identity_cannot_be_called_even_without_the_comptime_entry_gate() {
         kind: K::Call {
             callee: Box::new(callee),
             arguments: vec![],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         },
     };
@@ -406,6 +408,7 @@ fn body_free_trait_method_cannot_execute_or_erase_a_precondition() {
         kind: K::Call {
             callee: Box::new(callee),
             arguments: vec![],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         },
     };
@@ -1293,6 +1296,7 @@ fn comptime_functions_execute_under_either_membership_phase() {
                     },
                 }),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         };
@@ -1364,6 +1368,7 @@ fn dynamic_trait_package() -> Package {
                 },
             }),
             arguments: vec![],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         },
     };
@@ -1594,6 +1599,7 @@ fn dynamic_trait_default_package() -> Package {
         callee,
         arguments,
         parameter_bindings,
+        ..
     } = &mut package.functions[0].body.kind
     else {
         unreachable!()
@@ -1695,6 +1701,7 @@ fn dependent_method_defaults_and_program_contracts_use_the_public_inputs() {
         callee,
         arguments,
         parameter_bindings,
+        ..
     } = &mut package.functions[0].body.kind
     else {
         unreachable!()

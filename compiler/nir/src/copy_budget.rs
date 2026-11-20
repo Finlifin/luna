@@ -634,6 +634,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                 for width in [
                     function.name.len(),
                     function.parameters.len(),
+                    function.env_parameters.len(),
                     function.type_parameters.len(),
                     function.entry_snapshots.len(),
                     function.preconditions.len(),
@@ -646,6 +647,12 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                     charge_width(steps, width)?;
                 }
                 work.push((Node::Type(&function.signature), depth));
+                work.extend(
+                    function
+                        .env_parameters
+                        .iter()
+                        .map(|env| (Node::Type(&env.ty), depth)),
+                );
                 work.extend(
                     function
                         .preconditions
@@ -778,13 +785,20 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         callee,
                         arguments,
                         parameter_bindings,
+                        env_arguments,
                     } => {
                         charge_width(steps, arguments.len())?;
+                        charge_width(steps, env_arguments.len())?;
                         work.push((Node::Expr(callee), depth + 1));
                         work.extend(
                             arguments
                                 .iter()
                                 .map(|argument| (Node::Expr(&argument.value), depth + 1)),
+                        );
+                        work.extend(
+                            env_arguments
+                                .iter()
+                                .map(|argument| (Node::Expr(argument), depth + 1)),
                         );
                         parameter_bindings.len()
                     }

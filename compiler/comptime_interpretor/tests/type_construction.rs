@@ -42,6 +42,7 @@ fn function(local: u32, body: Expr) -> Function {
                 result: Box::new(p(P::Type)),
             },
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
         },
         body,
@@ -103,6 +104,7 @@ fn call(local: u32) -> Expr {
             parameter_bindings: vec![],
             callee: Box::new(expr(signature, K::Function(id(local)))),
             arguments: vec![],
+            env_arguments: vec![],
         },
     )
 }

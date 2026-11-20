@@ -327,6 +327,7 @@ mod delivery_tests {
                 callee: Box::new(identity),
                 arguments: vec![],
                 parameter_bindings: vec![],
+                env_arguments: vec![],
             },
             signature.clone(),
         );
@@ -391,6 +392,7 @@ mod delivery_tests {
                 callee: Box::new(callback),
                 arguments: vec![],
                 parameter_bindings: vec![],
+                env_arguments: vec![],
             },
             signature,
         );

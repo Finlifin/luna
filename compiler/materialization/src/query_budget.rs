@@ -97,6 +97,7 @@ mod tests {
                 is_unsafe: false,
                 type_parameters: vec![],
                 parameters: vec![binding],
+                env_parameters: vec![],
                 defaults: vec![],
                 signature: Term::Function {
                     parameters: vec![nir::Parameter {
@@ -140,6 +141,7 @@ mod tests {
             kind: K::Call {
                 callee: Box::new(callee),
                 parameter_bindings: vec![binding],
+                env_arguments: vec![],
                 arguments: vec![n::CallArgument {
                     passing: n::ArgumentPassing::Value,
                     parameter: 0,

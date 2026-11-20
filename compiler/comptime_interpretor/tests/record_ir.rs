@@ -38,6 +38,7 @@ fn function(local: u32, body: Expr, result: Term) -> Function {
                 result: Box::new(result),
             },
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
         },
         body,
@@ -56,6 +57,7 @@ fn call(local: u32) -> Expr {
                 K::Function(id(local)),
             )),
             arguments: vec![],
+            env_arguments: vec![],
         },
     )
 }

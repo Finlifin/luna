@@ -25,6 +25,7 @@ pub struct ProgramParts<'a> {
     pub(crate) is_unsafe: bool,
     pub type_parameters: &'a [DeclarationId],
     pub parameters: &'a [LocalId],
+    pub env_parameters: &'a [crate::program::RuntimeEnvParameter],
     pub body: Option<&'a Expr>,
     pub source: SourceRange,
     pub(crate) defaults: &'a [(usize, Expr)],
@@ -76,6 +77,7 @@ impl<'a> CallableProgram<'a> {
                 is_unsafe: function.is_unsafe,
                 type_parameters: &function.type_parameters,
                 parameters: &function.parameters,
+                env_parameters: &function.env_parameters,
                 body: None,
                 source: function.source,
                 defaults: &function.defaults,
@@ -141,6 +143,7 @@ impl<'a> CallableProgram<'a> {
                 is_unsafe: false,
                 type_parameters,
                 parameters,
+                env_parameters: &[],
                 body: Some(body),
                 source: body.source,
                 defaults: &[],
@@ -189,6 +192,7 @@ impl<'a> ProgramParts<'a> {
             is_unsafe: method.is_unsafe,
             type_parameters: &method.type_parameters,
             parameters: &method.parameter_bindings,
+            env_parameters: &[],
             body: None,
             source: method.source,
             defaults: &[],
@@ -227,6 +231,12 @@ impl fmt::Display for CallableProgram<'_> {
         f.write_str(") (parameters")?;
         for parameter in self.parts.parameters {
             write!(f, " {parameter}")?;
+        }
+        if !self.parts.env_parameters.is_empty() {
+            f.write_str(") (env-parameters")?;
+            for env in self.parts.env_parameters {
+                write!(f, " {env}")?;
+            }
         }
         f.write_str(") (requires")?;
         for condition in self.parts.preconditions {
@@ -510,6 +520,7 @@ mod tests {
                 }),
                 arguments: vec![],
                 parameter_bindings: vec![],
+                env_arguments: vec![],
             },
             ..flag(71)
         };

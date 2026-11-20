@@ -1369,6 +1369,7 @@ fn substitute_forwarded_expression<'layout>(
             callee,
             arguments,
             parameter_bindings,
+            env_arguments,
         } = &mut expr.kind
         {
             let Term::Function { parameters, .. } = callee.ty.callable_signature() else {
@@ -1386,6 +1387,18 @@ fn substitute_forwarded_expression<'layout>(
                 fuel,
                 depth + 1,
             )?;
+            for env_arg in env_arguments {
+                substitute_forwarded_expression(
+                    heads,
+                    env_arg,
+                    values,
+                    unavailable,
+                    masked,
+                    staged,
+                    fuel,
+                    depth + 1,
+                )?;
+            }
             for argument in arguments {
                 let sort = sorts
                     .get(argument.parameter)
@@ -1489,10 +1502,14 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
         callee,
         arguments,
         parameter_bindings,
+        env_arguments,
     } = &call.kind
     else {
         return Err("staged routing requires a direct call".into());
     };
+    if !env_arguments.is_empty() || !template.env_parameters.is_empty() {
+        return Err("runtime environment parameter delivery is not yet implemented".into());
+    }
     let actual = match &callee.kind {
         K::Function(id) if declaration_arguments.is_empty() => (*id, &[][..]),
         K::FunctionInstance {
@@ -1720,6 +1737,7 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
             // was an indirect call. Publish its remaining parameter frame so
             // resource/default analysis can bind each runtime input uniquely.
             parameter_bindings: function.parameters.clone(),
+            env_arguments: vec![],
         },
     };
     Ok((crate::FunctionInstance { key, function }, result))
@@ -4623,6 +4641,7 @@ mod tests {
                 }),
                 arguments: vec![],
                 parameter_bindings: vec![],
+                env_arguments: vec![],
             },
             Primitive::Bool,
         );

@@ -25,6 +25,7 @@ fn function(local: u32, body: Expr) -> Function {
             is_unsafe: false,
             type_parameters: vec![],
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
             requirements: vec![],
             capabilities: vec![],
@@ -58,6 +59,7 @@ fn package(calls: usize, padding: u32) -> Package {
                 ..value(K::Unit, P::Void)
             }),
             arguments: vec![],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         },
         P::Void,
@@ -219,6 +221,7 @@ fn method_contract_domains_do_not_conflate_budget_with_invalid_inputs() {
                     ..value(K::Unit, P::Void)
                 }),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
             P::Void,

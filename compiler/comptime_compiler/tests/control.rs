@@ -154,6 +154,7 @@ fn invocation_code_distinguishes_normal_form_application() {
                 kind: K::Local(LocalId { owner: 1, index: 0 }),
             }),
             arguments: vec![],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         },
     };
@@ -277,6 +278,7 @@ fn default_templates_are_owned_and_copy_work_is_bounded() {
                     kind: K::Local(LocalId { owner: 1, index: 0 }),
                 }),
                 parameter_bindings: vec![LocalId { owner: 2, index: 0 }],
+                env_arguments: vec![],
                 arguments: vec![nir::program::CallArgument {
                     passing: nir::program::ArgumentPassing::Value,
                     parameter: 0,
@@ -337,6 +339,7 @@ fn reference_dump_preserves_field_ownership_and_rebind_permission() {
                     },
                 },
             }],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         },
     };

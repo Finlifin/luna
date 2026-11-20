@@ -40,6 +40,7 @@ fn declaration() -> FunctionDeclaration {
             result: Box::new(boolean()),
         },
         parameters: (0..3).map(binding).collect(),
+        env_parameters: vec![],
         defaults: vec![(1, local(0)), (2, local(1))],
         preconditions: vec![],
         postconditions: vec![],

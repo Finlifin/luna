@@ -232,6 +232,7 @@ impl<'a> Search<'a> {
                         | (Term::BFloat16(_), Term::BFloat16(_))
                         | (Term::Float32(_), Term::Float32(_))
                         | (Term::Float64(_), Term::Float64(_))
+                        | (Term::Runtime(_), Term::Runtime(_))
                 ) {
                     return Ok(Relation::Different);
                 }

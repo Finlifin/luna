@@ -721,6 +721,7 @@ mod tests {
                 K::Call {
                     callee: Box::new(expr(signature.clone(), K::Local(local(0)))),
                     arguments: vec![],
+                    env_arguments: vec![],
                     parameter_bindings: vec![],
                 },
             )

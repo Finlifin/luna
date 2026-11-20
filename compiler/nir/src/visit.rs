@@ -806,15 +806,20 @@ fn walk_mut(
                     }
                     K::Return(value) => extend!(work, fuel, value.as_deref_mut().map(Node::Expr)),
                     K::Call {
-                        callee, arguments, ..
+                        callee,
+                        arguments,
+                        env_arguments,
+                        ..
                     } => {
                         work::charge_entries(fuel, arguments.len())?;
+                        work::charge_entries(fuel, env_arguments.len())?;
                         push!(work, fuel, Node::Expr(callee));
                         extend!(
                             work,
                             fuel,
                             arguments.iter_mut().map(|a| Node::Expr(&mut a.value))
                         );
+                        extend!(work, fuel, env_arguments.iter_mut().map(Node::Expr));
                     }
                     K::WritePointer {
                         pointer: a,

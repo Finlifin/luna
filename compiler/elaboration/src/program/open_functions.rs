@@ -1265,6 +1265,7 @@ impl Checker<'_, '_> {
                 | H::Defer(value)
                 | H::TyPtr(value)
                 | H::TyOptional(value)
+                | H::LiftType(value)
                 | H::Unary(_, value)
                 | H::Projection(value, _)
                 | H::Ref(value)
@@ -2075,6 +2076,7 @@ impl Checker<'_, '_> {
                                 result: Box::new(result_type),
                             },
                             parameters: bindings,
+                            env_parameters: vec![],
                             defaults: vec![],
                             type_parameters: this.type_parameters[&owner].clone(),
                             preconditions,
@@ -2612,7 +2614,7 @@ impl Checker<'_, '_> {
                 }
                 expected.unwrap().clone()
             }
-            H::TyPtr(inner) | H::TyOptional(inner) => {
+            H::TyPtr(inner) | H::TyOptional(inner) | H::LiftType(inner) => {
                 self.describe_open_expression(
                     inner,
                     locals,
@@ -7561,6 +7563,7 @@ impl Checker<'_, '_> {
             kind: K::Call {
                 callee: Box::new(callee),
                 arguments,
+                env_arguments: vec![],
                 parameter_bindings: sig
                     .params
                     .iter()
@@ -7827,6 +7830,7 @@ impl Checker<'_, '_> {
                     .iter()
                     .map(|parameter| local(parameter.hir_id))
                     .collect(),
+                env_parameters: vec![],
                 preconditions,
                 postconditions,
                 entry_snapshots,

@@ -254,7 +254,7 @@ fn layout_at(
             }
             pointer_layout(world, ty)
         }
-        Term::ComptimeFunction(_) | Term::NormalFormFunction(..) => {
+        Term::ComptimeFunction(_) | Term::NormalFormFunction(..) | Term::Lift(_) => {
             Err(LayoutError::ComptimeOnly(ty.clone()))
         }
         Term::Optional(payload) => {
@@ -681,6 +681,16 @@ mod tests {
             compute_layout(&world, &link, &mut fuel),
             Ok(TypeLayout { size: 24, align: 8 })
         );
+        assert!(matches!(
+            compute_layout(
+                &world,
+                &Term::Lift(Box::new(Term::Pointer(Box::new(Term::Primitive(
+                    Primitive::U32
+                ))))),
+                &mut fuel,
+            ),
+            Err(LayoutError::ComptimeOnly(_))
+        ));
 
         // Mutual by-value cycle A -> B -> A must fail cleanly.
         let a = Term::Nominal {

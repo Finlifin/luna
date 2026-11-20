@@ -56,6 +56,7 @@ impl Checker<'_, '_> {
                         result: Box::new(p(P::Void)),
                     },
                     parameters: vec![],
+                    env_parameters: vec![],
                     type_parameters: vec![],
                     requirements: vec![],
                     capabilities: vec![],

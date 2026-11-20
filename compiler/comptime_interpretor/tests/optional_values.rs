@@ -51,6 +51,7 @@ fn function(local: u32, body: Expr) -> Function {
                 result: Box::new(body.ty.clone()),
             },
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
         },
         body,
@@ -119,6 +120,7 @@ fn optional_injection_invokes_payload_once_and_host_admission_rejects_forged_val
             parameter_bindings: vec![],
             callee: Box::new(expr(signature, K::Function(id(1)))),
             arguments: vec![],
+            env_arguments: vec![],
         },
     );
     let package = Package {
@@ -175,6 +177,7 @@ fn invalid_optional_construction_rejects_before_evaluating_payload() {
             parameter_bindings: vec![],
             callee: Box::new(expr(signature, K::Function(id(1)))),
             arguments: vec![],
+            env_arguments: vec![],
         },
     );
     let package = Package {

@@ -333,6 +333,9 @@ impl Package {
         use nir::program::ExprKind as K;
         for instance in &self.functions {
             self.validate_type(&links, &instance.function.signature, fuel)?;
+            for env in &instance.function.env_parameters {
+                self.validate_type(&links, &env.ty, fuel)?;
+            }
             nir::call_safety::validate(&instance.function, fuel)?;
             if instance.function.is_unsafe && self.roots.contains(&instance.key) {
                 return Err("unsafe entry requires an explicit safe wrapper".into());

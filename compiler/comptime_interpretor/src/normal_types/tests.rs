@@ -1765,6 +1765,7 @@ fn dynamic_normal_calls_compile_and_preserve_order_plan_checks_and_identity() {
             K::Call {
                 callee: Box::new(callee.clone()),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         );

@@ -73,10 +73,17 @@ pub(super) fn complete_inputs<C>(
         callee,
         arguments,
         parameter_bindings,
+        env_arguments,
     } = &expression.kind
     else {
         return Ok(());
     };
+    if !env_arguments.is_empty() {
+        return Err(
+            "conditional call input completion does not yet support runtime environment arguments"
+                .into(),
+        );
+    }
     if !matches!(
         callee.kind,
         K::If { .. } | K::Match { .. } | K::Block { .. } | K::CallPreparation { .. }
@@ -168,10 +175,17 @@ impl Builder<'_> {
             callee,
             arguments,
             parameter_bindings,
+            env_arguments,
         } = &expression.kind
         else {
             return Ok(());
         };
+        if !env_arguments.is_empty() {
+            return Err(
+                "conditional callable resolution does not yet support runtime environment arguments"
+                    .into(),
+            );
+        }
         if matches!(
             callee.kind,
             K::Match { .. } | K::Block { .. } | K::CallPreparation { .. }
@@ -221,6 +235,7 @@ impl Builder<'_> {
                 callee: unwrap_target(then_branch.clone()),
                 arguments: arguments.clone(),
                 parameter_bindings: parameter_bindings.clone(),
+                env_arguments: vec![],
             },
         });
         let source_end = sources.len();
@@ -234,6 +249,7 @@ impl Builder<'_> {
             callee,
             arguments,
             parameter_bindings,
+            ..
         } = std::mem::replace(&mut expression.kind, K::Unit)
         else {
             unreachable!()
@@ -254,6 +270,7 @@ impl Builder<'_> {
                     callee: unwrap_target(callee),
                     arguments,
                     parameter_bindings,
+                    env_arguments: vec![],
                 },
             })
         };
@@ -281,10 +298,16 @@ fn resolve_scoped_callable(
         callee,
         arguments,
         parameter_bindings,
+        env_arguments,
     } = &expression.kind
     else {
         unreachable!()
     };
+    if !env_arguments.is_empty() {
+        return Err(
+            "scoped callable resolution does not yet support runtime environment arguments".into(),
+        );
+    }
     let Term::Function { parameters, .. } = callee.ty.callable_signature() else {
         return Ok(());
     };
@@ -339,6 +362,7 @@ fn resolve_scoped_callable(
                 kind: K::Call {
                     callee: Box::new(target),
                     arguments: arguments.clone(),
+                    env_arguments: vec![],
                     parameter_bindings: vec![],
                 },
             };
@@ -499,6 +523,7 @@ mod tests {
                     }),
                 }),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         }]);
@@ -531,6 +556,7 @@ mod tests {
                     }),
                 }),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         };
@@ -581,6 +607,7 @@ mod tests {
                         value: producer(parameter as u32),
                     })
                     .collect(),
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         };

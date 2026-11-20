@@ -87,6 +87,7 @@ mod tests {
                     result: Box::new(Term::Primitive(P::Void)),
                 },
                 parameters: vec![binding],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body: Expr {

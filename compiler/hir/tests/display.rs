@@ -748,6 +748,7 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             "ty-optional",
             vec![("type", &b_tree)],
         ),
+        (ExprKind::LiftType(&b), "lift", vec![("type", &b_tree)]),
         (ExprKind::TyFn(&typarams), "ty-fn", vec![]),
         (
             ExprKind::TyModifiedFn(
@@ -827,7 +828,7 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![("value", &a_tree)],
         ),
     ];
-    assert_eq!(cases.len(), 87);
+    assert_eq!(cases.len(), 88);
     for (kind, tag, children) in cases {
         let tree = parsed(&kind);
         assert_eq!(tree.tag(), tag);

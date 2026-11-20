@@ -80,7 +80,10 @@ fn predicate_shape(
         }
         match &expr.kind {
             ExprKind::Call {
-                callee, arguments, ..
+                callee,
+                arguments,
+                env_arguments,
+                ..
             } if calls => {
                 pending.push(callee);
                 queue(
@@ -88,6 +91,7 @@ fn predicate_shape(
                     arguments.iter().map(|argument| &argument.value),
                     remaining,
                 )?;
+                queue(&mut pending, env_arguments.iter(), remaining)?;
             }
             ExprKind::Function(_)
             | ExprKind::FunctionInstance { .. }

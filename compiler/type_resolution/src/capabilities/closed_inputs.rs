@@ -61,7 +61,7 @@ fn closed(
         Term::Record(fields) | Term::RecordValue(fields) => {
             fields.iter().map(|(_, ty)| ty).collect()
         }
-        Term::Optional(inner) | Term::Pointer(inner) => vec![inner],
+        Term::Optional(inner) | Term::Pointer(inner) | Term::Lift(inner) => vec![inner],
         Term::Function { parameters, result } => parameters
             .iter()
             .map(|p| &p.ty)

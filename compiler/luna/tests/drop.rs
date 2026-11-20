@@ -398,6 +398,7 @@ fn guard_defaults_cannot_read_a_later_unprepared_parameter() {
             callee,
             arguments,
             parameter_bindings,
+            ..
         } = &mut expr.kind
         {
             if matches!(callee.kind,nir::program::ExprKind::Function(id) if id==target) {
@@ -13388,6 +13389,7 @@ fn computed_capture_initializers_preserve_evaluated_callable_evidence() {
             kind: K::Call {
                 callee: Box::new(callee),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         };

@@ -47,6 +47,7 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
             Term::Record(fields) | Term::RecordValue(fields) => fields.len(),
             Term::Optional(_)
             | Term::Pointer(_)
+            | Term::Lift(_)
             | Term::ComptimeFunction(_)
             | Term::NormalFormFunction(..)
             | Term::UnsafeFunction(_) => 1,
@@ -92,6 +93,7 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
             }
             Term::Optional(inner)
             | Term::Pointer(inner)
+            | Term::Lift(inner)
             | Term::ComptimeFunction(inner)
             | Term::NormalFormFunction(inner, _)
             | Term::UnsafeFunction(inner) => children.push(inner),
@@ -750,6 +752,7 @@ fn value_in<'a, 'd>(
             callee,
             arguments,
             parameter_bindings,
+            env_arguments,
         } => {
             let K::Closure {
                 parameters,
@@ -760,6 +763,7 @@ fn value_in<'a, 'd>(
                 return Err("completed value cannot invoke a declaration".into());
             };
             if !arguments.is_empty()
+                || !env_arguments.is_empty()
                 || !parameter_bindings.is_empty()
                 || !parameters.is_empty()
                 || !captures.is_empty()

@@ -56,6 +56,7 @@ fn nested_bindings(layers: u32) -> Function {
                 result: Box::new(boolean),
             },
             parameters: vec![],
+            env_parameters: vec![],
             type_parameters: vec![],
             defaults: vec![],
             preconditions: vec![],

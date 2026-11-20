@@ -1028,6 +1028,15 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     span,
                 }
             }
+            NodeKind::LiftType => {
+                let inner = self.lower_expr(ExprContext::Type, children[0]);
+                let inner_ref = self.arena.alloc_expr(inner);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::LiftType(inner_ref),
+                    span,
+                }
+            }
             NodeKind::ClosureQualifiedType => {
                 let context = self.lower_expr(ExprContext::Type, children[0]);
                 let body = self.lower_expr(ExprContext::Type, children[1]);

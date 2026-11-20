@@ -51,6 +51,7 @@ fn fixture(repeat: bool) -> (Arc<Program>, Environment) {
                 kind: K::Local(function),
             }),
             arguments: vec![],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         },
     };

@@ -528,6 +528,7 @@ mod tests {
                         result: Box::new(Term::Primitive(Primitive::Bool)),
                     },
                     parameters: vec![],
+                    env_parameters: vec![],
                     defaults: vec![],
                 },
                 body: body.clone(),

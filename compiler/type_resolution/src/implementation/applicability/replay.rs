@@ -12,6 +12,7 @@ impl ImplementationHead {
         context: &Context,
         budget: Budget,
         domains: &BTreeMap<DeclarationId, Term>,
+        runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
         layouts: Option<&nir::program::Package>,
         mut verify_requirement: impl FnMut(
             &crate::ptc::Proof,
@@ -39,11 +40,12 @@ impl ImplementationHead {
             .parameter_binders()
             .map_err(|error| QueryError::Invalid(error.to_string()))?;
         let mut domain_fuel = remaining;
-        validate_head_arguments_with_domains(
+        validate_head_arguments_with_runtime_domains(
             &parameters,
             &self.parameter_types,
             &evidence.type_arguments,
             domains,
+            runtime_domains,
             Some((context, budget.max_depth)),
             layouts,
             &mut domain_fuel,
@@ -96,7 +98,8 @@ impl ImplementationHead {
         for (template, actual) in self.interface_arguments.iter().zip(interface_arguments) {
             let template = substitution.instantiate_bounded(template, &mut domain_fuel)?;
             if template == *actual
-                && matches!(actual, Term::Rigid { declaration, sort: Sort::ComptimeValue } if domains.contains_key(declaration))
+                && (matches!(actual, Term::Rigid { declaration, sort: Sort::ComptimeValue | Sort::Runtime } if domains.contains_key(declaration))
+                    || matches!(actual, Term::Runtime(id) if runtime_domains.contains_key(id)))
             {
                 continue;
             }

@@ -928,6 +928,12 @@ impl Builder<'_> {
             self.world
                 .instantiate_function(f, &arguments, &mut self.fuel)?
         };
+        if !function.env_parameters.is_empty() {
+            return Err(format!(
+                "function `{}` has runtime environment parameters requiring Stage G1b materialization",
+                function.name
+            ));
+        }
         if function.phase == n::FunctionPhase::Comptime
             && matches!(function.signature.callable_signature(), Term::Function { parameters, .. }
                 if parameters.iter().any(|parameter| parameter.sort != nir::Sort::Runtime))
@@ -1874,8 +1880,15 @@ impl Builder<'_> {
             callee,
             arguments,
             parameter_bindings,
+            env_arguments,
         } = &mut expression.kind
         {
+            if !env_arguments.is_empty() {
+                return Err(
+                    "runtime environment call arguments require Stage G1b materialization support"
+                        .into(),
+                );
+            }
             if let K::TraitMethod {
                 interface,
                 interface_arguments,
@@ -3564,7 +3577,10 @@ impl Builder<'_> {
                 }
             }
             K::Call {
-                callee, arguments, ..
+                callee,
+                arguments,
+                env_arguments,
+                ..
             } => {
                 if self.instances.is_none()
                     && matches!(callee.ty.callable_signature(), Term::Function { parameters, .. }
@@ -3584,6 +3600,9 @@ impl Builder<'_> {
                 self.expr(callee, depth + 1, comptime)?;
                 for a in arguments {
                     self.expr(&a.value, depth + 1, comptime)?;
+                }
+                for arg in env_arguments {
+                    self.expr(arg, depth + 1, comptime)?;
                 }
             }
             K::WritePointer {

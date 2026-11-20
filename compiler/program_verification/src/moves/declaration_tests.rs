@@ -33,6 +33,7 @@ fn function(local: u32, body: Expr) -> Function {
             is_unsafe: false,
             type_parameters: vec![],
             parameters: vec![],
+            env_parameters: vec![],
             signature: signature(body.ty.clone()),
             requirements: vec![],
             capabilities: vec![],
@@ -151,6 +152,7 @@ fn returned_callable_retains_dependent_inputs() {
             K::Call {
                 callee: Box::new(callee),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         ),

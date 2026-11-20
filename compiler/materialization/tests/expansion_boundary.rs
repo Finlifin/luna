@@ -206,6 +206,7 @@ fn fixture() -> (n::Package, iir::InstanceKey) {
             result_guarantees: vec![],
             entry_snapshots: vec![],
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
             signature: Term::Function {
                 parameters: vec![],
@@ -401,6 +402,7 @@ fn retained_source_reuses_the_directory_but_rebuilds_each_instance_graph() {
             kind: n::ExprKind::Function(id(900)),
         }),
         arguments: vec![],
+        env_arguments: vec![],
         parameter_bindings: vec![],
     };
     let changed = DeclarationSnapshot::new(changed);
@@ -824,6 +826,7 @@ fn dispatch_closes_transitive_calls_without_a_source_provider() {
             kind: n::ExprKind::Function(id(99)),
         }),
         arguments: vec![],
+        env_arguments: vec![],
         parameter_bindings: vec![],
     };
     assert!(
@@ -881,6 +884,7 @@ fn dispatch_roots_do_not_visit_unrelated_function_bodies() {
             kind: n::ExprKind::Function(id(99)),
         }),
         arguments: vec![],
+        env_arguments: vec![],
         parameter_bindings: vec![],
     };
     package.functions.push(unrelated);

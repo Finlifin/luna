@@ -2049,6 +2049,7 @@ fn function_specialization_covers_contracts_defaults_and_preserves_local_identit
                 result: Box::new(ty.clone()),
             },
             parameters: vec![local],
+            env_parameters: vec![],
             defaults: vec![(0, expression)],
             preconditions: vec![predicate.clone()],
             postconditions: vec![predicate],
@@ -2929,4 +2930,61 @@ fn incremental_binding_preserves_phase_variadics_and_retained_indices() {
             suffix.unwrap_or_else(|| bound(0, 0, Sort::ComptimeValue))
         );
     }
+}
+
+#[test]
+fn lift_domain_and_runtime_interning_preserve_sort_and_identity() {
+    let inner = Term::Pointer(Box::new(primitive(Primitive::U32)));
+    let lift_ty = Term::Lift(Box::new(inner.clone()));
+    assert_eq!(lift_ty.sort(), Sort::Type);
+    assert_eq!(Sort::of_comptime_domain(&lift_ty), Sort::Runtime);
+    assert_eq!(lift_ty.to_string(), "(lift (pointer (primitive u32)))");
+    assert!(lift_ty.check_scope(&[]).is_ok());
+
+    let scoped_lift = Term::Lift(Box::new(Term::Pointer(Box::new(bound(0, 0, Sort::Type)))));
+    assert!(scoped_lift.check_scope(&[]).is_err());
+    assert!(scoped_lift.check_scope(&[vec![Sort::Type]]).is_ok());
+
+    for kind in [
+        TypeKind::Boolean,
+        TypeKind::Symbol,
+        TypeKind::Integer,
+        TypeKind::SignedInteger,
+        TypeKind::UnsignedInteger,
+        TypeKind::FloatingPoint,
+        TypeKind::Tuple,
+        TypeKind::Pointer,
+        TypeKind::Function,
+    ] {
+        assert_eq!(kind.evaluate(&lift_ty), Some(false), "{kind}");
+    }
+
+    let id_a = RuntimeId {
+        instance: 10,
+        local: 1,
+    };
+    let id_b = RuntimeId {
+        instance: 10,
+        local: 2,
+    };
+    let body_a = Term::Nominal {
+        declaration: SENSOR,
+        arguments: vec![primitive(Primitive::Bool), Term::Runtime(id_a)],
+    };
+    let body_b = Term::Nominal {
+        declaration: SENSOR,
+        arguments: vec![primitive(Primitive::Bool), Term::Runtime(id_b)],
+    };
+    let mut interner = TypeInterner::default();
+    let ref_a = interner
+        .abstract_runtime(&body_a, &[(id_a, lift_ty.clone())])
+        .unwrap();
+    let ref_b = interner
+        .abstract_runtime(&body_b, &[(id_b, lift_ty)])
+        .unwrap();
+    assert!(Arc::ptr_eq(ref_a.core(), ref_b.core()));
+    assert_eq!(interner.len(), 1);
+    assert_ne!(ref_a, ref_b);
+    assert_eq!(ref_a.arguments(), &[Term::Runtime(id_a)]);
+    assert_eq!(ref_b.arguments(), &[Term::Runtime(id_b)]);
 }

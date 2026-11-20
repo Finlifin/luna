@@ -131,6 +131,7 @@ fn function(declaration: u32, result: Term, body: Expr) -> Function {
             result_guarantees: vec![],
             entry_snapshots: vec![],
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
             signature: Term::Function {
                 parameters: vec![],
@@ -167,6 +168,7 @@ fn fixture(direct: bool) -> (Package, Expr) {
             K::Call {
                 callee: Box::new(method),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         )
@@ -230,6 +232,7 @@ fn fixture(direct: bool) -> (Package, Expr) {
                         K::Function(id(9)),
                     )),
                     arguments: vec![],
+                    env_arguments: vec![],
                     parameter_bindings: vec![],
                 },
             ))),

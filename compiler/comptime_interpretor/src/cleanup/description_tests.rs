@@ -138,6 +138,7 @@ fn cleanup_effect_index_preserves_typed_failures_and_publishes_only_a_complete_m
             requirements: vec![],
             type_parameters: vec![],
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
             signature: Term::Function {
                 parameters: vec![],

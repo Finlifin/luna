@@ -88,6 +88,7 @@ fn main() {
                             result: Box::new(boolean),
                         },
                         parameters,
+                        env_parameters: vec![],
                         defaults: vec![],
                     },
                     body,

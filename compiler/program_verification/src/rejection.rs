@@ -627,6 +627,7 @@ mod tests {
         expr(K::Call {
             callee: Box::new(callee(local)),
             arguments: vec![],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         })
     }
@@ -666,6 +667,7 @@ mod tests {
                     result: Box::new(Term::Primitive(Primitive::Void)),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body,
@@ -897,6 +899,7 @@ mod tests {
         expr(K::Call {
             callee: Box::new(generic_callee(local, vec![argument])),
             arguments: vec![],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         })
     }

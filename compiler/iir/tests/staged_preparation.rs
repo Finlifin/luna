@@ -66,6 +66,7 @@ fn call(callee: Expr, values: Vec<Expr>, ty: Term) -> Expr {
                     is_default: false,
                 })
                 .collect(),
+            env_arguments: vec![],
             parameter_bindings: vec![],
         },
         ty,

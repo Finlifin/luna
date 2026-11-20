@@ -158,6 +158,7 @@ fn explicit_call_inputs_never_use_the_defaults_parameter_frame() {
             },
         ],
         parameter_bindings: vec![id(1), id(2)],
+        env_arguments: vec![],
     });
     assert_eq!(result(&call), vec![id(1)]);
     let K::Call { arguments, .. } = &mut call.kind else {

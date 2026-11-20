@@ -46,6 +46,7 @@ fn call(declaration: u32) -> Expr {
             kind: K::Function(id(declaration)),
         }),
         arguments: vec![],
+        env_arguments: vec![],
         parameter_bindings: vec![],
     })
 }
@@ -69,6 +70,7 @@ fn function(local: u32, body: Expr) -> Function {
             result_guarantees: vec![],
             entry_snapshots: vec![],
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
             signature: Term::Function {
                 parameters: vec![],

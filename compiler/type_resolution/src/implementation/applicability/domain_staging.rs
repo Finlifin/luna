@@ -12,6 +12,7 @@ impl ImplementationHead {
         context: &Context,
         mut budget: Budget,
         domains: &BTreeMap<DeclarationId, Term>,
+        runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
         layouts: Option<&nir::program::Package>,
     ) -> Result<Option<HeadMatch>, TypeAssessment> {
         let pending = |error: String| TypeAssessment::Pending(error);
@@ -62,11 +63,7 @@ impl ImplementationHead {
                 &mut budget.steps,
             )
             .map_err(computation)?;
-            let sort = if domain == Term::Primitive(nir::Primitive::Type) {
-                Sort::Type
-            } else {
-                Sort::ComptimeValue
-            };
+            let sort = Sort::of_comptime_domain(&domain);
             if let Some(position) = known_by_position[index] {
                 nir::type_computations::charge_term(&known[position], &mut budget.steps)
                     .map_err(computation)?;
@@ -147,6 +144,7 @@ impl ImplementationHead {
             context,
             next_budget,
             domains,
+            runtime_domains,
             layouts,
         )?;
         for (index, value) in unresolved.iter().zip(&matched.evidence.type_arguments) {
@@ -184,6 +182,7 @@ impl ImplementationHead {
                 context,
                 budget,
                 domains,
+                runtime_domains,
                 layouts,
                 |proof, budget| context.verify_proof(proof, budget),
             )

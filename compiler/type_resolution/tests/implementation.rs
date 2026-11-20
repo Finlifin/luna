@@ -4242,3 +4242,142 @@ fn candidates_metered_subindexes_concrete_subjects_and_arguments_while_preservin
     assert!(open_iface.declarations().contains(&other_decl));
     assert!(open_iface.declarations().contains(&blanket_decl));
 }
+
+#[test]
+fn drop_impl_selects_and_verifies_runtime_allocator_dependency_domain() {
+    use nir::RuntimeId;
+    use type_resolution::implementation::{Selection, TypeAssessment};
+    use type_resolution::ptc::Context;
+
+    let drop_iface = id(710);
+    let box_decl = id(711);
+    let my_alloc_decl = id(712);
+    let other_alloc_decl = id(713);
+    let impl_decl = id(714);
+    let t_param = id(715);
+    let a_param = id(716);
+    let alloc_param = id(717);
+
+    let my_alloc = Term::Nominal {
+        declaration: my_alloc_decl,
+        arguments: vec![],
+    };
+    let other_alloc = Term::Nominal {
+        declaration: other_alloc_decl,
+        arguments: vec![],
+    };
+    let drop_head = ImplementationHead {
+        declaration: impl_decl,
+        interface: Some(drop_iface),
+        subject: Term::Nominal {
+            declaration: box_decl,
+            arguments: vec![
+                var(t_param.local),
+                var(a_param.local),
+                Term::Rigid {
+                    declaration: alloc_param,
+                    sort: Sort::Runtime,
+                },
+            ],
+        },
+        type_parameters: vec![t_param, a_param, alloc_param],
+        parameter_types: vec![
+            Term::Primitive(P::Type),
+            Term::Primitive(P::Type),
+            Term::Lift(Box::new(Term::Pointer(Box::new(var(a_param.local))))),
+        ],
+        interface_arguments: vec![],
+        requirements: vec![],
+    };
+
+    let rt_good = RuntimeId {
+        instance: 12,
+        local: 1,
+    };
+    let rt_unregistered = RuntimeId {
+        instance: 12,
+        local: 2,
+    };
+    let rt_wrong_alloc = RuntimeId {
+        instance: 12,
+        local: 3,
+    };
+    let lift_my_alloc = Term::Lift(Box::new(Term::Pointer(Box::new(my_alloc.clone()))));
+    let lift_other_alloc = Term::Lift(Box::new(Term::Pointer(Box::new(other_alloc))));
+
+    let mut index = Index::default();
+    index.insert(drop_head.clone(), Budget::default()).unwrap();
+    index
+        .register_runtime_domain(rt_good, lift_my_alloc.clone())
+        .unwrap();
+    index
+        .register_runtime_domain(rt_wrong_alloc, lift_other_alloc)
+        .unwrap();
+    // Conflicting runtime domain registration must be rejected cleanly.
+    assert!(
+        index
+            .register_runtime_domain(
+                rt_good,
+                Term::Lift(Box::new(Term::Pointer(Box::new(Term::Nominal {
+                    declaration: other_alloc_decl,
+                    arguments: vec![],
+                })))),
+            )
+            .is_err()
+    );
+
+    let mut context = Context::default();
+    context.admit_nominal_constructor(box_decl);
+    context.admit_nominal_constructor(my_alloc_decl);
+    context.admit_nominal_constructor(other_alloc_decl);
+
+    let box_subject = |rt: RuntimeId| Term::Nominal {
+        declaration: box_decl,
+        arguments: vec![ty(P::I32), my_alloc.clone(), Term::Runtime(rt)],
+    };
+
+    let good_subject = box_subject(rt_good);
+    let selected = index
+        .resolve_types(drop_iface, &[], &good_subject, &context, Budget::default())
+        .unwrap();
+    assert_eq!(
+        selected.selection,
+        Selection::Selected(impl_decl),
+        "{selected}"
+    );
+    let TypeAssessment::Applicable(evidence) = &selected.assessments[&impl_decl] else {
+        panic!("expected Applicable evidence: {selected}");
+    };
+    assert_eq!(
+        evidence.type_arguments,
+        vec![ty(P::I32), my_alloc.clone(), Term::Runtime(rt_good)]
+    );
+    drop_head
+        .verify_type_evidence_with_runtime_domains(
+            evidence,
+            &good_subject,
+            &[],
+            &context,
+            Budget::default(),
+            &std::collections::BTreeMap::new(),
+            index.runtime_domains(),
+            None,
+        )
+        .unwrap();
+
+    for bad_rt in [rt_unregistered, rt_wrong_alloc] {
+        let bad_subject = box_subject(bad_rt);
+        let rejected = index
+            .resolve_types(drop_iface, &[], &bad_subject, &context, Budget::default())
+            .unwrap();
+        assert_ne!(
+            rejected.selection,
+            Selection::Selected(impl_decl),
+            "{rejected}"
+        );
+        assert!(
+            matches!(rejected.assessments[&impl_decl], TypeAssessment::Invalid(_)),
+            "{rejected}"
+        );
+    }
+}

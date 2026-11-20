@@ -112,6 +112,27 @@ fn validate_value(
     *fuel = fuel.checked_sub(1).ok_or(Error::Budget)?;
     if matches!(
         argument,
+        Term::Runtime(_)
+            | Term::Rigid {
+                sort: Sort::Runtime,
+                ..
+            }
+            | Term::Bound {
+                sort: Sort::Runtime,
+                ..
+            }
+    ) {
+        if !matches!(domain, Term::Lift(_)) {
+            return Err("runtime dependency index requires a lift domain".into());
+        }
+        return if (queries.declared)(argument, domain, fuel)? {
+            Ok(())
+        } else {
+            Err("runtime dependency index lacks matching completed domain evidence".into())
+        };
+    }
+    if matches!(
+        argument,
         Term::Rigid {
             sort: Sort::ComptimeValue,
             ..

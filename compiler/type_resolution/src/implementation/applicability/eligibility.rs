@@ -79,6 +79,7 @@ pub(super) fn eligible_shape(context: &Context, ty: &Term) -> bool {
             | Term::Record(_)
             | Term::Optional(_)
             | Term::Pointer(_)
+            | Term::Lift(_)
             | Term::Function { .. }
             | Term::ComptimeFunction(_)
             | Term::NormalFormFunction(..)

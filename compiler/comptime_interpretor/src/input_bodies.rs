@@ -240,6 +240,7 @@ mod tests {
                     pure: false,
                     is_unsafe: false,
                     type_parameters: vec![],
+                    env_parameters: vec![],
                     defaults: vec![],
                     postconditions: vec![],
                     result_binding: None,

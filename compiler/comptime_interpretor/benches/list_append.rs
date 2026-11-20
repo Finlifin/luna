@@ -81,6 +81,7 @@ fn base_package(element: Primitive) -> Package {
                 result_guarantees: vec![],
                 entry_snapshots: vec![],
                 parameters,
+                env_parameters: vec![],
                 defaults: vec![],
                 signature: Term::Function {
                     parameters: types,
@@ -214,6 +215,7 @@ fn package(
                 is_default: false,
                 passing: ArgumentPassing::ComptimeReference,
             }],
+            env_arguments: vec![],
             parameter_bindings: writer.parameters.clone(),
         },
     );

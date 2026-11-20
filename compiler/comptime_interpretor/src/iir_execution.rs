@@ -492,6 +492,7 @@ mod callable_budget_tests {
                         is_unsafe: false,
                         type_parameters: vec![],
                         parameters: vec![],
+                        env_parameters: vec![],
                         signature: Term::Function {
                             parameters: vec![],
                             result: Box::new(Term::Primitive(Primitive::Bool)),

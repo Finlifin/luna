@@ -55,6 +55,7 @@ pub fn llvm_ir_discarding_result(
                 kind: K::Function(selected),
             }),
             arguments: vec![],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         },
     };
@@ -82,6 +83,7 @@ pub fn llvm_ir_discarding_result(
             requirements: vec![],
             capabilities: vec![],
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
             signature: Term::Function {
                 parameters: vec![],

@@ -179,6 +179,7 @@ impl Engine<'_> {
                 | Term::UnsafeFunction(_)
                 | Term::Closure { .. }
                 | Term::Pointer { .. }
+                | Term::Lift(_)
         ) {
             return Ok(ty.clone());
         }

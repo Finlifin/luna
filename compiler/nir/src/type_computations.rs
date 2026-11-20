@@ -151,6 +151,7 @@ fn entry_with_bound_locals(
                 result: Box::new(result),
             },
             parameters,
+            env_parameters: vec![],
             defaults: vec![],
         },
         body,
@@ -268,7 +269,10 @@ impl Invocation {
             }
         }
         let K::Call {
-            callee, arguments, ..
+            callee,
+            arguments,
+            env_arguments,
+            ..
         } = &call.kind
         else {
             return Err(Error::UnsupportedExpression(call.source));
@@ -277,7 +281,10 @@ impl Invocation {
             return Err(Error::UnsupportedExpression(callee.source));
         };
         bounded(&callee.ty, fuel)?;
-        if !callee.ty.is_comptime_callable() || call.ty != Term::Primitive(crate::Primitive::Type) {
+        if !callee.ty.is_comptime_callable()
+            || !env_arguments.is_empty()
+            || call.ty != Term::Primitive(crate::Primitive::Type)
+        {
             return Err(Error::InvalidCall(call.source));
         }
         let Term::Function { parameters, result } = callee.ty.callable_signature() else {

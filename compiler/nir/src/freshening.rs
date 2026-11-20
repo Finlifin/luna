@@ -143,6 +143,7 @@ impl n::Rewriter for Renamer<'_> {
                 callee,
                 arguments,
                 parameter_bindings,
+                env_arguments,
             } => {
                 self.ty(&mut expression.ty)?;
                 callee.rewrite_with(self)?;
@@ -158,6 +159,9 @@ impl n::Rewriter for Renamer<'_> {
                     } else {
                         argument.value.rewrite_with(self)?;
                     }
+                }
+                for env_arg in env_arguments {
+                    env_arg.rewrite_with(self)?;
                 }
                 return Ok(false);
             }

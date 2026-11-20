@@ -82,6 +82,7 @@ macro_rules! visit_children {
             }
             Self::Optional(inner)
             | Self::Pointer(inner)
+            | Self::Lift(inner)
             | Self::ComptimeFunction(inner)
             | Self::NormalFormFunction(inner, _)
             | Self::UnsafeFunction(inner) => $visit(inner)?,

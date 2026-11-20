@@ -215,6 +215,7 @@ impl Checker<'_, '_> {
                 kind: K::Call {
                     callee: Box::new(callee),
                     arguments: vec![],
+                    env_arguments: vec![],
                     parameter_bindings: vec![],
                 },
             })

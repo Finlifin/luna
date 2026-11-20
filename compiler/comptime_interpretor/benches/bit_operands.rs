@@ -99,6 +99,7 @@ fn fixture(arity: usize, repeats: usize) -> Package {
                 result_guarantees: vec![],
                 entry_snapshots: vec![],
                 parameters: vec![INPUT],
+                env_parameters: vec![],
                 defaults: vec![],
                 signature: Term::Function {
                     parameters: vec![Parameter {

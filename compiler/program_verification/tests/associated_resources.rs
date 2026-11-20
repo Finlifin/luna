@@ -38,6 +38,7 @@ fn function(body: Expr) -> Function {
             result_guarantees: vec![],
             entry_snapshots: vec![],
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
             signature: Term::Function {
                 parameters: vec![],

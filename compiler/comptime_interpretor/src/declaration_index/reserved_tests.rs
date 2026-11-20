@@ -95,6 +95,7 @@ fn source() -> Arc<Package> {
                 result_guarantees: vec![],
                 entry_snapshots: vec![],
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
                 signature: signature(),
             },

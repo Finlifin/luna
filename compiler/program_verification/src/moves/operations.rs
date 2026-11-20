@@ -651,7 +651,14 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 callee,
                 arguments,
                 parameter_bindings,
+                env_arguments,
             } => {
+                if !env_arguments.is_empty() {
+                    return Err(error(
+                        source,
+                        "move analysis does not yet support runtime environment call arguments",
+                    ));
+                }
                 if self.defer_unknown_calls
                     && !matches!(callee.kind, K::Local(_))
                     && expression_place(callee).is_some()
@@ -784,6 +791,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         kind: K::Call {
                             callee: Box::new(selected),
                             arguments: arguments.clone(),
+                            env_arguments: vec![],
                             parameter_bindings: parameter_bindings.clone(),
                         },
                     };

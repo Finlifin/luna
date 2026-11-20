@@ -62,6 +62,7 @@ fn declaration() -> FunctionDeclaration {
             result: Box::new(generic()),
         },
         parameters: vec![binding(0)],
+        env_parameters: vec![],
         defaults: vec![(0, expression(generic(), ExprKind::Local(binding(3))))],
     }
 }
@@ -140,5 +141,82 @@ fn declaration_display_preserves_contracts_and_escapes_names_without_a_body() {
         assert!(dump.contains(field), "{field}: {dump}");
     }
     assert!(!dump.contains("(body "), "{dump}");
+    assert!(!dump.contains("(env-parameters "), "{dump}");
     assert_eq!(dump, header.to_string());
+}
+
+#[test]
+fn env_parameters_and_call_env_arguments_substitute_and_display() {
+    use nir::program::RuntimeEnvParameter;
+    let mut header = declaration();
+    header.phase = FunctionPhase::Runtime;
+    header.env_parameters.push(RuntimeEnvParameter {
+        declaration: id(4),
+        binding: binding(4),
+        ty: Term::Pointer(Box::new(generic())),
+    });
+    let dump = header.to_string();
+    assert!(dump.contains("(env-parameters (env-param "), "{dump}");
+
+    let concrete = Term::Primitive(P::U32);
+    let instantiated = header
+        .instantiate_parameters(
+            &[DeclarationParameter {
+                declaration: id(2),
+                sort: Sort::Type,
+            }],
+            std::slice::from_ref(&concrete),
+        )
+        .unwrap();
+    assert_eq!(
+        instantiated.env_parameters,
+        vec![RuntimeEnvParameter {
+            declaration: id(4),
+            binding: binding(4),
+            ty: Term::Pointer(Box::new(concrete.clone())),
+        }]
+    );
+
+    let env_arg = expression(
+        Term::Pointer(Box::new(concrete.clone())),
+        ExprKind::Local(binding(5)),
+    );
+    let empty_call = expression(
+        concrete.clone(),
+        ExprKind::Call {
+            callee: Box::new(expression(
+                Term::Function {
+                    parameters: vec![],
+                    result: Box::new(concrete.clone()),
+                },
+                ExprKind::Function(id(10)),
+            )),
+            arguments: vec![],
+            parameter_bindings: vec![],
+            env_arguments: vec![],
+        },
+    );
+    assert!(
+        !empty_call.to_string().contains("(env-arguments "),
+        "{empty_call}"
+    );
+    let with_env_call = expression(
+        concrete.clone(),
+        ExprKind::Call {
+            callee: Box::new(expression(
+                Term::Function {
+                    parameters: vec![],
+                    result: Box::new(concrete),
+                },
+                ExprKind::Function(id(10)),
+            )),
+            arguments: vec![],
+            parameter_bindings: vec![],
+            env_arguments: vec![env_arg],
+        },
+    );
+    assert!(
+        with_env_call.to_string().contains("(env-arguments "),
+        "{with_env_call}"
+    );
 }

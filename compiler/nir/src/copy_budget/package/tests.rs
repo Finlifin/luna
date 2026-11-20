@@ -46,6 +46,7 @@ fn function() -> n::Function {
                 result: Box::new(boolean()),
             },
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
         },
         body: expr(),

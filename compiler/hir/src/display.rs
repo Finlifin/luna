@@ -878,6 +878,7 @@ impl Display for ExprKind<'_> {
             }
             Self::TyPtr(ty) => form!(f, "ty-ptr", "type" => ty),
             Self::TyOptional(ty) => form!(f, "ty-optional", "type" => ty),
+            Self::LiftType(ty) => form!(f, "lift", "type" => ty),
             Self::TyComptimeFn(params) => form!(f, "ty-comptime-fn", "params" => List(params)),
             Self::TyFn(params) => form!(f, "ty-fn", "params" => List(params)),
             Self::TyModifiedFn(modifiers, params) => {

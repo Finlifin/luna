@@ -507,6 +507,7 @@ fn graph_for_list(body: Expr) -> iir::Package {
                         result: Box::new(body.ty.clone()),
                     },
                     parameters: vec![],
+                    env_parameters: vec![],
                     defaults: vec![],
                     type_parameters: vec![],
                     requirements: vec![],

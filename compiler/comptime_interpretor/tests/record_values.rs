@@ -52,6 +52,7 @@ fn identity(ty: Term) -> Package {
                     result: Box::new(ty.clone()),
                 },
                 parameters: vec![binding],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body: Expr {

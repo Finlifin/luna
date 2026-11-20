@@ -60,6 +60,7 @@ fn main() {
                         requirements: vec![],
                         capabilities: vec![],
                         parameters: vec![LocalId { owner: 1, index: 0 }],
+                        env_parameters: vec![],
                         defaults: vec![],
                         signature: Term::Function {
                             parameters: vec![Parameter {
@@ -96,6 +97,7 @@ fn main() {
                             nir::program::ArgumentPassing::Value
                         },
                     }],
+                    env_arguments: vec![],
                     parameter_bindings: package.functions[0].parameters.clone(),
                 },
             );

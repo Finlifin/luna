@@ -64,6 +64,7 @@ impl Checker<'_, '_> {
                     is_unsafe: false,
                     signature: ty.callable_signature().clone(),
                     parameters: bindings,
+                    env_parameters: vec![],
                     defaults: vec![],
                     type_parameters: vec![],
                     requirements: vec![],

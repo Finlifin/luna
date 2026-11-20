@@ -38,6 +38,7 @@ fn package(body: Expr) -> Package {
                     result: Box::new(Term::Primitive(P::Bool)),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body,

@@ -206,6 +206,7 @@ impl Checker<'_, '_> {
                 | H::Block(_)
                 | H::TyPtr(_)
                 | H::TyOptional(_)
+                | H::LiftType(_)
                 | H::TyFn(_)
                 | H::TyComptimeFn(_)
                 | H::TyFnArrow(..)

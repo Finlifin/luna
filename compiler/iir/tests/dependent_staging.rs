@@ -70,6 +70,7 @@ fn dependent_inputs_rebind_body_contracts_defaults_and_trait_arguments() {
                 result: Box::new(t.clone()),
             },
             parameters: vec![id(0), id(1), id(2)],
+            env_parameters: vec![],
             defaults: vec![(2, expr(K::Local(id(1)), t.clone()))],
             preconditions: vec![observation.clone()],
             postconditions: vec![observation],
@@ -165,6 +166,7 @@ fn dependent_default_values_receive_concrete_types_before_evaluation_or_runtime_
                     result: Box::new(t.clone()),
                 },
                 parameters: vec![id(0), id(1), id(2)],
+                env_parameters: vec![],
                 defaults: vec![(2, expr(K::Local(id(1)), t.clone()))],
                 preconditions: vec![],
                 postconditions: vec![],
@@ -202,6 +204,7 @@ fn dependent_default_values_receive_concrete_types_before_evaluation_or_runtime_
                         is_default: parameter == 2,
                     })
                     .collect(),
+                env_arguments: vec![],
                 parameter_bindings: template.parameters.clone(),
             },
             p(Primitive::Bool),
@@ -316,6 +319,7 @@ fn dependent_defaults_do_not_recharge_unrelated_completed_payloads() {
                 result: Box::new(t.clone()),
             },
             parameters: bindings.clone(),
+            env_parameters: vec![],
             defaults: defaults.clone(),
             preconditions: vec![],
             postconditions: vec![],
@@ -364,6 +368,7 @@ fn dependent_defaults_do_not_recharge_unrelated_completed_payloads() {
                 template.signature.clone(),
             )),
             arguments,
+            env_arguments: vec![],
             parameter_bindings: bindings,
         },
         p(Primitive::Bool),
@@ -443,6 +448,7 @@ fn dependent_type_value_domains_rebind_body_and_contracts_compositionally() {
                 result: Box::new(p(Primitive::Type)),
             },
             parameters: vec![id(0), id(1)],
+            env_parameters: vec![],
             defaults: vec![],
             preconditions: vec![expr(
                 K::TypeEqual(

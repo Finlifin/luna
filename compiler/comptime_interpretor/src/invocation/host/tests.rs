@@ -115,6 +115,7 @@ fn fixture(two: bool, nested: bool) -> Value {
                     K::Call {
                         callee: Box::new(expr(signature, K::Local(local(0)))),
                         arguments: vec![],
+                        env_arguments: vec![],
                         parameter_bindings: vec![],
                     },
                 ),

@@ -118,6 +118,7 @@ fn fixture() -> (n::Expr, n::LocalId, Term) {
         K::Call {
             callee: Box::new(expr(K::Local(binding), signature.clone())),
             parameter_bindings: vec![],
+            env_arguments: vec![],
             arguments: vec![n::CallArgument {
                 passing: Default::default(),
                 parameter: 0,

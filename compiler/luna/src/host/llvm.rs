@@ -282,6 +282,7 @@ fn repr_at(
             }
             Ok(Ty::Pointer)
         }
+        Term::Lift(_) => Err("comptime-only lift type has no runtime representation".into()),
         Term::Nominal { .. } => {
             if !checked {
                 return Err(
@@ -1230,10 +1231,16 @@ impl Emitter<'_> {
             callee,
             arguments,
             parameter_bindings,
+            env_arguments,
         } = &expr.kind
         else {
             unreachable!()
         };
+        if !env_arguments.is_empty() {
+            return Err(
+                "LLVM lowering does not yet support runtime environment call arguments".into(),
+            );
+        }
         // The target expression runs once, before any argument effects.
         let function = self.expr(callee, depth)?;
         if self.terminated {
@@ -2386,6 +2393,12 @@ pub(super) fn emit_with_result_output(
     let mut bodies = Vec::new();
     for (index, instance) in graph.functions.iter().enumerate() {
         let f = &instance.function;
+        if !f.env_parameters.is_empty() {
+            return Err(format!(
+                "LLVM lowering does not yet support runtime environment parameters in `{}`",
+                f.name
+            ));
+        }
         bodies.push((
             format!("flurry_{index}"),
             &f.signature,

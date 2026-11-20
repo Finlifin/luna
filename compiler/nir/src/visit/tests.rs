@@ -106,6 +106,7 @@ fn metadata_scans_are_bounded_even_without_expression_children() {
             WIDTH
         ],
         parameter_bindings: vec![],
+        env_arguments: vec![],
     });
     assert!(expression_in_scope(&call, &mut 8, |_, _| Ok(())).is_err());
     let mut visits = 0;
@@ -169,6 +170,7 @@ fn excluded_function_defaults_leave_the_root_budget_untouched() {
             name: "scope".into(),
             signature: Term::Primitive(Primitive::Void),
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![(0, expr(K::Tuple(vec![expr(K::Unit); 8]))); WIDTH],
         },
         body: expr(K::Unit),

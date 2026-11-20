@@ -335,6 +335,7 @@ impl<'a> Walk<'a> {
                 callee,
                 arguments,
                 parameter_bindings,
+                env_arguments,
             } => {
                 if !arguments.is_empty() {
                     self.tasks.push(Step::Call(Box::new(Call {
@@ -343,6 +344,7 @@ impl<'a> Walk<'a> {
                         environment: Environment::default(),
                     })));
                 }
+                self.sequence(env_arguments, Step::Expr, fuel)?;
                 self.tasks.push(Step::Expr(callee));
             }
             K::NominalType { .. }

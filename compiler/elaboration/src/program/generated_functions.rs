@@ -146,6 +146,7 @@ mod tests {
             is_unsafe: false,
             type_parameters: vec![],
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
             capabilities: vec![],
             requirements: vec![],

@@ -1035,6 +1035,7 @@ mod sequential_computation_tests {
                     kind: K::Local(LocalId { owner: 9, index: 0 }),
                 }),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             })
         };

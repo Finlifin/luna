@@ -70,6 +70,7 @@ fn residual_list_capture_retains_nested_domains_bindings_and_effect_boundaries()
                 value,
             }],
             parameter_bindings: vec![local],
+            env_arguments: vec![],
         },
     };
     for (ty, element, sort) in [
@@ -392,6 +393,7 @@ fn capture_rejects_ambiguous_routes_unknown_bindings_and_effectful_operands() {
                 LocalId { owner: 2, index: 0 },
                 LocalId { owner: 2, index: 1 },
             ],
+            env_arguments: vec![],
         },
     };
     let plan = Invocation::from_call(&call, &captures, &mut 100).unwrap();
@@ -965,6 +967,7 @@ fn exact_float_capture_preserves_decimal_identity_and_checks_domain_and_budget()
                 },
             }],
             parameter_bindings: vec![LocalId { owner: 2, index: 0 }],
+            env_arguments: vec![],
         },
     };
     let a = Invocation::from_call(

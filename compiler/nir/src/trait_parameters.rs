@@ -365,11 +365,7 @@ impl Trait {
             }
             result.push(DeclarationParameter {
                 declaration: *declaration,
-                sort: if *domain == Term::Primitive(Primitive::Type) {
-                    Sort::Type
-                } else {
-                    Sort::ComptimeValue
-                },
+                sort: Sort::of_comptime_domain(domain),
             });
         }
         Ok(result)
@@ -638,7 +634,7 @@ impl Trait {
                     |value, expected, fuel| {
                         let Term::Rigid {
                             declaration,
-                            sort: Sort::ComptimeValue,
+                            sort: Sort::ComptimeValue | Sort::Runtime,
                         } = value
                         else {
                             return Ok(false);
@@ -681,7 +677,7 @@ impl Trait {
                                 |value, expected, fuel| {
                                     let Term::Rigid {
                                         declaration,
-                                        sort: Sort::ComptimeValue,
+                                        sort: Sort::ComptimeValue | Sort::Runtime,
                                     } = value
                                     else {
                                         return Ok(false);
@@ -701,7 +697,7 @@ impl Trait {
                         }
                         let Term::Rigid {
                             declaration,
-                            sort: Sort::ComptimeValue,
+                            sort: Sort::ComptimeValue | Sort::Runtime,
                         } = value
                         else {
                             return Ok(false);
@@ -744,7 +740,7 @@ impl Trait {
                 }
                 Term::Rigid {
                     declaration,
-                    sort: Sort::ComptimeValue,
+                    sort: Sort::ComptimeValue | Sort::Runtime,
                 } => declared_value_domain(*declaration, declarations, domains, scope, fuel)?,
                 _ => return Err("trait value argument requires declared domain evidence".into()),
             };
@@ -768,7 +764,7 @@ fn declared_value_domain(
         let binders = owner.parameter_binders_checked(fuel)?;
         for (slot, binder) in binders.iter().enumerate() {
             if binder.declaration == declaration {
-                if found.is_some() || binder.sort != Sort::ComptimeValue {
+                if found.is_some() || binder.sort == Sort::Type {
                     return Err("ambiguous or mismatched trait value declaration".into());
                 }
                 crate::type_computations::charge_term(&owner.parameter_types[slot], fuel)?;

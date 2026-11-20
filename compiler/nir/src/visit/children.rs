@@ -318,9 +318,13 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
             }
             K::Return(value) => extend!(work, fuel, value.as_deref().map(Node::Expr)),
             K::Call {
-                callee, arguments, ..
+                callee,
+                arguments,
+                env_arguments,
+                ..
             } => {
                 work::charge_entries(fuel, arguments.len())?;
+                work::charge_entries(fuel, env_arguments.len())?;
                 push!(work, fuel, Node::Expr(callee));
                 extend!(
                     work,
@@ -330,6 +334,7 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
                         .filter(|a| include_defaults || !a.is_default)
                         .map(|a| Node::Expr(&a.value)),
                 );
+                extend!(work, fuel, env_arguments.iter().map(Node::Expr));
             }
             K::WritePointer {
                 pointer: a,

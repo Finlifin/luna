@@ -62,6 +62,7 @@ fn package() -> Package {
                 is_unsafe: false,
                 type_parameters: vec![],
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
                 requirements: vec![],
                 capabilities: vec![],
@@ -185,6 +186,7 @@ fn weakening_observes_all_effective_callee_contracts_in_either_method_order() {
                 kind: ExprKind::Function(id(13)),
             }),
             arguments: vec![],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         },
         ..boolean(true)

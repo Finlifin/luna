@@ -15,6 +15,17 @@ pub(super) fn validate(
         return Err("IIR runtime function has no callable signature".into());
     };
     let frames = vec![parameters.iter().map(|p| p.sort).collect()];
+    for env in &function.env_parameters {
+        nir::phases::validate_runtime_storage_with_nominals(
+            &env.ty, metadata, &frames, resolve, fuel,
+        )
+        .map_err(|message| {
+            format!(
+                "IIR runtime environment storage in {} at {}: {message}",
+                function.name, function.source
+            )
+        })?;
+    }
     let mut roots = vec![&function.body];
     roots.extend(&function.preconditions);
     roots.extend(&function.postconditions);
@@ -43,7 +54,10 @@ pub(super) fn validate(
             })?;
             match &expression.kind {
                 K::Call {
-                    callee, arguments, ..
+                    callee,
+                    arguments,
+                    env_arguments,
+                    ..
                 } => {
                     let Term::Function { parameters, .. } = callee.ty.callable_signature() else {
                         return Err("IIR call has no callable signature".into());
@@ -59,6 +73,7 @@ pub(super) fn validate(
                             roots.push(&argument.value);
                         }
                     }
+                    roots.extend(env_arguments.iter());
                     Ok(false)
                 }
                 K::TypeEqual(left, right)

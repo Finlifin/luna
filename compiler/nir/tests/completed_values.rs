@@ -63,6 +63,7 @@ fn frozen() -> Expr {
             )),
             arguments: vec![],
             parameter_bindings: vec![],
+            env_arguments: vec![],
         },
     )
 }
@@ -392,6 +393,7 @@ fn completed_error_payloads_validate_domains_and_remain_closed() {
                         )),
                         arguments: vec![],
                         parameter_bindings: vec![],
+                        env_arguments: vec![],
                     },
                 )),
             },

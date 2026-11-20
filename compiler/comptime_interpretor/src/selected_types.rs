@@ -382,6 +382,7 @@ fn normalize(
             Term::Optional(Box::new(normalize(inner, values, fuel, depth + 1)?))
         }
         Term::Pointer(inner) => Term::Pointer(Box::new(normalize(inner, values, fuel, depth + 1)?)),
+        Term::Lift(inner) => Term::Lift(Box::new(normalize(inner, values, fuel, depth + 1)?)),
         Term::NormalFormFunction(inner, collector) => Term::NormalFormFunction(
             Box::new(normalize(inner, values, fuel, depth + 1)?),
             *collector,

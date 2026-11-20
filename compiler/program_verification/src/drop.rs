@@ -364,6 +364,7 @@ pub fn select(
     if function.phase != FunctionPhase::Runtime
         || actual != signature(subject.clone())
         || function.parameters.len() != 1
+        || !function.env_parameters.is_empty()
         || !function.defaults.is_empty()
     {
         return Err("Drop selected body does not implement runtime fn drop(*self) -> void".into());

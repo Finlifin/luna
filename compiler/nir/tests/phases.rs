@@ -39,6 +39,7 @@ fn function(local: u32, phase: Phase, inputs: &[Sort]) -> Function {
                     index: index as u32,
                 })
                 .collect(),
+            env_parameters: vec![],
             type_parameters: vec![],
             defaults: vec![],
             preconditions: vec![],
@@ -89,6 +90,7 @@ fn normal_form_values_require_matching_metadata_and_comptime_storage() {
             callee: Box::new(callee),
             arguments: vec![],
             parameter_bindings: vec![],
+            env_arguments: vec![],
         },
     };
     application.functions[0].signature = Term::Function {
@@ -268,6 +270,7 @@ fn call(target: &Function, arguments: Vec<(usize, Expr)>) -> Expr {
             })
             .collect(),
         parameter_bindings: target.parameters.clone(),
+        env_arguments: vec![],
     })
 }
 

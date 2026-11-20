@@ -2258,7 +2258,9 @@ impl Checker<'_, '_> {
                         pending.push((result, depth + 1));
                     }
                 }
-                Term::Optional(inner) | Term::Pointer(inner) => pending.push((inner, depth + 1)),
+                Term::Optional(inner) | Term::Pointer(inner) | Term::Lift(inner) => {
+                    pending.push((inner, depth + 1))
+                }
                 Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_) => {}
                 Term::Closure {
                     environment,
@@ -2315,9 +2317,18 @@ impl Checker<'_, '_> {
                         K::AddressOf(_) | K::Assign { .. } | K::Call { .. }
                     );
                     if let K::Call {
-                        callee, arguments, ..
+                        callee,
+                        arguments,
+                        env_arguments,
+                        ..
                     } = &expr.kind
                     {
+                        if !env_arguments.is_empty() {
+                            return Err(
+                                "code generator call cannot pass runtime environment arguments"
+                                    .into(),
+                            );
+                        }
                         if callee.ty.is_comptime_callable() != comptime {
                             return Err("code generator computation calls a function in the wrong execution phase".into());
                         }

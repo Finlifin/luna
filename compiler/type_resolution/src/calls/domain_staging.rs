@@ -136,11 +136,7 @@ impl Scheme {
                 let domain = substitution
                     .instantiate_bounded(&domains[index], &mut budget.steps)
                     .map_err(computation)?;
-                sorts[index] = if domain == Term::Primitive(nir::Primitive::Type) {
-                    Sort::Type
-                } else {
-                    Sort::ComptimeValue
-                };
+                sorts[index] = Sort::of_comptime_domain(&domain);
                 if matches!(domain, Term::Bound { depth: 0, .. }) {
                     dependent_value_parameters.push(index);
                 }

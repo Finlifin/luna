@@ -69,6 +69,7 @@ fn fixture(domain: Term, argument: Term) -> n::Package {
                 is_unsafe: false,
                 type_parameters: vec![],
                 parameters: vec![],
+                env_parameters: vec![],
                 signature: Term::Function {
                     parameters: vec![],
                     result: Box::new(boolean()),
@@ -500,6 +501,7 @@ fn staged_associated_fixture(second_associated_on_body: bool) -> n::Package {
                         owner: 11,
                         index: 0,
                     }],
+                    env_parameters: vec![],
                     signature: bool_param_sig(body_result),
                     defaults: vec![],
                     preconditions: vec![],
@@ -524,6 +526,7 @@ fn staged_associated_fixture(second_associated_on_body: bool) -> n::Package {
                     is_unsafe: false,
                     type_parameters: vec![],
                     parameters: vec![],
+                    env_parameters: vec![],
                     signature: Term::Function {
                         parameters: vec![],
                         result: Box::new(boolean()),
@@ -556,6 +559,7 @@ fn staged_associated_fixture(second_associated_on_body: bool) -> n::Package {
                             value: expr(n::ExprKind::Literal(n::Literal::Bool(true)), boolean()),
                             is_default: false,
                         }],
+                        env_arguments: vec![],
                         parameter_bindings: vec![n::LocalId {
                             owner: 20,
                             index: 0,
@@ -755,6 +759,7 @@ fn staged_callable_with_dependent_and_closed_associated_types_retains_only_close
                     ],
                     result: Box::new(assoc_term(boolean())),
                 },
+                env_parameters: vec![],
                 defaults: vec![],
                 preconditions: vec![],
                 postconditions: vec![],

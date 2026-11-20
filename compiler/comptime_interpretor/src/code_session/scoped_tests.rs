@@ -57,6 +57,7 @@ fn source() -> Arc<Package> {
                     result: Box::new(flag().ty),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 type_parameters: vec![],
                 defaults: vec![],
                 preconditions: vec![],
@@ -236,6 +237,7 @@ fn direct_source_entries_check_closed_capabilities_without_a_formation_receipt()
                                 ..flag()
                             }),
                             arguments: vec![],
+                            env_arguments: vec![],
                             parameter_bindings: vec![],
                         },
                         ..flag()

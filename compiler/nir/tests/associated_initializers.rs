@@ -46,6 +46,7 @@ fn call(comptime: bool) -> Expr {
             )),
             arguments: vec![],
             parameter_bindings: vec![],
+            env_arguments: vec![],
         },
     )
 }

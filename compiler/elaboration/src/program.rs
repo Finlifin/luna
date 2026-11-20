@@ -1942,6 +1942,7 @@ fn match_default_strategy_term(
         }
         (Term::Optional(a), Term::Optional(b))
         | (Term::Pointer(a), Term::Pointer(b))
+        | (Term::Lift(a), Term::Lift(b))
         | (Term::ComptimeFunction(a), Term::ComptimeFunction(b))
         | (Term::UnsafeFunction(a), Term::UnsafeFunction(b)) => {
             match_default_strategy_term(a, b, params, bindings, fuel)
@@ -3740,6 +3741,7 @@ impl Checker<'_, '_> {
             | H::TyNoReturn
             | H::TyPtr(_)
             | H::TyOptional(_)
+            | H::LiftType(_)
             | H::TyClosure(..)
             | H::TyFn(_)
             | H::TyComptimeFn(_)
@@ -4194,6 +4196,7 @@ impl Checker<'_, '_> {
             H::TyNoReturn => Ok(p(P::Never)),
             H::TyOptional(inner) => Ok(Term::Optional(Box::new(self.type_expr(inner)?))),
             H::TyPtr(inner) => Ok(Term::Pointer(Box::new(self.type_expr(inner)?))),
+            H::LiftType(inner) => Ok(Term::Lift(Box::new(self.type_expr(inner)?))),
             H::Tuple(_) => Err(error(
                 expr.span,
                 "a parenthesized tuple is a value, not a type; use Tuple<...> to construct a tuple type",
@@ -6055,6 +6058,7 @@ impl Checker<'_, '_> {
                     },
                 }),
                 arguments,
+                env_arguments: vec![],
                 parameter_bindings: declarations
                     .iter()
                     .map(|param| local(param.hir_id))

@@ -24,6 +24,7 @@ fn function(local: u32, phase: Phase) -> Function {
                 result: Box::new(Term::Primitive(Primitive::Bool)),
             },
             parameters: vec![],
+            env_parameters: vec![],
             type_parameters: vec![],
             defaults: vec![],
             preconditions: vec![],
@@ -359,6 +360,7 @@ fn a_definition_region_borrows_its_frame_without_publishing_the_owner() {
                 }),
                 arguments: vec![],
                 parameter_bindings: vec![],
+                env_arguments: vec![],
             },
             ..flag()
         },

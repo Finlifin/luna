@@ -69,6 +69,7 @@ fn package() -> Package {
                         result: Box::new(Term::Primitive(P::Type)),
                     },
                     parameters,
+                    env_parameters: vec![],
                     defaults: vec![],
                 },
             }

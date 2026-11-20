@@ -151,6 +151,9 @@ pub fn prepare_method_invocation(
         )
         .ok_or("composed memory frame budget exhausted")?;
     bound_type(selected.ty.callable_signature(), fuel)?;
+    if !body.env_parameters.is_empty() {
+        return Err("method contracts do not yet support runtime environment parameters".into());
+    }
     let mut composed = nir::program::FunctionDeclaration {
         source: callee.source,
         phase: FunctionPhase::Runtime,
@@ -170,6 +173,7 @@ pub fn prepare_method_invocation(
         name: body.name.clone(),
         signature: selected.ty.callable_signature().clone(),
         parameters: body.parameters.clone(),
+        env_parameters: vec![],
         defaults: vec![],
     };
 
@@ -260,6 +264,7 @@ pub fn prepare_method_invocation(
         kind: K::Call {
             callee: Box::new(selected.clone()),
             arguments: call_arguments,
+            env_arguments: vec![],
             parameter_bindings: composed.parameters.clone(),
         },
     };

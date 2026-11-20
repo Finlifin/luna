@@ -173,6 +173,7 @@ impl InherentIndex {
                     context,
                     allowance,
                     &self.index.parameter_domains,
+                    &self.index.runtime_domains,
                     Some(&self.index.nominal_layouts),
                 );
                 assess(head.declaration, matched, allowance)
@@ -216,6 +217,7 @@ impl InherentIndex {
                 context,
                 budget,
                 &self.index.parameter_domains,
+                &self.index.runtime_domains,
                 Some(&self.index.nominal_layouts),
                 verify_requirement,
             )

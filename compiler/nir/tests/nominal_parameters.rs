@@ -1898,3 +1898,113 @@ fn unused_observations_are_checked_at_handoff_and_projection_keeps_caller_scope(
         bound
     );
 }
+
+#[test]
+fn lift_domain_admits_verified_runtime_dependency_and_rejects_mismatches() {
+    let type_t = id(1);
+    let type_a = id(2);
+    let alloc = id(3);
+    let my_alloc = Term::Nominal {
+        declaration: id(10),
+        arguments: vec![],
+    };
+    let other_alloc = Term::Nominal {
+        declaration: id(11),
+        arguments: vec![],
+    };
+    let box_struct = Struct {
+        declaration: id(20),
+        name: "Box".into(),
+        type_parameters: vec![type_t, type_a, alloc],
+        parameter_types: vec![
+            Term::Primitive(P::Type),
+            Term::Primitive(P::Type),
+            Term::Lift(Box::new(Term::Pointer(Box::new(rigid(2, Sort::Type))))),
+        ],
+        fields: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        packed: false,
+    };
+    let runtime_obj = Term::Runtime(nir::RuntimeId {
+        instance: 7,
+        local: 1,
+    });
+    let expected_lift = Term::Lift(Box::new(Term::Pointer(Box::new(my_alloc.clone()))));
+    let other_lift = Term::Lift(Box::new(Term::Pointer(Box::new(other_alloc.clone()))));
+
+    // Unverified RuntimeId must be rejected by completed-argument validation.
+    assert!(
+        box_struct
+            .validate_completed_arguments(
+                &[
+                    Term::Primitive(P::Bool),
+                    my_alloc.clone(),
+                    runtime_obj.clone(),
+                ],
+                &mut 10_000,
+            )
+            .is_err()
+    );
+
+    // Matching evidence admits both concrete RuntimeId and symbolic Sort::Runtime rigid.
+    for dep in [runtime_obj.clone(), rigid(30, Sort::Runtime)] {
+        assert!(
+            nir::validate_declaration_arguments_with_evidence(
+                &box_struct.type_parameters,
+                &box_struct.parameter_types,
+                &[Term::Primitive(P::Bool), my_alloc.clone(), dep],
+                &mut 10_000,
+                |_, _, _| Ok(vec![]),
+                |value, domain, _| {
+                    (value == &runtime_obj
+                        || matches!(
+                            value,
+                            Term::Rigid {
+                                sort: Sort::Runtime,
+                                ..
+                            }
+                        ))
+                        && domain == &expected_lift
+                },
+            )
+            .is_ok()
+        );
+    }
+
+    // Mismatched lift domain evidence is rejected.
+    assert!(
+        nir::validate_declaration_arguments_with_evidence(
+            &box_struct.type_parameters,
+            &box_struct.parameter_types,
+            &[
+                Term::Primitive(P::Bool),
+                my_alloc.clone(),
+                runtime_obj.clone(),
+            ],
+            &mut 10_000,
+            |_, _, _| Ok(vec![]),
+            |_, domain, _| domain == &other_lift,
+        )
+        .is_err()
+    );
+
+    // Wrong sort (Type or ComptimeValue in the lift slot) is rejected.
+    for bad in [
+        Term::Primitive(P::Bool),
+        Term::Bool(true),
+        Term::Pointer(Box::new(my_alloc.clone())),
+    ] {
+        assert!(
+            nir::validate_declaration_arguments_with_evidence(
+                &box_struct.type_parameters,
+                &box_struct.parameter_types,
+                &[Term::Primitive(P::Bool), my_alloc.clone(), bad],
+                &mut 10_000,
+                |_, _, _| Ok(vec![]),
+                |_, _, _| true,
+            )
+            .is_err()
+        );
+    }
+}

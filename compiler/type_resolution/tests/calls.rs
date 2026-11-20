@@ -3194,3 +3194,91 @@ fn repeated_value_constraints_share_traversal_fuel_and_preserve_failed_trials() 
         .unwrap();
     assert_eq!(candidate.finish().unwrap().type_arguments, vec![retained]);
 }
+
+#[test]
+fn runtime_dependency_clause_parameter_infers_and_checks_identity() {
+    use type_resolution::calls::Error;
+    use type_resolution::ptc::Context;
+    let box_head = DeclarationId {
+        package: 94,
+        local: 1,
+    };
+    let alloc_ty = Term::Nominal {
+        declaration: DeclarationId {
+            package: 94,
+            local: 2,
+        },
+        arguments: vec![],
+    };
+    let box_tpl = Term::Nominal {
+        declaration: box_head,
+        arguments: vec![
+            generic(0),
+            generic(1),
+            Term::Bound {
+                depth: 1,
+                index: 2,
+                sort: Sort::Runtime,
+            },
+        ],
+    };
+    let mut source = scheme(vec![box_tpl.clone(), box_tpl], primitive(P::Void), 3);
+    source.parameter_sorts = vec![Sort::Type, Sort::Type, Sort::Runtime];
+
+    let mut context = Context::default();
+    context.admit_nominal_constructor(box_head);
+
+    let rt_a = Term::Runtime(RuntimeId {
+        instance: 4,
+        local: 1,
+    });
+    let rt_b = Term::Runtime(RuntimeId {
+        instance: 4,
+        local: 2,
+    });
+    let box_with = |rt: Term| Term::Nominal {
+        declaration: box_head,
+        arguments: vec![primitive(P::I32), alloc_ty.clone(), rt],
+    };
+
+    let instance = source
+        .infer_partial_types_in_context(
+            &[Some(box_with(rt_a.clone())), Some(box_with(rt_a.clone()))],
+            None,
+            &context,
+            Budget::default(),
+        )
+        .unwrap()
+        .finish()
+        .unwrap();
+    assert_eq!(
+        instance.type_arguments,
+        vec![primitive(P::I32), alloc_ty.clone(), rt_a.clone()]
+    );
+
+    let mismatch = source
+        .infer_partial_types_in_context(
+            &[Some(box_with(rt_a.clone())), Some(box_with(rt_b.clone()))],
+            None,
+            &context,
+            Budget::default(),
+        )
+        .unwrap()
+        .finish();
+    assert!(mismatch.is_err());
+
+    let mut direct = source
+        .infer_partial_types_in_context(&[None, None], None, &context, Budget::default())
+        .unwrap();
+    direct
+        .constrain_type_argument(2, &rt_a, Budget::default())
+        .unwrap();
+    assert!(matches!(
+        direct.constrain_type_argument(2, &rt_b, Budget::default()),
+        Err(Error::InvalidSignature)
+    ));
+    direct
+        .constrain_type_argument(2, &rt_a, Budget::default())
+        .unwrap();
+    assert_eq!(direct.type_argument(2).unwrap(), Some(rt_a));
+}

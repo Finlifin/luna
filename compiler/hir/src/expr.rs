@@ -194,6 +194,8 @@ pub enum ExprKind<'hir> {
     TyClosureEnvironment(&'hir [ClosureEnvironmentBinding<'hir>]),
     /// Optional type `??`.
     TyOptional(&'hir Expr<'hir>),
+    /// Lifted comptime-to-runtime domain wrapper `lift T`.
+    LiftType(&'hir Expr<'hir>),
     /// Function types are constructed using `TyFn` and `TyFnArrow`.
     TyFn(&'hir [TyParam<'hir>]),
     TyComptimeFn(&'hir [TyParam<'hir>]),

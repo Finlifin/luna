@@ -505,6 +505,7 @@ fn decompose(
         }
         (Term::Optional(a), Term::Optional(b))
         | (Term::Pointer(a), Term::Pointer(b))
+        | (Term::Lift(a), Term::Lift(b))
         | (Term::ComptimeFunction(a), Term::ComptimeFunction(b))
         | (Term::UnsafeFunction(a), Term::UnsafeFunction(b)) => decompose(
             a,

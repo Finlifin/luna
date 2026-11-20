@@ -60,6 +60,7 @@ fn package(body: Expr) -> Package {
                     result: Box::new(body.ty.clone()),
                 },
                 parameters: vec![local()],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body,

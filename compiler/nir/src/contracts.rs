@@ -233,6 +233,7 @@ impl MethodContract {
             is_unsafe: self.is_unsafe,
             signature,
             parameters: self.parameter_bindings.clone(),
+            env_parameters: vec![],
             preconditions: program.preconditions,
             postconditions: program.postconditions,
             result_binding: program.result_binding,

@@ -42,6 +42,7 @@ fn function() -> Function {
                 result: Box::new(boolean()),
             },
             parameters: vec![binding(0), binding(1)],
+            env_parameters: vec![],
             defaults: vec![(1, local(0))],
             preconditions: vec![],
             postconditions: vec![],

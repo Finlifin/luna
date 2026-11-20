@@ -219,6 +219,7 @@ pub(crate) fn prepare_runtime_entry<'a>(
             requirements: vec![],
             capabilities: vec![],
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
             signature: nir::Term::Function {
                 parameters: vec![],

@@ -349,6 +349,7 @@ pub(super) fn inspect<'signature>(
             Term::Function { parameters, .. } => parameters.len().saturating_add(1),
             Term::Optional(_)
             | Term::Pointer(_)
+            | Term::Lift(_)
             | Term::ComptimeFunction(_)
             | Term::NormalFormFunction(..)
             | Term::UnsafeFunction(_) => 1,
@@ -521,6 +522,7 @@ pub(super) fn inspect<'signature>(
             }
             Term::Optional(inner)
             | Term::Pointer(inner)
+            | Term::Lift(inner)
             | Term::ComptimeFunction(inner)
             | Term::NormalFormFunction(inner, _)
             | Term::UnsafeFunction(inner) => pending.push(Work::Visit(inner, depth + 1)),

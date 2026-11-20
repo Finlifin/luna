@@ -6672,7 +6672,14 @@ impl<'a> Infer<'a, '_> {
                 callee,
                 arguments,
                 parameter_bindings,
+                env_arguments,
             } => {
+                if !env_arguments.is_empty() {
+                    return Err(
+                        "memory analysis does not yet support runtime environment call arguments"
+                            .into(),
+                    );
+                }
                 if self.immediate_borrowed_call(
                     expr,
                     callee,
@@ -9067,6 +9074,11 @@ fn infer_body(
     if parameters.len() != function.parameters.len() {
         return Err("memory summary parameter signature mismatch".into());
     }
+    if !function.env_parameters.is_empty() {
+        return Err(
+            "runtime environment parameters require Stage G1b memory summary support".into(),
+        );
+    }
     for (input, value) in inputs {
         let parameter = parameters
             .get(input.parameter)
@@ -11036,6 +11048,7 @@ mod borrowed_capture_scope_tests {
                     value: address(),
                     is_default,
                 }],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             });
             assert_eq!(

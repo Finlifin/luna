@@ -478,6 +478,7 @@ mod tests {
                 result_guarantees: vec![],
                 entry_snapshots: vec![],
                 capabilities: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body: Expr {

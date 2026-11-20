@@ -52,6 +52,7 @@ fn package(returned: bool) -> Package {
                     result: Box::new(ty(Primitive::Bool)),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body,

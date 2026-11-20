@@ -39,7 +39,9 @@ fn distinct_type_heads(left: &ImplementationHead, right: &ImplementationHead) ->
     {
         if !matches!(
             (left_arg.sort(), right_arg.sort()),
-            (Sort::Type, Sort::Type) | (Sort::ComptimeValue, Sort::ComptimeValue)
+            (Sort::Type, Sort::Type)
+                | (Sort::ComptimeValue, Sort::ComptimeValue)
+                | (Sort::Runtime, Sort::Runtime)
         ) {
             return false;
         }
@@ -363,6 +365,7 @@ fn separation_goal(
                     terms.extend(fields.iter().map(|(_, ty)| ty))
                 }
                 Term::Pointer(inner)
+                | Term::Lift(inner)
                 | Term::ComptimeFunction(inner)
                 | Term::NormalFormFunction(inner, _)
                 | Term::UnsafeFunction(inner) => terms.push(inner),
@@ -453,6 +456,12 @@ fn separation_goal(
             overlap.push(Formula::equal(a, b));
         } else if a.sort() == Sort::ComptimeValue && b.sort() == Sort::ComptimeValue {
             overlap.extend(index_overlap(&a, &b, &mut fuel, budget.max_depth)?);
+        } else if a.sort() == Sort::Runtime && b.sort() == Sort::Runtime {
+            if let (Term::Runtime(left), Term::Runtime(right)) = (&a, &b) {
+                if left != right {
+                    overlap.push(Formula::False);
+                }
+            }
         } else {
             return Err("interface index overlap requires a declared supported domain".into());
         }

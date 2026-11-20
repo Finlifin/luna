@@ -918,6 +918,7 @@ mod list_width_tests {
                     }),
                 )),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         );

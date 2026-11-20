@@ -502,6 +502,7 @@ impl Checker<'_, '_> {
                         | Term::Tuple(_)
                         | Term::Record(_)
                         | Term::Pointer(_)
+                        | Term::Lift(_)
                         | Term::Function { .. }
                         | Term::ComptimeFunction(_)
                         | Term::NormalFormFunction(..)

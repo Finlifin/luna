@@ -69,7 +69,7 @@ impl Binders {
             }));
         }
         for (parameter, domain) in parameters.ordered.iter().zip(domains) {
-            if parameter.sort == Sort::ComptimeValue {
+            if parameter.sort != Sort::Type {
                 parameters.charge_expansion(domain.borrow(), arguments, fuel)?;
             }
         }

@@ -44,6 +44,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
                 result: Box::new(Term::Primitive(P::Void)),
             },
             parameters: vec![binding],
+            env_parameters: vec![],
             defaults: vec![],
         },
         body: Expr {

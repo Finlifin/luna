@@ -125,6 +125,7 @@ mod tests {
                     result: Box::new(p(P::Bool)),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 type_parameters: vec![],
                 defaults: vec![],
                 preconditions: vec![],
@@ -205,6 +206,7 @@ mod tests {
                 kind: K::Function(id(8)),
             }),
             arguments: vec![],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         };
         let package = n::Package {

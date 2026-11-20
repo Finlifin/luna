@@ -138,6 +138,11 @@ impl Entry {
         })();
         *fuel -= (before - steps) as u64;
         copied.map_err(|error| format!("entry call copy budget exhausted: {error:?}"))?;
+        if !function.env_parameters.is_empty() {
+            return Err(
+                "command-line invocation does not support runtime environment parameters".into(),
+            );
+        }
         let source = function.source;
         Ok(Expr {
             source,
@@ -149,6 +154,7 @@ impl Entry {
                     kind: ExprKind::Function(self.declaration),
                 }),
                 parameter_bindings: function.parameters.clone(),
+                env_arguments: vec![],
                 arguments: self
                     .default_order
                     .iter()

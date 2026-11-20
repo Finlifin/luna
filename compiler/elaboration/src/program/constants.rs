@@ -2007,10 +2007,17 @@ impl Checker<'_, '_> {
             callee,
             arguments,
             parameter_bindings,
+            env_arguments,
         } = &mut call.kind
         else {
             return Ok(call);
         };
+        if !env_arguments.is_empty() {
+            return Err(error(
+                source.span,
+                "staged call input preparation does not yet support runtime environment arguments",
+            ));
+        }
         let Term::Function { parameters, .. } = callee.ty.callable_signature() else {
             return Ok(call);
         };

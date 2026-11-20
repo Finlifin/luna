@@ -37,6 +37,7 @@ fn graph() -> Package {
                         result: Box::new(boolean.clone()),
                     },
                     parameters: vec![],
+                    env_parameters: vec![],
                     defaults: vec![],
                     type_parameters: vec![],
                     requirements: vec![],

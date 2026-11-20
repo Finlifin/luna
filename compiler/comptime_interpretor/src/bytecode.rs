@@ -3477,6 +3477,7 @@ mod tests {
                         is_default: false,
                     },
                 ],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         };
@@ -3569,6 +3570,7 @@ mod tests {
                         kind: K::Local(binding),
                     }),
                     arguments,
+                    env_arguments: vec![],
                     parameter_bindings,
                 },
             };
@@ -3616,6 +3618,7 @@ mod tests {
                     kind: K::Local(function),
                 }),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         };

@@ -163,6 +163,7 @@ impl Checker<'_, '_> {
                         result: Box::new(ty),
                     },
                     parameters: vec![],
+                    env_parameters: vec![],
                     preconditions: vec![],
                     postconditions: vec![],
                     entry_snapshots: vec![],

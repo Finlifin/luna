@@ -167,6 +167,7 @@ mod tests {
                     owner: local,
                     index: 0,
                 }],
+                env_parameters: vec![],
                 defaults: vec![(
                     0,
                     Expr {

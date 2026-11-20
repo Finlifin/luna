@@ -132,6 +132,7 @@ fn nonterminating_private_loop_is_p4_but_not_a_stable_default() {
                     result: Box::new(body.ty.clone()),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body: body.clone(),

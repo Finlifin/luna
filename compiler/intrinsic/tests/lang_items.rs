@@ -372,6 +372,7 @@ fn a_function_named_tuple_does_not_supply_a_pure_normal_form_head() {
             requirements: vec![],
             capabilities: vec![],
             parameters: vec![],
+            env_parameters: vec![],
             defaults: vec![],
             preconditions: vec![],
             postconditions: vec![],

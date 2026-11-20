@@ -594,11 +594,18 @@ impl Expansion<'_> {
         let K::Call {
             arguments,
             parameter_bindings,
+            env_arguments,
             ..
         } = &mut expression.kind
         else {
             unreachable!()
         };
+        if !env_arguments.is_empty() {
+            return Err(error(
+                span,
+                "quote fn expansion cannot pass runtime environment arguments",
+            ));
+        }
         if arguments.len() != template.parameters.len() {
             return Err(error(
                 span,

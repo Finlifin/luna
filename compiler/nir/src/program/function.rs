@@ -1,6 +1,25 @@
 //! Checked function declarations and their separately owned bodies.
 use super::*;
 
+/// Runtime parameter carrying the concrete address/handle of a `quote`
+/// dependency bound into a runtime function's caller environment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeEnvParameter {
+    pub declaration: DeclarationId,
+    pub binding: LocalId,
+    pub ty: Term,
+}
+
+impl fmt::Display for RuntimeEnvParameter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(env-param (declaration {}) (binding {}) (type {}))",
+            self.declaration, self.binding, self.ty
+        )
+    }
+}
+
 /// Checked declaration metadata, independent of the executable body.
 /// The signature is a telescope, not the complete public supply protocol.
 /// Owning this interface grants neither invocation nor phase authority.
@@ -29,6 +48,7 @@ pub struct FunctionDeclaration {
     pub name: String,
     pub signature: Term,
     pub parameters: Vec<LocalId>,
+    pub env_parameters: Vec<RuntimeEnvParameter>,
     pub defaults: Vec<(usize, Expr)>,
 }
 impl FunctionDeclaration {
@@ -75,6 +95,17 @@ impl FunctionDeclaration {
             declaration: self.declaration,
             name: self.name.clone(),
             parameters: self.parameters.clone(),
+            env_parameters: self
+                .env_parameters
+                .iter()
+                .map(|env| {
+                    Ok(RuntimeEnvParameter {
+                        declaration: env.declaration,
+                        binding: env.binding,
+                        ty: substitution.term(&env.ty)?,
+                    })
+                })
+                .collect::<Result<_, crate::TypeError>>()?,
             signature: substitution.term(&self.signature)?,
             requirements: self
                 .requirements
@@ -265,6 +296,17 @@ impl Function {
                     declaration: self.declaration,
                     name: self.name.clone(),
                     parameters: self.parameters.clone(),
+                    env_parameters: self
+                        .env_parameters
+                        .iter()
+                        .map(|env| {
+                            Ok(RuntimeEnvParameter {
+                                declaration: env.declaration,
+                                binding: env.binding,
+                                ty: scoped.instantiate(&env.ty)?,
+                            })
+                        })
+                        .collect::<Result<_, crate::TypeError>>()?,
                     signature: scoped.instantiate_closed_signature(&self.signature)?,
                     requirements: self
                         .requirements
@@ -338,6 +380,12 @@ impl FunctionDeclaration {
         write!(f, ") (signature {}) (parameters", self.signature)?;
         for p in &self.parameters {
             write!(f, " {p}")?;
+        }
+        if !self.env_parameters.is_empty() {
+            f.write_str(") (env-parameters")?;
+            for env in &self.env_parameters {
+                write!(f, " {env}")?;
+            }
         }
         f.write_str(") (requires")?;
         for requirement in &self.requirements {

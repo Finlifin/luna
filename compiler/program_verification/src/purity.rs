@@ -239,6 +239,7 @@ mod behavior_code_snapshot_tests {
                 is_unsafe: false,
                 type_parameters: vec![],
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
                 preconditions: vec![],
                 postconditions: vec![],
@@ -266,6 +267,7 @@ mod behavior_code_snapshot_tests {
                     kind: K::Function(producer),
                 }),
                 arguments: vec![],
+                env_arguments: vec![],
                 parameter_bindings: vec![],
             },
         };
@@ -280,6 +282,7 @@ mod behavior_code_snapshot_tests {
                     kind: K::Call {
                         callee: Box::new(code(bad)),
                         arguments: vec![],
+                        env_arguments: vec![],
                         parameter_bindings: vec![],
                     },
                 },
@@ -342,6 +345,7 @@ mod behavior_code_snapshot_tests {
                             kind: K::Call {
                                 callee: Box::new(local.clone()),
                                 arguments: vec![],
+                                env_arguments: vec![],
                                 parameter_bindings: vec![],
                             },
                         }),
@@ -371,6 +375,7 @@ mod behavior_code_snapshot_tests {
                         kind: K::Call {
                             callee: Box::new(code(bad)),
                             arguments: vec![],
+                            env_arguments: vec![],
                             parameter_bindings: vec![],
                         },
                     }));
@@ -452,6 +457,7 @@ mod behavior_code_snapshot_tests {
                             kind: K::Local(binding),
                         }),
                         arguments: vec![],
+                        env_arguments: vec![],
                         parameter_bindings: vec![],
                     },
                 }),
@@ -904,6 +910,7 @@ impl<'a> Analysis<'a> {
                 is_unsafe: false,
                 type_parameters: vec![],
                 parameters: types.keys().copied().collect(),
+                env_parameters: vec![],
                 defaults: vec![],
                 preconditions: vec![],
                 postconditions: vec![],
@@ -2213,8 +2220,14 @@ impl<'a> Analysis<'a> {
                 true
             }
             K::Call {
-                callee, arguments, ..
+                callee,
+                arguments,
+                env_arguments,
+                ..
             } => {
+                if !env_arguments.is_empty() {
+                    return false;
+                }
                 // Finite factories may deliver fresh owned values. Their
                 // consumers still need explicit transfer/cleanup permission.
                 let candidates = if matches!(callee.kind, K::TraitMethod { .. }) {
@@ -3598,8 +3611,14 @@ impl<'a> Analysis<'a> {
                 Some(codes)
             }
             K::Call {
-                callee, arguments, ..
+                callee,
+                arguments,
+                env_arguments,
+                ..
             } => {
+                if !env_arguments.is_empty() {
+                    return None;
+                }
                 // Identity inference never authorizes execution: the later
                 // behavior walk checks each factory and argument computation.
                 let callees = match self.loop_code_value_at(callee, &[], facts, depth + 1) {
@@ -4435,6 +4454,9 @@ impl<'a> Analysis<'a> {
         } else {
             function
         };
+        if !function.env_parameters.is_empty() {
+            return false;
+        }
         let Term::Function { parameters, result } = &function.signature else {
             return false;
         };
@@ -4606,6 +4628,7 @@ mod resource_world_tests {
                         result: Box::new(p(P::Bool)),
                     },
                     parameters: vec![],
+                    env_parameters: vec![],
                     type_parameters: vec![],
                     requirements: vec![],
                     capabilities: vec![],
@@ -4668,6 +4691,7 @@ mod resource_world_tests {
         package.functions[1].body.kind = K::Call {
             callee: Box::new(callee),
             arguments: vec![],
+            env_arguments: vec![],
             parameter_bindings: vec![],
         };
         let mut analysis = Analysis::new(&package, false);
@@ -4904,6 +4928,7 @@ mod resource_world_tests {
                         result: Box::new(p(P::Bool)),
                     },
                     parameters: vec![],
+                    env_parameters: vec![],
                     type_parameters: vec![],
                     requirements: vec![],
                     capabilities: vec![],
@@ -4951,6 +4976,7 @@ mod resource_world_tests {
                     result: Box::new(p(P::Bool)),
                 },
                 parameters: vec![],
+                env_parameters: vec![],
                 type_parameters: vec![],
                 requirements: vec![],
                 capabilities: vec![],
@@ -4981,6 +5007,7 @@ mod resource_world_tests {
                         kind: K::Function(unknown),
                     }),
                     arguments: vec![],
+                    env_arguments: vec![],
                     parameter_bindings: vec![],
                 },
             },

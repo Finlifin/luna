@@ -171,7 +171,9 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 callee,
                 arguments,
                 parameter_bindings,
-            } if self.package.is_some()
+                env_arguments,
+            } if env_arguments.is_empty()
+                && self.package.is_some()
                 && matches!(
                     completion_type(&expr.ty),
                     Term::Tuple(_)

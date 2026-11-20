@@ -49,6 +49,7 @@ fn function(preconditions: Vec<Expr>, postconditions: Vec<Expr>) -> Function {
                 result: Box::new(Term::Primitive(Primitive::Void)),
             },
             parameters: vec![LocalId { owner: 1, index: 0 }],
+            env_parameters: vec![],
             type_parameters: vec![],
             defaults: vec![],
             preconditions,

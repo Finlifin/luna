@@ -220,6 +220,7 @@ fn identity_package() -> Package {
                     result: Box::new(ty.clone()),
                 },
                 parameters: vec![local],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body: Expr {

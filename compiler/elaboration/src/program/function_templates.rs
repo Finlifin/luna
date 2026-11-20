@@ -757,6 +757,7 @@ impl<'h> Rebind<'_, 'h> {
             E::Projection(a, field) => E::Projection(self.expr(a, depth)?, *field),
             E::TyPtr(a) => E::TyPtr(self.expr(a, depth)?),
             E::TyOptional(a) => E::TyOptional(self.expr(a, depth)?),
+            E::LiftType(a) => E::LiftType(self.expr(a, depth)?),
             E::TyClosure(environment, signature) => {
                 E::TyClosure(self.expr(environment, depth)?, self.expr(signature, depth)?)
             }

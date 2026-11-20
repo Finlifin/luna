@@ -764,10 +764,16 @@ impl Query<'_, '_, '_, '_> {
             callee,
             arguments,
             parameter_bindings,
+            env_arguments,
         } = &expr.kind
         else {
             unreachable!("checked text transfer variant")
         };
+        if !env_arguments.is_empty() {
+            return Err(
+                "text region transfer does not yet support runtime environment arguments".into(),
+            );
+        }
         let Some(callee_value) = self.expr(callee, locals, returned, next)? else {
             return Ok(None);
         };

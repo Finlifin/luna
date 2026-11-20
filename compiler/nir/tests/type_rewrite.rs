@@ -457,6 +457,7 @@ fn conditional_call_and_aggregate_children_keep_source_order() {
                         },
                     ],
                     parameter_bindings: vec![],
+                    env_arguments: vec![],
                 },
             )),
             else_branch: Some(Box::new(node(

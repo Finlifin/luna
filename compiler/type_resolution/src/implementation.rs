@@ -31,6 +31,7 @@ pub enum Head {
     Record(Vec<String>),
     Optional,
     Pointer,
+    Lift,
     ComptimeFunction,
     NormalFormFunction(Option<usize>),
     UnsafeFunction,
@@ -62,6 +63,7 @@ enum KeyDiscriminant {
     Tuple,
     Optional,
     Pointer,
+    Lift,
     ComptimeFunction,
     NormalFormFunction(Option<usize>),
     UnsafeFunction,
@@ -75,6 +77,7 @@ impl Key {
             Self::Node(Head::Tuple, _) => Some(KeyDiscriminant::Tuple),
             Self::Node(Head::Optional, _) => Some(KeyDiscriminant::Optional),
             Self::Node(Head::Pointer, _) => Some(KeyDiscriminant::Pointer),
+            Self::Node(Head::Lift, _) => Some(KeyDiscriminant::Lift),
             Self::Node(Head::ComptimeFunction, _) => Some(KeyDiscriminant::ComptimeFunction),
             Self::Node(Head::NormalFormFunction(collector), _) => {
                 Some(KeyDiscriminant::NormalFormFunction(*collector))
@@ -136,6 +139,7 @@ impl Key {
                 }
                 Term::Optional(inner) => (Head::Optional, vec![inner]),
                 Term::Pointer(inner) => (Head::Pointer, vec![inner]),
+                Term::Lift(inner) => (Head::Lift, vec![inner]),
                 Term::Record(fields) => {
                     let work = fields
                         .iter()
@@ -245,6 +249,7 @@ impl Key {
                             }
                             Term::Optional(t)
                             | Term::Pointer(t)
+                            | Term::Lift(t)
                             | Term::ComptimeFunction(t)
                             | Term::NormalFormFunction(t, _)
                             | Term::UnsafeFunction(t) => work.push((t, d + 1)),
@@ -547,6 +552,7 @@ impl InterfaceBucket {
 pub struct Index {
     builtin_packages: BTreeSet<u64>,
     pub(crate) parameter_domains: BTreeMap<DeclarationId, Term>,
+    pub(crate) runtime_domains: BTreeMap<nir::RuntimeId, Term>,
     pub(crate) nominal_layouts: nir::program::Package,
     identity: u64,
     entries: BTreeMap<DeclarationId, Entry>,
@@ -559,6 +565,7 @@ impl Default for Index {
         Self {
             builtin_packages: BTreeSet::new(),
             parameter_domains: BTreeMap::new(),
+            runtime_domains: BTreeMap::new(),
             nominal_layouts: Default::default(),
             identity: crate::fresh_identity(),
             entries: BTreeMap::new(),
@@ -719,6 +726,43 @@ impl Index {
             };
         }
         self.parameter_domains.insert(declaration, domain);
+        self.revision += 1;
+        Ok(())
+    }
+
+    pub fn runtime_domains(&self) -> &BTreeMap<nir::RuntimeId, Term> {
+        &self.runtime_domains
+    }
+
+    pub fn register_runtime_domain(
+        &mut self,
+        runtime: nir::RuntimeId,
+        domain: Term,
+    ) -> Result<(), String> {
+        self.register_runtime_domain_metered(runtime, domain, &mut 100_000)
+            .map_err(String::from)
+    }
+
+    pub fn register_runtime_domain_metered(
+        &mut self,
+        runtime: nir::RuntimeId,
+        domain: Term,
+        fuel: &mut usize,
+    ) -> Result<(), nir::NominalAdmissionError> {
+        nir::type_computations::charge_term(&domain, fuel)?;
+        if !matches!(domain, Term::Lift(_)) || domain.sort() != nir::Sort::Type {
+            return Err("runtime dependency domain must be a lift Type".into());
+        }
+        domain.check_scope(&[]).map_err(|error| error.to_string())?;
+        if let Some(previous) = self.runtime_domains.get(&runtime) {
+            nir::type_computations::charge_term(previous, fuel)?;
+            return if previous == &domain {
+                Ok(())
+            } else {
+                Err("conflicting runtime dependency domains".into())
+            };
+        }
+        self.runtime_domains.insert(runtime, domain);
         self.revision += 1;
         Ok(())
     }
@@ -976,6 +1020,7 @@ impl fmt::Display for Key {
                     }
                     Head::Optional => f.write_str("optional")?,
                     Head::Pointer => f.write_str("pointer")?,
+                    Head::Lift => f.write_str("lift")?,
                     Head::ComptimeFunction => f.write_str("comptime-function")?,
                     Head::NormalFormFunction(collector) => {
                         f.write_str("normal-form-function (collector ")?;
@@ -1009,6 +1054,9 @@ impl fmt::Display for Index {
         self.fmt_nominal_layouts(f)?;
         for (id, domain) in &self.parameter_domains {
             write!(f, " (parameter-domain {id} {domain})")?;
+        }
+        for (id, domain) in &self.runtime_domains {
+            write!(f, " (runtime-domain {id} {domain})")?;
         }
         for (id, entry) in &self.entries {
             write!(f, " (implementation (id {id}) (phases")?;

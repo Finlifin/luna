@@ -35,6 +35,7 @@ fn main() {
                 type_parameters: vec![],
                 signature: signature.clone(),
                 parameters: vec![],
+                env_parameters: vec![],
                 defaults: vec![],
             },
             body: Expr {

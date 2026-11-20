@@ -1410,6 +1410,11 @@ impl Query<'_, '_, '_, '_> {
         if parameters.len() != body.parameters.len() {
             return Err("text region parameter identity mismatch".into());
         }
+        if !body.env_parameters.is_empty() {
+            return Err(
+                "runtime environment parameters require Stage G1b text region support".into(),
+            );
+        }
         for (parameter, path, callback) in &key.callbacks {
             if !path.is_empty() {
                 continue;
@@ -2480,6 +2485,7 @@ mod tests {
                 result: Box::new(result),
             },
             parameters: param_ids,
+            env_parameters: vec![],
             defaults: vec![],
         }
     }
@@ -2596,6 +2602,7 @@ mod tests {
                                         K::Function(comptime_str_fn),
                                     )),
                                     arguments: vec![],
+                                    env_arguments: vec![],
                                     parameter_bindings: vec![],
                                 },
                             ))),
