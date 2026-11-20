@@ -2,11 +2,17 @@
 //! Associated defaults complete later within the checker’s own contract view.
 use super::*;
 
+#[derive(Clone, Copy)]
+enum Member {
+    Method(usize),
+    Associated(usize),
+}
+
 #[derive(Clone, Default)]
 pub(in crate::program) struct CheckedTraits {
     // The input map orders contracts by semantic declaration identity.
     contracts: Vec<n::Trait>,
-    methods: BTreeMap<DeclarationId, (usize, usize)>,
+    members: BTreeMap<DeclarationId, (usize, Member)>,
 }
 
 impl CheckedTraits {
@@ -24,22 +30,38 @@ impl CheckedTraits {
             Ok(())
         };
         spend(fuel, contracts.len())?;
-        let mut methods = BTreeMap::new();
+        let mut members = BTreeMap::new();
         for (index, contract) in contracts.values().enumerate() {
             spend(fuel, contract.methods.len())?;
-            for (slot, method) in contract.methods.iter().enumerate() {
-                if methods.insert(method.declaration, (index, slot)).is_some() {
+            spend(fuel, contract.associated.len())?;
+            let methods = contract
+                .methods
+                .iter()
+                .enumerate()
+                .map(|(slot, m)| (m.declaration, Member::Method(slot)));
+            let associated = contract
+                .associated
+                .iter()
+                .enumerate()
+                .map(|(slot, m)| (m.declaration, Member::Associated(slot)));
+            for (id, member) in methods.chain(associated) {
+                if members.insert(id, (index, member)).is_some() {
                     return Err(error(
                         Span::default(),
-                        "duplicate source trait method identity",
+                        "duplicate source trait member identity",
                     ));
                 }
             }
         }
         Ok(Self {
             contracts: contracts.into_values().collect(),
-            methods,
+            members,
         })
+    }
+
+    pub(in crate::program) fn member_interface(&self, id: DeclarationId) -> Option<&n::Trait> {
+        let &(index, _) = self.members.get(&id)?;
+        Some(&self.contracts[index])
     }
 
     pub(in crate::program) fn by_id(&self, id: DeclarationId) -> Option<&n::Trait> {
@@ -55,23 +77,24 @@ impl CheckedTraits {
         interface: DeclarationId,
         contract: n::AssociatedContract,
     ) {
-        let index = self
-            .contracts
-            .binary_search_by_key(&interface, |t| t.declaration)
-            .expect("checked associated interface");
-        let slot = self.contracts[index]
-            .associated
-            .iter_mut()
-            .find(|member| member.declaration == contract.declaration)
-            .expect("checked associated member");
-        *slot = contract;
+        let &(index, Member::Associated(slot)) = self
+            .members
+            .get(&contract.declaration)
+            .expect("checked associated member")
+        else {
+            unreachable!("checked associated member kind")
+        };
+        assert_eq!(self.contracts[index].declaration, interface);
+        self.contracts[index].associated[slot] = contract;
     }
 
     pub(in crate::program) fn method(
         &self,
         id: DeclarationId,
     ) -> Option<(&n::Trait, &n::MethodContract)> {
-        let &(index, slot) = self.methods.get(&id)?;
+        let &(index, Member::Method(slot)) = self.members.get(&id)? else {
+            return None;
+        };
         let contract = &self.contracts[index];
         Some((contract, &contract.methods[slot]))
     }

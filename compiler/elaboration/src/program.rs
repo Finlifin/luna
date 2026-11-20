@@ -514,6 +514,7 @@ fn elaborate_in_mode(
         invocation_steps,
     )?;
     let mut checker = Checker {
+        declared_nominals: source_declarations.nominal_context.clone(),
         source_declarations,
         definition_identities: package
             .next_definition_index()
@@ -2309,6 +2310,8 @@ struct LocalRuntimeDelivery {
 }
 
 struct Checker<'a, 'h> {
+    // Declaration authority only. Lexical premises never enter this shared root.
+    declared_nominals: crate::ptc::Context,
     source_declarations: source_declarations::SourceDeclarations<'a, 'h>,
     definition_identities: crate::definitions::DefinitionIdentities,
     delivered_types: BTreeMap<n::LocalId, (std::sync::Arc<Term>, Span)>,
@@ -4714,41 +4717,17 @@ impl Checker<'_, '_> {
     }
 
     fn nominal_context(&self) -> crate::ptc::Context {
-        let mut context = crate::ptc::Context::default();
+        let mut context = self.declared_nominals.clone();
         for declaration in &self.code_packet_nominals {
             context.admit_nominal_constructor(*declaration);
-        }
-        // Checked builder results have no source HIR owner. Their nominal
-        // identity must survive fresh binder and required-invocation contexts.
-        for declaration in self.structs.keys() {
-            context.admit_nominal_constructor(*declaration);
-        }
-        // Nominal declaration identity does not depend on obtaining its field
-        // layout. World preparation can compare impl heads before unrelated
-        // layouts/signatures have been demanded; formation is checked separately.
-        for (owner, info) in self.package.owners() {
-            if matches!(
-                info.node.expect_item().kind,
-                ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(..)
-            ) {
-                context.admit_nominal_constructor(declaration(
-                    self.package,
-                    &self.package_identities,
-                    owner,
-                ));
-            }
         }
         // Only checked opaque definitions with the supported immutable input
         // telescope receive forward congruence. No body equation or inverse
         // constructor rule is introduced by this admission.
         for owner in self.normal_parameters.keys() {
             if self.is_registered_normal_form(*owner) {
-                context.admit_congruence(declaration(
-                    self.package,
-                    &self.package_identities,
-                    *owner,
-                ));
                 let head = declaration(self.package, &self.package_identities, *owner);
+                context.admit_congruence(head);
                 if Some(head) == self.protocols.meta_list
                     && self.normal_parameters[owner].len() == 1
                     && self.normal_parameters[owner][0].2 == p(P::Type)
@@ -4839,15 +4818,24 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        if let Some(interface) = self.checked_traits.iter().find(|interface| {
-            self.self_containers.get(&owner).is_some_and(|parent| {
-                self.source_declarations.owner(interface.declaration) == Some(*parent)
-            }) || interface.methods.iter().any(|method| {
-                method.declaration == declaration(self.package, &self.package_identities, owner)
-            }) || interface.associated.iter().any(|member| {
-                member.declaration == declaration(self.package, &self.package_identities, owner)
+        let interface = self
+            .self_containers
+            .get(&owner)
+            .and_then(|&parent| {
+                self.checked_traits.by_id(declaration(
+                    self.package,
+                    &self.package_identities,
+                    parent,
+                ))
             })
-        }) {
+            .or_else(|| {
+                self.checked_traits.member_interface(declaration(
+                    self.package,
+                    &self.package_identities,
+                    owner,
+                ))
+            });
+        if let Some(interface) = interface {
             assumptions.push(n::TraitRequirement {
                 subject: Term::Rigid {
                     declaration: interface.self_parameter,

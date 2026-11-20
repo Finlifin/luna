@@ -8,7 +8,6 @@ fn add<'h>(
     name: &str,
     import: bool,
 ) -> OwnerId {
-    let owner = package.alloc_owner_id();
     let kind = if import {
         ItemKind::Use(hir::item::UsePath {
             path: hir::Path {
@@ -32,6 +31,16 @@ fn add<'h>(
             span: DUMMY_SP,
         })
     };
+    add_item(package, arena, name, kind)
+}
+
+fn add_item<'h>(
+    package: &mut hir::Package<'h>,
+    arena: &'h HirArena,
+    name: &str,
+    kind: ItemKind<'h>,
+) -> OwnerId {
+    let owner = package.alloc_owner_id();
     let item = arena.alloc_item(Item {
         owner_id: owner,
         ident: Ident::new(Symbol::intern(name), DUMMY_SP),
@@ -177,7 +186,17 @@ fn duplicate_semantic_identities_are_rejected_instead_of_selecting_first_owner()
 fn equal_numeric_ids_in_successor_views_do_not_reuse_old_source_items() {
     let arena = HirArena::new();
     let mut before = hir::Package::new();
-    let owner = add(&mut before, &arena, "before", false);
+    let owner = add_item(
+        &mut before,
+        &arena,
+        "before",
+        ItemKind::Struct(hir::item::StructDef {
+            fields: &[],
+            clause_params: &[],
+            clause_constraints: &[],
+            nested_items: vec![],
+        }),
+    );
     let old = SourceDeclarations::new(&before, &BTreeMap::new(), &mut 100).unwrap();
     let mut after = hir::Package::new();
     assert_eq!(add(&mut after, &arena, "after", false), owner);
@@ -186,6 +205,8 @@ fn equal_numeric_ids_in_successor_views_do_not_reuse_old_source_items() {
         package: 0,
         local: 0,
     };
+    assert!(old.nominal_context.is_nominal_constructor(identity));
+    assert!(!new.nominal_context.is_nominal_constructor(identity));
     assert_eq!(old.item(identity).unwrap().ident.name.as_str(), "before");
     assert_eq!(new.item(identity).unwrap().ident.name.as_str(), "after");
 }

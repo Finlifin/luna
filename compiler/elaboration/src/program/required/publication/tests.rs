@@ -61,6 +61,7 @@ fn generated() -> PublishedDefinitions {
 #[derive(Default)]
 struct World {
     context: crate::ptc::Context,
+    declared_nominals: crate::ptc::Context,
     structs: BTreeMap<DeclarationId, n::Struct>,
     enums: BTreeMap<DeclarationId, n::Enum>,
     newtypes: BTreeMap<DeclarationId, nir::newtypes::Newtype>,
@@ -75,6 +76,7 @@ impl World {
     ) -> Result<(), Error> {
         Receiver {
             context: &mut self.context,
+            declared_nominals: &mut self.declared_nominals,
             structs: &mut self.structs,
             enums: &mut self.enums,
             newtypes: &mut self.newtypes,
@@ -102,7 +104,9 @@ impl World {
         assert!(self.enums.is_empty());
         assert!(self.newtypes.is_empty());
         assert!(self.context.is_nominal_constructor(id(1)));
+        assert!(self.declared_nominals.is_nominal_constructor(id(1)));
         for local in 10..=13 {
+            assert!(!self.declared_nominals.is_nominal_constructor(id(local)));
             assert!(
                 !self.context.is_nominal_constructor(id(local)),
                 "leaked constructor {local}"
@@ -128,6 +132,7 @@ impl World {
         );
         for local in [1, 10, 11, 12, 13] {
             assert!(self.context.is_nominal_constructor(id(local)));
+            assert!(self.declared_nominals.is_nominal_constructor(id(local)));
         }
         // Synchronizing the same complete layouts must not change evidence
         // revision: the production receiver already delivered every kind.

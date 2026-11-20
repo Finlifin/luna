@@ -5,6 +5,7 @@ use crate::definitions::PublishedDefinitions;
 
 pub(super) struct Receiver<'a> {
     pub context: &'a mut crate::ptc::Context,
+    pub declared_nominals: &'a mut crate::ptc::Context,
     pub structs: &'a mut BTreeMap<DeclarationId, n::Struct>,
     pub enums: &'a mut BTreeMap<DeclarationId, n::Enum>,
     pub newtypes: &'a mut BTreeMap<DeclarationId, nir::newtypes::Newtype>,
@@ -88,6 +89,8 @@ impl Receiver<'_> {
         // Reserved builder identities and spent invocation work are not undone.
         for batch in &definitions.structs {
             for definition in batch.iter() {
+                self.declared_nominals
+                    .admit_nominal_constructor(definition.declaration);
                 self.context
                     .admit_nominal_constructor(definition.declaration);
                 self.structs
@@ -96,6 +99,8 @@ impl Receiver<'_> {
         }
         for batch in &definitions.enums {
             for definition in batch.iter() {
+                self.declared_nominals
+                    .admit_nominal_constructor(definition.declaration);
                 self.context
                     .admit_nominal_constructor(definition.declaration);
                 self.enums
@@ -104,6 +109,8 @@ impl Receiver<'_> {
         }
         for batch in &definitions.newtypes {
             for definition in batch.iter() {
+                self.declared_nominals
+                    .admit_nominal_constructor(definition.declaration);
                 self.context
                     .admit_nominal_constructor(definition.declaration);
                 self.newtypes

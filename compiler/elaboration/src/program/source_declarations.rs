@@ -4,6 +4,7 @@ use super::*;
 pub(super) struct SourceDeclarations<'a, 'h> {
     package: &'a hir::Package<'h>,
     owners: BTreeMap<DeclarationId, OwnerId>,
+    pub(super) nominal_context: crate::ptc::Context,
 }
 
 impl<'a, 'h> SourceDeclarations<'a, 'h> {
@@ -21,6 +22,7 @@ impl<'a, 'h> SourceDeclarations<'a, 'h> {
             )
         })?;
         let mut owners = BTreeMap::new();
+        let mut nominal_context = crate::ptc::Context::default();
         for (owner, info) in package.owners() {
             let item = info.node.expect_item();
             // Imports have syntax owners, not a new declaration identity. Their
@@ -29,6 +31,12 @@ impl<'a, 'h> SourceDeclarations<'a, 'h> {
                 continue;
             }
             let identity = declaration(package, identities, owner);
+            if matches!(
+                item.kind,
+                ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(..)
+            ) {
+                nominal_context.admit_nominal_constructor(identity);
+            }
             if owners.insert(identity, owner).is_some() {
                 return Err(error(
                     item.span,
@@ -36,7 +44,11 @@ impl<'a, 'h> SourceDeclarations<'a, 'h> {
                 ));
             }
         }
-        Ok(Self { package, owners })
+        Ok(Self {
+            package,
+            owners,
+            nominal_context,
+        })
     }
 
     pub(super) fn owner(&self, identity: DeclarationId) -> Option<OwnerId> {
