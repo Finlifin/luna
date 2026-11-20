@@ -1,0 +1,235 @@
+use List;
+use builtin.{Integer, bool, u64}
+use hashing.{ComptimeHash, mix_byte, mix_digest}
+use numeric.equality.ComptimeEq;
+
+{-
+    Ordered comptime key-value pair exposed by Map.entries. Both fields hold
+    ordinary value snapshots; mutating an extracted MapEntry never aliases the
+    source Map.
+-}
+pub struct MapEntry where K, V {
+    key: K,
+    value: V,
+}
+
+{-
+    Insertion-ordered compile-time associative map using value-reference `self`
+    methods without comptime pointers. Keys match by `ComptimeEq`; updating an
+    existing key replaces its value in place while preserving key position.
+-}
+pub struct Map where K, V {
+    raw_keys: List<K>,
+    raw_values: List<V>,
+}
+
+pure comptime fn xor_u64(left: u64, right: u64) -> u64 {
+    let a = left'bitvec;
+    let b = right'bitvec;
+    ((a and not b) or (not a and b)).as(u64)
+}
+
+impl Map<K, V> where K, V {
+    pub comptime fn new() -> Map<K, V> {
+        Map<K, V> {
+            raw_keys: [],
+            raw_values: [],
+        }
+    }
+
+    pub pure comptime fn length(self) -> Integer {
+        self.raw_keys.length()
+    }
+
+    pub pure comptime fn is_empty(self) -> bool {
+        self.raw_keys.length() == 0
+    }
+
+    pub comptime fn keys(self) -> List<K> {
+        self.raw_keys
+    }
+
+    pub comptime fn values(self) -> List<V> {
+        self.raw_values
+    }
+
+    pub comptime fn entries(self) -> List<MapEntry<K, V>> {
+        let count = self.raw_keys.length();
+        var result: List<MapEntry<K, V>> = [];
+        var index: Integer = 0;
+        while index < count {
+            result.append(MapEntry<K, V> {
+                key: self.raw_keys[index],
+                value: self.raw_values[index],
+            });
+            index = index + 1;
+        }
+        result
+    }
+
+    pub comptime fn clear(self) {
+        self.raw_keys = [];
+        self.raw_values = [];
+    }
+}
+
+impl Map<K, V> where K :- ComptimeEq, V {
+    comptime fn find_index(self, key: K) -> ?Integer {
+        let count = self.raw_keys.length();
+        var index: Integer = 0;
+        while index < count {
+            if self.raw_keys[index].as(ComptimeEq).eq(key) {
+                return index;
+            }
+            index = index + 1;
+        }
+        null
+    }
+
+    pub comptime fn contains_key(self, key: K) -> bool {
+        self.find_index(key) match {
+            _? => true,
+            null => false,
+        }
+    }
+
+    pub comptime fn get(self, key: K) -> ?V {
+        self.find_index(key) match {
+            index? => self.raw_values[index],
+            null => null,
+        }
+    }
+
+    {-
+        Insert `(key, value)` or replace the existing value in place while
+        keeping key insertion order. Returns the previous value if present.
+    -}
+    pub comptime fn insert(self, key: K, value: V) -> ?V {
+        self.find_index(key) match {
+            index? => {
+                let previous = self.raw_values[index];
+                self.raw_values.replace_range(index, index + 1, [value]) match {
+                    updated? => {
+                        self.raw_values = updated;
+                    },
+                    null => {},
+                };
+                previous
+            },
+            null => {
+                self.raw_keys.append(key);
+                self.raw_values.append(value);
+                null
+            },
+        }
+    }
+
+    {-
+        Remove `key` and its associated value while preserving relative order of
+        all remaining entries. Returns the removed value if present.
+    -}
+    pub comptime fn remove(self, key: K) -> ?V {
+        self.find_index(key) match {
+            index? => {
+                let removed = self.raw_values[index];
+                self.raw_keys.replace_range(index, index + 1, []) match {
+                    updated_keys? => {
+                        self.raw_keys = updated_keys;
+                    },
+                    null => {},
+                };
+                self.raw_values.replace_range(index, index + 1, []) match {
+                    updated_values? => {
+                        self.raw_values = updated_values;
+                    },
+                    null => {},
+                };
+                removed
+            },
+            null => null,
+        }
+    }
+
+    {- Insert all entries from `other` in order, overwriting matching keys. -}
+    pub comptime fn insert_all(self, other: Map<K, V>) {
+        let source = other;
+        let count = source.raw_keys.length();
+        var index: Integer = 0;
+        while index < count {
+            self.insert(source.raw_keys[index], source.raw_values[index]);
+            index = index + 1;
+        }
+    }
+
+    {- Return a new map combining `self` and `other` without mutating either. -}
+    pub comptime fn merged(self, other: Map<K, V>) -> Map<K, V> {
+        var combined = self;
+        combined.insert_all(other);
+        combined
+    }
+}
+
+comptime impl ComptimeEq for MapEntry<K, V> where K :- ComptimeEq, V :- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool {
+        self.key.as(ComptimeEq).eq(other.key) and self.value.as(ComptimeEq).eq(other.value)
+    }
+}
+
+comptime impl ComptimeHash for MapEntry<K, V> where K :- ComptimeHash, V :- ComptimeHash {
+    comptime fn hash(self) -> u64 {
+        let with_tag = mix_byte(14695981039346656037, 69);
+        let with_key = mix_digest(with_tag, self.key.as(ComptimeHash).hash());
+        mix_digest(with_key, self.value.as(ComptimeHash).hash())
+    }
+}
+
+comptime impl ComptimeEq for Map<K, V> where K :- ComptimeEq, V :- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool {
+        let left = self;
+        let right = other;
+        let count = left.raw_keys.length();
+        if count != right.raw_keys.length() {
+            return false;
+        }
+        var index: Integer = 0;
+        while index < count {
+            let key = left.raw_keys[index];
+            right.get(key) match {
+                found? => {
+                    if not left.raw_values[index].as(ComptimeEq).eq(found) {
+                        return false;
+                    }
+                },
+                null => {
+                    return false;
+                },
+            };
+            index = index + 1;
+        }
+        true
+    }
+}
+
+comptime impl ComptimeHash for Map<K, V> where K :- ComptimeHash, V :- ComptimeHash {
+    comptime fn hash(self) -> u64 {
+        let input = self;
+        let count = input.raw_keys.length();
+        var combined: u64 = 0;
+        var index: Integer = 0;
+        while index < count {
+            let key_seed = mix_digest(
+                14695981039346656037,
+                input.raw_keys[index].as(ComptimeHash).hash(),
+            );
+            let entry_digest = mix_digest(
+                key_seed,
+                input.raw_values[index].as(ComptimeHash).hash(),
+            );
+            combined = xor_u64(combined, entry_digest);
+            index = index + 1;
+        }
+        let with_tag = mix_byte(14695981039346656037, 77);
+        let with_count = mix_digest(with_tag, count.as(ComptimeHash).hash());
+        mix_digest(with_count, combined)
+    }
+}

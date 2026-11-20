@@ -377,3 +377,21 @@ runtime 对应协议由 builtin 提供独立实现。真实 sysroot 验收位于
 
 真实 sysroot 验收 `development/library_check.py --stage sysroot-comptime-ordering`
 包含列表的列表排序；输入列表保持原顺序。
+
+## 编译期映射与集合（`Map<K, V>` 与 `Set<T>`）
+
+`map.fl` 与 `set.fl` 在 `meta` 根路径及 `meta.prelude` 中提供 `Map<K, V>`、
+`MapEntry<K, V>` 与 `Set<T>`。方法全部遵循 comptime 值引用 `self` 语义（不使用
+任何指针或 `.ref`/`.*`）：
+
+- `Map<K, V>`（键按 `K :- ComptimeEq` 比较）保留首次插入顺序：`insert` 在更新已有
+  键时原地替换值并返回旧的 `?V`，`remove` 按顺序移除并返回被删除的值，`insert_all` /
+  `merged` / `keys` / `values` / `entries` / `contains_key` / `get` / `clear` 完整
+  覆盖常用映射操作。支持 `Type` 等仅实现 `ComptimeEq` 的键类型并保留 normal-form
+  身份。
+- `Set<T>`（按 `T :- ComptimeEq` 去重）支持 `from_list`、`insert`、`remove`、`clear`、
+  `contains`、`to_list`、`union_with`、`intersection`、`difference`、`is_subset`、
+  `is_superset`、`is_disjoint`。
+- 两者均实现与插入顺序无关的 `ComptimeEq`；当键/值（或元素）实现 `ComptimeHash`
+  时，通过交换律 XOR 混合实现与插入顺序无关的 `ComptimeHash`（分别使用标记字节
+  77 与 83 混合元素个数）。

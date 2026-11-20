@@ -12,9 +12,11 @@ use data.{
     list_equality,
     list_hashing,
     list_ordering,
+    map,
     object,
     optional,
     patterns,
+    set,
     text,
 }
 use definitions.{enums, newtypes, structs}
@@ -28,11 +30,13 @@ pub use equality.ComptimeEq;
 pub use errors.ComptimeErrorResultOps;
 pub use hashing.ComptimeHash;
 pub use integer.*;
+pub use map.{Map, MapEntry}
 pub use newtypes.*;
 pub use object.*;
 pub use optional.ComptimeOptionalOps;
 pub use ordering.ComptimeOrd;
 pub use patterns.ComptimeListPatternView;
+pub use set.Set;
 pub use structs.*;
 pub use structure.*;
 pub use text.ComptimeTextBytes;
@@ -43,7 +47,10 @@ pub mod math {
 
 pub mod prelude {
     pub use .List;
+    pub use .Map;
+    pub use .MapEntry;
     pub use .Object;
+    pub use .Set;
     pub use conversions.{ComptimeTryFrom, ComptimeTryInto}
     pub use equality.ComptimeEq;
     pub use errors.ComptimeErrorResultOps;

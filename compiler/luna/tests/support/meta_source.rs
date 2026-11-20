@@ -20,6 +20,8 @@ concat!(
     "mod list_equality {\n", include_str!("../../../../library/meta/data/list_equality.fl"), "\n}\n",
     "mod list_hashing {\n", include_str!("../../../../library/meta/data/list_hashing.fl"), "\n}\n",
     "mod list_ordering {\n", include_str!("../../../../library/meta/data/list_ordering.fl"), "\n}\n",
+    "mod map {\n", include_str!("../../../../library/meta/data/map.fl"), "\n}\n",
+    "mod set {\n", include_str!("../../../../library/meta/data/set.fl"), "\n}\n",
     "mod text {\n", include_str!("../../../../library/meta/data/text.fl"), "\n}\n",
     "mod optional {\n", include_str!("../../../../library/meta/data/optional.fl"), "\n}\n",
     "mod errors {\n", include_str!("../../../../library/meta/data/errors.fl"), "\n}\n",

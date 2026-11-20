@@ -1,0 +1,204 @@
+use List;
+use builtin.{Integer, bool, u64}
+use hashing.{ComptimeHash, mix_byte, mix_digest}
+use numeric.equality.ComptimeEq;
+
+{-
+    Insertion-ordered compile-time unique set using value-reference `self`
+    methods without comptime pointers. Elements match by `ComptimeEq`.
+-}
+pub struct Set where T {
+    raw_elements: List<T>,
+}
+
+pure comptime fn xor_u64(left: u64, right: u64) -> u64 {
+    let a = left'bitvec;
+    let b = right'bitvec;
+    ((a and not b) or (not a and b)).as(u64)
+}
+
+impl Set<T> where T {
+    pub comptime fn new() -> Set<T> {
+        Set<T> { raw_elements: [] }
+    }
+
+    pub pure comptime fn length(self) -> Integer {
+        self.raw_elements.length()
+    }
+
+    pub pure comptime fn is_empty(self) -> bool {
+        self.raw_elements.length() == 0
+    }
+
+    pub comptime fn to_list(self) -> List<T> {
+        self.raw_elements
+    }
+
+    pub comptime fn clear(self) {
+        self.raw_elements = [];
+    }
+}
+
+impl Set<T> where T :- ComptimeEq {
+    pub comptime fn from_list(items: List<T>) -> Set<T> {
+        var result = Set<T>.new();
+        let count = items.length();
+        var index: Integer = 0;
+        while index < count {
+            result.insert(items[index]);
+            index = index + 1;
+        }
+        result
+    }
+
+    comptime fn find_index(self, value: T) -> ?Integer {
+        let count = self.raw_elements.length();
+        var index: Integer = 0;
+        while index < count {
+            if self.raw_elements[index].as(ComptimeEq).eq(value) {
+                return index;
+            }
+            index = index + 1;
+        }
+        null
+    }
+
+    pub comptime fn contains(self, value: T) -> bool {
+        self.find_index(value) match {
+            _? => true,
+            null => false,
+        }
+    }
+
+    {- Insert `value` if absent; returns `true` only when newly added. -}
+    pub comptime fn insert(self, value: T) -> bool {
+        if self.contains(value) {
+            return false;
+        }
+        self.raw_elements.append(value);
+        true
+    }
+
+    {- Remove `value` while preserving remaining element order. -}
+    pub comptime fn remove(self, value: T) -> bool {
+        self.find_index(value) match {
+            index? => {
+                self.raw_elements.replace_range(index, index + 1, []) match {
+                    updated? => {
+                        self.raw_elements = updated;
+                    },
+                    null => {},
+                };
+                true
+            },
+            null => false,
+        }
+    }
+
+    pub comptime fn union_with(self, other: Set<T>) -> Set<T> {
+        var result = self;
+        let rhs = other;
+        let count = rhs.raw_elements.length();
+        var index: Integer = 0;
+        while index < count {
+            result.insert(rhs.raw_elements[index]);
+            index = index + 1;
+        }
+        result
+    }
+
+    pub comptime fn intersection(self, other: Set<T>) -> Set<T> {
+        var result = Set<T>.new();
+        let lhs = self;
+        let rhs = other;
+        let count = lhs.raw_elements.length();
+        var index: Integer = 0;
+        while index < count {
+            let item = lhs.raw_elements[index];
+            if rhs.contains(item) {
+                result.insert(item);
+            }
+            index = index + 1;
+        }
+        result
+    }
+
+    pub comptime fn difference(self, other: Set<T>) -> Set<T> {
+        var result = Set<T>.new();
+        let lhs = self;
+        let rhs = other;
+        let count = lhs.raw_elements.length();
+        var index: Integer = 0;
+        while index < count {
+            let item = lhs.raw_elements[index];
+            if not rhs.contains(item) {
+                result.insert(item);
+            }
+            index = index + 1;
+        }
+        result
+    }
+
+    pub comptime fn is_subset(self, other: Set<T>) -> bool {
+        let lhs = self;
+        let rhs = other;
+        let count = lhs.raw_elements.length();
+        var index: Integer = 0;
+        while index < count {
+            if not rhs.contains(lhs.raw_elements[index]) {
+                return false;
+            }
+            index = index + 1;
+        }
+        true
+    }
+
+    pub comptime fn is_superset(self, other: Set<T>) -> bool {
+        other.is_subset(self)
+    }
+
+    pub comptime fn is_disjoint(self, other: Set<T>) -> bool {
+        let lhs = self;
+        let rhs = other;
+        let count = lhs.raw_elements.length();
+        var index: Integer = 0;
+        while index < count {
+            if rhs.contains(lhs.raw_elements[index]) {
+                return false;
+            }
+            index = index + 1;
+        }
+        true
+    }
+}
+
+comptime impl ComptimeEq for Set<T> where T :- ComptimeEq {
+    comptime fn eq(self, other: Self) -> bool {
+        let left = self;
+        let right = other;
+        if left.raw_elements.length() != right.raw_elements.length() {
+            return false;
+        }
+        left.is_subset(right)
+    }
+}
+
+comptime impl ComptimeHash for Set<T> where T :- ComptimeHash {
+    comptime fn hash(self) -> u64 {
+        let input = self;
+        let count = input.raw_elements.length();
+        var combined: u64 = 0;
+        var index: Integer = 0;
+        while index < count {
+            let entry_digest = mix_digest(
+                14695981039346656037,
+                input.raw_elements[index].as(ComptimeHash).hash(),
+            );
+            combined = xor_u64(combined, entry_digest);
+            index = index + 1;
+        }
+        let with_tag = mix_byte(14695981039346656037, 83);
+        let with_count = mix_digest(with_tag, count.as(ComptimeHash).hash());
+        mix_digest(with_count, combined)
+    }
+}
