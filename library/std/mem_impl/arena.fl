@@ -1,0 +1,604 @@
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock, ReallocErr}
+use mem_impl.layout.Layout;
+
+{-
+    Custom runtime-dependent allocators implementing `std.mem.Allocator`:
+
+    - `FixedBufferAllocator`: non-owning bump allocator over a caller-provided
+      `RawBlock`. Tracks allocated bytes and live non-zero allocations, supports
+      in-place tail reclamation/growth, and returns `AllocErr.OutOfMemory` on
+      exhaustion.
+    - `ArenaAllocator<.Backing, quote .backing>`: intrusive chunk-linked arena
+      that draws variable-sized backing slabs from any `Backing: Allocator`
+      (defaulting to `DefaultAllocator.GLOBAL.ref`) and returns every slab to
+      `backing` on `reset` or `Drop` without storing the allocator inside the
+      arena header when `.Backing` is global.
+-}
+
+fn layout_parts_usize(layout: Layout) -> ?Tuple<usize, usize> {
+    let size = layout.byte_size_usize() match {
+        value? => value,
+        null => return null,
+    }
+    let align = layout.byte_alignment_usize() match {
+        value? => value,
+        null => return null,
+    }
+    if align == 0 {
+        return null;
+    }
+    (size, align)
+}
+
+fn is_aligned_usize(addr: usize, align: usize) -> bool {
+    builtin.mem.align_up_usize(addr, align) match {
+        aligned? => aligned == addr,
+        null => false,
+    }
+}
+
+fn alloc_err_to_realloc_err(err: AllocErr) -> ReallocErr {
+    err match {
+        .OutOfMemory => ReallocErr.OutOfMemory,
+        .InvalidLayout => ReallocErr.InvalidLayout,
+    }
+}
+
+pub struct FixedBufferAllocator {
+    base_addr: usize,
+    cap_bytes: usize,
+    offset: usize,
+    live_count: usize,
+}
+
+impl FixedBufferAllocator {
+    pub fn from_raw_block(block: RawBlock) -> Self {
+        let cap = block.layout().byte_size_usize() match {
+            value? => value,
+            null => 0,
+        }
+        FixedBufferAllocator {
+            base_addr: block.address(),
+            cap_bytes: cap,
+            offset: 0,
+            live_count: 0,
+        }
+    }
+
+    pub fn capacity(*self) -> usize {
+        self.cap_bytes.*
+    }
+
+    pub fn used(*self) -> usize {
+        self.offset.*
+    }
+
+    pub fn remaining(*self) -> usize {
+        let cap = self.cap_bytes.*;
+        let used = self.offset.*;
+        if cap >= used {
+            cap - used
+        } else {
+            0
+        }
+    }
+
+    pub fn live_allocations(*self) -> usize {
+        self.live_count.*
+    }
+
+    pub fn reset(*self) {
+        self.offset.* = 0;
+        self.live_count.* = 0;
+    }
+
+    fn alloc_raw(*self, layout: Layout) -> !AllocErr RawBlock {
+        let (size, align) = layout_parts_usize(layout) match {
+            parts? => parts,
+            null => return error AllocErr.InvalidLayout,
+        }
+        if size == 0 {
+            return RawBlock.dangling(layout) match {
+                empty? => empty,
+                null => error AllocErr.InvalidLayout,
+            }
+        }
+        if self.base_addr.* == 0 or self.cap_bytes.* == 0 {
+            return error AllocErr.OutOfMemory;
+        }
+        let current = builtin.mem.checked_add_usize(self.base_addr.*, self.offset.*) match {
+            addr? => addr,
+            null => return error AllocErr.OutOfMemory,
+        }
+        let aligned = builtin.mem.align_up_usize(current, align) match {
+            addr? => addr,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let next_end = builtin.mem.checked_add_usize(aligned, size) match {
+            addr? => addr,
+            null => return error AllocErr.OutOfMemory,
+        }
+        let limit = builtin.mem.checked_add_usize(self.base_addr.*, self.cap_bytes.*) match {
+            addr? => addr,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let base = self.base_addr.*;
+        if next_end > limit or next_end < base {
+            return error AllocErr.OutOfMemory;
+        }
+        let next_live = builtin.mem.checked_add_usize(self.live_count.*, 1) match {
+            value? => value,
+            null => return error AllocErr.OutOfMemory,
+        }
+        self.offset.* = next_end - base;
+        self.live_count.* = next_live;
+        RawBlock.from_raw_parts(aligned, layout)
+    }
+
+    fn dealloc_raw(*self, block: RawBlock) {
+        let (size, _) = layout_parts_usize(block.layout()) match {
+            parts? => parts,
+            null => return,
+        }
+        let addr = block.address();
+        if size == 0 or addr == 0 {
+            return;
+        }
+        let live = self.live_count.*;
+        if live > 0 {
+            self.live_count.* = live - 1;
+        }
+        let base = self.base_addr.*;
+        let used = self.offset.*;
+        if addr >= base {
+            let rel_start = addr - base;
+            if rel_start <= used and used - rel_start == size {
+                self.offset.* = rel_start;
+            }
+        }
+    }
+}
+
+impl Allocator for FixedBufferAllocator {
+    fn allocate(*self, layout: Layout) -> !AllocErr RawBlock {
+        self.alloc_raw(layout)
+    }
+
+    fn allocate_zeroed(*self, layout: Layout) -> !AllocErr RawBlock {
+        let block = self.alloc_raw(layout)!;
+        let size = layout.byte_size_usize() match {
+            bytes? => bytes,
+            null => {
+                self.dealloc_raw(block);
+                return error AllocErr.InvalidLayout;
+            },
+        }
+        if size > 0 {
+            unsafe {
+                builtin.mem.set_bytes(block.address(), 0, size);
+            }
+        }
+        block
+    }
+
+    unsafe fn deallocate(*self, block: RawBlock) {
+        self.dealloc_raw(block);
+    }
+
+    unsafe fn reallocate(*self, block: RawBlock, new_layout: Layout) -> !ReallocErr RawBlock {
+        let (new_size, new_align) = layout_parts_usize(new_layout) match {
+            parts? => parts,
+            null => return error ReallocErr.InvalidLayout,
+        }
+        let (old_size, _) = layout_parts_usize(block.layout()) match {
+            parts? => parts,
+            null => return error ReallocErr.InvalidLayout,
+        }
+        if new_size == 0 {
+            self.dealloc_raw(block);
+            return RawBlock.dangling(new_layout) match {
+                empty? => empty,
+                null => error ReallocErr.InvalidLayout,
+            }
+        }
+        if old_size == 0 {
+            return self.alloc_raw(new_layout) match {
+                fresh! => fresh,
+                error reason => error alloc_err_to_realloc_err(reason),
+            }
+        }
+        let base = self.base_addr.*;
+        let addr = block.address();
+        if addr >= base and is_aligned_usize(addr, new_align) {
+            let rel_start = addr - base;
+            let used = self.offset.*;
+            let cap = self.cap_bytes.*;
+            if rel_start <= used and used - rel_start == old_size {
+                if rel_start <= cap and new_size <= cap - rel_start {
+                    let next_offset = builtin.mem.checked_add_usize(rel_start, new_size) match {
+                        value? => value,
+                        null => return error ReallocErr.InvalidLayout,
+                    }
+                    self.offset.* = next_offset;
+                    return RawBlock.from_raw_parts(addr, new_layout);
+                }
+            } else if new_size <= old_size {
+                return RawBlock.from_raw_parts(addr, new_layout);
+            }
+        }
+        let fresh = self.alloc_raw(new_layout) match {
+            allocated! => allocated,
+            error reason => return error alloc_err_to_realloc_err(reason),
+        }
+        let copy_count = if old_size < new_size {
+            old_size
+        } else {
+            new_size
+        }
+        if copy_count > 0 {
+            builtin
+                .mem
+                .copy_bytes_nonoverlapping(fresh.address(), block.address(), copy_count);
+        }
+        self.dealloc_raw(block);
+        fresh
+    }
+}
+
+struct ArenaChunkHeader {
+    prev_addr: usize,
+    block_addr: usize,
+    block_size: u64,
+    block_align: u64,
+    cursor: usize,
+    end: usize,
+}
+
+const DEFAULT_ARENA_CHUNK_BYTES: usize = 4096;
+
+pub struct ArenaAllocator
+where
+    .Backing: Type = DefaultAllocator,
+    requires Backing :- Allocator,
+    quote .backing: lift *Backing = DefaultAllocator.GLOBAL.ref,
+{
+    raw_head_addr: usize,
+    raw_chunk_size: usize,
+    raw_total_allocated: usize,
+    raw_chunk_count: usize,
+}
+
+impl Drop for ArenaAllocator<.Backing = Backing, .backing = backing>
+where
+    Backing: Type,
+    requires Backing :- Allocator,
+    quote backing: lift *Backing,
+{
+    fn drop(*self) {
+        self.reset();
+    }
+}
+
+impl ArenaAllocator<.Backing = Backing, .backing = backing>
+where
+    Backing: Type,
+    requires Backing :- Allocator,
+    quote backing: lift *Backing,
+{
+    pub pure fn new() -> Self {
+        ArenaAllocator<.Backing = Backing, .backing = backing> {
+            raw_head_addr: 0,
+            raw_chunk_size: DEFAULT_ARENA_CHUNK_BYTES,
+            raw_total_allocated: 0,
+            raw_chunk_count: 0,
+        }
+    }
+
+    pub pure fn with_chunk_size(chunk_size: usize) -> Self {
+        let effective = if chunk_size == 0 {
+            DEFAULT_ARENA_CHUNK_BYTES
+        } else {
+            chunk_size
+        }
+        ArenaAllocator<.Backing = Backing, .backing = backing> {
+            raw_head_addr: 0,
+            raw_chunk_size: effective,
+            raw_total_allocated: 0,
+            raw_chunk_count: 0,
+        }
+    }
+
+    pub fn total_allocated(*self) -> usize {
+        self.raw_total_allocated.*
+    }
+
+    pub fn chunk_count(*self) -> usize {
+        self.raw_chunk_count.*
+    }
+
+    pub fn reset(*self) {
+        var cur = self.raw_head_addr.*;
+        self.raw_head_addr.* = 0;
+        self.raw_total_allocated.* = 0;
+        self.raw_chunk_count.* = 0;
+        while cur != 0 {
+            let hdr = unsafe { builtin.mem.raw_read<ArenaChunkHeader>(cur) }
+            cur = hdr.prev_addr;
+            let layout = Layout.new(hdr.block_size, hdr.block_align) match {
+                found? => found,
+                null => continue,
+            }
+            unsafe {
+                backing
+                    .as(Allocator)
+                    .deallocate(RawBlock.from_raw_parts(hdr.block_addr, layout));
+            }
+        }
+    }
+
+    fn try_alloc_in_head(*self, layout: Layout, size: usize, align: usize) -> ?RawBlock {
+        let head = self.raw_head_addr.*;
+        if head == 0 {
+            return null;
+        }
+        var hdr = unsafe { builtin.mem.raw_read<ArenaChunkHeader>(head) }
+        let aligned = builtin.mem.align_up_usize(hdr.cursor, align) match {
+            addr? => addr,
+            null => return null,
+        }
+        let next_cursor = builtin.mem.checked_add_usize(aligned, size) match {
+            addr? => addr,
+            null => return null,
+        }
+        if next_cursor > hdr.end {
+            return null;
+        }
+        let next_total = builtin.mem.checked_add_usize(self.raw_total_allocated.*, size) match {
+            value? => value,
+            null => return null,
+        }
+        hdr.cursor = next_cursor;
+        unsafe {
+            builtin.mem.raw_write<ArenaChunkHeader>(head, hdr);
+        }
+        self.raw_total_allocated.* = next_total;
+        RawBlock.from_raw_parts(aligned, layout)
+    }
+
+    fn allocate_chunk(*self, min_payload: usize, align: usize) -> !AllocErr void {
+        let next_chunks = builtin.mem.checked_add_usize(self.raw_chunk_count.*, 1) match {
+            value? => value,
+            null => return error AllocErr.OutOfMemory,
+        }
+        let hdr_layout = Layout.of<ArenaChunkHeader>() match {
+            found? => found,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let (hdr_size, hdr_align) = layout_parts_usize(hdr_layout) match {
+            parts? => parts,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let hdr_plus_align = builtin.mem.checked_add_usize(hdr_size, align) match {
+            value? => value,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let min_total = builtin.mem.checked_add_usize(hdr_plus_align, min_payload) match {
+            value? => value,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let chunk_bytes = if min_total > self.raw_chunk_size.* {
+            min_total
+        } else {
+            self.raw_chunk_size.*
+        }
+        let chunk_bytes_u64 = builtin.compiler.try_usize_to_u64(chunk_bytes) match {
+            value? => value,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let align_u64 = builtin.compiler.try_usize_to_u64(align) match {
+            value? => value,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let hdr_align_u64 = hdr_layout.byte_alignment();
+        let chunk_align = if hdr_align_u64 >= align_u64 {
+            hdr_align_u64
+        } else {
+            align_u64
+        }
+        let _ = hdr_align;
+        let chunk_layout = Layout.new(chunk_bytes_u64, chunk_align) match {
+            found? => found,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let block = backing.as(Allocator).allocate(chunk_layout)!;
+        let data_start = builtin.mem.checked_add_usize(block.address(), hdr_size) match {
+            addr? => addr,
+            null => {
+                unsafe {
+                    backing.as(Allocator).deallocate(block);
+                }
+                return error AllocErr.InvalidLayout;
+            },
+        }
+        let data_end = builtin.mem.checked_add_usize(block.address(), chunk_bytes) match {
+            addr? => addr,
+            null => {
+                unsafe {
+                    backing.as(Allocator).deallocate(block);
+                }
+                return error AllocErr.InvalidLayout;
+            },
+        }
+        let hdr = ArenaChunkHeader {
+            prev_addr: self.raw_head_addr.*,
+            block_addr: block.address(),
+            block_size: chunk_bytes_u64,
+            block_align: chunk_align,
+            cursor: data_start,
+            end: data_end,
+        }
+        unsafe {
+            builtin.mem.raw_write<ArenaChunkHeader>(block.address(), hdr);
+        }
+        self.raw_head_addr.* = block.address();
+        self.raw_chunk_count.* = next_chunks;
+    }
+
+    fn alloc_raw(*self, layout: Layout) -> !AllocErr RawBlock {
+        let (size, align) = layout_parts_usize(layout) match {
+            parts? => parts,
+            null => return error AllocErr.InvalidLayout,
+        }
+        if size == 0 {
+            return RawBlock.dangling(layout) match {
+                empty? => empty,
+                null => error AllocErr.InvalidLayout,
+            }
+        }
+        self.try_alloc_in_head(layout, size, align) match {
+            found? => return found,
+            null => {},
+        }
+        self.allocate_chunk(size, align)!;
+        self.try_alloc_in_head(layout, size, align) match {
+            found? => found,
+            null => error AllocErr.OutOfMemory,
+        }
+    }
+
+    fn tail_reclaim(*self, block: RawBlock) {
+        let head = self.raw_head_addr.*;
+        if head == 0 or block.address() == 0 {
+            return;
+        }
+        let (size, _) = layout_parts_usize(block.layout()) match {
+            parts? => parts,
+            null => return,
+        }
+        if size == 0 {
+            return;
+        }
+        var hdr = unsafe { builtin.mem.raw_read<ArenaChunkHeader>(head) }
+        let addr = block.address();
+        let cursor = hdr.cursor;
+        if addr >= hdr.block_addr and addr <= cursor and cursor - addr == size {
+            hdr.cursor = addr;
+            unsafe {
+                builtin.mem.raw_write<ArenaChunkHeader>(head, hdr);
+            }
+            let total = self.raw_total_allocated.*;
+            if total >= size {
+                self.raw_total_allocated.* = total - size;
+            }
+        }
+    }
+}
+
+impl Allocator for ArenaAllocator<.Backing = Backing, .backing = backing>
+where
+    Backing: Type,
+    requires Backing :- Allocator,
+    quote backing: lift *Backing,
+{
+    fn allocate(*self, layout: Layout) -> !AllocErr RawBlock {
+        self.alloc_raw(layout)
+    }
+
+    fn allocate_zeroed(*self, layout: Layout) -> !AllocErr RawBlock {
+        let block = self.alloc_raw(layout)!;
+        let size = layout.byte_size_usize() match {
+            bytes? => bytes,
+            null => return error AllocErr.InvalidLayout,
+        }
+        if size > 0 {
+            unsafe {
+                builtin.mem.set_bytes(block.address(), 0, size);
+            }
+        }
+        block
+    }
+
+    unsafe fn deallocate(*self, block: RawBlock) {
+        self.tail_reclaim(block);
+    }
+
+    unsafe fn reallocate(*self, block: RawBlock, new_layout: Layout) -> !ReallocErr RawBlock {
+        let (new_size, new_align) = layout_parts_usize(new_layout) match {
+            parts? => parts,
+            null => return error ReallocErr.InvalidLayout,
+        }
+        let (old_size, _) = layout_parts_usize(block.layout()) match {
+            parts? => parts,
+            null => return error ReallocErr.InvalidLayout,
+        }
+        if new_size == 0 {
+            self.tail_reclaim(block);
+            return RawBlock.dangling(new_layout) match {
+                empty? => empty,
+                null => error ReallocErr.InvalidLayout,
+            }
+        }
+        if old_size == 0 {
+            return self.alloc_raw(new_layout) match {
+                fresh! => fresh,
+                error reason => error alloc_err_to_realloc_err(reason),
+            }
+        }
+        let head = self.raw_head_addr.*;
+        let addr = block.address();
+        if head != 0 and is_aligned_usize(addr, new_align) {
+            var hdr = unsafe { builtin.mem.raw_read<ArenaChunkHeader>(head) }
+            let cursor = hdr.cursor;
+            let end_addr = hdr.end;
+            if addr >= hdr.block_addr
+                and addr <= cursor
+                and addr <= end_addr
+                and cursor - addr == old_size
+                and new_size <= end_addr - addr
+            {
+                let next_cursor = builtin.mem.checked_add_usize(addr, new_size) match {
+                    value? => value,
+                    null => return error ReallocErr.InvalidLayout,
+                }
+                hdr.cursor = next_cursor;
+                unsafe {
+                    builtin.mem.raw_write<ArenaChunkHeader>(head, hdr);
+                }
+                let total = self.raw_total_allocated.*;
+                if new_size >= old_size {
+                    let delta = new_size - old_size;
+                    let next_total = builtin.mem.checked_add_usize(total, delta) match {
+                        value? => value,
+                        null => total,
+                    }
+                    self.raw_total_allocated.* = next_total;
+                } else {
+                    let delta = old_size - new_size;
+                    if total >= delta {
+                        self.raw_total_allocated.* = total - delta;
+                    }
+                }
+                return RawBlock.from_raw_parts(addr, new_layout);
+            }
+            if new_size <= old_size {
+                return RawBlock.from_raw_parts(addr, new_layout);
+            }
+        }
+        let fresh = self.alloc_raw(new_layout) match {
+            allocated! => allocated,
+            error reason => return error alloc_err_to_realloc_err(reason),
+        }
+        let copy_count = if old_size < new_size {
+            old_size
+        } else {
+            new_size
+        }
+        if copy_count > 0 {
+            builtin
+                .mem
+                .copy_bytes_nonoverlapping(fresh.address(), block.address(), copy_count);
+        }
+        self.tail_reclaim(block);
+        fresh
+    }
+}

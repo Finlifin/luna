@@ -5,7 +5,7 @@ use fmt_impl.arguments;
 use fmt_impl.parse;
 use fs_impl.file;
 use io_impl.{errors, writer}
-use mem_impl.{allocator, boxed, layout}
+use mem_impl.{allocator, arena, boxed, layout}
 use platform.{linux as linux_impl, unix as unix_impl}
 use string_impl.string as string_mod;
 
@@ -32,6 +32,7 @@ pub mod fs {
 
 pub mod mem {
     pub use allocator.*;
+    pub use arena.{ArenaAllocator, FixedBufferAllocator}
     pub use boxed.Box;
     pub use layout.Layout;
 }
