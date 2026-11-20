@@ -9021,6 +9021,37 @@ pub fn bound_type(ty: &Term, fuel: &mut usize) -> Result<(), String> {
         .map_err(|_| "memory summary type budget exhausted".into())
 }
 
+pub(crate) fn signature_may_have_effects(signature: &Term) -> bool {
+    match signature.callable_signature() {
+        Term::Function { result, .. } => match result.as_ref() {
+            Term::Computation { effects, .. } => !effects.is_empty(),
+            Term::Primitive(_)
+            | Term::Nominal { .. }
+            | Term::Tuple(_)
+            | Term::Record(_)
+            | Term::Pointer(_)
+            | Term::Optional(_)
+            | Term::ErrorResult { .. }
+            | Term::Function { .. }
+            | Term::Closure { .. }
+            | Term::BitVec(_) => false,
+            _ => true,
+        },
+        _ => true,
+    }
+}
+
+fn callee_may_have_effects(
+    package: &Package,
+    declaration: DeclarationId,
+    arguments: &[Term],
+) -> bool {
+    let Some((function, _)) = package.runtime_body(declaration, arguments) else {
+        return true;
+    };
+    signature_may_have_effects(&function.signature)
+}
+
 fn derive_with_borrowed(
     package: &Package,
     declaration: DeclarationId,
@@ -9031,14 +9062,22 @@ fn derive_with_borrowed(
     fuel: &mut usize,
     round: &mut Round,
 ) -> Result<Summary, String> {
+    let drop_effects = (round.complete_calls || round.active.is_some())
+        && !round.effects.is_empty()
+        && !callee_may_have_effects(package, declaration, arguments);
     if round.complete_calls {
+        let effects = if drop_effects {
+            &[][..]
+        } else {
+            &round.effects
+        };
         return infer_borrowed_context_with_full_context(
             package,
             declaration,
             arguments,
             inputs,
             prepared,
-            &round.effects,
+            effects,
             borrowed,
             None,
             round.source,
@@ -9059,7 +9098,7 @@ fn derive_with_borrowed(
     if round.cleanup.is_none()
         && inputs.is_empty()
         && prepared.is_empty()
-        && round.effects.is_empty()
+        && (drop_effects || round.effects.is_empty())
         && borrowed.is_empty()
     {
         let instance = iir::InstanceKey {
@@ -9110,7 +9149,11 @@ fn derive_with_borrowed(
     borrowed_code::charge(borrowed, fuel)?;
     let key = MemoryInstance {
         borrowed: borrowed.clone(),
-        effects: effects::copy_inputs(&round.effects, fuel)?,
+        effects: if drop_effects {
+            vec![]
+        } else {
+            effects::copy_inputs(&round.effects, fuel)?
+        },
         instance: iir::InstanceKey {
             declaration,
             arguments: arguments.to_vec().into(),
@@ -9220,7 +9263,11 @@ fn derive_with_borrowed(
         callable_inputs: inputs.clone(),
         prepared_inputs: prepared.clone(),
         borrowed_inputs: borrowed.clone(),
-        effect_inputs: effects::copy_inputs(&round.effects, fuel)?,
+        effect_inputs: if drop_effects {
+            vec![]
+        } else {
+            effects::copy_inputs(&round.effects, fuel)?
+        },
         accesses: vec![],
         may_reject: false,
         may_run_cleanup: false,
@@ -11660,5 +11707,311 @@ mod optional_layout_tests {
         assert!(owned_variant_pattern(None, &present, &boolean, &mut 1000).is_err());
         assert!(owned_variant_fields(None, &outer, &mut 0).is_err());
         assert!(owned_variant_fields(None, &outer, &mut 1000).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod effect_cache_tests {
+    use super::*;
+
+    #[test]
+    fn signature_may_have_effects_classifies_concrete_empty_and_open_returns() {
+        let void = Term::Primitive(Primitive::Void);
+        let eff_id = DeclarationId {
+            package: 1,
+            local: 99,
+        };
+        let operation = nir::effects::Operation {
+            declaration: eff_id,
+            arguments: vec![],
+        };
+        let fn_of = |result: Term| Term::Function {
+            parameters: vec![],
+            result: Box::new(result),
+        };
+        assert!(!signature_may_have_effects(&fn_of(void.clone())));
+        assert!(!signature_may_have_effects(&fn_of(Term::Optional(
+            Box::new(void.clone())
+        ))));
+        assert!(!signature_may_have_effects(&fn_of(Term::Tuple(vec![]))));
+        assert!(!signature_may_have_effects(&fn_of(Term::Pointer(
+            Box::new(void.clone())
+        ))));
+        assert!(!signature_may_have_effects(&fn_of(Term::Computation {
+            effects: vec![],
+            result: Box::new(void.clone()),
+        })));
+        assert!(signature_may_have_effects(&fn_of(Term::Computation {
+            effects: vec![operation],
+            result: Box::new(void.clone()),
+        })));
+        assert!(signature_may_have_effects(&fn_of(Term::Rigid {
+            declaration: DeclarationId {
+                package: 1,
+                local: 1,
+            },
+            sort: nir::Sort::Type,
+        })));
+        assert!(signature_may_have_effects(&fn_of(Term::NormalForm {
+            head: DeclarationId {
+                package: 1,
+                local: 2,
+            },
+            sort: nir::Sort::Type,
+            arguments: vec![],
+        })));
+        assert!(signature_may_have_effects(&void));
+    }
+
+    #[test]
+    fn effectful_caller_caches_effect_free_helper_but_keeps_effectful_callee_context() {
+        let source = nir::program::SourceRange { start: 0, end: 1 };
+        let void = Term::Primitive(Primitive::Void);
+        let eff_id = DeclarationId {
+            package: 1,
+            local: 10,
+        };
+        let helper_id = DeclarationId {
+            package: 1,
+            local: 11,
+        };
+        let eff_callee_id = DeclarationId {
+            package: 1,
+            local: 12,
+        };
+        let caller_id = DeclarationId {
+            package: 1,
+            local: 13,
+        };
+        let caller2_id = DeclarationId {
+            package: 1,
+            local: 14,
+        };
+        let operation = nir::effects::Operation {
+            declaration: eff_id,
+            arguments: vec![],
+        };
+        let eff_sig = Term::Function {
+            parameters: vec![],
+            result: Box::new(void.clone()),
+        };
+        let eff_comp = Term::Computation {
+            effects: vec![operation.clone()],
+            result: Box::new(void.clone()),
+        };
+        let eff_fn_sig = Term::Function {
+            parameters: vec![],
+            result: Box::new(eff_comp.clone()),
+        };
+        let unit = || Expr {
+            source,
+            ty: void.clone(),
+            kind: K::Unit,
+        };
+        let fn_decl =
+            |declaration, name: &str, signature: Term| nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration,
+                name: name.into(),
+                signature,
+                parameters: vec![],
+                env_parameters: vec![],
+                defaults: vec![],
+            };
+        let helper_call = Expr {
+            source,
+            ty: void.clone(),
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: eff_sig.clone(),
+                    kind: K::Function(helper_id),
+                }),
+                arguments: vec![],
+                env_arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        };
+        let eff_callee_call = Expr {
+            source,
+            ty: void.clone(),
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: eff_fn_sig.clone(),
+                    kind: K::Function(eff_callee_id),
+                }),
+                arguments: vec![],
+                env_arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        };
+        let effect_request = Expr {
+            source,
+            ty: void.clone(),
+            kind: K::EffectRequest {
+                operation: operation.clone(),
+                abi: nir::effects::Abi::Direct,
+                allowed_index: 0,
+                signature: Box::new(eff_sig.clone()),
+                arguments: vec![],
+            },
+        };
+        let mut package = Package::default();
+        package.effects.push(nir::effects::Declaration {
+            declaration: eff_id,
+            group: None,
+            name: "ping".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            signature: eff_sig.clone(),
+            abi: nir::effects::Abi::Direct,
+            inline: false,
+            requirements: vec![],
+            capabilities: vec![],
+        });
+        package.functions.push(Function {
+            interface: fn_decl(helper_id, "helper", eff_sig.clone()),
+            body: Expr {
+                source,
+                ty: void.clone(),
+                kind: K::Block {
+                    statements: (0..800).map(|_| unit()).collect(),
+                    result: Some(Box::new(unit())),
+                },
+            },
+            runtime_deliveries: Default::default(),
+        });
+        package.functions.push(Function {
+            interface: fn_decl(eff_callee_id, "eff_callee", eff_fn_sig.clone()),
+            body: effect_request,
+            runtime_deliveries: Default::default(),
+        });
+        package.functions.push(Function {
+            interface: fn_decl(caller_id, "caller", eff_fn_sig.clone()),
+            body: Expr {
+                source,
+                ty: void.clone(),
+                kind: K::Block {
+                    statements: vec![helper_call.clone(), eff_callee_call],
+                    result: Some(Box::new(unit())),
+                },
+            },
+            runtime_deliveries: Default::default(),
+        });
+        package.functions.push(Function {
+            interface: fn_decl(caller2_id, "caller2", eff_fn_sig),
+            body: Expr {
+                source,
+                ty: void.clone(),
+                kind: K::Block {
+                    statements: vec![helper_call],
+                    result: Some(Box::new(unit())),
+                },
+            },
+            runtime_deliveries: Default::default(),
+        });
+
+        let effect_input = EffectInput {
+            operation,
+            abi: nir::effects::Abi::Direct,
+            signature: eff_sig,
+            forwarded_parameters: None,
+            copy_parameters: BTreeSet::new(),
+            owned_inputs: false,
+            parameter_accesses: BTreeSet::new(),
+        };
+        let mut cache = SummaryCache::default();
+        let mut fuel = 10_000;
+        let caller_summary = infer_with_effect_inputs_full_context(
+            &package,
+            caller_id,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            std::slice::from_ref(&effect_input),
+            None,
+            None,
+            None,
+            TextProvenance::Unchecked,
+            Some(&mut cache),
+            &mut fuel,
+        )
+        .unwrap();
+        assert_eq!(caller_summary.effect_inputs, vec![effect_input.clone()]);
+        let helper_cached = cache
+            .get(
+                TextProvenance::Unchecked,
+                &iir::InstanceKey {
+                    declaration: helper_id,
+                    arguments: vec![].into(),
+                },
+            )
+            .expect("effect-free helper should be cached");
+        assert!(helper_cached.effect_inputs.is_empty());
+        assert!(
+            cache
+                .get(
+                    TextProvenance::Unchecked,
+                    &iir::InstanceKey {
+                        declaration: eff_callee_id,
+                        arguments: vec![].into(),
+                    },
+                )
+                .is_none(),
+            "effectful callee must not be cached as effect-free"
+        );
+
+        // Tight budget too small to walk helper's 800 statements fails cold
+        // yet succeeds with warm SummaryCache even under the caller's effect row.
+        let mut cold_cache = SummaryCache::default();
+        let mut cold_fuel = 300;
+        let cold_err = infer_with_effect_inputs_full_context(
+            &package,
+            caller2_id,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            std::slice::from_ref(&effect_input),
+            None,
+            None,
+            None,
+            TextProvenance::Unchecked,
+            Some(&mut cold_cache),
+            &mut cold_fuel,
+        )
+        .unwrap_err();
+        assert!(cold_err.contains("exhausted"), "{cold_err}");
+
+        let mut tight_fuel = 300;
+        let cached_caller2 = infer_with_effect_inputs_full_context(
+            &package,
+            caller2_id,
+            &[],
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            std::slice::from_ref(&effect_input),
+            None,
+            None,
+            None,
+            TextProvenance::Unchecked,
+            Some(&mut cache),
+            &mut tight_fuel,
+        )
+        .unwrap();
+        assert_eq!(cached_caller2.effect_inputs, vec![effect_input]);
     }
 }

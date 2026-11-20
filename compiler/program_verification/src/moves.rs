@@ -6407,6 +6407,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             } => Some(prepared_captures.as_ref()),
                             _ => None,
                         });
+                    let effect_inputs = if !self.effect_memory_inputs.is_empty()
+                        && super::memory::signature_may_have_effects(&candidate.definition.ty)
+                    {
+                        self.effect_memory_inputs.as_slice()
+                    } else {
+                        &[]
+                    };
                     super::memory::infer_closure_with_effect_inputs(
                         self.package
                             .ok_or_else(|| error(source, "closure memory requires a package"))?,
@@ -6415,7 +6422,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         prepared_captures.unwrap_or(&BTreeMap::new()),
                         &inputs,
                         &code_inputs,
-                        &self.effect_memory_inputs,
+                        effect_inputs,
                         &mut self.fuel,
                     )
                     .map(|conditional| conditional.memory)
@@ -11304,13 +11311,20 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             } => (*declaration, arguments.as_slice()),
             _ => return Err("memory callee must identify a function".into()),
         };
+        let effect_inputs = if !self.effect_memory_inputs.is_empty()
+            && super::memory::signature_may_have_effects(&callee.ty)
+        {
+            self.effect_memory_inputs.as_slice()
+        } else {
+            &[]
+        };
         infer_callable_memory_with_borrowed_full_context(
             self.package.ok_or("memory summary requires a package")?,
             declaration,
             arguments,
             inputs,
             enums,
-            &self.effect_memory_inputs,
+            effect_inputs,
             borrowed,
             self.cleanup
                 .as_mut()
@@ -11348,13 +11362,20 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             } => (*declaration, arguments.as_slice()),
             _ => return Err("memory callee must identify a function".into()),
         };
+        let effect_inputs = if !self.effect_memory_inputs.is_empty()
+            && super::memory::signature_may_have_effects(&callee.ty)
+        {
+            self.effect_memory_inputs.as_slice()
+        } else {
+            &[]
+        };
         super::memory::infer_with_effect_inputs_full_context(
             self.package.ok_or("memory summary requires a package")?,
             id,
             arguments,
             inputs,
             code_inputs,
-            &self.effect_memory_inputs,
+            effect_inputs,
             self.declaration_source,
             Some(self.method_callees.as_mut()),
             Some(self.declarations.as_ref()),
