@@ -8,17 +8,19 @@ impl Checker<'_, '_> {
     pub(super) fn acquire_constructor_inputs(
         &mut self,
         head: &Expr<'_>,
+        ty: &Term,
     ) -> Result<Acquisition, Error> {
         let mut statements = Vec::new();
-        let H::NFApplication(_, args) = &head.kind else {
-            return Ok(Acquisition(statements));
+        let args = match head.kind {
+            H::NFApplication(_, args) => args,
+            _ => &[],
         };
         self.required_steps = self
             .required_steps
             .checked_sub(args.len() as u64)
             .ok_or_else(|| error(head.span, "constructor input inspection budget exhausted"))?;
 
-        for arg in *args {
+        for arg in args {
             let (Arg::Positional(value)
             | Arg::Named(_, value)
             | Arg::Expand(value)
@@ -55,6 +57,13 @@ impl Checker<'_, '_> {
                 .acquired_bindings
                 .insert(binding, id);
             self.local_runtime_deliveries.get_mut(&id).unwrap().expr = operand;
+        }
+        if !self.local_runtime_origins.defaults.is_empty() {
+            for id in self.result_dependencies(ty, head.span)? {
+                if self.local_runtime_origins.defaults.contains_key(&id) {
+                    statements.push(self.acquire_runtime_default(id, |_| None, head.span)?);
+                }
+            }
         }
         Ok(Acquisition(statements))
     }

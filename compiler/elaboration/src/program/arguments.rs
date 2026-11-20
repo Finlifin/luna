@@ -636,13 +636,15 @@ impl Checker<'_, '_> {
         offset: usize,
         expr: &Expr<'_>,
         mut prefixes: BTreeMap<usize, Vec<n::Expr>>,
+        after_explicit: Vec<n::Expr>,
     ) -> Result<n::Expr, Error> {
         let span = expr.span;
         let completed_defaults = matches!(&call.kind, K::Call { arguments, .. }
             if arguments.iter().any(|argument| argument.parameter >= offset
                 && !argument.is_default
                 && !routes.iter().any(|route| offset + route.parameter == argument.parameter)));
-        if prefixes.is_empty()
+        if after_explicit.is_empty()
+            && prefixes.is_empty()
             && !routes.iter().any(|route| route.is_collected())
             && !completed_defaults
         {
@@ -693,6 +695,7 @@ impl Checker<'_, '_> {
             }
             ordered.extend(statement);
         }
+        ordered.extend(after_explicit);
         let call = n::Expr {
             ty: call.ty.clone(),
             source: call.source,

@@ -3938,7 +3938,7 @@ impl Checker<'_, '_> {
         let ty = self.type_expr(callee)?;
         let outer = self.locals.clone();
         let result = (|| {
-            let acquisition = self.acquire_constructor_inputs(callee)?;
+            let acquisition = self.acquire_constructor_inputs(callee, &ty)?;
             let record = self.construct_typed(expr, ty, args, expected)?;
             acquisition.finish(self, record, expr.span)
         })();

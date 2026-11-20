@@ -470,6 +470,24 @@ impl Checker<'_, '_> {
         }))
     }
 
+    pub(super) fn runtime_dependency_body(&self, owner: Option<OwnerId>) -> bool {
+        !self.observing_type
+            && !self.checking_contract
+            && self.captures.last().is_none_or(|frame| !frame.comptime)
+            && (self.in_code_body
+                || owner.is_some_and(|owner| {
+                    !self.active_signatures.contains(&owner)
+                        && self.package.item(owner).is_some_and(|item| {
+                            matches!(
+                                &item.kind,
+                                ItemKind::Fn(sig, _)
+                                    if !sig.modifiers.is_comptime
+                                        && !sig.modifiers.is_normal_form_head
+                            )
+                        })
+                }))
+    }
+
     pub(super) fn runtime_lift_argument(
         &mut self,
         value: &Expr<'_>,
@@ -488,22 +506,7 @@ impl Checker<'_, '_> {
                 "quote runtime parameter expected a lift dependency, not a comptime input",
             ));
         }
-        let in_runtime_body = !self.observing_type
-            && !self.checking_contract
-            && self.captures.last().is_none_or(|frame| !frame.comptime)
-            && (self.in_code_body
-                || self.signature_owner.is_some_and(|owner| {
-                    !self.active_signatures.contains(&owner)
-                        && self.package.item(owner).is_some_and(|item| {
-                            matches!(
-                                &item.kind,
-                                ItemKind::Fn(sig, _)
-                                    if !sig.modifiers.is_comptime
-                                        && !sig.modifiers.is_normal_form_head
-                            )
-                        })
-                }));
-        if !in_runtime_body {
+        if !self.runtime_dependency_body(self.signature_owner) {
             if let Some(identity) = self.signature_runtime_projection(value, expected_inner)? {
                 return Ok(identity);
             }

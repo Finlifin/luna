@@ -17,6 +17,11 @@ impl BindingKey for nir::program::SourceRange {
         u128::from(self.start) << 32 | u128::from(self.end)
     }
 }
+impl BindingKey for nir::RuntimeId {
+    fn bits(self) -> u128 {
+        u128::from(self.instance) << 32 | u128::from(self.local)
+    }
+}
 impl BindingKey for LocalId {
     fn bits(self) -> u128 {
         u128::from(self.owner) << 32 | u128::from(self.index)

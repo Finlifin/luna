@@ -7,6 +7,8 @@ use super::*;
 pub(super) struct LocalOrigins {
     pub(super) ids: BTreeMap<LocalRuntimeOrigin, nir::RuntimeId>,
     pub(super) sources: SourceBindings<Term>,
+    pub(super) defaults:
+        super::local_bindings::Bindings<nir::RuntimeId, super::runtime_defaults::ScopedDefault>,
     pub(super) acquired_bindings: LocalBindings<nir::RuntimeId>,
     pub(super) call_regions: super::local_bindings::Bindings<n::SourceRange, ()>,
 }

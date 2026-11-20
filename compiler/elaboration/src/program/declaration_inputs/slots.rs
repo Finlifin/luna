@@ -261,6 +261,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
                         let term = checker.default_runtime_argument(
                             provider.owner,
                             param,
+                            checker.default_input_owner,
                             &prefix_args,
                             provider.expression,
                             &expected_domain,

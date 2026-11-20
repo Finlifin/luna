@@ -814,6 +814,7 @@ impl Checker<'_, '_> {
                             self.default_runtime_argument(
                                 owner,
                                 parameters[slot],
+                                caller_scope.owner,
                                 &prefix_args,
                                 value,
                                 &domain,

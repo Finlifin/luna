@@ -873,7 +873,15 @@ impl<'h> Checker<'_, 'h> {
             let domain = self.type_expr(ty)?;
             let default = if matches!(domain, Term::Lift(_)) {
                 let param = self.type_parameters[&owner][slot_index];
-                self.default_runtime_argument(owner, param, &arguments, value, &domain, span)?
+                self.default_runtime_argument(
+                    owner,
+                    param,
+                    caller_owner,
+                    &arguments,
+                    value,
+                    &domain,
+                    span,
+                )?
             } else {
                 self.normal_value_argument(value, &domain)?
             };

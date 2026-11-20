@@ -960,6 +960,84 @@ fn computed_quote_defaults_require_finite_observation_at_the_declaration() {
 }
 
 #[test]
+fn computed_defaults_observe_acquired_inputs_once_in_source_order() {
+    let src = r#"
+        struct Cell { val: i32 }
+        fn read(p: *Cell) -> i32 { p.val.* }
+        fn choose(n: *i32, p: *Cell) -> *Cell {
+            if n.* >= 0 and n.* < 100 { n.* = n.* + 1; }
+            p
+        }
+        fn change(p: *Cell) -> bool { p.*.val = 42; true }
+        fn keep(x: i32) -> i32 { x }
+        struct Sample
+        where quote src: lift *Cell, quote .saved: lift i32 = read(src), quote .again: lift i32 = keep(saved)
+        {}
+        fn stored(v: Sample<src, .saved = a, .again = b>) -> i32
+        where quote src: lift *Cell, quote a: lift i32, quote b: lift i32
+        {
+            if a == b { b } else { 0 }
+        }
+        fn sample(changed: bool) -> i32
+        where quote src: lift *Cell, quote .saved: lift i32 = read(src)
+        {
+            saved
+        }
+        fn relay(value: T) -> T where T { value }
+        fn default_number() -> i32 { 53 }
+        struct Closed where quote .n: lift i32 = default_number() {}
+        fn number(v: Closed<.n = n>) -> i32 where quote n: lift i32 { n }
+        fn run() -> bool {
+            var p = Cell { val: 7 };
+            var count: i32 = 0;
+            let value = relay(Sample<choose(count.ref, p.ref)> {});
+            let after = sample<choose(count.ref, p.ref)>(change(p.ref));
+            let overridden = sample<p.ref, .saved = 13>(true);
+            stored(value) == 7 and after == 42 and count == 2
+                and overridden == 13 and number(Closed<> {}) == 53
+        }
+    "#;
+    let case = NativeCase::new(src);
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
+fn computed_default_identities_are_per_acquisition_and_cannot_export_dead_storage() {
+    let definitions = r#"
+        struct Pair { first: i32 }
+        fn first(p: *Pair) -> *i32 { p.first }
+        struct View where quote src: lift *Pair, quote .field: lift *i32 = first(src) {}
+        fn read(v: View<src, .field = field>) -> i32
+        where quote src: lift *Pair, quote field: lift *i32
+        {
+            field.*
+        }
+        fn same(a: View<src, .field = field>, b: View<src, .field = field>) -> i32
+        where quote src: lift *Pair, quote field: lift *i32
+        {
+            field.*
+        }
+    "#;
+    for (body, diagnostic) in [
+        (
+            "var p = Pair { first: 7 }; same(View<p.ref> {}, View<p.ref> {})",
+            "not entailed",
+        ),
+        (
+            "let v = do { var p = Pair { first: 7 }; View<p.ref> {} }; read(v)",
+            "no longer in scope",
+        ),
+    ] {
+        let source = format!("{definitions} fn run() -> i32 {{ {body} }}");
+        let reason = support::compile(&source).unwrap_err();
+        assert!(reason.contains(diagnostic), "{reason}");
+    }
+}
+
+#[test]
 fn projected_quote_defaults_keep_the_field_and_storage_identity() {
     let source = r#"
         struct Cell {

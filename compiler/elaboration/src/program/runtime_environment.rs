@@ -147,6 +147,7 @@ pub(super) struct Acquisition(pub(super) Vec<n::Expr>);
 pub(super) struct CallEnvironment {
     before_arguments: Acquisition,
     argument_prefixes: BTreeMap<usize, Vec<n::Expr>>,
+    after_explicit: Vec<n::Expr>,
 }
 
 impl CallEnvironment {
@@ -158,8 +159,14 @@ impl CallEnvironment {
         offset: usize,
         site: &Expr<'_>,
     ) -> Result<n::Expr, Error> {
-        let call =
-            checker.stage_collected_call(call, routes, offset, site, self.argument_prefixes)?;
+        let call = checker.stage_collected_call(
+            call,
+            routes,
+            offset,
+            site,
+            self.argument_prefixes,
+            self.after_explicit,
+        )?;
         if self.before_arguments.0.is_empty() {
             return Ok(call);
         }
@@ -227,6 +234,7 @@ impl Checker<'_, '_> {
             return Ok(CallEnvironment {
                 before_arguments: Acquisition(statements),
                 argument_prefixes: BTreeMap::new(),
+                after_explicit: Vec::new(),
             });
         }
         let K::Call {
@@ -268,6 +276,7 @@ impl Checker<'_, '_> {
             )?;
         }
         let mut identities = std::collections::HashMap::<Term, usize>::new();
+        let mut defaults = BTreeMap::new();
         let mut slots = Vec::new();
         let mut operands: Vec<n::Expr> = Vec::new();
         let mut bind = receiver_prefixes.iter().any(|prefix| !prefix.is_empty());
@@ -287,7 +296,16 @@ impl Checker<'_, '_> {
                 });
                 continue;
             }
-            let value = self.deliver_runtime_dependency(&identity, &domain, site.span)?;
+            let value = if let Term::Runtime(id) = &identity
+                && let Some(local) = self.default_result_local(*id, site.span)
+            {
+                self.require_expression(&local.ty, &domain, site.span)?;
+                defaults.insert(operands.len(), *id);
+                bind = true;
+                local
+            } else {
+                self.deliver_runtime_dependency(&identity, &domain, site.span)?
+            };
             bind |= match self.runtime_place(&value, site.span)? {
                 Some(runtime_origins::Place::Local(LocalRuntimeOrigin::LocalValue {
                     binding,
@@ -359,7 +377,8 @@ impl Checker<'_, '_> {
             for slot in order {
                 // The enclosing source argument establishes this binding at
                 // its own position, after explicit quote suppliers have run.
-                if matches!(&operands[slot].kind, K::Local(binding) if argument_bindings.contains(binding))
+                if defaults.contains_key(&slot)
+                    || matches!(&operands[slot].kind, K::Local(binding) if argument_bindings.contains(binding))
                 {
                     continue;
                 }
@@ -378,6 +397,11 @@ impl Checker<'_, '_> {
                 }
             }
         }
+        let mut after_explicit = Vec::with_capacity(defaults.len());
+        for (_, id) in defaults {
+            let prepared = |root: &Term| identities.get(root).map(|&slot| &operands[slot]);
+            after_explicit.push(self.acquire_runtime_default(id, prepared, site.span)?);
+        }
         for slot in slots {
             let base = &operands[slot.operand];
             constants::charge_copy(base, &mut self.required_steps, site.span)?;
@@ -387,6 +411,7 @@ impl Checker<'_, '_> {
         Ok(CallEnvironment {
             before_arguments: Acquisition(statements),
             argument_prefixes,
+            after_explicit,
         })
     }
 }

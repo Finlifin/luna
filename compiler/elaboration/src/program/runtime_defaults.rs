@@ -7,6 +7,15 @@ struct Provider {
     inputs: BTreeMap<n::LocalId, DeclarationId>,
 }
 
+/// A checked provider awaiting evaluation at a concrete runtime use. Its local
+/// parameters are private to the provider; the result binding belongs to the
+/// consuming call or constructor. Only that binding is published for delivery.
+pub(super) struct ScopedDefault {
+    binding: n::LocalId,
+    value: n::Expr,
+    inputs: Vec<(n::LocalId, Term)>,
+}
+
 impl Checker<'_, '_> {
     /// Rebuild a checked address in the active lexical environment. A
     /// projected identity can occur in a signature without such an environment.
@@ -224,10 +233,100 @@ impl Checker<'_, '_> {
         result
     }
 
+    pub(super) fn default_result_local(&self, id: nir::RuntimeId, span: Span) -> Option<n::Expr> {
+        let provider = self.local_runtime_origins.defaults.get(&id)?;
+        Some(n::Expr {
+            ty: provider.value.ty.clone(),
+            kind: K::Local(provider.binding),
+            source: source(span),
+        })
+    }
+
+    pub(super) fn acquire_runtime_default<'a>(
+        &mut self,
+        id: nir::RuntimeId,
+        prepared: impl Fn(&Term) -> Option<&'a n::Expr>,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let provider = self
+            .local_runtime_origins
+            .defaults
+            .shared(&id)
+            .cloned()
+            .ok_or_else(|| error(span, "missing scoped runtime default"))?;
+        let mut inputs = Vec::new();
+        let mut connections = BTreeMap::new();
+        for (binding, identity) in &provider.inputs {
+            let (root, fields) = self.runtime_field_path(identity, span)?;
+            if let Term::Runtime(id) = root
+                && self.local_runtime_origins.defaults.contains_key(id)
+            {
+                return Err(error(
+                    span,
+                    "runtime default depends on a later acquisition",
+                ));
+            }
+            let base = if let Some(base) = prepared(root) {
+                constants::charge_copy(base, &mut self.required_steps, span)?;
+                base.clone()
+            } else {
+                let ty = self.runtime_root_payload(root, span)?;
+                self.deliver_runtime_dependency(root, &ty, span)?
+            };
+            let mut input = self.apply_runtime_fields(base, fields, span)?;
+            if !matches!(input.kind, K::Local(_)) {
+                inputs.push(self.prepare_call_operand(&mut input, span)?);
+            }
+            let K::Local(actual) = input.kind else {
+                unreachable!("prepared provider input")
+            };
+            connections.insert(*binding, actual);
+        }
+        constants::charge_copy(&provider.value, &mut self.required_steps, span)?;
+        let mut value = provider.value.clone();
+        cmtt::freshen(
+            &mut value,
+            connections,
+            &mut self.next_temporary_binding,
+            &mut self.expansion_sources,
+            span,
+        )?;
+        let ty = value.ty.clone();
+        let body = super::runtime_environment::Acquisition(inputs).finish(self, value, span)?;
+        let binding = provider.binding;
+        self.locals.insert(binding, ty.clone());
+        self.immutable.insert(binding);
+        self.local_runtime_origins
+            .acquired_bindings
+            .insert(binding, id);
+        self.local_runtime_deliveries.insert(
+            id,
+            LocalRuntimeDelivery {
+                producer_site: None,
+                checked_epoch: None,
+                expr: n::Expr {
+                    ty,
+                    source: source(span),
+                    kind: K::Local(binding),
+                },
+            },
+        );
+        self.local_runtime_origins.defaults.remove(&id);
+        Ok(n::Expr {
+            ty: p(P::Void),
+            source: source(span),
+            kind: K::Let {
+                binding,
+                value: Box::new(body),
+            },
+        })
+    }
+
     pub(super) fn default_runtime_argument(
         &mut self,
         owner: OwnerId,
         param: DeclarationId,
+        caller: Option<OwnerId>,
         prefix_args: &[Term],
         value: &Expr<'_>,
         domain: &Term,
@@ -242,6 +341,69 @@ impl Checker<'_, '_> {
         if let Some(identity) = self.forward_runtime_dependency(value, Some(expected_inner))? {
             return Ok(identity);
         }
+        let expected_inner = self.callable_input_view(expected_inner, value.span)?;
+        let provider = self.runtime_default_provider(owner, value, Some(&expected_inner))?;
+        if let Some(identity) = self.provider_identity(&provider, value.span)? {
+            return Ok(identity);
+        }
+        let checked = provider.value;
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let free = nir::free_bindings::collect(&checked, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        let free = free.map_err(|reason| error(value.span, reason.to_string()))?;
+        if free.is_empty() && self.runtime_place(&checked, span)?.is_some() {
+            return self.intern_runtime_operand(checked, value, span);
+        }
+        // A closed call still evaluates runtime code. Only values which are
+        // already immutable leaves can be delivered directly from the package.
+        if !matches!(
+            &checked.kind,
+            K::Literal(_)
+                | K::Unit
+                | K::Function(_)
+                | K::FunctionInstance { .. }
+                | K::ComptimeValue(_)
+                | K::TypeValue(_)
+        ) || !free.is_empty()
+        {
+            if !self.runtime_dependency_body(caller) {
+                return Err(error(
+                    span,
+                    "computed quote default requires a runtime acquisition site",
+                ));
+            }
+            let mut inputs = Vec::with_capacity(free.len());
+            for binding in free {
+                let param = *provider.inputs.get(&binding).ok_or_else(|| {
+                    error(value.span, "runtime default captures an unavailable local")
+                })?;
+                let identity = match self.alias_substitution.get(&param) {
+                    Some(term) => {
+                        declaration_inputs::copy_input_domain(term, &mut self.required_steps, span)?
+                    }
+                    None => Term::Rigid {
+                        declaration: param,
+                        sort: Sort::Runtime,
+                    },
+                };
+                if identity.sort() != Sort::Runtime {
+                    return Err(error(span, "runtime default needs a quote input"));
+                }
+                inputs.push((binding, identity));
+            }
+            let binding = self.spread_binding(span)?;
+            let id = self.intern_runtime_id(Term::Lift(Box::new(checked.ty.clone())), span)?;
+            self.local_runtime_origins.defaults.insert(
+                id,
+                ScopedDefault {
+                    binding,
+                    inputs,
+                    value: checked,
+                },
+            );
+            return Ok(Term::Runtime(id));
+        }
         let key = GlobalRuntimeOrigin::DefaultParam {
             owner,
             param,
@@ -254,28 +416,6 @@ impl Checker<'_, '_> {
         };
         if let Some(&existing) = self.global_runtime_origin_ids.get(&key) {
             return Ok(Term::Runtime(existing));
-        }
-        let expected_inner = self.callable_input_view(expected_inner, value.span)?;
-        let provider = self.runtime_default_provider(owner, value, Some(&expected_inner))?;
-        if let Some(identity) = self.provider_identity(&provider, value.span)? {
-            return Ok(identity);
-        }
-        let checked = provider.value;
-        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let before = fuel;
-        let free = nir::free_bindings::collect(&checked, &mut fuel);
-        self.required_steps -= (before - fuel) as u64;
-        if !free
-            .map_err(|reason| error(value.span, reason.to_string()))?
-            .is_empty()
-        {
-            return Err(error(
-                value.span,
-                "computed quote default requires a scoped runtime operand",
-            ));
-        }
-        if self.runtime_place(&checked, span)?.is_some() {
-            return self.intern_runtime_operand(checked, value, span);
         }
         let id = {
             let id = self.intern_runtime_id(Term::Lift(Box::new(checked.ty.clone())), span)?;
