@@ -2100,7 +2100,7 @@ impl<'a> Interpreter<'a> {
 
     // Finish binding before recursive body evaluation so its temporary values
     // do not accumulate in every invocation frame on small host stacks.
-    #[inline(never)]
+    #[cfg(test)]
     fn bind_invocation_inputs(
         &mut self,
         parameters: &[LocalId],
@@ -2108,7 +2108,29 @@ impl<'a> Interpreter<'a> {
         signature: &Term,
         environment: &mut Environment,
         source: SourceRange,
+        observed: Option<&mut Vec<Term>>,
+    ) -> Result<Option<nir::FunctionInputBinding>, Error> {
+        self.bind_invocation_inputs_for_body(
+            parameters,
+            arguments,
+            signature,
+            environment,
+            source,
+            observed,
+            None,
+        )
+    }
+
+    #[inline(never)]
+    fn bind_invocation_inputs_for_body(
+        &mut self,
+        parameters: &[LocalId],
+        arguments: Vec<Value>,
+        signature: &Term,
+        environment: &mut Environment,
+        source: SourceRange,
         mut observed: Option<&mut Vec<Term>>,
+        mut defer: Option<(&BTreeSet<usize>, &mut Vec<(usize, LocalId)>)>,
     ) -> Result<Option<nir::FunctionInputBinding>, Error> {
         let Term::Function {
             parameters: types, ..
@@ -2215,6 +2237,16 @@ impl<'a> Interpreter<'a> {
                     _ => return Err(self.failure(ErrorKind::Type, Some(source))),
                 };
                 Some(ty)
+            } else if parameter.sort == nir::Sort::ComptimeValue
+                && matches!(representation, std::borrow::Cow::Borrowed(_))
+                && let Some((entry, deferred)) = defer.as_mut()
+                && !entry.contains(&index)
+            {
+                // Direct owned arguments survive suspension in the activation.
+                // Storage and value-reference receivers use their entry snapshot.
+                deferred.push((index, *binding));
+                supplied = true;
+                None
             } else if parameter.sort == nir::Sort::ComptimeValue
                 && self.normal_input_is_data(&representation, source)?
             {

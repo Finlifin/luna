@@ -300,6 +300,64 @@ impl FunctionInputBinding {
         std::iter::once(&self.signature).chain(&self.replacements)
     }
 
+    /// Supply already admitted terms for retained inputs by original slot.
+    /// The resulting binding still rewrites annotations of the original body.
+    pub fn bind_retained_bounded(
+        &self,
+        inputs: std::collections::BTreeMap<usize, Term>,
+        fuel: &mut usize,
+    ) -> Result<Self, crate::type_computations::Error> {
+        use crate::type_computations::Error;
+        crate::copy_budget::charge_term_copy(&self.signature, fuel, 128)?;
+        let mut builder = FunctionInputBuilder::new(&self.signature).map_err(Error::Scope)?;
+        let mut retained: Vec<Option<Term>> = (0..builder.parameters.len()).map(|_| None).collect();
+        for (original, value) in inputs {
+            let Some(Term::Bound {
+                depth: 0, index, ..
+            }) = self.replacements.get(original)
+            else {
+                return Err(Error::Scope(TypeError::UnpreparedCallInput(original)));
+            };
+            crate::copy_budget::charge_term_copy(&value, fuel, 128)?;
+            retained[*index] = Some(value);
+        }
+        for input in retained {
+            builder.next_type_bounded(fuel)?;
+            builder.push(input).map_err(Error::Scope)?;
+        }
+        let next = builder.finish_bounded(fuel)?;
+        *fuel = fuel
+            .checked_sub(self.replacements.len())
+            .ok_or(Error::Budget)?;
+        let mut remaining = next.replacements.into_iter().enumerate();
+        let mut replacements = Vec::with_capacity(self.replacements.len());
+        let mut type_slots = self.type_slots.clone();
+        for (original, term) in self.replacements.iter().enumerate() {
+            if let Term::Bound {
+                depth: 0, index, ..
+            } = term
+            {
+                // Each retained slot occurs once, in telescope order. Move its
+                // completed term without copying a potentially large payload.
+                let (position, replacement) = remaining
+                    .next()
+                    .ok_or(Error::Scope(TypeError::MissingArgument(*index)))?;
+                debug_assert_eq!(position, *index);
+                if next.type_slots.contains(index) {
+                    type_slots.insert(original);
+                }
+                replacements.push(replacement);
+            } else {
+                replacements.push(crate::copy_budget::clone_term(term, fuel)?);
+            }
+        }
+        Ok(Self {
+            signature: next.signature,
+            replacements,
+            type_slots,
+        })
+    }
+
     pub fn rebind_bounded(
         &self,
         term: &Term,

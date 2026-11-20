@@ -257,18 +257,50 @@ pub fn expression_has_contextual_types(
     value: &n::Expr,
     steps: &mut u64,
 ) -> Result<bool, CopyBudgetExhausted> {
-    let mut found = false;
-    charge_node_observed(
-        Node::Expr(value),
-        steps,
-        true,
-        None,
-        &mut |term, nesting| {
-            found |= matches!(term, Term::Bound { depth, .. } if *depth >= nesting)
-                || matches!(term, Term::Hole { .. });
-        },
-    )?;
-    Ok(found)
+    Ok(expression_contextual_slots(value, steps)?.is_some())
+}
+
+/// None proves independence. A contextual expression may still have no input
+/// slots when it contains a hole or a reference beyond this callable's frame.
+pub fn expression_contextual_slots(
+    value: &n::Expr,
+    steps: &mut u64,
+) -> Result<Option<std::collections::BTreeSet<usize>>, CopyBudgetExhausted> {
+    let mut slots = std::collections::BTreeSet::new();
+    let contextual = collect_contextual_slots(Node::Expr(value), steps, &mut slots)?;
+    Ok(contextual.then_some(slots))
+}
+
+/// Observe original slot positions across one callable telescope. Sort
+/// refinement and declaration admission belong to the receiving binder.
+pub fn signature_input_slots(
+    parameters: &[crate::Parameter],
+    result: &Term,
+    steps: &mut u64,
+) -> Result<std::collections::BTreeSet<usize>, CopyBudgetExhausted> {
+    let mut slots = std::collections::BTreeSet::new();
+    for ty in parameters.iter().map(|p| &p.ty).chain([result]) {
+        collect_contextual_slots(Node::Type(ty), steps, &mut slots)?;
+    }
+    Ok(slots)
+}
+
+fn collect_contextual_slots(
+    root: Node<'_>,
+    steps: &mut u64,
+    slots: &mut std::collections::BTreeSet<usize>,
+) -> Result<bool, CopyBudgetExhausted> {
+    let mut contextual = false;
+    charge_node_observed(root, steps, true, None, &mut |term, nesting| match term {
+        Term::Bound { depth, index, .. } if *depth == nesting => {
+            contextual = true;
+            slots.insert(*index);
+        }
+        Term::Bound { depth, .. } if *depth > nesting => contextual = true,
+        Term::Hole { .. } => contextual = true,
+        _ => {}
+    })?;
+    Ok(contextual)
 }
 
 /// Observe rigid declaration inputs in every embedded term, including value

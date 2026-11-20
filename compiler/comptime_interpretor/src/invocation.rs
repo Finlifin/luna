@@ -45,6 +45,7 @@ struct InvocationFrame<'a> {
     source: SourceRange,
     result_type: Term,
     type_scope: Option<nir::FunctionInputBinding>,
+    deferred_inputs: Vec<(usize, LocalId)>,
     progress: contracts::Progress<'a>,
     condition: Option<Arc<Expr>>,
 }
@@ -520,12 +521,17 @@ impl<'a> Interpreter<'a> {
         let Some(scope) = &frame.type_scope else {
             return Ok((body, origin));
         };
-        let (prepared, independent) = match &body {
-            Body::Package(body) => {
-                self.prepare_input_body(body, scope, origin.expect("named body origin"))?
-            }
-            Body::Owned(body) => self.prepare_owned_input_body(body, scope)?,
+        let key = match &body {
+            Body::Package(_) => input_bodies::SourceKey::Named(origin.expect("named body origin")),
+            Body::Owned(body) => input_bodies::SourceKey::Owned(body),
         };
+        let (prepared, independent) = self.prepare_input_body_key(
+            body.expression(),
+            scope,
+            key,
+            &frame.deferred_inputs,
+            &frame.environment,
+        )?;
         Ok((Body::Owned(prepared), origin.filter(|_| independent)))
     }
 
@@ -605,13 +611,46 @@ impl<'a> Interpreter<'a> {
         } else {
             Vec::new()
         };
-        let type_scope = self.bind_invocation_inputs(
+        let mut deferred_inputs = Vec::new();
+        let entry_slots;
+        let defer = if self.comptime_only
+            && pending.is_empty()
+            && declaration.is_none_or(|f| {
+                f.preconditions.is_empty()
+                    && f.postconditions.is_empty()
+                    && f.result_guarantees.is_empty()
+            })
+            && let Term::Function { parameters, result } = signature.callable_signature()
+            && parameters.iter().any(|p| {
+                p.sort == nir::Sort::ComptimeValue && p.ty != Term::Primitive(Primitive::Type)
+            }) {
+            entry_slots =
+                nir::copy_budget::signature_input_slots(parameters, result, &mut self.budget.steps)
+                    .map_err(|reason| {
+                        self.failure(
+                            match reason {
+                                nir::copy_budget::CopyBudgetExhausted::Steps => {
+                                    ErrorKind::StepsExhausted
+                                }
+                                nir::copy_budget::CopyBudgetExhausted::Depth => {
+                                    ErrorKind::DepthExhausted
+                                }
+                            },
+                            Some(source),
+                        )
+                    })?;
+            Some((&entry_slots, &mut deferred_inputs))
+        } else {
+            None
+        };
+        let type_scope = self.bind_invocation_inputs_for_body(
             parameters,
             arguments,
             signature,
             &mut environment,
             source,
             domains,
+            defer,
         )?;
         for mut predicate in pending {
             let scope = type_scope
@@ -650,6 +689,7 @@ impl<'a> Interpreter<'a> {
             source,
             result_type,
             type_scope,
+            deferred_inputs,
             progress: contracts::Progress::Entry(0),
             condition: None,
         })

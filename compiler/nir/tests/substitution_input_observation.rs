@@ -291,3 +291,56 @@ fn partial_frame_expansion_charges_each_reached_replacement_under_its_binder() {
         Err(Error::Scope(TypeError::MissingArgument(1)))
     );
 }
+
+#[test]
+fn completing_retained_slots_agrees_with_one_shot_binding_and_sort_refinement() {
+    let ty = Term::Primitive(Primitive::Type);
+    let boolean = Term::Primitive(Primitive::Bool);
+    let signature = Term::Function {
+        parameters: vec![
+            Parameter {
+                sort: Sort::ComptimeValue,
+                ty: boolean.clone(),
+            },
+            Parameter {
+                sort: Sort::Type,
+                ty: ty.clone(),
+            },
+            Parameter {
+                sort: Sort::ComptimeValue,
+                ty: bound(0, 1, Sort::Type),
+            },
+            Parameter {
+                sort: Sort::Runtime,
+                ty: boolean.clone(),
+            },
+        ],
+        result: Box::new(ty.clone()),
+    };
+    let initial = signature
+        .prepare_function_inputs(&[Some(Term::Bool(false)), None, None, None])
+        .unwrap();
+    let inputs = BTreeMap::from([(1, ty.clone()), (2, boolean.clone())]);
+    let completed = initial
+        .bind_retained_bounded(inputs.clone(), &mut 1000)
+        .unwrap();
+    let direct = signature
+        .prepare_function_inputs(&[
+            Some(Term::Bool(false)),
+            Some(ty),
+            Some(boolean.clone()),
+            None,
+        ])
+        .unwrap();
+    assert_eq!(completed, direct);
+    assert_eq!(
+        completed.rebind(&bound(0, 2, Sort::ComptimeValue)).unwrap(),
+        boolean
+    );
+    assert!(initial.bind_retained_bounded(inputs, &mut 0).is_err());
+    assert!(
+        initial
+            .bind_retained_bounded(BTreeMap::from([(0, Term::Bool(true))]), &mut 1000)
+            .is_err()
+    );
+}

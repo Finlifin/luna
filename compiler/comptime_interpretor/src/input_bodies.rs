@@ -7,6 +7,7 @@ enum Entry {
     Prepared(Arc<Expr>),
 }
 struct BoundBody {
+    slots: Arc<BTreeSet<usize>>,
     binding: nir::FunctionInputBinding,
     body: Arc<Expr>,
 }
@@ -65,34 +66,50 @@ impl Cache {
             .insert(key, (Arc::downgrade(body), entry, weight));
     }
 }
-enum SourceKey<'a> {
+pub(super) enum SourceKey<'a> {
     Named(CodeOrigin),
     Owned(&'a Arc<Expr>),
 }
 
 impl Interpreter<'_> {
+    #[cfg(test)]
     pub(super) fn prepare_input_body(
         &mut self,
         body: &Expr,
         scope: &nir::FunctionInputBinding,
         origin: CodeOrigin,
     ) -> Result<(Arc<Expr>, bool), Error> {
-        self.prepare_input_body_key(body, scope, SourceKey::Named(origin))
+        self.prepare_input_body_key(
+            body,
+            scope,
+            SourceKey::Named(origin),
+            &[],
+            &Environment::new(),
+        )
     }
 
+    #[cfg(test)]
     pub(super) fn prepare_owned_input_body(
         &mut self,
         body: &Arc<Expr>,
         scope: &nir::FunctionInputBinding,
     ) -> Result<(Arc<Expr>, bool), Error> {
-        self.prepare_input_body_key(body, scope, SourceKey::Owned(body))
+        self.prepare_input_body_key(
+            body,
+            scope,
+            SourceKey::Owned(body),
+            &[],
+            &Environment::new(),
+        )
     }
 
-    fn prepare_input_body_key(
+    pub(super) fn prepare_input_body_key(
         &mut self,
         body: &Expr,
         scope: &nir::FunctionInputBinding,
         key: SourceKey<'_>,
+        deferred: &[(usize, LocalId)],
+        environment: &Environment,
     ) -> Result<(Arc<Expr>, bool), Error> {
         let cached = match key {
             SourceKey::Named(origin) => self
@@ -105,6 +122,19 @@ impl Interpreter<'_> {
         if let Some(Entry::Prepared(body)) = cached {
             return Ok((body, true));
         }
+        let slots = match &cached {
+            Some(Entry::Dependent(previous)) => Some(previous.slots.clone()),
+            _ => nir::copy_budget::expression_contextual_slots(body, &mut self.budget.steps)
+                .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(body.source)))?
+                .map(Arc::new),
+        };
+        let completed = match &slots {
+            Some(slots) => {
+                self.complete_body_inputs(scope, slots, deferred, environment, body.source)?
+            }
+            None => None,
+        };
+        let scope = completed.as_ref().unwrap_or(scope);
         // Rewriting depends only on this checked binding and the immutable
         // source body. Equality covers all replacements and slot refinements,
         // not just the resulting signature or the positions declared as Type.
@@ -119,14 +149,12 @@ impl Interpreter<'_> {
                 }
             }
         }
-        let dependent = if matches!(cached, Some(Entry::Dependent(_))) {
+        if cached.is_some() {
+            // A cold dependency observation already preflights the source copy.
             nir::copy_budget::charge_type_rewrite(body, &mut self.budget.steps)
                 .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(body.source)))?;
-            true
-        } else {
-            nir::copy_budget::expression_has_contextual_types(body, &mut self.budget.steps)
-                .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(body.source)))?
-        };
+        }
+        let dependent = slots.is_some();
         let mut prepared = body.clone();
         // Retain all original rewrite/scope validation, including pattern-domain
         // completion, before publishing an independent body for later calls.
@@ -139,9 +167,12 @@ impl Interpreter<'_> {
             if dependent {
                 self.charge_input_binding(scope, body.source)?;
             }
-            let weight = (before - self.budget.steps).saturating_add(1);
-            let entry = if dependent {
+            let weight = (before - self.budget.steps)
+                .saturating_add(1)
+                .saturating_add(slots.as_ref().map_or(0, |s| s.len() as u64));
+            let entry = if let Some(slots) = slots {
                 Entry::Dependent(Arc::new(BoundBody {
+                    slots,
                     binding: scope.clone(),
                     body: prepared.clone(),
                 }))
@@ -154,6 +185,34 @@ impl Interpreter<'_> {
             }
         }
         Ok((prepared, !dependent))
+    }
+
+    fn complete_body_inputs(
+        &mut self,
+        scope: &nir::FunctionInputBinding,
+        slots: &BTreeSet<usize>,
+        deferred: &[(usize, LocalId)],
+        environment: &Environment,
+        source: SourceRange,
+    ) -> Result<Option<nir::FunctionInputBinding>, Error> {
+        let mut supplied = BTreeMap::new();
+        for (slot, binding) in deferred {
+            self.tick(Some(source))?;
+            if slots.contains(slot) {
+                let value = environment
+                    .get(binding)
+                    .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(source)))?;
+                if self.normal_input_is_data(value, source)? {
+                    supplied.insert(*slot, self.borrowed_residual_input_term(value, source)?);
+                }
+            }
+        }
+        if supplied.is_empty() {
+            return Ok(None);
+        }
+        self.query_admission(Some(source), |_, fuel| {
+            Ok(Some(scope.bind_retained_bounded(supplied, fuel)?))
+        })
     }
 
     fn charge_input_binding(
@@ -686,6 +745,92 @@ mod tests {
             first.kind,
             K::TypeValue(Term::Primitive(Primitive::Bool))
         ));
+    }
+
+    #[test]
+    fn only_body_type_uses_join_the_binding_on_cold_and_warm_calls() {
+        let source = SourceRange { start: 1, end: 2 };
+        let binding = |index| LocalId { owner: 1, index };
+        let term = |index| Term::Bound {
+            depth: 0,
+            index,
+            sort: nir::Sort::ComptimeValue,
+        };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let signature = Term::Function {
+            parameters: vec![
+                nir::Parameter {
+                    sort: nir::Sort::ComptimeValue,
+                    ty: boolean.clone()
+                };
+                2
+            ],
+            result: Box::new(boolean.clone()),
+        };
+        let mut package = guarded_type_body(0);
+        let function = &mut package.functions[0];
+        function.interface.signature = signature;
+        function.interface.preconditions.clear();
+        // One ordinary read and one use in an embedded term. Only the latter
+        // changes the specialized code; both remain ordinary invocation values.
+        function.body = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::Block {
+                statements: vec![Expr {
+                    source,
+                    ty: boolean.clone(),
+                    kind: K::Local(binding(0)),
+                }],
+                result: Some(Box::new(Expr {
+                    source,
+                    ty: boolean,
+                    kind: K::StagedValue(term(1)),
+                })),
+            },
+        };
+        for tree in [false, true] {
+            let mut vm = if tree {
+                Interpreter::for_comptime_tree(&package, Budget::default())
+            } else {
+                Interpreter::for_comptime(&package, Budget::default())
+            }
+            .unwrap();
+            let mut previous: Option<Arc<Expr>> = None;
+            for (first, second) in [(true, false), (false, false), (true, true)] {
+                assert_eq!(
+                    vm.invoke(id(1), vec![Value::Bool(first), Value::Bool(second)])
+                        .unwrap(),
+                    Value::Bool(second)
+                );
+                let (Entry::Dependent(bound), _) = &vm.input_body_cache.entries[&named(1)] else {
+                    panic!("missing dependent body")
+                };
+                assert_eq!(bound.binding.rebind(&term(0)).unwrap(), term(0));
+                assert_eq!(bound.binding.rebind(&term(1)).unwrap(), Term::Bool(second));
+                if let Some(previous) = &previous {
+                    assert_eq!(Arc::ptr_eq(previous, &bound.body), !second);
+                }
+                previous = Some(bound.body.clone());
+            }
+            // A caller can change a value-reference receiver while a source
+            // call is suspended. Its type input keeps the admission-time value.
+            let cell = Storage::new(Value::Bool(false));
+            let receiver =
+                Value::ComptimeReference(value_reference::ValueReference::root(cell.clone()));
+            let mut fuel = 100_000;
+            let call = vm
+                .admit_source_call(id(1), vec![], vec![Value::Bool(true), receiver], &mut fuel)
+                .unwrap();
+            cell.pointer(Term::Primitive(Primitive::Bool), vec![])
+                .write(Value::Bool(true), |_| Ok(()))
+                .unwrap();
+            assert_eq!(call.resume(&mut fuel).unwrap(), Value::Bool(false));
+            assert!(
+                vm.invoke(id(1), vec![Value::Unit, Value::Bool(true)])
+                    .is_err()
+            );
+        }
     }
 
     #[test]
