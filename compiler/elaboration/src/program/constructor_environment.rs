@@ -54,7 +54,7 @@ impl Checker<'_, '_> {
             self.immutable.insert(binding);
             self.local_runtime_origins
                 .acquired_bindings
-                .insert(binding, ());
+                .insert(binding, id);
             self.local_runtime_deliveries.get_mut(&id).unwrap().expr = operand;
             captured.insert(id);
         }

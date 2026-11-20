@@ -450,7 +450,7 @@ impl Checker<'_, '_> {
                     self.local_runtime_deliveries.get_mut(&id).unwrap().expr = operand.clone();
                     self.local_runtime_origins
                         .acquired_bindings
-                        .insert(binding, ());
+                        .insert(binding, id);
                     self.immutable.insert(binding);
                     captured.insert(id);
                 }

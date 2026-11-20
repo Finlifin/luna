@@ -120,19 +120,13 @@ impl Checker<'_, '_> {
                 }
             }
             if !escaping.contains(binding) {
-                if self
-                    .local_runtime_origins
-                    .acquired_bindings
-                    .contains_key(binding)
-                {
-                    return Ok(Vec::new());
-                }
                 transit.insert(*binding);
             }
         }
 
         let cuts: Vec<_> = regions.into_iter().map(<[_]>::len).collect();
         let mut prefix = Vec::new();
+        let mut transferred = BTreeSet::new();
         let mut cursor = value;
         for cut in cuts {
             let (K::CallPreparation {
@@ -165,6 +159,20 @@ impl Checker<'_, '_> {
                 } else {
                     let original = *binding;
                     *binding = self.spread_binding(span)?;
+                    // The earlier argument can already need its environment
+                    // for Drop if a later supplier transfers control. Keep
+                    // the producer as its delivery path. The preparation
+                    // still takes ownership at the original position below.
+                    if let Some(&id) = self.local_runtime_origins.acquired_bindings.get(&original)
+                        && let Some(entry) = self.local_runtime_deliveries.get_mut(&id)
+                        && matches!(entry.expr.kind, K::Local(local) if local == original)
+                    {
+                        entry.expr.kind = K::Local(*binding);
+                        self.local_runtime_origins
+                            .acquired_bindings
+                            .insert(*binding, id);
+                        transferred.insert(id);
+                    }
                     statements.push(n::Expr {
                         ty: stmt.ty.clone(),
                         source: stmt.source,
@@ -182,6 +190,24 @@ impl Checker<'_, '_> {
             }
             statements.extend(tail);
             cursor = body;
+        }
+        if !transferred.is_empty() {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(self.local_runtime_deliveries.len() as u64)
+                .ok_or_else(|| error(span, "returned environment projection budget exhausted"))?;
+            let projections = self
+                .local_runtime_deliveries
+                .iter()
+                .filter_map(|(id, entry)| {
+                    entry
+                        .projection
+                        .as_ref()
+                        .filter(|path| transferred.contains(&path.root))
+                        .map(|_| *id)
+                })
+                .collect();
+            self.rebase_environment_projections(&projections, &transferred, span)?;
         }
         Ok(prefix)
     }

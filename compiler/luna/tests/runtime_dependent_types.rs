@@ -705,6 +705,111 @@ fn returned_environments_preserve_argument_order_cleanup_and_projected_storage()
 }
 
 #[test]
+fn returning_one_argument_keeps_other_acquisitions_available_for_cleanup() {
+    let case = NativeCase::new(
+        r#"
+        struct Cell { value: i32 }
+        fn bump(p: *Cell) {
+            if p.value.* >= 0 and p.value.* < 99 {
+                p.*.value = p.value.* + 1;
+            }
+        }
+        fn choose(calls: *Cell, target: *Cell) -> *Cell {
+            bump(calls);
+            target
+        }
+        struct Guard where quote counter: lift *Cell {}
+        impl Drop for Guard<counter> where quote counter: lift *Cell {
+            fn drop(*self) { bump(counter); }
+        }
+        struct View where quote src: lift *Cell {}
+        impl View<src> where quote src: lift *Cell {
+            fn read(*self) -> i32 { src.value.* }
+        }
+        fn right(g: Guard<counter>, v: View<src>, last: bool) -> View<src>
+        where quote counter: lift *Cell, quote src: lift *Cell
+        {
+            v
+        }
+        fn identity(t: T) -> T where T { t }
+        fn observe(calls: *Cell, drops: *Cell, data: *Cell, stop: bool, late: bool) -> bool {
+            var v = identity(right(
+                Guard<choose(calls, drops)> {},
+                View<do {
+                    if stop { return true; }
+                    choose(calls, data)
+                }> {}, do { if late { return true; } false }
+            ));
+            v.ref.read() == 17 and drops.value.* == 1
+        }
+        fn run() -> bool {
+            var calls = Cell { value: 0 };
+            var drops = Cell { value: 0 };
+            var data = Cell { value: 17 };
+            let done = observe(calls.ref, drops.ref, data.ref, false, false);
+            let once = calls.value == 2 and drops.value == 1;
+            let stopped = observe(calls.ref, drops.ref, data.ref, true, false);
+            let early = stopped and calls.value == 3 and drops.value == 2;
+            let late = observe(calls.ref, drops.ref, data.ref, false, true);
+            done and once and early and late and calls.value == 5 and drops.value == 3
+        }
+        "#,
+    );
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
+fn call_scoped_affine_environment_drops_before_the_result_is_used() {
+    let case = NativeCase::new(
+        r#"
+        struct Cell { value: i32 }
+        struct Ticket { counter: *Cell }
+        impl Drop for Ticket {
+            fn drop(*self) {
+                let p = self.counter.*;
+                if p.value.* >= 0 and p.value.* < 100 {
+                    p.*.value = p.value.* + 1;
+                }
+            }
+        }
+        fn acquire(p: *Cell) -> Ticket { Ticket { counter: p } }
+        struct Tag where quote ticket: lift Ticket {}
+        struct View where quote src: lift *Cell {}
+        impl View<src> where quote src: lift *Cell {
+            fn read(*self) -> i32 { src.value.* }
+        }
+        fn choose(p: *Cell) -> *Cell { p }
+        fn right(a: Tag<ticket>, b: View<src>) -> View<src>
+        where quote ticket: lift Ticket, quote src: lift *Cell
+        {
+            b
+        }
+        fn observe(drops: *Cell, data: *Cell, stop: bool) -> bool {
+            var v = right(Tag<acquire(drops)> {}, View<do {
+                if stop { return true; }
+                choose(data)
+            }> {});
+            v.ref.read() == 17 and drops.value.* == 1
+        }
+        fn run() -> bool {
+            var drops = Cell { value: 0 };
+            var data = Cell { value: 17 };
+            let ok = observe(drops.ref, data.ref, false);
+            let early = observe(drops.ref, data.ref, true);
+            ok and early and drops.value == 2
+        }
+        "#,
+    );
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
 fn returned_environments_reuse_explicit_runtime_inputs_after_the_call() {
     let case = NativeCase::new(
         r#"
