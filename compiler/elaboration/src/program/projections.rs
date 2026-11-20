@@ -3,6 +3,22 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    fn projected_unit_variant(
+        &mut self,
+        expr: &Expr<'_>,
+        ty: Term,
+        name: &str,
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        self.with_constructor_inputs(expr, ty, expr.span, |this, ty| {
+            let value = this.enum_variant(&ty, name, expr.span)?;
+            if let Some(expected) = expected {
+                this.require(&value.ty, expected, expr.span)?;
+            }
+            Ok(value)
+        })
+    }
+
     /// A Type namespace can be supplied by a value, not only declaration syntax.
     /// Classification observes its domain; it neither completes the represented
     /// identity nor authorizes dropping the receiver's evaluation. Keep this
@@ -1464,11 +1480,9 @@ impl Checker<'_, '_> {
                 unreachable!()
             };
             let name = self.enums[declaration].variants[index].name.clone();
-            let variant = self.enum_variant(&ty, &name, expr.span)?;
-            if let Some(expected) = expected {
-                self.require(&variant.ty, expected, expr.span)?;
-            }
-            return Ok(splicing::Operand::Value(variant));
+            return self
+                .projected_unit_variant(expr, ty, &name, expected)
+                .map(splicing::Operand::Value);
         }
         if !known_type_member
             && let Some(value) = self.projected_member_expression(expr, expected)?
@@ -1533,21 +1547,17 @@ impl Checker<'_, '_> {
                     unreachable!()
                 };
                 let name = self.enums[declaration].variants[index].name.clone();
-                let variant = self.enum_variant(&ty, &name, expr.span)?;
-                if let Some(expected) = expected {
-                    self.require(&variant.ty, expected, expr.span)?;
-                }
-                return Ok(splicing::Operand::Value(variant));
+                return self
+                    .projected_unit_variant(expr, ty, &name, expected)
+                    .map(splicing::Operand::Value);
             }
             if self.is_type_head(value) {
                 let ty = self.type_expr(value)?;
                 if let Term::Nominal { declaration, .. } = &ty {
                     if self.enums.contains_key(declaration) {
-                        let variant = self.enum_variant(&ty, field.name.as_str(), expr.span)?;
-                        if let Some(expected) = expected {
-                            self.require(&variant.ty, expected, expr.span)?;
-                        }
-                        return Ok(splicing::Operand::Value(variant));
+                        return self
+                            .projected_unit_variant(expr, ty, field.name.as_str(), expected)
+                            .map(splicing::Operand::Value);
                     }
                 }
             }

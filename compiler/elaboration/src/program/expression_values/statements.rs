@@ -120,7 +120,13 @@ impl Checker<'_, '_> {
                         "let/var declaration requires an initializer",
                     )
                 })?;
-                let value = self.expr(init, annotation.as_ref())?;
+                let value = if let (Some(head), Some(ty)) = (decl.ty, annotation.as_ref()) {
+                    let inputs = self.acquire_constructor_inputs(head, ty)?;
+                    let init = self.expr(init, Some(ty))?;
+                    self.finish_constructor_inputs(inputs, init, decl.span)?
+                } else {
+                    self.expr(init, None)?
+                };
                 // Preparation can exit before an operation with an already
                 // formed result. Retain that domain for static pattern checks;
                 // the initializer itself stays Never and binds no runtime value.

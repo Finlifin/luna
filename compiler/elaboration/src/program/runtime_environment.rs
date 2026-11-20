@@ -173,8 +173,8 @@ impl CallEnvironment {
         let region = self.before_arguments.finish(checker, call, site.span)?;
         checker
             .local_runtime_origins
-            .call_regions
-            .insert(region.source, ());
+            .regions
+            .insert(region.source, runtime_origins::Region::Call);
         Ok(region)
     }
 }

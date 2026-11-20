@@ -10,10 +10,10 @@ impl Checker<'_, '_> {
             } => true,
             K::Block {
                 result: Some(_), ..
-            } => self
-                .local_runtime_origins
-                .call_regions
-                .contains_key(&value.source),
+            } => {
+                self.local_runtime_origins.regions.get(&value.source)
+                    == Some(&runtime_origins::Region::Call)
+            }
             _ => false,
         }
     }

@@ -3936,14 +3936,9 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
         let ty = self.type_expr(callee)?;
-        let outer = self.locals.clone();
-        let result = (|| {
-            let acquisition = self.acquire_constructor_inputs(callee, &ty)?;
-            let record = self.construct_typed(expr, ty, args, expected)?;
-            acquisition.finish(self, record, expr.span)
-        })();
-        self.locals = outer;
-        result
+        self.with_constructor_inputs(callee, ty, expr.span, |this, ty| {
+            this.construct_typed(expr, ty, args, expected)
+        })
     }
 
     fn construct_typed(
@@ -7815,7 +7810,9 @@ impl Checker<'_, '_> {
                             }
                         }
                         if let Some((ty, index)) = self.variant_target(callee, expected)? {
-                            self.construct_variant(expr, ty, index, args, expected)
+                            self.with_constructor_inputs(callee, ty, expr.span, |this, ty| {
+                                this.construct_variant(expr, ty, index, args, expected)
+                            })
                         } else {
                             self.call(expr, callee, args, expected, partial)
                         }
@@ -7823,7 +7820,9 @@ impl Checker<'_, '_> {
                 }
                 H::ExtendedApplication(callee, args) => {
                     if let Some((ty, index)) = self.variant_target(callee, expected)? {
-                        self.construct_named_variant(expr, ty, index, args, expected)
+                        self.with_constructor_inputs(callee, ty, expr.span, |this, ty| {
+                            this.construct_named_variant(expr, ty, index, args, expected)
+                        })
                     } else if let Some(call) =
                         self.extended_call(expr, callee, args, expected, partial)?
                     {

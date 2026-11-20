@@ -2,6 +2,12 @@
 //! checked field indices. Reading a pointer binding also fixes its write epoch.
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Region {
+    Constructor,
+    Call,
+}
+
 /// Occurrences and identities have the same lexical and speculative lifetime.
 #[derive(Default, Clone)]
 pub(super) struct LocalOrigins {
@@ -10,7 +16,7 @@ pub(super) struct LocalOrigins {
     pub(super) defaults:
         super::local_bindings::Bindings<nir::RuntimeId, super::runtime_defaults::ScopedDefault>,
     pub(super) acquired_bindings: LocalBindings<nir::RuntimeId>,
-    pub(super) call_regions: super::local_bindings::Bindings<n::SourceRange, ()>,
+    pub(super) regions: super::local_bindings::Bindings<n::SourceRange, Region>,
 }
 
 pub(super) enum Place {

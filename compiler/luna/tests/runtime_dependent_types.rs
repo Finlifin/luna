@@ -1005,6 +1005,51 @@ fn computed_defaults_observe_acquired_inputs_once_in_source_order() {
 }
 
 #[test]
+fn variants_acquire_quote_inputs_before_payloads_and_retain_their_values() {
+    let source = r#"
+        struct Cell { value: i32 }
+        fn read(p: *Cell) -> i32 { p.value.* }
+        fn select(p: *Cell, times: *i32) -> *Cell {
+            if times.* < 10 { times.* = times.* + 1; }
+            p
+        }
+        fn change(p: *Cell, n: i32) -> i32 { p.*.value = n; n }
+        enum Sample where quote src: lift *Cell, quote .saved: lift i32 = read(src) {
+            empty,
+            pair(i32, bool),
+            group.{point { x: i32 }, leaf},
+        }
+        fn saved(v: Sample<src, .saved = n>) -> i32
+        where quote src: lift *Cell, quote n: lift i32
+        {
+            n
+        }
+        fn relay(v: T) -> T where T { v }
+        fn run() -> bool {
+            var cell = Cell { value: 7 };
+            var times: i32 = 0;
+            let a = Sample<select(cell.ref, times.ref)>.pair(change(cell.ref, 11), true);
+            let b = relay(Sample<select(cell.ref, times.ref)>.group.point { x: change(cell.ref, 13) });
+            let c = Sample<select(cell.ref, times.ref)>.group.leaf;
+            change(cell.ref, 17);
+            let d = Sample<select(cell.ref, times.ref)>.pair(...(change(cell.ref, 19), false));
+            let e = Sample<select(cell.ref, times.ref), .saved = 23>.empty;
+            change(cell.ref, 31);
+            let f: Sample<select(cell.ref, times.ref)> = .empty;
+            let g: Sample<select(cell.ref, times.ref)> = .pair(change(cell.ref, 37), false);
+            change(cell.ref, 41);
+            times == 7 and saved(f) == 31 and saved(g) == 31 and saved(a) == 7 and saved(b) == 11 and saved(c) == 13
+                and saved(d) == 17 and saved(e) == 23
+        }
+    "#;
+    let case = NativeCase::new(source);
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
 fn computed_default_identities_are_per_acquisition_and_cannot_export_dead_storage() {
     let definitions = r#"
         struct Pair { first: i32 }
