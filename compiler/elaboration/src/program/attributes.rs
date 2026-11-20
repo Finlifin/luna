@@ -49,8 +49,7 @@ pub fn inspect(
     protocols: &Protocols,
     target: Option<nir::target::TargetData>,
 ) -> Result<Vec<EvaluatedAttribute>, Error> {
-    let mut invocation_steps =
-        DEFAULT_PACKAGE_ELABORATION_BUDGET.saturating_mul((package_identities.len() as u64).max(1));
+    let mut invocation_steps = default_elaboration_steps(package_identities.len());
     elaborate_with_attributes(
         package,
         package_identities,

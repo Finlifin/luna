@@ -66,7 +66,7 @@ fn command_help(name: &str) -> Result<String, String> {
             "dump <input.fl> [--emit ast|hir|nir|iir|llvm|asm|attributes|merged-attributes]\n  Defaults to nir. --entry <name> (default main) applies to iir, llvm and asm."
         }
         "comptime" => {
-            "comptime <input.fl> --entry <name> [--definition-fuel <steps>]\n  Invoke a comptime function and print its result.\n  --fuel includes source phase preparation and execution (default 2100000)."
+            "comptime <input.fl> --entry <name> [--definition-fuel <steps>]\n  Invoke a comptime function and print its result.\n  --fuel includes source phase preparation and execution."
         }
         "interpret" => {
             "interpret <input.fl> [--entry <name>]\n  Reference-execute a runtime entry (default main) and print its value."
@@ -88,7 +88,14 @@ fn command_help(name: &str) -> Result<String, String> {
     }
     if name != "check" {
         text.push_str("\n  -o, --output <path>        Write output to a file\n");
-        text.push_str("  --fuel <steps>             Action budget (dump: iir/llvm/asm only)\n");
+        if name == "comptime" {
+            text.push_str(&format!(
+                "  --fuel <steps>             Action budget (default {})\n",
+                super::DEFAULT_COMPTIME_FUEL
+            ));
+        } else {
+            text.push_str("  --fuel <steps>             Action budget (dump: iir/llvm/asm only)\n");
+        }
     }
     if matches!(name, "build" | "test" | "dump") {
         text.push_str(HOST);

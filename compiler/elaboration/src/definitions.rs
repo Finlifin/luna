@@ -36,7 +36,7 @@ pub fn publish(
     publish_with_invocation_budget(
         batch,
         structural_fuel,
-        &mut 1_000_000,
+        &mut program::default_elaboration_steps(package_identities.len()),
         package_identities,
         protocols,
         target,

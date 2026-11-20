@@ -314,8 +314,11 @@ pub fn elaborate_packages_with_protocols(
     elaborate_packages_for_target(package, package_identities, protocols, None)
 }
 
-/// Target facts are invocation input and remain attached to the resulting NIR.
-const DEFAULT_PACKAGE_ELABORATION_BUDGET: u64 = 2_000_000;
+/// Default allowance for checking a source world, scaled by its package count.
+pub(crate) fn default_elaboration_steps(package_count: usize) -> u64 {
+    const STEPS_PER_PACKAGE: u64 = 32_000_000;
+    STEPS_PER_PACKAGE.saturating_mul((package_count as u64).max(1))
+}
 
 pub fn elaborate_packages_for_target(
     package: &hir::Package<'_>,
@@ -323,8 +326,7 @@ pub fn elaborate_packages_for_target(
     protocols: &Protocols,
     target: Option<nir::target::TargetData>,
 ) -> Result<n::Package, Error> {
-    let mut invocation_steps =
-        DEFAULT_PACKAGE_ELABORATION_BUDGET.saturating_mul((package_identities.len() as u64).max(1));
+    let mut invocation_steps = default_elaboration_steps(package_identities.len());
     elaborate_packages_with_invocation_budget(
         package,
         package_identities,
@@ -596,7 +598,10 @@ fn elaborate_in_mode(
         lexical_input_domains: BTreeMap::new(),
         lexical_input_plans: BTreeMap::new(),
         lexical_source_protocols: lexical_inputs::SourceProtocolIndex::new(package),
-        lexical_dependency_steps: 1_000_000,
+        lexical_dependency_steps: usize::try_from(default_elaboration_steps(
+            package_identities.len(),
+        ))
+        .unwrap_or(usize::MAX),
         callable_type_inputs: BTreeMap::new(),
         open_staged_locals: BTreeSet::new(),
         open_member_locals: BTreeSet::new(),

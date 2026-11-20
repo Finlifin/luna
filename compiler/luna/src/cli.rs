@@ -5,10 +5,8 @@ mod help;
 mod subcommands;
 pub use help::{HELP, USAGE};
 
-// Source phase preparation used to have two unreported million-step allowances
-// in addition to the action's 100,000 steps. Make that default envelope explicit
-// as one total budget; an explicit --fuel remains the exact caller limit.
-pub const DEFAULT_COMPTIME_FUEL: u64 = 2_100_000;
+/// Source preparation and execution share the same action allowance.
+pub const DEFAULT_COMPTIME_FUEL: u64 = comptime_interpretor::Budget::DEFAULT_STEPS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emit {

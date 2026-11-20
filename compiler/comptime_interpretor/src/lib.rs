@@ -570,10 +570,15 @@ pub struct Budget {
     pub depth: usize,
 }
 
+impl Budget {
+    /// Default VM action allowance, shared with the public comptime command.
+    pub const DEFAULT_STEPS: u64 = 50_000_000;
+}
+
 impl Default for Budget {
     fn default() -> Self {
         Self {
-            steps: 100_000,
+            steps: Self::DEFAULT_STEPS,
             depth: 128,
         }
     }
