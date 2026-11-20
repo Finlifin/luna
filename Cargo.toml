@@ -21,6 +21,7 @@ members = [
     "compiler/verification_core",
     "compiler/materialization",
     "compiler/program_verification",
+    "compiler/bitvec_opt",
     "compiler/luna", "compiler/nir", "compiler/comptime_executor", "compiler/comptime_interpretor", "compiler/comptime_runtime", "compiler/comptime_compiler", "compiler/iir",
     "compiler/fmt",
     "compiler/anar",
