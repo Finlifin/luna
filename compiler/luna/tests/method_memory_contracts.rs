@@ -586,3 +586,193 @@ fn staged_runtime_trait_method_still_rejects_impure_selected_bodies() {
     let error = support::compile_with_bindings(source, &Default::default(), None).unwrap_err();
     assert!(error.contains("P4 evidence"), "{error}");
 }
+
+#[test]
+fn borrowed_runtime_env_parameters_work_with_fallible_optional_and_unsafe_returns() {
+    use std::path::PathBuf;
+    use std::process::Command as ProcessCommand;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct TempNativeDir(PathBuf);
+
+    impl Drop for TempNativeDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "luna-env-return-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    let _guard = TempNativeDir(dir.clone());
+
+    let source = r#"
+        enum MyErr {
+            LimitExceeded,
+        }
+
+        trait MiniAlloc {
+            fn alloc(*self, v: u64) -> !MyErr u64;
+            unsafe fn realloc(*self, v: u64) -> !MyErr u64;
+        }
+
+        struct Buf {
+            n: u64,
+        }
+
+        impl MiniAlloc for Buf {
+            fn alloc(*self, v: u64) -> !MyErr u64 {
+                let cur = self.n.*;
+                if v > 100 or cur > 1000 {
+                    return error MyErr.LimitExceeded;
+                }
+                let next = cur + v;
+                self.n.* = next;
+                next
+            }
+
+            unsafe fn realloc(*self, v: u64) -> !MyErr u64 {
+                let cur = self.n.*;
+                if v > 100 or cur > 1000 {
+                    return error MyErr.LimitExceeded;
+                }
+                let next = cur + v;
+                self.n.* = next;
+                next
+            }
+        }
+
+        struct GenericCell
+        where
+            A: Type,
+            requires A :- MiniAlloc,
+            quote a: lift *A,
+        {
+            v: u64,
+        }
+
+        impl GenericCell<A, a>
+        where
+            A: Type,
+            requires A :- MiniAlloc,
+            quote a: lift *A,
+        {
+            fn try_new(x: u64) -> !MyErr Self {
+                let total = a.as(MiniAlloc).alloc(x)!;
+                GenericCell<A, a> { v: total }
+            }
+
+            fn opt_new(x: u64) -> ?Self {
+                let total = a.as(MiniAlloc).alloc(x) match {
+                    value! => value,
+                    error _ => return null,
+                };
+                GenericCell<A, a> { v: total }
+            }
+
+            unsafe fn realloc_bump(*self, delta: u64) -> !MyErr u64 {
+                let next = a.as(MiniAlloc).realloc(delta)!;
+                self.v.* = next;
+                next
+            }
+        }
+
+        struct DirectCell
+        where
+            quote a: lift *Buf,
+        {
+            v: u64,
+        }
+
+        impl DirectCell<a>
+        where
+            quote a: lift *Buf,
+        {
+            fn new_write(x: u64) -> !MyErr Self {
+                let cur = a.n.*;
+                if x > 100 or cur > 1000 {
+                    return error MyErr.LimitExceeded;
+                }
+                let next = cur + x;
+                a.n.* = next;
+                DirectCell<a> { v: next }
+            }
+        }
+
+        fn run() -> bool {
+            var buf = Buf { n: 0 };
+            let g1 = GenericCell<Buf, buf.ref>.try_new(10) match {
+                cell! => cell,
+                error _ => return false,
+            };
+            var g2 = GenericCell<Buf, buf.ref>.opt_new(20) match {
+                cell? => cell,
+                null => return false,
+            };
+            let after_realloc = unsafe { g2.ref.realloc_bump(5) } match {
+                total! => total,
+                error _ => return false,
+            };
+            let d1 = DirectCell<buf.ref>.new_write(7) match {
+                cell! => cell,
+                error _ => return false,
+            };
+            let oom = GenericCell<Buf, buf.ref>.try_new(200) match {
+                _! => false,
+                error err => err match {
+                    .LimitExceeded => true,
+                },
+            };
+            oom
+                and g1.v == 10
+                and g2.v == 35
+                and after_realloc == 35
+                and d1.v == 42
+                and buf.n == 42
+        }
+    "#;
+
+    let main_path = dir.join("main.fl");
+    std::fs::write(&main_path, source).unwrap();
+
+    let build = ProcessCommand::new(env!("CARGO_BIN_EXE_luna"))
+        .current_dir(&dir)
+        .args([
+            "build",
+            "main.fl",
+            "--entry",
+            "run",
+            "--output",
+            "program",
+            "--opt-level",
+            "0",
+            "--fuel",
+            "10000000",
+            "--sysroot",
+        ])
+        .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library"))
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "build stdout: {}\nbuild stderr: {}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let output = ProcessCommand::new(dir.join("program"))
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "run stdout: {}\nrun stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"(bool true)\n");
+}

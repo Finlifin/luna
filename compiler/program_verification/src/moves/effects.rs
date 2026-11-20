@@ -169,10 +169,28 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let Some(function) = self.exit_contract else {
             return Ok(targets.clone());
         };
-        let Some(parameter) = function
+        let Term::Function { parameters, .. } = function.signature.callable_signature() else {
+            return Ok(targets.clone());
+        };
+        let Some((parameter, source_ty)) = function
             .parameters
             .iter()
-            .position(|binding| root(*binding) == place.root)
+            .enumerate()
+            .find_map(|(index, binding)| {
+                (root(*binding) == place.root)
+                    .then(|| parameters.get(index).map(|param| (index, &param.ty)))
+                    .flatten()
+            })
+            .or_else(|| {
+                function
+                    .env_parameters
+                    .iter()
+                    .enumerate()
+                    .find_map(|(offset, env)| {
+                        (root(env.binding) == place.root)
+                            .then_some((parameters.len() + offset, &env.ty))
+                    })
+            })
         else {
             return Ok(targets.clone());
         };
@@ -188,11 +206,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         if changed {
             return Ok(targets.clone());
         }
-        let Term::Function { parameters, .. } = function.signature.callable_signature() else {
-            return Ok(targets.clone());
-        };
-        let source_layout =
-            self.pointer_input_layout(&parameters[parameter].ty, argument.source)?;
+        let source_layout = self.pointer_input_layout(source_ty, argument.source)?;
         let mut kept = BTreeSet::new();
         for target in targets {
             let mut excluded = false;
@@ -285,6 +299,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         .map_err(|reason| error(scope.source, reason))?;
         Ok(std::sync::Arc::new(changed))
     }
+
     pub(super) fn effect_escape_checkpoint(
         &mut self,
         flow: &Flow,
@@ -2195,6 +2210,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     pub(super) fn authorize_effect_borrow(
         &mut self,
         caller: &Flow,
@@ -2259,6 +2275,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     pub(super) fn copy_effect_memory_inputs(
         &mut self,
         source: SourceRange,
@@ -2290,6 +2307,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(self.effect_memory_inputs.clone())
     }
+
     /// Called only after all installation arms have passed resource analysis.
     /// An established row may mutate stable captures. A proven identity transfer
     /// retains candidate operand origins. Completed direct handlers may also
@@ -2514,6 +2532,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(self.effect_result_inputs.clone())
     }
+
     pub(super) fn capture_handler_completion(
         &mut self,
         flow: &Flow,
@@ -2530,6 +2549,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.handler_completions.push(value);
         Ok(())
     }
+
     fn handler_value_evidence(
         &mut self,
         flow: &Flow,
@@ -2568,6 +2588,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             variants,
         }))
     }
+
     fn restore_effect_result(
         &mut self,
         expression: &Expr,
@@ -2734,6 +2755,7 @@ pub fn effect_result_slots_with_envs(
     }
     Ok(slots)
 }
+
 impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shape, String>>
     Analyzer<'a, F, G>
 {

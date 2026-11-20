@@ -17,20 +17,27 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
 };
+
 mod borrowed_code;
+
 use borrowed_code::borrowed_memory_inputs;
 pub use borrowed_code::copy_borrowed_code;
+
 mod cleanup_memory;
+
 pub use cleanup_memory::BorrowedRoot;
+
 #[cfg(test)]
 mod declaration_tests;
 mod effects;
+
 #[cfg(test)]
 mod layout_tests;
 mod operations;
 mod origins;
 mod patterns;
 mod value_origins;
+
 pub use effects::{effect_result_slots, effect_result_slots_with_envs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,11 +45,13 @@ pub enum Delivery {
     Move,
     Copy,
 }
+
 #[derive(Debug)]
 pub struct Error {
     pub source: SourceRange,
     pub reason: String,
 }
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -53,13 +62,16 @@ impl fmt::Display for Error {
         )
     }
 }
+
 impl std::error::Error for Error {}
+
 #[derive(Debug)]
 pub struct Cleanup {
     pub source: SourceRange,
     pub place: Place,
     pub availability: Availability,
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TemporaryBoundary {
     FullExpression,
@@ -69,11 +81,13 @@ pub enum TemporaryBoundary {
     FunctionResult,
     DefaultArgument,
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TemporaryScope {
     pub source: SourceRange,
     pub boundary: TemporaryBoundary,
 }
+
 impl fmt::Display for TemporaryScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let kind = match self.boundary {
@@ -91,6 +105,7 @@ impl fmt::Display for TemporaryScope {
         )
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TemporaryCleanup {
     pub scope: TemporaryScope,
@@ -98,6 +113,7 @@ pub struct TemporaryCleanup {
     pub ty: Term,
     pub fields: Vec<usize>,
 }
+
 /// One completed component, before ownership reaches the enclosing operation.
 #[derive(Clone, Debug)]
 pub struct PendingValue {
@@ -110,6 +126,7 @@ pub struct PendingValue {
     /// local and pending responsibilities rather than concatenate report lists.
     pub locals_before: Vec<PlaceId>,
 }
+
 #[derive(Clone, Debug)]
 struct PendingFrame {
     conditions: BTreeMap<u64, ValueConditions>,
@@ -117,6 +134,7 @@ struct PendingFrame {
     source: SourceRange,
     values: Vec<PendingValue>,
 }
+
 #[derive(Debug)]
 pub struct IncompleteCleanup {
     pub exit: SourceRange,
@@ -125,6 +143,7 @@ pub struct IncompleteCleanup {
     /// unfinished enclosing object is implied.
     pub values: Vec<PendingValue>,
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CleanupReason {
     /// Abandon this resource scope through an effect handler outside it.
@@ -146,6 +165,7 @@ pub enum CleanupReason {
     Replacement,
     TemporaryEnd,
 }
+
 impl fmt::Display for CleanupReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Self::EffectBreak(id) | Self::EffectContinue(id) = self {
@@ -173,6 +193,7 @@ impl fmt::Display for CleanupReason {
         })
     }
 }
+
 /// A known enum case at a relative position within an owned cleanup tree.
 /// An absent entry leaves enum cleanup dependent on its runtime discriminant.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -180,6 +201,7 @@ pub struct VariantSelection {
     pub fields: Vec<usize>,
     pub index: usize,
 }
+
 impl fmt::Display for VariantSelection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(variant-selection (fields")?;
@@ -189,6 +211,7 @@ impl fmt::Display for VariantSelection {
         write!(f, ") (index {}))", self.index)
     }
 }
+
 // Callable evidence paths qualify enum payloads with [VARIANT_PATH, tag].
 // Ownership paths remain ordinary field paths after a successful tag guard.
 // No allocated field layout can have usize::MAX entries.
@@ -210,6 +233,7 @@ fn display_callable_path(path: &[usize], f: &mut fmt::Formatter<'_>) -> fmt::Res
 }
 
 struct CallablePlace<'a>(&'a Place);
+
 impl fmt::Display for CallablePlace<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -532,6 +556,7 @@ fn group_owned_callables<'a>(
 }
 
 type PointerTargetGuards = BTreeMap<Place, Vec<(Vec<usize>, usize)>>;
+
 type ValuePointerGuards = BTreeMap<Vec<usize>, PointerTargetGuards>;
 
 struct PatternPreparation<'a> {
@@ -548,6 +573,7 @@ struct PatternPreparation<'a> {
     copy_bindings: bool,
     binding_remaps: Vec<BTreeMap<LocalId, LocalId>>,
 }
+
 #[derive(Debug)]
 pub enum CleanupAction {
     /// A validated plan for this exact candidate, not an additional action.
@@ -573,6 +599,7 @@ pub enum CleanupAction {
         value: PendingValue,
     },
 }
+
 impl fmt::Display for CleanupAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -624,6 +651,7 @@ impl fmt::Display for CleanupAction {
         }
     }
 }
+
 /// Ordered structural candidates, before applying user Drop contracts. A user
 /// destructor runs before children and may change the remaining field state.
 /// Temporary presence is path-sensitive, but conditional execution still needs
@@ -640,6 +668,7 @@ pub struct CleanupSite {
     pub reason: CleanupReason,
     pub actions: Vec<CleanupAction>,
 }
+
 impl fmt::Display for CleanupSite {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -669,6 +698,7 @@ impl fmt::Display for CleanupSite {
         f.write_str("))")
     }
 }
+
 #[derive(Debug)]
 pub struct TemporaryOwner {
     pub scope: TemporaryScope,
@@ -677,6 +707,7 @@ pub struct TemporaryOwner {
     /// Relative ownership shape in an isolated synthetic root, not a source local.
     pub remaining: State,
 }
+
 #[derive(Debug)]
 pub struct ClosureReport {
     pub definition: Expr,
@@ -685,28 +716,33 @@ pub struct ClosureReport {
     pub captures: Vec<PlaceId>,
     pub invocation: Report,
 }
+
 #[derive(Debug)]
 pub struct LoopReport {
     pub source: SourceRange,
     pub header: State,
     pub breaks: Vec<State>,
 }
+
 #[derive(Debug)]
 pub struct CallPreparation {
     pub source: SourceRange,
     pub parameters: State,
 }
+
 #[derive(Debug)]
 pub struct MatchArmReport {
     pub pattern: Pattern,
     pub guards: Vec<Expr>,
     pub exit: Option<State>,
 }
+
 #[derive(Debug)]
 pub struct MatchReport {
     pub source: SourceRange,
     pub arms: Vec<MatchArmReport>,
 }
+
 #[derive(Debug)]
 pub struct Decomposition {
     pub source: SourceRange,
@@ -714,6 +750,7 @@ pub struct Decomposition {
     pub fields: Vec<usize>,
     pub variant: Option<usize>,
 }
+
 #[derive(Debug)]
 pub struct LetReport {
     pub source: SourceRange,
@@ -722,6 +759,7 @@ pub struct LetReport {
     pub success: bool,
     pub failure: bool,
 }
+
 /// Default-local obligations live in a separate parameter environment. Its
 /// prepared parameters alias pending caller arguments, rather than new owners.
 #[derive(Debug)]
@@ -731,6 +769,7 @@ pub struct DefaultEvaluation {
     pub parameter: usize,
     pub evaluation: Report,
 }
+
 impl fmt::Display for DefaultEvaluation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -740,12 +779,14 @@ impl fmt::Display for DefaultEvaluation {
         )
     }
 }
+
 /// Caller-established enum tags, conditional on qualified enclosing variant paths.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnumParameter {
     pub parameter: usize,
     pub domains: BTreeMap<Vec<usize>, BTreeSet<usize>>,
 }
+
 impl fmt::Display for EnumParameter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(enum-parameter (parameter {}) (domains", self.parameter)?;
@@ -761,6 +802,7 @@ impl fmt::Display for EnumParameter {
         f.write_str("))")
     }
 }
+
 // Empty prepared code or closed-summary pointer origins at a variant-qualified
 // leaf prove that combination of enclosing tags absent. Propagate an empty
 // nested domain to its parent.
@@ -882,6 +924,7 @@ fn copy_captured_enums(
     }
     Ok(result)
 }
+
 fn display_captured_enums(
     captures: &BTreeMap<PlaceId, EnumDomains>,
     f: &mut fmt::Formatter<'_>,
@@ -905,6 +948,7 @@ fn display_captured_enums(
     }
     Ok(())
 }
+
 fn record_enum_parameter(
     inputs: &mut Vec<EnumParameter>,
     parameter: usize,
@@ -930,6 +974,7 @@ pub struct NamedCall {
     pub effects: Vec<EffectResultInput>,
     pub borrowed_code: Vec<BorrowedCode>,
 }
+
 impl fmt::Display for NamedCall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -962,6 +1007,7 @@ pub struct NamedCandidateCall {
     pub source: SourceRange,
     pub candidates: Vec<Expr>,
 }
+
 impl fmt::Display for NamedCandidateCall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -990,6 +1036,7 @@ pub struct CallableEvidence {
     /// Captured binding plus relative owned field path; an empty path is the whole binding.
     pub captures: BTreeMap<Place, CallableEvidence>,
 }
+
 impl fmt::Display for CallableEvidence {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -1032,6 +1079,7 @@ pub struct CallableParameter {
     /// Captured binding plus relative owned field path; an empty path is the whole binding.
     pub captures: BTreeMap<Place, CallableEvidence>,
 }
+
 impl fmt::Display for CallableParameter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -1071,6 +1119,7 @@ pub struct HandlerReturnValue {
     pub fields: BTreeMap<Vec<usize>, CallableEvidence>,
     pub variants: BTreeMap<Vec<usize>, BTreeSet<usize>>,
 }
+
 impl fmt::Display for HandlerReturnValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(handler-return (source {}) (callable", self.source)?;
@@ -1132,6 +1181,7 @@ pub struct HandlerReport {
     pub result: Term,
     pub invocation: Report,
 }
+
 impl fmt::Display for HandlerReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -1141,6 +1191,7 @@ impl fmt::Display for HandlerReport {
         )
     }
 }
+
 /// Conditional validity of a pointer stored in an owned parameter field.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BorrowedField {
@@ -1161,6 +1212,7 @@ pub struct BorrowedCode {
     fields: BTreeMap<Vec<usize>, Callable>,
     domains: EnumDomains,
 }
+
 impl std::fmt::Display for BorrowedField {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(borrowed-field (parameter {}) (fields", self.parameter)?;
@@ -1170,6 +1222,7 @@ impl std::fmt::Display for BorrowedField {
         write!(f, ") (pointee {}))", self.pointee)
     }
 }
+
 #[derive(Debug, Default)]
 pub struct Report {
     /// Checked affine deliveries, executed after evaluating the exact source
@@ -1256,6 +1309,7 @@ pub struct Report {
     pub decompositions: Vec<Decomposition>,
     pub bindings: Vec<LetReport>,
 }
+
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(move-report (transfers")?;
@@ -1657,6 +1711,7 @@ impl fmt::Display for Report {
         f.write_str("))")
     }
 }
+
 impl Report {
     fn append(&mut self, mut other: Report) {
         // append is only for work in the same invocation. Nested function and
@@ -1724,6 +1779,7 @@ impl Report {
         self.bindings.append(&mut other.bindings);
     }
 }
+
 #[derive(Clone)]
 struct LoopFrame {
     temporary_floor: u64,
@@ -1733,6 +1789,7 @@ struct LoopFrame {
     breaks: Vec<Flow>,
     continues: Vec<Flow>,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 struct Callable {
     choices: Vec<Callable>,
@@ -1745,6 +1802,7 @@ struct Callable {
     // the nested owned positions imported at each invocation, never this tree.
     captures: BTreeMap<Place, Callable>,
 }
+
 fn bound_callable_copy(
     value: &Callable,
     fuel: &mut usize,
@@ -1784,6 +1842,7 @@ fn bound_callable_copy(
     }
     Ok(())
 }
+
 /// Values already prepared at their source evaluation points. Parameter slots
 /// are positional so different closure definitions can bind the same delivered
 /// arguments without evaluating source expressions again.
@@ -1794,16 +1853,19 @@ struct ClosureArguments {
     fields: BTreeMap<usize, BTreeMap<Vec<usize>, Callable>>,
     domains: BTreeMap<usize, EnumDomains>,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 struct ResidualLayout {
     remaining: State,
     variants: Vec<VariantSelection>,
 }
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct ValueConditions {
     domains: EnumDomains,
     pointers: ValuePointerGuards,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 struct ActiveTemporary {
     conditions: ValueConditions,
@@ -1816,6 +1878,7 @@ struct ActiveTemporary {
     presence: Availability,
     locals_before: Vec<PlaceId>,
 }
+
 // A reserved, uninhabited target preserves uncertainty beside known alternatives.
 // Source locals use u32 owners; synthetic storage uses MAX through MAX-4.
 // MAX-6 similarly marks a target invalidated by retirement. Neither root is
@@ -1830,6 +1893,7 @@ fn unknown_pointer_target() -> Place {
         fields: vec![],
     }
 }
+
 fn invalidated_pointer_target() -> Place {
     Place {
         root: PlaceId {
@@ -1839,9 +1903,11 @@ fn invalidated_pointer_target() -> Place {
         fields: vec![],
     }
 }
+
 // Known pointer leaves relative to the root of a value being delivered.
 // Missing leaves are unknown, not proof that the value has no dependencies.
 type ValueOrigins = BTreeMap<Vec<usize>, BTreeSet<Place>>;
+
 // Symbolic owned input paths; unlike ValueOrigins these omit pointer wrappers.
 type MemoryTargets = BTreeMap<usize, ValueOrigins>;
 
@@ -1881,6 +1947,7 @@ struct Flow {
     memory_exposed: bool,
     live: bool,
 }
+
 impl Flow {
     fn callable_at(&self, place: &Place) -> Option<&Callable> {
         if place.fields.is_empty() {
@@ -1889,6 +1956,7 @@ impl Flow {
             self.callable_fields.get(place)
         }
     }
+
     fn callable_at_mut(&mut self, place: &Place) -> Option<&mut Callable> {
         if place.fields.is_empty() {
             self.callables.get_mut(&place.root)
@@ -1896,6 +1964,7 @@ impl Flow {
             self.callable_fields.get_mut(place)
         }
     }
+
     fn set_callable_at(&mut self, place: &Place, callable: Callable) {
         if place.fields.is_empty() {
             self.callables.insert(place.root, callable);
@@ -1904,27 +1973,32 @@ impl Flow {
         }
     }
 }
+
 fn root(local: LocalId) -> PlaceId {
     PlaceId {
         owner: u64::from(local.owner),
         local: local.index,
     }
 }
+
 fn error(source: SourceRange, reason: impl Into<String>) -> Error {
     Error {
         source,
         reason: reason.into(),
     }
 }
+
 /// An immutable-world binding arena. Acquisition is separate from planning;
 /// `plan` must only use choices previously captured by `acquire`.
 pub trait CleanupPolicy {
     fn acquire(&mut self, ty: &Term, fuel: &mut usize) -> Result<(), String>;
+
     /// No user cleanup in the complete representation, independently of Copy.
     /// Missing evidence must not manufacture duplicability or trivial cleanup.
     fn is_trivial(&mut self, _ty: &Term, _fuel: &mut usize) -> Result<bool, String> {
         Ok(false)
     }
+
     /// No writes, reads outside the owned receiver, or checked-predicate
     /// rejection from cleanup in the complete representation. Receiver-field
     /// availability remains an obligation of the actual resource plan. Unlike
@@ -1933,6 +2007,7 @@ pub trait CleanupPolicy {
     fn is_memory_inert(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
         self.is_trivial(ty, fuel)
     }
+
     /// Complete receiver-relative read footprint, with no writes or predicate
     /// rejection. None retains the unmodeled-cleanup obligation. Returned paths
     /// still need mapping to the current value's pointer origins.
@@ -1943,6 +2018,7 @@ pub trait CleanupPolicy {
     ) -> Result<Option<Vec<super::memory::Access>>, String> {
         Ok(None)
     }
+
     /// Embedding preserves payloads, but replaces the enclosing result owner.
     /// A custom responsibility on that owner needs an explicit transfer rule.
     fn check_error_embedding(
@@ -1957,11 +2033,13 @@ pub trait CleanupPolicy {
             Err("error embedding requires Drop responsibility transfer evidence".into())
         }
     }
+
     /// Conservative rejection evidence for implicit retirement in this fixed
     /// selection world. This does not authorize access or execute cleanup.
     fn may_reject(&mut self, _ty: &Term, _fuel: &mut usize) -> Result<bool, String> {
         Ok(true)
     }
+
     fn plan(
         &mut self,
         ty: &Term,
@@ -1970,6 +2048,7 @@ pub trait CleanupPolicy {
         variants: &[VariantSelection],
         fuel: &mut usize,
     ) -> Result<super::drop::CleanupPlan, String>;
+
     /// Domain keys use physical fields when enclosing tags are selected, or
     /// `[usize::MAX, tag, field, ...]` qualifiers for conditional payloads.
     /// Implementations may conservatively ignore domains, but must not interpret
@@ -1987,6 +2066,7 @@ pub trait CleanupPolicy {
         let _ = domains;
         self.plan_with_memory(ty, state, place, variants, pointers, fuel)
     }
+
     fn plan_with_memory(
         &mut self,
         ty: &Term,
@@ -2045,6 +2125,7 @@ impl EffectResultInput {
             parameter_accesses: self.parameter_accesses.clone(),
         })
     }
+
     fn charge(&self, fuel: &mut usize, source: SourceRange) -> Result<(), Error> {
         *fuel = fuel
             .checked_sub(
@@ -2069,6 +2150,7 @@ impl EffectResultInput {
         Ok(())
     }
 }
+
 impl fmt::Display for EffectResultInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2105,6 +2187,7 @@ enum SummaryCacheStorage<'a> {
     Owned(super::memory::SummaryCache),
     Borrowed(&'a mut super::memory::SummaryCache),
 }
+
 impl SummaryCacheStorage<'_> {
     fn as_mut(&mut self) -> &mut super::memory::SummaryCache {
         match self {
@@ -2159,6 +2242,7 @@ struct Analyzer<'a, F, G> {
     loops: Vec<LoopFrame>,
     pending: Vec<PendingFrame>,
 }
+
 impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shape, String>>
     Analyzer<'a, F, G>
 {
@@ -2240,6 +2324,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     fn select_method_callee(&mut self, callee: &Expr, source: SourceRange) -> Result<Expr, Error> {
         self.select_method_callee_mode(callee, false, source)
     }
+
     fn select_method_callee_behavior(
         &mut self,
         callee: &Expr,
@@ -2247,6 +2332,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     ) -> Result<Expr, Error> {
         self.select_method_callee_mode(callee, true, source)
     }
+
     fn select_method_callee_mode(
         &mut self,
         callee: &Expr,
@@ -2270,6 +2356,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             )
             .map_err(|reason| error(source, reason))
     }
+
     fn callee_env_parameter_types(
         &mut self,
         package: &'a Package,
@@ -2378,6 +2465,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(env_params)
     }
+
     fn call_may_reject(&mut self, callee: &Expr) -> Result<bool, &'static str> {
         let policy = &mut self.cleanup;
         self.rejection
@@ -2390,6 +2478,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 },
             )
     }
+
     fn acquire_cleanup(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
         if let Some(policy) = self.cleanup.as_mut() {
             policy
@@ -2411,6 +2500,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn pointer_input_layout(
         &mut self,
         ty: &Term,
@@ -2424,6 +2514,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         )
         .map_err(|reason| error(source, reason))
     }
+
     fn readable_representation(&mut self, ty: &Term, source: SourceRange) -> Result<bool, Error> {
         super::memory::readable_representation_for(
             self.package,
@@ -2433,6 +2524,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         )
         .map_err(|reason| error(source, reason))
     }
+
     fn copy_readable_representation(
         &mut self,
         ty: &Term,
@@ -2446,6 +2538,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         )
         .map_err(|reason| error(source, reason))
     }
+
     #[allow(dead_code)]
     fn capture_pointer_replacement_layout(
         &mut self,
@@ -2460,6 +2553,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         )
         .map_err(|reason| error(source, reason))
     }
+
     #[allow(dead_code)]
     fn require_pointer_free_owned(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
         super::memory::require_pointer_free_owned_for(
@@ -2471,6 +2565,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         )
         .map_err(|reason| error(source, reason))
     }
+
     fn check_observation_cleanup(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
         let pointer_bearing = !self.pointer_input_layout(ty, source)?.is_empty();
         let policy = self.cleanup.as_mut().ok_or_else(|| {
@@ -2501,6 +2596,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn check_contract_predicate(
         &mut self,
         condition: &Expr,
@@ -2530,6 +2626,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn stored_pointer_possible(
         &mut self,
         flow: &Flow,
@@ -2568,6 +2665,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             0,
         )
     }
+
     fn join_pointer_origins(
         &mut self,
         left: &mut Flow,
@@ -2603,6 +2701,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn join_value_origins(
         &mut self,
         ty: &Term,
@@ -2655,6 +2754,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn check_scope_targets(
         &mut self,
         targets: &BTreeSet<Place>,
@@ -2676,6 +2776,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn check_scope_origins(
         &mut self,
         origins: &ValueOrigins,
@@ -2691,6 +2792,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn check_return_origins(
         &mut self,
         flow: &Flow,
@@ -2712,6 +2814,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .collect();
         self.check_scope_origins(origins, &retiring, source)
     }
+
     fn check_function_result(
         &mut self,
         flow: &mut Flow,
@@ -2792,6 +2895,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         self.check_return_origins(flow, &delivered_origins, source)
     }
+
     fn sequence(&mut self, source: SourceRange) -> Result<u64, Error> {
         let sequence = self.next_sequence;
         self.next_sequence = sequence
@@ -2799,6 +2903,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .ok_or_else(|| error(source, "cleanup sequence exhausted"))?;
         Ok(sequence)
     }
+
     fn value_conditions(
         &mut self,
         flow: &Flow,
@@ -2809,6 +2914,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             pointers: self.copy_value_pointer_guards(&flow.value_pointer_guards, source)?,
         })
     }
+
     fn retain_temporary(
         &mut self,
         description: TemporaryCleanup,
@@ -2835,6 +2941,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         );
         Ok(())
     }
+
     fn temporary_component(
         &mut self,
         ty: &Term,
@@ -2870,6 +2977,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let conditions = self.value_conditions(flow, source)?;
         self.retain_temporary(description, state, origins, conditions, flow)
     }
+
     fn temporary_action(
         &mut self,
         identity: u64,
@@ -2938,6 +3046,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             plan: Box::new(plan),
         })
     }
+
     fn temporary_layout_action(
         &mut self,
         identity: u64,
@@ -2982,6 +3091,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             source,
         )
     }
+
     fn plan_retained_action(
         &mut self,
         candidate: CleanupAction,
@@ -3132,6 +3242,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             plan: Box::new(plan),
         })
     }
+
     fn finish_temporaries(
         &mut self,
         flow: &mut Flow,
@@ -3165,6 +3276,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn owned_action(
         &mut self,
         state: &State,
@@ -3316,6 +3428,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             source,
         )
     }
+
     fn cleanup_exit(
         &mut self,
         flow: &mut Flow,
@@ -3441,6 +3554,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn pending_frame<T>(
         &mut self,
         source: SourceRange,
@@ -3456,6 +3570,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.pending.pop().expect("active preparation frame");
         result
     }
+
     fn remember_pending_origins(
         &mut self,
         expr: &Expr,
@@ -3502,6 +3617,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn incomplete_exit(&mut self, source: SourceRange, depth: usize) {
         // Observation only: conditional exits must not consume sibling paths'
         // preparation state. Loop edges preserve frames outside their loop.
@@ -3515,6 +3631,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
         }
     }
+
     fn check_interface_preparation(
         &mut self,
         callee: &Expr,
@@ -3554,6 +3671,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     /// On interface rejection the input frame has transferred, but the produced
     /// result has not. Analyze this alternative without consuming the success
     /// path; outer pending constructions and caller locals still unwind normally.
@@ -3610,6 +3728,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn prepare_values<'b>(
         &mut self,
         source: SourceRange,
@@ -3628,6 +3747,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             Ok(())
         })
     }
+
     fn in_temporary_scope<T>(
         &mut self,
         source: SourceRange,
@@ -3654,6 +3774,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             Ok(value)
         })
     }
+
     fn full_expression(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
         self.in_temporary_scope(
             expr.source,
@@ -3668,6 +3789,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             },
         )
     }
+
     fn fresh_borrowed_scope(&mut self, source: SourceRange) -> Result<u64, Error> {
         let scope = self.next_borrowed_scope;
         self.next_borrowed_scope = scope
@@ -3675,6 +3797,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .ok_or_else(|| error(source, "borrowed context identity exhausted"))?;
         Ok(scope)
     }
+
     fn complete_borrowed_premises(
         &mut self,
         flow: &mut Flow,
@@ -3720,6 +3843,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn join_flow(
         &mut self,
         left: &mut Flow,
@@ -3900,6 +4024,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn loop_edge(
         &mut self,
         identity: LocalId,
@@ -3961,6 +4086,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.live = false;
         Ok(())
     }
+
     fn take_nested_report(&mut self, source: SourceRange) -> Result<Report, Error> {
         let borrowed_roots =
             cleanup_memory::copy_roots(&self.report.borrowed_roots, &mut self.fuel)
@@ -4060,6 +4186,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return Ok(());
         }
     }
+
     fn store_callable(
         &mut self,
         flow: &mut Flow,
@@ -4082,6 +4209,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.callables.insert(id, callable);
         Ok(())
     }
+
     fn forget_callable_fields(
         &mut self,
         flow: &mut Flow,
@@ -4109,6 +4237,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn stored_enum_domains(
         &mut self,
         flow: &Flow,
@@ -4129,6 +4258,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(domains)
     }
+
     fn stored_code(
         &mut self,
         flow: &Flow,
@@ -4156,6 +4286,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(code)
     }
+
     fn install_enum_domains(
         &mut self,
         flow: &mut Flow,
@@ -4188,6 +4319,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn install_callable_fields(
         &mut self,
         flow: &mut Flow,
@@ -4224,6 +4356,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn field_type(
         &mut self,
         ty: &Term,
@@ -4232,6 +4365,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     ) -> Result<Term, Error> {
         owned_field_type(self.package, ty, path, &mut self.fuel, source)
     }
+
     fn project_temporary(
         &mut self,
         expr: &Expr,
@@ -4381,6 +4515,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(selected_origins)
     }
+
     fn temporary(
         &mut self,
         expr: &Expr,
@@ -4389,6 +4524,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     ) -> Result<(), Error> {
         self.temporary_component(completion_type(&expr.ty), expr.source, &[], origins, flow)
     }
+
     fn declare(
         &mut self,
         flow: &mut Flow,
@@ -4406,6 +4542,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.types.insert(root(id), ty.clone());
         Ok(())
     }
+
     fn evaluate_default(
         &mut self,
         argument: &nir::program::CallArgument,
@@ -4503,6 +4640,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn prepare_defaults(
         &mut self,
         callee: &Expr,
@@ -4671,6 +4809,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         });
         Ok(())
     }
+
     // Reconstruct code provenance only where Copy preserves all captured
     // positions and captured code cannot change after its construction snapshot.
     // Runtime values and pointer origins never come from these descriptors.
@@ -5051,6 +5190,26 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     borrows.push((slot, subject));
                 }
             }
+            for (offset, env) in function.env_parameters.iter().enumerate() {
+                let slot = parameters.len() + offset;
+                for leaf in self.pointer_input_layout(&env.ty, source)? {
+                    let path = leaf.input_fields;
+                    let pointee = leaf.pointee;
+                    if !path.is_empty() {
+                        fields.push(BorrowedField {
+                            parameter: slot,
+                            fields: path,
+                            pointee,
+                        });
+                    }
+                }
+                if let Some((_, subject)) =
+                    super::memory::pointer_representation(self.package, &env.ty, &mut self.fuel)
+                        .map_err(|reason| error(source, reason))?
+                {
+                    borrows.push((slot, subject));
+                }
+            }
         }
         if !borrows.is_empty() || !fields.is_empty() {
             let footprint = self
@@ -5065,7 +5224,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     source,
                 )
                 .map_err(|reason| error(source, reason))?;
-            if footprint.signature != function.signature {
+            if footprint.signature.callable_signature() != function.signature.callable_signature() {
                 return Err(error(source, "callable result borrowed signature mismatch"));
             }
         }
@@ -5732,6 +5891,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.value_callable = result;
         Ok((pointer_result, result_origins, result_guards))
     }
+
     fn call_closure(
         &mut self,
         binding: PlaceId,
@@ -5754,6 +5914,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         )
         .map(|(pointer, _, _)| pointer)
     }
+
     fn call_closure_with_origins(
         &mut self,
         binding: &Place,
@@ -6099,6 +6260,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             result_guards,
         ))
     }
+
     // Mixed sets use the same completed argument frame as closure candidates.
     // Any pointer footprint has already been checked against actual targets.
     fn call_prepared_named_candidate(
@@ -6140,6 +6302,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             Ok(None)
         }
     }
+
     fn prepare_closure_arguments(
         &mut self,
         callable: &Callable,
@@ -6239,6 +6402,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             domains: argument_domains,
         }))
     }
+
     fn declare_closure_borrow(
         &mut self,
         flow: &mut Flow,
@@ -6293,6 +6457,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.memory_exposed = true;
         Ok(())
     }
+
     fn restore_capture_pointer_origins<'b>(
         &mut self,
         binding: &Place,
@@ -7095,6 +7260,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         });
         Ok(failure)
     }
+
     fn let_pattern(
         &mut self,
         pattern: &Pattern,
@@ -7207,9 +7373,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn observe_guard(&mut self, expr: &Expr, flow: &Flow, depth: usize) -> Result<(), Error> {
         self.observe_guard_result(expr, flow, depth).map(|_| ())
     }
+
     // Template dispatch observes an existing environment-free identity. It
     // neither transfers the callable nor requires a user Copy implementation.
     fn observe_template_identity(&mut self, expr: &Expr, flow: &Flow) -> Result<(), Error> {
@@ -7247,6 +7415,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             )),
         }
     }
+
     /// Validate a child that the enclosing ordinary expression will analyze
     /// again. Only that ordinary traversal owns its runtime cleanup records.
     fn check_guard_observation(
@@ -7262,6 +7431,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.candidate_observations = observations;
         result
     }
+
     fn observe_candidate(
         &mut self,
         expr: &Expr,
@@ -7280,6 +7450,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .append(observed);
         result
     }
+
     fn scalar_packet_shape(
         &mut self,
         ty: &Term,
@@ -7350,6 +7521,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             || (self.text_provenance == super::memory::TextProvenance::VerifiedByRegionAnalysis
                 && *ty == Term::Primitive(nir::Primitive::Str)))
     }
+
     fn observe_associated_value(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
         // Selection/initialization is comptime work. An unresolved identity is
         // not permission to invent owned resources, pointer provenance or a
@@ -7428,6 +7600,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     && (self.delivery)(ty).map_err(|e| error(source, e))? == Delivery::Copy,
         )
     }
+
     // Validate evaluation effects without requiring indirect slot contents to
     // have been materialized already. The subsequent ordinary call walk checks
     // every dereference on a resource snapshot, including pointer availability.
@@ -7481,6 +7654,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             _ => self.observe_guard(expr, flow, depth + 1),
         }
     }
+
     fn install_observation_input_borrows(
         &mut self,
         frame: &mut Flow,
@@ -7548,6 +7722,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn check_guard_arguments(
         &mut self,
         callee: &Expr,
@@ -7703,6 +7878,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.candidate_observations = observations;
         checked
     }
+
     fn observe_pointer_flow(
         &mut self,
         expr: &Expr,
@@ -7719,6 +7895,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         checked?;
         self.observe_checked_value(expr, flow, depth + 1, &BTreeSet::new(), true)
     }
+
     fn observe_checked_expression(
         &mut self,
         expr: &Expr,
@@ -7728,6 +7905,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.observe_checked_flow(expr, flow, depth, &BTreeSet::new())
             .map(|observed| observed.value_callable)
     }
+
     fn observe_checked_flow(
         &mut self,
         expr: &Expr,
@@ -7738,6 +7916,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.observe_checked_value(expr, flow, depth, private, false)
             .map(|(flow, _)| flow)
     }
+
     fn observe_checked_value(
         &mut self,
         expr: &Expr,
@@ -7810,6 +7989,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok((observed, origins))
     }
+
     fn observe_guard_result(
         &mut self,
         expr: &Expr,
@@ -8250,6 +8430,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(result_code)
     }
+
     fn observe_region_argument(
         &mut self,
         expr: &Expr,
@@ -8308,6 +8489,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.observation_locals = previous_locals;
         result
     }
+
     fn observe_guard_call(
         &mut self,
         expr: &Expr,
@@ -8508,6 +8690,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             self.observe_checked_expression(expr, flow, depth + 1)
         }
     }
+
     fn match_arms(
         &mut self,
         value: &Expr,
@@ -8655,6 +8838,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(result_origins.unwrap_or_default())
     }
+
     fn decomposition(
         &mut self,
         ty: &Term,
@@ -8679,6 +8863,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn bind_pattern(
         &mut self,
         pattern: &Pattern,
@@ -8700,6 +8885,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             depth,
         )
     }
+
     fn bind_pattern_with_pointer_guards(
         &mut self,
         pattern: &Pattern,
@@ -8919,6 +9105,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     /// A structural test may inspect an affine value without acquiring its
     /// fields. Keep this distinct from decomposition and from patterns which
     /// run code: a failed test must leave ownership available to the next arm.
@@ -9085,6 +9272,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(true)
     }
+
     fn observe_pattern_result(
         &mut self,
         value: &Expr,
@@ -9194,6 +9382,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             _ => self.pointer_target(value, flow, depth + 1),
         }
     }
+
     fn observe_pattern_value(
         &mut self,
         value: &Expr,
@@ -9223,6 +9412,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         .map_err(|reason| error(value.source, reason))?;
         self.observe_pattern_result(&value, flow, depth + 1)
     }
+
     fn bind_components(
         &mut self,
         pattern: &Pattern,
@@ -9797,6 +9987,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
         }
     }
+
     fn bind_fields(
         &mut self,
         patterns: &[Pattern],
@@ -9826,6 +10017,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(Shape::Fields(shapes))
     }
+
     fn retire(&mut self, flow: &mut Flow, id: PlaceId, source: SourceRange) -> Result<(), Error> {
         if let Some(action) = self.local_action(flow, id, &[], source)? {
             self.report.cleanup_sites.push(CleanupSite {
@@ -9840,6 +10032,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         self.remove_local(flow, id, source)
     }
+
     fn remove_local(
         &mut self,
         flow: &mut Flow,
@@ -9884,6 +10077,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn captured_slot_present(
         &mut self,
         state: &State,
@@ -9944,6 +10138,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(domains)
     }
+
     fn capture_storage_domains(
         &mut self,
         captures: &[nir::program::Capture],
@@ -9971,6 +10166,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(physical)
     }
+
     fn install_capture_domains(
         &mut self,
         flow: &mut Flow,
@@ -9982,6 +10178,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let physical = self.capture_storage_domains(captures, domains, source)?;
         self.install_enum_domains(flow, binding, physical, source)
     }
+
     fn restore_exit_capture_domains(
         &mut self,
         flow: &mut Flow,
@@ -10043,6 +10240,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(snapshot)
     }
+
     fn capture_pointer_snapshot(
         &mut self,
         flow: &Flow,
@@ -10208,6 +10406,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow.live = false;
         Ok(())
     }
+
     /// Bind a prepared input without ending the enclosing expression's temporaries.
     fn prepared_binding(
         &mut self,
@@ -10287,6 +10486,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn scope_origins(
         &mut self,
         expr: &Expr,
@@ -10310,6 +10510,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(origins)
     }
+
     fn scope(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
         let outer = flow.roots.clone();
         self.expr(expr, flow, depth)?;
@@ -10327,6 +10528,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn fork(
         &mut self,
         left: &Expr,
@@ -10348,6 +10550,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     /// Invoking known code observes its owned slot. This grants no permission
     /// to deliver/copy the function value elsewhere, and checks availability
     /// before any argument can move or replace the selected slot.
@@ -10428,6 +10631,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             },
         })
     }
+
     fn call_named_candidates(
         &mut self,
         expr: &Expr,
@@ -10622,6 +10826,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         });
         Ok((result, origins, guards))
     }
+
     fn memory_candidate_summary_with_enums(
         &mut self,
         callee: &Expr,
@@ -10748,6 +10953,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         combined.ok_or_else(|| error(source, "empty callable candidates"))
     }
+
     fn memory_summary_with_inputs(
         &mut self,
         callee: &Expr,
@@ -10756,6 +10962,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     ) -> Result<super::memory::Summary, String> {
         self.memory_summary_with_borrowed(callee, inputs, &[], source)
     }
+
     fn memory_summary_with_borrowed(
         &mut self,
         callee: &Expr,
@@ -10765,6 +10972,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     ) -> Result<super::memory::Summary, String> {
         self.memory_summary_with_enum_context(callee, inputs, borrowed, &[], source, false)
     }
+
     // Ordinary summaries may precede destructor selection. Observation calls
     // supply cleanup and tag premises from their independently checked frame.
     fn memory_summary_with_enum_context(
@@ -10805,6 +11013,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             source,
         )
     }
+
     fn memory_summary_with_code(
         &mut self,
         callee: &Expr,
@@ -10812,6 +11021,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
     ) -> Result<super::memory::Summary, String> {
         self.memory_summary_with_prepared_code(callee, inputs, &BTreeMap::new())
     }
+
     fn memory_summary_with_prepared_code(
         &mut self,
         callee: &Expr,
@@ -10841,6 +11051,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             &mut self.fuel,
         )
     }
+
     /// Conditional borrowed-body analysis only. Concrete callers must establish
     /// every indirect footprint against their own stored pointer provenance.
     /// These roots are validity premises, never owned values or no-alias facts.
@@ -10915,6 +11126,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         );
         Ok(())
     }
+
     /// Separate validity premises for distinct enum payloads sharing one slot.
     /// Stored candidates retain their guards in flow.pointer_guards.
     fn borrowed_guarded_contents(
@@ -10993,6 +11205,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .insert(target.clone(), absolute);
         Ok(Some(BTreeSet::from([target])))
     }
+
     fn declare_input_field_borrows(
         &mut self,
         flow: &mut Flow,
@@ -11054,6 +11267,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(targets)
     }
+
     fn capture_input_targets(
         &mut self,
         flow: &Flow,
@@ -11168,6 +11382,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let layout = self.pointer_input_layout(ty, source)?;
         origins::bind_input_origins(&layout, origins, domains, &mut self.fuel, source)
     }
+
     fn guarded_memory_projection(
         &mut self,
         base: &Place,
@@ -11218,6 +11433,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         place.fields.extend(fields.iter().map(|(_, index)| *index));
         Ok(Some((place, traversal.target.ty)))
     }
+
     fn map_memory_target(
         &mut self,
         target: &super::memory::ParameterPlace,
@@ -11355,6 +11571,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(Some(result))
     }
+
     fn memory_accesses(
         &mut self,
         accesses: &[super::memory::Access],
@@ -11396,6 +11613,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn type_cleanup_is_trivial(&mut self, ty: &Term, source: SourceRange) -> Result<bool, Error> {
         super::memory::bound_type(ty, &mut self.fuel).map_err(|e| error(source, e))?;
         if self.trivial_cleanup_types.contains(ty) {
@@ -12127,6 +12345,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok((Some(all), Some(summary), origins, result_guards))
     }
+
     fn pointer_work(
         &mut self,
         targets: &BTreeSet<Place>,
@@ -12142,6 +12361,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn pointer_target(
         &mut self,
         expr: &Expr,
@@ -12239,6 +12459,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             )),
         }
     }
+
     fn charge_pointer_conditions(
         &mut self,
         guards: &[(Vec<usize>, usize)],
@@ -12252,6 +12473,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn merge_pointer_conditions(
         &mut self,
         guarded: &mut PointerTargetGuards,
@@ -12282,6 +12504,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     /// A completely mapped, empty result leaf cannot contain a live pointer.
     /// Recover the excluded payload tag so later by-value calls do not turn
     /// established absence back into unknown pointer provenance.
@@ -12359,6 +12582,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn record_result_pointer_guards(
         &mut self,
         guards: &mut ValuePointerGuards,
@@ -12373,6 +12597,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             source,
         )
     }
+
     fn join_result_pointer_guards(
         &mut self,
         left: &ValuePointerGuards,
@@ -12510,6 +12735,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(guards.clone())
     }
+
     fn value_pointer_guards(
         &mut self,
         value: &Expr,
@@ -12521,6 +12747,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         };
         self.stored_pointer_guards(&place, flow, source)
     }
+
     fn stored_pointer_guards(
         &mut self,
         place: &Place,
@@ -12630,6 +12857,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         });
         Ok(())
     }
+
     fn replace_pointer_slot(
         &mut self,
         flow: &mut Flow,
@@ -12644,6 +12872,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn install_value_origins(
         &mut self,
         flow: &mut Flow,
@@ -12668,6 +12897,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn read_aggregate_origins(
         &mut self,
         expr: &Expr,
@@ -12946,6 +13176,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(origins)
     }
+
     fn storage_inputs_are_closed(&mut self, ty: &Term, source: SourceRange) -> Result<bool, Error> {
         // Whole generic values can be transferred before their field layout is
         // known. Materialized calls are checked again with concrete inputs.
@@ -13512,6 +13743,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         self.expr(expr, flow, depth + 1)?;
         Ok(pointer)
     }
+
     fn pointer_initializer(&mut self, expr: &Expr, flow: &Flow) -> Option<BTreeSet<Place>> {
         if matches!(expr.ty, Term::Pointer(_)) {
             self.pointer_target(expr, flow, 0).ok()
@@ -13519,6 +13751,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             None
         }
     }
+
     // Keep scratch reports out of the recursive expression walk's stack frame.
     fn check_observation_expression(
         &mut self,
@@ -13552,6 +13785,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn expr(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
         if flow.live && self.observation_region {
             self.check_observation_expression(expr, flow, depth)?;
@@ -13675,6 +13909,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn check_observation_write_targets(
         &mut self,
         targets: &BTreeSet<Place>,
@@ -13698,6 +13933,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     // Keep the pointer update's candidate maps off the recursive expression frame.
     #[inline(never)]
     fn write_pointer(
@@ -13862,6 +14098,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         Ok(())
     }
+
     fn expr_inner(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
         if !flow.live {
             return Ok(());
@@ -13886,6 +14123,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             _ => self.expr_operation(expr, flow, depth),
         }
     }
+
     #[inline(never)]
     fn expr_control(&mut self, expr: &Expr, flow: &mut Flow, depth: usize) -> Result<(), Error> {
         let source = expr.source;
@@ -13949,6 +14187,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         Ok(())
     }
 }
+
 /// `delivery` must supply checked representation-copy permission, not merely
 /// the existence of a Copy impl. This analysis alone does not discharge cleanup,
 /// dependency, observation, or alias obligations and is not a safety certificate.
@@ -14652,6 +14891,7 @@ pub fn analyze_in_package_with_field_context<'a>(
         &[],
     )
 }
+
 #[allow(clippy::too_many_arguments)]
 pub fn analyze_in_package_with_borrowed_code_context<'a>(
     package: &'a Package,
@@ -15134,6 +15374,7 @@ fn memory_code_definitions<'a>(
 ) -> Result<Option<Vec<super::memory::CodeDefinition<'a>>>, Error> {
     memory_code_definitions_at(package, callable, fuel, source, 0)
 }
+
 fn memory_code_definitions_at<'a>(
     package: Option<&Package>,
     callable: &'a Callable,
@@ -15316,6 +15557,7 @@ pub fn infer_callable_memory_with_effect_context(
         source,
     )
 }
+
 pub fn infer_callable_memory_with_borrowed_context(
     package: &Package,
     declaration: nir::DeclarationId,
@@ -15339,6 +15581,7 @@ pub fn infer_callable_memory_with_borrowed_context(
         source,
     )
 }
+
 /// Preserve the caller's independently selected complete-layout cleanup policy.
 #[allow(clippy::too_many_arguments)]
 pub fn infer_callable_memory_with_borrowed_cleanup_context(
@@ -15453,6 +15696,7 @@ pub fn infer_callable_memory_with_session<'a, 's>(
         source,
     )
 }
+
 fn infer_callable_memory_with_effects(
     package: &Package,
     declaration: nir::DeclarationId,
@@ -15476,6 +15720,7 @@ fn infer_callable_memory_with_effects(
         source,
     )
 }
+
 #[allow(clippy::too_many_arguments)]
 fn infer_callable_memory_with_borrowed(
     package: &Package,
@@ -15507,6 +15752,7 @@ fn infer_callable_memory_with_borrowed(
         source,
     )
 }
+
 #[allow(clippy::too_many_arguments)]
 fn infer_callable_memory_with_borrowed_cached<'b>(
     package: &Package,
@@ -15739,6 +15985,7 @@ fn named_memory_callees(
     }
     named_memory_definitions(&callable.definition, &callable.alternatives, fuel, source)
 }
+
 fn named_memory_definitions(
     definition: &Expr,
     alternatives: &[Expr],
@@ -15831,6 +16078,7 @@ fn merge_named_callables(
         captures: BTreeMap::new(),
     }))
 }
+
 fn same_callable_definition(left: &Expr, right: &Expr) -> bool {
     if matches!(left.kind, K::Function(_) | K::FunctionInstance { .. }) {
         // Reference spans distinguish uses, not named function identities.
@@ -16466,6 +16714,7 @@ fn contains_return_evidence(
 ) -> Result<bool, Error> {
     contains_return_evidence_kind(package, ty, fuel, source, depth, true, false)
 }
+
 fn contains_callable_value(
     package: Option<&Package>,
     ty: &Term,
@@ -16486,6 +16735,7 @@ fn contains_effect_value(
     Ok(contains_callable_value(package, ty, fuel, source, depth)?
         || contains_pointer_value(package, ty, fuel, source, depth)?)
 }
+
 fn contains_pointer_value(
     package: Option<&Package>,
     ty: &Term,
@@ -17062,6 +17312,7 @@ fn callable_source_depth(
 #[cfg(test)]
 mod record_shape_tests {
     use super::*;
+
     #[test]
     fn handler_return_display_keeps_origins_outside_variant_domains() {
         let target = Place {
@@ -17648,6 +17899,7 @@ mod record_shape_tests {
             same
         );
     }
+
     #[test]
     fn enum_callable_dumps_name_variant_guards() {
         let definition = Expr {
@@ -17685,6 +17937,7 @@ mod record_shape_tests {
         );
         assert!(!dump.contains(&usize::MAX.to_string()), "{dump}");
     }
+
     #[test]
     fn newtype_return_capture_layout_is_bounded_and_preserves_pointer_rejection() {
         let source = SourceRange { start: 0, end: 0 };
@@ -17812,6 +18065,7 @@ mod record_shape_tests {
             owned_field_type(Some(&package), &invalid_arguments, &path, &mut 100, source).is_err()
         );
     }
+
     #[test]
     fn enum_callable_paths_require_the_matching_tag_and_preserve_siblings() {
         let source = SourceRange { start: 0, end: 0 };
@@ -17857,6 +18111,7 @@ mod record_shape_tests {
             vec![vec![1, VARIANT_PATH, 0, 0]]
         );
     }
+
     #[test]
     fn record_partial_moves_preserve_siblings_and_reinitialization() {
         let scalar = Term::Primitive(nir::Primitive::Bool);
@@ -17891,6 +18146,7 @@ mod record_shape_tests {
         state.take(&parent).unwrap();
         assert!(state.remaining().is_empty());
     }
+
     #[test]
     fn empty_record_still_owns_a_responsibility_and_shape_budgets_recover() {
         let package = nir::program::Package::default();
