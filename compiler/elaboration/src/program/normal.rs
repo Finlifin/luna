@@ -455,6 +455,9 @@ impl Checker<'_, '_> {
         expected_inner: &Term,
     ) -> Result<Term, Error> {
         if let Some(identity) = self.forward_runtime_dependency(value, Some(expected_inner))? {
+            self.local_runtime_origins
+                .sources
+                .insert(value.hir_id, identity.clone());
             return Ok(identity);
         }
         if matches!(value.kind, H::ResolvedClauseParam(..)) {
@@ -497,7 +500,11 @@ impl Checker<'_, '_> {
                 "diverging expression cannot satisfy a runtime quote dependency",
             ));
         }
-        self.intern_runtime_operand(checked, value.span)
+        let identity = self.intern_runtime_operand(checked, value.span)?;
+        self.local_runtime_origins
+            .sources
+            .insert(value.hir_id, identity.clone());
+        Ok(identity)
     }
 }
 

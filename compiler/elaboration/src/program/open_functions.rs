@@ -7188,7 +7188,7 @@ impl Checker<'_, '_> {
                     None => self.lexical_function_arguments(owner, expr.span)?,
                 },
             };
-            self.generic_call_with_receiver(expr, owner, args, expected, None, vec![], known)
+            self.generic_call_with_receiver(expr, owner, args, expected, None, vec![], known, None)
         };
         result.map(Some)
     }
@@ -7619,23 +7619,23 @@ impl Checker<'_, '_> {
             .and_then(|id| self.generated_functions.declaration(id))
             .map(|decl| decl.env_parameters.clone())
             .unwrap_or_default();
-        let env_arguments = env_params
+        let inputs = env_params
             .iter()
             .map(|env| {
                 let term = env.runtime_id.map(Term::Runtime).unwrap_or(Term::Rigid {
                     declaration: env.declaration,
                     sort: Sort::Runtime,
                 });
-                self.deliver_runtime_dependency(&term, &env.ty, expr.span)
+                (term, env.ty.clone())
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        let call = n::Expr {
+            .collect();
+        let mut call = n::Expr {
             source: source(expr.span),
             ty: result,
             kind: K::Call {
                 callee: Box::new(callee),
                 arguments,
-                env_arguments,
+                env_arguments: Vec::new(),
                 parameter_bindings: sig
                     .params
                     .iter()
@@ -7643,7 +7643,9 @@ impl Checker<'_, '_> {
                     .collect(),
             },
         };
+        let environment = self.prepare_call_environment(&mut call, inputs, 0, expr)?;
         let call = self.stage_collected_call(call, &routes, 0, expr)?;
+        let call = environment.finish(call);
         if live_bindings.is_empty() {
             return Ok(call);
         }
@@ -8024,6 +8026,7 @@ impl Checker<'_, '_> {
                     this.local_runtime_deliveries.insert(
                         rt_id,
                         LocalRuntimeDelivery {
+                            projection: None,
                             expr: n::Expr {
                                 source: source(span),
                                 ty: inner_ty.clone(),

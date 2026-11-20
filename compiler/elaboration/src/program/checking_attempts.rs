@@ -173,7 +173,7 @@ impl LexicalCheckpoint {
 /// and type-use stability obligations.
 struct RetainedCheckpoint {
     abstract_code_dependencies: BTreeMap<n::LocalId, BTreeSet<n::LocalId>>,
-    local_runtime_origin_ids: BTreeMap<LocalRuntimeOrigin, nir::RuntimeId>,
+    local_runtime_origins: runtime_origins::LocalOrigins,
     local_runtime_deliveries: BTreeMap<nir::RuntimeId, LocalRuntimeDelivery>,
     pending_refinements_len: usize,
     pending_contract_projections_len: usize,
@@ -186,7 +186,7 @@ impl RetainedCheckpoint {
     fn capture(checker: &Checker<'_, '_>) -> Self {
         Self {
             abstract_code_dependencies: checker.abstract_code_dependencies.clone(),
-            local_runtime_origin_ids: checker.local_runtime_origin_ids.clone(),
+            local_runtime_origins: checker.local_runtime_origins.clone(),
             local_runtime_deliveries: checker.local_runtime_deliveries.clone(),
             pending_refinements_len: checker.pending_refinements.len(),
             pending_contract_projections_len: checker.pending_contract_projections.len(),
@@ -213,7 +213,7 @@ impl RetainedCheckpoint {
             .pending_predicate_stability
             .truncate(self.pending_predicate_stability_len);
         checker.abstract_code_dependencies = self.abstract_code_dependencies;
-        checker.local_runtime_origin_ids = self.local_runtime_origin_ids;
+        checker.local_runtime_origins = self.local_runtime_origins;
         checker.local_runtime_deliveries = self.local_runtime_deliveries;
     }
 }
@@ -359,7 +359,7 @@ impl std::fmt::Display for RetainedCheckpoint {
         write!(
             f,
             ") (local-runtime-origins {}) (local-runtime-deliveries {}) (pending-refinements {}) (pending-contract-projections {}) (signature-type-uses {}) (pending-default-stability {}) (pending-predicate-stability {}))",
-            self.local_runtime_origin_ids.len(),
+            self.local_runtime_origins.ids.len(),
             self.local_runtime_deliveries.len(),
             self.pending_refinements_len,
             self.pending_contract_projections_len,
@@ -448,7 +448,7 @@ mod tests {
         };
         let retained = RetainedCheckpoint {
             abstract_code_dependencies: BTreeMap::new(),
-            local_runtime_origin_ids: BTreeMap::new(),
+            local_runtime_origins: Default::default(),
             local_runtime_deliveries: BTreeMap::new(),
             pending_refinements_len: 0,
             pending_contract_projections_len: 0,

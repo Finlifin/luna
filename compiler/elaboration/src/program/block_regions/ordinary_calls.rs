@@ -366,19 +366,21 @@ impl Completion<'_> {
         checker.comptime_receiver_arguments(site.owner, &mut arguments);
         let mut callee = site.callee;
         callee.ty = retained_callable;
-        let env_arguments = checker.call_env_arguments(&callee, expr.span)?;
-        let call = n::Expr {
+        let inputs = checker.call_environment_inputs(&callee, expr.span)?;
+        let mut call = n::Expr {
             ty,
             source: source(expr.span),
             kind: K::Call {
                 callee: Box::new(callee),
                 arguments,
-                env_arguments,
+                env_arguments: Vec::new(),
                 parameter_bindings,
             },
         };
+        let environment = checker.prepare_call_environment(&mut call, inputs, offset, expr)?;
         let call = checker.freeze_staged_call_inputs(call, expr)?;
-        checker.stage_collected_call(call, &site.routes, offset, expr)
+        let call = checker.stage_collected_call(call, &site.routes, offset, expr)?;
+        Ok(environment.finish(call))
     }
 }
 

@@ -71,6 +71,7 @@ mod open_functions;
 mod operators;
 mod pattern_checking;
 mod runtime_defaults;
+mod runtime_environment;
 mod runtime_origins;
 
 use pattern_checking::*;
@@ -697,7 +698,7 @@ fn elaborate_in_mode(
         runtime_domains: BTreeMap::new(),
         global_runtime_origin_ids: std::collections::HashMap::new(),
         global_runtime_deliveries: BTreeMap::new(),
-        local_runtime_origin_ids: BTreeMap::new(),
+        local_runtime_origins: Default::default(),
         local_runtime_deliveries: BTreeMap::new(),
         local_write_versions: BTreeMap::new(),
         active_env_parameters: BTreeMap::new(),
@@ -2290,11 +2291,13 @@ enum LocalRuntimeOrigin {
         epoch: u64,
         fields: Vec<usize>,
     },
+    Projection(std::sync::Arc<runtime_origins::Projection>),
     Ephemeral(u32),
 }
 
 #[derive(Clone, Debug)]
 struct LocalRuntimeDelivery {
+    projection: Option<std::sync::Arc<runtime_origins::Projection>>,
     expr: n::Expr,
     checked_epoch: Option<(n::LocalId, u64)>,
 }
@@ -2477,7 +2480,7 @@ struct Checker<'a, 'h> {
     runtime_domains: BTreeMap<nir::RuntimeId, Term>,
     global_runtime_origin_ids: std::collections::HashMap<GlobalRuntimeOrigin, nir::RuntimeId>,
     global_runtime_deliveries: BTreeMap<nir::RuntimeId, n::Expr>,
-    local_runtime_origin_ids: BTreeMap<LocalRuntimeOrigin, nir::RuntimeId>,
+    local_runtime_origins: runtime_origins::LocalOrigins,
     local_runtime_deliveries: BTreeMap<nir::RuntimeId, LocalRuntimeDelivery>,
     local_write_versions: BTreeMap<n::LocalId, u64>,
     active_env_parameters: BTreeMap<DeclarationId, (n::LocalId, Term)>,
@@ -2563,7 +2566,7 @@ impl Checker<'_, '_> {
                 Ok(expr)
             }
             Term::Runtime(id) => {
-                let mut delivered = if let Some(entry) = self.local_runtime_deliveries.get(id) {
+                let delivered = if let Some(entry) = self.local_runtime_deliveries.get(id) {
                     if let Some((binding, epoch)) = entry.checked_epoch {
                         let current = self
                             .local_write_versions
@@ -2591,140 +2594,9 @@ impl Checker<'_, '_> {
                     ));
                 };
                 self.require_expression(&delivered.ty, expected_inner, span)?;
-                delivered.source = source(span);
                 Ok(delivered)
             }
             _ => Err(error(span, "invalid runtime dependency argument")),
-        }
-    }
-
-    fn deliver_owner_env_arguments(
-        &mut self,
-        owner: OwnerId,
-        args: &[Term],
-        span: Span,
-    ) -> Result<Vec<n::Expr>, Error> {
-        let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
-            self.package.item(owner).map(|item| &item.kind)
-        else {
-            return Ok(vec![]);
-        };
-        if function_bodies::phase(&sig.modifiers) != n::FunctionPhase::Runtime
-            || sig.modifiers.is_normal_form_head
-        {
-            return Ok(vec![]);
-        }
-        self.ensure_signature(owner, span)?;
-        let params = self
-            .type_parameters
-            .get(&owner)
-            .cloned()
-            .unwrap_or_default();
-        if params.is_empty() {
-            return Ok(vec![]);
-        }
-        let domains = self.trait_domains(owner)?;
-        if params.len() != args.len() || domains.len() != params.len() {
-            if domains.iter().any(|d| matches!(d, Term::Lift(_))) {
-                return Err(error(span, "runtime environment argument arity mismatch"));
-            }
-            return Ok(vec![]);
-        }
-        let frames = self.call_input_frames();
-        let mut env_args = Vec::new();
-        for (slot, (domain, arg)) in domains.iter().zip(args).enumerate() {
-            let Term::Lift(inner) = domain else {
-                continue;
-            };
-            let instantiated_inner = self.instantiate_input_types_in_scope(
-                inner,
-                &params[..slot],
-                &args[..slot],
-                &frames,
-                span,
-            )?;
-            let instantiated_inner = self.callable_input_view(&instantiated_inner, span)?;
-            env_args.push(self.deliver_runtime_dependency(arg, &instantiated_inner, span)?);
-        }
-        Ok(env_args)
-    }
-
-    fn call_env_arguments(&mut self, callee: &n::Expr, span: Span) -> Result<Vec<n::Expr>, Error> {
-        match &callee.kind {
-            K::Function(decl_id) => {
-                let Some(owner) = self.source_declarations.owner(*decl_id) else {
-                    return Ok(vec![]);
-                };
-                self.deliver_owner_env_arguments(owner, &[], span)
-            }
-            K::FunctionInstance {
-                declaration: decl_id,
-                arguments,
-            } => {
-                let Some(owner) = self.source_declarations.owner(*decl_id) else {
-                    return Ok(vec![]);
-                };
-                self.deliver_owner_env_arguments(owner, arguments, span)
-            }
-            K::TraitMethod {
-                interface,
-                interface_arguments,
-                subject,
-                member,
-                method_arguments,
-            } => {
-                let instance = n::InterfaceInstance {
-                    declaration: *interface,
-                    arguments: interface_arguments.clone(),
-                };
-                if let Ok(resolution) =
-                    self.resolve_trait_capability(&instance, subject, crate::ptc::Budget::default())
-                    && let crate::implementation::Selection::Selected(impl_id) =
-                        resolution.selection
-                    && let Some(crate::implementation::TypeAssessment::Applicable(evidence)) =
-                        resolution.assessments.get(&impl_id)
-                {
-                    let implementation =
-                        &self.checked_implementations[self.implementation_positions[&impl_id]];
-                    let contract = self
-                        .checked_traits
-                        .by_id(*interface)
-                        .and_then(|t| t.methods.iter().find(|m| m.declaration == *member))
-                        .ok_or_else(|| error(span, "missing trait method contract"))?;
-                    let body = implementation
-                        .methods
-                        .iter()
-                        .find(|(method, _)| *method == contract.name)
-                        .map(|(_, body)| *body)
-                        .ok_or_else(|| error(span, "unknown trait method implementation"))?;
-                    let Some(impl_owner) = self.source_declarations.owner(body) else {
-                        return Err(error(span, "missing trait method owner"));
-                    };
-                    let args = if self.self_containers.contains_key(&impl_owner) {
-                        evidence
-                            .type_arguments
-                            .iter()
-                            .cloned()
-                            .chain(method_arguments.iter().cloned())
-                            .collect::<Vec<_>>()
-                    } else {
-                        std::iter::once(subject.clone())
-                            .chain(interface_arguments.iter().cloned())
-                            .chain(method_arguments.iter().cloned())
-                            .collect::<Vec<_>>()
-                    };
-                    return self.deliver_owner_env_arguments(impl_owner, &args, span);
-                }
-                let Some(contract_owner) = self.source_declarations.owner(*member) else {
-                    return Ok(vec![]);
-                };
-                let args: Vec<_> = std::iter::once(subject.clone())
-                    .chain(interface_arguments.iter().cloned())
-                    .chain(method_arguments.iter().cloned())
-                    .collect();
-                self.deliver_owner_env_arguments(contract_owner, &args, span)
-            }
-            _ => Ok(vec![]),
         }
     }
 
@@ -5980,7 +5852,16 @@ impl Checker<'_, '_> {
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
         let known = self.lexical_function_arguments(owner, expr.span)?;
-        self.generic_call_with_receiver(expr, owner, args, expected, partial, Vec::new(), known)
+        self.generic_call_with_receiver(
+            expr,
+            owner,
+            args,
+            expected,
+            partial,
+            Vec::new(),
+            known,
+            None,
+        )
     }
 
     fn generic_call_with_receiver(
@@ -5992,6 +5873,7 @@ impl Checker<'_, '_> {
         partial: Option<&crate::calls::CallableContext>,
         prefix: Vec<n::Expr>,
         known: Vec<Term>,
+        selected_method: Option<interfaces::SelectedMethod>,
     ) -> Result<n::Expr, Error> {
         if self.is_quote_function(owner) {
             self.record_quote_application(expr.span)?;
@@ -6548,39 +6430,45 @@ impl Checker<'_, '_> {
         } else {
             self.callable_input_view(&instance.result, expr.span)?
         };
-        let callee_expr = n::Expr {
-            ty: self.callable_type(
-                owner,
-                self.instantiate_input_types_in_scope(
-                    &signature,
-                    &parameters,
-                    &instance.type_arguments,
-                    &caller_frames,
-                    expr.span,
-                )?,
-            ),
-            source: source(expr.span),
-            kind: K::FunctionInstance {
-                declaration: declaration(self.package, &self.package_identities, owner),
-                arguments: full_arguments,
-            },
+        let callee_expr = if let Some(method) = selected_method {
+            method.callee(self, owner, &full_arguments, expr.span)?
+        } else {
+            n::Expr {
+                ty: self.callable_type(
+                    owner,
+                    self.instantiate_input_types_in_scope(
+                        &signature,
+                        &parameters,
+                        &instance.type_arguments,
+                        &caller_frames,
+                        expr.span,
+                    )?,
+                ),
+                source: source(expr.span),
+                kind: K::FunctionInstance {
+                    declaration: declaration(self.package, &self.package_identities, owner),
+                    arguments: full_arguments,
+                },
+            }
         };
-        let env_arguments = self.call_env_arguments(&callee_expr, expr.span)?;
-        let call = n::Expr {
+        let inputs = self.call_environment_inputs(&callee_expr, expr.span)?;
+        let mut call = n::Expr {
             ty,
             source: source(expr.span),
             kind: K::Call {
                 callee: Box::new(callee_expr),
                 arguments,
-                env_arguments,
+                env_arguments: Vec::new(),
                 parameter_bindings: declarations
                     .iter()
                     .map(|param| local(param.hir_id))
                     .collect(),
             },
         };
+        let environment = self.prepare_call_environment(&mut call, inputs, offset, expr)?;
         let call = self.freeze_staged_call_inputs(call, expr)?;
-        self.stage_collected_call(call, &routes, offset, expr)
+        let call = self.stage_collected_call(call, &routes, offset, expr)?;
+        Ok(environment.finish(call))
     }
 
     fn closure(

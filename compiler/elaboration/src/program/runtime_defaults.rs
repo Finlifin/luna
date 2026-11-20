@@ -113,15 +113,21 @@ impl Checker<'_, '_> {
         self.required_steps -= (before - fuel) as u64;
         let free = free.map_err(|reason| error(value.span, reason.to_string()))?;
         if !free.is_empty() {
+            let mut fields = Vec::new();
             let mut root = &mut checked;
             let binding = loop {
                 match root.kind {
                     K::PointerField {
-                        ref mut pointer, ..
+                        ref mut pointer,
+                        index,
+                        ..
                     }
                     | K::PointerAnonymousField {
-                        ref mut pointer, ..
+                        ref mut pointer,
+                        index,
+                        ..
                     } => {
+                        fields.push(index);
                         root = pointer;
                     }
                     K::Local(binding) => break binding,
@@ -145,13 +151,39 @@ impl Checker<'_, '_> {
                     sort: Sort::Runtime,
                 });
             let base = self.deliver_runtime_dependency(&identity, &root.ty, span)?;
-            if self.runtime_place(&base, span)?.is_none() {
-                return Err(error(
-                    value.span,
-                    "runtime default needs its producing operand to be bound once",
-                ));
-            }
+            let stable_place = self.runtime_place(&base, span)?.is_some();
             *root = base;
+            if !stable_place {
+                let Term::Runtime(id) = identity else {
+                    return Err(error(
+                        span,
+                        "computed runtime dependency has no producer identity",
+                    ));
+                };
+                fields.reverse();
+                let mut path = runtime_origins::Projection {
+                    root: id,
+                    fields: Vec::new(),
+                };
+                if let Some(parent) = self
+                    .local_runtime_deliveries
+                    .get(&id)
+                    .and_then(|d| d.projection.as_ref())
+                {
+                    self.required_steps = self
+                        .required_steps
+                        .checked_sub(parent.fields.len() as u64)
+                        .ok_or_else(|| error(span, "runtime projection path budget exhausted"))?;
+                    path.root = parent.root;
+                    path.fields.extend_from_slice(&parent.fields);
+                }
+                path.fields.extend(fields);
+                return self.intern_local_runtime_operand(
+                    LocalRuntimeOrigin::Projection(std::sync::Arc::new(path)),
+                    checked,
+                    span,
+                );
+            }
             return self.intern_runtime_operand(checked, span);
         }
         let id = if let Some(Place::Global(origin)) = self.runtime_place(&checked, span)? {

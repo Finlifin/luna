@@ -2,6 +2,19 @@
 //! checked field indices. Reading a pointer binding also fixes its write epoch.
 use super::*;
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct Projection {
+    pub(super) root: nir::RuntimeId,
+    pub(super) fields: Vec<usize>,
+}
+
+/// Occurrences and identities have the same lexical and speculative lifetime.
+#[derive(Default, Clone)]
+pub(super) struct LocalOrigins {
+    pub(super) ids: BTreeMap<LocalRuntimeOrigin, nir::RuntimeId>,
+    pub(super) sources: SourceBindings<Term>,
+}
+
 pub(super) enum Place {
     Global(GlobalRuntimeOrigin),
     Local(LocalRuntimeOrigin),
@@ -96,7 +109,16 @@ impl Checker<'_, '_> {
             Some(Place::Local(origin)) => origin,
             None => LocalRuntimeOrigin::Ephemeral(self.next_runtime_id),
         };
-        if let Some(id) = self.local_runtime_origin_ids.get(&origin) {
+        self.intern_local_runtime_operand(origin, expr, span)
+    }
+
+    pub(super) fn intern_local_runtime_operand(
+        &mut self,
+        origin: LocalRuntimeOrigin,
+        expr: n::Expr,
+        span: Span,
+    ) -> Result<Term, Error> {
+        if let Some(id) = self.local_runtime_origins.ids.get(&origin) {
             return Ok(Term::Runtime(*id));
         }
         let checked_epoch = match &origin {
@@ -104,12 +126,17 @@ impl Checker<'_, '_> {
             _ => None,
         };
         let id = self.intern_runtime_id(Term::Lift(Box::new(expr.ty.clone())), span)?;
-        self.local_runtime_origin_ids.insert(origin, id);
+        let projection = match &origin {
+            LocalRuntimeOrigin::Projection(path) => Some(path.clone()),
+            _ => None,
+        };
+        self.local_runtime_origins.ids.insert(origin, id);
         self.local_runtime_deliveries.insert(
             id,
             LocalRuntimeDelivery {
                 expr,
                 checked_epoch,
+                projection,
             },
         );
         Ok(Term::Runtime(id))

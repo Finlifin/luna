@@ -21,6 +21,47 @@ mod program_contracts;
 mod signatures;
 mod values;
 
+/// A generic method call retains its selected interface until inference
+/// completes the arguments belonging to the member itself.
+pub(super) struct SelectedMethod {
+    interface: DeclarationId,
+    interface_arguments: Vec<Term>,
+    member: DeclarationId,
+    subject: Term,
+}
+
+impl SelectedMethod {
+    pub(super) fn callee(
+        self,
+        checker: &Checker<'_, '_>,
+        owner: OwnerId,
+        arguments: &[Term],
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let inherited = 1 + self.interface_arguments.len();
+        let signature = checker
+            .declared_signature(owner)
+            .ok_or_else(|| error(span, "missing trait method signature"))?
+            .instantiate_parameters_in_scope(
+                &checker.declaration_binders(owner),
+                arguments,
+                &checker.call_input_frames(),
+            )
+            .map_err(|e| error(span, e.to_string()))?;
+        Ok(n::Expr {
+            source: source(span),
+            ty: checker.callable_type(owner, signature),
+            kind: K::TraitMethod {
+                interface: self.interface,
+                interface_arguments: self.interface_arguments,
+                member: self.member,
+                subject: self.subject,
+                method_arguments: arguments[inherited..].to_vec(),
+            },
+        })
+    }
+}
+
 /// The result domain is known when the implementation is admitted. Closed
 /// data can be formed by this owner without linking code into its consumer.
 #[derive(Clone)]
@@ -3162,67 +3203,31 @@ impl Checker<'_, '_> {
             interface,
             interface_arguments,
             subject,
-            member,
             method_arguments,
-            ..
+            member,
         } = callee.kind
         else {
             unreachable!()
         };
-        let fixed: Vec<_> = std::iter::once(subject.clone())
+        let fixed = std::iter::once(subject.clone())
             .chain(interface_arguments.iter().cloned())
-            .chain(method_arguments.iter().cloned())
+            .chain(method_arguments)
             .collect();
-        let inherited = 1 + interface_arguments.len();
-        let mut call =
-            self.generic_call_with_receiver(expr, owner, args, expected, partial, prefix, fixed)?;
-        fn prepared_callee(call: &mut n::Expr) -> Option<&mut n::Expr> {
-            match &mut call.kind {
-                K::Call { callee, .. } => Some(callee),
-                K::CallPreparation {
-                    result: Some(result),
-                    ..
-                } => prepared_callee(result),
-                _ => None,
-            }
-        }
-        let callee = prepared_callee(&mut call)
-            .ok_or_else(|| error(expr.span, "generic method preparation lacks a call"))?;
-        let K::FunctionInstance { arguments, .. } = &callee.kind else {
-            unreachable!()
-        };
-        let method_arguments = arguments[inherited..].to_vec();
-        let frames = self.call_input_frames();
-        let signature = self
-            .signatures
-            .get(&owner)
-            .or_else(|| self.interface_signatures.get(&owner))
-            .unwrap()
-            .instantiate_parameters_in_scope(&self.declaration_binders(owner), arguments, &frames)
-            .map_err(|e| error(expr.span, e.to_string()))?;
-        callee.ty = self.callable_type(owner, signature);
-        callee.kind = K::TraitMethod {
+        let target = SelectedMethod {
             interface,
             interface_arguments,
             member,
             subject,
-            method_arguments,
         };
-        let refreshed_callee = callee.clone();
-        let refreshed_env = self.call_env_arguments(&refreshed_callee, expr.span)?;
-        fn prepared_env_arguments(call: &mut n::Expr) -> Option<&mut Vec<n::Expr>> {
-            match &mut call.kind {
-                K::Call { env_arguments, .. } => Some(env_arguments),
-                K::CallPreparation {
-                    result: Some(result),
-                    ..
-                } => prepared_env_arguments(result),
-                _ => None,
-            }
-        }
-        *prepared_env_arguments(&mut call)
-            .ok_or_else(|| error(expr.span, "generic method preparation lacks a call"))? =
-            refreshed_env;
-        Ok(call)
+        self.generic_call_with_receiver(
+            expr,
+            owner,
+            args,
+            expected,
+            partial,
+            prefix,
+            fixed,
+            Some(target),
+        )
     }
 }

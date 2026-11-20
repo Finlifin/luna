@@ -101,7 +101,7 @@ impl Checker<'_, '_> {
         let saved_result_context = self.structural_result_context.take();
         let saved_effects = self.effect_environment.take();
         let saved_resume = self.effect_resume_result.take();
-        let saved_local_runtime_origins = std::mem::take(&mut self.local_runtime_origin_ids);
+        let saved_local_runtime_origins = std::mem::take(&mut self.local_runtime_origins);
         let saved_local_runtime_deliveries = std::mem::take(&mut self.local_runtime_deliveries);
         let saved_local_write_versions = std::mem::take(&mut self.local_write_versions);
         let saved_active_env_parameters = std::mem::take(&mut self.active_env_parameters);
@@ -109,7 +109,7 @@ impl Checker<'_, '_> {
         self.active_env_parameters = saved_active_env_parameters;
         self.local_write_versions = saved_local_write_versions;
         self.local_runtime_deliveries = saved_local_runtime_deliveries;
-        self.local_runtime_origin_ids = saved_local_runtime_origins;
+        self.local_runtime_origins = saved_local_runtime_origins;
         self.definition_refinements = saved_refinements;
         self.ordinary_behavior_inputs = saved_behavior_inputs;
         self.checking_open_behavior = saved_behavior;

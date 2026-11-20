@@ -560,6 +560,121 @@ fn forwarded_quote_defaults_check_the_instantiated_payload_domain() {
 }
 
 #[test]
+fn forwarded_and_projected_slots_acquire_one_runtime_producer() {
+    let case = NativeCase::new(
+        r#"
+        struct Cell { value: i32 }
+        struct Envelope { inner: Cell }
+        fn choose(counter: *Cell, target: *Envelope) -> *Envelope {
+            if counter.value.* >= 0 and counter.value.* < 1000 {
+                counter.*.value = counter.value.* + 1;
+            }
+            target
+        }
+        fn observe() -> i32
+        where quote src: lift *Envelope,
+            quote .same: lift *Envelope = src,
+            quote .inner: lift *Cell = same.inner,
+            quote .last: lift *i32 = inner.value,
+            quote .also: lift *i32 = src.inner.value
+        {
+            if last.* == also.* { last.* } else { 0 }
+        }
+        fn run() -> i32 {
+            var calls = Cell { value: 0 };
+            var data = Envelope { inner: Cell { value: 34 } };
+            let result = observe<choose(calls.ref, data.ref)>();
+            if result == 34 { calls.value } else { 0 }
+        }
+    "#,
+    );
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(signed-integer 1)\n");
+}
+
+#[test]
+fn named_quote_inputs_run_between_the_receiver_and_ordinary_arguments() {
+    let case = NativeCase::new(
+        r#"
+        struct Trace { value: i32 }
+        fn mark(trace: *Trace, digit: i32) -> i32 {
+            if trace.value.* >= 0 and trace.value.* < 10000 and digit > 0 and digit < 10 {
+                trace.*.value = trace.value.* * 10 + digit;
+            }
+            digit
+        }
+        struct Gauge { v: i32 }
+        impl Gauge {
+            fn observe(self, last: i32) -> bool
+            where quote .left: lift i32 = 0, quote .right: lift i32 = 0,
+                quote .same: lift i32 = left
+            {
+                left == 1 and right == 2 and same == 1 and last == 3
+            }
+        }
+        fn receiver(t: *Trace) -> Gauge { Gauge { v: mark(t, 4) } }
+        fn run() -> i32 {
+            var trace = Trace { value: 0 };
+            let ok = receiver(trace.ref).observe<
+                .right = mark(trace.ref, 2), .left = mark(trace.ref, 1)
+            >(mark(trace.ref, 3));
+            if ok { trace.value } else { 0 }
+        }
+    "#,
+    );
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(signed-integer 4213)\n");
+}
+
+#[test]
+fn quote_acquisition_stops_at_return_and_keeps_distinct_producer_calls() {
+    let case = NativeCase::new(
+        r#"
+        struct Trace { value: i32 }
+        fn mark(trace: *Trace, digit: i32) -> i32 {
+            if trace.value.* >= 0 and trace.value.* < 10000 and digit > 0 and digit < 10 {
+                trace.*.value = trace.value.* * 10 + digit;
+            }
+            digit
+        }
+        fn observe(last: i32) -> bool
+        where quote .left: lift i32 = 0, quote .right: lift i32 = 0,
+            quote .same: lift i32 = left
+        {
+            left == 1 and right == 2 and same == 1 and last == 3
+        }
+        fn pair() -> bool
+        where quote .left: lift i32 = 0, quote .right: lift i32 = 0,
+            quote .again: lift i32 = left
+        {
+            left == right and again == left
+        }
+        fn exits(trace: *Trace, stop: bool) -> i32 {
+            let unused = observe<
+                .right = do { if stop { return 7; }; mark(trace, 2) },
+                .left = mark(trace, 1)
+            >(mark(trace, 3));
+            9
+        }
+        fn run() -> i32 {
+            var trace = Trace { value: 0 };
+            let value = exits(trace.ref, true);
+            let both = pair<.left = mark(trace.ref, 1), .right = mark(trace.ref, 1)>();
+            if value == 7 and both { trace.value } else { 0 }
+        }
+    "#,
+    );
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(signed-integer 11)\n");
+}
+
+#[test]
 fn projected_quote_defaults_keep_the_field_and_storage_identity() {
     let source = r#"
         struct Cell {

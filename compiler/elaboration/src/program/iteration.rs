@@ -168,7 +168,7 @@ impl Checker<'_, '_> {
         let input_boundary = self.input_facts.lexical_boundary();
         let saved_environment = self.effect_environment.clone();
         let saved_resume = self.effect_resume_result.clone();
-        let saved_runtime_origins = self.local_runtime_origin_ids.clone();
+        let saved_runtime_origins = self.local_runtime_origins.clone();
         let saved_delivery_ids: BTreeSet<_> =
             self.local_runtime_deliveries.keys().copied().collect();
         let first = self.next_temporary_binding;
@@ -362,7 +362,7 @@ impl Checker<'_, '_> {
         self.input_facts.leave_lexical(&input_boundary);
         self.effect_environment = saved_environment;
         self.effect_resume_result = saved_resume;
-        self.local_runtime_origin_ids = saved_runtime_origins;
+        self.local_runtime_origins = saved_runtime_origins;
         checked
     }
 

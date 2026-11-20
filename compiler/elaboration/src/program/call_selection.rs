@@ -401,6 +401,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                         partial,
                         prefix,
                         arguments.clone(),
+                        None,
                     )
                     .map(block_regions::CallPlan::Ready);
             }

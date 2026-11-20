@@ -71,7 +71,7 @@ impl Checker<'_, '_> {
         let saved_immutable = self.immutable.clone();
         let saved_context = self.context.clone();
         let saved_data = self.generator_data.clone();
-        let saved_runtime_origins = self.local_runtime_origin_ids.clone();
+        let saved_runtime_origins = self.local_runtime_origins.clone();
         let input_boundary = self.input_facts.lexical_boundary();
         self.control.loops.push(identity);
         let result = (|| {
@@ -185,7 +185,7 @@ impl Checker<'_, '_> {
         self.immutable = saved_immutable;
         self.context = saved_context;
         self.generator_data = saved_data;
-        self.local_runtime_origin_ids = saved_runtime_origins;
+        self.local_runtime_origins = saved_runtime_origins;
         self.input_facts.leave_lexical(&input_boundary);
         result
     }

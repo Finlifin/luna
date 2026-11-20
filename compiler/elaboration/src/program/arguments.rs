@@ -728,7 +728,7 @@ pub(super) fn literal_spread_arguments<'hir>(args: &[Arg<'hir>]) -> Option<Vec<A
 
 // Keep local receiver places live across argument collection. Computed bases
 // are evaluated into private storage before later explicit arguments.
-fn reference_base(value: &mut n::Expr) -> &mut n::Expr {
+pub(super) fn reference_base(value: &mut n::Expr) -> &mut n::Expr {
     match value {
         n::Expr {
             kind: K::Field { value, .. } | K::AnonymousField { value, .. },

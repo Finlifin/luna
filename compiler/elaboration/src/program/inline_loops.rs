@@ -197,7 +197,7 @@ impl Checker<'_, '_> {
         let saved_context = self.context.clone();
         let saved_selection = self.inline_selection;
         let saved_suppressed = self.in_unselected_inline;
-        let saved_runtime_origins = self.local_runtime_origin_ids.clone();
+        let saved_runtime_origins = self.local_runtime_origins.clone();
         let identity = local(expr.hir_id);
         self.control.loops.push(identity);
         let result = (|| {
@@ -210,7 +210,7 @@ impl Checker<'_, '_> {
                 self.generator_data = saved_data.clone();
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
-                self.local_runtime_origin_ids = saved_runtime_origins.clone();
+                self.local_runtime_origins = saved_runtime_origins.clone();
                 let saved_delivery_ids: BTreeSet<_> =
                     self.local_runtime_deliveries.keys().copied().collect();
                 self.immutable.extend(pattern_binding_ids(pat));
@@ -357,7 +357,7 @@ impl Checker<'_, '_> {
         self.context = saved_context;
         self.inline_selection = saved_selection;
         self.in_unselected_inline = saved_suppressed;
-        self.local_runtime_origin_ids = saved_runtime_origins;
+        self.local_runtime_origins = saved_runtime_origins;
         result
     }
 
@@ -418,7 +418,7 @@ impl Checker<'_, '_> {
         let saved_context = self.context.clone();
         let saved_selection = self.inline_selection;
         let saved_suppressed = self.in_unselected_inline;
-        let saved_runtime_origins = self.local_runtime_origin_ids.clone();
+        let saved_runtime_origins = self.local_runtime_origins.clone();
         let suppressed = self.in_unselected_inline;
         let identity = local(expr.hir_id);
         self.control.loops.push(identity);
@@ -464,7 +464,7 @@ impl Checker<'_, '_> {
                 self.generator_data = saved_data.clone();
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
-                self.local_runtime_origin_ids = saved_runtime_origins.clone();
+                self.local_runtime_origins = saved_runtime_origins.clone();
                 self.inline_selection = Some((expr.hir_id, usize::MAX));
                 self.in_unselected_inline = true;
                 self.immutable.extend(pattern_binding_ids(pat));
@@ -495,7 +495,7 @@ impl Checker<'_, '_> {
                 self.generator_data = saved_data.clone();
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
-                self.local_runtime_origin_ids = saved_runtime_origins.clone();
+                self.local_runtime_origins = saved_runtime_origins.clone();
                 let saved_delivery_ids: BTreeSet<_> =
                     self.local_runtime_deliveries.keys().copied().collect();
                 self.inline_selection = saved_selection;
@@ -683,7 +683,7 @@ impl Checker<'_, '_> {
         self.context = saved_context;
         self.inline_selection = saved_selection;
         self.in_unselected_inline = saved_suppressed;
-        self.local_runtime_origin_ids = saved_runtime_origins;
+        self.local_runtime_origins = saved_runtime_origins;
         result
     }
 
