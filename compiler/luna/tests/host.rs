@@ -17059,10 +17059,42 @@ fn conditional_const_exit_survives_nested_block_delivery() {
 }
 
 #[test]
+fn conditional_const_exit_joins_only_reachable_if_paths() {
+    let source = r#"
+        comptime fn checked(value: bool) -> bool { assumes value; true }
+        fn choose(comptime flag: bool, side: bool) -> bool {
+            if side {
+                const found if found = flag else { return true; };
+            } else {
+                return false;
+            };
+            const answer = checked(flag);
+            answer
+        }
+        fn condition(comptime flag: bool) -> bool {
+            if do {
+                const found if found = flag else { return true; };
+                found
+            } {};
+            const answer = checked(flag);
+            answer
+        }
+        fn run() -> bool {
+            choose(true, true) and not choose(true, false)
+                and choose(false, true) and not choose(false, false)
+                and condition(true) and condition(false)
+        }
+    "#;
+    native(source, "(bool true)\n");
+}
+
+#[test]
 fn conditional_const_exit_keeps_independent_continuations_checked() {
     for statement in [
         "do { return true; const found if found = flag else { return false; }; };",
         "if enabled { const found if found = flag else { return true; }; };",
+        "if false { const found if found = flag else { return true; }; } else { return true; };",
+        "if true { return true; } else { const found if found = flag else { return true; }; };",
     ] {
         let source = format!(
             r#"

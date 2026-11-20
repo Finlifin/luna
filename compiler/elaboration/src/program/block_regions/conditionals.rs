@@ -59,6 +59,7 @@ pub(super) struct Frame<'h> {
     branch: Option<TypeConditionScope>,
     ambient: Option<Ambient>,
     selection: Option<usize>,
+    selected_exit: bool,
     // None means the enclosing expression adapter owns effect delivery.
     preserve_effect: Option<bool>,
     partial_input: bool,
@@ -148,6 +149,7 @@ impl<'h> Frame<'h> {
             own_input_delivery: false,
             probe: None,
             ambient: ordinary.then(|| Ambient::capture(checker)),
+            selected_exit: false,
             selection: ordinary
                 .then(|| {
                     checker
@@ -194,6 +196,7 @@ impl<'h> Frame<'h> {
                 Ok(Step::Child(Request::expression(condition, destination)))
             }
             (State::Condition, Some(value)) => {
+                self.selected_exit = value.selected_exit();
                 let condition = value.ordinary(self.source.span)?;
                 self.leave_branch(checker);
                 if self.partial_input {
@@ -227,6 +230,7 @@ impl<'h> Frame<'h> {
             (State::Then(condition), Some(value)) => {
                 self.leave_branch(checker);
                 let Some(no) = no else {
+                    self.join_selected_exits(&condition, value.selected_exit(), false);
                     let yes = checker
                         .discard_result(value.ordinary(self.source.span)?, self.source.span)?;
                     return self.finish_ordinary(
@@ -252,6 +256,7 @@ impl<'h> Frame<'h> {
             }
             (State::Else(condition, yes, destination), Some(no)) => {
                 self.leave_branch(checker);
+                self.join_selected_exits(&condition, yes.selected_exit(), no.selected_exit());
                 if self.partial_input {
                     self.finish_partial(
                         checker,
@@ -363,6 +368,23 @@ impl<'h> Frame<'h> {
         Ok(())
     }
 
+    // Only a branch that the checked condition can enter can account for an
+    // exit. The final delivered type must also establish noncompletion.
+    fn join_selected_exits(&mut self, condition: &n::Expr, yes: bool, no: bool) {
+        if (yes || no) && !is_never(&condition.ty) {
+            self.selected_exit |= match self.selection {
+                Some(0) => yes,
+                Some(1) => no,
+                Some(_) => false,
+                None => match control::boolean(condition) {
+                    Some(true) => yes,
+                    Some(false) => no,
+                    None => yes || no,
+                },
+            };
+        }
+    }
+
     fn finish_partial(
         &self,
         checker: &mut Checker<'_, '_>,
@@ -401,7 +423,9 @@ impl<'h> Frame<'h> {
         } else {
             value
         };
-        Ok(Step::Completed(CheckedBlock::Ordinary(value)))
+        Ok(Step::Completed(
+            CheckedBlock::Ordinary(value).with_selected_exit(self.selected_exit),
+        ))
     }
 
     fn enter_branch(
@@ -476,7 +500,9 @@ impl<'h> Frame<'h> {
         } else {
             value
         };
-        Ok(Step::Completed(CheckedBlock::Ordinary(value)))
+        Ok(Step::Completed(
+            CheckedBlock::Ordinary(value).with_selected_exit(self.selected_exit),
+        ))
     }
 
     fn leave_branch(&mut self, checker: &mut Checker<'_, '_>) {
@@ -520,8 +546,8 @@ impl std::fmt::Display for Frame<'_> {
         }?;
         write!(
             f,
-            " (partial-input {}) (input-delivery {}) (probe",
-            self.partial_input, self.own_input_delivery
+            " (partial-input {}) (input-delivery {}) (selected-exit {}) (probe",
+            self.partial_input, self.own_input_delivery, self.selected_exit
         )?;
         if let Some(probe) = &self.probe {
             write!(f, " {probe}")?;
@@ -583,6 +609,7 @@ mod tests {
             destination: Destination::Contextual(ContextualTail { depth: 7 }),
             ambient: None,
             selection: None,
+            selected_exit: false,
             preserve_effect: None,
             state: State::Else(
                 condition,
