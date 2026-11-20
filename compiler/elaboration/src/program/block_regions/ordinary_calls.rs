@@ -377,10 +377,10 @@ impl Completion<'_> {
                 parameter_bindings,
             },
         };
-        let environment = checker.prepare_call_environment(&mut call, inputs, offset, expr)?;
+        let environment =
+            checker.prepare_call_environment(&mut call, inputs, offset, &site.routes, expr)?;
         let call = checker.freeze_staged_call_inputs(call, expr)?;
-        let call = checker.stage_collected_call(call, &site.routes, offset, expr)?;
-        Ok(environment.finish(call))
+        environment.finish(checker, call, &site.routes, offset, expr)
     }
 }
 

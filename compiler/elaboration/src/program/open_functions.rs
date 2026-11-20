@@ -7643,9 +7643,8 @@ impl Checker<'_, '_> {
                     .collect(),
             },
         };
-        let environment = self.prepare_call_environment(&mut call, inputs, 0, expr)?;
-        let call = self.stage_collected_call(call, &routes, 0, expr)?;
-        let call = environment.finish(call);
+        let environment = self.prepare_call_environment(&mut call, inputs, 0, &routes, expr)?;
+        let call = environment.finish(self, call, &routes, 0, expr)?;
         if live_bindings.is_empty() {
             return Ok(call);
         }
@@ -8026,6 +8025,7 @@ impl Checker<'_, '_> {
                     this.local_runtime_deliveries.insert(
                         rt_id,
                         LocalRuntimeDelivery {
+                            producer_site: None,
                             projection: None,
                             expr: n::Expr {
                                 source: source(span),

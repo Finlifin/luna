@@ -595,6 +595,55 @@ fn forwarded_and_projected_slots_acquire_one_runtime_producer() {
 }
 
 #[test]
+fn record_acquires_computed_environment_before_fields_and_preserves_it_for_reads() {
+    let case = NativeCase::new(
+        r#"
+        struct Cell { value: i32 }
+        fn choose(calls: *Cell, target: *Cell) -> *Cell {
+            if calls.value.* >= 0 and calls.value.* < 1000 {
+                calls.*.value = calls.value.* + 1;
+            }
+            target
+        }
+        struct View where quote src: lift *Cell, quote .field: lift *i32 = src.value {
+            at_creation: i32,
+        }
+        impl View<src, .field = field> where quote src: lift *Cell, quote field: lift *i32 {
+            fn read(*self) -> i32 { field.* }
+            fn observed(self) -> i32 { self.at_creation }
+        }
+        fn consume(before: i32, view: View<src, .field = field>, after: i32) -> bool
+        where quote src: lift *Cell, quote field: lift *i32
+        {
+            before == 2 and view.at_creation == 3 and after == 3 and field.* == 42
+        }
+        fn run() -> bool {
+            var calls = Cell { value: 0 };
+            var data = Cell { value: 34 };
+            if data.value == 0 {
+                let unused = View<choose(calls.ref, data.ref)> { at_creation: calls.value };
+            }
+            var view = View<choose(calls.ref, data.ref)> { at_creation: calls.value };
+            let a = view.ref.read();
+            data.value = 42;
+            let b = view.ref.read();
+            let after_reads = calls.value;
+            let immediate = View<choose(calls.ref, data.ref)> { at_creation: calls.value }.observed();
+            let ordinary = consume(calls.value, View<choose(calls.ref, data.ref)> {
+                at_creation: calls.value,
+            }, calls.value);
+            view.at_creation == 1 and after_reads == 1 and a == 34 and b == 42
+                and immediate == 2 and ordinary and calls.value == 3
+        }
+    "#,
+    );
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
 fn named_quote_inputs_run_between_the_receiver_and_ordinary_arguments() {
     let case = NativeCase::new(
         r#"
@@ -943,6 +992,11 @@ fn drop_delivers_global_and_local_stateful_allocator_environments() {
             quote a: lift *A,
         {}
 
+        fn select(calls: *i32, allocator: *CountingAlloc) -> *CountingAlloc {
+            if calls.* >= 0 and calls.* < 100 { calls.* = calls.* + 1; }
+            allocator
+        }
+
         fn run() -> bool {
             let default_v = do {
                 let d = make_default_box(99);
@@ -964,12 +1018,19 @@ fn drop_delivers_global_and_local_stateful_allocator_environments() {
 
             consume_box(OwnedBox<i32, .A = CountingAlloc, .allocator = alloc.ref> { value: 25 });
 
+            var selections: i32 = 0;
+            do {
+                let selected = OwnedBox<i32, .A = CountingAlloc,
+                    .allocator = select(selections.ref, alloc.ref)> { value: 5 };
+            };
+
             size_ok
+                and selections == 1
                 and default_v == 99
                 and after_local_drops == 1
                 and after_local_sum == 10
-                and alloc.drops == 2
-                and alloc.sum == 35
+                and alloc.drops == 3
+                and alloc.sum == 40
         }
     "#;
 

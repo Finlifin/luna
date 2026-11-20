@@ -13,6 +13,7 @@ pub(super) struct Projection {
 pub(super) struct LocalOrigins {
     pub(super) ids: BTreeMap<LocalRuntimeOrigin, nir::RuntimeId>,
     pub(super) sources: SourceBindings<Term>,
+    pub(super) constructor_bindings: LocalBindings<()>,
 }
 
 pub(super) enum Place {
@@ -98,6 +99,7 @@ impl Checker<'_, '_> {
     pub(super) fn intern_runtime_operand(
         &mut self,
         expr: n::Expr,
+        supplier: &Expr<'_>,
         span: Span,
     ) -> Result<Term, Error> {
         let origin = match self.runtime_place(&expr, span)? {
@@ -107,7 +109,10 @@ impl Checker<'_, '_> {
                     .map(Term::Runtime);
             }
             Some(Place::Local(origin)) => origin,
-            None => LocalRuntimeOrigin::Ephemeral(self.next_runtime_id),
+            None => LocalRuntimeOrigin::Ephemeral {
+                occurrence: self.next_runtime_id,
+                site: local(supplier.hir_id),
+            },
         };
         self.intern_local_runtime_operand(origin, expr, span)
     }
@@ -130,10 +135,15 @@ impl Checker<'_, '_> {
             LocalRuntimeOrigin::Projection(path) => Some(path.clone()),
             _ => None,
         };
+        let producer_site = match &origin {
+            LocalRuntimeOrigin::Ephemeral { site, .. } => Some(*site),
+            _ => None,
+        };
         self.local_runtime_origins.ids.insert(origin, id);
         self.local_runtime_deliveries.insert(
             id,
             LocalRuntimeDelivery {
+                producer_site,
                 expr,
                 checked_epoch,
                 projection,

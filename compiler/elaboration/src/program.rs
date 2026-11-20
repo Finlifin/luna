@@ -61,6 +61,7 @@ mod local_bindings;
 
 use local_bindings::{DeclarationBindings, LocalBindings, SourceBindings};
 
+mod constructor_environment;
 mod list_operations;
 mod list_patterns;
 mod literal_conversion;
@@ -2292,11 +2293,15 @@ enum LocalRuntimeOrigin {
         fields: Vec<usize>,
     },
     Projection(std::sync::Arc<runtime_origins::Projection>),
-    Ephemeral(u32),
+    Ephemeral {
+        occurrence: u32,
+        site: n::LocalId,
+    },
 }
 
 #[derive(Clone, Debug)]
 struct LocalRuntimeDelivery {
+    producer_site: Option<n::LocalId>,
     projection: Option<std::sync::Arc<runtime_origins::Projection>>,
     expr: n::Expr,
     checked_epoch: Option<(n::LocalId, u64)>,
@@ -3932,7 +3937,13 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
         let ty = self.type_expr(callee)?;
-        self.construct_typed(expr, ty, args, expected)
+        let outer = self.locals.clone();
+        let result = (|| {
+            let acquisition = self.acquire_constructor_inputs(callee, &ty)?;
+            Ok(acquisition.finish(self.construct_typed(expr, ty, args, expected)?))
+        })();
+        self.locals = outer;
+        result
     }
 
     fn construct_typed(
@@ -6465,10 +6476,10 @@ impl Checker<'_, '_> {
                     .collect(),
             },
         };
-        let environment = self.prepare_call_environment(&mut call, inputs, offset, expr)?;
+        let environment =
+            self.prepare_call_environment(&mut call, inputs, offset, &routes, expr)?;
         let call = self.freeze_staged_call_inputs(call, expr)?;
-        let call = self.stage_collected_call(call, &routes, offset, expr)?;
-        Ok(environment.finish(call))
+        environment.finish(self, call, &routes, offset, expr)
     }
 
     fn closure(

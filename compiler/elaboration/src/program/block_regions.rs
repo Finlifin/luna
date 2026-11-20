@@ -3,6 +3,7 @@
 //! neither path executes a producer while preparing this region.
 use super::*;
 use constants::StagedPatternSnapshot;
+pub(super) type StagedStatements<'h> = BTreeMap<usize, (&'h Expr<'h>, StagedPatternSnapshot)>;
 mod aggregates;
 pub(super) mod arithmetic;
 mod comparisons;
@@ -111,7 +112,8 @@ struct Progress<'h, T> {
     block: hir::Block<'h>,
     phase: Phase,
     statements: Vec<n::Expr>,
-    staged_patterns: BTreeMap<usize, StagedPatternSnapshot>,
+    next_statement: usize,
+    staged_patterns: StagedStatements<'h>,
     diverges: bool,
     tail: T,
 }
@@ -122,6 +124,7 @@ impl<'h, T: Tail> Progress<'h, T> {
             block: block.clone(),
             phase: Phase::Statements,
             statements: Vec::new(),
+            next_statement: 0,
             staged_patterns: BTreeMap::new(),
             diverges: false,
             tail,
@@ -135,7 +138,7 @@ impl<'h, T: Tail> Progress<'h, T> {
                 "block child check is already pending or complete",
             ));
         }
-        let next = self.block.stmts.get(self.statements.len());
+        let next = self.block.stmts.get(self.next_statement);
         self.phase = if next.is_some() {
             Phase::Child
         } else {
@@ -144,11 +147,15 @@ impl<'h, T: Tail> Progress<'h, T> {
         Ok(next)
     }
 
-    fn accept(&mut self, checker: &mut Checker<'_, '_>, value: n::Expr) -> Result<(), Error> {
+    fn accept(&mut self, checker: &mut Checker<'_, '_>, mut value: n::Expr) -> Result<(), Error> {
         if !matches!(self.phase, Phase::Child) {
             return Err(error(self.block.span, "block has no pending child result"));
         }
-        let statement = &self.block.stmts[self.statements.len()];
+        let statement = &self.block.stmts[self.next_statement];
+        if let K::Let { value: init, .. } | K::LetPattern { value: init, .. } = &mut value.kind {
+            self.statements
+                .extend(checker.take_constructor_environment(init, statement.span)?);
+        }
         let initialized = if let K::LetPattern {
             pattern,
             value: input,
@@ -170,9 +177,11 @@ impl<'h, T: Tail> Progress<'h, T> {
             }
         }
         if let Some(inputs) = initialized {
-            self.staged_patterns.insert(self.statements.len(), inputs);
+            self.staged_patterns
+                .insert(self.statements.len(), (statement, inputs));
         }
         self.statements.push(value);
+        self.next_statement += 1;
         self.diverges = diverges;
         self.phase = Phase::Statements;
         Ok(())
@@ -228,14 +237,14 @@ impl<T: Tail> std::fmt::Display for Progress<'_, T> {
             f,
             "(block-check (source {}) (phase {phase}) (next {}) (diverges {}) (statements",
             source(self.block.span),
-            self.statements.len(),
+            self.next_statement,
             self.diverges
         )?;
         for statement in &self.statements {
             write!(f, " {statement}")?;
         }
         f.write_str(") (staged-patterns")?;
-        for (index, inputs) in &self.staged_patterns {
+        for (index, (_, inputs)) in &self.staged_patterns {
             write!(f, " (statement {index} {inputs})")?;
         }
         write!(f, ") (tail {}))", self.tail)
@@ -303,7 +312,7 @@ impl Checker<'_, '_> {
     pub(super) fn block_binding_liveness_needed(
         &self,
         statements: &[n::Expr],
-        initialized: &BTreeMap<usize, StagedPatternSnapshot>,
+        initialized: &StagedStatements<'_>,
     ) -> bool {
         !initialized.is_empty()
             || (!self.input_facts.specialized.is_empty()
@@ -330,7 +339,7 @@ impl Checker<'_, '_> {
         statements: &mut Vec<n::Expr>,
         references: &BTreeSet<n::LocalId>,
         block: &hir::Block<'_>,
-        staged_patterns: &BTreeMap<usize, StagedPatternSnapshot>,
+        staged_patterns: &StagedStatements<'_>,
     ) -> Result<(), Error> {
         self.materialize_mixed_staged_patterns(statements, references, block, staged_patterns)?;
         self.erase_consumed_staged_aliases(statements, references, block.span)?;

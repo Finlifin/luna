@@ -1487,7 +1487,7 @@ impl Checker<'_, '_> {
         statements: &mut Vec<n::Expr>,
         tail_references: &BTreeSet<n::LocalId>,
         source: &hir::Block<'_>,
-        initialized: &BTreeMap<usize, StagedPatternSnapshot>,
+        initialized: &block_regions::StagedStatements<'_>,
     ) -> Result<(), Error> {
         if initialized.is_empty() {
             return Ok(());
@@ -1499,7 +1499,7 @@ impl Checker<'_, '_> {
         // remain eligible for the existing pure, unguarded alias erasure.
         let preserved = initialized
             .iter()
-            .filter(|(_, snapshot)| !snapshot.parts.is_empty())
+            .filter(|(_, (_, snapshot))| !snapshot.parts.is_empty())
             .map(|(index, _)| *index)
             .collect();
         let removed =
@@ -1533,7 +1533,7 @@ impl Checker<'_, '_> {
             }
             let mut pending = Vec::new();
             let mut waiters: BTreeMap<n::LocalId, Vec<usize>> = BTreeMap::new();
-            for (index, snapshot) in initialized {
+            for (index, (_, snapshot)) in initialized {
                 if removed.contains(index) || !snapshot.parts.is_empty() {
                     continue;
                 }
@@ -1553,7 +1553,7 @@ impl Checker<'_, '_> {
                 if replaced.contains(&index) {
                     continue;
                 }
-                let snapshot = &initialized[&index];
+                let (_, snapshot) = &initialized[&index];
                 fuel = fuel
                     .checked_sub(snapshot.staged.len())
                     .ok_or("staged pattern liveness budget exhausted")?;
@@ -1616,7 +1616,7 @@ impl Checker<'_, '_> {
         let used = used.map_err(|e| error(source.span, e))?;
         let mut replacements: BTreeMap<_, Vec<n::Expr>> =
             removed.iter().map(|index| (*index, Vec::new())).collect();
-        for (index, snapshot) in initialized {
+        for (index, (statement_source, snapshot)) in initialized {
             if removed.contains(index) {
                 continue;
             }
@@ -1636,7 +1636,7 @@ impl Checker<'_, '_> {
                 replacements.insert(*index, Vec::new());
                 continue;
             }
-            let source = &source.stmts[*index];
+            let source = *statement_source;
             let (input_source, guard, otherwise) = match &statements[*index].kind {
                 K::LetPattern {
                     value,

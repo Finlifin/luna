@@ -151,7 +151,15 @@ impl Checker<'_, '_> {
                     sort: Sort::Runtime,
                 });
             let base = self.deliver_runtime_dependency(&identity, &root.ty, span)?;
-            let stable_place = self.runtime_place(&base, span)?.is_some();
+            // A lexical temporary is a delivery location. Projection identity
+            // still follows the original supplier even after acquisition.
+            let computed_root = match &identity {
+                Term::Runtime(id) => self.local_runtime_deliveries.get(id).is_some_and(|entry| {
+                    entry.producer_site.is_some() || entry.projection.is_some()
+                }),
+                _ => false,
+            };
+            let stable_place = !computed_root && self.runtime_place(&base, span)?.is_some();
             *root = base;
             if !stable_place {
                 let Term::Runtime(id) = identity else {
@@ -184,7 +192,7 @@ impl Checker<'_, '_> {
                     span,
                 );
             }
-            return self.intern_runtime_operand(checked, span);
+            return self.intern_runtime_operand(checked, value, span);
         }
         let id = if let Some(Place::Global(origin)) = self.runtime_place(&checked, span)? {
             self.intern_global_runtime_operand(origin, checked, span)?

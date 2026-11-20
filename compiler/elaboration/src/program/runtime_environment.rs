@@ -1,6 +1,7 @@
 //! Acquire runtime clause inputs in the caller. Hidden argument positions use
 //! the resulting values after acquisition, including forwarded defaults.
 use super::*;
+use arguments::RoutedArgument;
 
 impl Checker<'_, '_> {
     fn owner_environment_inputs(
@@ -141,7 +142,27 @@ impl Checker<'_, '_> {
     }
 }
 
-pub(super) struct Acquisition(Vec<n::Expr>);
+pub(super) struct Acquisition(pub(super) Vec<n::Expr>);
+
+pub(super) struct CallEnvironment {
+    before_arguments: Acquisition,
+    argument_prefixes: BTreeMap<usize, Vec<n::Expr>>,
+}
+
+impl CallEnvironment {
+    pub(super) fn finish(
+        self,
+        checker: &mut Checker<'_, '_>,
+        call: n::Expr,
+        routes: &[RoutedArgument<'_>],
+        offset: usize,
+        site: &Expr<'_>,
+    ) -> Result<n::Expr, Error> {
+        let call =
+            checker.stage_collected_call(call, routes, offset, site, self.argument_prefixes)?;
+        Ok(self.before_arguments.finish(call))
+    }
+}
 
 impl Acquisition {
     pub(super) fn finish(self, call: n::Expr) -> n::Expr {
@@ -168,7 +189,7 @@ struct EnvironmentSlot {
 impl runtime_origins::Projection {
     /// Copy only the checked field path. The producer under it has already
     /// been evaluated in the caller and can be arbitrarily large.
-    fn apply(
+    pub(super) fn apply(
         &self,
         mut template: &n::Expr,
         mut base: n::Expr,
@@ -229,11 +250,29 @@ impl Checker<'_, '_> {
         call: &mut n::Expr,
         inputs: Vec<(Term, Term)>,
         receiver_count: usize,
+        routes: &[RoutedArgument<'_>],
         site: &Expr<'_>,
-    ) -> Result<Acquisition, Error> {
+    ) -> Result<CallEnvironment, Error> {
+        let outer = self.locals.clone();
+        let result = self.acquire_call_inputs(call, inputs, receiver_count, routes, site);
+        self.locals = outer;
+        result
+    }
+
+    fn acquire_call_inputs(
+        &mut self,
+        call: &mut n::Expr,
+        inputs: Vec<(Term, Term)>,
+        receiver_count: usize,
+        routes: &[RoutedArgument<'_>],
+        site: &Expr<'_>,
+    ) -> Result<CallEnvironment, Error> {
         let mut statements = Vec::new();
         if inputs.is_empty() {
-            return Ok(Acquisition(statements));
+            return Ok(CallEnvironment {
+                before_arguments: Acquisition(statements),
+                argument_prefixes: BTreeMap::new(),
+            });
         }
         let K::Call {
             callee,
@@ -244,10 +283,39 @@ impl Checker<'_, '_> {
         else {
             return Err(error(site.span, "runtime environment requires a call"));
         };
+        let mut receiver_prefixes = Vec::with_capacity(receiver_count);
+        for arg in arguments.iter_mut().take(receiver_count) {
+            let value = arguments::reference_base(&mut arg.value);
+            receiver_prefixes.push(self.take_constructor_environment(value, site.span)?);
+        }
+        let mut argument_prefixes = BTreeMap::new();
+        let mut argument_bindings = BTreeSet::new();
+        if !self.local_runtime_origins.constructor_bindings.is_empty() {
+            self.visit_routed_arguments(
+                arguments,
+                routes,
+                receiver_count,
+                site.span,
+                false,
+                |checker, value, position, _| {
+                    let prefix = checker.take_constructor_environment(value, site.span)?;
+                    if !prefix.is_empty() {
+                        argument_bindings.extend(prefix.iter().filter_map(
+                            |stmt| match stmt.kind {
+                                K::Let { binding, .. } => Some(binding),
+                                _ => None,
+                            },
+                        ));
+                        argument_prefixes.insert(position, prefix);
+                    }
+                    Ok(())
+                },
+            )?;
+        }
         let mut identities = std::collections::HashMap::<Term, usize>::new();
         let mut slots = Vec::new();
         let mut operands: Vec<n::Expr> = Vec::new();
-        let mut bind = false;
+        let mut bind = receiver_prefixes.iter().any(|prefix| !prefix.is_empty());
         for (mut identity, mut domain) in inputs {
             let mut projection = None;
             if let Term::Runtime(id) = &identity
@@ -299,7 +367,8 @@ impl Checker<'_, '_> {
             if let Some(selected) = self.prepare_call_callee(callee, site.span)? {
                 statements.push(selected);
             }
-            for arg in arguments.iter_mut().take(receiver_count) {
+            for (arg, prefix) in arguments.iter_mut().zip(receiver_prefixes) {
+                statements.extend(prefix);
                 let value = if arg.passing == n::ArgumentPassing::Value {
                     &mut arg.value
                 } else {
@@ -334,6 +403,12 @@ impl Checker<'_, '_> {
             }
             order.extend((0..operands.len()).filter(|&slot| !acquired[slot]));
             for slot in order {
+                // The enclosing source argument establishes this binding at
+                // its own position, after explicit quote suppliers have run.
+                if matches!(&operands[slot].kind, K::Local(binding) if argument_bindings.contains(binding))
+                {
+                    continue;
+                }
                 statements.push(self.prepare_call_operand(&mut operands[slot], site.span)?);
             }
         }
@@ -351,6 +426,9 @@ impl Checker<'_, '_> {
             }
             env_arguments.push(value);
         }
-        Ok(Acquisition(statements))
+        Ok(CallEnvironment {
+            before_arguments: Acquisition(statements),
+            argument_prefixes,
+        })
     }
 }

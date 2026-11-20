@@ -591,19 +591,61 @@ impl Checker<'_, '_> {
         })
     }
 
+    pub(super) fn visit_routed_arguments(
+        &mut self,
+        arguments: &mut [n::CallArgument],
+        routes: &[RoutedArgument<'_>],
+        offset: usize,
+        span: Span,
+        anchor_collections: bool,
+        mut visit: impl FnMut(&mut Self, &mut n::Expr, usize, n::ArgumentPassing) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        let mut slots = vec![0; arguments.len()];
+        for (slot, argument) in arguments.iter().enumerate() {
+            slots[argument.parameter] = slot;
+        }
+        for route in routes {
+            let argument = &mut arguments[slots[offset + route.parameter]];
+            if route.is_collected() {
+                if anchor_collections {
+                    argument.value.source = preparation_anchor(span);
+                }
+                let K::Tuple(items) = &mut argument.value.kind else {
+                    return Err(error(span, "variadic collection requires a tuple value"));
+                };
+                debug_assert_eq!(items.len(), route.positions.len());
+                for (item, position) in items.iter_mut().zip(&route.positions) {
+                    visit(self, item, offset + position, n::ArgumentPassing::Value)?;
+                }
+            } else {
+                visit(
+                    self,
+                    &mut argument.value,
+                    offset + route.positions[0],
+                    argument.passing,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn stage_collected_call(
         &mut self,
         mut call: n::Expr,
         routes: &[RoutedArgument<'_>],
         offset: usize,
         expr: &Expr<'_>,
+        mut prefixes: BTreeMap<usize, Vec<n::Expr>>,
     ) -> Result<n::Expr, Error> {
         let span = expr.span;
         let completed_defaults = matches!(&call.kind, K::Call { arguments, .. }
             if arguments.iter().any(|argument| argument.parameter >= offset
                 && !argument.is_default
                 && !routes.iter().any(|route| offset + route.parameter == argument.parameter)));
-        if !routes.iter().any(|route| route.is_collected()) && !completed_defaults {
+        if prefixes.is_empty()
+            && !routes.iter().any(|route| route.is_collected())
+            && !completed_defaults
+        {
             return Ok(call);
         }
         let K::Call {
@@ -612,19 +654,15 @@ impl Checker<'_, '_> {
         else {
             unreachable!()
         };
-        let anchor = preparation_anchor(span);
         let selected = self.prepare_call_callee(callee, span)?;
-        let mut argument_slots = vec![0; arguments.len()];
-        for (slot, argument) in arguments.iter().enumerate() {
-            argument_slots[argument.parameter] = slot;
-        }
         let input_count = offset
             + routes
                 .iter()
                 .map(|route| route.positions.len())
                 .sum::<usize>();
         let mut statements = vec![None; input_count];
-        let mut stage = |value: &mut n::Expr,
+        let mut stage = |checker: &mut Self,
+                         value: &mut n::Expr,
                          position: usize,
                          passing: n::ArgumentPassing|
          -> Result<(), Error> {
@@ -636,42 +674,30 @@ impl Checker<'_, '_> {
             if passing != n::ArgumentPassing::Value && matches!(value.kind, K::Local(_)) {
                 return Ok(());
             }
-            statements[position] = Some(self.prepare_call_operand(value, span)?);
+            statements[position] = Some(checker.prepare_call_operand(value, span)?);
             Ok(())
         };
         for argument in arguments.iter_mut().take(offset) {
-            stage(&mut argument.value, argument.parameter, argument.passing)?;
+            stage(
+                self,
+                &mut argument.value,
+                argument.parameter,
+                argument.passing,
+            )?;
         }
-        for route in routes {
-            let argument = &mut arguments[argument_slots[offset + route.parameter]];
-            if route.is_collected() {
-                argument.value.source = anchor;
-                let K::Tuple(items) = &mut argument.value.kind else {
-                    return Err(error(
-                        span,
-                        "default variadic collection requires a tuple value",
-                    ));
-                };
-                debug_assert_eq!(items.len(), route.positions.len());
-                for (item, position) in items.iter_mut().zip(&route.positions) {
-                    stage(item, offset + position, n::ArgumentPassing::Value)?;
-                }
-            } else {
-                stage(
-                    &mut argument.value,
-                    offset + route.positions[0],
-                    argument.passing,
-                )?;
+        self.visit_routed_arguments(arguments, routes, offset, span, true, stage)?;
+        let mut ordered: Vec<_> = selected.into_iter().collect();
+        for (position, statement) in statements.into_iter().enumerate() {
+            if let Some(prefix) = prefixes.remove(&position) {
+                ordered.extend(prefix);
             }
+            ordered.extend(statement);
         }
         let call = n::Expr {
             ty: call.ty.clone(),
             source: call.source,
             kind: K::CallPreparation {
-                statements: selected
-                    .into_iter()
-                    .chain(statements.into_iter().flatten())
-                    .collect(),
+                statements: ordered,
                 result: Some(Box::new(call)),
             },
         };

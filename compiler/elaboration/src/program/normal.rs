@@ -500,7 +500,7 @@ impl Checker<'_, '_> {
                 "diverging expression cannot satisfy a runtime quote dependency",
             ));
         }
-        let identity = self.intern_runtime_operand(checked, value.span)?;
+        let identity = self.intern_runtime_operand(checked, value, value.span)?;
         self.local_runtime_origins
             .sources
             .insert(value.hir_id, identity.clone());
