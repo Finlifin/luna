@@ -222,3 +222,64 @@ fn computed_clause_operands_keep_their_value_until_delivery() {
         "{error}"
     );
 }
+
+#[test]
+fn contextual_clause_control_runs_in_order_before_ordinary_type_inference() {
+    let source = r#"
+        comptime fn choose(name: Symbol, result: bool) -> bool {
+            let generated = meta.StructBuilder.new(.name = name).Build();
+            result
+        }
+
+        fn present(value: T) -> bool
+        where T, .tag: ?T = null, .stamp: bool = false
+        {
+            stamp and (tag matches _?)
+        }
+
+        fn run() -> bool {
+            let byte: u8 = 0;
+            present<.tag = do {
+                let flag = choose(.FirstSelector, false);
+                flag match {
+                    true => null,
+                    false => when {
+                        choose(.SecondSelector, true) => 255,
+                        choose(.SkippedSelector, false) => 1,
+                        else => null,
+                    },
+                }
+            }, .stamp = choose(.FollowingInput, true)>(byte)
+        }
+    "#;
+    let package = sysroot::compile(source).unwrap();
+    let mut events: Vec<_> = package
+        .structs
+        .iter()
+        .filter_map(|definition| {
+            let name = definition.name.as_str();
+            matches!(
+                name,
+                "FirstSelector" | "SecondSelector" | "SkippedSelector" | "FollowingInput"
+            )
+            .then_some((definition.declaration, name))
+        })
+        .collect();
+    events.sort_by_key(|(id, _)| *id);
+    assert_eq!(
+        events.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+        ["FirstSelector", "SecondSelector", "FollowingInput"]
+    );
+    let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let wrong = source.replace("true => null", "true => 256");
+    assert!(
+        sysroot::compile(&wrong)
+            .unwrap_err()
+            .contains("does not fit")
+    );
+}

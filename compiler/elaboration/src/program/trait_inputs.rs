@@ -1,9 +1,12 @@
 //! Source trait input domains and declaration-ordered supplied/default indices.
 use super::*;
 
+mod selection;
+
 #[derive(Clone)]
 pub(super) enum ExplicitClause<'hir> {
-    Literal(&'hir Expr<'hir>),
+    Contextual(&'hir Expr<'hir>),
+    Selection(selection::Selection<'hir>),
     Computed { value: Box<n::Expr>, span: Span },
 }
 
@@ -26,7 +29,8 @@ impl ExplicitClause<'_> {
 
     pub(super) fn span(&self) -> Span {
         match self {
-            Self::Literal(source) => source.span,
+            Self::Contextual(source) => source.span,
+            Self::Selection(selection) => selection.span(),
             Self::Computed { span, .. } => *span,
         }
     }
@@ -37,7 +41,8 @@ impl ExplicitClause<'_> {
         domain: &Term,
     ) -> Result<Term, Error> {
         match self {
-            Self::Literal(source) => checker.normal_value_argument(source, domain),
+            Self::Contextual(source) => checker.normal_value_argument(source, domain),
+            Self::Selection(selection) => selection.admit(checker, domain),
             Self::Computed { value, span } => {
                 let value = checker.deliver_computed_value(value, domain, *span)?;
                 checker
@@ -852,7 +857,13 @@ impl Checker<'_, '_> {
             // A closed literal expression can receive its context after earlier
             // slots settle. Producers with observable evaluation stay in source order.
             if unresolved_domain && self.is_closed_clause_literal(value)? {
-                pending_explicit[slot] = Some(ExplicitClause::Literal(value));
+                pending_explicit[slot] = Some(ExplicitClause::Contextual(value));
+                continue;
+            }
+            if unresolved_domain
+                && let Some(selection) = selection::Selection::prepare(self, value)?
+            {
+                pending_explicit[slot] = Some(selection);
                 continue;
             }
             if unresolved_domain {
