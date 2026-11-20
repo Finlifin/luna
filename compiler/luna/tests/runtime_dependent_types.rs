@@ -487,6 +487,79 @@ fn negative_rejections_enforce_runtime_dependent_safety_and_identity() {
 }
 
 #[test]
+fn forwarded_quote_defaults_preserve_identity_across_generic_calls() {
+    let source = r#"
+        struct Cell { v: i32 }
+
+        struct View
+        where
+            quote src: lift *Cell,
+            quote .via: lift *Cell = src,
+            quote .end: lift *Cell = via,
+        {}
+
+        fn read(v: View<src, .via = src, .end = src>) -> i32
+        where quote src: lift *Cell
+        {
+            src.v.*
+        }
+
+        fn forward(v: View<src>) -> i32
+        where quote src: lift *Cell
+        {
+            read<src>(v)
+        }
+
+        fn inferred(v: View<src>) -> i32
+        where quote src: lift *Cell, quote .end: lift *Cell = src
+        {
+            end.v.*
+        }
+
+        fn read_default() -> i32
+        where quote src: lift *Cell, quote .end: lift *Cell = src
+        {
+            end.v.*
+        }
+
+        fn run() -> bool {
+            var a = Cell { v: 7 };
+            var b = Cell { v: 42 };
+            let left = View<a.ref> {};
+            let right = View<b.ref> {};
+            forward<a.ref>(left) == 7 and forward<b.ref>(right) == 42
+                and read_default<a.ref>() == 7 and read_default<b.ref>() == 42
+                and inferred(View<b.ref> {}) == 42
+        }
+    "#;
+    let case = NativeCase::new(source);
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+
+    let mismatch = source.replace("forward<a.ref>(left)", "forward<b.ref>(left)");
+    let error = support::compile(&mismatch).unwrap_err();
+    assert!(error.contains("type mismatch"), "{error}");
+}
+
+#[test]
+fn forwarded_quote_defaults_check_the_instantiated_payload_domain() {
+    let source = r#"
+        struct View
+        where A, B, quote src: lift *A, quote .via: lift *B = src
+        {}
+        fn run() {
+            var a: u8 = 7;
+            let same = View<u8, u8, a.ref> {};
+        }
+    "#;
+    support::compile(source).unwrap();
+    let error = support::compile(&source.replace("View<u8, u8,", "View<u8, bool,")).unwrap_err();
+    assert!(error.contains("type mismatch"), "{error}");
+}
+
+#[test]
 fn global_const_address_identity_and_dependent_quote_defaults() {
     let source = r#"
         trait MiniAlloc {

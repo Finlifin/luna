@@ -385,82 +385,83 @@ impl Checker<'_, '_> {
         self.required_normal_term(result, value.span)
     }
 
+    /// Forward the identity in a quote binder without reading its runtime payload.
+    /// Both written arguments and omitted defaults use the current telescope.
+    pub(super) fn forward_runtime_dependency(
+        &mut self,
+        value: &Expr<'_>,
+        expected: Option<&Term>,
+    ) -> Result<Option<Term>, Error> {
+        let H::ResolvedClauseParam(_, id) = value.kind else {
+            return Ok(None);
+        };
+        let declaration = self.visible_clause_input(id, value.span)?;
+        let substitution = self.alias_substitution.get(&declaration);
+        let binder = match substitution {
+            Some(Term::Runtime(id)) => {
+                let Some(Term::Lift(inner)) = self.runtime_domains.get(id) else {
+                    return Err(error(
+                        value.span,
+                        "substituted runtime dependency domain is missing",
+                    ));
+                };
+                if let Some(expected) = expected {
+                    self.require(inner, expected, value.span)?;
+                }
+                return Ok(Some(Term::Runtime(*id)));
+            }
+            Some(Term::Rigid {
+                declaration,
+                sort: Sort::Runtime,
+            }) => *declaration,
+            Some(_) => return Ok(None),
+            None => declaration,
+        };
+        let domain = self
+            .active_env_parameters
+            .get(&binder)
+            .map(|(_, ty)| Term::Lift(Box::new(ty.clone())))
+            .or_else(|| self.trait_input_domain(binder))
+            .or_else(|| self.nominal_input_prefixes.get(&binder).cloned())
+            .or_else(|| {
+                self.normal_input_prefixes
+                    .values()
+                    .flatten()
+                    .find(|(id, _, _)| *id == binder)
+                    .map(|(_, _, domain)| domain.clone())
+            });
+        let Some(Term::Lift(inner)) = domain else {
+            if substitution.is_some() {
+                return Err(error(
+                    value.span,
+                    "forwarded runtime dependency domain is missing",
+                ));
+            }
+            return Ok(None);
+        };
+        if let Some(expected) = expected {
+            let actual = self.substituted_trait_domain(&inner, value.span)?;
+            self.require(&actual, expected, value.span)?;
+        }
+        Ok(Some(Term::Rigid {
+            declaration: binder,
+            sort: Sort::Runtime,
+        }))
+    }
+
     pub(super) fn runtime_lift_argument(
         &mut self,
         value: &Expr<'_>,
         expected_inner: &Term,
     ) -> Result<Term, Error> {
-        if let H::ResolvedClauseParam(_, id) = value.kind {
-            let declaration = self.visible_clause_input(id, value.span)?;
-            if let Some(substituted) = self.alias_substitution.shared(&declaration).cloned() {
-                let substituted = self.copy_alias_type(&substituted, value.span)?;
-                match &substituted {
-                    Term::Runtime(runtime_id) => {
-                        let Some(Term::Lift(actual_inner)) =
-                            self.runtime_domains.get(runtime_id).cloned()
-                        else {
-                            return Err(error(
-                                value.span,
-                                "substituted runtime dependency domain is missing",
-                            ));
-                        };
-                        self.require(&actual_inner, expected_inner, value.span)?;
-                        return Ok(substituted);
-                    }
-                    Term::Rigid {
-                        declaration: forwarded_decl,
-                        sort: Sort::Runtime,
-                    } => {
-                        let Some(Term::Lift(actual_inner)) =
-                            self.trait_input_domain(*forwarded_decl).or_else(|| {
-                                self.active_env_parameters
-                                    .get(forwarded_decl)
-                                    .map(|(_, ty)| Term::Lift(Box::new(ty.clone())))
-                            })
-                        else {
-                            return Err(error(
-                                value.span,
-                                "forwarded runtime dependency domain is missing",
-                            ));
-                        };
-                        let actual_inner =
-                            self.substituted_trait_domain(&actual_inner, value.span)?;
-                        self.require(&actual_inner, expected_inner, value.span)?;
-                        return Ok(substituted);
-                    }
-                    _ => {
-                        return Err(error(
-                            value.span,
-                            "expected runtime quote dependency substitution",
-                        ));
-                    }
-                }
-            }
-            let declared_domain = self
-                .active_env_parameters
-                .get(&declaration)
-                .map(|(_, ty)| Term::Lift(Box::new(ty.clone())))
-                .or_else(|| self.trait_input_domain(declaration))
-                .or_else(|| self.nominal_input_prefixes.get(&declaration).cloned())
-                .or_else(|| {
-                    self.normal_input_prefixes
-                        .values()
-                        .flatten()
-                        .find(|(id, _, _)| *id == declaration)
-                        .map(|(_, _, domain)| domain.clone())
-                });
-            let Some(Term::Lift(actual_inner)) = declared_domain else {
-                return Err(error(
-                    value.span,
-                    "quote runtime parameter expected a lift dependency, not a comptime input",
-                ));
-            };
-            let actual_inner = self.substituted_trait_domain(&actual_inner, value.span)?;
-            self.require(&actual_inner, expected_inner, value.span)?;
-            return Ok(Term::Rigid {
-                declaration,
-                sort: Sort::Runtime,
-            });
+        if let Some(identity) = self.forward_runtime_dependency(value, Some(expected_inner))? {
+            return Ok(identity);
+        }
+        if matches!(value.kind, H::ResolvedClauseParam(..)) {
+            return Err(error(
+                value.span,
+                "quote runtime parameter expected a lift dependency, not a comptime input",
+            ));
         }
         let in_runtime_body = !self.observing_type
             && !self.checking_contract

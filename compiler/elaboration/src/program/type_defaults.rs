@@ -504,6 +504,60 @@ impl<'h> Checker<'_, 'h> {
         Ok((inferred, inputs, pending))
     }
 
+    pub(super) fn default_domain_has_rigid(
+        &mut self,
+        domain: &Term,
+        span: Span,
+    ) -> Result<bool, Error> {
+        nominal_fields::metered(&mut self.required_steps, |fuel| {
+            nir::type_computations::has_rigid_parameters_bounded(domain, fuel)
+        })
+        .map_err(|failure| {
+            error(
+                span,
+                format!("default input domain inspection failed: {failure}"),
+            )
+        })
+    }
+
+    /// Validate the provider in its declaration telescope. Only a use of the
+    /// default needs to allocate an identity for a newly produced operand.
+    pub(super) fn check_runtime_default(
+        &mut self,
+        value: &Expr<'_>,
+        inner: &Term,
+    ) -> Result<(), Error> {
+        let expected = (!self.default_domain_has_rigid(inner, value.span)?).then_some(inner);
+        if self.forward_runtime_dependency(value, expected)?.is_some() {
+            return Ok(());
+        }
+        self.runtime_default_operand(value, expected).map(|_| ())
+    }
+
+    pub(super) fn runtime_default_operand(
+        &mut self,
+        value: &Expr<'_>,
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
+        let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
+        let saved_locals = std::mem::take(&mut self.locals);
+        let saved_active_env = std::mem::take(&mut self.active_env_parameters);
+        let checked = self.expr(value, expected);
+        self.active_env_parameters = saved_active_env;
+        self.locals = saved_locals;
+        self.in_staged_input = saved_staged;
+        self.in_required_comptime = saved_required;
+        let checked = checked?;
+        if is_never(&checked.ty) {
+            return Err(error(
+                value.span,
+                "diverging default cannot satisfy a runtime quote dependency",
+            ));
+        }
+        Ok(checked)
+    }
+
     fn function_default_dependencies(
         &mut self,
         owner: OwnerId,
@@ -559,32 +613,7 @@ impl<'h> Checker<'_, 'h> {
                 }
             }
             if let Term::Lift(inner) = &domain {
-                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let before = fuel;
-                let has_rigid =
-                    nir::type_computations::has_rigid_parameters_bounded(&domain, &mut fuel);
-                self.required_steps -= (before - fuel) as u64;
-                let has_rigid = has_rigid.map_err(|failure| {
-                    error(
-                        value.span,
-                        format!("default input domain inspection failed: {failure}"),
-                    )
-                })?;
-                let expected_lift = (!has_rigid).then_some(inner.as_ref());
-                let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
-                let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
-                let saved_locals = std::mem::take(&mut self.locals);
-                let checked = self.expr(value, expected_lift);
-                self.locals = saved_locals;
-                self.in_staged_input = saved_staged;
-                self.in_required_comptime = saved_required;
-                let checked = checked?;
-                if is_never(&checked.ty) {
-                    return Err(error(
-                        value.span,
-                        "diverging default cannot satisfy a runtime quote dependency",
-                    ));
-                }
+                self.check_runtime_default(value, inner)?;
                 return Ok(Vec::new());
             }
             let checked = self.expr(value, Some(&domain))?;

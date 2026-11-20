@@ -2533,6 +2533,9 @@ impl Checker<'_, '_> {
                 "runtime default requires a lift dependency domain",
             ));
         };
+        if let Some(identity) = self.forward_runtime_dependency(value, Some(expected_inner))? {
+            return Ok(identity);
+        }
         let key = GlobalRuntimeOrigin::DefaultParam {
             owner,
             param,
@@ -2542,22 +2545,7 @@ impl Checker<'_, '_> {
             return Ok(Term::Runtime(existing));
         }
         let expected_inner = self.callable_input_view(expected_inner, value.span)?;
-        let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
-        let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
-        let saved_locals = std::mem::take(&mut self.locals);
-        let saved_active_env = std::mem::take(&mut self.active_env_parameters);
-        let checked = self.expr(value, Some(&expected_inner));
-        self.active_env_parameters = saved_active_env;
-        self.locals = saved_locals;
-        self.in_staged_input = saved_staged;
-        self.in_required_comptime = saved_required;
-        let checked = checked?;
-        if is_never(&checked.ty) {
-            return Err(error(
-                value.span,
-                "diverging default cannot satisfy a runtime quote dependency",
-            ));
-        }
+        let checked = self.runtime_default_operand(value, Some(&expected_inner))?;
         let id = if let K::ConstAddress { declaration, .. } = &checked.kind {
             self.intern_const_address_runtime_id(*declaration, checked, span)?
         } else {
