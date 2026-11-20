@@ -4,7 +4,7 @@ use collections_impl.{hash_map, hash_set, vec, vec_deque}
 use fmt_impl.arguments;
 use fmt_impl.parse;
 use fs_impl.file;
-use io_impl.{errors, writer}
+use io_impl.{buffered, errors, reader, writer}
 use mem_impl.{allocator, arena, boxed, layout}
 use platform.{linux as linux_impl, unix as unix_impl}
 use string_impl.string as string_mod;
@@ -20,10 +20,12 @@ pub mod os {
 }
 
 pub mod io {
+    pub use buffered.{BufReader, BufWriter}
     pub use builtin.fmt.ByteWriter;
     pub use errors.IoErr;
+    pub use reader.{Cursor, Reader, Stdin, stdin}
     pub use unix_impl.read_byte;
-    pub use writer.{Writer, stderr, stdout, write_all, write_all_raw, write_all_str}
+    pub use writer.{Write, Writer, stderr, stdout, write_all, write_all_raw, write_all_str}
 }
 
 pub mod fs {

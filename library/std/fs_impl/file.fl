@@ -1,7 +1,8 @@
 use builtin.fmt.ByteWriter;
 use collections_impl.vec.Vec;
 use io_impl.errors.{IoErr, check}
-use io_impl.writer.write_all_raw;
+use io_impl.reader.Reader;
+use io_impl.writer.Write;
 use mem_impl.allocator.Allocator;
 use std.os.{linux, unix}
 use string_impl.string.String;
@@ -56,7 +57,7 @@ impl File {
         if len == 0 {
             return;
         }
-        unsafe { write_all_raw(self.descriptor.*, bytes.as_addr(), len) }
+        unsafe { io_impl.writer.write_all_raw(self.descriptor.*, bytes.as_addr(), len) }
     }
 
     pub fn write_string(
@@ -73,7 +74,7 @@ impl File {
             return;
         }
         unsafe {
-            write_all_raw(self.descriptor.*, text.as_bytes_addr(), len)
+            io_impl.writer.write_all_raw(self.descriptor.*, text.as_bytes_addr(), len)
         }
     }
 
@@ -101,5 +102,59 @@ impl ByteWriter for File {
 
     fn write_str(*self, text: str) -> !IoErr void {
         io_impl.writer.write_all_str(self.descriptor.*, text)
+    }
+}
+
+impl Reader for File {
+    assoc Err: Type = IoErr;
+
+    unsafe fn read_raw(*self, dst: usize, len: usize) -> !IoErr usize {
+        if len == 0 {
+            return 0;
+        }
+        let len_u64 = builtin.compiler.try_usize_to_u64(len) match {
+            v? => v,
+            null => return error IoErr.Os(22),
+        }
+        let n = unix.read_raw(self.descriptor.*, dst, len_u64)!;
+        let n_usize = builtin.compiler.try_u64_to_usize(n) match {
+            v? => v,
+            null => return error IoErr.Os(5),
+        }
+        if n_usize > len {
+            return error IoErr.Os(5);
+        }
+        n_usize
+    }
+
+    fn read_byte(*self) -> !IoErr ?u8 {
+        unix.read_byte(self.descriptor.*)
+    }
+}
+
+impl Write for File {
+    assoc Err: Type = IoErr;
+
+    unsafe fn write_raw(*self, src: usize, len: usize) -> !IoErr usize {
+        if len == 0 {
+            return 0;
+        }
+        let len_u64 = builtin.compiler.try_usize_to_u64(len) match {
+            v? => v,
+            null => return error IoErr.Os(22),
+        }
+        let n = unix.write_raw(self.descriptor.*, src, len_u64)!;
+        let n_usize = builtin.compiler.try_u64_to_usize(n) match {
+            v? => v,
+            null => return error IoErr.Os(5),
+        }
+        if n_usize > len {
+            return error IoErr.Os(5);
+        }
+        n_usize
+    }
+
+    unsafe fn write_all_raw(*self, src: usize, len: usize) -> !IoErr void {
+        io_impl.writer.write_all_raw(self.descriptor.*, src, len)
     }
 }

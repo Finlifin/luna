@@ -1,0 +1,254 @@
+use collections_impl.vec.Vec;
+use io_impl.errors.IoErr;
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
+use std.os.unix;
+use string_impl.string.{String, Utf8Err}
+
+{-
+    Synchronous byte source Reader protocol, non-owning Stdin descriptor
+    handle, and in-memory Cursor reader over Vec<u8, .A, .allocator>.
+-}
+pub trait Reader {
+    assoc Err: Type;
+
+    unsafe fn read_raw(*self, dst: usize, len: usize) -> !Err usize;
+
+    fn read_byte(*self) -> !Err ?u8;
+
+    fn read_into(
+        *self,
+        target: *Vec<u8, .A = A, .allocator = a>,
+        max_bytes: usize,
+    ) -> ![Err, AllocErr] usize
+    where
+        A: Type,
+        requires A :- Allocator,
+        quote a: lift *A,
+    {
+        if max_bytes == 0 {
+            return 0;
+        }
+        target.reserve(max_bytes)!;
+        let old_len = target.len();
+        let dst = builtin.mem.checked_add_usize(target.as_addr(), old_len) match {
+            addr? => addr,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let n = unsafe { self.read_raw(dst, max_bytes) }!;
+        if n > max_bytes {
+            return error AllocErr.InvalidLayout;
+        }
+        let new_len = builtin.mem.checked_add_usize(old_len, n) match {
+            len? => len,
+            null => return error AllocErr.InvalidLayout,
+        }
+        if n > 0 {
+            unsafe {
+                target.set_len(new_len);
+            }
+        }
+        n
+    }
+
+    fn read_exact(
+        *self,
+        target: *Vec<u8, .A = A, .allocator = a>,
+        count: usize,
+    ) -> ![Err, IoErr, AllocErr] void
+    where
+        A: Type,
+        requires A :- Allocator,
+        quote a: lift *A,
+    {
+        if count == 0 {
+            return;
+        }
+        target.reserve(count)!;
+        var remaining: usize = count;
+        while remaining > 0 {
+            let n = self.read_into(target, remaining)!;
+            if n == 0 {
+                return error IoErr.UnexpectedEof;
+            }
+            if n > remaining {
+                return error IoErr.Os(5);
+            }
+            remaining = remaining - n;
+        }
+    }
+
+    fn read_to_end(
+        *self,
+        target: *Vec<u8, .A = A, .allocator = a>,
+    ) -> ![Err, AllocErr] usize
+    where
+        A: Type,
+        requires A :- Allocator,
+        quote a: lift *A,
+    {
+        var total: usize = 0;
+        let chunk: usize = 4096;
+        while true {
+            let n = self.read_into(target, chunk)!;
+            if n == 0 {
+                break;
+            }
+            total = builtin.mem.checked_add_usize(total, n) match {
+                next? => next,
+                null => return error AllocErr.InvalidLayout,
+            }
+        }
+        total
+    }
+
+    fn read_to_string(
+        *self,
+        target: *String<.A = A, .allocator = a>,
+    ) -> ![Err, AllocErr, Utf8Err] usize
+    where
+        A: Type,
+        requires A :- Allocator,
+        quote a: lift *A,
+    {
+        var tmp = Vec<u8, .A = A, .allocator = a>.new();
+        let total = self.read_to_end(tmp.ref)!;
+        let decoded = String<.A = A, .allocator = a>.from_utf8(tmp)!;
+        target.push_string(decoded.ref)!;
+        total
+    }
+}
+
+pub struct Stdin {
+    descriptor: i32,
+}
+
+impl Clone for Stdin {
+    fn clone(*self) -> Self {
+        Stdin { descriptor: self.descriptor.* }
+    }
+}
+
+impl Copy for Stdin {}
+
+pub fn stdin() -> Stdin {
+    Stdin { descriptor: unix.stdin }
+}
+
+impl Reader for Stdin {
+    assoc Err: Type = IoErr;
+
+    unsafe fn read_raw(*self, dst: usize, len: usize) -> !IoErr usize {
+        if len == 0 {
+            return 0;
+        }
+        let len_u64 = builtin.compiler.try_usize_to_u64(len) match {
+            v? => v,
+            null => return error IoErr.Os(22),
+        }
+        let n = unix.read_raw(self.descriptor.*, dst, len_u64)!;
+        let n_usize = builtin.compiler.try_u64_to_usize(n) match {
+            v? => v,
+            null => return error IoErr.Os(5),
+        }
+        if n_usize > len {
+            return error IoErr.Os(5);
+        }
+        n_usize
+    }
+
+    fn read_byte(*self) -> !IoErr ?u8 {
+        unix.read_byte(self.descriptor.*)
+    }
+}
+
+pub struct Cursor
+where
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    data: Vec<u8, .A = A, .allocator = allocator>,
+    pos: usize,
+}
+
+impl Cursor<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn new(data: Vec<u8, .A = A, .allocator = alloc>) -> Self {
+        Cursor<.A = A, .allocator = alloc> { data: data, pos: 0 }
+    }
+
+    pub fn position(*self) -> usize {
+        self.pos.*
+    }
+
+    pub fn set_position(*self, pos: usize) {
+        self.pos.* = pos;
+    }
+
+    pub fn len(*self) -> usize {
+        self.data.len()
+    }
+
+    pub fn remaining(*self) -> usize {
+        let len = self.data.len();
+        let pos = self.pos.*;
+        if pos >= len {
+            0
+        } else {
+            len - pos
+        }
+    }
+
+    pub fn is_empty(*self) -> bool {
+        self.remaining() == 0
+    }
+
+    pub fn into_inner(self) -> Vec<u8, .A = A, .allocator = alloc> {
+        self.data
+    }
+}
+
+impl Reader for Cursor<.A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Err: Type = IoErr;
+
+    unsafe fn read_raw(*self, dst: usize, len: usize) -> !IoErr usize {
+        let data_len = self.data.len();
+        let pos = self.pos.*;
+        if pos >= data_len or len == 0 {
+            return 0;
+        }
+        let avail = data_len - pos;
+        let to_copy = if avail < len { avail } else { len }
+        let src = builtin.mem.checked_add_usize(self.data.as_addr(), pos) match {
+            addr? => addr,
+            null => return error IoErr.Os(22),
+        }
+        builtin.mem.copy_bytes_nonoverlapping(dst, src, to_copy);
+        self.pos.* = pos + to_copy;
+        to_copy
+    }
+
+    fn read_byte(*self) -> !IoErr ?u8 {
+        let pos = self.pos.*;
+        let data_len = self.data.len();
+        if pos >= data_len {
+            return null;
+        }
+        self.data.get(pos) match {
+            byte? => {
+                self.pos.* = pos + 1;
+                byte
+            },
+            null => null,
+        }
+    }
+}

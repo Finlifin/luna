@@ -1,5 +1,6 @@
 //! End-to-end native execution tests for custom runtime-dependent allocators
-//! (`FixedBufferAllocator`, `ArenaAllocator`) and `std.collections` containers
+//! (`FixedBufferAllocator`, `ArenaAllocator`), `std.collections` containers, and
+//! `std.io` (`Reader`, `Write`, `Cursor`, `Stdin`, `BufReader`, `BufWriter`)
 //! backed through real sysroot compilation.
 use std::fs;
 use std::path::PathBuf;
@@ -576,6 +577,309 @@ fn hash_set_operations_cross_allocator_subset_disjoint_and_iteration() {
             };
             var fba = FixedBufferAllocator.from_raw_block(backing);
             let ok = exercise_sets(fba.ref) match {
+                passed! => passed,
+                error _ => false,
+            };
+            let clean = fba.ref.live_allocations() == 0;
+            unsafe {
+                SystemAllocator.GLOBAL.ref.as(Allocator).deallocate(backing);
+            }
+            ok and clean
+        }
+    "#;
+
+    let case = NativeCase::new(source);
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
+fn buf_writer_and_buf_reader_roundtrip_file_and_custom_allocator() {
+    let source = r#"
+        use std.prelude.*;
+        use std.fs.{File, remove_file};
+        use std.io.{BufReader, BufWriter, IoErr, Reader};
+        use std.mem.{AllocErr, Allocator, FixedBufferAllocator, Layout, SystemAllocator};
+        use std.string.Utf8Err;
+
+        fn exercise_buffered_file_io(
+            fba: *FixedBufferAllocator,
+        ) -> ![IoErr, AllocErr, Utf8Err] bool {
+            -- 1. Write via small BufWriter<File> using write_fmt, write_byte, bypass write,
+            --    explicit flush, and a trailing write left solely for Drop auto-flush.
+            do {
+                let file = File.create<"stage1c_roundtrip.txt">()!;
+                var bw = BufWriter<
+                    File,
+                    .A = FixedBufferAllocator,
+                    .allocator = fba,
+                >.with_capacity(11, file)!;
+                write_fmt(bw.ref, "head={}!", 42)!;
+                bw.ref.write_byte(10)!;
+                var mid = String<
+                    .A = FixedBufferAllocator,
+                    .allocator = fba,
+                >.from_str("bypass-payload-line\n")!;
+                bw.ref.write_string(mid.ref)!;
+                bw.ref.flush()!;
+                if bw.ref.buffered_len() != 0 {
+                    return false;
+                }
+                var tail = String<
+                    .A = FixedBufferAllocator,
+                    .allocator = fba,
+                >.from_str("tail-drop\n")!;
+                bw.ref.write_string(tail.ref)!;
+                if bw.ref.buffered_len() != 10 {
+                    return false;
+                }
+            }
+
+            -- 2. Read back with a small BufReader<File> (cap = 7) using peek_byte,
+            --    read_byte, read_line, read_until, read_exact, UnexpectedEof, and into_inner.
+            let file = File.open<"stage1c_roundtrip.txt">()!;
+            var br = BufReader<
+                File,
+                .A = FixedBufferAllocator,
+                .allocator = fba,
+            >.with_capacity(7, file)!;
+            let peeked = br.ref.peek_byte()! match {
+                b? => b,
+                null => return false,
+            };
+            let first = br.ref.read_byte()! match {
+                b? => b,
+                null => return false,
+            };
+            if peeked != 104 or first != 104 {
+                return false;
+            }
+
+            var line1 = String<.A = FixedBufferAllocator, .allocator = fba>.new();
+            let n1 = br.ref.read_line(line1.ref)!;
+            if n1 != 8 or not line1.ref.equals_str("ead=42!\n") {
+                return false;
+            }
+
+            var line2 = Vec<u8, .A = FixedBufferAllocator, .allocator = fba>.new();
+            let n2 = br.ref.read_until(10, line2.ref)!;
+            if n2 != 20 or line2.ref.len() != 20 {
+                return false;
+            }
+            let line2_str = String<.A = FixedBufferAllocator, .allocator = fba>.from_utf8(line2)!;
+            if not line2_str.ref.equals_str("bypass-payload-line\n") {
+                return false;
+            }
+
+            var tail_bytes = Vec<u8, .A = FixedBufferAllocator, .allocator = fba>.new();
+            br.ref.as(Reader).read_exact(tail_bytes.ref, 10)!;
+            let tail_str = String<.A = FixedBufferAllocator, .allocator = fba>.from_utf8(tail_bytes)!;
+            if not tail_str.ref.equals_str("tail-drop\n") {
+                return false;
+            }
+
+            var eof_probe = Vec<u8, .A = FixedBufferAllocator, .allocator = fba>.new();
+            let got_eof = br.ref.as(Reader).read_exact(eof_probe.ref, 4) match {
+                _! => false,
+                error IoErr.UnexpectedEof => true,
+                error _ => false,
+            };
+            let inner_file = br.into_inner();
+            let _ = inner_file.ref.close();
+            got_eof
+        }
+
+        fn run() -> bool {
+            let layout = Layout.new(16384, 16) match {
+                found? => found,
+                null => return false,
+            };
+            let backing = SystemAllocator.GLOBAL.ref.as(Allocator).allocate(layout) match {
+                block! => block,
+                error _ => return false,
+            };
+            var fba = FixedBufferAllocator.from_raw_block(backing);
+            let ok = exercise_buffered_file_io(fba.ref) match {
+                passed! => passed,
+                error _ => false,
+            };
+            let _ = remove_file("stage1c_roundtrip.txt");
+            let clean = fba.ref.live_allocations() == 0;
+            unsafe {
+                SystemAllocator.GLOBAL.ref.as(Allocator).deallocate(backing);
+            }
+            ok and clean
+        }
+    "#;
+
+    let case = NativeCase::new(source);
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
+fn cursor_reader_buffered_utf8_errors_and_vec_buf_writer() {
+    let source = r#"
+        use std.prelude.*;
+        use std.io.{BufReader, BufWriter, Cursor, IoErr, Reader, Stdin, stdin};
+        use std.mem.{AllocErr, Allocator, FixedBufferAllocator, Layout, SystemAllocator};
+        use std.string.Utf8Err;
+
+        fn push_str_bytes(
+            dst: *Vec<u8, .A = FixedBufferAllocator, .allocator = fba>,
+            text: str,
+        ) -> !AllocErr void
+        where
+            quote fba: lift *FixedBufferAllocator,
+        {
+            let len = builtin.compiler.str_byte_length(text);
+            var i: u64 = 0;
+            while i < len {
+                let b = builtin.compiler.str_byte(text, i) match {
+                    found? => found,
+                    null => break,
+                };
+                dst.push(b)!;
+                i = i + 1;
+            }
+        }
+
+        fn exercise_memory_io(
+            fba: *FixedBufferAllocator,
+        ) -> ![IoErr, AllocErr, Utf8Err] bool {
+            let _stdin_handle: Stdin = stdin();
+
+            -- 1. BufWriter<Vec<u8, ...>> with assoc Err = AllocErr and scoped with_inner check.
+            var sink = Vec<u8, .A = FixedBufferAllocator, .allocator = fba>.new();
+            var bw = BufWriter<
+                Vec<u8, .A = FixedBufferAllocator, .allocator = fba>,
+                .A = FixedBufferAllocator,
+                .allocator = fba,
+            >.with_capacity(8, sink)!;
+            write_fmt(bw.ref, "v={}", 7)!;
+            bw.ref.write_byte(44)!;
+            if bw.ref.buffered_len() != 4 {
+                return false;
+            }
+            var big = String<
+                .A = FixedBufferAllocator,
+                .allocator = fba,
+            >.from_str("0123456789")!;
+            bw.ref.write_string(big.ref)!;
+            bw.ref.flush()!;
+            let vec_ok = bw.ref.with_inner(|inner| -> bool {
+                if inner.len() != 14 {
+                    return false;
+                }
+                let b0 = inner.get(0) match {
+                    v? => v,
+                    null => return false,
+                };
+                let b3 = inner.get(3) match {
+                    v? => v,
+                    null => return false,
+                };
+                let b13 = inner.get(13) match {
+                    v? => v,
+                    null => return false,
+                };
+                b0 == 118 and b3 == 44 and b13 == 57
+            });
+            if not vec_ok {
+                return false;
+            }
+
+            -- 2. Direct Cursor Reader operations: read_byte, read_into, read_exact, UnexpectedEof,
+            --    set_position, read_to_end, and read_to_string.
+            var raw = Vec<u8, .A = FixedBufferAllocator, .allocator = fba>.new();
+            push_str_bytes(raw.ref, "alpha-beta")!;
+            var cursor = Cursor<.A = FixedBufferAllocator, .allocator = fba>.new(raw);
+            let b_first = cursor.ref.as(Reader).read_byte()! match {
+                v? => v,
+                null => return false,
+            };
+            if b_first != 97 or cursor.ref.position() != 1 or cursor.ref.remaining() != 9 {
+                return false;
+            }
+            var part = Vec<u8, .A = FixedBufferAllocator, .allocator = fba>.new();
+            let got_into = cursor.ref.as(Reader).read_into(part.ref, 4)!;
+            if got_into != 4 or cursor.ref.remaining() != 5 {
+                return false;
+            }
+            cursor.ref.as(Reader).read_exact(part.ref, 5)!;
+            if not cursor.ref.is_empty() {
+                return false;
+            }
+            let eof_hit = cursor.ref.as(Reader).read_exact(part.ref, 1) match {
+                _! => false,
+                error IoErr.UnexpectedEof => true,
+                error _ => false,
+            };
+            if not eof_hit {
+                return false;
+            }
+            let part_text = String<.A = FixedBufferAllocator, .allocator = fba>.from_utf8(part)!;
+            if not part_text.ref.equals_str("lpha-beta") {
+                return false;
+            }
+
+            cursor.ref.set_position(0);
+            var end_buf = Vec<u8, .A = FixedBufferAllocator, .allocator = fba>.new();
+            let total_end = cursor.ref.as(Reader).read_to_end(end_buf.ref)!;
+            if total_end != 10 or end_buf.ref.len() != 10 {
+                return false;
+            }
+            cursor.ref.set_position(0);
+            var full_str = String<.A = FixedBufferAllocator, .allocator = fba>.new();
+            let total_str = cursor.ref.as(Reader).read_to_string(full_str.ref)!;
+            if total_str != 10 or not full_str.ref.equals_str("alpha-beta") {
+                return false;
+            }
+
+            -- 3. BufReader<Cursor> read_line reports Utf8Err without corrupting destination String.
+            var mixed = Vec<u8, .A = FixedBufferAllocator, .allocator = fba>.new();
+            push_str_bytes(mixed.ref, "ok\n")!;
+            mixed.ref.push(255)!;
+            mixed.ref.push(254)!;
+            mixed.ref.push(10)!;
+            let bad_cursor = Cursor<.A = FixedBufferAllocator, .allocator = fba>.new(mixed);
+            var bad_br = BufReader<
+                Cursor<.A = FixedBufferAllocator, .allocator = fba>,
+                .A = FixedBufferAllocator,
+                .allocator = fba,
+            >.with_capacity(5, bad_cursor)!;
+            var lines = String<.A = FixedBufferAllocator, .allocator = fba>.new();
+            let valid_len = bad_br.ref.read_line(lines.ref)!;
+            if valid_len != 3 or not lines.ref.equals_str("ok\n") {
+                return false;
+            }
+            let utf8_failed = bad_br.ref.read_line(lines.ref) match {
+                _! => false,
+                error IoErr.Os(_) => false,
+                error IoErr.WriteZero => false,
+                error IoErr.UnexpectedEof => false,
+                error AllocErr.OutOfMemory => false,
+                error AllocErr.InvalidLayout => false,
+                error _ => true,
+            };
+            utf8_failed and lines.ref.equals_str("ok\n")
+        }
+
+        fn run() -> bool {
+            let layout = Layout.new(65536, 16) match {
+                found? => found,
+                null => return false,
+            };
+            let backing = SystemAllocator.GLOBAL.ref.as(Allocator).allocate(layout) match {
+                block! => block,
+                error _ => return false,
+            };
+            var fba = FixedBufferAllocator.from_raw_block(backing);
+            let ok = exercise_memory_io(fba.ref) match {
                 passed! => passed,
                 error _ => false,
             };

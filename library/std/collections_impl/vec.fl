@@ -179,6 +179,10 @@ where
         self.raw_addr.*
     }
 
+    pub unsafe fn set_len(*self, new_len: usize) {
+        self.raw_len.* = new_len;
+    }
+
     pub fn reserve(*self, additional: usize) -> !AllocErr void {
         let len = self.raw_len.*;
         let required = builtin.mem.checked_add_usize(len, additional) match {

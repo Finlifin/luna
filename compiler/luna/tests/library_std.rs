@@ -5,7 +5,9 @@ use std::{
     process::{Command, Output},
     sync::atomic::{AtomicU64, Ordering},
 };
+
 struct Case(PathBuf);
+
 impl Case {
     fn new(source: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -18,9 +20,11 @@ impl Case {
         fs::write(path.join("main.fl"), source).unwrap();
         Self(path)
     }
+
     fn build(&self, level: &str) -> Output {
         self.build_with_options(level, &[])
     }
+
     fn build_with_options(&self, level: &str, options: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_luna"))
             .current_dir(&self.0)
@@ -42,6 +46,7 @@ impl Case {
             .output()
             .unwrap()
     }
+
     fn run(&self) -> Output {
         Command::new(self.0.join("program"))
             .current_dir(&self.0)
@@ -49,11 +54,13 @@ impl Case {
             .unwrap()
     }
 }
+
 impl Drop for Case {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
+
 fn success(output: &Output) {
     assert!(
         output.status.success(),
@@ -219,6 +226,7 @@ fn writes_retry_interruption_and_short_transfers_but_propagate_failure() {
             println("hello") match {
                 _! => true,
                 error std.io.IoErr.WriteZero => false,
+                error std.io.IoErr.UnexpectedEof => false,
                 error std.io.IoErr.Os(code) => code != 5,
             }
         }

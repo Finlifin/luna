@@ -1,0 +1,543 @@
+use builtin.fmt.ByteWriter;
+use collections_impl.vec.Vec;
+use io_impl.reader.Reader;
+use io_impl.writer.Write;
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
+use string_impl.string.{String, Utf8Err}
+
+{-
+    Buffered byte reader wrapping any R :- Reader using a runtime-dependent
+    allocator for its internal byte buffer. Structural affine Drop drops both
+    the buffer and the inner reader on scope exit.
+-}
+pub struct BufReader
+where
+    R,
+    requires R :- Reader,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    inner: R,
+    buf: Vec<u8, .A = A, .allocator = allocator>,
+    pos: usize,
+    cap: usize,
+}
+
+impl BufReader<R, .A = A, .allocator = alloc>
+where
+    R,
+    requires R :- Reader,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn new(inner: R) -> !AllocErr Self {
+        BufReader<R, .A = A, .allocator = alloc>.with_capacity(8192, inner)
+    }
+
+    pub fn with_capacity(capacity: usize, inner: R) -> !AllocErr Self {
+        let cap: usize = if capacity == 0 { 1 } else { capacity }
+        let buf = Vec<u8, .A = A, .allocator = alloc>.with_capacity(cap)!;
+        if builtin.mem.checked_add_usize(buf.as_addr(), cap).is_none() {
+            return error AllocErr.InvalidLayout;
+        }
+        BufReader<R, .A = A, .allocator = alloc> {
+            inner: inner,
+            buf: buf,
+            pos: 0,
+            cap: cap,
+        }
+    }
+
+    pub fn capacity(*self) -> usize {
+        self.cap.*
+    }
+
+    pub fn buffered_len(*self) -> usize {
+        let pos = self.pos.*;
+        let filled = self.buf.len();
+        if pos >= filled {
+            0
+        } else {
+            filled - pos
+        }
+    }
+
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+
+    pub fn with_inner(*self, f: %c fn(*R) -> U) -> U
+    where
+        U,
+        c: Type.vars.Closure,
+    {
+        f(self.inner)
+    }
+
+    pub fn refill(*self) -> !R.as(Reader).Err usize {
+        let pos = self.pos.*;
+        let filled = self.buf.len();
+        if pos < filled {
+            return filled - pos;
+        }
+        self.pos.* = 0;
+        self.buf.clear();
+        let cap = self.cap.*;
+        let dst = self.buf.as_addr();
+        let n = unsafe { self.inner.as(Reader).read_raw(dst, cap) }!;
+        let clamped = if n > cap { cap } else { n }
+        unsafe {
+            self.buf.set_len(clamped);
+        }
+        clamped
+    }
+
+    pub fn consume(*self, amt: usize) {
+        let pos = self.pos.*;
+        let filled = self.buf.len();
+        if pos >= filled {
+            self.pos.* = filled;
+            return;
+        }
+        let avail = filled - pos;
+        let step = if amt < avail { amt } else { avail }
+        self.pos.* = pos + step;
+    }
+
+    pub fn peek_byte(*self) -> !R.as(Reader).Err ?u8 {
+        let avail = self.refill()!;
+        if avail == 0 {
+            return null;
+        }
+        self.buf.get(self.pos.*)
+    }
+
+    pub fn read_byte(*self) -> !R.as(Reader).Err ?u8 {
+        let avail = self.refill()!;
+        if avail == 0 {
+            return null;
+        }
+        let pos = self.pos.*;
+        let filled = self.buf.len();
+        if pos >= filled {
+            return null;
+        }
+        let byte = self.buf.get(pos);
+        self.pos.* = pos + 1;
+        byte
+    }
+
+    pub fn read_until(
+        *self,
+        delim: u8,
+        out: *Vec<u8, .A = B, .allocator = b>,
+    ) -> ![R.as(Reader).Err, AllocErr] usize
+    where
+        B: Type,
+        requires B :- Allocator,
+        quote b: lift *B,
+    {
+        var total: usize = 0;
+        while true {
+            let avail = self.refill()!;
+            if avail == 0 {
+                return total;
+            }
+            let start = self.pos.*;
+            let filled = self.buf.len();
+            var end = start;
+            var found = false;
+            while end < filled {
+                let byte = self.buf.get(end) match {
+                    v? => v,
+                    null => break,
+                }
+                end = end + 1;
+                if byte == delim {
+                    found = true;
+                    break;
+                }
+            }
+            let chunk_len: usize = if end > start { end - start } else { 0 }
+            let next_total = builtin.mem.checked_add_usize(total, chunk_len) match {
+                v? => v,
+                null => return error AllocErr.InvalidLayout,
+            }
+            if chunk_len > 0 {
+                out.reserve(chunk_len)!;
+                let old_len = out.len();
+                let next_out_len = builtin.mem.checked_add_usize(old_len, chunk_len) match {
+                    v? => v,
+                    null => return error AllocErr.InvalidLayout,
+                }
+                let dst = builtin.mem.checked_add_usize(out.as_addr(), old_len) match {
+                    addr? => addr,
+                    null => return error AllocErr.InvalidLayout,
+                }
+                let src = builtin.mem.checked_add_usize(self.buf.as_addr(), start) match {
+                    addr? => addr,
+                    null => return error AllocErr.InvalidLayout,
+                }
+                unsafe {
+                    builtin.mem.copy_bytes_nonoverlapping(dst, src, chunk_len);
+                    out.set_len(next_out_len);
+                }
+            }
+            self.pos.* = end;
+            total = next_total;
+            if found {
+                return total;
+            }
+        }
+        total
+    }
+
+    pub fn read_line(
+        *self,
+        out: *String<.A = B, .allocator = b>,
+    ) -> ![R.as(Reader).Err, AllocErr, Utf8Err] usize
+    where
+        B: Type,
+        requires B :- Allocator,
+        quote b: lift *B,
+    {
+        var tmp = Vec<u8, .A = B, .allocator = b>.new();
+        let total = self.read_until(10, tmp.ref)!;
+        if total == 0 {
+            return 0;
+        }
+        let line = String<.A = B, .allocator = b>.from_utf8(tmp)!;
+        out.push_string(line.ref)!;
+        total
+    }
+}
+
+impl Reader for BufReader<R, .A = A, .allocator = alloc>
+where
+    R,
+    requires R :- Reader,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Err: Type = R.as(Reader).Err;
+
+    unsafe fn read_raw(*self, dst: usize, len: usize) -> !R.as(Reader).Err usize {
+        if len == 0 {
+            return 0;
+        }
+        let pos = self.pos.*;
+        let filled = self.buf.len();
+        if pos < filled {
+            let avail = filled - pos;
+            let to_copy = if avail < len { avail } else { len }
+            let src = if pos == 0 {
+                self.buf.as_addr()
+            } else {
+                builtin.mem.checked_add_usize(self.buf.as_addr(), pos) match {
+                    addr? => addr,
+                    null => return 0,
+                }
+            }
+            builtin.mem.copy_bytes_nonoverlapping(dst, src, to_copy);
+            self.pos.* = pos + to_copy;
+            return to_copy;
+        }
+        if len >= self.cap.* {
+            self.pos.* = 0;
+            self.buf.clear();
+            return self.inner.as(Reader).read_raw(dst, len);
+        }
+        let avail = self.refill()!;
+        if avail == 0 {
+            return 0;
+        }
+        let pos_after = self.pos.*;
+        let filled_after = self.buf.len();
+        if pos_after >= filled_after {
+            return 0;
+        }
+        let remaining = filled_after - pos_after;
+        let bounded = if avail < remaining { avail } else { remaining }
+        let to_copy = if bounded < len { bounded } else { len }
+        let src = if pos_after == 0 {
+            self.buf.as_addr()
+        } else {
+            builtin.mem.checked_add_usize(self.buf.as_addr(), pos_after) match {
+                addr? => addr,
+                null => return 0,
+            }
+        }
+        builtin.mem.copy_bytes_nonoverlapping(dst, src, to_copy);
+        self.pos.* = pos_after + to_copy;
+        to_copy
+    }
+
+    fn read_byte(*self) -> !R.as(Reader).Err ?u8 {
+        let avail = self.refill()!;
+        if avail == 0 {
+            return null;
+        }
+        let pos = self.pos.*;
+        let filled = self.buf.len();
+        if pos >= filled {
+            return null;
+        }
+        let byte = self.buf.get(pos);
+        self.pos.* = pos + 1;
+        byte
+    }
+}
+
+{-
+    Buffered byte sink wrapping any W :- Write using a runtime-dependent
+    allocator for its internal write buffer. Custom Drop flushes pending
+    buffered bytes before releasing the buffer and inner writer.
+-}
+pub struct BufWriter
+where
+    W,
+    requires W :- Write,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    inner: W,
+    buf: Vec<u8, .A = A, .allocator = allocator>,
+    cap: usize,
+}
+
+impl BufWriter<W, .A = A, .allocator = alloc>
+where
+    W,
+    requires W :- Write,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn new(inner: W) -> !AllocErr Self {
+        BufWriter<W, .A = A, .allocator = alloc>.with_capacity(8192, inner)
+    }
+
+    pub fn with_capacity(capacity: usize, inner: W) -> !AllocErr Self {
+        let cap: usize = if capacity == 0 { 1 } else { capacity }
+        let buf = Vec<u8, .A = A, .allocator = alloc>.with_capacity(cap)!;
+        if builtin.mem.checked_add_usize(buf.as_addr(), cap).is_none() {
+            return error AllocErr.InvalidLayout;
+        }
+        BufWriter<W, .A = A, .allocator = alloc> {
+            inner: inner,
+            buf: buf,
+            cap: cap,
+        }
+    }
+
+    pub fn capacity(*self) -> usize {
+        self.cap.*
+    }
+
+    pub fn buffered_len(*self) -> usize {
+        self.buf.len()
+    }
+
+    pub fn with_inner(*self, f: %c fn(*W) -> R) -> R
+    where
+        R,
+        c: Type.vars.Closure,
+    {
+        f(self.inner)
+    }
+
+    pub fn flush_buf(*self) -> !W.as(Write).Err void {
+        let len = self.buf.len();
+        if len == 0 {
+            return;
+        }
+        let addr = self.buf.as_addr();
+        unsafe {
+            self.inner.as(Write).write_all_raw(addr, len)!;
+        }
+        self.buf.clear();
+    }
+
+    pub fn flush(*self) -> !W.as(Write).Err void {
+        self.flush_buf()!;
+        self.inner.as(Write).flush()
+    }
+
+    fn buffer_byte(*self, byte: u8) -> !W.as(Write).Err void {
+        let cap = self.cap.*;
+        if self.buf.len() >= cap {
+            self.flush_buf()!;
+        }
+        let len = self.buf.len();
+        let next_len = builtin.mem.checked_add_usize(len, 1) match {
+            v? => v,
+            null => return,
+        }
+        let dst = builtin.mem.checked_add_usize(self.buf.as_addr(), len) match {
+            addr? => addr,
+            null => return,
+        }
+        unsafe {
+            builtin.mem.raw_write<u8>(dst, byte);
+            self.buf.set_len(next_len);
+        }
+    }
+
+    pub fn write_byte(*self, byte: u8) -> !W.as(Write).Err void {
+        self.buffer_byte(byte)
+    }
+
+    pub fn write_bytes(
+        *self,
+        bytes: *Vec<u8, .A = B, .allocator = b>,
+    ) -> !W.as(Write).Err void
+    where
+        B: Type,
+        requires B :- Allocator,
+        quote b: lift *B,
+    {
+        let len = bytes.len();
+        if len == 0 {
+            return;
+        }
+        unsafe {
+            self.as(Write).write_all_raw(bytes.as_addr(), len)
+        }
+    }
+
+    pub fn write_string(
+        *self,
+        text: *String<.A = B, .allocator = b>,
+    ) -> !W.as(Write).Err void
+    where
+        B: Type,
+        requires B :- Allocator,
+        quote b: lift *B,
+    {
+        let len = text.len();
+        if len == 0 {
+            return;
+        }
+        unsafe {
+            self.as(Write).write_all_raw(text.as_bytes_addr(), len)
+        }
+    }
+}
+
+impl Drop for BufWriter<W, .A = A, .allocator = alloc>
+where
+    W,
+    requires W :- Write,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let _ = self.flush_buf();
+    }
+}
+
+impl Write for BufWriter<W, .A = A, .allocator = alloc>
+where
+    W,
+    requires W :- Write,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Err: Type = W.as(Write).Err;
+
+    unsafe fn write_raw(*self, src: usize, len: usize) -> !W.as(Write).Err usize {
+        if len == 0 {
+            return 0;
+        }
+        let cap = self.cap.*;
+        let cur_len = self.buf.len();
+        if cur_len > cap or len > cap - cur_len {
+            self.flush_buf()!;
+        }
+        if len >= cap {
+            return self.inner.as(Write).write_raw(src, len);
+        }
+        let after_len = self.buf.len();
+        let new_len = builtin.mem.checked_add_usize(after_len, len) match {
+            v? => v,
+            null => return self.inner.as(Write).write_raw(src, len),
+        }
+        if new_len > cap {
+            return self.inner.as(Write).write_raw(src, len);
+        }
+        let dst = builtin.mem.checked_add_usize(self.buf.as_addr(), after_len) match {
+            addr? => addr,
+            null => return self.inner.as(Write).write_raw(src, len),
+        }
+        builtin.mem.copy_bytes_nonoverlapping(dst, src, len);
+        self.buf.set_len(new_len);
+        len
+    }
+
+    unsafe fn write_all_raw(*self, src: usize, len: usize) -> !W.as(Write).Err void {
+        if len == 0 {
+            return;
+        }
+        let cap = self.cap.*;
+        let cur_len = self.buf.len();
+        if cur_len > cap or len > cap - cur_len {
+            self.flush_buf()!;
+        }
+        if len >= cap {
+            return self.inner.as(Write).write_all_raw(src, len);
+        }
+        let after_len = self.buf.len();
+        let new_len = builtin.mem.checked_add_usize(after_len, len) match {
+            v? => v,
+            null => return self.inner.as(Write).write_all_raw(src, len),
+        }
+        if new_len > cap {
+            return self.inner.as(Write).write_all_raw(src, len);
+        }
+        let dst = builtin.mem.checked_add_usize(self.buf.as_addr(), after_len) match {
+            addr? => addr,
+            null => return self.inner.as(Write).write_all_raw(src, len),
+        }
+        builtin.mem.copy_bytes_nonoverlapping(dst, src, len);
+        self.buf.set_len(new_len);
+    }
+
+    fn flush(*self) -> !W.as(Write).Err void {
+        self.flush_buf()!;
+        self.inner.as(Write).flush()
+    }
+}
+
+impl ByteWriter for BufWriter<W, .A = A, .allocator = alloc>
+where
+    W,
+    requires W :- Write,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Err: Type = W.as(Write).Err;
+
+    fn write_byte(*self, byte: u8) -> !W.as(Write).Err void {
+        self.buffer_byte(byte)
+    }
+
+    fn write_str(*self, text: str) -> !W.as(Write).Err void {
+        let len = builtin.compiler.str_byte_length(text);
+        var index: u64 = 0;
+        while index < len {
+            let byte = builtin.compiler.str_byte(text, index) match {
+                found? => found,
+                null => break,
+            }
+            self.buffer_byte(byte)!;
+            index = index + 1;
+        }
+    }
+}

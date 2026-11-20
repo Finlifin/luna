@@ -1,6 +1,44 @@
 pub enum IoErr {
     Os(i64),
     WriteZero,
+    UnexpectedEof,
+}
+
+impl Clone for IoErr {
+    fn clone(*self) -> Self {
+        self.* match {
+            .Os(code) => .Os(code),
+            .WriteZero => .WriteZero,
+            .UnexpectedEof => .UnexpectedEof,
+        }
+    }
+}
+
+impl Copy for IoErr {}
+
+impl Eq for IoErr {
+    fn eq(self, other: Self) -> bool {
+        self match {
+            .Os(left) =>
+                other match {
+                    .Os(right) => left == right,
+                    .WriteZero => false,
+                    .UnexpectedEof => false,
+                },
+            .WriteZero =>
+                other match {
+                    .Os(_) => false,
+                    .WriteZero => true,
+                    .UnexpectedEof => false,
+                },
+            .UnexpectedEof =>
+                other match {
+                    .Os(_) => false,
+                    .WriteZero => false,
+                    .UnexpectedEof => true,
+                },
+        }
+    }
 }
 
 -- Preserve the platform error before another operation changes errno.

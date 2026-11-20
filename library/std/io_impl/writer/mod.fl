@@ -1,7 +1,7 @@
 use builtin.fmt.ByteWriter;
 use collections_impl.vec.Vec;
 use io_impl.errors.IoErr;
-use mem_impl.allocator.Allocator;
+use mem_impl.allocator.{AllocErr, Allocator}
 use std.os.unix;
 use string_impl.string.String;
 
@@ -134,4 +134,111 @@ pub fn stdout() -> Writer {
 
 pub fn stderr() -> Writer {
     Writer { descriptor: unix.stderr }
+}
+
+{-
+    Synchronous byte sink Write protocol supporting raw slice writes,
+    complete writes, explicit flush, and Vec<u8>/String helpers.
+-}
+pub trait Write {
+    assoc Err: Type;
+
+    unsafe fn write_raw(*self, src: usize, len: usize) -> !Err usize;
+
+    unsafe fn write_all_raw(*self, src: usize, len: usize) -> !Err void;
+
+    fn flush(*self) -> !Err void {
+        ()
+    }
+
+    fn write_bytes(
+        *self,
+        bytes: *Vec<u8, .A = A, .allocator = a>,
+    ) -> !Err void
+    where
+        A: Type,
+        requires A :- Allocator,
+        quote a: lift *A,
+    {
+        let len = bytes.len();
+        if len == 0 {
+            return;
+        }
+        unsafe { self.write_all_raw(bytes.as_addr(), len) }
+    }
+
+    fn write_string(
+        *self,
+        text: *String<.A = A, .allocator = a>,
+    ) -> !Err void
+    where
+        A: Type,
+        requires A :- Allocator,
+        quote a: lift *A,
+    {
+        let len = text.len();
+        if len == 0 {
+            return;
+        }
+        unsafe { self.write_all_raw(text.as_bytes_addr(), len) }
+    }
+}
+
+impl Write for Writer {
+    assoc Err: Type = IoErr;
+
+    unsafe fn write_raw(*self, src: usize, len: usize) -> !IoErr usize {
+        if len == 0 {
+            return 0;
+        }
+        let len_u64 = builtin.compiler.try_usize_to_u64(len) match {
+            v? => v,
+            null => return error IoErr.Os(22),
+        }
+        let n = unix.write_raw(self.descriptor.*, src, len_u64)!;
+        let n_usize = builtin.compiler.try_u64_to_usize(n) match {
+            v? => v,
+            null => return error IoErr.Os(5),
+        }
+        if n_usize > len {
+            return error IoErr.Os(5);
+        }
+        n_usize
+    }
+
+    unsafe fn write_all_raw(*self, src: usize, len: usize) -> !IoErr void {
+        io_impl.writer.write_all_raw(self.descriptor.*, src, len)
+    }
+}
+
+impl Write for Vec<u8, .A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Err: Type = AllocErr;
+
+    unsafe fn write_raw(*self, src: usize, len: usize) -> !AllocErr usize {
+        if len == 0 {
+            return 0;
+        }
+        self.reserve(len)!;
+        let old_len = self.len();
+        let new_len = builtin.mem.checked_add_usize(old_len, len) match {
+            next? => next,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let dst = builtin.mem.checked_add_usize(self.as_addr(), old_len) match {
+            addr? => addr,
+            null => return error AllocErr.InvalidLayout,
+        }
+        builtin.mem.copy_bytes_nonoverlapping(dst, src, len);
+        self.set_len(new_len);
+        len
+    }
+
+    unsafe fn write_all_raw(*self, src: usize, len: usize) -> !AllocErr void {
+        let _ = self.write_raw(src, len)!;
+    }
 }
