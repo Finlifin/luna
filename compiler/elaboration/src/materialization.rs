@@ -20,12 +20,23 @@ impl ::materialization::Expansion for SourceExpansion {
         &self,
         package: &n::Package,
         expression: &mut n::Expr,
+        caller_env_parameters: &[n::RuntimeEnvParameter],
+        caller_runtime_deliveries: &std::collections::BTreeMap<nir::RuntimeId, n::Expr>,
         next: &mut u32,
         sources: &mut Vec<n::ExpansionSource>,
         enums: &mut Vec<n::Enum>,
         fuel: &mut usize,
     ) -> Result<(), String> {
-        crate::program::expand_materialized_quotes(package, expression, next, sources, enums, fuel)
+        crate::program::expand_materialized_quotes(
+            package,
+            expression,
+            caller_env_parameters,
+            caller_runtime_deliveries,
+            next,
+            sources,
+            enums,
+            fuel,
+        )
     }
     fn effects(
         &self,
@@ -52,13 +63,25 @@ impl ::materialization::Expansion for SourceExpansion {
         package: &n::Package,
         template: &n::Function,
         expression: &mut n::Expr,
+        caller_env_parameters: &[n::RuntimeEnvParameter],
+        caller_runtime_deliveries: &std::collections::BTreeMap<nir::RuntimeId, n::Expr>,
+        in_closure: bool,
         next: &mut u32,
         sources: &mut Vec<n::ExpansionSource>,
         enums: &mut Vec<n::Enum>,
         fuel: &mut usize,
     ) -> Result<(), String> {
         crate::program::expand_bound_quote(
-            package, template, expression, next, sources, enums, fuel,
+            package,
+            template,
+            expression,
+            caller_env_parameters,
+            caller_runtime_deliveries,
+            in_closure,
+            next,
+            sources,
+            enums,
+            fuel,
         )
     }
     fn inline(
@@ -66,13 +89,25 @@ impl ::materialization::Expansion for SourceExpansion {
         package: &n::Package,
         template: &n::Function,
         expression: &mut n::Expr,
+        caller_env_parameters: &[n::RuntimeEnvParameter],
+        caller_runtime_deliveries: &std::collections::BTreeMap<nir::RuntimeId, n::Expr>,
+        in_closure: bool,
         next: &mut u32,
         sources: &mut Vec<n::ExpansionSource>,
         enums: &mut Vec<n::Enum>,
         fuel: &mut usize,
     ) -> Result<bool, String> {
         crate::program::inlining::expand_bound_inline(
-            package, template, expression, next, sources, enums, fuel,
+            package,
+            template,
+            expression,
+            caller_env_parameters,
+            caller_runtime_deliveries,
+            in_closure,
+            next,
+            sources,
+            enums,
+            fuel,
         )
     }
 }

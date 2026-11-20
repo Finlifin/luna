@@ -231,42 +231,88 @@ impl InherentIndex {
             )
     }
     /// Declaration-world check, independent of local caller assumptions. Only
-    /// heads with a shared member name compete. Unknown never means disjoint.
+    /// heads with a shared member name, equal precision, and non-distinct outer
+    /// type heads require solver overlap queries. Unknown never means disjoint.
     pub fn check_coherence(&self, context: &Context, budget: Budget) -> Result<(), String> {
-        let entries: Vec<_> = self.heads.values().collect();
-        let pairs = entries
+        let mut by_member: BTreeMap<&str, Vec<DeclarationId>> = BTreeMap::new();
+        let mut member_entries = 0usize;
+        for head in self.heads.values() {
+            member_entries = member_entries
+                .checked_add(head.members.len())
+                .ok_or("inherent coherence budget exhausted")?;
+            for name in &head.members {
+                by_member
+                    .entry(name.as_str())
+                    .or_default()
+                    .push(head.declaration);
+            }
+        }
+        let mut pairs = 0usize;
+        for decls in by_member.values() {
+            let group_pairs = decls
+                .len()
+                .checked_mul(decls.len().saturating_sub(1))
+                .and_then(|n| n.checked_div(2))
+                .ok_or("inherent coherence budget exhausted")?;
+            pairs = pairs
+                .checked_add(group_pairs)
+                .ok_or("inherent coherence budget exhausted")?;
+        }
+        let scan_cost = self
+            .heads
             .len()
-            .checked_mul(entries.len().saturating_sub(1))
-            .and_then(|n| n.checked_div(2))
+            .checked_add(member_entries)
+            .and_then(|n| n.checked_add(pairs))
             .ok_or("inherent coherence budget exhausted")?;
-        if pairs.saturating_add(entries.len()) > budget.steps {
-            return Err("inherent coherence budget exhausted".into());
+        let remaining = budget
+            .steps
+            .checked_sub(scan_cost)
+            .ok_or("inherent coherence budget exhausted")?;
+        let mut seen_pairs = BTreeSet::new();
+        let mut solver_pairs = Vec::new();
+        for (name, decls) in by_member {
+            for (i, &left_decl) in decls.iter().enumerate() {
+                for &right_decl in &decls[i + 1..] {
+                    if !seen_pairs.insert((left_decl, right_decl)) {
+                        continue;
+                    }
+                    let a = &self.index.entries[&left_decl];
+                    let b = &self.index.entries[&right_decl];
+                    if a.precision != b.precision {
+                        continue;
+                    }
+                    if crate::ptc::distinct_outer_type_heads(&a.head.subject, &b.head.subject) {
+                        continue;
+                    }
+                    solver_pairs.push((name, left_decl, right_decl));
+                }
+            }
+        }
+        if solver_pairs.is_empty() {
+            return Ok(());
         }
         let allowance = Budget {
-            steps: (budget.steps - entries.len()) / pairs.max(1),
+            steps: remaining / solver_pairs.len(),
             ..budget
         };
-        for (i, left) in entries.iter().enumerate() {
-            for right in &entries[i + 1..] {
-                let Some(name) = left.members.intersection(&right.members).next() else {
-                    continue;
-                };
-                let a = &self.index.entries[&left.declaration].head;
-                let b = &self.index.entries[&right.declaration].head;
-                let assessment = a.assess_subject_overlap(b, context, allowance);
-                let valid = match &assessment {
-                    PairAssessment::OrderedPrecision { .. } => true,
-                    PairAssessment::Disjoint(proof) => {
-                        a.verify_subject_disjointness(b, proof, context, allowance)
-                    }
-                    _ => false,
-                };
-                if !valid {
-                    return Err(format!(
-                        "inherent implementation overlap for {name:?} between {} and {}: {assessment}",
-                        left.declaration, right.declaration
-                    ));
+        if allowance.steps == 0 {
+            return Err("inherent coherence budget exhausted".into());
+        }
+        for (name, left_decl, right_decl) in solver_pairs {
+            let a = &self.index.entries[&left_decl].head;
+            let b = &self.index.entries[&right_decl].head;
+            let assessment = a.assess_subject_overlap(b, context, allowance);
+            let valid = match &assessment {
+                PairAssessment::OrderedPrecision { .. } => true,
+                PairAssessment::Disjoint(proof) => {
+                    a.verify_subject_disjointness(b, proof, context, allowance)
                 }
+                _ => false,
+            };
+            if !valid {
+                return Err(format!(
+                    "inherent implementation overlap for {name:?} between {left_decl} and {right_decl}: {assessment}"
+                ));
             }
         }
         Ok(())

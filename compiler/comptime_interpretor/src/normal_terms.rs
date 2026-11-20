@@ -6,6 +6,7 @@ use super::*;
 struct ExportScope<'a> {
     type_parameters: &'a BTreeSet<DeclarationId>,
     value_parameters: &'a BTreeMap<DeclarationId, Term>,
+    runtime_domains: &'a BTreeMap<nir::RuntimeId, Term>,
     invocation: bool,
 }
 
@@ -30,6 +31,7 @@ impl ExportScope<'_> {
             term,
             self.type_parameters,
             self.value_parameters,
+            self.runtime_domains,
             &mut budget.steps,
         )
         .map(|_| ())
@@ -47,6 +49,7 @@ pub fn validate_snapshot_term(
     ExportScope {
         type_parameters: parameters,
         value_parameters: &BTreeMap::new(),
+        runtime_domains: &BTreeMap::new(),
         invocation: false,
     }
     .inspect_term(term, budget)
@@ -133,9 +136,16 @@ impl Value {
         budget: &mut comptime_runtime::Budget,
         parameters: &BTreeSet<DeclarationId>,
         value_parameters: &BTreeMap<DeclarationId, Term>,
+        runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
         invocation: bool,
     ) -> Result<Term, ErrorKind> {
-        let result = self.to_scoped_term(budget, parameters, value_parameters, invocation);
+        let result = self.to_scoped_term(
+            budget,
+            parameters,
+            value_parameters,
+            runtime_domains,
+            invocation,
+        );
         // Even rejected host data must be released without recursively dropping
         // a potentially unbounded aggregate tail. Cleanup is not fuel-limited.
         let mut pending = vec![self];
@@ -204,7 +214,13 @@ impl Value {
 
     /// Freeze borrowed immutable data under a closed export scope.
     pub fn to_normal_term(&self, budget: &mut comptime_runtime::Budget) -> Result<Term, ErrorKind> {
-        self.to_scoped_term(budget, &BTreeSet::new(), &BTreeMap::new(), false)
+        self.to_scoped_term(
+            budget,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            false,
+        )
     }
 
     /// Build an independent term directly from an admitted borrowed value.
@@ -214,9 +230,17 @@ impl Value {
         budget: &mut comptime_runtime::Budget,
         parameters: &BTreeSet<DeclarationId>,
         value_parameters: &BTreeMap<DeclarationId, Term>,
+        runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
         invocation: bool,
     ) -> Result<Term, ErrorKind> {
-        self.freeze_input_template(budget, parameters, value_parameters, invocation, None)
+        self.freeze_input_template(
+            budget,
+            parameters,
+            value_parameters,
+            runtime_domains,
+            invocation,
+            None,
+        )
     }
 
     pub(super) fn freeze_input_template(
@@ -224,6 +248,7 @@ impl Value {
         budget: &mut comptime_runtime::Budget,
         parameters: &BTreeSet<DeclarationId>,
         value_parameters: &BTreeMap<DeclarationId, Term>,
+        runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
         invocation: bool,
         mut holes: Option<&mut Vec<nir::program::DescriptionLiteral>>,
     ) -> Result<Term, ErrorKind> {
@@ -572,7 +597,11 @@ impl Value {
                     scope.inspect_type(ty, budget)?;
                     Term::Rigid {
                         declaration: *declaration,
-                        sort: nir::Sort::ComptimeValue,
+                        sort: if matches!(ty, Term::Lift(_)) {
+                            nir::Sort::Runtime
+                        } else {
+                            nir::Sort::ComptimeValue
+                        },
                     }
                 }
                 Value::TypeParameter(declaration)
@@ -594,6 +623,7 @@ impl Value {
             })
         }
         let closed_values = BTreeMap::new();
+        let closed_runtime_domains = BTreeMap::new();
         visit(
             self,
             0,
@@ -604,6 +634,11 @@ impl Value {
                     value_parameters
                 } else {
                     &closed_values
+                },
+                runtime_domains: if invocation {
+                    runtime_domains
+                } else {
+                    &closed_runtime_domains
                 },
                 invocation,
             },
@@ -629,12 +664,13 @@ mod borrowed_input_tests {
         let parameters = BTreeSet::new();
         let domains = BTreeMap::new();
         for invocation in [false, true] {
+            let rt_domains = BTreeMap::new();
             let mut small = comptime_runtime::Budget {
                 steps: 10000,
                 max_limbs: 1,
             };
             assert_eq!(
-                value.to_scoped_term(&mut small, &parameters, &domains, invocation),
+                value.to_scoped_term(&mut small, &parameters, &domains, &rt_domains, invocation),
                 Err(ErrorKind::RepresentationSizeLimit)
             );
             let mut linear = comptime_runtime::Budget {
@@ -643,7 +679,7 @@ mod borrowed_input_tests {
             };
             assert_eq!(
                 value
-                    .to_scoped_term(&mut linear, &parameters, &domains, invocation)
+                    .to_scoped_term(&mut linear, &parameters, &domains, &rt_domains, invocation)
                     .unwrap(),
                 Term::Float(number.clone())
             );
@@ -652,7 +688,13 @@ mod borrowed_input_tests {
                 max_limbs: 4096,
             };
             assert_eq!(
-                value.to_scoped_term(&mut exhausted, &parameters, &domains, invocation),
+                value.to_scoped_term(
+                    &mut exhausted,
+                    &parameters,
+                    &domains,
+                    &rt_domains,
+                    invocation
+                ),
                 Err(ErrorKind::StepsExhausted)
             );
         }
@@ -753,12 +795,22 @@ mod borrowed_input_tests {
                 steps,
                 max_limbs: 4096,
             };
-            let result = value.to_scoped_term(&mut borrowed, &parameters, &BTreeMap::new(), true);
+            let result = value.to_scoped_term(
+                &mut borrowed,
+                &parameters,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                true,
+            );
             assert_eq!(
                 result,
-                value
-                    .clone()
-                    .into_scoped_term(&mut owned, &parameters, &BTreeMap::new(), true)
+                value.clone().into_scoped_term(
+                    &mut owned,
+                    &parameters,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    true,
+                )
             );
             assert_eq!(borrowed.steps, owned.steps);
             assert_eq!(value, original);
@@ -789,13 +841,25 @@ mod borrowed_input_tests {
         };
         assert!(
             value
-                .to_scoped_term(&mut budget, &BTreeSet::new(), &BTreeMap::new(), true)
+                .to_scoped_term(
+                    &mut budget,
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    true,
+                )
                 .is_err()
         );
         let storage = Value::Storage(Storage::new(Value::Bool(true)));
         assert!(
             storage
-                .to_scoped_term(&mut budget, &BTreeSet::new(), &BTreeMap::new(), true)
+                .to_scoped_term(
+                    &mut budget,
+                    &BTreeSet::new(),
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    true,
+                )
                 .is_err()
         );
         assert_eq!(value, original);

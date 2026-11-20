@@ -196,6 +196,7 @@ impl Checker<'_, '_> {
         let saved_context = self.context.clone();
         let saved_selection = self.inline_selection;
         let saved_suppressed = self.in_unselected_inline;
+        let saved_runtime_origins = self.local_runtime_origin_ids.clone();
         let identity = local(expr.hir_id);
         self.control.loops.push(identity);
         let result = (|| {
@@ -208,6 +209,9 @@ impl Checker<'_, '_> {
                 self.generator_data = saved_data.clone();
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
+                self.local_runtime_origin_ids = saved_runtime_origins.clone();
+                let saved_delivery_ids: BTreeSet<_> =
+                    self.local_runtime_deliveries.keys().copied().collect();
                 self.immutable.extend(pattern_binding_ids(pat));
                 let pattern = self.pattern(pat, &p(P::Integer))?;
                 let staged: BTreeSet<_> = self
@@ -310,6 +314,7 @@ impl Checker<'_, '_> {
                         expr.span,
                         body.span,
                         connections,
+                        &saved_delivery_ids,
                     )?);
                 }
                 self.inline_selection = saved_selection;
@@ -352,6 +357,7 @@ impl Checker<'_, '_> {
         self.context = saved_context;
         self.inline_selection = saved_selection;
         self.in_unselected_inline = saved_suppressed;
+        self.local_runtime_origin_ids = saved_runtime_origins;
         result
     }
     fn expand_inline_tuple(
@@ -411,6 +417,7 @@ impl Checker<'_, '_> {
         let saved_context = self.context.clone();
         let saved_selection = self.inline_selection;
         let saved_suppressed = self.in_unselected_inline;
+        let saved_runtime_origins = self.local_runtime_origin_ids.clone();
         let suppressed = self.in_unselected_inline;
         let identity = local(expr.hir_id);
         self.control.loops.push(identity);
@@ -456,6 +463,7 @@ impl Checker<'_, '_> {
                 self.generator_data = saved_data.clone();
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
+                self.local_runtime_origin_ids = saved_runtime_origins.clone();
                 self.inline_selection = Some((expr.hir_id, usize::MAX));
                 self.in_unselected_inline = true;
                 self.immutable.extend(pattern_binding_ids(pat));
@@ -486,6 +494,9 @@ impl Checker<'_, '_> {
                 self.generator_data = saved_data.clone();
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
+                self.local_runtime_origin_ids = saved_runtime_origins.clone();
+                let saved_delivery_ids: BTreeSet<_> =
+                    self.local_runtime_deliveries.keys().copied().collect();
                 self.inline_selection = saved_selection;
                 self.in_unselected_inline = saved_suppressed;
                 self.immutable.extend(pattern_binding_ids(pat));
@@ -605,6 +616,7 @@ impl Checker<'_, '_> {
                     expr.span,
                     body.span,
                     iteration_connections,
+                    &saved_delivery_ids,
                 )?);
             }
             iterations.push(n::Expr {
@@ -670,6 +682,7 @@ impl Checker<'_, '_> {
         self.context = saved_context;
         self.inline_selection = saved_selection;
         self.in_unselected_inline = saved_suppressed;
+        self.local_runtime_origin_ids = saved_runtime_origins;
         result
     }
 
@@ -684,6 +697,7 @@ impl Checker<'_, '_> {
         loop_span: Span,
         body_span: Span,
         connections: BTreeMap<n::LocalId, n::LocalId>,
+        previous_runtime_deliveries: &BTreeSet<nir::RuntimeId>,
     ) -> Result<n::Expr, Error> {
         let iteration = n::LocalId {
             owner: u32::MAX,
@@ -727,13 +741,35 @@ impl Checker<'_, '_> {
         };
         let mut expanded = self.expanded_loop(iteration_body, iteration, body_span)?;
         constants::charge_copy(&expanded, &mut self.required_steps, loop_span)?;
-        cmtt::freshen(
+        let renaming = cmtt::freshen_with_renaming(
             &mut expanded,
             connections,
             &mut self.next_temporary_binding,
             &mut self.expansion_sources,
             body_span,
         )?;
+        let new_deliveries: Vec<_> = self
+            .local_runtime_deliveries
+            .keys()
+            .copied()
+            .filter(|id| !previous_runtime_deliveries.contains(id))
+            .collect();
+        for rt_id in new_deliveries {
+            let Some(mut entry) = self.local_runtime_deliveries.get(&rt_id).cloned() else {
+                continue;
+            };
+            cmtt::freshen(
+                &mut entry.expr,
+                renaming.clone(),
+                &mut self.next_temporary_binding,
+                &mut self.expansion_sources,
+                body_span,
+            )?;
+            if let Some((ref mut binding, _)) = entry.checked_epoch {
+                *binding = *renaming.get(binding).unwrap_or(binding);
+            }
+            self.local_runtime_deliveries.insert(rt_id, entry);
+        }
         Ok(expanded)
     }
     /// Both the outer exit and each iteration use the caller's compilation

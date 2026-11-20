@@ -2478,7 +2478,7 @@ impl Checker<'_, '_> {
         Ok(id)
     }
 
-    fn default_runtime_argument(
+    pub(super) fn default_runtime_argument(
         &mut self,
         owner: OwnerId,
         param: DeclarationId,

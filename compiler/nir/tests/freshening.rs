@@ -216,4 +216,45 @@ fn pattern_bindings_and_refusals_preserve_the_existing_limits() {
             .unwrap_err()
             .contains("runtime-dependent quoted type")
     );
+
+    let runtime_ty = Term::Nominal {
+        declaration: nir::DeclarationId {
+            package: 1,
+            local: 7,
+        },
+        arguments: vec![Term::Runtime(nir::RuntimeId {
+            instance: 0,
+            local: 3,
+        })],
+    };
+    let mut with_runtime_dep = Expr {
+        kind: K::Let {
+            binding: id(4),
+            value: Box::new(Expr {
+                kind: K::Local(id(1)),
+                ty: runtime_ty.clone(),
+                source: site,
+            }),
+        },
+        ty: runtime_ty.clone(),
+        source: site,
+    };
+    let mut next = 100;
+    let mut sources = vec![];
+    let renaming = nir::freshening::expression_with_renaming(
+        &mut with_runtime_dep,
+        BTreeMap::from([(id(1), id(1))]),
+        &mut next,
+        &mut sources,
+        site,
+    )
+    .unwrap();
+    assert_eq!(with_runtime_dep.ty, runtime_ty);
+    let K::Let { binding, value } = &with_runtime_dep.kind else {
+        panic!()
+    };
+    assert_eq!(*binding, renaming[&id(4)]);
+    assert_ne!(*binding, id(4));
+    assert_eq!(value.ty, runtime_ty);
+    assert!(matches!(value.kind, K::Local(input) if input == id(1)));
 }

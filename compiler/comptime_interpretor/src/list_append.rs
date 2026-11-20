@@ -79,6 +79,7 @@ impl Interpreter<'_> {
                     .inspect_representation(
                         &vm.abstract_type_parameters,
                         &vm.abstract_value_parameters,
+                        vm.runtime_domains(),
                         fuel,
                     )
                     .map(|_| ())

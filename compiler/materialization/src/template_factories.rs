@@ -102,6 +102,12 @@ impl Builder<'_> {
         if !has_return {
             return Ok(false);
         }
+        if !function.env_parameters.is_empty() {
+            return Err(
+                "staged or inline functions with runtime environment parameters are not yet supported"
+                    .into(),
+            );
+        }
         // Captured/addressed result storage needs its own environment lowering;
         // never turn those uses into a differently typed hidden storage slot.
         if let Some(binding) = function.result_binding {

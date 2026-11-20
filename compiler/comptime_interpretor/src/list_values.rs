@@ -334,7 +334,12 @@ mod tests {
     ) -> Option<(usize, usize)> {
         let mut fuel = 1_000_000;
         let size = value
-            .inspect_representation(parameters, evidence, &mut fuel)
+            .inspect_representation(
+                parameters,
+                evidence,
+                &std::collections::BTreeMap::new(),
+                &mut fuel,
+            )
             .ok()?;
         Some((size.expanded, 1_000_000 - fuel))
     }

@@ -1070,12 +1070,19 @@ impl Checker<'_, '_> {
             let mut abstract_value_parameters = Vec::new();
             let visible = self.visible_comptime_parameters(expr.span)?;
             for id in visible {
-                let Some(domain) = self
-                    .trait_input_domain(id)
-                    .filter(|domain| Sort::of_comptime_domain(domain) == Sort::ComptimeValue)
-                else {
+                let Some(domain) = self.trait_input_domain(id) else {
                     continue;
                 };
+                if Sort::of_comptime_domain(&domain) == Sort::Runtime {
+                    if self.alias_substitution.get(&id).is_none() {
+                        let domain = self.substituted_trait_domain(&domain, expr.span)?;
+                        abstract_value_parameters.push((id, domain));
+                    }
+                    continue;
+                }
+                if Sort::of_comptime_domain(&domain) != Sort::ComptimeValue {
+                    continue;
+                }
                 // Generator clauses already have local identities. Reuse the
                 // live binding when capturing an invocation instead of
                 // treating its presence as evidence that a value was supplied.
@@ -1322,7 +1329,7 @@ impl Checker<'_, '_> {
                             sort: *sort,
                         });
                         scoped_arguments.push(symbol.clone());
-                        if *sort == Sort::ComptimeValue {
+                        if matches!(*sort, Sort::ComptimeValue | Sort::Runtime) {
                             abstract_value_parameters.push((
                                 declaration,
                                 inputs::copy(domain, &mut self.required_steps, expr.span)?,
@@ -1568,10 +1575,9 @@ impl Checker<'_, '_> {
                         Sort::Type => {
                             observed.types.insert(id);
                         }
-                        Sort::ComptimeValue => {
+                        Sort::ComptimeValue | Sort::Runtime => {
                             forwarded.insert(id);
                         }
-                        Sort::Runtime => {}
                     }
                 }
             }

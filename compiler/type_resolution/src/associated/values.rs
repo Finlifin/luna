@@ -165,7 +165,8 @@ impl<'world> World<'world> {
             .chain(interface.arguments.iter().cloned())
             .collect();
         charge_projection_substitution(&member.ty, &parameters, &inputs, &mut budget.steps)?;
-        let substitution = contract.input_substitution(&inputs, &[], &mut budget.steps)?;
+        let substitution =
+            contract.input_substitution(&inputs, self.context.scope(), &mut budget.steps)?;
         let member_type = substitution.instantiate_bounded(&member.ty, &mut budget.steps)?;
         if matches!(access, Access::TypeProjection)
             && member_type != Term::Primitive(Primitive::Type)

@@ -684,7 +684,11 @@ impl Solver<'_, '_> {
         let arguments: Vec<_> = std::iter::once(subject.clone())
             .chain(interface.arguments.iter().cloned())
             .collect();
-        let substitution = contract.input_substitution(&arguments, &[], &mut self.remaining)?;
+        let substitution = contract.input_substitution(
+            &arguments,
+            self.world.context.scope(),
+            &mut self.remaining,
+        )?;
         for parent in &contract.parents {
             let parent = substitution.instantiate_interface_bounded(parent, &mut self.remaining)?;
             // A comptime-only declaration makes the phase part of the given
@@ -733,7 +737,7 @@ impl Solver<'_, '_> {
             requirement,
             budget,
             &[],
-            &[],
+            self.world.context.scope(),
             &mut self.remaining,
         )
     }

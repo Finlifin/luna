@@ -29,10 +29,10 @@ fn show(value: u32) -> !std.io.IoErr void {
 
 `println`/`eprintln`/`print`/`eprint` 与泛型 `write_fmt<W :- ByteWriter>`、`format`、`format_into` 按格式写出文本与字段；其中 `println`/`eprintln` 末尾附加换行。
 当前实例按字节或字面片段顺序输出；写入失败立即返回，并保留已经输出的前缀。
-`format` 分配并构建拥有型 `std.string.String`，`format_into` 将格式化结果追加到既有 `*String`，两者均返回 `!std.mem.AllocErr`。
+`format` 分配并构建拥有型 `std.string.String<.A = A, .allocator = a>`（默认 `.A = DefaultAllocator, .allocator = DefaultAllocator.GLOBAL.ref`），`format_into` 将格式化结果追加到既有 `*String<.A = A, .allocator = a>`，两者均通过运行时环境参数交付分配器且返回 `!std.mem.AllocErr`。
 `print_value`/`println_value` 调用 builtin 的 runtime `Display.write(self, output)`，output 为泛型 writer 的借用。
 标准输出入口返回 `!std.io.IoErr`，使用后缀 `!` 传播；`write_fmt` 与 `Display` 保留实际 writer 的关联错误类型。
-协议与标量/`char`/`str` 实现在 builtin/protocols/formatting，`String` 实现在 `std.string_impl`，`std.fmt` 再导出同一 `Display`。
+协议与标量/`char`/`str` 实现在 builtin/protocols/formatting，`String<.A = A, .allocator = a>` 实现在 `std.string_impl`，`std.fmt` 再导出同一 `Display`。
 
 当前支持 bool、机器有符号/无符号整数（含 i128 最小值与 u128 最大值）、Unicode 标量 `char`、`str` 与拥有型 `std.string.String` 的格式化输出。没有借用开发用 S-expression 结果打印器。
 

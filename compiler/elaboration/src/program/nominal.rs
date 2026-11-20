@@ -326,7 +326,9 @@ impl Checker<'_, '_> {
             } else {
                 captures
             };
-            self.check_formation_application(owner, prepared.observations.into_formation(), span)?;
+            let formation = prepared.observations.into_formation();
+            let formation_deferred_empty = formation.deferred.is_empty();
+            self.check_formation_application(owner, formation, span)?;
             let alias_body = if let Some(alias) = alias {
                 Some(Box::new(self.planned_alias_body(
                     owner, alias, &bindings, &domains, span,
@@ -376,6 +378,26 @@ impl Checker<'_, '_> {
             if let Some(expected) = expected {
                 self.require_expression(&ty, expected, span)?;
             }
+            let direct_terms = (alias_body.is_none()
+                && preparations.is_empty()
+                && formation_deferred_empty
+                && !is_never(&ty))
+            .then(|| {
+                arguments
+                    .iter()
+                    .map(|argument| match argument {
+                        n::NormalFormArgument::Value(expr) => match &expr.kind {
+                            K::TypeValue(term) | K::ComptimeValue(term) => {
+                                self.copy_alias_type(term, span).map(Some)
+                            }
+                            _ => Ok(None),
+                        },
+                        _ => Ok(None),
+                    })
+                    .collect::<Result<Option<Vec<_>>, _>>()
+            })
+            .transpose()?
+            .flatten();
             let kind = if let Some(body) = alias_body {
                 K::CheckTypeAlias {
                     declaration: declaration(self.package, &self.package_identities, owner),
@@ -385,6 +407,11 @@ impl Checker<'_, '_> {
                     arguments,
                     body: Some(body),
                 }
+            } else if let Some(direct_terms) = direct_terms {
+                K::TypeValue(Term::Nominal {
+                    declaration: declaration(self.package, &self.package_identities, owner),
+                    arguments: direct_terms,
+                })
             } else {
                 K::NominalType {
                     preparations,

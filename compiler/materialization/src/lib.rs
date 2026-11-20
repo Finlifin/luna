@@ -131,6 +131,11 @@ struct Builder<'a> {
     frozen_methods: Vec<n::Expr>,
     callable_identities: Vec<iir::CallableIdentity>,
     type_cores: nir::TypeInterner,
+    active_caller_env: Option<(
+        Vec<n::RuntimeEnvParameter>,
+        BTreeMap<nir::RuntimeId, n::Expr>,
+    )>,
+    active_closure_scopes: Vec<BTreeSet<n::LocalId>>,
 }
 /// Bounded, transactional: failure returns no partially materialized world.
 pub fn dispatch_instances(
@@ -654,6 +659,17 @@ fn build(
         context.as_ref().map(|c| (c.types, c.assumptions)),
     )?;
     let mut input_fuel = construction_budget.steps;
+    let mut runtime_bindings = runtime_bindings;
+    let before_runtime_bindings = runtime_bindings.len();
+    runtime_bindings.extend(package.runtime_domains.keys().copied());
+    let added_runtime_bindings = runtime_bindings
+        .len()
+        .saturating_sub(before_runtime_bindings);
+    if added_runtime_bindings > 0 {
+        input_fuel = input_fuel
+            .checked_sub(added_runtime_bindings)
+            .ok_or("materialization runtime binding budget exhausted")?;
+    }
     let value_scope = input_admission::ValueScope::new(
         context.as_ref().map_or(&[], |c| c.value_parameters),
         &mut input_fuel,
@@ -717,6 +733,8 @@ fn build(
         frozen_methods: vec![],
         callable_identities: vec![],
         type_cores: nir::TypeInterner::default(),
+        active_caller_env: None,
+        active_closure_scopes: Vec::new(),
     };
     for ty in type_roots {
         let ty = builder.normalized_type(ty)?;
@@ -724,6 +742,9 @@ fn build(
     }
     if let Roots::Annotations(function) = roots {
         function.signature = builder.staging_type_view(&function.signature)?;
+        for env in &mut function.interface.env_parameters {
+            env.ty = builder.staging_type_view(&env.ty)?;
+        }
         for expression in std::iter::once(&mut function.body)
             .chain(
                 function
@@ -977,6 +998,15 @@ impl Builder<'_> {
             self.world
                 .instantiate_function(f, &arguments, &mut self.fuel)?
         };
+        if function.phase == n::FunctionPhase::Runtime {
+            let implicit = nir::program::implicit_runtime_env_parameters(
+                &self.package.runtime_domains,
+                &self.package.global_runtime_deliveries,
+                &arguments,
+                &function.interface.env_parameters,
+            )?;
+            function.interface.env_parameters.extend(implicit);
+        }
         if function.phase == n::FunctionPhase::Comptime
             && matches!(function.signature.callable_signature(), Term::Function { parameters, .. }
                 if parameters.iter().any(|parameter| parameter.sort != nir::Sort::Runtime))
@@ -1020,6 +1050,16 @@ impl Builder<'_> {
             &mut function,
             &mut self.fuel,
         )?;
+        let saved_caller_env = self.active_caller_env.take();
+        let saved_closure_scopes = std::mem::take(&mut self.active_closure_scopes);
+        self.active_caller_env = Some((function.interface.env_parameters.clone(), BTreeMap::new()));
+        for expression in function.runtime_deliveries.values_mut() {
+            self.normalize_expression(expression)?;
+        }
+        self.active_caller_env = Some((
+            function.interface.env_parameters.clone(),
+            function.runtime_deliveries.clone(),
+        ));
         self.normalize_expression(&mut function.body)?;
         for expression in function
             .interface
@@ -1036,9 +1076,47 @@ impl Builder<'_> {
         {
             self.normalize_expression(expression)?;
         }
-        for expression in function.runtime_deliveries.values_mut() {
-            self.normalize_expression(expression)?;
+        if function.phase == n::FunctionPhase::Runtime {
+            let caller_envs = &function.interface.env_parameters;
+            let caller_deliveries = &function.runtime_deliveries;
+            self.deliver_missing_call_env_arguments(
+                &mut function.body,
+                caller_envs,
+                caller_deliveries,
+                None,
+            )?;
+            for expression in function
+                .interface
+                .preconditions
+                .iter_mut()
+                .chain(&mut function.interface.postconditions)
+                .chain(
+                    function
+                        .interface
+                        .defaults
+                        .iter_mut()
+                        .map(|(_, expression)| expression),
+                )
+            {
+                self.deliver_missing_call_env_arguments(
+                    expression,
+                    caller_envs,
+                    caller_deliveries,
+                    None,
+                )?;
+            }
+            let deliveries_snapshot = caller_deliveries.clone();
+            for expression in function.runtime_deliveries.values_mut() {
+                self.deliver_missing_call_env_arguments(
+                    expression,
+                    caller_envs,
+                    &deliveries_snapshot,
+                    None,
+                )?;
+            }
         }
+        self.active_closure_scopes = saved_closure_scopes;
+        self.active_caller_env = saved_caller_env;
         function.type_parameters.clear();
         // Interface and body predicates may substitute the same staged
         // input expression. Each predicate executes at a distinct boundary,
@@ -1506,23 +1584,17 @@ impl Builder<'_> {
             dead_tails::prune(expression, &mut self.fuel)?;
             // Expose runtime template factories before collecting local target
             // choices. Their argument frames and effects remain runtime code.
-            let mut fuel = self.fuel;
-            let result = iir::visit::expression_mut_pruned(expression, &mut fuel, |expr, fuel| {
-                self.fuel = *fuel;
+            self.walk_pruned_tracking_closures(expression, &mut |this, expr| {
                 let factory = matches!(&expr.kind, K::Call { callee, .. }
                     if matches!(callee.ty.callable_signature(), Term::Function { result, .. }
                         if matches!(result.callable_signature(), Term::Function { parameters, .. }
                             if parameters.iter().any(|p| p.sort != nir::Sort::Runtime))));
-                let result = if factory {
-                    self.stage_direct_call(expr)
+                if factory {
+                    this.stage_direct_call(expr)
                 } else {
                     Ok(true)
-                };
-                *fuel = self.fuel;
-                result
-            });
-            self.fuel = fuel.min(self.fuel);
-            result?;
+                }
+            })?;
         }
         let mut fuel = self.fuel;
         let result = iir::visit::expression_mut(expression, &mut fuel, |expr, fuel| {
@@ -1663,11 +1735,18 @@ impl Builder<'_> {
             )?;
             template_factories::discard_selections(expression, &mut self.fuel)?;
             let mut generated = Vec::new();
+            let empty_deliveries = BTreeMap::new();
+            let (caller_envs, caller_deliveries) = match &self.active_caller_env {
+                Some((envs, deliveries)) => (envs.as_slice(), deliveries),
+                None => (&[][..], &empty_deliveries),
+            };
             self.expansion
                 .ok_or("IIR materialization lacks an expansion service")?
                 .quotes(
                     self.package,
                     expression,
+                    caller_envs,
+                    caller_deliveries,
                     &mut self.quote_cursor,
                     &mut self.quote_sources,
                     &mut generated,
@@ -1676,44 +1755,36 @@ impl Builder<'_> {
             self.register_quote_layouts(generated)?;
         }
         if self.instances.is_some() {
-            let mut fuel = self.fuel;
-            let result = iir::visit::expression_mut_pruned(expression, &mut fuel, |expr, fuel| {
-                self.fuel = *fuel;
-                let result = (|| {
-                    if let Some(plan) =
-                        iir::staging::preparation_with_layouts(self.package, expr, &mut self.fuel)?
-                    {
-                        let completed = self.invoke_staged_input(&plan.expression)?;
-                        plan.apply_with_layouts(self.package, expr, completed, &mut self.fuel)?;
-                    }
-                    let mut remaining = self.fuel;
-                    let completed = conditional_calls::complete_inputs(
-                        expr,
-                        self,
-                        &mut remaining,
-                        |this, input, fuel| {
-                            this.fuel = *fuel;
-                            let result = this.invoke_staged_input(input);
-                            *fuel = this.fuel;
-                            result
-                        },
-                    );
-                    self.fuel = remaining.min(self.fuel);
-                    completed?;
-                    Self::resolve_conditional_callable(
-                        expr,
-                        !self.active_staged_inlines.is_empty(),
-                        &mut self.quote_cursor,
-                        &mut self.quote_sources,
-                        &mut self.fuel,
-                    )?;
-                    self.stage_direct_call(expr)
-                })();
-                *fuel = self.fuel;
-                result
-            });
-            self.fuel = fuel.min(self.fuel);
-            result?;
+            self.walk_pruned_tracking_closures(expression, &mut |this, expr| {
+                if let Some(plan) =
+                    iir::staging::preparation_with_layouts(this.package, expr, &mut this.fuel)?
+                {
+                    let completed = this.invoke_staged_input(&plan.expression)?;
+                    plan.apply_with_layouts(this.package, expr, completed, &mut this.fuel)?;
+                }
+                let mut remaining = this.fuel;
+                let completed = conditional_calls::complete_inputs(
+                    expr,
+                    this,
+                    &mut remaining,
+                    |this, input, fuel| {
+                        this.fuel = *fuel;
+                        let result = this.invoke_staged_input(input);
+                        *fuel = this.fuel;
+                        result
+                    },
+                );
+                this.fuel = remaining.min(this.fuel);
+                completed?;
+                Self::resolve_conditional_callable(
+                    expr,
+                    !this.active_staged_inlines.is_empty(),
+                    &mut this.quote_cursor,
+                    &mut this.quote_sources,
+                    &mut this.fuel,
+                )?;
+                this.stage_direct_call(expr)
+            })?;
         }
         expression.rewrite_types(&mut |ty| {
             if ty.sort() == nir::Sort::Type {
@@ -1917,6 +1988,18 @@ impl Builder<'_> {
                         &selected.arguments,
                         &mut self.fuel,
                     )?;
+                    if bound.phase == n::FunctionPhase::Runtime {
+                        let implicit = nir::program::implicit_runtime_env_parameters(
+                            &self.package.runtime_domains,
+                            &self.package.global_runtime_deliveries,
+                            &selected.arguments,
+                            &bound.interface.env_parameters,
+                        )?;
+                        bound.interface.env_parameters.extend(implicit);
+                        for env in &mut bound.interface.env_parameters {
+                            env.ty = self.normalized_type(&env.ty)?;
+                        }
+                    }
                     bound.type_parameters.clear();
                     // Keep the TraitMethod callee until expansion has merged its
                     // interface contract and rebound the argument/default frame.
@@ -1934,7 +2017,7 @@ impl Builder<'_> {
             callee,
             arguments,
             parameter_bindings,
-            env_arguments,
+            ..
         } = &mut expression.kind
         {
             if let K::TraitMethod {
@@ -1949,12 +2032,6 @@ impl Builder<'_> {
                     || matches!(callee.ty.callable_signature(),Term::Function {parameters,..}
                         if parameters.iter().any(|p|p.sort!=nir::Sort::Runtime))
                 {
-                    if !env_arguments.is_empty() {
-                        return Err(
-                            "staged trait method calls with runtime environment arguments are not yet supported"
-                                .into(),
-                        );
-                    }
                     let instance = n::InterfaceInstance {
                         declaration: *interface,
                         arguments: interface_arguments.clone(),
@@ -2162,11 +2239,17 @@ impl Builder<'_> {
             let mut bound =
                 self.world
                     .instantiate_function(template, &arguments, &mut self.fuel)?;
-            if !bound.env_parameters.is_empty() {
-                return Err(
-                    "staged or inline functions with runtime environment parameters are not yet supported"
-                        .into(),
-                );
+            if bound.phase == n::FunctionPhase::Runtime {
+                let implicit = nir::program::implicit_runtime_env_parameters(
+                    &self.package.runtime_domains,
+                    &self.package.global_runtime_deliveries,
+                    &arguments,
+                    &bound.interface.env_parameters,
+                )?;
+                bound.interface.env_parameters.extend(implicit);
+                for env in &mut bound.interface.env_parameters {
+                    env.ty = self.normalized_type(&env.ty)?;
+                }
             }
             bound.type_parameters.clear();
             if let Some((requirements, capabilities, program)) = entry_contract {
@@ -2187,16 +2270,24 @@ impl Builder<'_> {
         let mut template = self
             .world
             .instantiate_function(template, &arguments, &mut self.fuel)?;
-        if !template.env_parameters.is_empty() {
-            return Err(
-                "staged functions with runtime environment parameters are not yet supported".into(),
-            );
-        }
         template.type_parameters.clear();
         if let Some((requirements, capabilities, program)) = entry_contract {
             Self::merge_entry_contract(&mut template, requirements, capabilities, program);
         }
         template.signature = self.staging_type_view(&template.signature)?;
+        if template.phase == n::FunctionPhase::Runtime {
+            let implicit = nir::program::implicit_runtime_env_parameters(
+                &self.package.runtime_domains,
+                &self.package.global_runtime_deliveries,
+                &arguments,
+                &template.interface.env_parameters,
+            )?;
+            template.interface.env_parameters.extend(implicit);
+            for env in &mut template.interface.env_parameters {
+                env.ty = self.staging_type_view(&env.ty)?;
+            }
+            self.deliver_staged_call_envs(expression, &template.interface.env_parameters)?;
+        }
         let mut fuel = self.fuel;
         let result = iir::staging::bind_call_with_layouts_and_type_views(
             self.package,
@@ -2221,6 +2312,27 @@ impl Builder<'_> {
         self.fuel = fuel.min(self.fuel);
         let (mut instance, call) = result?;
         *expression = call;
+        if instance.function.phase == n::FunctionPhase::Runtime {
+            let extra = nir::program::implicit_runtime_env_parameters(
+                &self.package.runtime_domains,
+                &self.package.global_runtime_deliveries,
+                &instance.key.arguments,
+                &instance.function.interface.env_parameters,
+            )?;
+            if !extra.is_empty() {
+                let mut normalized_extra = Vec::with_capacity(extra.len());
+                for mut env in extra {
+                    env.ty = self.normalized_type(&env.ty)?;
+                    normalized_extra.push(env);
+                }
+                self.deliver_call_env_slice(expression, &normalized_extra)?;
+                instance
+                    .function
+                    .interface
+                    .env_parameters
+                    .extend(normalized_extra);
+            }
+        }
         if matches!(instance.function.signature.callable_signature(), Term::Function { result, .. }
             if matches!(result.callable_signature(), Term::Function { parameters, .. }
                 if parameters.iter().any(|p| p.sort != nir::Sort::Runtime)))
@@ -2232,15 +2344,30 @@ impl Builder<'_> {
             .quote_templates
             .iter()
             .any(|template| template.declaration == declaration);
+        if !instance.function.env_parameters.is_empty() && quote {
+            return Err(
+                "staged quote functions with runtime environment parameters are not yet supported"
+                    .into(),
+            );
+        }
         if quote {
             self.check_expanded_requirements(&instance.function, "quote")?;
             let mut generated = Vec::new();
+            let empty_deliveries = BTreeMap::new();
+            let (caller_envs, caller_deliveries) = match &self.active_caller_env {
+                Some((envs, deliveries)) => (envs.as_slice(), deliveries),
+                None => (&[][..], &empty_deliveries),
+            };
+            let in_closure = !self.active_closure_scopes.is_empty();
             self.expansion
                 .ok_or("IIR materialization lacks an expansion service")?
                 .quote(
                     self.package,
                     &instance.function,
                     expression,
+                    caller_envs,
+                    caller_deliveries,
+                    in_closure,
                     &mut self.quote_cursor,
                     &mut self.quote_sources,
                     &mut generated,
@@ -2301,6 +2428,12 @@ impl Builder<'_> {
             return Ok(false);
         }
         let mut generated = Vec::new();
+        let empty_deliveries = BTreeMap::new();
+        let (caller_envs, caller_deliveries) = match &self.active_caller_env {
+            Some((envs, deliveries)) => (envs.as_slice(), deliveries),
+            None => (&[][..], &empty_deliveries),
+        };
+        let in_closure = !self.active_closure_scopes.is_empty();
         if !self
             .expansion
             .ok_or("IIR materialization lacks an expansion service")?
@@ -2308,6 +2441,9 @@ impl Builder<'_> {
                 self.package,
                 function,
                 expression,
+                caller_envs,
+                caller_deliveries,
+                in_closure,
                 &mut self.quote_cursor,
                 &mut self.quote_sources,
                 &mut generated,
@@ -2323,6 +2459,456 @@ impl Builder<'_> {
         self.active_staged_inlines.remove(&declaration);
         result?;
         Ok(true)
+    }
+
+    fn collect_pattern_binders(
+        pattern: &P,
+        target: &mut BTreeSet<n::LocalId>,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        let mut work = vec![pattern];
+        while let Some(current) = work.pop() {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("closure scope pattern budget exhausted")?;
+            match current {
+                P::Binding { binding, inner } | P::Observe { binding, inner } => {
+                    target.insert(*binding);
+                    work.push(inner);
+                }
+                P::Remap { pattern, bindings } => {
+                    for (_, to) in bindings {
+                        target.insert(*to);
+                    }
+                    work.push(pattern);
+                }
+                P::CodeEvidence { outputs } => {
+                    for (id, _) in outputs {
+                        target.insert(*id);
+                    }
+                }
+                P::OptionalPresent(inner)
+                | P::ErrorResult { inner, .. }
+                | P::Guard { pattern: inner, .. } => work.push(inner),
+                P::Then { first, next, .. } => {
+                    work.push(first);
+                    work.push(next);
+                }
+                P::NominalType { fields, .. }
+                | P::AnonymousRecord { fields, .. }
+                | P::Record { fields, .. }
+                | P::Tuple(fields)
+                | P::TypeTuple(fields)
+                | P::NormalForm {
+                    arguments: fields, ..
+                }
+                | P::Variant { fields, .. }
+                | P::Or(fields) => work.extend(fields.iter()),
+                P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_closure_allowed_bindings(
+        parameters: &[n::LocalId],
+        captures: &[n::Capture],
+        body: &n::Expr,
+        fuel: &mut usize,
+    ) -> Result<BTreeSet<n::LocalId>, String> {
+        let mut allowed: BTreeSet<n::LocalId> = parameters
+            .iter()
+            .copied()
+            .chain(captures.iter().map(|c| c.binding))
+            .collect();
+        nir::visit::expression_pruned(body, fuel, |expr, fuel| {
+            match &expr.kind {
+                K::Let { binding, .. } => {
+                    allowed.insert(*binding);
+                }
+                K::LetPattern { pattern, .. } => {
+                    Self::collect_pattern_binders(pattern, &mut allowed, fuel)?;
+                }
+                K::Match { arms, .. } => {
+                    for arm in arms {
+                        Self::collect_pattern_binders(&arm.pattern, &mut allowed, fuel)?;
+                    }
+                }
+                K::EffectHandle { handlers, .. } => {
+                    for handler in handlers {
+                        for arm in &handler.arms {
+                            Self::collect_pattern_binders(&arm.pattern, &mut allowed, fuel)?;
+                        }
+                    }
+                }
+                K::Closure { .. } => return Ok(false),
+                _ => {}
+            }
+            Ok(true)
+        })?;
+        Ok(allowed)
+    }
+
+    fn walk_pruned_tracking_closures<F>(
+        &mut self,
+        expression: &mut n::Expr,
+        action: &mut F,
+    ) -> Result<(), String>
+    where
+        F: FnMut(&mut Self, &mut n::Expr) -> Result<bool, String>,
+    {
+        let mut fuel = self.fuel;
+        let result = iir::visit::expression_mut_pruned(expression, &mut fuel, |expr, fuel| {
+            self.fuel = *fuel;
+            if let K::Closure {
+                parameters,
+                captures,
+                body,
+            } = &mut expr.kind
+            {
+                for capture in captures.iter_mut() {
+                    if let Some(value) = &mut capture.value {
+                        self.walk_pruned_tracking_closures(value, action)?;
+                    }
+                }
+                let allowed = Self::collect_closure_allowed_bindings(
+                    parameters,
+                    captures,
+                    body,
+                    &mut self.fuel,
+                )?;
+                self.active_closure_scopes.push(allowed);
+                let res =
+                    self.walk_pruned_tracking_closures(std::sync::Arc::make_mut(body), action);
+                self.active_closure_scopes.pop();
+                res?;
+                *fuel = self.fuel;
+                return Ok(false);
+            }
+            let cont = action(self, expr)?;
+            *fuel = self.fuel;
+            Ok(cont)
+        });
+        self.fuel = fuel.min(self.fuel);
+        result
+    }
+
+    fn inner_call_mut(expr: &mut n::Expr) -> Option<&mut n::Expr> {
+        if matches!(expr.kind, K::Call { .. }) {
+            return Some(expr);
+        }
+        match &mut expr.kind {
+            K::Block {
+                result: Some(inner),
+                ..
+            }
+            | K::CallPreparation {
+                result: Some(inner),
+                ..
+            } => Self::inner_call_mut(inner),
+            _ => None,
+        }
+    }
+
+    fn target_env_parameters(
+        &mut self,
+        callee: &n::Expr,
+    ) -> Result<Option<Vec<n::RuntimeEnvParameter>>, String> {
+        let (target_decl, target_args) = match &callee.kind {
+            K::Function(id) => (*id, vec![]),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => (*declaration, arguments.clone()),
+            K::TraitMethod {
+                interface,
+                interface_arguments,
+                subject,
+                member,
+                method_arguments,
+            } => {
+                let instance = n::InterfaceInstance {
+                    declaration: *interface,
+                    arguments: interface_arguments.clone(),
+                };
+                let slot = self.interface(instance, subject.clone())?;
+                let instance = self.output[slot].interface_instance();
+                let subject = self.output[slot].subject.clone();
+                let method =
+                    self.specialize_method(slot, &instance, &subject, *member, method_arguments)?;
+                (method.body, method.arguments)
+            }
+            _ => return Ok(None),
+        };
+        if let Some(staged) = self
+            .staged_functions
+            .get(&(target_decl, target_args.clone()))
+        {
+            if staged.phase != n::FunctionPhase::Runtime {
+                return Ok(None);
+            }
+            return Ok(Some(staged.interface.env_parameters.clone()));
+        }
+        let target_fn = self
+            .world
+            .function_declaration(target_decl)
+            .or_else(|| self.generated_functions.get(&target_decl));
+        let Some(target_fn) = target_fn else {
+            return Ok(None);
+        };
+        if target_fn.phase != n::FunctionPhase::Runtime {
+            return Ok(None);
+        }
+        let domains = self
+            .world
+            .input_domains(&target_fn.type_parameters, &mut self.fuel)?;
+        let frame =
+            [
+                nir::function_parameters::ordinary_frame(&target_fn.signature, &mut self.fuel)
+                    .map_err(|e| e.to_string())?,
+            ];
+        let substitution = nir::DeclarationSubstitution::bounded_domains(
+            &target_fn.type_parameters,
+            &domains,
+            &target_args,
+            nir::DeclarationInputScope::ClosedInBody(&frame),
+            &mut self.fuel,
+        )
+        .map_err(|e| e.to_string())?;
+        let mut envs = Vec::with_capacity(target_fn.interface.env_parameters.len());
+        for env in &target_fn.interface.env_parameters {
+            let substituted = substitution
+                .instantiate_bounded(
+                    &Term::Rigid {
+                        declaration: env.declaration,
+                        sort: nir::Sort::Runtime,
+                    },
+                    &mut self.fuel,
+                )
+                .map_err(|e| e.to_string())?;
+            let (declaration, runtime_id) = match substituted {
+                Term::Runtime(id) => (env.declaration, Some(id)),
+                Term::Rigid {
+                    declaration: next,
+                    sort: nir::Sort::Runtime,
+                } => (next, env.runtime_id),
+                _ => (env.declaration, env.runtime_id),
+            };
+            let ty = substitution
+                .instantiate_bounded(&env.ty, &mut self.fuel)
+                .map_err(|e| e.to_string())?;
+            envs.push(n::RuntimeEnvParameter {
+                declaration,
+                runtime_id,
+                binding: env.binding,
+                ty,
+            });
+        }
+        let implicit = nir::program::implicit_runtime_env_parameters(
+            &self.package.runtime_domains,
+            &self.package.global_runtime_deliveries,
+            &target_args,
+            &envs,
+        )?;
+        envs.extend(implicit);
+        for env in &mut envs {
+            env.ty = self.normalized_type(&env.ty)?;
+        }
+        Ok(Some(envs))
+    }
+
+    fn deliver_env_requirement(
+        &mut self,
+        req: &n::RuntimeEnvParameter,
+        source: n::SourceRange,
+        caller_env_parameters: &[n::RuntimeEnvParameter],
+        caller_runtime_deliveries: &BTreeMap<nir::RuntimeId, n::Expr>,
+        closure_allowed: Option<&BTreeSet<n::LocalId>>,
+    ) -> Result<n::Expr, String> {
+        let mut delivered = if let Some(ep) = caller_env_parameters.iter().find(|ep| {
+            let matches_id = match (req.runtime_id, ep.runtime_id) {
+                (Some(req_id), Some(ep_id)) => req_id == ep_id,
+                (None, _) => ep.declaration == req.declaration,
+                (Some(_), None) => false,
+            };
+            matches_id && closure_allowed.is_none_or(|allowed| allowed.contains(&ep.binding))
+        }) {
+            n::Expr {
+                source,
+                ty: ep.ty.clone(),
+                kind: K::Local(ep.binding),
+            }
+        } else if let Some(rt_id) = req.runtime_id {
+            if let Some(expr) = caller_runtime_deliveries.get(&rt_id)
+                && {
+                    let free = nir::free_bindings::collect(expr, &mut self.fuel)
+                        .map_err(|e| e.to_string())?;
+                    closure_allowed.is_none_or(|allowed| free.iter().all(|b| allowed.contains(b)))
+                }
+            {
+                let mut expr = expr.clone();
+                expr.source = source;
+                expr
+            } else if let Some(expr) = self
+                .global_runtime_deliveries
+                .get(&rt_id)
+                .or_else(|| self.package.global_runtime_deliveries.get(&rt_id))
+            {
+                let mut expr = expr.clone();
+                expr.source = source;
+                expr
+            } else {
+                return Err(
+                    "materialized call cannot deliver runtime environment parameter".into(),
+                );
+            }
+        } else {
+            return Err("materialized call cannot deliver runtime environment parameter".into());
+        };
+        delivered.ty = self.normalized_type(&delivered.ty)?;
+        let expected_ty = self.normalized_type(&req.ty)?;
+        if delivered.ty != expected_ty {
+            return Err("materialized call runtime environment type mismatch".into());
+        }
+        Ok(delivered)
+    }
+
+    fn deliver_missing_call_env_arguments(
+        &mut self,
+        expr: &mut n::Expr,
+        caller_env_parameters: &[n::RuntimeEnvParameter],
+        caller_runtime_deliveries: &BTreeMap<nir::RuntimeId, n::Expr>,
+        closure_allowed: Option<&BTreeSet<n::LocalId>>,
+    ) -> Result<(), String> {
+        let mut fuel = self.fuel;
+        let result = iir::visit::expression_mut_pruned(expr, &mut fuel, |node, fuel| {
+            self.fuel = *fuel;
+            if let K::Closure {
+                parameters,
+                captures,
+                body,
+            } = &mut node.kind
+            {
+                for capture in captures.iter_mut() {
+                    if let Some(value) = &mut capture.value {
+                        self.deliver_missing_call_env_arguments(
+                            value,
+                            caller_env_parameters,
+                            caller_runtime_deliveries,
+                            closure_allowed,
+                        )?;
+                    }
+                }
+                let allowed = Self::collect_closure_allowed_bindings(
+                    parameters,
+                    captures,
+                    body,
+                    &mut self.fuel,
+                )?;
+                self.deliver_missing_call_env_arguments(
+                    std::sync::Arc::make_mut(body),
+                    caller_env_parameters,
+                    caller_runtime_deliveries,
+                    Some(&allowed),
+                )?;
+                *fuel = self.fuel;
+                return Ok(false);
+            }
+            let call_info = if let K::Call {
+                callee,
+                env_arguments,
+                ..
+            } = &node.kind
+            {
+                self.target_env_parameters(callee)?
+                    .map(|envs| (envs, env_arguments.len(), callee.source))
+            } else {
+                None
+            };
+            if let Some((target_envs, existing_len, call_source)) = call_info {
+                if existing_len > target_envs.len() {
+                    return Err("materialized call has excess runtime environment arguments".into());
+                }
+                if existing_len < target_envs.len() {
+                    let mut extra = Vec::with_capacity(target_envs.len() - existing_len);
+                    for req in &target_envs[existing_len..] {
+                        extra.push(self.deliver_env_requirement(
+                            req,
+                            call_source,
+                            caller_env_parameters,
+                            caller_runtime_deliveries,
+                            closure_allowed,
+                        )?);
+                    }
+                    if let K::Call { env_arguments, .. } = &mut node.kind {
+                        env_arguments.extend(extra);
+                    }
+                }
+            }
+            *fuel = self.fuel;
+            Ok(true)
+        });
+        self.fuel = fuel.min(self.fuel);
+        result
+    }
+
+    fn deliver_call_env_slice(
+        &mut self,
+        call: &mut n::Expr,
+        reqs: &[n::RuntimeEnvParameter],
+    ) -> Result<(), String> {
+        if reqs.is_empty() {
+            return Ok(());
+        }
+        let call_source = match Self::inner_call_mut(call) {
+            Some(inner) => match &inner.kind {
+                K::Call { callee, .. } => callee.source,
+                _ => unreachable!(),
+            },
+            None => {
+                return Err("staged call result lacks a call node for runtime environments".into());
+            }
+        };
+        let active_env = self.active_caller_env.clone();
+        let (caller_envs, caller_deliveries) = match &active_env {
+            Some((envs, deliveries)) => (envs.as_slice(), deliveries),
+            None => (&[][..], &BTreeMap::new()),
+        };
+        let closure_allowed = self.active_closure_scopes.last().cloned();
+        let mut delivered = Vec::with_capacity(reqs.len());
+        for req in reqs {
+            delivered.push(self.deliver_env_requirement(
+                req,
+                call_source,
+                caller_envs,
+                caller_deliveries,
+                closure_allowed.as_ref(),
+            )?);
+        }
+        let inner = Self::inner_call_mut(call)
+            .ok_or("staged call result lacks a call node for runtime environments")?;
+        if let K::Call { env_arguments, .. } = &mut inner.kind {
+            env_arguments.extend(delivered);
+        }
+        Ok(())
+    }
+
+    fn deliver_staged_call_envs(
+        &mut self,
+        call: &mut n::Expr,
+        env_params: &[n::RuntimeEnvParameter],
+    ) -> Result<(), String> {
+        let existing_len = match Self::inner_call_mut(call) {
+            Some(inner) => match &inner.kind {
+                K::Call { env_arguments, .. } => env_arguments.len(),
+                _ => unreachable!(),
+            },
+            None => return Ok(()),
+        };
+        if existing_len < env_params.len() {
+            self.deliver_call_env_slice(call, &env_params[existing_len..])?;
+        }
+        Ok(())
     }
 
     fn normalized_capability(

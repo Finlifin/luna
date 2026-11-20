@@ -881,7 +881,7 @@ impl Checker<'_, '_> {
             };
             for (parameter, argument) in parameters.into_iter().zip(arguments) {
                 match argument.kind {
-                    K::TypeValue(ty) => {
+                    K::TypeValue(ty) | K::ComptimeValue(ty) => {
                         self.alias_substitution
                             .insert(parameter, std::sync::Arc::new(ty));
                         self.alias_value_bindings.remove(&parameter);
@@ -1023,19 +1023,29 @@ impl Checker<'_, '_> {
                 _ => break,
             };
         }
-        if let K::NominalType {
-            arguments: inputs, ..
-        } = &root.kind
-        {
-            for (index, input) in inputs.iter().enumerate() {
-                if let n::NormalFormArgument::Value(n::Expr {
-                    kind: K::TypeValue(ty),
-                    ..
-                }) = input
-                {
+        match &root.kind {
+            K::NominalType {
+                arguments: inputs, ..
+            } => {
+                for (index, input) in inputs.iter().enumerate() {
+                    if let n::NormalFormArgument::Value(n::Expr {
+                        kind: K::TypeValue(ty) | K::ComptimeValue(ty),
+                        ..
+                    }) = input
+                    {
+                        known.insert(index, self.copy_alias_type(ty, span)?);
+                    }
+                }
+            }
+            K::TypeValue(Term::Nominal {
+                declaration: nominal_id,
+                arguments: inputs,
+            }) if *nominal_id == parent => {
+                for (index, ty) in inputs.iter().enumerate() {
                     known.insert(index, self.copy_alias_type(ty, span)?);
                 }
             }
+            _ => {}
         }
         let mut parameter_ids = self.type_parameters[&owner].clone();
         parameter_ids.extend(self.nominal_captures(owner, span)?);
@@ -1055,13 +1065,15 @@ impl Checker<'_, '_> {
                 self.instantiate_trait_domain(&domain, &known_binders, &known_types, span)?;
             let binding = self.spread_binding(span)?;
             self.locals.insert(binding, domain.clone());
+            let kind = match known.remove(&index) {
+                Some(value) if domain == p(P::Type) => K::TypeValue(value),
+                Some(value) => K::ComptimeValue(value),
+                None => K::Local(binding),
+            };
             arguments.push(n::Expr {
                 source: source(span),
                 ty: domain,
-                kind: known
-                    .remove(&index)
-                    .map(K::TypeValue)
-                    .unwrap_or(K::Local(binding)),
+                kind,
             });
             fields.push(n::Pattern::Binding {
                 binding,

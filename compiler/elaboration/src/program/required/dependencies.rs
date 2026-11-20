@@ -306,10 +306,9 @@ impl ObservedInputs {
                 Sort::Type => {
                     self.types.insert(id);
                 }
-                Sort::ComptimeValue => {
+                Sort::ComptimeValue | Sort::Runtime => {
                     self.values.insert(id);
                 }
-                Sort::Runtime => {}
             }
         }
         Ok(())

@@ -32,11 +32,46 @@ impl Builder<'_> {
                 if parameters.iter().any(|p| p.sort != nir::Sort::Runtime)
         );
         self.queue.push_back(Task::Type(signature));
+        let mut explicit_envs = Vec::with_capacity(function.env_parameters.len());
         for env in &function.env_parameters {
+            let substituted = projection
+                .instantiate_bounded(
+                    &Term::Rigid {
+                        declaration: env.declaration,
+                        sort: nir::Sort::Runtime,
+                    },
+                    &mut self.fuel,
+                )
+                .map_err(|e| e.to_string())?;
+            let (declaration, runtime_id) = match substituted {
+                Term::Runtime(id) => (env.declaration, Some(id)),
+                Term::Rigid {
+                    declaration: next,
+                    sort: nir::Sort::Runtime,
+                } => (next, env.runtime_id),
+                _ => (env.declaration, env.runtime_id),
+            };
             let ty = projection
                 .instantiate_bounded(&env.ty, &mut self.fuel)
                 .map_err(|e| e.to_string())?;
-            self.queue.push_back(Task::Type(ty));
+            self.queue.push_back(Task::Type(ty.clone()));
+            explicit_envs.push(n::RuntimeEnvParameter {
+                declaration,
+                runtime_id,
+                binding: env.binding,
+                ty,
+            });
+        }
+        if function.phase == n::FunctionPhase::Runtime {
+            let implicit = nir::program::implicit_runtime_env_parameters(
+                &self.package.runtime_domains,
+                &self.package.global_runtime_deliveries,
+                arguments,
+                &explicit_envs,
+            )?;
+            for env in implicit {
+                self.queue.push_back(Task::Type(env.ty));
+            }
         }
         if retained {
             // Ordinary staged inputs defer dependency selection until invocation.

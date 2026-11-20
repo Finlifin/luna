@@ -16,18 +16,20 @@ pub struct ImmutableSize {
 
 impl Value {
     pub fn inspect_immutable(&self, fuel: &mut usize) -> Result<ImmutableSize, ErrorKind> {
-        self.inspect_representation(&BTreeSet::new(), &BTreeMap::new(), fuel)
+        self.inspect_representation(&BTreeSet::new(), &BTreeMap::new(), &BTreeMap::new(), fuel)
     }
 
     pub(super) fn inspect_representation(
         &self,
         parameters: &BTreeSet<DeclarationId>,
         value_parameters: &BTreeMap<DeclarationId, Term>,
+        runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
         fuel: &mut usize,
     ) -> Result<ImmutableSize, ErrorKind> {
         let mut walk = Inspection {
             parameters,
             value_parameters,
+            runtime_domains,
             fuel,
             expanded: 0,
             shared: 0,
@@ -55,7 +57,7 @@ impl Value {
     pub(super) fn scoped_copy_work(&self, parameters: &BTreeSet<DeclarationId>) -> Option<usize> {
         let mut fuel = usize::MAX;
         Some(
-            self.inspect_representation(parameters, &BTreeMap::new(), &mut fuel)
+            self.inspect_representation(parameters, &BTreeMap::new(), &BTreeMap::new(), &mut fuel)
                 .ok()?
                 .expanded,
         )
@@ -65,6 +67,7 @@ impl Value {
 struct Inspection<'a> {
     parameters: &'a BTreeSet<DeclarationId>,
     value_parameters: &'a BTreeMap<DeclarationId, Term>,
+    runtime_domains: &'a BTreeMap<nir::RuntimeId, Term>,
     fuel: &'a mut usize,
     expanded: usize,
     shared: usize,
@@ -93,6 +96,7 @@ impl Inspection<'_> {
             term,
             self.parameters,
             self.value_parameters,
+            self.runtime_domains,
             self.fuel,
         )?;
         self.include(size)
@@ -148,7 +152,9 @@ impl Inspection<'_> {
                             uniform_scalar = None;
                         }
                     }
-                    if (self.parameters.is_empty() && self.value_parameters.is_empty())
+                    if (self.parameters.is_empty()
+                        && self.value_parameters.is_empty()
+                        && self.runtime_domains.is_empty())
                         || values.is_empty()
                         || uniform_scalar.is_some()
                     {

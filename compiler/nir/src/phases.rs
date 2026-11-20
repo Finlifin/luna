@@ -293,6 +293,7 @@ impl<'a> PhaseContext<'a> {
                         &function.parameters,
                         &function.type_parameters,
                     );
+                    delivery_program.parts.env_parameters = &function.env_parameters;
                     delivery_program.parts.is_unsafe = function.is_unsafe;
                     self.inspect(delivery_program, fuel)?;
                 }

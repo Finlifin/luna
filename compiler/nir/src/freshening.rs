@@ -15,13 +15,27 @@ pub fn expression(
     sources: &mut Vec<n::ExpansionSource>,
     span: n::SourceRange,
 ) -> Result<(), String> {
-    body.rewrite_with(&mut Renamer {
+    expression_with_renaming(body, connections, next, sources, span).map(|_| ())
+}
+
+/// Mutate a private expansion candidate and return the complete local-id
+/// renaming map accumulated during freshening.
+pub fn expression_with_renaming(
+    body: &mut n::Expr,
+    connections: BTreeMap<n::LocalId, n::LocalId>,
+    next: &mut u32,
+    sources: &mut Vec<n::ExpansionSource>,
+    span: n::SourceRange,
+) -> Result<BTreeMap<n::LocalId, n::LocalId>, String> {
+    let mut renamer = Renamer {
         bindings: connections,
         next,
         sources,
         locations: BTreeMap::new(),
         span,
-    })
+    };
+    body.rewrite_with(&mut renamer)?;
+    Ok(renamer.bindings)
 }
 
 struct Renamer<'a> {
@@ -63,7 +77,7 @@ impl n::Rewriter for Renamer<'_> {
             .map_err(|failure| failure.to_string())?
             .values()
             .any(|sort| *sort == Sort::Runtime);
-        if !ty.runtime_dependencies().is_empty() || runtime_slots {
+        if runtime_slots {
             return Err("runtime-dependent quoted type substitution is not yet implemented".into());
         }
         Ok(())

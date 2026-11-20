@@ -101,7 +101,10 @@ fn at(source: n::SourceRange) -> Span {
 struct Expansion<'a> {
     selection: Option<&'a n::Package>,
     parameter_domains: Option<BTreeMap<DeclarationId, Term>>,
-    templates: BTreeMap<DeclarationId, &'a n::Function>,
+    templates: &'a BTreeMap<DeclarationId, &'a n::Function>,
+    caller_env_parameters: &'a [n::RuntimeEnvParameter],
+    caller_runtime_deliveries: &'a BTreeMap<nir::RuntimeId, n::Expr>,
+    in_closure: bool,
     next: &'a mut u32,
     fuel: &'a mut u64,
     sources: &'a mut Vec<n::ExpansionSource>,
@@ -574,8 +577,24 @@ impl Expansion<'_> {
         *self.fuel = fuel as u64;
         let mut template = template
             .map_err(|failure| error(span, format!("quote fn instantiation: {failure}")))?;
+        if !template.runtime_deliveries.is_empty() {
+            return Err(error(
+                span,
+                "inline expansion does not support callee-local runtime deliveries",
+            ));
+        }
         self.merge_entry_contract(expression, &mut template)?;
         if let Some(package) = self.selection {
+            if template.phase == n::FunctionPhase::Runtime {
+                let implicit = nir::program::implicit_runtime_env_parameters(
+                    &package.runtime_domains,
+                    &package.global_runtime_deliveries,
+                    &types,
+                    &template.interface.env_parameters,
+                )
+                .map_err(|failure| error(span, failure))?;
+                template.interface.env_parameters.extend(implicit);
+            }
             let mut fuel = usize::try_from(*self.fuel).unwrap_or(usize::MAX);
             let normalized = crate::materialization::normalize_inline_annotations(
                 package,
@@ -600,12 +619,51 @@ impl Expansion<'_> {
         else {
             unreachable!()
         };
-        if !env_arguments.is_empty() {
+        let resolved_env_exprs = if env_arguments.len() <= template.interface.env_parameters.len() {
+            let mut delivered_envs = std::mem::take(env_arguments);
+            for env in &template.interface.env_parameters[delivered_envs.len()..] {
+                let delivered = if !self.in_closure
+                    && let Some(ep) = self.caller_env_parameters.iter().find(|ep| {
+                        match (env.runtime_id, ep.runtime_id) {
+                            (Some(req), Some(avail)) => req == avail,
+                            (None, _) => ep.declaration == env.declaration,
+                            (Some(_), None) => false,
+                        }
+                    }) {
+                    self.node(ep.ty.clone(), K::Local(ep.binding), expression.source)?
+                } else if !self.in_closure
+                    && let Some(rt_id) = env.runtime_id
+                    && let Some(expr) = self.caller_runtime_deliveries.get(&rt_id)
+                {
+                    self.charge(expr, span)?;
+                    expr.clone()
+                } else if let Some(package) = self.selection
+                    && let Some(rt_id) = env.runtime_id
+                    && let Some(expr) = package.global_runtime_deliveries.get(&rt_id)
+                {
+                    self.charge(expr, span)?;
+                    expr.clone()
+                } else {
+                    return Err(error(
+                        span,
+                        "inline expansion cannot deliver runtime environment parameter",
+                    ));
+                };
+                if delivered.ty != env.ty {
+                    return Err(error(
+                        span,
+                        "inline expansion runtime environment type mismatch",
+                    ));
+                }
+                delivered_envs.push(delivered);
+            }
+            delivered_envs
+        } else {
             return Err(error(
                 span,
-                "quote fn expansion cannot pass runtime environment arguments",
+                "inline expansion runtime environment argument count mismatch",
             ));
-        }
+        };
         if arguments.len() != template.parameters.len() {
             return Err(error(
                 span,
@@ -661,6 +719,27 @@ impl Expansion<'_> {
                 source,
             )?);
         }
+        let mut prepared_envs = Vec::with_capacity(resolved_env_exprs.len());
+        for (env, env_expr) in template
+            .interface
+            .env_parameters
+            .iter()
+            .zip(resolved_env_exprs)
+        {
+            let prepared_env = self.fresh(span)?;
+            let body_env = self.fresh(span)?;
+            let env_source = env_expr.source;
+            connections.insert(env.binding, body_env);
+            statements.push(self.node(
+                p(P::Void),
+                K::Let {
+                    binding: prepared_env,
+                    value: Box::new(env_expr),
+                },
+                env_source,
+            )?);
+            prepared_envs.push((prepared_env, body_env, env.ty.clone(), env_source));
+        }
         // Ordinary argument evaluation shares the caller's temporary lifetime.
         // Entry snapshots/contracts and the callee body have their own lexical
         // scopes, but cannot end argument projection temporaries early.
@@ -680,6 +759,17 @@ impl Expansion<'_> {
                     value: Box::new(value),
                 },
                 source,
+            )?);
+        }
+        for (prepared_env, body_env, env_ty, env_source) in prepared_envs {
+            let value = self.node(env_ty, K::Local(prepared_env), env_source)?;
+            statements.push(self.node(
+                p(P::Void),
+                K::Let {
+                    binding: body_env,
+                    value: Box::new(value),
+                },
+                env_source,
             )?);
         }
         let Term::Function { parameters, .. } = template.signature.callable_signature() else {
@@ -873,8 +963,11 @@ impl n::Rewriter for Expansion<'_> {
                 }
             }
             let previous = self.runtime;
+            let previous_closure = self.in_closure;
             self.runtime = !expr.ty.is_comptime_callable();
+            self.in_closure = true;
             let checked = Arc::make_mut(body).rewrite_with(self);
+            self.in_closure = previous_closure;
             self.runtime = previous;
             checked?;
             return Ok(false);
@@ -1141,45 +1234,55 @@ pub(in crate::program) fn expand_retained_quote_functions(
     } else {
         None
     };
+    let mut parameter_domains = Some(domains);
     let templates = output
         .quote_templates
         .iter()
         .map(|template| (template.declaration, template))
         .collect();
-    let mut expansion = Expansion {
-        parameter_domains: Some(domains),
-        selection: selection.as_ref(),
-        templates,
-        next,
-        fuel,
-        sources: &mut output.expansion_sources,
-        enums: &mut output.enums,
-        internal_packets: &mut output.internal_return_packets,
-        empty_replacements: &mut output.internal_return_empty_replacements,
-        depth: 0,
-        active: Vec::new(),
-        runtime: true,
-    };
-    let result = (|| {
-        for function in &mut output.functions {
-            expansion.runtime = function.phase == n::FunctionPhase::Runtime;
-            expansion.charge(&function.body, at(function.body.source))?;
-            function.body.rewrite_with(&mut expansion)?;
-            for value in function
-                .interface
-                .defaults
-                .iter_mut()
-                .map(|(_, value)| value)
-                .chain(function.interface.preconditions.iter_mut())
-                .chain(function.interface.postconditions.iter_mut())
-            {
-                value.rewrite_with(&mut expansion)?;
-            }
+    let n::Package {
+        ref mut functions,
+        ref mut expansion_sources,
+        ref mut enums,
+        ref mut internal_return_packets,
+        ref mut internal_return_empty_replacements,
+        ref mut quote_identity_cursor,
+        ..
+    } = *output;
+    for function in functions {
+        let mut expansion = Expansion {
+            parameter_domains: parameter_domains.take(),
+            selection: selection.as_ref(),
+            templates: &templates,
+            caller_env_parameters: &function.interface.env_parameters,
+            caller_runtime_deliveries: &function.runtime_deliveries,
+            in_closure: false,
+            next,
+            fuel,
+            sources: expansion_sources,
+            enums,
+            internal_packets: internal_return_packets,
+            empty_replacements: internal_return_empty_replacements,
+            depth: 0,
+            active: Vec::new(),
+            runtime: function.phase == n::FunctionPhase::Runtime,
+        };
+        expansion.charge(&function.body, at(function.body.source))?;
+        function.body.rewrite_with(&mut expansion)?;
+        for value in function
+            .interface
+            .defaults
+            .iter_mut()
+            .map(|(_, value)| value)
+            .chain(function.interface.preconditions.iter_mut())
+            .chain(function.interface.postconditions.iter_mut())
+        {
+            value.rewrite_with(&mut expansion)?;
         }
-        Ok(())
-    })();
-    output.quote_identity_cursor = *expansion.next;
-    result
+        parameter_domains = expansion.parameter_domains;
+    }
+    *quote_identity_cursor = *next;
+    Ok(())
 }
 
 /// Materialization uses the same hygiene and return lowering after substituting
@@ -1187,6 +1290,8 @@ pub(in crate::program) fn expand_retained_quote_functions(
 pub(crate) fn expand_materialized_quotes(
     package: &n::Package,
     expression: &mut n::Expr,
+    caller_env_parameters: &[n::RuntimeEnvParameter],
+    caller_runtime_deliveries: &BTreeMap<nir::RuntimeId, n::Expr>,
     next: &mut u32,
     sources: &mut Vec<n::ExpansionSource>,
     enums: &mut Vec<n::Enum>,
@@ -1209,7 +1314,10 @@ pub(crate) fn expand_materialized_quotes(
     let mut expansion = Expansion {
         parameter_domains: None,
         selection: Some(package),
-        templates,
+        templates: &templates,
+        caller_env_parameters,
+        caller_runtime_deliveries,
+        in_closure: false,
         next,
         fuel: &mut remaining,
         sources,
@@ -1234,6 +1342,9 @@ pub(crate) fn expand_bound_quote(
     package: &n::Package,
     template: &n::Function,
     expression: &mut n::Expr,
+    caller_env_parameters: &[n::RuntimeEnvParameter],
+    caller_runtime_deliveries: &BTreeMap<nir::RuntimeId, n::Expr>,
+    in_closure: bool,
     next: &mut u32,
     sources: &mut Vec<n::ExpansionSource>,
     enums: &mut Vec<n::Enum>,
@@ -1253,7 +1364,10 @@ pub(crate) fn expand_bound_quote(
     let mut expansion = Expansion {
         parameter_domains: None,
         selection: Some(package),
-        templates,
+        templates: &templates,
+        caller_env_parameters,
+        caller_runtime_deliveries,
+        in_closure,
         next,
         fuel: &mut remaining,
         sources,
@@ -1278,6 +1392,9 @@ pub(crate) fn inline_template(
     template: &n::Function,
     expression: &mut n::Expr,
     types: Vec<Term>,
+    caller_env_parameters: &[n::RuntimeEnvParameter],
+    caller_runtime_deliveries: &BTreeMap<nir::RuntimeId, n::Expr>,
+    in_closure: bool,
     next: &mut u32,
     sources: &mut Vec<n::ExpansionSource>,
     enums: &mut Vec<n::Enum>,
@@ -1286,10 +1403,14 @@ pub(crate) fn inline_template(
     fuel: &mut usize,
 ) -> Result<(), String> {
     let mut remaining = *fuel as u64;
+    let templates = BTreeMap::new();
     let mut expansion = Expansion {
         parameter_domains: None,
         selection,
-        templates: BTreeMap::new(),
+        templates: &templates,
+        caller_env_parameters,
+        caller_runtime_deliveries,
+        in_closure,
         next,
         fuel: &mut remaining,
         sources,

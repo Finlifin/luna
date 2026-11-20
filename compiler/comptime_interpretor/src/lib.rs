@@ -388,7 +388,15 @@ impl Value {
         budget: &mut comptime_runtime::Budget,
         parameters: &BTreeSet<DeclarationId>,
     ) -> Result<Term, ErrorKind> {
-        self.into_scoped_term(budget, parameters, &BTreeMap::new(), true)
+        static EMPTY_DOMAINS: std::sync::OnceLock<BTreeMap<nir::RuntimeId, Term>> =
+            std::sync::OnceLock::new();
+        self.into_scoped_term(
+            budget,
+            parameters,
+            &BTreeMap::new(),
+            EMPTY_DOMAINS.get_or_init(BTreeMap::new),
+            true,
+        )
     }
     /// Validate immutable callable declaration inputs for capture snapshots.
     /// This checks data shape only; the receiving VM still checks invocation authority.
@@ -421,7 +429,15 @@ impl Value {
         budget: &mut comptime_runtime::Budget,
         parameters: &BTreeSet<DeclarationId>,
     ) -> Result<Term, ErrorKind> {
-        self.into_scoped_term(budget, parameters, &BTreeMap::new(), false)
+        static EMPTY_DOMAINS: std::sync::OnceLock<BTreeMap<nir::RuntimeId, Term>> =
+            std::sync::OnceLock::new();
+        self.into_scoped_term(
+            budget,
+            parameters,
+            &BTreeMap::new(),
+            EMPTY_DOMAINS.get_or_init(BTreeMap::new),
+            false,
+        )
     }
 
     /// Reify a residual substitution under explicit declaration-domain authority.
@@ -432,7 +448,15 @@ impl Value {
         type_parameters: &BTreeSet<DeclarationId>,
         value_parameters: &BTreeMap<DeclarationId, Term>,
     ) -> Result<Term, ErrorKind> {
-        self.into_scoped_term(budget, type_parameters, value_parameters, true)
+        static EMPTY_DOMAINS: std::sync::OnceLock<BTreeMap<nir::RuntimeId, Term>> =
+            std::sync::OnceLock::new();
+        self.into_scoped_term(
+            budget,
+            type_parameters,
+            value_parameters,
+            EMPTY_DOMAINS.get_or_init(BTreeMap::new),
+            true,
+        )
     }
 }
 /// A graph position is meaningful only in the admitting VM. Frozen data
@@ -779,6 +803,15 @@ pub struct Interpreter<'a> {
     events: Vec<Event>,
 }
 impl<'a> Interpreter<'a> {
+    pub(crate) fn runtime_domains(&self) -> &'a BTreeMap<nir::RuntimeId, Term> {
+        static EMPTY: std::sync::OnceLock<BTreeMap<nir::RuntimeId, Term>> =
+            std::sync::OnceLock::new();
+        self.declaration_world.map_or_else(
+            || EMPTY.get_or_init(BTreeMap::new),
+            |package| &package.runtime_domains,
+        )
+    }
+
     pub fn target(&self) -> Option<nir::target::TargetData> {
         self.target
     }
@@ -2654,6 +2687,7 @@ impl<'a> Interpreter<'a> {
             &mut budget,
             &self.abstract_type_parameters,
             &self.abstract_value_parameters,
+            self.runtime_domains(),
             true,
             Some(&mut fields),
         );
@@ -2864,10 +2898,12 @@ impl<'a> Interpreter<'a> {
             steps,
             max_limbs: 4096,
         };
-        let term = value.into_abstract_invocation_term(
+        let term = value.into_scoped_term(
             &mut budget,
             &self.abstract_type_parameters,
             &self.abstract_value_parameters,
+            self.runtime_domains(),
+            true,
         );
         self.budget.steps -= (steps - budget.steps) as u64;
         term.map_err(|kind| self.failure(kind, Some(source)))
@@ -2887,6 +2923,7 @@ impl<'a> Interpreter<'a> {
             &mut budget,
             &self.abstract_type_parameters,
             &self.abstract_value_parameters,
+            self.runtime_domains(),
             true,
         );
         self.budget.steps -= (steps - budget.steps) as u64;
@@ -5260,6 +5297,7 @@ fn scoped_term_value_work_with_evidence(
         heads,
         parameters,
         value_parameters,
+        &BTreeMap::new(),
         |_, _, _| Err("nominal layout unavailable during structural inspection".into()),
         |_, _, _| Ok(None),
         None,

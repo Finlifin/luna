@@ -683,3 +683,71 @@ fn inherent_candidates_preserve_distinct_nested_binders_and_empty_frames() {
         );
     }
 }
+
+#[test]
+fn inherent_coherence_groups_by_member_and_skips_distinct_outer_heads() {
+    let mut index = InherentIndex::default();
+    let mut ctx = context();
+    // Add many unrelated inherent impls with distinct member names and distinct
+    // nominal types sharing "new", so all-pairs N*(N-1)/2 would have starved
+    // the default step budget down to zero per pair.
+    for n in 0..80u32 {
+        let nominal = Id {
+            package: 0,
+            local: 1000 + n,
+        };
+        ctx.admit_nominal_constructor(nominal);
+        let subject = Term::Nominal {
+            declaration: nominal,
+            arguments: vec![],
+        };
+        index
+            .insert(head(100 + n, subject, vec![], &["new"]), Budget::default())
+            .unwrap();
+        let other = Id {
+            package: 0,
+            local: 2000 + n,
+        };
+        ctx.admit_nominal_constructor(other);
+        let other_subject = Term::Nominal {
+            declaration: other,
+            arguments: vec![],
+        };
+        index
+            .insert(
+                head(300 + n, other_subject, vec![], &[&format!("m_{n}")]),
+                Budget::default(),
+            )
+            .unwrap();
+    }
+    // Two same-family heads sharing "new" proved disjoint via `requires` clauses.
+    for (decl, prim) in [(500, P::Bool), (501, P::Char)] {
+        let mut h = head(decl, boxed(var(1)), vec![id(1)], &["new"]);
+        h.requirements
+            .push(TypePredicate::Equal(var(1), Term::Primitive(prim)));
+        index.insert(h, Budget::default()).unwrap();
+    }
+    index.check_coherence(&ctx, Budget::default()).unwrap();
+
+    // Zero budget still fails closed.
+    assert!(
+        index
+            .check_coherence(
+                &ctx,
+                Budget {
+                    steps: 0,
+                    ..Budget::default()
+                }
+            )
+            .is_err()
+    );
+
+    // Real same-family overlap still fails closed.
+    index
+        .insert(
+            head(502, boxed(var(2)), vec![id(2)], &["new"]),
+            Budget::default(),
+        )
+        .unwrap();
+    assert!(index.check_coherence(&ctx, Budget::default()).is_err());
+}

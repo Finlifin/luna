@@ -385,7 +385,7 @@ impl Checker<'_, '_> {
         self.required_normal_term(result, value.span)
     }
 
-    fn runtime_lift_argument(
+    pub(super) fn runtime_lift_argument(
         &mut self,
         value: &Expr<'_>,
         expected_inner: &Term,

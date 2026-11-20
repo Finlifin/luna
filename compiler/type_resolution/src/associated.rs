@@ -639,7 +639,7 @@ impl Normalizer<'_, '_, '_> {
                             &mut self.remaining,
                         )?;
                         let ty = contract
-                            .input_substitution(&inputs, &[], &mut self.remaining)
+                            .input_substitution(&inputs, &self.frames, &mut self.remaining)
                             .and_then(|substitution| {
                                 substitution.instantiate_bounded(&member.ty, &mut self.remaining)
                             })?;

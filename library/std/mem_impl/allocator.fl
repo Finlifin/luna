@@ -135,7 +135,9 @@ pub trait Allocator {
     unsafe fn reallocate(*self, block: RawBlock, new_layout: Layout) -> !ReallocErr RawBlock;
 }
 
-pub struct SystemAllocator {}
+pub struct SystemAllocator {
+    pub const GLOBAL: SystemAllocator = SystemAllocator {};
+}
 
 impl Clone for SystemAllocator {
     fn clone(*self) -> Self {
@@ -144,6 +146,16 @@ impl Clone for SystemAllocator {
 }
 
 impl Copy for SystemAllocator {}
+
+impl Splice for SystemAllocator {
+    assoc RuntimeTarget: Type = SystemAllocator;
+
+    fn splice(comptime data: SystemAllocator) -> SystemAllocator {
+        SystemAllocator {}
+    }
+}
+
+pub typealias DefaultAllocator = SystemAllocator;
 
 fn valid_usize_layout(layout: Layout) -> bool {
     let has_size = layout.byte_size_usize() match {

@@ -257,3 +257,100 @@ fn env_parameters_and_call_env_arguments_substitute_and_display() {
         "{with_env_call}"
     );
 }
+
+#[test]
+fn implicit_runtime_env_parameters_filter_globals_existing_and_unregistered_deterministically() {
+    let rt_global = nir::RuntimeId {
+        instance: 0,
+        local: 1,
+    };
+    let rt_explicit = nir::RuntimeId {
+        instance: 0,
+        local: 2,
+    };
+    let rt_first = nir::RuntimeId {
+        instance: 0,
+        local: 5,
+    };
+    let rt_second = nir::RuntimeId {
+        instance: 0,
+        local: 3,
+    };
+    let rt_unregistered = nir::RuntimeId {
+        instance: 0,
+        local: 9,
+    };
+
+    let alloc_a = Term::Primitive(P::U32);
+    let alloc_b = Term::Primitive(P::U64);
+    let ptr_a = Term::Pointer(Box::new(alloc_a));
+    let ptr_b = Term::Pointer(Box::new(alloc_b));
+
+    let runtime_domains = std::collections::BTreeMap::from([
+        (rt_global, Term::Lift(Box::new(ptr_a.clone()))),
+        (rt_explicit, Term::Lift(Box::new(ptr_a.clone()))),
+        (rt_first, Term::Lift(Box::new(ptr_a.clone()))),
+        (rt_second, Term::Lift(Box::new(ptr_b.clone()))),
+    ]);
+    let global_runtime_deliveries =
+        std::collections::BTreeMap::from([(rt_global, expression(ptr_a.clone(), ExprKind::Unit))]);
+    let existing = vec![nir::program::RuntimeEnvParameter {
+        declaration: id(4),
+        runtime_id: Some(rt_explicit),
+        binding: binding(4),
+        ty: ptr_a.clone(),
+    }];
+    let nested_arg = Term::Nominal {
+        declaration: id(20),
+        arguments: vec![
+            Term::Runtime(rt_first),
+            Term::Nominal {
+                declaration: id(21),
+                arguments: vec![
+                    Term::Runtime(rt_global),
+                    Term::Runtime(rt_explicit),
+                    Term::Runtime(rt_second),
+                    Term::Runtime(rt_unregistered),
+                ],
+            },
+        ],
+    };
+
+    let implicit = nir::program::implicit_runtime_env_parameters(
+        &runtime_domains,
+        &global_runtime_deliveries,
+        &[nested_arg],
+        &existing,
+    )
+    .unwrap();
+
+    assert_eq!(
+        implicit,
+        vec![
+            nir::program::RuntimeEnvParameter {
+                declaration: DeclarationId {
+                    package: nir::program::IMPLICIT_RUNTIME_ENV_PACKAGE,
+                    local: 3,
+                },
+                runtime_id: Some(rt_second),
+                binding: LocalId {
+                    owner: nir::program::IMPLICIT_RUNTIME_ENV_OWNER,
+                    index: 3,
+                },
+                ty: ptr_b,
+            },
+            nir::program::RuntimeEnvParameter {
+                declaration: DeclarationId {
+                    package: nir::program::IMPLICIT_RUNTIME_ENV_PACKAGE,
+                    local: 5,
+                },
+                runtime_id: Some(rt_first),
+                binding: LocalId {
+                    owner: nir::program::IMPLICIT_RUNTIME_ENV_OWNER,
+                    index: 5,
+                },
+                ty: ptr_a,
+            },
+        ]
+    );
+}

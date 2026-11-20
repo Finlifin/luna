@@ -688,6 +688,28 @@ impl Checker<'_, '_> {
         }
         constants::charge_copy(template, &mut self.required_steps, site.span)?;
         let mut body = (**template).clone();
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let runtime_checked = nir::visit::expression(&body, &mut fuel, |node, fuel| {
+            nir::type_computations::charge_term(&node.ty, fuel).map_err(|e| e.to_string())?;
+            for rt_id in node.ty.runtime_dependencies() {
+                if let Some(delivery) = self.local_runtime_deliveries.get(&rt_id) {
+                    for binding in nir::free_bindings::collect(&delivery.expr, fuel)? {
+                        if connections
+                            .get(&binding)
+                            .is_some_and(|&redirected| redirected != binding)
+                        {
+                            return Err(
+                                "splice cannot redirect a binding captured by a local runtime-dependent type"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(())
+        });
+        self.required_steps = fuel as u64;
+        runtime_checked.map_err(|message| error(site.span, message))?;
         let mut next = self.next_temporary_binding;
         let result = freshen(
             &mut body,
@@ -728,6 +750,16 @@ pub(super) fn freshen(
     sources: &mut Vec<n::ExpansionSource>,
     span: Span,
 ) -> Result<(), Error> {
-    nir::freshening::expression(body, connections, next, sources, source(span))
+    freshen_with_renaming(body, connections, next, sources, span).map(|_| ())
+}
+
+pub(super) fn freshen_with_renaming(
+    body: &mut n::Expr,
+    connections: BTreeMap<n::LocalId, n::LocalId>,
+    next: &mut u32,
+    sources: &mut Vec<n::ExpansionSource>,
+    span: Span,
+) -> Result<BTreeMap<n::LocalId, n::LocalId>, Error> {
+    nir::freshening::expression_with_renaming(body, connections, next, sources, source(span))
         .map_err(|message| error(span, message))
 }

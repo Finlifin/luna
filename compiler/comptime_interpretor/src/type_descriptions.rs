@@ -35,6 +35,7 @@ impl Interpreter<'_> {
             &self.normal_forms,
             &self.abstract_type_parameters,
             &self.abstract_value_parameters,
+            self.runtime_domains(),
             |ty, variant, fuel| self.query_normal_value_fields(ty, variant, fuel),
             |value, frames, fuel| self.admitted_callable_signature(value, frames, fuel),
             self.target,
@@ -54,6 +55,7 @@ impl Interpreter<'_> {
             &self.normal_forms,
             &BTreeSet::new(),
             &BTreeMap::new(),
+            self.runtime_domains(),
             |ty, variant, fuel| self.query_normal_value_fields(ty, variant, fuel),
             |value, frames, fuel| self.admitted_callable_signature(value, frames, fuel),
             self.target,
@@ -170,32 +172,50 @@ impl<'t> Telescope<'t> {
 pub(super) fn declared_domain_matches(
     frames: &[&[nir::Parameter]],
     values: &BTreeMap<DeclarationId, Term>,
+    runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
     value: &Term,
     domain: &Term,
     fuel: &mut usize,
 ) -> Result<bool, AdmissionError> {
     *fuel = fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
     let (expected, distance) = match value {
+        Term::Runtime(id) => {
+            let Some(expected) = runtime_domains.get(id) else {
+                return Ok(false);
+            };
+            (expected, 0)
+        }
         Term::Rigid {
             declaration,
-            sort: nir::Sort::ComptimeValue,
+            sort: nir::Sort::ComptimeValue | nir::Sort::Runtime,
         } => {
             let Some(expected) = values.get(declaration) else {
                 return Ok(false);
             };
+            let rigid = Term::Rigid {
+                declaration: *declaration,
+                sort: nir::Sort::of_comptime_domain(expected),
+            };
+            if rigid != *value {
+                return Ok(false);
+            }
             (expected, 0)
         }
         Term::Bound {
             depth,
             index,
-            sort: nir::Sort::ComptimeValue,
+            sort: nir::Sort::ComptimeValue | nir::Sort::Runtime,
         } => {
+            let expected_sort = match value {
+                Term::Bound { sort, .. } => *sort,
+                _ => unreachable!(),
+            };
             let parameter = frames
                 .iter()
                 .rev()
                 .nth(*depth as usize)
                 .and_then(|frame| frame.get(*index));
-            let Some(parameter) = parameter.filter(|p| p.sort == nir::Sort::ComptimeValue) else {
+            let Some(parameter) = parameter.filter(|p| p.sort == expected_sort) else {
                 return Ok(false);
             };
             (&parameter.ty, *depth)
@@ -219,6 +239,7 @@ pub(super) fn inspect_data_term(
     term: &Term,
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
+    runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
     fuel: &mut usize,
 ) -> Result<usize, ErrorKind> {
     inspect(
@@ -227,6 +248,7 @@ pub(super) fn inspect_data_term(
         &BTreeMap::new(),
         parameters,
         value_parameters,
+        runtime_domains,
         |_, _, _| Err("nominal layout unavailable during structural inspection".into()),
         |_, _, _| Ok(None),
         None,
@@ -234,12 +256,14 @@ pub(super) fn inspect_data_term(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn inspect<'signature>(
     ty: &Term,
     enclosing: &[&[nir::Parameter]],
     heads: &impl declaration_index::HeadLookup,
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
+    runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
     callable_signature: impl Fn(
         nir::CallableValueRef<'_>,
@@ -415,6 +439,7 @@ pub(super) fn inspect<'signature>(
                                 declared_domain_matches(
                                     &scope.parameters,
                                     value_parameters,
+                                    runtime_domains,
                                     value,
                                     domain,
                                     fuel,
@@ -472,7 +497,16 @@ pub(super) fn inspect<'signature>(
             Term::Rigid {
                 declaration,
                 sort: nir::Sort::ComptimeValue,
-            } if value_parameters.contains_key(declaration) => {}
+            } if value_parameters
+                .get(declaration)
+                .is_some_and(|domain| !matches!(domain, Term::Lift(_))) => {}
+            Term::Rigid {
+                declaration,
+                sort: nir::Sort::Runtime,
+            } if value_parameters
+                .get(declaration)
+                .is_some_and(|domain| matches!(domain, Term::Lift(_))) => {}
+            Term::Runtime(id) if runtime_domains.contains_key(id) => {}
             Term::AssociatedType { .. } => return Err(ErrorKind::UnmaterializedDispatch),
             Term::Rigid { .. } | Term::Runtime(_) | Term::Value { .. } | Term::Hole { .. } => {
                 return Err(ErrorKind::Type);

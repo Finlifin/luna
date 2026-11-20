@@ -172,6 +172,12 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             )?;
             return Ok(Poll::Continue);
         }
+        if matches!(domain.ty, Term::Lift(_)) && !domain.pending.is_empty() {
+            return Err(error(
+                self.span,
+                "runtime quote dependency slot requires resolved preceding type parameters",
+            ));
+        }
         let contextual = !domain.pending.is_empty() && self.checking == InputChecking::Contextual;
         let explicit = self.routed[slot].take();
         let provider = self.interface.default(slot);
@@ -179,6 +185,98 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             && self.checking == InputChecking::Contextual
             && provider
                 .is_some_and(|provider| checker.normal_parameters.contains_key(&provider.owner));
+        if domain.pending.is_empty() && matches!(domain.ty, Term::Lift(_)) && !declaration_default {
+            let expected_inner = match &domain.ty {
+                Term::Lift(inner) => inner.as_ref().clone(),
+                _ => unreachable!(),
+            };
+            let input = match &explicit {
+                Some(RoutedDeclarationInput::Source(input)) => Some(*input),
+                Some(_) => None,
+                None => {
+                    let provider = provider
+                        .ok_or_else(|| error(self.span, "normal-form argument count mismatch"))?;
+                    self.default_scope = Some(scope::Scope::enter(checker, self.span)?);
+                    Some(self.enter_default(checker, slot, provider, false)?)
+                }
+            };
+            if explicit.is_none() {
+                let provider = provider.expect("omitted input has a default provider");
+                let guard = (provider.owner, provider.slot);
+                if checker.active_type_defaults.len() >= 64
+                    || !checker.active_type_defaults.insert(guard)
+                {
+                    return Err(error(
+                        self.span,
+                        "cyclic or excessively deep normal-form default",
+                    ));
+                }
+                self.active_default = Some(guard);
+            }
+            self.pending = Some(Pending {
+                slot,
+                domain,
+                input,
+            });
+            let result = match explicit {
+                Some(RoutedDeclarationInput::Collected(items)) => self.collection(checker, items),
+                Some(RoutedDeclarationInput::Prepared(value)) => {
+                    let expected_domain = &self.pending.as_ref().unwrap().domain.ty;
+                    checker
+                        .require_expression(&value.ty, expected_domain, self.span)
+                        .map(|()| n::NormalFormArgument::Value(value))
+                }
+                Some(RoutedDeclarationInput::Source(input)) => {
+                    let expected_domain = self.pending.as_ref().unwrap().domain.ty.clone();
+                    checker
+                        .runtime_lift_argument(input, &expected_inner)
+                        .map(|term| {
+                            n::NormalFormArgument::Value(n::Expr {
+                                source: source(input.span),
+                                ty: expected_domain,
+                                kind: K::ComptimeValue(term),
+                            })
+                        })
+                }
+                None => {
+                    let provider = provider.expect("omitted input has a default provider");
+                    let expected_domain = self.pending.as_ref().unwrap().domain.ty.clone();
+                    checker.context = checker.definition_context(provider.owner);
+                    (|| {
+                        let mut prefix_args = Vec::with_capacity(slot);
+                        for previous in 0..slot {
+                            let Some(known) = self
+                                .progress
+                                .known_bindings
+                                .get(&self.progress.binding(previous))
+                            else {
+                                return Err(error(
+                                    self.span,
+                                    "runtime quote default requires known preceding parameters",
+                                ));
+                            };
+                            prefix_args.push((**known).clone());
+                        }
+                        let param = self.progress.telescope.parameters[slot].0;
+                        let term = checker.default_runtime_argument(
+                            provider.owner,
+                            param,
+                            &prefix_args,
+                            provider.expression,
+                            &expected_domain,
+                            self.span,
+                        )?;
+                        Ok(n::NormalFormArgument::Value(n::Expr {
+                            source: source(provider.expression.span),
+                            ty: expected_domain,
+                            kind: K::ComptimeValue(term),
+                        }))
+                    })()
+                }
+            };
+            self.accept(checker, result)?;
+            return Ok(Poll::Continue);
+        }
         let input = match &explicit {
             Some(RoutedDeclarationInput::Source(input)) => Some(*input),
             Some(_) => None,

@@ -1,6 +1,6 @@
 use builtin.fmt.ByteWriter;
 use collections_impl.vec.Vec;
-use mem_impl.allocator.AllocErr;
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
 
 {-
     Byte offset at which UTF-8 validation first failed. All preceding bytes in
@@ -36,7 +36,12 @@ fn is_cont(byte: u8) -> bool {
     byte >= 128 and byte <= 191
 }
 
-fn validate_utf8_2(bytes: *Vec<u8>, i: usize, len: usize) -> bool {
+fn validate_utf8_2(bytes: *Vec<u8, .A = A, .allocator = a>, i: usize, len: usize) -> bool
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     if i >= len or len - i < 2 {
         return false;
     }
@@ -47,7 +52,17 @@ fn validate_utf8_2(bytes: *Vec<u8>, i: usize, len: usize) -> bool {
     is_cont(b1)
 }
 
-fn validate_utf8_3(bytes: *Vec<u8>, i: usize, len: usize, b0: u8) -> bool {
+fn validate_utf8_3(
+    bytes: *Vec<u8, .A = A, .allocator = a>,
+    i: usize,
+    len: usize,
+    b0: u8,
+) -> bool
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     if i >= len or len - i < 3 {
         return false;
     }
@@ -71,7 +86,17 @@ fn validate_utf8_3(bytes: *Vec<u8>, i: usize, len: usize, b0: u8) -> bool {
     is_cont(b1)
 }
 
-fn validate_utf8_4(bytes: *Vec<u8>, i: usize, len: usize, b0: u8) -> bool {
+fn validate_utf8_4(
+    bytes: *Vec<u8, .A = A, .allocator = a>,
+    i: usize,
+    len: usize,
+    b0: u8,
+) -> bool
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     if i >= len or len - i < 4 {
         return false;
     }
@@ -99,7 +124,16 @@ fn validate_utf8_4(bytes: *Vec<u8>, i: usize, len: usize, b0: u8) -> bool {
     is_cont(b1)
 }
 
-fn validate_utf8_step(bytes: *Vec<u8>, i: usize, len: usize) -> usize {
+fn validate_utf8_step(
+    bytes: *Vec<u8, .A = A, .allocator = a>,
+    i: usize,
+    len: usize,
+) -> usize
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     if i >= len {
         return 0;
     }
@@ -130,7 +164,12 @@ fn validate_utf8_step(bytes: *Vec<u8>, i: usize, len: usize) -> usize {
     0
 }
 
-fn validate_utf8(bytes: *Vec<u8>) -> ?usize {
+fn validate_utf8(bytes: *Vec<u8, .A = A, .allocator = a>) -> ?usize
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     let len = bytes.len();
     var i: usize = 0;
     while i < len {
@@ -143,7 +182,17 @@ fn validate_utf8(bytes: *Vec<u8>) -> ?usize {
     null
 }
 
-fn decode_utf8_2(bytes: *Vec<u8>, start: usize, len: usize, b0: u8) -> ?u32 {
+fn decode_utf8_2(
+    bytes: *Vec<u8, .A = A, .allocator = a>,
+    start: usize,
+    len: usize,
+    b0: u8,
+) -> ?u32
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     if start >= len or len - start < 2 or b0 < 194 or b0 > 223 {
         return null;
     }
@@ -162,7 +211,17 @@ fn decode_utf8_2(bytes: *Vec<u8>, start: usize, len: usize, b0: u8) -> ?u32 {
     p0 * 64 + p1
 }
 
-fn decode_utf8_3(bytes: *Vec<u8>, start: usize, len: usize, b0: u8) -> ?u32 {
+fn decode_utf8_3(
+    bytes: *Vec<u8, .A = A, .allocator = a>,
+    start: usize,
+    len: usize,
+    b0: u8,
+) -> ?u32
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     if start >= len or len - start < 3 or b0 < 224 or b0 > 239 {
         return null;
     }
@@ -186,7 +245,17 @@ fn decode_utf8_3(bytes: *Vec<u8>, start: usize, len: usize, b0: u8) -> ?u32 {
     p0 * 4096 + p1 * 64 + p2
 }
 
-fn decode_utf8_4(bytes: *Vec<u8>, start: usize, len: usize, b0: u8) -> ?u32 {
+fn decode_utf8_4(
+    bytes: *Vec<u8, .A = A, .allocator = a>,
+    start: usize,
+    len: usize,
+    b0: u8,
+) -> ?u32
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     if start >= len or len - start < 4 or b0 < 240 or b0 > 244 {
         return null;
     }
@@ -217,46 +286,58 @@ fn decode_utf8_4(bytes: *Vec<u8>, start: usize, len: usize, b0: u8) -> ?u32 {
 
 {-
     Owned, heap-allocated, UTF-8 encoded growable string. Inherits structural
-    affine Drop through its underlying Vec<u8> while maintaining valid UTF-8
-    across all public mutators and constructors.
+    affine Drop through its underlying Vec<u8, .A, .allocator> while
+    maintaining valid UTF-8 across all public mutators and constructors.
 -}
-pub struct String {
-    bytes: Vec<u8>,
+pub struct String
+where
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    bytes: Vec<u8, .A = A, .allocator = allocator>,
 }
 
-impl String {
+impl String<.A = A, .allocator = a>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     pub pure fn new() -> Self {
-        String { bytes: Vec<u8>.new() }
+        String<.A = A, .allocator = a> {
+            bytes: Vec<u8, .A = A, .allocator = a>.new(),
+        }
     }
 
     pub fn with_capacity(capacity: usize) -> !AllocErr Self {
-        let bytes = Vec<u8>.with_capacity(capacity)!;
-        String { bytes: bytes }
+        let bytes = Vec<u8, .A = A, .allocator = a>.with_capacity(capacity)!;
+        String<.A = A, .allocator = a> { bytes: bytes }
     }
 
     pub fn from_str(text: str) -> !AllocErr Self {
-        var out = String.new();
+        var out = String<.A = A, .allocator = a>.new();
         out.ref.push_str(text)!;
         out
     }
 
-    pub fn from_utf8(bytes: Vec<u8>) -> !Utf8Err Self {
+    pub fn from_utf8(bytes: Vec<u8, .A = A, .allocator = a>) -> !Utf8Err Self {
         var owned = bytes;
         validate_utf8(owned.ref) match {
             offset? => return error Utf8Err { valid_up_to_offset: offset },
             null => {},
         }
-        String { bytes: owned }
+        String<.A = A, .allocator = a> { bytes: owned }
     }
 
-    pub fn from_utf8_lossy(bytes: Vec<u8>) -> !AllocErr Self {
+    pub fn from_utf8_lossy(bytes: Vec<u8, .A = A, .allocator = a>) -> !AllocErr Self {
         var owned = bytes;
         validate_utf8(owned.ref) match {
-            null => return String { bytes: owned },
+            null => return String<.A = A, .allocator = a> { bytes: owned },
             _? => {},
         }
         let len = owned.ref.len();
-        var out = Vec<u8>.with_capacity(len)!;
+        var out = Vec<u8, .A = A, .allocator = a>.with_capacity(len)!;
         var i: usize = 0;
         while i < len {
             let step = validate_utf8_step(owned.ref, i, len);
@@ -279,7 +360,7 @@ impl String {
                 i = end;
             }
         }
-        String { bytes: out }
+        String<.A = A, .allocator = a> { bytes: out }
     }
 
     pub fn len(*self) -> usize {
@@ -324,7 +405,7 @@ impl String {
         }
     }
 
-    pub fn into_bytes(self) -> Vec<u8> {
+    pub fn into_bytes(self) -> Vec<u8, .A = A, .allocator = a> {
         self.bytes
     }
 
@@ -344,7 +425,15 @@ impl String {
         self.bytes.write_str(text)
     }
 
-    pub fn push_string(*self, other: *String) -> !AllocErr void {
+    pub fn push_string(
+        *self,
+        other: *String<.A = B, .allocator = b>,
+    ) -> !AllocErr void
+    where
+        B: Type,
+        requires B :- Allocator,
+        quote b: lift *B,
+    {
         let other_len = other.len();
         if other_len == 0 {
             return;
@@ -450,10 +539,18 @@ impl String {
 
     pub fn try_clone(*self) -> !AllocErr Self {
         let cloned = self.bytes.try_clone()!;
-        String { bytes: cloned }
+        String<.A = A, .allocator = a> { bytes: cloned }
     }
 
-    pub fn equals(*self, other: *Self) -> bool {
+    pub fn equals(
+        *self,
+        other: *String<.A = B, .allocator = b>,
+    ) -> bool
+    where
+        B: Type,
+        requires B :- Allocator,
+        quote b: lift *B,
+    {
         let len = self.len();
         if len != other.len() {
             return false;
@@ -483,7 +580,15 @@ impl String {
         self.starts_with(other)
     }
 
-    pub fn cmp_ref(*self, other: *Self) -> Order {
+    pub fn cmp_ref(
+        *self,
+        other: *String<.A = B, .allocator = b>,
+    ) -> Order
+    where
+        B: Type,
+        requires B :- Allocator,
+        quote b: lift *B,
+    {
         let a_len = self.len();
         let b_len = other.len();
         let min_len = if a_len < b_len { a_len } else { b_len }
@@ -667,14 +772,24 @@ impl String {
     }
 }
 
-impl Display for String {
+impl Display for String<.A = A, .allocator = a>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
         var this = self;
         this.ref.write_to(output)
     }
 }
 
-impl Eq for String {
+impl Eq for String<.A = A, .allocator = a>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     fn eq(self, other: Self) -> bool {
         var left = self;
         var right = other;
@@ -682,7 +797,12 @@ impl Eq for String {
     }
 }
 
-impl Ord for String {
+impl Ord for String<.A = A, .allocator = a>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     fn cmp(self, other: Self) -> Order {
         var left = self;
         var right = other;
@@ -690,7 +810,12 @@ impl Ord for String {
     }
 }
 
-impl Hash for String {
+impl Hash for String<.A = A, .allocator = a>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
     fn hash(self) -> u64 {
         var this = self;
         this.ref.hash_bytes()

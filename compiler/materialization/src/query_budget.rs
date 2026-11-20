@@ -74,6 +74,8 @@ mod tests {
             frozen_methods: vec![],
             callable_identities: vec![],
             type_cores: Default::default(),
+            active_caller_env: None,
+            active_closure_scopes: Vec::new(),
         }
     }
 

@@ -13,6 +13,9 @@ pub(crate) fn expand_bound_inline(
     package: &n::Package,
     template: &n::Function,
     expression: &mut n::Expr,
+    caller_env_parameters: &[n::RuntimeEnvParameter],
+    caller_runtime_deliveries: &BTreeMap<nir::RuntimeId, n::Expr>,
+    in_closure: bool,
     next: &mut u32,
     sources: &mut Vec<n::ExpansionSource>,
     enums: &mut Vec<n::Enum>,
@@ -30,6 +33,9 @@ pub(crate) fn expand_bound_inline(
         template,
         &mut candidate,
         vec![],
+        caller_env_parameters,
+        caller_runtime_deliveries,
+        in_closure,
         next,
         sources,
         enums,
@@ -163,13 +169,49 @@ pub fn expand(package: &mut n::Package, fuel: &mut usize) -> Result<Report, Stri
         {
             break;
         }
-        function.body.rewrite_with(&mut pass)?;
+        let mut function_pass = FunctionPass {
+            pass: &mut pass,
+            env_parameters: &function.interface.env_parameters,
+            runtime_deliveries: &function.runtime_deliveries,
+            closure_depth: 0,
+        };
+        function.body.rewrite_with(&mut function_pass)?;
     }
     let mut report = pass.report;
     let (handlers, requests) = effects::expand(package, fuel)?;
     report.expanded_handlers = handlers;
     report.expanded_requests = requests;
     Ok(report)
+}
+
+struct FunctionPass<'p, 'a, 'f> {
+    pass: &'p mut Pass<'a>,
+    env_parameters: &'f [n::RuntimeEnvParameter],
+    runtime_deliveries: &'f BTreeMap<nir::RuntimeId, n::Expr>,
+    closure_depth: usize,
+}
+impl n::Rewriter for FunctionPass<'_, '_, '_> {
+    type Error = String;
+    fn expression(&mut self, expression: &mut n::Expr) -> Result<bool, String> {
+        if let K::Closure { captures, body, .. } = &mut expression.kind {
+            for capture in captures {
+                if let Some(value) = &mut capture.value {
+                    value.rewrite_with(self)?;
+                }
+            }
+            self.closure_depth += 1;
+            let result = std::sync::Arc::make_mut(body).rewrite_with(self);
+            self.closure_depth -= 1;
+            result?;
+            return Ok(false);
+        }
+        self.pass.expand_expression(
+            expression,
+            self.env_parameters,
+            self.runtime_deliveries,
+            self.closure_depth > 0,
+        )
+    }
 }
 
 // Representation equality is deliberately conservative: no opaque head is
@@ -197,9 +239,14 @@ struct Pass<'a> {
     fuel: &'a mut usize,
     report: Report,
 }
-impl n::Rewriter for Pass<'_> {
-    type Error = String;
-    fn expression(&mut self, expression: &mut n::Expr) -> Result<bool, String> {
+impl<'a> Pass<'a> {
+    fn expand_expression(
+        &mut self,
+        expression: &mut n::Expr,
+        caller_env_parameters: &[n::RuntimeEnvParameter],
+        caller_runtime_deliveries: &BTreeMap<nir::RuntimeId, n::Expr>,
+        in_closure: bool,
+    ) -> Result<bool, String> {
         if *self.fuel == 0 {
             return Ok(false);
         }
@@ -347,6 +394,9 @@ impl n::Rewriter for Pass<'_> {
             template,
             &mut candidate,
             types,
+            caller_env_parameters,
+            caller_runtime_deliveries,
+            in_closure,
             self.next,
             self.sources,
             self.enums,
@@ -367,8 +417,14 @@ impl n::Rewriter for Pass<'_> {
             .is_ok()
             {
                 self.active.push(active_instance);
-                let nested = expression.rewrite_with(self);
-                self.active.pop();
+                let mut nested_pass = FunctionPass {
+                    pass: self,
+                    env_parameters: caller_env_parameters,
+                    runtime_deliveries: caller_runtime_deliveries,
+                    closure_depth: usize::from(in_closure),
+                };
+                let nested = expression.rewrite_with(&mut nested_pass);
+                nested_pass.pass.active.pop();
                 nested?;
             }
         } else {

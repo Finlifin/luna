@@ -110,6 +110,7 @@ fn nf_description_queries_preserve_typed_failures_with_positive_fuel() {
             &heads,
             &BTreeSet::new(),
             &BTreeMap::new(),
+            &BTreeMap::new(),
             |_, _, fuel| {
                 calls.set(calls.get() + 1);
                 *fuel -= 7;
@@ -130,6 +131,7 @@ fn nf_description_queries_preserve_typed_failures_with_positive_fuel() {
             &[],
             &heads,
             &BTreeSet::new(),
+            &BTreeMap::new(),
             &BTreeMap::new(),
             |_, _, _| Ok(vec![Term::Primitive(Primitive::Bool)]),
             |_, _, _| Ok(None),
@@ -152,6 +154,7 @@ fn expensive_queries_do_not_change_the_structural_size_of_an_nf_description() {
         &heads,
         &BTreeSet::new(),
         &BTreeMap::new(),
+        &BTreeMap::new(),
         |_, _, fuel| {
             *fuel = fuel.checked_sub(150_000).ok_or(AdmissionError::Budget)?;
             Ok(vec![Term::Primitive(Primitive::Bool)])
@@ -169,6 +172,7 @@ fn expensive_queries_do_not_change_the_structural_size_of_an_nf_description() {
             &[],
             &heads,
             &BTreeSet::new(),
+            &BTreeMap::new(),
             &BTreeMap::new(),
             |_, _, fuel| {
                 *fuel = fuel.checked_sub(150_000).ok_or(AdmissionError::Budget)?;
@@ -286,4 +290,74 @@ fn successive_dependent_domains_do_not_rescan_the_parameter_prefix() {
     let (twice_inspect, twice_admit) = measure(&mut vm, 256);
     assert!(twice_inspect <= 2 * inspect, "{inspect} -> {twice_inspect}");
     assert!(twice_admit <= 2 * admit, "{admit} -> {twice_admit}");
+}
+
+#[test]
+fn registered_runtime_dependency_in_type_description_is_admitted_and_domain_checked() {
+    let alloc_ty = Term::Primitive(Primitive::Bool);
+    let lift_alloc = Term::Lift(Box::new(Term::Pointer(Box::new(alloc_ty.clone()))));
+    let wrong_lift = Term::Lift(Box::new(Term::Pointer(Box::new(Term::Primitive(
+        Primitive::Char,
+    )))));
+    let rt_valid = nir::RuntimeId {
+        instance: 0,
+        local: 7,
+    };
+    let rt_wrong = nir::RuntimeId {
+        instance: 0,
+        local: 8,
+    };
+    let rt_unregistered = nir::RuntimeId {
+        instance: 0,
+        local: 9,
+    };
+    let mut package = Package {
+        structs: vec![nir::program::Struct {
+            declaration: id(10),
+            name: "Holder".into(),
+            packed: false,
+            type_parameters: vec![id(11)],
+            parameter_types: vec![lift_alloc.clone()],
+            requirements: vec![],
+            capabilities: vec![],
+            fields: vec![],
+        }],
+        ..Package::default()
+    };
+    package.runtime_domains.insert(rt_valid, lift_alloc.clone());
+    package.runtime_domains.insert(rt_wrong, wrong_lift);
+
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let valid_ty = Term::Nominal {
+        declaration: id(10),
+        arguments: vec![Term::Runtime(rt_valid)],
+    };
+    vm.check_type_description(&valid_ty, Some(SOURCE)).unwrap();
+    vm.admit_type(&valid_ty, 0).unwrap();
+
+    let wrong_domain_ty = Term::Nominal {
+        declaration: id(10),
+        arguments: vec![Term::Runtime(rt_wrong)],
+    };
+    vm.check_type_description(&wrong_domain_ty, Some(SOURCE))
+        .unwrap();
+    assert_eq!(
+        vm.admit_type(&wrong_domain_ty, 0).unwrap_err().kind,
+        ErrorKind::Type
+    );
+
+    let unregistered_ty = Term::Nominal {
+        declaration: id(10),
+        arguments: vec![Term::Runtime(rt_unregistered)],
+    };
+    assert_eq!(
+        vm.check_type_description(&unregistered_ty, Some(SOURCE))
+            .unwrap_err()
+            .kind,
+        ErrorKind::Type
+    );
+    assert_eq!(
+        vm.admit_type(&unregistered_ty, 0).unwrap_err().kind,
+        ErrorKind::Type
+    );
 }

@@ -9,7 +9,10 @@ use std::sync::Arc;
 mod input_schedule;
 pub use input_schedule::{CheckedInputSchedule, InputPath, InputSchedule, InputStep};
 mod function;
-pub use function::{DefinitionRegion, Function, FunctionDeclaration, RuntimeEnvParameter};
+pub use function::{
+    DefinitionRegion, Function, FunctionDeclaration, IMPLICIT_RUNTIME_ENV_OWNER,
+    IMPLICIT_RUNTIME_ENV_PACKAGE, RuntimeEnvParameter, implicit_runtime_env_parameters,
+};
 mod predicate_shape;
 pub use predicate_shape::{PredicateShapeError, checkable_predicate, predicate_call_candidate};
 

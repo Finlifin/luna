@@ -2143,3 +2143,201 @@ fn cached_type_views_charge_failed_queries_without_publishing_children() {
         },
     );
 }
+
+#[test]
+fn associated_view_propagates_context_scope_for_bound_assumptions_and_requires_subgoals() {
+    use type_resolution::ptc::Formula;
+
+    let display_id = id(10);
+    let byte_writer_id = id(11);
+    let err_member_id = id(12);
+    let alloc_trait_id = id(13);
+    let vec_decl_id = id(14);
+    let default_alloc_id = id(15);
+
+    let display_trait = Trait {
+        comptime_only: false,
+        parameter_types: Vec::new(),
+        declaration: display_id,
+        self_parameter: id(101),
+        name: "Display".into(),
+        type_parameters: vec![],
+        parents: vec![],
+        methods: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        associated: vec![],
+    };
+    let alloc_trait = Trait {
+        comptime_only: false,
+        parameter_types: Vec::new(),
+        declaration: alloc_trait_id,
+        self_parameter: id(102),
+        name: "Allocator".into(),
+        type_parameters: vec![],
+        parents: vec![],
+        methods: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        associated: vec![],
+    };
+    let byte_writer_trait = Trait {
+        comptime_only: false,
+        parameter_types: Vec::new(),
+        declaration: byte_writer_id,
+        self_parameter: id(103),
+        name: "ByteWriter".into(),
+        type_parameters: vec![],
+        parents: vec![],
+        methods: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        associated: vec![AssociatedContract {
+            phase: Default::default(),
+            declaration: err_member_id,
+            name: "Err".into(),
+            ty: ty(P::Type),
+            default: None,
+        }],
+    };
+
+    let alloc_type = Term::Nominal {
+        declaration: default_alloc_id,
+        arguments: vec![],
+    };
+    let alloc_impl = Implementation {
+        phases: Default::default(),
+        associated_initializers: vec![],
+        parameter_types: vec![],
+        declaration: id(20),
+        subject: alloc_type.clone(),
+        interface: Some(alloc_trait_id),
+        interface_arguments: vec![],
+        type_parameters: vec![],
+        capabilities: vec![],
+        requirements: vec![],
+        associated: vec![],
+        methods: vec![],
+    };
+
+    let elem_param = id(30);
+    let alloc_param = id(31);
+    let allocator_ref_param = id(32);
+    let vec_subject = Term::Nominal {
+        declaration: vec_decl_id,
+        arguments: vec![
+            Term::Rigid {
+                declaration: elem_param,
+                sort: Sort::Type,
+            },
+            Term::Rigid {
+                declaration: alloc_param,
+                sort: Sort::Type,
+            },
+            Term::Rigid {
+                declaration: allocator_ref_param,
+                sort: Sort::Runtime,
+            },
+        ],
+    };
+    let vec_writer_impl = Implementation {
+        phases: Default::default(),
+        associated_initializers: vec![],
+        parameter_types: vec![
+            ty(P::Type),
+            ty(P::Type),
+            Term::Lift(Box::new(Term::Pointer(Box::new(Term::Rigid {
+                declaration: alloc_param,
+                sort: Sort::Type,
+            })))),
+        ],
+        declaration: id(21),
+        subject: vec_subject,
+        interface: Some(byte_writer_id),
+        interface_arguments: vec![],
+        type_parameters: vec![elem_param, alloc_param, allocator_ref_param],
+        capabilities: vec![],
+        requirements: vec![TypePredicate::Trait(TraitRequirement {
+            subject: Term::Rigid {
+                declaration: alloc_param,
+                sort: Sort::Type,
+            },
+            interface: alloc_trait_id,
+            interface_arguments: vec![],
+        })],
+        associated: vec![(
+            err_member_id,
+            value(Term::Nominal {
+                declaration: id(16),
+                arguments: vec![],
+            }),
+        )],
+        methods: vec![],
+    };
+
+    let rt_id = nir::RuntimeId {
+        instance: 0,
+        local: 1,
+    };
+    let mut package = nir::program::Package {
+        traits: vec![display_trait, alloc_trait, byte_writer_trait],
+        implementations: vec![alloc_impl, vec_writer_impl],
+        ..Default::default()
+    };
+    package.runtime_domains.insert(
+        rt_id,
+        Term::Lift(Box::new(Term::Pointer(Box::new(alloc_type.clone())))),
+    );
+    let (declarations, _) =
+        type_resolution::dispatch::DeclarationWorld::new(&package, Budget::default(), None)
+            .unwrap();
+    let mut base_context = Context::default();
+    base_context.admit_nominal_constructor(vec_decl_id);
+    base_context.admit_nominal_constructor(default_alloc_id);
+    base_context.admit_nominal_constructor(id(16));
+    let mut context =
+        base_context.theory_in_scope(vec![vec![Sort::Runtime, Sort::Type, Sort::Runtime]]);
+    let bound_display = TraitRequirement {
+        subject: Term::Bound {
+            depth: 0,
+            index: 1,
+            sort: Sort::Type,
+        },
+        interface: display_id,
+        interface_arguments: vec![],
+    };
+    context.assume(Formula::from_predicate(&TypePredicate::Trait(
+        bound_display.clone(),
+    )));
+    let assumptions = [bound_display];
+    let world = World {
+        index: declarations.index(),
+        implementations: &package.implementations,
+        traits: &package.traits,
+        assumptions: &assumptions,
+        context: &context,
+    };
+
+    let vec_instance = Term::Nominal {
+        declaration: vec_decl_id,
+        arguments: vec![ty(P::U8), alloc_type, Term::Runtime(rt_id)],
+    };
+    let query_term = Term::AssociatedType {
+        origin: Box::new(AssociatedTypeOrigin {
+            interface: byte_writer_id,
+            member: err_member_id,
+        }),
+        subject: Box::new(vec_instance),
+        arguments: vec![],
+    };
+    let normalized = world
+        .associated_type_view(&query_term, Budget::default())
+        .unwrap();
+    assert_eq!(
+        normalized.value,
+        Term::Nominal {
+            declaration: id(16),
+            arguments: vec![],
+        }
+    );
+}

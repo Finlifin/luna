@@ -31,7 +31,7 @@ mod operations;
 mod origins;
 mod patterns;
 mod value_origins;
-pub use effects::effect_result_slots;
+pub use effects::{effect_result_slots, effect_result_slots_with_envs};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
@@ -2269,6 +2269,114 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 behavior_only,
             )
             .map_err(|reason| error(source, reason))
+    }
+    fn callee_env_parameter_types(
+        &mut self,
+        package: &'a Package,
+        callee: &Expr,
+        source: SourceRange,
+    ) -> Result<Vec<Term>, Error> {
+        let (declaration, type_args): (nir::DeclarationId, &[Term]) = match &callee.kind {
+            K::Function(id) => (*id, &[]),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => (*declaration, arguments.as_slice()),
+            _ => return Ok(vec![]),
+        };
+        let mut env_params = Vec::new();
+        if let Some(instance) = self
+            .declarations
+            .runtime_instance_body_checked(declaration, type_args, &mut self.fuel)
+            .map_err(|reason| error(source, reason))?
+        {
+            for env in &instance.interface.env_parameters {
+                nir::type_computations::charge_term(&env.ty, &mut self.fuel)
+                    .map_err(|e| error(source, e.to_string()))?;
+                env_params.push(env.ty.clone());
+            }
+            let implicit = nir::program::implicit_runtime_env_parameters(
+                &package.runtime_domains,
+                &package.global_runtime_deliveries,
+                type_args,
+                &instance.interface.env_parameters,
+            )
+            .map_err(|reason| error(source, reason))?;
+            for ep in implicit {
+                nir::type_computations::charge_term(&ep.ty, &mut self.fuel)
+                    .map_err(|e| error(source, e.to_string()))?;
+                env_params.push(ep.ty);
+            }
+            return Ok(env_params);
+        }
+        let mut existing = Vec::new();
+        if let Some(index) = self
+            .declarations
+            .function_index(&mut self.fuel)
+            .map_err(|reason| error(source, reason))?
+            && let Some(&slot) = index.get(&declaration)
+            && let Some(function) = package.functions.get(slot)
+            && !function.interface.env_parameters.is_empty()
+        {
+            let domains = self
+                .declarations
+                .parameter_domains(&function.type_parameters, &mut self.fuel)
+                .map_err(|e| error(source, e.to_string()))?;
+            for ty in type_args {
+                nir::type_computations::charge_term(ty, &mut self.fuel)
+                    .map_err(|e| error(source, e.to_string()))?;
+            }
+            let substitution = nir::DeclarationSubstitution::bounded(
+                &function.type_parameters,
+                &domains,
+                type_args,
+                &[],
+                &mut self.fuel,
+            )
+            .map_err(|e| error(source, e.to_string()))?;
+            for env in &function.interface.env_parameters {
+                let substituted = substitution
+                    .instantiate_bounded(
+                        &Term::Rigid {
+                            declaration: env.declaration,
+                            sort: nir::Sort::Runtime,
+                        },
+                        &mut self.fuel,
+                    )
+                    .map_err(|e| error(source, e.to_string()))?;
+                let (env_decl, runtime_id) = match substituted {
+                    Term::Runtime(id) => (env.declaration, Some(id)),
+                    Term::Rigid {
+                        declaration: next,
+                        sort: nir::Sort::Runtime,
+                    } => (next, env.runtime_id),
+                    _ => (env.declaration, env.runtime_id),
+                };
+                let ty = substitution
+                    .instantiate_bounded(&env.ty, &mut self.fuel)
+                    .map_err(|e| error(source, e.to_string()))?;
+                env_params.push(ty.clone());
+                existing.push(nir::program::RuntimeEnvParameter {
+                    declaration: env_decl,
+                    runtime_id,
+                    binding: env.binding,
+                    ty,
+                });
+            }
+        }
+        let implicit = nir::program::implicit_runtime_env_parameters(
+            &package.runtime_domains,
+            &package.global_runtime_deliveries,
+            type_args,
+            &existing,
+        )
+        .map_err(|reason| error(source, reason))?;
+        for ep in implicit {
+            nir::type_computations::charge_term(&ep.ty, &mut self.fuel)
+                .map_err(|e| error(source, e.to_string()))?;
+            env_params.push(ep.ty);
+        }
+        Ok(env_params)
     }
     fn call_may_reject(&mut self, callee: &Expr) -> Result<bool, &'static str> {
         let policy = &mut self.cleanup;
@@ -5053,8 +5161,13 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return Ok(None);
         };
         let effects = self.effect_inputs_for(&callee.ty, source)?;
-        let effect_slots = if let Some(package) = self.package {
-            effect_result_slots(package, &callee.ty, &mut self.fuel, source)?
+        let effect_slots = if let Some(package) = self.package
+            && matches!(
+                result_ty.as_ref(),
+                Term::Computation { effects, .. } if !effects.is_empty()
+            ) {
+            let env_types = self.callee_env_parameter_types(package, callee, source)?;
+            effect_result_slots_with_envs(package, &callee.ty, &env_types, &mut self.fuel, source)?
         } else {
             vec![]
         };
@@ -14179,13 +14292,14 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
             }]),
         );
         // This remains conditional: publication requires a body footprint
-        // checked at the actual call site. A scalar
-        // pointee cannot carry ownership/provenance that a handler invalidates.
-        // Entry pointers without this premise remain unestablished.
-        if matches!(subject, Term::Primitive(_))
-            && nir::program::intrinsic_pointer_value(subject)
-            && (analyzer.delivery)(subject).map_err(|reason| error(source, reason))?
-                == Delivery::Copy
+        // checked at the actual call site. Pointer-free, callable-free data
+        // pointees cannot hide pointer/callable provenance invalidations:
+        // moving out through pointers is forbidden, handler exits preserve
+        // initialization, handler lexical returns reject borrowed_roots, and
+        // effect_call clears borrowed enum domains. Pointer-bearing and
+        // callable-bearing pointees remain fail-closed.
+        if super::memory::effect_data_layout(analyzer.package, subject, &mut analyzer.fuel, 0)
+            .map_err(|reason| error(source, reason))?
         {
             flow.effect_borrows.insert(pointee);
         }
@@ -14233,13 +14347,17 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
             for target in targets {
                 // This is a conditional borrowed-input premise, just like a
                 // direct pointer parameter. The caller still establishes the
-                // actual target and footprint; scalar storage cannot hide a
-                // handler-induced ownership or pointer-provenance transition.
-                if matches!(premise.pointee, Term::Primitive(_))
-                    && nir::program::intrinsic_pointer_value(&premise.pointee)
-                    && (analyzer.delivery)(&premise.pointee)
-                        .map_err(|reason| error(source, reason))?
-                        == Delivery::Copy
+                // actual target and footprint; pointer-free, callable-free data
+                // pointees cannot hide handler-induced pointer/callable
+                // provenance transitions, while pointer-bearing and
+                // callable-bearing storage stay rejected.
+                if super::memory::effect_data_layout(
+                    analyzer.package,
+                    &premise.pointee,
+                    &mut analyzer.fuel,
+                    0,
+                )
+                .map_err(|reason| error(source, reason))?
                 {
                     flow.effect_borrows.insert(target.root);
                 }
@@ -17116,6 +17234,387 @@ mod record_shape_tests {
         );
         evidence.parameter_accesses.clear();
         assert!(infer(&evidence, &mut 100_000).unwrap().accesses.is_empty());
+    }
+
+    #[test]
+    fn borrowed_pointer_free_data_struct_survives_effect_request_while_pointer_struct_rejects() {
+        let source = SourceRange { start: 0, end: 1 };
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let pointer_bool = Term::Pointer(Box::new(boolean.clone()));
+        let make_case = |with_ptr_field: bool| {
+            let struct_id = nir::DeclarationId {
+                package: 0,
+                local: 10,
+            };
+            let function_id = nir::DeclarationId {
+                package: 0,
+                local: 1,
+            };
+            let effect_id = nir::DeclarationId {
+                package: 0,
+                local: 2,
+            };
+            let env_decl = nir::DeclarationId {
+                package: 0,
+                local: 20,
+            };
+            let struct_term = Term::Nominal {
+                declaration: struct_id,
+                arguments: vec![],
+            };
+            let env_ptr = Term::Pointer(Box::new(struct_term.clone()));
+            let operation = nir::effects::Operation {
+                declaration: effect_id,
+                arguments: vec![],
+            };
+            let op_signature = Term::Function {
+                parameters: vec![],
+                result: Box::new(boolean.clone()),
+            };
+            let computation = Term::Computation {
+                effects: vec![operation.clone()],
+                result: Box::new(boolean.clone()),
+            };
+            let package = Package {
+                structs: vec![nir::program::Struct {
+                    parameter_types: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    declaration: struct_id,
+                    name: if with_ptr_field {
+                        "PtrHolder".into()
+                    } else {
+                        "DataHolder".into()
+                    },
+                    fields: vec![(
+                        "field".into(),
+                        if with_ptr_field {
+                            pointer_bool.clone()
+                        } else {
+                            boolean.clone()
+                        },
+                    )],
+                    packed: false,
+                }],
+                effects: vec![nir::effects::Declaration {
+                    declaration: effect_id,
+                    group: None,
+                    name: "tick".into(),
+                    type_parameters: vec![],
+                    parameter_types: vec![],
+                    signature: op_signature.clone(),
+                    abi: nir::effects::Abi::Direct,
+                    inline: false,
+                    requirements: vec![],
+                    capabilities: vec![],
+                }],
+                functions: vec![Function {
+                    interface: nir::program::FunctionDeclaration {
+                        source,
+                        phase: FunctionPhase::Runtime,
+                        inline: false,
+                        pure: false,
+                        is_unsafe: false,
+                        preconditions: vec![],
+                        postconditions: vec![],
+                        result_binding: None,
+                        result_type_binder: None,
+                        result_guarantees: vec![],
+                        entry_snapshots: vec![],
+                        capabilities: vec![],
+                        requirements: vec![],
+                        type_parameters: vec![],
+                        declaration: function_id,
+                        name: "effectful_env".into(),
+                        parameters: vec![],
+                        env_parameters: vec![nir::program::RuntimeEnvParameter {
+                            declaration: env_decl,
+                            runtime_id: None,
+                            binding: LocalId { owner: 1, index: 0 },
+                            ty: env_ptr,
+                        }],
+                        defaults: vec![],
+                        signature: Term::Function {
+                            parameters: vec![],
+                            result: Box::new(computation.clone()),
+                        },
+                    },
+                    body: Expr {
+                        source,
+                        ty: computation,
+                        kind: K::EffectComputation {
+                            effects: vec![operation.clone()],
+                            body: Box::new(Expr {
+                                source,
+                                ty: boolean.clone(),
+                                kind: K::EffectRequest {
+                                    operation: operation.clone(),
+                                    abi: nir::effects::Abi::Direct,
+                                    allowed_index: 0,
+                                    signature: Box::new(op_signature.clone()),
+                                    arguments: vec![],
+                                },
+                            }),
+                        },
+                    },
+                    runtime_deliveries: Default::default(),
+                }],
+                ..Default::default()
+            };
+            let evidence = EffectResultInput {
+                owned_inputs: false,
+                slot: 0,
+                operation,
+                abi: nir::effects::Abi::Direct,
+                signature: op_signature,
+                values: vec![],
+                forwarded_parameters: None,
+                copy_parameters: BTreeSet::new(),
+                parameter_accesses: BTreeSet::new(),
+            };
+            let mut delivery = |ty: &Term| {
+                Ok(match ty {
+                    Term::Nominal { .. } => Delivery::Move,
+                    _ => Delivery::Copy,
+                })
+            };
+            analyze_in_package_with_effect_context(
+                &package,
+                &package.functions[0],
+                &mut delivery,
+                100_000,
+                None,
+                &[(0, struct_term)],
+                &[],
+                &[],
+                vec![evidence],
+            )
+        };
+        // Non-Copy pointer-free affine data struct env pointee is admitted across effect requests.
+        assert!(make_case(false).is_ok());
+        // Pointer-bearing struct pointee remains rejected across effect requests.
+        let err = make_case(true).unwrap_err();
+        assert!(
+            err.reason
+                .contains("handler pointer requires live local storage"),
+            "unexpected error: {}",
+            err.reason
+        );
+    }
+
+    #[test]
+    fn const_global_pointer_survives_handler_installation_while_writes_stay_rejected() {
+        let source = SourceRange { start: 0, end: 1 };
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let ptr_bool = Term::Pointer(Box::new(boolean.clone()));
+        let const_decl = nir::DeclarationId {
+            package: 0,
+            local: 10,
+        };
+        let function_id = nir::DeclarationId {
+            package: 0,
+            local: 1,
+        };
+        let effect_id = nir::DeclarationId {
+            package: 0,
+            local: 2,
+        };
+        let ptr_local = LocalId { owner: 1, index: 0 };
+        let operation = nir::effects::Operation {
+            declaration: effect_id,
+            arguments: vec![],
+        };
+        let op_signature = Term::Function {
+            parameters: vec![],
+            result: Box::new(boolean.clone()),
+        };
+        let computation = Term::Computation {
+            effects: vec![operation.clone()],
+            result: Box::new(boolean.clone()),
+        };
+        let make_package = |with_write: bool| {
+            let const_init = Expr {
+                source,
+                ty: ptr_bool.clone(),
+                kind: K::ConstAddress {
+                    declaration: const_decl,
+                    value: Box::new(Expr {
+                        source,
+                        ty: boolean.clone(),
+                        kind: K::Literal(nir::program::Literal::Bool(true)),
+                    }),
+                },
+            };
+            let arm_body = if with_write {
+                Expr {
+                    source,
+                    ty: Term::Primitive(nir::Primitive::Never),
+                    kind: K::Block {
+                        statements: vec![Expr {
+                            source,
+                            ty: Term::Primitive(nir::Primitive::Void),
+                            kind: K::WritePointer {
+                                pointer: Box::new(Expr {
+                                    source,
+                                    ty: ptr_bool.clone(),
+                                    kind: K::Local(ptr_local),
+                                }),
+                                value: Box::new(Expr {
+                                    source,
+                                    ty: boolean.clone(),
+                                    kind: K::Literal(nir::program::Literal::Bool(false)),
+                                }),
+                            },
+                        }],
+                        result: Some(Box::new(Expr {
+                            source,
+                            ty: Term::Primitive(nir::Primitive::Never),
+                            kind: K::EffectResume(Box::new(Expr {
+                                source,
+                                ty: boolean.clone(),
+                                kind: K::Literal(nir::program::Literal::Bool(true)),
+                            })),
+                        })),
+                    },
+                }
+            } else {
+                Expr {
+                    source,
+                    ty: Term::Primitive(nir::Primitive::Never),
+                    kind: K::EffectResume(Box::new(Expr {
+                        source,
+                        ty: boolean.clone(),
+                        kind: K::ReadPointer(Box::new(Expr {
+                            source,
+                            ty: ptr_bool.clone(),
+                            kind: K::Local(ptr_local),
+                        })),
+                    })),
+                }
+            };
+            let handle = Expr {
+                source,
+                ty: boolean.clone(),
+                kind: K::EffectHandle {
+                    computation: Box::new(Expr {
+                        source,
+                        ty: computation.clone(),
+                        kind: K::EffectComputation {
+                            effects: vec![operation.clone()],
+                            body: Box::new(Expr {
+                                source,
+                                ty: boolean.clone(),
+                                kind: K::EffectRequest {
+                                    operation: operation.clone(),
+                                    abi: nir::effects::Abi::Direct,
+                                    allowed_index: 0,
+                                    signature: Box::new(op_signature.clone()),
+                                    arguments: vec![],
+                                },
+                            }),
+                        },
+                    }),
+                    handlers: vec![nir::program::EffectHandler {
+                        operation: operation.clone(),
+                        abi: nir::effects::Abi::Direct,
+                        signature: op_signature.clone(),
+                        arms: vec![nir::program::MatchArm {
+                            pattern: Pattern::Tuple(vec![]),
+                            guard: None,
+                            body: arm_body,
+                        }],
+                        fallback: None,
+                    }],
+                    outer: vec![],
+                },
+            };
+            Package {
+                effects: vec![nir::effects::Declaration {
+                    declaration: effect_id,
+                    group: None,
+                    name: "peek".into(),
+                    type_parameters: vec![],
+                    parameter_types: vec![],
+                    signature: op_signature.clone(),
+                    abi: nir::effects::Abi::Direct,
+                    inline: false,
+                    requirements: vec![],
+                    capabilities: vec![],
+                }],
+                functions: vec![Function {
+                    interface: nir::program::FunctionDeclaration {
+                        source,
+                        phase: FunctionPhase::Runtime,
+                        inline: false,
+                        pure: false,
+                        is_unsafe: false,
+                        preconditions: vec![],
+                        postconditions: vec![],
+                        result_binding: None,
+                        result_type_binder: None,
+                        result_guarantees: vec![],
+                        entry_snapshots: vec![],
+                        capabilities: vec![],
+                        requirements: vec![],
+                        type_parameters: vec![],
+                        declaration: function_id,
+                        name: "use_const_in_handler".into(),
+                        parameters: vec![],
+                        env_parameters: vec![],
+                        defaults: vec![],
+                        signature: Term::Function {
+                            parameters: vec![],
+                            result: Box::new(boolean.clone()),
+                        },
+                    },
+                    body: Expr {
+                        source,
+                        ty: boolean.clone(),
+                        kind: K::Block {
+                            statements: vec![Expr {
+                                source,
+                                ty: Term::Primitive(nir::Primitive::Void),
+                                kind: K::Let {
+                                    binding: ptr_local,
+                                    value: Box::new(const_init),
+                                },
+                            }],
+                            result: Some(Box::new(handle)),
+                        },
+                    },
+                    runtime_deliveries: Default::default(),
+                }],
+                ..Default::default()
+            }
+        };
+        let mut delivery = |_: &Term| Ok(Delivery::Copy);
+        let ok_pkg = make_package(false);
+        assert!(
+            analyze_in_package_with_cleanup(
+                &ok_pkg,
+                &ok_pkg.functions[0],
+                &mut delivery,
+                100_000,
+                None
+            )
+            .is_ok()
+        );
+        let bad_pkg = make_package(true);
+        let err = analyze_in_package_with_cleanup(
+            &bad_pkg,
+            &bad_pkg.functions[0],
+            &mut delivery,
+            100_000,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.reason
+                .contains("cannot write through a pointer to a global constant"),
+            "unexpected error: {}",
+            err.reason
+        );
     }
 
     #[test]

@@ -442,7 +442,7 @@ impl Solver<'_, '_> {
         contract.validate_arguments_with_layouts(
             &query.subject,
             &query.arguments,
-            &[],
+            self.world.context.scope(),
             self.world.traits,
             &self.world.index.parameter_domains,
             &mut self.remaining,
@@ -454,7 +454,11 @@ impl Solver<'_, '_> {
         let inputs: Vec<_> = std::iter::once(query.subject.clone())
             .chain(query.arguments.iter().cloned())
             .collect();
-        let substitution = contract.input_substitution(&inputs, &[], &mut self.remaining)?;
+        let substitution = contract.input_substitution(
+            &inputs,
+            self.world.context.scope(),
+            &mut self.remaining,
+        )?;
         for requirement in &contract.requirements {
             if requirement.mentions_rigid(contract.self_parameter) {
                 continue;

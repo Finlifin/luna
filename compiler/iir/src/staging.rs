@@ -202,10 +202,15 @@ fn bind_inputs_with_type_view<'layout>(
     crate::visit::expressions(template, fuel, |_, _| Ok(()))?;
     let mut result = template.clone();
     result.signature = scope.signature().clone();
+    for env in &mut result.env_parameters {
+        let ty = scope.rebind(&env.ty).map_err(|error| error.to_string())?;
+        env.ty = binding_type_view(&ty, scope.signature(), fuel, &mut type_view)?;
+    }
     for root in std::iter::once(&mut result.body)
         .chain(&mut result.interface.preconditions)
         .chain(&mut result.interface.postconditions)
         .chain(result.interface.defaults.iter_mut().map(|(_, value)| value))
+        .chain(result.runtime_deliveries.values_mut())
     {
         root.rewrite_types(&mut |ty| {
             charge(fuel, 1)?;
@@ -1508,8 +1513,11 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
     else {
         return Err("staged routing requires a direct call".into());
     };
-    if !env_arguments.is_empty() || !template.env_parameters.is_empty() {
-        return Err("runtime environment parameter delivery is not yet implemented".into());
+    if env_arguments.len() != template.env_parameters.len() {
+        return Err("staged call runtime environment argument count mismatch".into());
+    }
+    for env_arg in env_arguments {
+        crate::visit::expression(env_arg, fuel, |_, _| Ok(()))?;
     }
     let actual = match &callee.kind {
         K::Function(id) if declaration_arguments.is_empty() => (*id, &[][..]),
@@ -1738,7 +1746,7 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
             // was an indirect call. Publish its remaining parameter frame so
             // resource/default analysis can bind each runtime input uniquely.
             parameter_bindings: function.parameters.clone(),
-            env_arguments: vec![],
+            env_arguments: env_arguments.clone(),
         },
     };
     Ok((crate::FunctionInstance { key, function }, result))

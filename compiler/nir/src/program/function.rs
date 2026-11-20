@@ -1,6 +1,52 @@
 //! Checked function declarations and their separately owned bodies.
 use super::*;
 
+/// Canonical package/owner namespaces reserved for compiler-synthesized
+/// implicit runtime environment parameters backing local `Term::Runtime` dependencies.
+pub const IMPLICIT_RUNTIME_ENV_PACKAGE: u64 = u64::MAX - 9;
+pub const IMPLICIT_RUNTIME_ENV_OWNER: u32 = u32::MAX - 1;
+
+/// Collect implicit runtime environment parameters required by `RuntimeId`s
+/// embedded inside `arguments`, excluding globals and already-bound entries.
+pub fn implicit_runtime_env_parameters(
+    runtime_domains: &std::collections::BTreeMap<crate::RuntimeId, Term>,
+    global_runtime_deliveries: &std::collections::BTreeMap<crate::RuntimeId, Expr>,
+    arguments: &[Term],
+    existing: &[RuntimeEnvParameter],
+) -> Result<Vec<RuntimeEnvParameter>, &'static str> {
+    let mut ids = std::collections::BTreeSet::new();
+    for argument in arguments {
+        ids.extend(argument.runtime_dependencies());
+    }
+    let mut extra = Vec::new();
+    for id in ids {
+        if global_runtime_deliveries.contains_key(&id)
+            || existing.iter().any(|ep| ep.runtime_id == Some(id))
+        {
+            continue;
+        }
+        let Some(Term::Lift(inner)) = runtime_domains.get(&id) else {
+            continue;
+        };
+        if id.instance != 0 {
+            return Err("implicit runtime environment parameter requires instance 0 identity");
+        }
+        extra.push(RuntimeEnvParameter {
+            declaration: DeclarationId {
+                package: IMPLICIT_RUNTIME_ENV_PACKAGE,
+                local: id.local,
+            },
+            runtime_id: Some(id),
+            binding: LocalId {
+                owner: IMPLICIT_RUNTIME_ENV_OWNER,
+                index: id.local,
+            },
+            ty: (**inner).clone(),
+        });
+    }
+    Ok(extra)
+}
+
 /// Runtime parameter carrying the concrete address/handle of a `quote`
 /// dependency bound into a runtime function's caller environment.
 #[derive(Clone, Debug, PartialEq)]

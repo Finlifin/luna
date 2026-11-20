@@ -1,6 +1,10 @@
 //! Immutable declaration evidence shared inside one package analysis. This
 //! contains no call-site assumptions, cleanup choices or behavior certificates.
-use nir::{DeclarationId, Primitive, Sort, Term, program::Package, type_computations::Error};
+use nir::{
+    DeclarationId, Primitive, Sort, Term,
+    program::{Function, FunctionPhase, Package},
+    type_computations::Error,
+};
 use std::{borrow::Cow, cell::OnceCell, collections::BTreeMap, sync::Arc};
 
 pub(crate) struct Metadata<'a> {
@@ -8,6 +12,7 @@ pub(crate) struct Metadata<'a> {
     domains: OnceCell<Arc<BTreeMap<DeclarationId, Term>>>,
     sorts: OnceCell<Arc<BTreeMap<DeclarationId, Sort>>>,
     function_index: OnceCell<Arc<BTreeMap<DeclarationId, usize>>>,
+    runtime_instance_index: OnceCell<Arc<BTreeMap<DeclarationId, Vec<usize>>>>,
 }
 
 #[cfg(test)]
@@ -108,6 +113,125 @@ mod tests {
             Sort::ComptimeValue
         );
     }
+
+    #[test]
+    fn runtime_instance_index_is_bounded_reusable_and_checks_validity() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let signature = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: Sort::Runtime,
+                ty: boolean.clone(),
+            }],
+            result: Box::new(boolean.clone()),
+        };
+        let make_instance = |local: u32, arg: Term| nir::program::RuntimeInstance {
+            declaration: id(local),
+            arguments: vec![arg],
+            function: Function {
+                interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
+                    phase: FunctionPhase::Runtime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    declaration: id(local),
+                    name: format!("f_{local}"),
+                    parameters: vec![nir::program::LocalId {
+                        owner: local,
+                        index: 0,
+                    }],
+                    env_parameters: vec![],
+                    defaults: vec![],
+                    signature: signature.clone(),
+                },
+                body: nir::program::Expr {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
+                    ty: boolean.clone(),
+                    kind: nir::program::ExprKind::Literal(nir::program::Literal::Bool(true)),
+                },
+                runtime_deliveries: Default::default(),
+            },
+            cleanup_accesses: vec![],
+        };
+        let mut package = Package::default();
+        for index in 0..32u32 {
+            package.runtime_instances.push(make_instance(
+                index + 1,
+                Term::Tuple(vec![boolean.clone(); index as usize]),
+            ));
+        }
+        package
+            .runtime_instances
+            .push(make_instance(1, Term::Tuple(vec![boolean.clone(); 40])));
+        let metadata = Metadata::new(Some(&package));
+        let target_arg = [Term::Tuple(vec![])];
+        assert_eq!(
+            metadata.runtime_instance_body_checked(id(1), &target_arg, &mut 8),
+            Err("runtime instance index budget exhausted")
+        );
+        assert!(metadata.runtime_instance_index.get().is_none());
+
+        let mut fuel = 10_000;
+        let found = metadata
+            .runtime_instance_body_checked(id(1), &target_arg, &mut fuel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found.declaration, id(1));
+
+        // Warm index lookup uses per-declaration bucket size rather than the full table.
+        let mut warm_fuel = 3;
+        let found_again = metadata
+            .runtime_instance_body_checked(id(1), &target_arg, &mut warm_fuel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(found_again.declaration, id(1));
+        assert_eq!(warm_fuel, 0);
+        assert_eq!(
+            metadata.runtime_instance_body_checked(id(1), &target_arg, &mut 2),
+            Err("runtime instance lookup budget exhausted")
+        );
+        assert_eq!(
+            metadata
+                .runtime_instance_body_checked(id(999), &[], &mut 1)
+                .unwrap(),
+            None
+        );
+
+        let mut duplicate = package.clone();
+        duplicate
+            .runtime_instances
+            .push(make_instance(2, Term::Tuple(vec![boolean.clone(); 1])));
+        let dup_meta = Metadata::new(Some(&duplicate));
+        assert_eq!(
+            dup_meta.runtime_instance_body_checked(
+                id(2),
+                &[Term::Tuple(vec![boolean.clone(); 1])],
+                &mut 10_000,
+            ),
+            Err("runtime function instance is ambiguous or malformed")
+        );
+
+        let mut malformed = package;
+        malformed.runtime_instances[2].function.phase = FunctionPhase::Comptime;
+        let bad_meta = Metadata::new(Some(&malformed));
+        assert_eq!(
+            bad_meta.runtime_instance_body_checked(
+                id(3),
+                &[Term::Tuple(vec![boolean; 2])],
+                &mut 10_000,
+            ),
+            Err("runtime function instance is ambiguous or malformed")
+        );
+    }
 }
 
 impl<'a> Metadata<'a> {
@@ -117,6 +241,7 @@ impl<'a> Metadata<'a> {
             domains: OnceCell::new(),
             sorts: OnceCell::new(),
             function_index: OnceCell::new(),
+            runtime_instance_index: OnceCell::new(),
         }
     }
 
@@ -147,6 +272,59 @@ impl<'a> Metadata<'a> {
         let index = Arc::new(definitions);
         let _ = self.function_index.set(Arc::clone(&index));
         Ok(Some(index))
+    }
+
+    pub(crate) fn runtime_instance_body_checked(
+        &self,
+        declaration: DeclarationId,
+        arguments: &[Term],
+        fuel: &mut usize,
+    ) -> Result<Option<&'a Function>, &'static str> {
+        let Some(package) = self.package else {
+            return Ok(None);
+        };
+        let index = if let Some(index) = self.runtime_instance_index.get() {
+            Arc::clone(index)
+        } else {
+            let cost = package.runtime_instances.len().max(1);
+            *fuel = fuel
+                .checked_sub(cost)
+                .ok_or("runtime instance index budget exhausted")?;
+            let mut grouped: BTreeMap<DeclarationId, Vec<usize>> = BTreeMap::new();
+            for (slot, instance) in package.runtime_instances.iter().enumerate() {
+                grouped.entry(instance.declaration).or_default().push(slot);
+            }
+            let index = Arc::new(grouped);
+            let _ = self.runtime_instance_index.set(Arc::clone(&index));
+            index
+        };
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("runtime instance lookup budget exhausted")?;
+        let Some(slots) = index.get(&declaration) else {
+            return Ok(None);
+        };
+        *fuel = fuel
+            .checked_sub(slots.len().max(1))
+            .ok_or("runtime instance lookup budget exhausted")?;
+        let mut matches = slots
+            .iter()
+            .map(|&slot| &package.runtime_instances[slot])
+            .filter(|instance| instance.arguments == arguments);
+        if let Some(instance) = matches.next() {
+            if matches.next().is_some()
+                || instance.function.declaration != declaration
+                || !instance.function.type_parameters.is_empty()
+                || instance.function.phase != FunctionPhase::Runtime
+                || !matches!(&instance.function.signature, Term::Function { parameters, .. }
+                    if parameters.len() == instance.function.parameters.len()
+                        && parameters.iter().all(|p| p.sort == Sort::Runtime))
+            {
+                return Err("runtime function instance is ambiguous or malformed");
+            }
+            return Ok(Some(&instance.function));
+        }
+        Ok(None)
     }
 
     /// A residual body without declaration inputs needs no copy or rewrite.

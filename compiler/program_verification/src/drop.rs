@@ -404,6 +404,7 @@ pub fn select(
     )
     .map_err(|e| e.to_string())?;
     let mut env_requirements = Vec::with_capacity(function.env_parameters.len());
+    let mut existing_envs = Vec::with_capacity(function.env_parameters.len());
     for env in &function.env_parameters {
         let substituted = scoped
             .instantiate_bounded(
@@ -429,11 +430,31 @@ pub fn select(
         let ty = scoped
             .instantiate_bounded(&env.ty, &mut preparation_fuel)
             .map_err(|e| e.to_string())?;
+        existing_envs.push(nir::program::RuntimeEnvParameter {
+            declaration,
+            runtime_id,
+            binding: env.binding,
+            ty: ty.clone(),
+        });
         env_requirements.push(DropEnvRequirement {
             declaration,
             runtime_id,
             binding: env.binding,
             ty,
+        });
+    }
+    let implicit_envs = nir::program::implicit_runtime_env_parameters(
+        &package.runtime_domains,
+        &package.global_runtime_deliveries,
+        &arguments,
+        &existing_envs,
+    )?;
+    for env in implicit_envs {
+        env_requirements.push(DropEnvRequirement {
+            declaration: env.declaration,
+            runtime_id: env.runtime_id,
+            binding: env.binding,
+            ty: env.ty,
         });
     }
     for requirement in &function.requirements {

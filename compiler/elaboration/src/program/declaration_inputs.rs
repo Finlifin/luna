@@ -92,7 +92,9 @@ impl PreparedDeclarationInputs {
                 return Err(error(span, "typed declaration input was not checked"));
             };
             let binding = bindings[slot];
-            let output = if matches!(value.kind, K::TypeValue(_)) {
+            let output = if matches!(value.kind, K::TypeValue(_))
+                || (matches!(value.kind, K::ComptimeValue(_)) && matches!(value.ty, Term::Lift(_)))
+            {
                 value
             } else {
                 let ty = copy_input_domain(&value.ty, fuel, span)?;

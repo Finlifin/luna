@@ -168,6 +168,9 @@ impl Checker<'_, '_> {
         let input_boundary = self.input_facts.lexical_boundary();
         let saved_environment = self.effect_environment.clone();
         let saved_resume = self.effect_resume_result.clone();
+        let saved_runtime_origins = self.local_runtime_origin_ids.clone();
+        let saved_delivery_ids: BTreeSet<_> =
+            self.local_runtime_deliveries.keys().copied().collect();
         let first = self.next_temporary_binding;
         self.next_temporary_binding = first
             .checked_add(1)
@@ -267,6 +270,7 @@ impl Checker<'_, '_> {
                 expr.span,
                 body.span,
                 connections,
+                &saved_delivery_ids,
             )?;
             let handler = n::EffectHandler {
                 operation: operation.clone(),
@@ -358,6 +362,7 @@ impl Checker<'_, '_> {
         self.input_facts.leave_lexical(&input_boundary);
         self.effect_environment = saved_environment;
         self.effect_resume_result = saved_resume;
+        self.local_runtime_origin_ids = saved_runtime_origins;
         checked
     }
 

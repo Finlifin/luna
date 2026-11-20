@@ -200,6 +200,20 @@ pub fn prepare_method_invocation(
             });
         }
     }
+    let implicit_envs = nir::program::implicit_runtime_env_parameters(
+        &package.runtime_domains,
+        &package.global_runtime_deliveries,
+        body_arguments,
+        &env_parameters,
+    )?;
+    for ep in implicit_envs {
+        env_arguments.push(Expr {
+            source: callee.source,
+            ty: ep.ty.clone(),
+            kind: K::Local(ep.binding),
+        });
+        env_parameters.push(ep);
+    }
     let mut composed = nir::program::FunctionDeclaration {
         source: callee.source,
         phase: FunctionPhase::Runtime,

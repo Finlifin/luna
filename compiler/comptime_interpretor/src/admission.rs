@@ -52,6 +52,7 @@ impl Interpreter<'_> {
                 type_descriptions::declared_domain_matches(
                     frames,
                     &self.abstract_value_parameters,
+                    self.runtime_domains(),
                     value,
                     domain,
                     fuel,
@@ -158,6 +159,7 @@ impl Interpreter<'_> {
             value.inspect_representation(
                 &vm.abstract_type_parameters,
                 &vm.abstract_value_parameters,
+                vm.runtime_domains(),
                 fuel,
             )
         })

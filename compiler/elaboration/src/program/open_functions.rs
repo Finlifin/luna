@@ -525,7 +525,26 @@ impl Checker<'_, '_> {
                 parameters,
                 result: result.unwrap(),
             };
-            self.open_instance_value(owner, &symbols, signature, expr.span)
+            let value = self.open_instance_value(owner, &symbols, signature, expr.span)?;
+            let generated_id = match &value.kind {
+                K::Function(id)
+                | K::FunctionInstance {
+                    declaration: id, ..
+                } => Some(*id),
+                _ => None,
+            };
+            if let Some(id) = generated_id
+                && self
+                    .generated_functions
+                    .declaration(id)
+                    .is_some_and(|decl| !decl.env_parameters.is_empty())
+            {
+                return Err(error(
+                    expr.span,
+                    "function with runtime quote dependencies cannot form a bare function value",
+                ));
+            }
+            Ok(value)
         })();
         self.alias_substitution = saved;
         result
@@ -1810,6 +1829,28 @@ impl Checker<'_, '_> {
                     }
                 }
             }
+            let mut env_parameters = Vec::new();
+            if !sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head {
+                let type_params = this.type_parameters[&owner].clone();
+                let domains = this.trait_domains(owner)?;
+                for (decl_id, domain) in type_params.iter().zip(&domains) {
+                    let Term::Lift(inner) = domain else {
+                        continue;
+                    };
+                    let inner_ty = this.callable_input_view(inner, item.span)?;
+                    let binding = this.spread_binding(item.span)?;
+                    this.locals.insert(binding, inner_ty.clone());
+                    this.immutable.insert(binding);
+                    this.active_env_parameters
+                        .insert(*decl_id, (binding, inner_ty.clone()));
+                    env_parameters.push(n::RuntimeEnvParameter {
+                        declaration: *decl_id,
+                        runtime_id: None,
+                        binding,
+                        ty: inner_ty,
+                    });
+                }
+            }
             let mut locals = BTreeMap::new();
             let mut default_types = BTreeMap::new();
             let mut default_dependencies = BTreeMap::new();
@@ -2079,7 +2120,7 @@ impl Checker<'_, '_> {
                                 result: Box::new(result_type),
                             },
                             parameters: bindings,
-                            env_parameters: vec![],
+                            env_parameters,
                             defaults: vec![],
                             type_parameters: this.type_parameters[&owner].clone(),
                             preconditions,
@@ -7561,13 +7602,34 @@ impl Checker<'_, '_> {
             self.require_expression(&result, expected, expr.span)?;
         }
         let callee = self.open_instance_value(owner, &symbols, signature, expr.span)?;
+        let generated_id = match &callee.kind {
+            K::Function(id)
+            | K::FunctionInstance {
+                declaration: id, ..
+            } => Some(*id),
+            _ => None,
+        };
+        let env_params = generated_id
+            .and_then(|id| self.generated_functions.declaration(id))
+            .map(|decl| decl.env_parameters.clone())
+            .unwrap_or_default();
+        let env_arguments = env_params
+            .iter()
+            .map(|env| {
+                let term = env.runtime_id.map(Term::Runtime).unwrap_or(Term::Rigid {
+                    declaration: env.declaration,
+                    sort: Sort::Runtime,
+                });
+                self.deliver_runtime_dependency(&term, &env.ty, expr.span)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let call = n::Expr {
             source: source(expr.span),
             ty: result,
             kind: K::Call {
                 callee: Box::new(callee),
                 arguments,
-                env_arguments: vec![],
+                env_arguments,
                 parameter_bindings: sig
                     .params
                     .iter()
@@ -7589,6 +7651,20 @@ impl Checker<'_, '_> {
         })
     }
 
+    fn collect_term_runtime_ids(
+        term: &Term,
+        pending: &mut Vec<nir::RuntimeId>,
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<(), Error> {
+        let deps = term.runtime_dependencies();
+        *steps = steps
+            .checked_sub(deps.len() as u64)
+            .ok_or_else(|| error(span, "open capture runtime dependency budget exhausted"))?;
+        pending.extend(deps);
+        Ok(())
+    }
+
     fn open_instance_captures(
         &mut self,
         owner: OwnerId,
@@ -7599,6 +7675,8 @@ impl Checker<'_, '_> {
         let mut steps = self.required_steps;
         let result = (|| {
             let mut pending = Vec::new();
+            let mut pending_runtimes = Vec::new();
+            let mut seen_runtimes = BTreeSet::new();
             let clauses = self
                 .declaration_binders(owner)
                 .into_iter()
@@ -7609,9 +7687,32 @@ impl Checker<'_, '_> {
             {
                 pending
                     .extend(input_observation::term_inputs(value, &mut steps, span)?.declarations);
+                Self::collect_term_runtime_ids(value, &mut pending_runtimes, &mut steps, span)?;
             }
             let mut captures = BTreeMap::new();
-            while let Some((declaration, sort)) = pending.pop() {
+            while !pending.is_empty() || !pending_runtimes.is_empty() {
+                if let Some(rt_id) = pending_runtimes.pop() {
+                    steps = steps
+                        .checked_sub(1)
+                        .ok_or_else(|| error(span, "open capture domain budget exhausted"))?;
+                    if seen_runtimes.insert(rt_id)
+                        && let Some(domain) = self.runtime_domains.get(&rt_id)
+                    {
+                        pending.extend(
+                            input_observation::term_inputs(domain, &mut steps, span)?.declarations,
+                        );
+                        Self::collect_term_runtime_ids(
+                            domain,
+                            &mut pending_runtimes,
+                            &mut steps,
+                            span,
+                        )?;
+                    }
+                    continue;
+                }
+                let Some((declaration, sort)) = pending.pop() else {
+                    unreachable!()
+                };
                 steps = steps
                     .checked_sub(1)
                     .ok_or_else(|| error(span, "open capture domain budget exhausted"))?;
@@ -7631,12 +7732,17 @@ impl Checker<'_, '_> {
                             error(span, "open value capture lacks declaration domain evidence")
                         })?
                     }
-                    _ => {
-                        return Err(error(
-                            span,
-                            "open instance cannot capture a runtime declaration input",
-                        ));
-                    }
+                    Sort::Runtime => self
+                        .active_env_parameters
+                        .get(&declaration)
+                        .map(|(_, inner)| Term::Lift(Box::new(inner.clone())))
+                        .or_else(|| self.trait_input_domain(declaration))
+                        .ok_or_else(|| {
+                            error(
+                                span,
+                                "open runtime capture lacks declaration domain evidence",
+                            )
+                        })?,
                 };
                 let inputs = input_observation::term_inputs(&domain, &mut steps, span)?;
                 domain
@@ -7644,6 +7750,7 @@ impl Checker<'_, '_> {
                     .map_err(|failure| error(span, failure.to_string()))?;
                 if domain.sort() != Sort::Type
                     || (sort == Sort::ComptimeValue && domain == p(P::Type))
+                    || (sort == Sort::Runtime && !matches!(domain, Term::Lift(_)))
                 {
                     return Err(error(
                         span,
@@ -7651,6 +7758,7 @@ impl Checker<'_, '_> {
                     ));
                 }
                 pending.extend(inputs.declarations);
+                Self::collect_term_runtime_ids(&domain, &mut pending_runtimes, &mut steps, span)?;
                 captures.insert(declaration, (sort, domain));
             }
             Ok(captures
@@ -7662,6 +7770,80 @@ impl Checker<'_, '_> {
         })();
         self.required_steps = steps;
         result
+    }
+
+    fn open_instance_local_runtimes(
+        &mut self,
+        owner: OwnerId,
+        symbols: &[Option<Term>],
+        signature: &Term,
+        captures: &[(nir::DeclarationParameter, Term)],
+        span: Span,
+    ) -> Result<BTreeMap<nir::RuntimeId, (DeclarationId, Term)>, Error> {
+        let mut steps = self.required_steps;
+        let collected = (|| {
+            let mut pending = Vec::new();
+            let binders = self.declaration_binders(owner);
+            for value in binders
+                .iter()
+                .filter_map(|binder| self.alias_substitution.get(&binder.declaration))
+                .chain(symbols.iter().flatten())
+                .chain(std::iter::once(signature))
+                .chain(captures.iter().map(|(_, domain)| domain))
+            {
+                Self::collect_term_runtime_ids(value, &mut pending, &mut steps, span)?;
+            }
+            let mut seen = BTreeSet::new();
+            while let Some(rt_id) = pending.pop() {
+                steps = steps
+                    .checked_sub(1)
+                    .ok_or_else(|| error(span, "open local runtime dependency budget exhausted"))?;
+                if seen.insert(rt_id)
+                    && let Some(domain) = self.runtime_domains.get(&rt_id)
+                {
+                    Self::collect_term_runtime_ids(domain, &mut pending, &mut steps, span)?;
+                }
+            }
+            Ok::<_, Error>((seen, binders))
+        })();
+        self.required_steps = steps;
+        let (seen, binders) = collected?;
+        let mut used_decls: BTreeSet<DeclarationId> = captures
+            .iter()
+            .filter(|(parameter, _)| parameter.sort == Sort::Runtime)
+            .map(|(parameter, _)| parameter.declaration)
+            .collect();
+        let mut local_runtime_ids = BTreeMap::new();
+        for rt_id in seen {
+            if self.global_runtime_deliveries.contains_key(&rt_id) {
+                continue;
+            }
+            let Some(Term::Lift(inner)) = self.runtime_domains.get(&rt_id).cloned() else {
+                return Err(error(
+                    span,
+                    "caller local runtime dependency domain is missing",
+                ));
+            };
+            let matched_binder = binders.iter().find_map(|binder| {
+                (binder.sort == Sort::Runtime
+                    && matches!(
+                        self.alias_substitution.get(&binder.declaration),
+                        Some(Term::Runtime(id)) if *id == rt_id
+                    )
+                    && !used_decls.contains(&binder.declaration))
+                .then_some(binder.declaration)
+            });
+            let env_decl = if let Some(decl) = matched_binder {
+                used_decls.insert(decl);
+                decl
+            } else {
+                let fresh = self.generated_functions.fresh_identity(span)?;
+                used_decls.insert(fresh);
+                fresh
+            };
+            local_runtime_ids.insert(rt_id, (env_decl, *inner));
+        }
+        Ok(local_runtime_ids)
     }
 
     fn open_instance_value(
@@ -7724,6 +7906,8 @@ impl Checker<'_, '_> {
         if self.open_instantiation_depth >= 64 {
             return Err(error(span, "open function instantiation depth exhausted"));
         }
+        let local_runtime_ids =
+            self.open_instance_local_runtimes(owner, symbols, &key.signature, captures, span)?;
         let checkpoint = self.generated_functions.checkpoint();
         let id = self.generated_functions.fresh_identity(span)?;
         let instance = self.generated_functions.reserve(
@@ -7744,6 +7928,12 @@ impl Checker<'_, '_> {
             let ItemKind::Fn(sig, body) = &item.kind else {
                 unreachable!()
             };
+            if sig.modifiers.is_comptime && !local_runtime_ids.is_empty() {
+                return Err(error(
+                    span,
+                    "comptime function cannot capture caller-local runtime quote dependency",
+                ));
+            }
             let Term::Function { parameters, result } = signature else {
                 unreachable!()
             };
@@ -7781,6 +7971,49 @@ impl Checker<'_, '_> {
                 context.assume(crate::ptc::Formula::from_predicate(requirement));
             }
             this.context = context;
+            let mut env_parameters = Vec::new();
+            if !sig.modifiers.is_comptime {
+                for (parameter, domain) in captures {
+                    let Term::Lift(inner) = domain else {
+                        continue;
+                    };
+                    let inner_ty = this.callable_input_view(inner, span)?;
+                    let binding = this.spread_binding(span)?;
+                    this.locals.insert(binding, inner_ty.clone());
+                    this.immutable.insert(binding);
+                    this.active_env_parameters
+                        .insert(parameter.declaration, (binding, inner_ty.clone()));
+                    env_parameters.push(n::RuntimeEnvParameter {
+                        declaration: parameter.declaration,
+                        runtime_id: None,
+                        binding,
+                        ty: inner_ty,
+                    });
+                }
+                for (&rt_id, (env_decl, inner_ty)) in &local_runtime_ids {
+                    let inner_ty = this.callable_input_view(inner_ty, span)?;
+                    let binding = this.spread_binding(span)?;
+                    this.locals.insert(binding, inner_ty.clone());
+                    this.immutable.insert(binding);
+                    this.local_runtime_deliveries.insert(
+                        rt_id,
+                        LocalRuntimeDelivery {
+                            expr: n::Expr {
+                                source: source(span),
+                                ty: inner_ty.clone(),
+                                kind: K::Local(binding),
+                            },
+                            checked_epoch: None,
+                        },
+                    );
+                    env_parameters.push(n::RuntimeEnvParameter {
+                        declaration: *env_decl,
+                        runtime_id: Some(rt_id),
+                        binding,
+                        ty: inner_ty,
+                    });
+                }
+            }
             for (slot, parameter) in sig.params.iter().enumerate() {
                 let binding = local(parameter.hir_id);
                 let ty = &parameters[slot].ty;
@@ -7834,7 +8067,7 @@ impl Checker<'_, '_> {
                     .iter()
                     .map(|parameter| local(parameter.hir_id))
                     .collect(),
-                env_parameters: vec![],
+                env_parameters,
                 preconditions,
                 postconditions,
                 entry_snapshots,

@@ -335,7 +335,18 @@ impl Interpreter<'_> {
             Term::Rigid {
                 declaration,
                 sort: nir::Sort::ComptimeValue,
-            } if self.abstract_value_parameters.contains_key(declaration) => {}
+            } if self
+                .abstract_value_parameters
+                .get(declaration)
+                .is_some_and(|domain| !matches!(domain, Term::Lift(_))) => {}
+            Term::Rigid {
+                declaration,
+                sort: nir::Sort::Runtime,
+            } if self
+                .abstract_value_parameters
+                .get(declaration)
+                .is_some_and(|domain| matches!(domain, Term::Lift(_))) => {}
+            Term::Runtime(id) if self.runtime_domains().contains_key(id) => {}
             Term::AssociatedType { .. }
             | Term::Rigid { .. }
             | Term::Runtime(_)

@@ -558,9 +558,15 @@ fn prepare_source_impl(
             )
             .map_err(|error| error.to_string())?
             .is_empty()
-                || !moves::effect_result_slots(
+                || !moves::effect_result_slots_with_envs(
                     package,
                     &instance.function.signature,
+                    &instance
+                        .function
+                        .env_parameters
+                        .iter()
+                        .map(|env| env.ty.clone())
+                        .collect::<Vec<_>>(),
                     fuel,
                     instance.function.body.source,
                 )

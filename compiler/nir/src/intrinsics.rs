@@ -775,7 +775,6 @@ pub fn concrete_payload(ty: &Term) -> bool {
                     | Term::Hole { .. }
                     | Term::AssociatedType { .. }
                     | Term::ListConcat { .. }
-                    | Term::Runtime(_)
             )
         })
 }
@@ -1164,6 +1163,96 @@ mod pending_dependency_tests {
                 .validate_specialized(tag, std::slice::from_ref(&usize_ty), &rigid_t, |_| {
                     Ok::<(), ()>(())
                 })
+                .unwrap()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn concrete_payload_allows_runtime_dependencies_and_rejects_rigid_slots() {
+        let tag = Tag {
+            family: DeclarationId {
+                package: 1,
+                local: 9,
+            },
+            variant: 0,
+        };
+        let input_param = DeclarationId {
+            package: 1,
+            local: 10,
+        };
+        let rigid_t = Term::Rigid {
+            declaration: input_param,
+            sort: crate::Sort::Type,
+        };
+        let rigid_rt = Term::Rigid {
+            declaration: DeclarationId {
+                package: 1,
+                local: 11,
+            },
+            sort: crate::Sort::Runtime,
+        };
+        let concrete_rt = Term::Runtime(crate::RuntimeId {
+            instance: 0,
+            local: 1,
+        });
+        let nominal_decl = DeclarationId {
+            package: 2,
+            local: 4,
+        };
+        let concrete_nominal = Term::Nominal {
+            declaration: nominal_decl,
+            arguments: vec![concrete_rt],
+        };
+        let rigid_rt_nominal = Term::Nominal {
+            declaration: nominal_decl,
+            arguments: vec![rigid_rt],
+        };
+        let rigid_ty_nominal = Term::Nominal {
+            declaration: nominal_decl,
+            arguments: vec![rigid_t.clone()],
+        };
+
+        assert!(concrete_payload(&concrete_nominal));
+        assert!(!concrete_payload(&rigid_rt_nominal));
+        assert!(!concrete_payload(&rigid_ty_nominal));
+
+        let usize_ty = Term::Primitive(Primitive::Usize);
+        let payload_read = Checked {
+            comptime: false,
+            tag,
+            operation: Operation::MemRawRead,
+            signature: Signature::Payload(rigid_t.clone()),
+        };
+        assert_eq!(
+            payload_read
+                .validate_specialized(
+                    tag,
+                    std::slice::from_ref(&usize_ty),
+                    &concrete_nominal,
+                    |ty| {
+                        if *ty == rigid_t {
+                            *ty = concrete_nominal.clone();
+                        }
+                        Ok::<(), ()>(())
+                    }
+                )
+                .unwrap(),
+            Ok(())
+        );
+        assert!(
+            payload_read
+                .validate_specialized(
+                    tag,
+                    std::slice::from_ref(&usize_ty),
+                    &rigid_rt_nominal,
+                    |ty| {
+                        if *ty == rigid_t {
+                            *ty = rigid_rt_nominal.clone();
+                        }
+                        Ok::<(), ()>(())
+                    }
+                )
                 .unwrap()
                 .is_err()
         );

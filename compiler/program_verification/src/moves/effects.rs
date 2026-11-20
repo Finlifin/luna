@@ -443,7 +443,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 // Captures retain installer targets. Operation parameters use
                 // a private borrowed-root namespace and still need request-side
                 // substitution before crossing this installation boundary.
-                if !flow.effect_borrows.contains(&target.root)
+                if (!flow.effect_borrows.contains(&target.root)
+                    && !crate::is_const_global_place(target.root))
                     || !flow.types.contains_key(&target.root)
                     || self.report.borrowed_roots.contains_key(&target.root)
                 {
@@ -858,6 +859,28 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             }
         }
         self.check_effect_memory_context(expr, flow)?;
+        if abi != nir::effects::Abi::DirectPassing
+            || !super::super::memory::data_passing_signature(
+                self.package,
+                signature,
+                &mut self.fuel,
+            )
+            .map_err(|reason| error(expr.source, reason))?
+        {
+            self.fuel = self
+                .fuel
+                .checked_sub(flow.enum_domains.len())
+                .ok_or_else(|| {
+                    error(
+                        expr.source,
+                        "effect borrow tag invalidation budget exhausted",
+                    )
+                })?;
+            flow.enum_domains.retain(|root, _| {
+                !(flow.effect_borrows.contains(root)
+                    && self.report.borrowed_roots.contains_key(root))
+            });
+        }
         flow.value_callable = None;
         flow.value_callables.clear();
         flow.value_variants.clear();
@@ -903,7 +926,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .types
                 .get(&target.root)
                 .ok_or_else(|| error(source, "handler pointer target is not a known local"))?;
-            if (!outer.roots.contains(&target.root) && !outer.effect_borrows.contains(&target.root))
+            if (!outer.roots.contains(&target.root)
+                && !outer.effect_borrows.contains(&target.root)
+                && !crate::is_const_global_place(target.root))
                 || target.fields.contains(&VARIANT_PATH)
             {
                 return Err(error(
@@ -2226,9 +2251,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .types
                 .get(input)
                 .ok_or_else(|| error(source, "closure handler input has no storage type"))?;
-            if matches!(ty, Term::Primitive(_))
-                && nir::program::intrinsic_pointer_value(ty)
-                && (self.delivery)(ty).map_err(|reason| error(source, reason))? == Delivery::Copy
+            if super::super::memory::effect_data_layout(self.package, ty, &mut self.fuel, 0)
+                .map_err(|reason| error(source, reason))?
             {
                 frame.effect_borrows.insert(*input);
             }
@@ -2652,6 +2676,18 @@ pub fn effect_result_slots(
     fuel: &mut usize,
     source: SourceRange,
 ) -> Result<Vec<usize>, Error> {
+    effect_result_slots_with_envs(package, signature, &[], fuel, source)
+}
+
+/// Include explicit and implicit pointer environment parameters when checking
+/// whether an effectful operation requires call-specific handler premises.
+pub fn effect_result_slots_with_envs(
+    package: &Package,
+    signature: &Term,
+    env_parameter_types: &[Term],
+    fuel: &mut usize,
+    source: SourceRange,
+) -> Result<Vec<usize>, Error> {
     let Term::Function { parameters, result } = signature.callable_signature() else {
         return Ok(vec![]);
     };
@@ -2662,6 +2698,9 @@ pub fn effect_result_slots(
         contains_pointer_value(Some(package), completion_type(result), fuel, source, 0)?;
     for parameter in parameters {
         pointer_context |= contains_pointer_value(Some(package), &parameter.ty, fuel, source, 0)?;
+    }
+    for env_ty in env_parameter_types {
+        pointer_context |= contains_pointer_value(Some(package), env_ty, fuel, source, 0)?;
     }
     let mut slots = vec![];
     for (slot, operation) in effects.iter().enumerate() {

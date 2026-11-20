@@ -1,20 +1,33 @@
-use mem_impl.allocator.{AllocErr, Allocator, RawBlock, SystemAllocator}
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
 use mem_impl.layout.Layout;
 
 {-
     Single-owner heap allocation holding one initialized value of T.
-    Box<T> is affine (Once) and drops T in place before releasing the backing
-    RawBlock. Zero-sized payloads use a non-zero aligned dangling address with
-    no OS allocation while still running T's Drop on destruction.
+    Box<T, .A, .allocator> is affine (Once) and drops T in place before
+    releasing the backing RawBlock through its runtime-dependent allocator.
+    Zero-sized payloads use a non-zero aligned dangling address with no OS
+    allocation while still running T's Drop on destruction.
 -}
-pub struct Box where T {
+pub struct Box
+where
+    T,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
     raw_addr: usize,
     raw_layout: Layout,
 }
 
 fn retire_value(value: T) where T {}
 
-impl Drop for Box<T> where T {
+impl Drop for Box<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
     fn drop(*self) {
         let addr = self.raw_addr.*;
         if addr != 0 {
@@ -22,7 +35,6 @@ impl Drop for Box<T> where T {
             self.raw_addr.* = 0;
             retire_value(unsafe { builtin.mem.raw_read<T>(addr) });
             if layout.byte_size() != 0 {
-                let alloc = SystemAllocator {}
                 unsafe {
                     alloc
                         .as(Allocator)
@@ -33,7 +45,13 @@ impl Drop for Box<T> where T {
     }
 }
 
-impl Box<T> where T {
+impl Box<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
     fn take_raw(*self) -> RawBlock {
         let addr = self.raw_addr.*;
         let layout = self.raw_layout.*;
@@ -46,12 +64,11 @@ impl Box<T> where T {
             found? => found,
             null => return error AllocErr.InvalidLayout,
         }
-        let alloc = SystemAllocator {}
         let block = alloc.as(Allocator).allocate(layout)!;
         unsafe {
             builtin.mem.raw_write<T>(block.address(), value);
         }
-        Box<T> {
+        Box<T, .A = A, .allocator = alloc> {
             raw_addr: block.address(),
             raw_layout: block.layout(),
         }
@@ -62,7 +79,6 @@ impl Box<T> where T {
         let block = this.ref.take_raw();
         let value = unsafe { builtin.mem.raw_read<T>(block.address()) }
         if block.byte_size() != 0 {
-            let alloc = SystemAllocator {}
             unsafe {
                 alloc.as(Allocator).deallocate(block);
             }
@@ -97,7 +113,13 @@ impl Box<T> where T {
     }
 }
 
-impl Box<T> where T :- Copy {
+impl Box<T, .A = A, .allocator = alloc>
+where
+    T :- Copy,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
     pub fn get(*self) -> T {
         unsafe { builtin.mem.raw_read<T>(self.raw_addr.*) }
     }

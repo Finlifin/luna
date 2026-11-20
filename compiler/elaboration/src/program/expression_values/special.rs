@@ -261,16 +261,22 @@ impl Checker<'_, '_> {
                 .map(|(_, _, ty)| ty.clone())
             {
                 let ty = self.substituted_trait_domain(&domain, expr.span)?;
+                if matches!(ty, Term::Lift(_))
+                    && (self.in_required_comptime || self.in_staged_input)
+                {
+                    return Err(error(
+                        expr.span,
+                        "cannot read runtime quote dependency in comptime expression",
+                    ));
+                }
                 if let Some(expected) = expected {
                     self.require_expression(&ty, expected, expr.span)?;
                 }
+                let sort = Sort::of_comptime_domain(&ty);
                 return Ok(Some(n::Expr {
                     source: source(expr.span),
                     ty,
-                    kind: K::ComptimeValue(Term::Rigid {
-                        declaration,
-                        sort: Sort::ComptimeValue,
-                    }),
+                    kind: K::ComptimeValue(Term::Rigid { declaration, sort }),
                 }));
             }
             if let Some((_, binding, ty)) = self
@@ -298,16 +304,22 @@ impl Checker<'_, '_> {
                     .contains(&declaration)
             {
                 let ty = self.substituted_trait_domain(&domain, expr.span)?;
+                if matches!(ty, Term::Lift(_))
+                    && (self.in_required_comptime || self.in_staged_input)
+                {
+                    return Err(error(
+                        expr.span,
+                        "cannot read runtime quote dependency in comptime expression",
+                    ));
+                }
                 if let Some(expected) = expected {
                     self.require_expression(&ty, expected, expr.span)?;
                 }
+                let sort = Sort::of_comptime_domain(&ty);
                 return Ok(Some(n::Expr {
                     source: source(expr.span),
                     ty,
-                    kind: K::ComptimeValue(Term::Rigid {
-                        declaration,
-                        sort: Sort::ComptimeValue,
-                    }),
+                    kind: K::ComptimeValue(Term::Rigid { declaration, sort }),
                 }));
             }
         }

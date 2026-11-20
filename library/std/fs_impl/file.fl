@@ -2,6 +2,7 @@ use builtin.fmt.ByteWriter;
 use collections_impl.vec.Vec;
 use io_impl.errors.{IoErr, check}
 use io_impl.writer.write_all_raw;
+use mem_impl.allocator.Allocator;
 use std.os.{linux, unix}
 use string_impl.string.String;
 
@@ -42,7 +43,15 @@ impl File {
         io_impl.writer.write_all<text>(self.descriptor.*)
     }
 
-    pub fn write_bytes(*self, bytes: *Vec<u8>) -> !IoErr void {
+    pub fn write_bytes(
+        *self,
+        bytes: *Vec<u8, .A = A, .allocator = a>,
+    ) -> !IoErr void
+    where
+        A: Type,
+        requires A :- Allocator,
+        quote a: lift *A,
+    {
         let len = bytes.len();
         if len == 0 {
             return;
@@ -50,7 +59,15 @@ impl File {
         unsafe { write_all_raw(self.descriptor.*, bytes.as_addr(), len) }
     }
 
-    pub fn write_string(*self, text: *String) -> !IoErr void {
+    pub fn write_string(
+        *self,
+        text: *String<.A = A, .allocator = a>,
+    ) -> !IoErr void
+    where
+        A: Type,
+        requires A :- Allocator,
+        quote a: lift *A,
+    {
         let len = text.len();
         if len == 0 {
             return;

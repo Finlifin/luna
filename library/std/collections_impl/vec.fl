@@ -1,17 +1,23 @@
 use builtin.fmt.ByteWriter;
-use mem_impl.allocator.{AllocErr, Allocator, RawBlock, ReallocErr, SystemAllocator}
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock, ReallocErr}
 use mem_impl.layout.Layout;
 
 {-
-    Growable heap-allocated contiguous sequence Vec<T> and its consuming
-    iterator VecIter<T>.
+    Growable heap-allocated contiguous sequence Vec<T, .A, .allocator> and its
+    consuming iterator VecIter<T, .A, .allocator>.
 
-    Vec<T> is affine (Once) and drops every initialized element in forward order
-    before releasing its RawBlock. Zero-sized elements never allocate OS memory
-    while still tracking element count and running T's Drop on destruction or
-    removal.
+    Both are affine (Once) and drop every initialized element in forward order
+    before releasing the backing RawBlock through their runtime-dependent
+    allocator. Zero-sized elements never allocate OS memory while still
+    tracking element count and running T's Drop on destruction or removal.
 -}
-pub struct Vec where T {
+pub struct Vec
+where
+    T,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
     raw_addr: usize,
     raw_len: usize,
     raw_cap: usize,
@@ -62,7 +68,12 @@ fn buffer_layout(cap: usize) -> ?Layout where T {
     layout
 }
 
-fn dealloc_vec_buffer(addr: usize, cap: usize) where T {
+fn dealloc_vec_buffer(alloc: *A, addr: usize, cap: usize)
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+{
     if Type.size_of(T) == 0 or cap == 0 or addr == 0 {
         return;
     }
@@ -70,7 +81,6 @@ fn dealloc_vec_buffer(addr: usize, cap: usize) where T {
         value? => value,
         null => return,
     }
-    let alloc = SystemAllocator {}
     unsafe {
         alloc
             .as(Allocator)
@@ -85,7 +95,13 @@ fn map_realloc_error(err: ReallocErr) -> AllocErr {
     }
 }
 
-impl Drop for Vec<T> where T {
+impl Drop for Vec<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
     fn drop(*self) {
         let len = self.raw_len.*;
         let cap = self.raw_cap.*;
@@ -99,13 +115,19 @@ impl Drop for Vec<T> where T {
             retire_value(elem);
             i = i + 1;
         }
-        dealloc_vec_buffer<T>(addr, cap);
+        dealloc_vec_buffer<T, A>(alloc, addr, cap);
     }
 }
 
-impl Vec<T> where T {
+impl Vec<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
     pub pure fn new() -> Self {
-        Vec<T> {
+        Vec<T, .A = A, .allocator = alloc> {
             raw_addr: 0,
             raw_len: 0,
             raw_cap: 0,
@@ -114,22 +136,21 @@ impl Vec<T> where T {
 
     pub fn with_capacity(capacity: usize) -> !AllocErr Self {
         if capacity == 0 {
-            return Vec<T>.new();
+            return Vec<T, .A = A, .allocator = alloc>.new();
         }
         if Type.size_of(T) == 0 {
             let _ = Layout.of<T>() match {
                 found? => found,
                 null => return error AllocErr.InvalidLayout,
             }
-            return Vec<T>.new();
+            return Vec<T, .A = A, .allocator = alloc>.new();
         }
         let layout = buffer_layout<T>(capacity) match {
             found? => found,
             null => return error AllocErr.InvalidLayout,
         }
-        let alloc = SystemAllocator {}
         let block = alloc.as(Allocator).allocate(layout)!;
-        Vec<T> {
+        Vec<T, .A = A, .allocator = alloc> {
             raw_addr: block.address(),
             raw_len: 0,
             raw_cap: capacity,
@@ -198,7 +219,6 @@ impl Vec<T> where T {
             found? => found,
             null => return error AllocErr.InvalidLayout,
         }
-        let alloc = SystemAllocator {}
         if cap == 0 {
             let block = alloc.as(Allocator).allocate(new_layout)!;
             self.raw_addr.* = block.address();
@@ -229,7 +249,7 @@ impl Vec<T> where T {
         }
         let addr = self.raw_addr.*;
         if len == 0 {
-            dealloc_vec_buffer<T>(addr, cap);
+            dealloc_vec_buffer<T, A>(alloc, addr, cap);
             self.raw_addr.* = 0;
             self.raw_cap.* = 0;
             return;
@@ -242,7 +262,6 @@ impl Vec<T> where T {
             found? => found,
             null => return error AllocErr.InvalidLayout,
         }
-        let alloc = SystemAllocator {}
         let new_block = unsafe {
             alloc
                 .as(Allocator)
@@ -459,7 +478,15 @@ impl Vec<T> where T {
         }
     }
 
-    pub fn append(*self, other: *Self) -> !AllocErr void {
+    pub fn append(
+        *self,
+        other: *Vec<T, .A = B, .allocator = b>,
+    ) -> !AllocErr void
+    where
+        B: Type,
+        requires B :- Allocator,
+        quote b: lift *B,
+    {
         let other_len = other.raw_len.*;
         if other_len == 0 {
             return;
@@ -538,7 +565,13 @@ impl Vec<T> where T {
     }
 }
 
-impl Vec<T> where T :- Copy {
+impl Vec<T, .A = A, .allocator = alloc>
+where
+    T :- Copy,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
     pub fn get(*self, index: usize) -> ?T {
         let len = self.raw_len.*;
         if index >= len {
@@ -564,7 +597,13 @@ impl Vec<T> where T :- Copy {
     }
 }
 
-impl Vec<T> where T :- Copy + Eq {
+impl Vec<T, .A = A, .allocator = alloc>
+where
+    T :- Copy + Eq,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
     pub fn contains(*self, needle: T) -> bool {
         let len = self.raw_len.*;
         let base = self.raw_addr.*;
@@ -580,10 +619,16 @@ impl Vec<T> where T :- Copy + Eq {
     }
 }
 
-impl Vec<T> where T :- Clone {
+impl Vec<T, .A = A, .allocator = alloc>
+where
+    T :- Clone,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
     pub fn try_clone(*self) -> !AllocErr Self {
         let len = self.raw_len.*;
-        var out = Vec<T>.with_capacity(len)!;
+        var out = Vec<T, .A = A, .allocator = alloc>.with_capacity(len)!;
         let base = self.raw_addr.*;
         var i: usize = 0;
         while i < len {
@@ -600,14 +645,26 @@ impl Vec<T> where T :- Clone {
     }
 }
 
-pub struct VecIter where T {
+pub struct VecIter
+where
+    T,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
     raw_addr: usize,
     raw_head: usize,
     raw_len: usize,
     raw_cap: usize,
 }
 
-impl Drop for VecIter<T> where T {
+impl Drop for VecIter<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
     fn drop(*self) {
         var i = self.raw_head.*;
         let len = self.raw_len.*;
@@ -622,11 +679,17 @@ impl Drop for VecIter<T> where T {
             retire_value(elem);
             i = i + 1;
         }
-        dealloc_vec_buffer<T>(addr, cap);
+        dealloc_vec_buffer<T, A>(alloc, addr, cap);
     }
 }
 
-impl Iterator for VecIter<T> where T {
+impl Iterator for VecIter<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
     assoc Item: Type = T;
 
     inline fn iterate(self) -> #emit_item<T> void {
@@ -645,10 +708,16 @@ impl Iterator for VecIter<T> where T {
     }
 }
 
-impl IntoIterator for Vec<T> where T {
-    assoc Iter: Type = VecIter<T>;
+impl IntoIterator for Vec<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Iter: Type = VecIter<T, .A = A, .allocator = alloc>;
 
-    fn into_iter(self) -> VecIter<T> {
+    fn into_iter(self) -> VecIter<T, .A = A, .allocator = alloc> {
         var this = self;
         let addr = this.raw_addr;
         let len = this.raw_len;
@@ -656,7 +725,7 @@ impl IntoIterator for Vec<T> where T {
         this.raw_addr = 0;
         this.raw_len = 0;
         this.raw_cap = 0;
-        VecIter<T> {
+        VecIter<T, .A = A, .allocator = alloc> {
             raw_addr: addr,
             raw_head: 0,
             raw_len: len,
@@ -665,23 +734,29 @@ impl IntoIterator for Vec<T> where T {
     }
 }
 
-impl Eq for Vec<T> where T :- Eq {
+impl Eq for Vec<T, .A = A, .allocator = alloc>
+where
+    T :- Eq,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
     fn eq(self, other: Self) -> bool {
-        var a = self.into_iter();
-        var b = other.into_iter();
-        let len = a.raw_len;
-        if len != b.raw_len {
+        var left_iter = self.into_iter();
+        var right_iter = other.into_iter();
+        let len = left_iter.raw_len;
+        if len != right_iter.raw_len {
             return false;
         }
-        let addr_a = a.raw_addr;
-        let addr_b = b.raw_addr;
+        let addr_a = left_iter.raw_addr;
+        let addr_b = right_iter.raw_addr;
         while true {
-            let i = a.raw_head;
+            let i = left_iter.raw_head;
             if i >= len {
                 break;
             }
-            a.raw_head = i + 1;
-            b.raw_head = i + 1;
+            left_iter.raw_head = i + 1;
+            right_iter.raw_head = i + 1;
             let left = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr_a, i)) }
             let right = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr_b, i)) }
             if not left.as(Eq).eq(right) {
@@ -692,7 +767,12 @@ impl Eq for Vec<T> where T :- Eq {
     }
 }
 
-impl ByteWriter for Vec<u8> {
+impl ByteWriter for Vec<u8, .A = A, .allocator = alloc>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
     assoc Err: Type = AllocErr;
 
     fn write_byte(*self, byte: u8) -> !AllocErr void {

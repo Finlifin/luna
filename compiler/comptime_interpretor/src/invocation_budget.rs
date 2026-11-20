@@ -53,7 +53,7 @@ pub(super) fn charge_world_tables(
         refinements: _, // Borrowed immutable registry; no VM index is constructed.
         definition_attributes: _,
         attributes_evaluating: _,
-        runtime_domains: _,
+        runtime_domains,
         builtin_implementation_packages,
         target: _,
         tests,
@@ -80,6 +80,7 @@ pub(super) fn charge_world_tables(
         global_runtime_deliveries,
     } = package;
     let cost = [
+        runtime_domains.len(),
         builtin_implementation_packages.len(),
         tests.len(),
         function_parameters.len(),
