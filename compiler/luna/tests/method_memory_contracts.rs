@@ -2,6 +2,7 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use elaboration::verification::memory;
 use nir::program::{Expr, ExprKind as K, Package};
 
@@ -510,4 +511,78 @@ fn type_valued_interface_indices_preserve_composed_pointer_observations() {
         memory::infer_method_in_package(&package, &callee, &mut 100000).unwrap(),
         composed
     );
+}
+
+#[test]
+fn staged_runtime_trait_method_splice_preserves_p4_purity_and_move_analysis() {
+    use elaboration::verification::moves::{Delivery, analyze_in_package};
+
+    let source = "
+        typealias Type = .Type'builtin;
+        typealias u64 = .u64'builtin;
+
+        trait Splice {
+            assoc RuntimeTarget: Type;
+
+            fn splice(comptime data: Self) -> RuntimeTarget;
+        }
+
+        impl Splice for u64 {
+            assoc RuntimeTarget: Type = u64;
+
+            fn splice(comptime data: u64) -> u64 {
+                data
+            }
+        }
+
+        const DEFAULT_CHUNK: u64 = 4096;
+
+        struct BufferConfig {
+            chunk: u64,
+        }
+
+        impl BufferConfig {
+            pub pure fn new() -> Self {
+                BufferConfig {
+                    chunk: DEFAULT_CHUNK,
+                }
+            }
+        }
+
+        fn run() -> bool {
+            let cfg = BufferConfig.new();
+            cfg.chunk == 4096
+        }
+    ";
+    let package =
+        support::compile_with_bindings(source, &Default::default(), Some("input.Splice")).unwrap();
+    let new_fn = package.functions.iter().find(|f| f.name == "new").unwrap();
+    assert!(new_fn.pure);
+    analyze_in_package(&package, new_fn, |_| Ok(Delivery::Copy), 100_000).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+}
+
+#[test]
+fn staged_runtime_trait_method_still_rejects_impure_selected_bodies() {
+    let source = "
+        trait StagedWrite {
+            fn mark(comptime tag: Self, p: *bool) -> bool;
+        }
+
+        impl StagedWrite for bool {
+            fn mark(comptime tag: bool, p: *bool) -> bool {
+                p.* = tag;
+                true
+            }
+        }
+
+        pure fn bad(p: *bool) -> bool {
+            bool.as(StagedWrite).mark(true, p)
+        }
+    ";
+    let error = support::compile_with_bindings(source, &Default::default(), None).unwrap_err();
+    assert!(error.contains("P4 evidence"), "{error}");
 }

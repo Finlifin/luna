@@ -4,9 +4,11 @@
 mod borrowed_layout;
 mod cleanup;
 mod method_contracts;
+
 #[cfg(test)]
 mod nominal_layout_tests;
 mod text_regions;
+
 use super::pattern_facts::{constant_bool, known_pattern, outer_guards};
 pub use borrowed_layout::{
     BorrowedInputLeaf, PointerInputLeaf, TextInputLeaf, TextProvenance, borrowed_input_layout,
@@ -46,6 +48,7 @@ pub struct ParameterPlace {
     /// Payload guards by load stage; the final stage is `through.len()`.
     pub conditions: BTreeMap<usize, Vec<(Vec<usize>, usize)>>,
 }
+
 impl ParameterPlace {
     pub(super) fn path_cost(&self) -> usize {
         self.through.iter().fold(
@@ -59,6 +62,7 @@ impl ParameterPlace {
         )
     }
 }
+
 fn condition_cost(conditions: &BTreeMap<usize, Vec<(Vec<usize>, usize)>>) -> usize {
     conditions
         .values()
@@ -67,6 +71,7 @@ fn condition_cost(conditions: &BTreeMap<usize, Vec<(Vec<usize>, usize)>>) -> usi
             cost.saturating_add(path.len()).saturating_add(2)
         })
 }
+
 fn display_conditions(
     conditions: &BTreeMap<usize, Vec<(Vec<usize>, usize)>>,
     f: &mut fmt::Formatter<'_>,
@@ -84,6 +89,7 @@ fn display_conditions(
     }
     Ok(())
 }
+
 // Internal roots never enter a published parameter footprint.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum PointerRoot {
@@ -91,6 +97,7 @@ enum PointerRoot {
     Local { binding: LocalId, storage: usize },
     ConstGlobal(DeclarationId),
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct PointerPlace {
     root: PointerRoot,
@@ -99,19 +106,23 @@ struct PointerPlace {
     fields: Vec<(nir::program::FieldOwner, usize)>,
     conditions: BTreeMap<usize, Vec<(Vec<usize>, usize)>>,
 }
+
 trait TargetCost {
     fn target_cost(&self) -> usize;
 }
+
 impl TargetCost for ParameterPlace {
     fn target_cost(&self) -> usize {
         self.path_cost()
     }
 }
+
 impl TargetCost for PointerPlace {
     fn target_cost(&self) -> usize {
         self.path_cost()
     }
 }
+
 impl PointerPlace {
     fn path_cost(&self) -> usize {
         self.through.iter().fold(
@@ -124,6 +135,7 @@ impl PointerPlace {
             |cost, path| cost.saturating_add(path.len()).saturating_add(1),
         )
     }
+
     fn append_path(&mut self, suffix: &ParameterPlace) -> Result<(), String> {
         if !suffix.input_fields.is_empty() {
             return Err(
@@ -173,6 +185,7 @@ impl PointerPlace {
         self.fields.extend_from_slice(&suffix.fields);
         Ok(())
     }
+
     // Callers charge the path before copying, and select the actual pointer at
     // input_fields before discarding that prefix. It is not a pointee projection.
     fn append_resolved_path(&mut self, suffix: &ParameterPlace) -> Result<(), String> {
@@ -180,6 +193,7 @@ impl PointerPlace {
         pointee.input_fields.clear();
         self.append_path(&pointee)
     }
+
     fn external(self) -> Result<ParameterPlace, String> {
         let PointerRoot::Parameter(parameter) = self.root else {
             return Err("local memory target cannot escape in a result".into());
@@ -193,6 +207,7 @@ impl PointerPlace {
         })
     }
 }
+
 impl fmt::Display for PointerPlace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(pointer-place (root ")?;
@@ -228,6 +243,7 @@ impl fmt::Display for PointerPlace {
         f.write_str(")")
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Access {
     pub target: ParameterPlace,
@@ -235,12 +251,14 @@ pub struct Access {
     pub read_value: bool,
     pub ty: Term,
 }
+
 /// A symbolic code source in the current function's delivered arguments.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CallableInput {
     pub parameter: usize,
     pub fields: Vec<usize>,
 }
+
 impl fmt::Display for CallableInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(callable-input (parameter {}) (fields", self.parameter)?;
@@ -248,6 +266,7 @@ impl fmt::Display for CallableInput {
         f.write_str("))")
     }
 }
+
 /// Callable result lattice used by the interprocedural worklist.
 /// NoReturn is bottom, not a guessed callable or an opaque result.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -261,6 +280,7 @@ pub enum CallableResult {
     },
     Unknown,
 }
+
 impl CallableResult {
     fn keys(&self) -> &[iir::InstanceKey] {
         match self {
@@ -269,12 +289,14 @@ impl CallableResult {
             _ => &[],
         }
     }
+
     fn inputs(&self) -> &[CallableInput] {
         match self {
             Self::Forwarded { inputs, .. } => inputs,
             _ => &[],
         }
     }
+
     fn charge(&self, fuel: &mut usize) -> Result<(), String> {
         for key in self.keys() {
             *fuel = fuel
@@ -291,6 +313,7 @@ impl CallableResult {
         }
         Ok(())
     }
+
     pub(crate) fn substitute_inputs(
         &self,
         arguments: &BTreeMap<usize, BTreeMap<Vec<usize>, CallableResult>>,
@@ -316,6 +339,7 @@ impl CallableResult {
         }
         Ok(result)
     }
+
     pub(crate) fn join(&mut self, other: &Self, fuel: &mut usize) -> Result<(), String> {
         self.charge(fuel)?;
         other.charge(fuel)?;
@@ -359,6 +383,7 @@ impl CallableResult {
         Ok(())
     }
 }
+
 impl fmt::Display for CallableResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -386,13 +411,17 @@ impl fmt::Display for CallableResult {
         }
     }
 }
+
 mod borrowed_code;
+
 pub(crate) use borrowed_code::infer_with_borrowed_callable_inputs_and_cleanup_full_context;
 pub use borrowed_code::{
     BorrowedCallableInputs, BorrowedCallableValue, infer_with_borrowed_callable_inputs,
     infer_with_borrowed_callable_inputs_and_cleanup,
 };
+
 mod effects;
+
 #[cfg(test)]
 pub(crate) use effects::effect_borrowed_code_layout;
 pub(crate) use effects::effect_transfer_layout;
@@ -433,6 +462,7 @@ pub struct Summary {
     pub callable_fields: BTreeMap<Vec<usize>, CallableResult>,
     pub code_fields: CodeFields,
 }
+
 impl fmt::Display for ParameterPlace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(parameter-place (parameter {})", self.parameter)?;
@@ -463,6 +493,7 @@ impl fmt::Display for ParameterPlace {
         f.write_str(")")
     }
 }
+
 impl fmt::Display for Access {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let operation = if self.write {
@@ -475,6 +506,7 @@ impl fmt::Display for Access {
         write!(f, "({operation} {} (type {}))", self.target, self.ty)
     }
 }
+
 impl fmt::Display for Summary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -540,6 +572,7 @@ impl fmt::Display for Summary {
         f.write_str(")")
     }
 }
+
 fn display_pointer_fields(
     fields: &BTreeMap<Vec<usize>, Option<BTreeSet<ParameterPlace>>>,
     f: &mut fmt::Formatter<'_>,
@@ -563,6 +596,7 @@ fn display_pointer_fields(
     }
     Ok(())
 }
+
 /// An owned callable leaf inside a captured or local value. Field indices are
 /// checked against the owned layout; enum payloads carry a variant path marker.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -570,6 +604,7 @@ pub struct CallablePlace {
     pub binding: LocalId,
     pub fields: Vec<usize>,
 }
+
 impl CallablePlace {
     fn root(binding: LocalId) -> Self {
         Self {
@@ -578,6 +613,7 @@ impl CallablePlace {
         }
     }
 }
+
 // Lexicographic paths keep a subtree contiguous. Stop at its first sibling;
 // unrelated roots and later fields must not consume projection fuel.
 fn callable_subtree<'a, T>(
@@ -589,6 +625,7 @@ fn callable_subtree<'a, T>(
         leaf.binding == place.binding && leaf.fields.starts_with(&place.fields)
     })
 }
+
 impl fmt::Display for CallablePlace {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(callable-place (binding {}) (fields", self.binding)?;
@@ -596,6 +633,7 @@ impl fmt::Display for CallablePlace {
         f.write_str("))")
     }
 }
+
 fn owned_fields(
     package: Option<&Package>,
     ty: &Term,
@@ -678,6 +716,7 @@ pub fn input_pointer_fields(
         .map(|leaf| (leaf.input_fields, leaf.pointee))
         .collect())
 }
+
 /// Conditional result delivery preserves logical keys until origins are
 /// merged at physical slots. Callers must union collisions, never overwrite.
 pub(super) fn conditional_pointer_storage_paths(
@@ -687,6 +726,7 @@ pub(super) fn conditional_pointer_storage_paths(
 ) -> Result<BTreeMap<Vec<usize>, Vec<usize>>, String> {
     conditional_pointer_storage_paths_for(package, ty, TextProvenance::Unchecked, fuel)
 }
+
 pub(super) fn conditional_pointer_storage_paths_for(
     package: Option<&Package>,
     ty: &Term,
@@ -698,6 +738,7 @@ pub(super) fn conditional_pointer_storage_paths_for(
         .map(|leaf| (leaf.input_fields, leaf.storage_fields))
         .collect())
 }
+
 // Symbolic summaries keep variant-qualified identities. Their consumers must
 // establish or exclude each leaf at the invocation boundary.
 fn symbolic_pointer_fields(
@@ -707,6 +748,7 @@ fn symbolic_pointer_fields(
 ) -> Result<BTreeMap<Vec<usize>, Term>, String> {
     symbolic_pointer_fields_for(package, ty, TextProvenance::Unchecked, fuel)
 }
+
 fn symbolic_pointer_fields_for(
     package: Option<&Package>,
     ty: &Term,
@@ -718,7 +760,9 @@ fn symbolic_pointer_fields_for(
         .map(|leaf| (leaf.input_fields, leaf.pointee))
         .collect())
 }
+
 const VARIANT_FIELD: usize = usize::MAX;
+
 fn display_owned_path(path: &[usize], f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let mut indices = path.iter();
     while let Some(index) = indices.next() {
@@ -764,6 +808,7 @@ pub fn error_tag_mapping(
     )
     .map_err(|failure| failure.to_string())
 }
+
 pub fn remap_error_path(
     path: &mut [usize],
     mapping: &nir::error_results::RepresentationTransport,
@@ -922,6 +967,7 @@ pub(crate) fn owned_variant_fields(
     }
     Err("memory variant metadata missing".into())
 }
+
 pub fn owned_path_type(
     package: Option<&Package>,
     ty: &Term,
@@ -963,6 +1009,7 @@ pub fn owned_path_type(
     }
     Ok(ty)
 }
+
 /// A checked storage projection. Guards name enum containers in physical
 /// coordinates relative to the supplied root, before the corresponding payload.
 #[derive(Clone, Debug, PartialEq)]
@@ -971,6 +1018,7 @@ pub struct StorageProjection {
     pub guards: Vec<(Vec<usize>, usize)>,
     pub ty: Term,
 }
+
 /// Truth of a storage guard in the current program state, not a type proof.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GuardActivity {
@@ -978,6 +1026,7 @@ pub enum GuardActivity {
     Inactive,
     Conditional,
 }
+
 impl fmt::Display for GuardActivity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -987,6 +1036,7 @@ impl fmt::Display for GuardActivity {
         })
     }
 }
+
 /// Query each enum domain with its enclosing variant selections in the path.
 /// Raw physical paths are insufficient: distinct variants can share a slot.
 /// An inactive outer guard short-circuits before touching an absent payload.
@@ -1033,6 +1083,7 @@ pub fn storage_guard_activity(
     }
     Ok(activity)
 }
+
 impl StorageProjection {
     pub fn activity(
         &self,
@@ -1042,6 +1093,7 @@ impl StorageProjection {
         storage_guard_activity(&self.guards, fuel, query)
     }
 }
+
 impl fmt::Display for StorageProjection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(storage-projection (fields")?;
@@ -1059,6 +1111,7 @@ impl fmt::Display for StorageProjection {
         write!(f, ") (type {}))", self.ty)
     }
 }
+
 /// Resolve the same symbolic variant paths used by pointer input/result leaves.
 /// This describes conditional storage; it does not prove the guards hold.
 pub fn project_owned_storage(
@@ -1076,6 +1129,7 @@ pub fn project_owned_storage(
     extend_storage_projection(package, &mut result, path, fuel)?;
     Ok(result)
 }
+
 impl StorageProjection {
     /// Continue a checked projection within the same storage root. No pointer
     /// load occurs here: guards in the suffix retain the outer field prefix.
@@ -1101,6 +1155,7 @@ impl StorageProjection {
         Ok(result)
     }
 }
+
 /// A typed traversal across distinct pointee storage roots. Each load keeps
 /// its own root-relative guards; target guards belong only to the last root.
 #[derive(Clone, Debug, PartialEq)]
@@ -1108,6 +1163,7 @@ pub struct StorageTraversal {
     pub loads: Vec<StorageProjection>,
     pub target: StorageProjection,
 }
+
 impl StorageTraversal {
     pub fn new(
         package: Option<&Package>,
@@ -1120,6 +1176,7 @@ impl StorageTraversal {
             target: project_owned_storage(package, root, path, fuel)?,
         })
     }
+
     fn check_extension(&self, extra: usize, fuel: &mut usize) -> Result<(), String> {
         let mut depth = self.loads.len().saturating_add(extra);
         for projection in self.loads.iter().chain(std::iter::once(&self.target)) {
@@ -1135,6 +1192,7 @@ impl StorageTraversal {
         }
         Ok(())
     }
+
     pub fn then(
         &mut self,
         package: Option<&Package>,
@@ -1146,6 +1204,7 @@ impl StorageTraversal {
         self.target = next;
         Ok(())
     }
+
     /// Load exactly one pointer. Conditions already accumulated remain attached
     /// to that slot, and the new projection starts at the loaded pointee root.
     pub fn load(
@@ -1163,6 +1222,7 @@ impl StorageTraversal {
         self.loads.push(slot);
         Ok(())
     }
+
     /// Validate a transported physical path and its payload-existence guards.
     /// Both are relative to the current target; enclosing conditions are kept.
     /// This reconstructs the typed path, without asserting that any tag holds.
@@ -1216,6 +1276,7 @@ impl StorageTraversal {
         Ok(())
     }
 }
+
 impl fmt::Display for StorageTraversal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(storage-traversal (loads")?;
@@ -1298,6 +1359,7 @@ fn result_callable_bottom(
     };
     owned_callable_bottom(package, ty, fuel, false)
 }
+
 // Mutation tracking must also visit environment-bearing callable leaves. They
 // cannot disappear just because the published named-result lattice omits them.
 fn owned_callable_bottom(
@@ -1352,6 +1414,7 @@ fn owned_callable_bottom(
     }
     Ok(leaves)
 }
+
 fn charge_callee_fields(
     fields: &BTreeMap<Vec<usize>, CallableResult>,
     fuel: &mut usize,
@@ -1364,9 +1427,13 @@ fn charge_callee_fields(
     }
     Ok(())
 }
+
 type Targets = Option<BTreeSet<PointerPlace>>;
+
 type PointerEnvironment = BTreeMap<LocalId, Targets>;
+
 type LocalCodeFields = BTreeMap<Vec<usize>, BTreeSet<usize>>;
+
 #[derive(Clone, Default, PartialEq, Eq)]
 struct Environment {
     pointers: PointerEnvironment,
@@ -1386,6 +1453,7 @@ struct CallFootprint {
     callable_fields: BTreeMap<Vec<usize>, CallableResult>,
     code_fields: CodeFields,
 }
+
 impl From<Summary> for CallFootprint {
     fn from(value: Summary) -> Self {
         Self {
@@ -1409,7 +1477,9 @@ pub enum CodeResult {
     Known(Vec<PreparedCode>),
     Unknown,
 }
+
 pub type CodeFields = BTreeMap<Vec<usize>, CodeResult>;
+
 impl CodeResult {
     fn charge(&self, fuel: &mut usize) -> Result<(), String> {
         *fuel = fuel.checked_sub(1).ok_or("code result budget exhausted")?;
@@ -1418,6 +1488,7 @@ impl CodeResult {
         }
         Ok(())
     }
+
     fn join(&mut self, other: &Self, fuel: &mut usize) -> Result<(), String> {
         self.charge(fuel)?;
         other.charge(fuel)?;
@@ -1432,6 +1503,7 @@ impl CodeResult {
         Ok(())
     }
 }
+
 impl fmt::Display for CodeResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1448,6 +1520,7 @@ impl fmt::Display for CodeResult {
         }
     }
 }
+
 pub fn code_result_bottom(
     package: Option<&Package>,
     ty: &Term,
@@ -1462,6 +1535,7 @@ pub fn code_result_bottom(
         .map(|path| (path, CodeResult::NoReturn))
         .collect())
 }
+
 fn display_code_fields(fields: &CodeFields, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.write_str(" (code-fields")?;
     for (path, value) in fields {
@@ -1471,6 +1545,7 @@ fn display_code_fields(fields: &CodeFields, f: &mut fmt::Formatter<'_>) -> fmt::
     }
     f.write_str(")")
 }
+
 pub(crate) fn join_code_fields(
     left: &mut CodeFields,
     right: &CodeFields,
@@ -1504,6 +1579,7 @@ pub enum CodeDefinition<'a> {
 }
 
 type LocalCode = PreparedCode;
+
 /// A supplied empty set asserts absence of a validated variant-guarded code
 /// leaf. The caller must establish the variant fact; omit unknown evidence.
 pub type CodeInputs<'a> = BTreeMap<CallableInput, Vec<CodeDefinition<'a>>>;
@@ -1519,12 +1595,15 @@ pub enum PreparedCode {
     },
     Named(iir::InstanceKey),
 }
+
 /// Conditional capture evidence. An empty candidate set is permitted only at
 /// a validated variant-guarded callable leaf and asserts that leaf is absent.
 /// Producers must establish this from construction or checked enum domains;
 /// missing/unknown provenance is represented by a missing entry instead.
 pub type PreparedCaptures = BTreeMap<CallablePlace, Vec<PreparedCode>>;
+
 pub type PreparedCodeInputs = BTreeMap<CallableInput, Vec<PreparedCode>>;
+
 impl PreparedCode {
     fn borrowed(&self) -> CodeDefinition<'_> {
         match self {
@@ -1540,10 +1619,12 @@ impl PreparedCode {
             Self::Named(key) => CodeDefinition::Named(key.clone()),
         }
     }
+
     fn charge(&self, fuel: &mut usize) -> Result<(), String> {
         charge_prepared_codes(std::slice::from_ref(self), fuel, 0)
     }
 }
+
 fn join_prepared_codes(
     previous: &mut Vec<PreparedCode>,
     values: Vec<PreparedCode>,
@@ -1567,6 +1648,7 @@ fn join_prepared_codes(
     }
     Ok(changed)
 }
+
 fn charge_prepared_captures(
     captures: &PreparedCaptures,
     fuel: &mut usize,
@@ -1580,6 +1662,7 @@ fn charge_prepared_captures(
     }
     Ok(())
 }
+
 fn charge_prepared_codes(
     codes: &[PreparedCode],
     fuel: &mut usize,
@@ -1616,11 +1699,13 @@ fn charge_prepared_codes(
     }
     Ok(())
 }
+
 impl fmt::Display for PreparedCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.borrowed().fmt(f)
     }
 }
+
 pub(crate) fn own_code_inputs(
     inputs: &CodeInputs<'_>,
     parameters: &[DeclarationId],
@@ -1661,6 +1746,7 @@ pub(crate) fn own_code_inputs(
     }
     Ok(result)
 }
+
 fn borrow_code_inputs(inputs: &PreparedCodeInputs) -> CodeInputs<'_> {
     inputs
         .iter()
@@ -1702,6 +1788,7 @@ impl CodeDefinition<'_> {
         Ok(())
     }
 }
+
 impl fmt::Display for CodeDefinition<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1752,6 +1839,7 @@ fn charge_pointer_captures(values: &BorrowedCaptures, fuel: &mut usize) -> Resul
     }
     Ok(())
 }
+
 struct Infer<'a, 'cleanup> {
     // Complete current runtime scope for stable handler code-capture checks.
     scope: &'a Expr,
@@ -1803,6 +1891,7 @@ struct Infer<'a, 'cleanup> {
     callable_field_returns: BTreeMap<Vec<usize>, CallableResult>,
     code_field_returns: CodeFields,
 }
+
 /// Layout-only prerequisite; ownership and destructor contracts remain separate.
 /// Private representation depth and pointee for a pointer or a newtype chain.
 /// This is storage metadata, never a source projection or a type equality.
@@ -2522,12 +2611,14 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     // Pointer provenance follows a single representation leaf while source
     // operations and nominal signatures keep their declared types.
     fn local_pointer_value(&mut self, ty: &Term) -> Result<bool, String> {
         let ty = self.ty(ty)?;
         Ok(pointer_representation(self.package, &ty, self.fuel)?.is_some())
     }
+
     fn pointer_free_owned(&mut self, ty: &Term, depth: usize) -> Result<(), String> {
         let ty = self.type_view(ty)?;
         require_pointer_free_owned_for(
@@ -2538,6 +2629,7 @@ impl<'a> Infer<'a, '_> {
             depth,
         )
     }
+
     fn completed_type_view(&mut self, ty: &Term) -> Result<Term, String> {
         if let Some(value) = self.type_views.get(ty) {
             bound_type(value, self.fuel)?;
@@ -2605,6 +2697,7 @@ impl<'a> Infer<'a, '_> {
         self.type_views.insert(ty.clone(), view.clone());
         Ok(view)
     }
+
     // Observe immutable declaration data without executing user code or
     // unfolding normal-form heads. Admission precedes projection, so a field
     // cannot hide malformed siblings or a mismatched record domain.
@@ -2654,6 +2747,7 @@ impl<'a> Infer<'a, '_> {
             _ => Ok(None),
         }
     }
+
     fn captured_data_domain(&mut self, ty: &Term, depth: usize) -> Result<bool, String> {
         self.step(depth)?;
         match ty {
@@ -2669,6 +2763,7 @@ impl<'a> Infer<'a, '_> {
             _ => Ok(false),
         }
     }
+
     fn captured_data(&mut self, expr: &Expr, depth: usize) -> Result<(), String> {
         let domain = self.ty(&expr.ty)?;
         if !self.captured_data_domain(&domain, depth)? {
@@ -2677,6 +2772,7 @@ impl<'a> Infer<'a, '_> {
         self.known_data(expr, depth)?;
         Ok(())
     }
+
     fn known_bool(&mut self, expr: &Expr, depth: usize) -> Result<Option<bool>, String> {
         self.step(depth)?;
         Ok(match &expr.kind {
@@ -2700,6 +2796,7 @@ impl<'a> Infer<'a, '_> {
             _ => constant_bool(expr, depth),
         })
     }
+
     fn ty(&mut self, ty: &Term) -> Result<Term, String> {
         self.step(0)?;
         bound_type(ty, self.fuel)?;
@@ -2710,6 +2807,7 @@ impl<'a> Infer<'a, '_> {
         bound_type(&ty, self.fuel)?;
         self.type_view(&ty)
     }
+
     fn step(&mut self, depth: usize) -> Result<(), String> {
         if *self.fuel == 0 || depth > 128 {
             return Err("memory summary budget exhausted".into());
@@ -2717,6 +2815,7 @@ impl<'a> Infer<'a, '_> {
         *self.fuel -= 1;
         Ok(())
     }
+
     fn target_work<T: TargetCost>(&mut self, targets: &BTreeSet<T>) -> Result<(), String> {
         for target in targets {
             *self.fuel = self
@@ -2726,6 +2825,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     fn join_targets<T: TargetCost + Ord>(
         &mut self,
         left: Option<BTreeSet<T>>,
@@ -2740,6 +2840,7 @@ impl<'a> Infer<'a, '_> {
             _ => Ok(None),
         }
     }
+
     fn join_pointer_fields<T: TargetCost + Ord>(
         &mut self,
         left: BTreeMap<Vec<usize>, Option<BTreeSet<T>>>,
@@ -2758,6 +2859,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(joined)
     }
+
     fn clone_pointer_environment(
         &mut self,
         environment: &PointerEnvironment,
@@ -2770,6 +2872,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(environment.clone())
     }
+
     fn clone_environment(&mut self, environment: &Environment) -> Result<Environment, String> {
         let pointers = self.clone_pointer_environment(&environment.pointers)?;
         for (place, targets) in &environment.field_pointers {
@@ -2795,12 +2898,14 @@ impl<'a> Infer<'a, '_> {
             callees: environment.callees.clone(),
         })
     }
+
     fn save_environment(&mut self) -> Result<Environment, String> {
         let environment = std::mem::take(&mut self.environment);
         let copy = self.clone_environment(&environment);
         self.environment = environment;
         copy
     }
+
     fn join_environment(
         &mut self,
         mut left: Environment,
@@ -2869,6 +2974,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(left)
     }
+
     fn local_candidates_for(&mut self, expr: &Expr) -> Result<Option<BTreeSet<usize>>, String> {
         self.step(0)?;
         if let K::UnsafeScope(body) = &expr.kind {
@@ -2900,6 +3006,7 @@ impl<'a> Infer<'a, '_> {
         let named = self.callee_key(expr)?;
         self.intern_named_candidates(named)
     }
+
     fn intern_named_candidates(
         &mut self,
         named: CallableResult,
@@ -2926,6 +3033,7 @@ impl<'a> Infer<'a, '_> {
             CallableResult::Unknown | CallableResult::Forwarded { .. } => Ok(None),
         }
     }
+
     fn charge_capture_code(
         &mut self,
         captures: &BTreeMap<CallablePlace, CallableResult>,
@@ -2939,6 +3047,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     fn snapshot_prepared_fields(
         &mut self,
         binding: LocalId,
@@ -2970,6 +3079,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(result)
     }
+
     // The initializer has already executed. Snapshot both named identities and
     // environment-bearing code before later captures/arguments can change them.
     fn snapshot_capture_code(
@@ -3036,6 +3146,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(pending)
     }
+
     fn remember_closure(
         &mut self,
         definition: &Expr,
@@ -3098,6 +3209,7 @@ impl<'a> Infer<'a, '_> {
             .insert(node, Some(BTreeSet::from([id])));
         Ok(())
     }
+
     fn transition_closure_environment(
         &mut self,
         id: usize,
@@ -3182,6 +3294,7 @@ impl<'a> Infer<'a, '_> {
         let ty = self.type_view(ty)?;
         effect_data_layout(self.package, &ty, self.fuel, depth + 1)
     }
+
     // A reusable capture invariant may include code selected from fixed source
     // definitions. Code supplied by a particular invocation needs actual state
     // transport; it must not be treated as fixed across later invocations.
@@ -3317,6 +3430,7 @@ impl<'a> Infer<'a, '_> {
             _ => Ok(false),
         }
     }
+
     fn record_capture_code_write(
         &mut self,
         root: LocalId,
@@ -3365,6 +3479,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     fn join_local_candidates(
         &mut self,
         left: Option<BTreeSet<usize>>,
@@ -3382,6 +3497,7 @@ impl<'a> Infer<'a, '_> {
             _ => Ok(None),
         }
     }
+
     fn set_local_candidates(
         &mut self,
         binding: CallablePlace,
@@ -3412,6 +3528,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     fn charge_local_fields(&mut self, fields: &LocalCodeFields) -> Result<(), String> {
         for (path, keys) in fields {
             *self.fuel = self
@@ -3421,6 +3538,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     fn local_fields_for(&mut self, expr: &Expr) -> Result<LocalCodeFields, String> {
         if matches!(
             self.ty(&expr.ty)?,
@@ -3460,6 +3578,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(values)
     }
+
     fn join_local_fields(
         &mut self,
         mut left: LocalCodeFields,
@@ -3479,6 +3598,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(left)
     }
+
     fn replace_local_fields(
         &mut self,
         place: CallablePlace,
@@ -3508,6 +3628,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     fn join_call_footprint(
         &mut self,
         combined: &mut Option<CallFootprint>,
@@ -3536,6 +3657,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     fn callee_key(&mut self, expr: &Expr) -> Result<CallableResult, String> {
         self.step(0)?;
         if let K::UnsafeScope(body) = &expr.kind {
@@ -3647,6 +3769,7 @@ impl<'a> Infer<'a, '_> {
             _ => Ok(CallableResult::Unknown),
         }
     }
+
     fn join_callee_result(
         &mut self,
         joined: &mut CallableResult,
@@ -3656,6 +3779,7 @@ impl<'a> Infer<'a, '_> {
         joined.join(&value, self.fuel)?;
         Ok(())
     }
+
     fn set_callee_at(&mut self, place: CallablePlace, key: CallableResult) -> Result<(), String> {
         for index in 0..self.loop_states.len() {
             self.step(0)?;
@@ -3669,6 +3793,7 @@ impl<'a> Infer<'a, '_> {
         self.environment.callees.insert(place, key);
         Ok(())
     }
+
     fn callable_place(&mut self, expr: &Expr) -> Result<Option<CallablePlace>, String> {
         let mut cursor = expr;
         let mut fields = vec![];
@@ -3690,6 +3815,7 @@ impl<'a> Infer<'a, '_> {
             }
         }
     }
+
     fn value_callees(
         &mut self,
         expr: &Expr,
@@ -3730,6 +3856,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(BTreeMap::new())
     }
+
     fn join_callee_fields(
         &mut self,
         mut left: BTreeMap<Vec<usize>, CallableResult>,
@@ -3748,6 +3875,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(left)
     }
+
     fn merge_code_field_return(&mut self, expr: &Expr) -> Result<(), String> {
         let fields = self.local_fields_for(expr)?;
         for (path, result) in &mut self.code_field_returns {
@@ -3778,6 +3906,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     fn remember_returned_code(&mut self, code: &PreparedCode) -> Result<usize, String> {
         code.charge(self.fuel)?;
         for (id, previous) in self.local_code.iter().enumerate() {
@@ -3790,6 +3919,7 @@ impl<'a> Infer<'a, '_> {
         self.local_code.push(code.clone());
         Ok(id)
     }
+
     fn install_code_results(&mut self, expr: &Expr, fields: &CodeFields) -> Result<(), String> {
         let mut local = BTreeMap::new();
         for (path, value) in fields {
@@ -3829,6 +3959,7 @@ impl<'a> Infer<'a, '_> {
             .insert(expr as *const Expr as usize, local);
         Ok(())
     }
+
     /// Reattach invocation-local origins after rebasing a returned value. Code
     /// identity alone cannot select the environment of a particular factory call.
     fn install_returned_capture_origins(&mut self, expr: &Expr) -> Result<(), String> {
@@ -3900,6 +4031,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     fn replace_callees(
         &mut self,
         place: CallablePlace,
@@ -3928,6 +4060,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     fn bind_owned_callees(
         &mut self,
         pattern: &'a Pattern,
@@ -4235,6 +4368,7 @@ impl<'a> Infer<'a, '_> {
             _ => Err("memory binding requires an owned pattern provenance contract".into()),
         }
     }
+
     fn set_pointer(&mut self, binding: LocalId, targets: Targets) -> Result<(), String> {
         // Every intermediate loop assignment contributes, including paths that
         // break/continue before later textual assignments. Unknown is absorbing.
@@ -4253,6 +4387,7 @@ impl<'a> Infer<'a, '_> {
         self.environment.pointers.insert(binding, targets);
         Ok(())
     }
+
     fn install_no_return_call(&mut self, expr: &Expr) -> Result<(), String> {
         self.expression_results
             .insert(expr as *const Expr as usize, Some(BTreeSet::new()));
@@ -4494,6 +4629,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(true)
     }
+
     fn local_address(&mut self, value: &Expr, depth: usize) -> Result<PointerPlace, String> {
         self.step(depth)?;
         let target = match &value.kind {
@@ -4601,6 +4737,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(target)
     }
+
     fn optional_target(&mut self, expr: &Expr, depth: usize) -> Result<Targets, String> {
         self.step(depth)?;
         if expr.ty == Term::Primitive(Primitive::Never) {
@@ -4779,10 +4916,12 @@ impl<'a> Infer<'a, '_> {
             _ => Err("memory target requires a richer contract".into()),
         }
     }
+
     fn target(&mut self, expr: &Expr, depth: usize) -> Result<BTreeSet<PointerPlace>, String> {
         self.optional_target(expr, depth)?
             .ok_or("unknown memory target".into())
     }
+
     /// Resolve owned pointer slots at the current evaluation point. Pointer
     /// stores update known local slots, retaining old targets for alternatives;
     /// external or conditional stores need a richer transition contract.
@@ -4922,6 +5061,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     fn rebase_result(
         &mut self,
         result: Option<&BTreeSet<ParameterPlace>>,
@@ -4951,6 +5091,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(Some(self.resolve_local_loads(targets)?))
     }
+
     fn merge_pointer_field_return(&mut self, value: &Expr) -> Result<(), String> {
         let ty = self.ty(&value.ty)?;
         let ty = self.effect_completion(&ty)?;
@@ -4998,6 +5139,7 @@ impl<'a> Infer<'a, '_> {
             });
         Ok(())
     }
+
     fn merge_input_code_exit(&mut self) -> Result<(), String> {
         for (place, input) in &self.input_code_slots {
             *self.fuel = self
@@ -5157,6 +5299,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     fn bind_match_subject(
         &mut self,
         pattern: &Pattern,
@@ -5242,6 +5385,7 @@ impl<'a> Infer<'a, '_> {
             _ => Err("memory match pattern requires a richer subject contract".into()),
         }
     }
+
     fn guard_value_type_for(
         package: Option<&Package>,
         ty: &Term,
@@ -5252,12 +5396,14 @@ impl<'a> Infer<'a, '_> {
             || (provenance == TextProvenance::VerifiedByRegionAnalysis
                 && *ty == Term::Primitive(Primitive::Str))
     }
+
     fn walk_guard(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         // Validation does not execute or install code evidence. The normal
         // walk owns evaluation order, callable results and memory footprints.
         self.check_guard(expr, depth + 1)?;
         self.walk(expr, depth + 1)
     }
+
     fn check_guard_pattern(
         &mut self,
         pattern: &'a Pattern,
@@ -5325,6 +5471,7 @@ impl<'a> Infer<'a, '_> {
             Pattern::OptionalAbsent | Pattern::Wild | Pattern::Unit | Pattern::Literal(_) => Ok(()),
         }
     }
+
     fn check_guard(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         self.step(depth)?;
         let mut constructed = false;
@@ -5597,6 +5744,7 @@ impl<'a> Infer<'a, '_> {
             _ => Err("memory guard requires read-only observation semantics".into()),
         }
     }
+
     fn walk_match(
         &mut self,
         expr: &Expr,
@@ -5751,6 +5899,7 @@ impl<'a> Infer<'a, '_> {
         );
         Ok(())
     }
+
     fn note_owned_cleanup(&mut self, ty: &Term) -> Result<(), String> {
         if self.may_run_cleanup
             || matches!(
@@ -5835,6 +5984,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     // Snapshot maps and guarded projection temporaries belong only to reads,
     // not to every recursive AST frame (including deeply inlined control flow).
     #[inline(never)]
@@ -5988,6 +6138,7 @@ impl<'a> Infer<'a, '_> {
         self.record_access(targets, false, true, ty)?;
         Ok(())
     }
+
     #[inline(never)]
     fn walk_error_transport(
         &mut self,
@@ -6058,6 +6209,7 @@ impl<'a> Infer<'a, '_> {
         self.walk_inner(expr, depth)?;
         self.record_value_cleanup_reads(expr)
     }
+
     fn walk_inner(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         self.step(depth)?;
         self.note_owned_cleanup(&expr.ty)?;
@@ -6076,6 +6228,7 @@ impl<'a> Infer<'a, '_> {
             _ => self.walk_operation(expr, depth),
         }
     }
+
     #[inline(never)]
     fn walk_control(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         match &expr.kind {
@@ -6227,6 +6380,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(())
     }
+
     #[inline(never)]
     fn walk_operation(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         match &expr.kind {
@@ -7666,6 +7820,7 @@ impl<'a> Infer<'a, '_> {
         Ok(())
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct MemoryInstance {
     effects: Vec<EffectInput>,
@@ -7674,6 +7829,7 @@ struct MemoryInstance {
     prepared: BTreeMap<CallableInput, Vec<usize>>,
     borrowed: BorrowedCallableInputs,
 }
+
 /// Package-local completed context-free memory summaries. Failed or incomplete
 /// inference attempts never enter this cache.
 #[derive(Default)]
@@ -7862,6 +8018,7 @@ impl Round<'_> {
             fuel,
         )
     }
+
     fn substitution<'a>(
         &mut self,
         package: Option<&Package>,
@@ -8231,6 +8388,14 @@ fn selected_method_callee_with_context(
     {
         return Err("interface predicates require a composed memory contract".into());
     }
+    let has_staged_parameters = !callee.ty.is_comptime_callable()
+        && matches!(
+            callee.ty.callable_signature(),
+            Term::Function { parameters, .. }
+                if parameters
+                    .iter()
+                    .any(|parameter| parameter.sort != nir::Sort::Runtime)
+        );
     let method = if contract.is_quote {
         ::materialization::resolve_quote_method_instance_in_source(
             source.unwrap_or(::materialization::DeclarationSource::Borrowed(package)),
@@ -8254,6 +8419,15 @@ fn selected_method_callee_with_context(
             bound_type(argument, fuel)?;
         }
         method
+    } else if has_staged_parameters {
+        // Staged runtime trait methods (such as `Splice.splice` for cross-stage
+        // `const` reads) retain `comptime` formal inputs until invocation staging.
+        // Select and check the contract without enqueueing an un-staged body.
+        ::materialization::resolve_quote_method_instance_in_source(
+            source.unwrap_or(::materialization::DeclarationSource::Borrowed(package)),
+            callee,
+            fuel,
+        )?
     } else {
         ::materialization::resolve_method_instance_in_source(
             source.unwrap_or(::materialization::DeclarationSource::Borrowed(package)),
@@ -8273,17 +8447,38 @@ fn selected_method_callee_with_context(
         &body.type_parameters,
         fuel,
     )?;
-    let substitution = nir::DeclarationSubstitution::bounded(
-        &body.type_parameters,
-        &domains,
-        body_arguments,
-        &[],
-        fuel,
-    )
-    .map_err(|error| error.to_string())?;
-    let signature = substitution
-        .instantiate_bounded(&body.signature, fuel)
+    let signature = if has_staged_parameters && !contract.is_quote {
+        let frame = [
+            nir::function_parameters::ordinary_frame(&body.signature, fuel)
+                .map_err(|error| error.to_string())?,
+        ];
+        let projection = nir::DeclarationSubstitution::bounded_domains(
+            &body.type_parameters,
+            &domains,
+            body_arguments,
+            nir::DeclarationInputScope::ClosedInBody(&frame),
+            fuel,
+        )
         .map_err(|error| error.to_string())?;
+        projection
+            .check_retained_body(body, fuel)
+            .map_err(|error| error.to_string())?;
+        projection
+            .instantiate_closed_signature_bounded(&body.signature, fuel)
+            .map_err(|error| error.to_string())?
+    } else {
+        let substitution = nir::DeclarationSubstitution::bounded(
+            &body.type_parameters,
+            &domains,
+            body_arguments,
+            &[],
+            fuel,
+        )
+        .map_err(|error| error.to_string())?;
+        substitution
+            .instantiate_bounded(&body.signature, fuel)
+            .map_err(|error| error.to_string())?
+    };
     Ok(Expr {
         source: callee.source,
         // Dispatch has checked the declaration-side contract. This reference
@@ -8323,6 +8518,7 @@ pub fn infer_with_inputs(
         fuel,
     )
 }
+
 /// Infer a named body with complete prepared anonymous/mixed code premises.
 /// Returned summaries retain those premises; they are not unconditional effects.
 pub fn infer_with_code_inputs(
@@ -8344,6 +8540,7 @@ pub fn infer_with_code_inputs(
     let code = own_code_inputs(code_inputs, &[], &[], fuel)?;
     infer_context(package, declaration, arguments, inputs, &code, &[], fuel)
 }
+
 fn validate_cleanup_access(
     package: &Package,
     signature: &Term,
@@ -8428,6 +8625,7 @@ fn infer_context(
         fuel,
     )
 }
+
 fn infer_borrowed_context(
     package: &Package,
     declaration: DeclarationId,
@@ -8450,6 +8648,7 @@ fn infer_borrowed_context(
         fuel,
     )
 }
+
 fn infer_borrowed_context_with_cleanup(
     package: &Package,
     declaration: DeclarationId,
@@ -8757,6 +8956,7 @@ pub(crate) fn infer_borrowed_context_with_full_context<'a>(
     }
     Ok(summary)
 }
+
 // Import the same completed cleanup footprint for ordinary and composed calls.
 fn finish_instance_summary(
     package: &Package,
@@ -8820,6 +9020,7 @@ pub fn bound_type(ty: &Term, fuel: &mut usize) -> Result<(), String> {
     nir::type_budget::charge_structure(ty, fuel)
         .map_err(|_| "memory summary type budget exhausted".into())
 }
+
 fn derive_with_borrowed(
     package: &Package,
     declaration: DeclarationId,
@@ -9030,6 +9231,7 @@ fn derive_with_borrowed(
         code_fields,
     })
 }
+
 fn validate_code_premise(
     package: &Package,
     round: &mut Round,
@@ -9114,6 +9316,7 @@ fn validate_code_premise(
     }
     Ok(())
 }
+
 fn infer_body(
     function: &Function,
     arguments: &[Term],
@@ -9463,6 +9666,7 @@ pub struct ArgumentSummary {
     /// input_pointer_exits, this does not imply writes to by-value arguments.
     pub input_code_exits: BTreeMap<CallableInput, Option<Vec<PreparedCode>>>,
 }
+
 impl fmt::Display for ArgumentSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(argument-memory (accesses")?;
@@ -9523,6 +9727,7 @@ impl fmt::Display for ArgumentSummary {
         f.write_str(")")
     }
 }
+
 /// Inspect a default in an isolated prepared-parameter environment. `slot` is
 /// the original callee parameter index, not the order of explicit arguments.
 pub fn infer_argument(
@@ -9714,6 +9919,7 @@ pub fn infer_closure_with_code_inputs(
         fuel,
     )
 }
+
 /// Captured anonymous code carries construction-time environments independently
 /// from invocation argument evidence. Neither establishes pointer validity.
 pub fn infer_closure_with_prepared_captures(
@@ -9736,6 +9942,7 @@ pub fn infer_closure_with_prepared_captures(
         fuel,
     )
 }
+
 fn infer_closure_with_prepared_effect_context(
     package: &Package,
     definition: &Expr,
@@ -9789,6 +9996,7 @@ pub fn infer_closure_with_borrowed_captures(
         fuel,
     )
 }
+
 fn infer_closure_with_borrowed_effect_context(
     package: &Package,
     definition: &Expr,
@@ -9843,6 +10051,7 @@ fn infer_closure_with_borrowed_effect_context_for(
         false,
     )
 }
+
 fn closure_transition_slots_for(
     package: &Package,
     captures: &[nir::program::Capture],
@@ -10307,6 +10516,7 @@ fn infer_closure_in_round(
     )
     .map(|(summary, _)| summary)
 }
+
 /// A conservative envelope for every invocation of a returned mutable closure.
 /// It contains identities, not current runtime values or pointer origins.
 pub(crate) fn returned_capture_invariant(
@@ -10356,6 +10566,7 @@ pub(crate) fn returned_capture_invariant_with_provenance<'a>(
     )
     .map(|(_, captures)| captures)
 }
+
 fn infer_stable_closure_in_round(
     package: &Package,
     definition: &Expr,
@@ -10923,6 +11134,7 @@ mod binder_cache_tests {
 #[cfg(test)]
 mod record_layout_tests {
     use super::*;
+
     #[test]
     fn data_replacement_layout_rejects_nested_code_and_pointer_leaves() {
         let scalar = Term::Primitive(nir::Primitive::Bool);
@@ -10958,6 +11170,7 @@ mod record_layout_tests {
         assert!(readable_representation(None, &code_record, &mut 1000).unwrap());
         assert!(!data_representation(None, &code_record, &mut 1000).unwrap());
     }
+
     #[test]
     fn error_result_pointer_footprints_check_success_and_every_complete_label() {
         let scalar = Term::Primitive(nir::Primitive::Bool);
@@ -11014,6 +11227,7 @@ mod record_layout_tests {
         assert!(require_pointer_free_owned(None, &opaque, &mut 1000, 0).is_err());
         require_pointer_free_owned(None, &record(scalar), &mut 1000, 0).unwrap();
     }
+
     #[test]
     fn code_signature_pointers_are_not_stored_data_aliases() {
         let pointer = Term::Pointer(Box::new(Term::Primitive(nir::Primitive::Bool)));
@@ -11040,6 +11254,7 @@ mod record_layout_tests {
         assert!(require_pointer_free_owned(None, &record, &mut 0, 0).is_err());
         require_pointer_free_owned(None, &record, &mut 1000, 0).unwrap();
     }
+
     #[test]
     fn record_memory_type_budgets_cover_nested_fields_and_recover() {
         let mut deep = Term::Primitive(nir::Primitive::Bool);
@@ -11064,9 +11279,11 @@ mod record_layout_tests {
 mod borrowed_capture_scope_tests {
     use super::*;
     use nir::program::{CallArgument, Capture, Place, SourceRange};
+
     fn id() -> LocalId {
         LocalId { owner: 7, index: 1 }
     }
+
     fn node(kind: K) -> Expr {
         Expr {
             source: SourceRange { start: 1, end: 2 },
@@ -11074,9 +11291,11 @@ mod borrowed_capture_scope_tests {
             kind,
         }
     }
+
     fn address() -> Expr {
         node(K::AddressOf(Box::new(node(K::Local(id())))))
     }
+
     fn nested(body: Expr, value: Option<Expr>) -> Expr {
         node(K::Closure {
             parameters: vec![],
@@ -11088,6 +11307,7 @@ mod borrowed_capture_scope_tests {
             body: std::sync::Arc::new(body),
         })
     }
+
     #[test]
     fn private_capture_storage_does_not_alias_outer_binding_identity() {
         let bindings = BTreeSet::from([id()]);
@@ -11126,6 +11346,7 @@ mod borrowed_capture_scope_tests {
             .is_err()
         );
     }
+
     #[test]
     fn call_defaults_use_callee_storage_but_explicit_arguments_use_caller_storage() {
         for is_default in [false, true] {
@@ -11153,6 +11374,7 @@ mod borrowed_capture_scope_tests {
             );
         }
     }
+
     #[test]
     fn scope_scan_is_bounded_and_budget_failure_does_not_poison_later_checks() {
         let body = nested(node(K::Unit), Some(node(K::Unit)));
@@ -11169,6 +11391,7 @@ mod borrowed_capture_scope_tests {
 #[cfg(test)]
 mod pointer_root_tests {
     use super::*;
+
     #[test]
     fn closure_storage_projection_uses_environment_and_preserves_bounds() {
         let boolean = Term::Primitive(nir::Primitive::Bool);
@@ -11190,6 +11413,7 @@ mod pointer_root_tests {
         assert!(StorageTraversal::new(None, &closure, &[1], &mut 1000).is_err());
         assert!(StorageTraversal::new(None, &closure, &[0], &mut 0).is_err());
     }
+
     #[test]
     fn input_field_origins_remain_distinct_from_pointee_projections() {
         let direct = PointerPlace {
