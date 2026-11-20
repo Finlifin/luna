@@ -1,0 +1,1132 @@
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
+use mem_impl.layout.Layout;
+
+{-
+    Open-addressed linear-probing HashMap<K, V, .A, .allocator> and its
+    consuming iterator HashMapIter<K, V, .A, .allocator>.
+
+    Storage uses one allocator-backed slab partitioned as:
+        [states: u8 * cap | hashes: u64 * cap | keys: K * cap | vals: V * cap]
+    with power-of-two bucket capacity >= 8, 75% max load (including tombstones),
+    SplitMix64 finalizer mixing, zero extra storage overhead when backed by a
+    global allocator, and exact affine (Once) cleanup for keys and values.
+-}
+const STATE_EMPTY: u8 = 0;
+
+const STATE_FULL: u8 = 1;
+
+const STATE_TOMBSTONE: u8 = 2;
+
+const MIN_TABLE_CAP: usize = 8;
+
+struct TableLayout {
+    total_bytes: usize,
+    align: u64,
+    hashes_offset: usize,
+    keys_offset: usize,
+    vals_offset: usize,
+}
+
+impl Clone for TableLayout {
+    fn clone(*self) -> Self {
+        TableLayout {
+            total_bytes: self.total_bytes.*,
+            align: self.align.*,
+            hashes_offset: self.hashes_offset.*,
+            keys_offset: self.keys_offset.*,
+            vals_offset: self.vals_offset.*,
+        }
+    }
+}
+
+impl Copy for TableLayout {}
+
+struct InsertProbe {
+    found: bool,
+    slot: usize,
+}
+
+impl Clone for InsertProbe {
+    fn clone(*self) -> Self {
+        InsertProbe {
+            found: self.found.*,
+            slot: self.slot.*,
+        }
+    }
+}
+
+impl Copy for InsertProbe {}
+
+fn retire_value(value: T) where T {}
+
+fn elem_stride() -> ?usize where T {
+    let size = Type.size_of(T);
+    if size == 0 {
+        return 0;
+    }
+    let align = Type.align_of(T);
+    builtin.mem.align_up_usize(size, align)
+}
+
+fn max_usize(a: usize, b: usize) -> usize {
+    if a >= b { a } else { b }
+}
+
+fn table_layout(cap: usize) -> ?TableLayout
+where
+    K,
+    V,
+{
+    if cap == 0 {
+        return null;
+    }
+    let _ = Layout.of<K>() match {
+        found? => found,
+        null => return null,
+    }
+    let _ = Layout.of<V>() match {
+        found? => found,
+        null => return null,
+    }
+    let u64_align = Type.align_of(u64);
+    let k_align = Type.align_of(K);
+    let v_align = Type.align_of(V);
+    let max_align_usize = max_usize(u64_align, max_usize(k_align, v_align));
+    let align_u64 = builtin.compiler.try_usize_to_u64(max_align_usize) match {
+        v? => v,
+        null => return null,
+    }
+    let hashes_offset = builtin.mem.align_up_usize(cap, u64_align) match {
+        v? => v,
+        null => return null,
+    }
+    let hashes_bytes = builtin.mem.checked_mul_usize(cap, 8) match {
+        v? => v,
+        null => return null,
+    }
+    let after_hashes = builtin.mem.checked_add_usize(hashes_offset, hashes_bytes) match {
+        v? => v,
+        null => return null,
+    }
+    let key_stride = elem_stride<K>() match {
+        v? => v,
+        null => return null,
+    }
+    let keys_offset = builtin.mem.align_up_usize(after_hashes, k_align) match {
+        v? => v,
+        null => return null,
+    }
+    let keys_bytes = builtin.mem.checked_mul_usize(cap, key_stride) match {
+        v? => v,
+        null => return null,
+    }
+    let after_keys = builtin.mem.checked_add_usize(keys_offset, keys_bytes) match {
+        v? => v,
+        null => return null,
+    }
+    let val_stride = elem_stride<V>() match {
+        v? => v,
+        null => return null,
+    }
+    let vals_offset = builtin.mem.align_up_usize(after_keys, v_align) match {
+        v? => v,
+        null => return null,
+    }
+    let vals_bytes = builtin.mem.checked_mul_usize(cap, val_stride) match {
+        v? => v,
+        null => return null,
+    }
+    let total_bytes = builtin.mem.checked_add_usize(vals_offset, vals_bytes) match {
+        v? => v,
+        null => return null,
+    }
+    let total_u64 = builtin.compiler.try_usize_to_u64(total_bytes) match {
+        v? => v,
+        null => return null,
+    }
+    let _ = Layout.new(total_u64, align_u64) match {
+        found? => found,
+        null => return null,
+    }
+    TableLayout {
+        total_bytes: total_bytes,
+        align: align_u64,
+        hashes_offset: hashes_offset,
+        keys_offset: keys_offset,
+        vals_offset: vals_offset,
+    }
+}
+
+fn layout_for_table(tl: TableLayout) -> ?Layout {
+    let total_u64 = builtin.compiler.try_usize_to_u64(tl.total_bytes) match {
+        v? => v,
+        null => return null,
+    }
+    Layout.new(total_u64, tl.align)
+}
+
+fn state_addr(base: usize, index: usize) -> usize {
+    builtin.mem.checked_add_usize(base, index) match {
+        addr? => addr,
+        null => base,
+    }
+}
+
+fn hash_addr(base: usize, hashes_offset: usize, index: usize) -> usize {
+    let byte_off = builtin.mem.checked_mul_usize(index, 8) match {
+        v? => v,
+        null => 0,
+    }
+    let rel = builtin.mem.checked_add_usize(hashes_offset, byte_off) match {
+        v? => v,
+        null => hashes_offset,
+    }
+    builtin.mem.checked_add_usize(base, rel) match {
+        addr? => addr,
+        null => base,
+    }
+}
+
+fn key_addr(base: usize, tl: TableLayout, index: usize) -> usize where K {
+    if Type.size_of(K) == 0 {
+        return Type.align_of(K);
+    }
+    let stride = elem_stride<K>() match {
+        s? => s,
+        null => return Type.align_of(K),
+    }
+    let byte_off = builtin.mem.checked_mul_usize(index, stride) match {
+        v? => v,
+        null => 0,
+    }
+    let rel = builtin.mem.checked_add_usize(tl.keys_offset, byte_off) match {
+        v? => v,
+        null => tl.keys_offset,
+    }
+    builtin.mem.checked_add_usize(base, rel) match {
+        addr? => addr,
+        null => base,
+    }
+}
+
+fn val_addr(base: usize, tl: TableLayout, index: usize) -> usize where V {
+    if Type.size_of(V) == 0 {
+        return Type.align_of(V);
+    }
+    let stride = elem_stride<V>() match {
+        s? => s,
+        null => return Type.align_of(V),
+    }
+    let byte_off = builtin.mem.checked_mul_usize(index, stride) match {
+        v? => v,
+        null => 0,
+    }
+    let rel = builtin.mem.checked_add_usize(tl.vals_offset, byte_off) match {
+        v? => v,
+        null => tl.vals_offset,
+    }
+    builtin.mem.checked_add_usize(base, rel) match {
+        addr? => addr,
+        null => base,
+    }
+}
+
+pure fn mix_hash(h: u64) -> u64 {
+    let x0 = builtin.math.bit_xor(h, h / 1073741824);
+    let w0 = x0'bitvec.as(u128);
+    assumes w0 <= 18446744073709551615;
+    let p0 = (w0 * 13787848793156543929)'bitvec[0..64].as(u64);
+    let x1 = builtin.math.bit_xor(p0, p0 / 134217728);
+    let w1 = x1'bitvec.as(u128);
+    assumes w1 <= 18446744073709551615;
+    let p1 = (w1 * 10723151780598845931)'bitvec[0..64].as(u64);
+    builtin.math.bit_xor(p1, p1 / 2147483648)
+}
+
+fn bucket_index(mixed_hash: u64, cap: usize) -> usize {
+    if cap == 0 {
+        return 0;
+    }
+    let cap_u64 = builtin.compiler.try_usize_to_u64(cap) match {
+        v? => v,
+        null => return 0,
+    }
+    if cap_u64 == 0 {
+        return 0;
+    }
+    let slot_u64 = mixed_hash % cap_u64;
+    let slot = builtin.compiler.try_u64_to_usize(slot_u64) match {
+        v? => v,
+        null => return 0,
+    }
+    if slot < cap { slot } else { 0 }
+}
+
+pure fn next_ring_index(idx: usize, cap: usize) -> usize {
+    if cap == 0 {
+        return 0;
+    }
+    let last = cap - 1;
+    if idx < last { idx + 1 } else { 0 }
+}
+
+pure fn max_entries_for_buckets(cap: usize) -> usize {
+    if cap == 0 {
+        return 0;
+    }
+    cap - cap / 4
+}
+
+pure fn exceeds_load(used: usize, cap: usize) -> bool {
+    if cap == 0 {
+        return true;
+    }
+    used >= max_entries_for_buckets(cap)
+}
+
+fn buckets_for_capacity(capacity: usize) -> ?usize {
+    if capacity == 0 {
+        return 0;
+    }
+    var cap: usize = MIN_TABLE_CAP;
+    let two: usize = 2;
+    while true {
+        if max_entries_for_buckets(cap) >= capacity {
+            return cap;
+        }
+        cap = builtin.mem.checked_mul_usize(cap, two) match {
+            next? => next,
+            null => return null,
+        }
+    }
+}
+
+fn dealloc_table(alloc: *A, addr: usize, cap: usize)
+where
+    K,
+    V,
+    A: Type,
+    requires A :- Allocator,
+{
+    if addr == 0 or cap == 0 {
+        return;
+    }
+    let tl = table_layout<K, V>(cap) match {
+        v? => v,
+        null => return,
+    }
+    let layout = layout_for_table(tl) match {
+        v? => v,
+        null => return,
+    }
+    unsafe {
+        alloc
+            .as(Allocator)
+            .deallocate(RawBlock.from_raw_parts(addr, layout));
+    }
+}
+
+unsafe fn place_empty_entry(
+    dst_addr: usize,
+    dst_tl: TableLayout,
+    dst_cap: usize,
+    hash: u64,
+    key: K,
+    val: V,
+) -> bool
+where
+    K,
+    V,
+{
+    var idx = bucket_index(hash, dst_cap);
+    var steps: usize = 0;
+    while steps < dst_cap {
+        let s_addr = state_addr(dst_addr, idx);
+        let st = unsafe { builtin.mem.raw_read<u8>(s_addr) }
+        if st == STATE_EMPTY {
+            unsafe {
+                builtin.mem.raw_write<u8>(s_addr, STATE_FULL);
+                builtin
+                    .mem
+                    .raw_write<u64>(hash_addr(dst_addr, dst_tl.hashes_offset, idx), hash);
+                builtin
+                    .mem
+                    .raw_write<K>(key_addr<K>(dst_addr, dst_tl, idx), key);
+                builtin
+                    .mem
+                    .raw_write<V>(val_addr<V>(dst_addr, dst_tl, idx), val);
+            }
+            return true;
+        }
+        idx = next_ring_index(idx, dst_cap);
+        steps = steps + 1;
+    }
+    retire_value<K>(key);
+    retire_value<V>(val);
+    false
+}
+
+pub struct HashMap
+where
+    K,
+    V,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    raw_addr: usize,
+    raw_len: usize,
+    raw_tombstones: usize,
+    raw_cap: usize,
+}
+
+impl Drop for HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K,
+    V,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.raw_addr.*;
+        let cap = self.raw_cap.*;
+        self.raw_addr.* = 0;
+        self.raw_len.* = 0;
+        self.raw_tombstones.* = 0;
+        self.raw_cap.* = 0;
+        if addr != 0 and cap != 0 {
+            table_layout<K, V>(cap) match {
+                tl? => {
+                    var i: usize = 0;
+                    while i < cap {
+                        let st = unsafe { builtin.mem.raw_read<u8>(state_addr(addr, i)) }
+                        if st == STATE_FULL {
+                            let k = unsafe { builtin.mem.raw_read<K>(key_addr<K>(addr, tl, i)) }
+                            let v = unsafe { builtin.mem.raw_read<V>(val_addr<V>(addr, tl, i)) }
+                            retire_value<K>(k);
+                            retire_value<V>(v);
+                        }
+                        i = i + 1;
+                    }
+                },
+                null => {},
+            }
+            dealloc_table<K, V, A>(alloc, addr, cap);
+        }
+    }
+}
+
+impl HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K,
+    V,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub pure fn new() -> Self {
+        HashMap<K, V, .A = A, .allocator = alloc> {
+            raw_addr: 0,
+            raw_len: 0,
+            raw_tombstones: 0,
+            raw_cap: 0,
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> !AllocErr Self {
+        if capacity == 0 {
+            return HashMap<K, V, .A = A, .allocator = alloc>.new();
+        }
+        let target_cap = buckets_for_capacity(capacity) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let tl = table_layout<K, V>(target_cap) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let layout = layout_for_table(tl) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let block = alloc.as(Allocator).allocate(layout)!;
+        let addr = block.address();
+        unsafe {
+            builtin.mem.set_bytes(addr, STATE_EMPTY, target_cap);
+        }
+        HashMap<K, V, .A = A, .allocator = alloc> {
+            raw_addr: addr,
+            raw_len: 0,
+            raw_tombstones: 0,
+            raw_cap: target_cap,
+        }
+    }
+
+    pub fn len(*self) -> usize {
+        self.raw_len.*
+    }
+
+    pub fn capacity(*self) -> usize {
+        max_entries_for_buckets(self.raw_cap.*)
+    }
+
+    pub fn bucket_count(*self) -> usize {
+        self.raw_cap.*
+    }
+
+    pub fn is_empty(*self) -> bool {
+        self.raw_len.* == 0
+    }
+
+    pub fn clear(*self) {
+        let addr = self.raw_addr.*;
+        let cap = self.raw_cap.*;
+        self.raw_len.* = 0;
+        self.raw_tombstones.* = 0;
+        if addr == 0 or cap == 0 {
+            return;
+        }
+        let tl = table_layout<K, V>(cap) match {
+            v? => v,
+            null => return,
+        }
+        var i: usize = 0;
+        while i < cap {
+            let s_addr = state_addr(addr, i);
+            let st = unsafe { builtin.mem.raw_read<u8>(s_addr) }
+            if st == STATE_FULL {
+                let k = unsafe { builtin.mem.raw_read<K>(key_addr<K>(addr, tl, i)) }
+                let v = unsafe { builtin.mem.raw_read<V>(val_addr<V>(addr, tl, i)) }
+                retire_value<K>(k);
+                retire_value<V>(v);
+            }
+            i = i + 1;
+        }
+        unsafe {
+            builtin.mem.set_bytes(addr, STATE_EMPTY, cap);
+        }
+    }
+
+    fn rehash_to(*self, new_cap: usize) -> !AllocErr void {
+        let new_tl = table_layout<K, V>(new_cap) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let new_layout = layout_for_table(new_tl) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let old_addr = self.raw_addr.*;
+        let old_cap = self.raw_cap.*;
+        if old_addr != 0 and old_cap != 0 {
+            let old_tl = table_layout<K, V>(old_cap) match {
+                v? => v,
+                null => return error AllocErr.InvalidLayout,
+            }
+            let block = alloc.as(Allocator).allocate(new_layout)!;
+            let new_addr = block.address();
+            unsafe {
+                builtin.mem.set_bytes(new_addr, STATE_EMPTY, new_cap);
+            }
+            var new_len: usize = 0;
+            var i: usize = 0;
+            while i < old_cap {
+                let st = unsafe { builtin.mem.raw_read<u8>(state_addr(old_addr, i)) }
+                if st == STATE_FULL {
+                    let h = unsafe {
+                        builtin
+                            .mem
+                            .raw_read<u64>(hash_addr(old_addr, old_tl.hashes_offset, i))
+                    }
+                    let k = unsafe { builtin.mem.raw_read<K>(key_addr<K>(old_addr, old_tl, i)) }
+                    let v = unsafe { builtin.mem.raw_read<V>(val_addr<V>(old_addr, old_tl, i)) }
+                    let placed = unsafe {
+                        place_empty_entry<K, V>(new_addr, new_tl, new_cap, h, k, v)
+                    }
+                    if placed {
+                        new_len = builtin.mem.checked_add_usize(new_len, 1) match {
+                            n? => n,
+                            null => new_len,
+                        }
+                    }
+                }
+                i = i + 1;
+            }
+            self.raw_addr.* = new_addr;
+            self.raw_len.* = new_len;
+            self.raw_tombstones.* = 0;
+            self.raw_cap.* = new_cap;
+            dealloc_table<K, V, A>(alloc, old_addr, old_cap);
+            return;
+        }
+        let block = alloc.as(Allocator).allocate(new_layout)!;
+        let new_addr = block.address();
+        unsafe {
+            builtin.mem.set_bytes(new_addr, STATE_EMPTY, new_cap);
+        }
+        self.raw_addr.* = new_addr;
+        self.raw_len.* = 0;
+        self.raw_tombstones.* = 0;
+        self.raw_cap.* = new_cap;
+    }
+
+    pub fn reserve(*self, additional: usize) -> !AllocErr void {
+        let len = self.raw_len.*;
+        let required = builtin.mem.checked_add_usize(len, additional) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        if required == 0 {
+            return;
+        }
+        let cap = self.raw_cap.*;
+        let tombs = self.raw_tombstones.*;
+        let used = builtin.mem.checked_add_usize(required, tombs) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        if cap != 0 and max_entries_for_buckets(cap) >= used {
+            return;
+        }
+        if cap != 0 and len == 0 {
+            unsafe {
+                builtin.mem.set_bytes(self.raw_addr.*, STATE_EMPTY, cap);
+            }
+            self.raw_tombstones.* = 0;
+            if max_entries_for_buckets(cap) >= required {
+                return;
+            }
+        }
+        let target_cap = buckets_for_capacity(required) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        if cap != 0 and target_cap <= cap {
+            self.rehash_to(cap)
+        } else {
+            self.rehash_to(target_cap)
+        }
+    }
+}
+
+impl HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K :- Eq + Hash + Clone,
+    V,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn find_slot(*self, key: *K, target_hash: u64) -> ?usize {
+        let addr = self.raw_addr.*;
+        let cap = self.raw_cap.*;
+        let len = self.raw_len.*;
+        if addr == 0 or cap == 0 or len == 0 {
+            return null;
+        }
+        let tl = table_layout<K, V>(cap) match {
+            v? => v,
+            null => return null,
+        }
+        var idx = bucket_index(target_hash, cap);
+        var steps: usize = 0;
+        while steps < cap {
+            let st = unsafe { builtin.mem.raw_read<u8>(state_addr(addr, idx)) }
+            if st == STATE_EMPTY {
+                return null;
+            }
+            if st == STATE_FULL {
+                let stored_hash = unsafe {
+                    builtin
+                        .mem
+                        .raw_read<u64>(hash_addr(addr, tl.hashes_offset, idx))
+                }
+                if stored_hash == target_hash {
+                    let k_slot = key_addr<K>(addr, tl, idx);
+                    var existing = unsafe { builtin.mem.raw_read<K>(k_slot) }
+                    let existing_copy = existing.as(Clone).clone();
+                    unsafe {
+                        builtin.mem.raw_write<K>(k_slot, existing);
+                    }
+                    let probe_copy = key.*.as(Clone).clone();
+                    if existing_copy.as(Eq).eq(probe_copy) {
+                        return idx;
+                    }
+                }
+            }
+            idx = next_ring_index(idx, cap);
+            steps = steps + 1;
+        }
+        null
+    }
+
+    fn probe_for_insert(*self, key: *K, target_hash: u64) -> ?InsertProbe {
+        let addr = self.raw_addr.*;
+        let cap = self.raw_cap.*;
+        if addr == 0 or cap == 0 {
+            return null;
+        }
+        let tl = table_layout<K, V>(cap) match {
+            v? => v,
+            null => return null,
+        }
+        var idx = bucket_index(target_hash, cap);
+        var steps: usize = 0;
+        var first_tombstone: ?usize = null;
+        while steps < cap {
+            let st = unsafe { builtin.mem.raw_read<u8>(state_addr(addr, idx)) }
+            if st == STATE_EMPTY {
+                let dst = first_tombstone match {
+                    t? => t,
+                    null => idx,
+                }
+                return InsertProbe { found: false, slot: dst };
+            }
+            if st == STATE_TOMBSTONE {
+                if first_tombstone.is_none() {
+                    first_tombstone = idx;
+                }
+            } else if st == STATE_FULL {
+                let stored_hash = unsafe {
+                    builtin
+                        .mem
+                        .raw_read<u64>(hash_addr(addr, tl.hashes_offset, idx))
+                }
+                if stored_hash == target_hash {
+                    let k_slot = key_addr<K>(addr, tl, idx);
+                    var existing = unsafe { builtin.mem.raw_read<K>(k_slot) }
+                    let existing_copy = existing.as(Clone).clone();
+                    unsafe {
+                        builtin.mem.raw_write<K>(k_slot, existing);
+                    }
+                    let probe_copy = key.*.as(Clone).clone();
+                    if existing_copy.as(Eq).eq(probe_copy) {
+                        return InsertProbe { found: true, slot: idx };
+                    }
+                }
+            }
+            idx = next_ring_index(idx, cap);
+            steps = steps + 1;
+        }
+        first_tombstone match {
+            t? => InsertProbe { found: false, slot: t },
+            null => null,
+        }
+    }
+
+    pub fn insert(*self, key: K, value: V) -> !AllocErr ?V {
+        let len = self.raw_len.*;
+        let next_len = builtin.mem.checked_add_usize(len, 1) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let cap = self.raw_cap.*;
+        let tombs = self.raw_tombstones.*;
+        if cap == 0 {
+            self.rehash_to(MIN_TABLE_CAP)!;
+        } else {
+            let used = builtin.mem.checked_add_usize(next_len, tombs) match {
+                v? => v,
+                null => cap,
+            }
+            if exceeds_load(used, cap) {
+                if len < cap / 2 and tombs > 0 {
+                    self.rehash_to(cap)!;
+                } else {
+                    let two: usize = 2;
+                    let grown = builtin.mem.checked_mul_usize(cap, two) match {
+                        v? => v,
+                        null => return error AllocErr.InvalidLayout,
+                    }
+                    self.rehash_to(grown)!;
+                }
+            }
+        }
+        let cur_cap = self.raw_cap.*;
+        let cur_addr = self.raw_addr.*;
+        let tl = table_layout<K, V>(cur_cap) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        var incoming = key;
+        let target_hash = mix_hash(incoming.as(Clone).clone().as(Hash).hash());
+        let probe = self.probe_for_insert(incoming.ref, target_hash) match {
+            p? => p,
+            null => {
+                retire_value<K>(incoming);
+                retire_value<V>(value);
+                return error AllocErr.InvalidLayout;
+            },
+        }
+        let slot = probe.slot;
+        if probe.found {
+            retire_value<K>(incoming);
+            let v_slot = val_addr<V>(cur_addr, tl, slot);
+            let old = unsafe { builtin.mem.raw_read<V>(v_slot) }
+            unsafe {
+                builtin.mem.raw_write<V>(v_slot, value);
+            }
+            return old;
+        }
+        let s_addr = state_addr(cur_addr, slot);
+        let prev_state = unsafe { builtin.mem.raw_read<u8>(s_addr) }
+        if prev_state == STATE_TOMBSTONE {
+            let cur_tombs = self.raw_tombstones.*;
+            if cur_tombs > 0 {
+                self.raw_tombstones.* = cur_tombs - 1;
+            }
+        }
+        unsafe {
+            builtin.mem.raw_write<u8>(s_addr, STATE_FULL);
+            builtin
+                .mem
+                .raw_write<u64>(hash_addr(cur_addr, tl.hashes_offset, slot), target_hash);
+            builtin
+                .mem
+                .raw_write<K>(key_addr<K>(cur_addr, tl, slot), incoming);
+            builtin
+                .mem
+                .raw_write<V>(val_addr<V>(cur_addr, tl, slot), value);
+        }
+        self.raw_len.* = next_len;
+        null
+    }
+
+    pub fn remove(*self, key: K) -> ?V {
+        var needle = key;
+        let target_hash = mix_hash(needle.as(Clone).clone().as(Hash).hash());
+        let slot = self.find_slot(needle.ref, target_hash) match {
+            v? => v,
+            null => {
+                retire_value<K>(needle);
+                return null;
+            },
+        }
+        retire_value<K>(needle);
+        let addr = self.raw_addr.*;
+        let cap = self.raw_cap.*;
+        let tl = table_layout<K, V>(cap) match {
+            v? => v,
+            null => return null,
+        }
+        let s_addr = state_addr(addr, slot);
+        unsafe {
+            builtin.mem.raw_write<u8>(s_addr, STATE_TOMBSTONE);
+        }
+        let cur_len = self.raw_len.*;
+        if cur_len > 0 {
+            self.raw_len.* = cur_len - 1;
+        }
+        let next_tombs = builtin.mem.checked_add_usize(self.raw_tombstones.*, 1) match {
+            v? => v,
+            null => self.raw_tombstones.*,
+        }
+        self.raw_tombstones.* = next_tombs;
+        let old_key = unsafe { builtin.mem.raw_read<K>(key_addr<K>(addr, tl, slot)) }
+        retire_value<K>(old_key);
+        unsafe { builtin.mem.raw_read<V>(val_addr<V>(addr, tl, slot)) }
+    }
+
+    pub fn contains_key(*self, key: K) -> bool {
+        var needle = key;
+        let target_hash = mix_hash(needle.as(Clone).clone().as(Hash).hash());
+        let found = self.find_slot(needle.ref, target_hash).is_some();
+        retire_value<K>(needle);
+        found
+    }
+}
+
+impl HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K :- Eq + Hash + Clone,
+    V :- Copy,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn get(*self, key: K) -> ?V {
+        var needle = key;
+        let target_hash = mix_hash(needle.as(Clone).clone().as(Hash).hash());
+        let slot = self.find_slot(needle.ref, target_hash) match {
+            v? => v,
+            null => {
+                retire_value<K>(needle);
+                return null;
+            },
+        }
+        retire_value<K>(needle);
+        let tl = table_layout<K, V>(self.raw_cap.*) match {
+            v? => v,
+            null => return null,
+        }
+        unsafe { builtin.mem.raw_read<V>(val_addr<V>(self.raw_addr.*, tl, slot)) }
+    }
+}
+
+impl HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K :- Eq + Hash + Clone,
+    V :- Clone,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn get_cloned(*self, key: K) -> ?V {
+        var needle = key;
+        let target_hash = mix_hash(needle.as(Clone).clone().as(Hash).hash());
+        let slot = self.find_slot(needle.ref, target_hash) match {
+            v? => v,
+            null => {
+                retire_value<K>(needle);
+                return null;
+            },
+        }
+        retire_value<K>(needle);
+        let addr = self.raw_addr.*;
+        let tl = table_layout<K, V>(self.raw_cap.*) match {
+            v? => v,
+            null => return null,
+        }
+        let v_slot = val_addr<V>(addr, tl, slot);
+        var val = unsafe { builtin.mem.raw_read<V>(v_slot) }
+        let cloned = val.as(Clone).clone();
+        unsafe {
+            builtin.mem.raw_write<V>(v_slot, val);
+        }
+        cloned
+    }
+}
+
+impl HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K :- Clone,
+    V,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn clone_key_at(*self, index: usize) -> ?K {
+        let addr = self.raw_addr.*;
+        let cap = self.raw_cap.*;
+        if addr == 0 or cap == 0 or index >= cap {
+            return null;
+        }
+        let st = unsafe { builtin.mem.raw_read<u8>(state_addr(addr, index)) }
+        if st != STATE_FULL {
+            return null;
+        }
+        let tl = table_layout<K, V>(cap) match {
+            v? => v,
+            null => return null,
+        }
+        let k_slot = key_addr<K>(addr, tl, index);
+        var k = unsafe { builtin.mem.raw_read<K>(k_slot) }
+        let cloned = k.as(Clone).clone();
+        unsafe {
+            builtin.mem.raw_write<K>(k_slot, k);
+        }
+        cloned
+    }
+}
+
+impl HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K :- Clone,
+    V :- Clone,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn try_clone(*self) -> !AllocErr Self {
+        let src_addr = self.raw_addr.*;
+        let src_cap = self.raw_cap.*;
+        let src_len = self.raw_len.*;
+        if src_addr == 0 or src_cap == 0 or src_len == 0 {
+            return HashMap<K, V, .A = A, .allocator = alloc>.new();
+        }
+        let src_tl = table_layout<K, V>(src_cap) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        var out = HashMap<K, V, .A = A, .allocator = alloc>.with_capacity(src_len)!;
+        let dst_addr = out.raw_addr;
+        let dst_cap = out.raw_cap;
+        if dst_addr == 0 or dst_cap == 0 {
+            return out;
+        }
+        let dst_tl = table_layout<K, V>(dst_cap) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        var i: usize = 0;
+        while i < src_cap {
+            let st = unsafe { builtin.mem.raw_read<u8>(state_addr(src_addr, i)) }
+            if st == STATE_FULL {
+                let h = unsafe {
+                    builtin
+                        .mem
+                        .raw_read<u64>(hash_addr(src_addr, src_tl.hashes_offset, i))
+                }
+                let k_slot = key_addr<K>(src_addr, src_tl, i);
+                var k = unsafe { builtin.mem.raw_read<K>(k_slot) }
+                let k_copy = k.as(Clone).clone();
+                unsafe {
+                    builtin.mem.raw_write<K>(k_slot, k);
+                }
+                let v_slot = val_addr<V>(src_addr, src_tl, i);
+                var v = unsafe { builtin.mem.raw_read<V>(v_slot) }
+                let v_copy = v.as(Clone).clone();
+                unsafe {
+                    builtin.mem.raw_write<V>(v_slot, v);
+                }
+                let placed = unsafe {
+                    place_empty_entry<K, V>(dst_addr, dst_tl, dst_cap, h, k_copy, v_copy)
+                }
+                if placed {
+                    out.raw_len = builtin.mem.checked_add_usize(out.raw_len, 1) match {
+                        n? => n,
+                        null => out.raw_len,
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        out
+    }
+}
+
+pub struct HashMapIter
+where
+    K,
+    V,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    raw_addr: usize,
+    raw_cursor: usize,
+    raw_cap: usize,
+}
+
+impl Drop for HashMapIter<K, V, .A = A, .allocator = alloc>
+where
+    K,
+    V,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.raw_addr.*;
+        let cap = self.raw_cap.*;
+        var i = self.raw_cursor.*;
+        self.raw_cursor.* = cap;
+        self.raw_addr.* = 0;
+        self.raw_cap.* = 0;
+        if addr != 0 and cap != 0 {
+            table_layout<K, V>(cap) match {
+                tl? => {
+                    while i < cap {
+                        let st = unsafe { builtin.mem.raw_read<u8>(state_addr(addr, i)) }
+                        if st == STATE_FULL {
+                            let k = unsafe { builtin.mem.raw_read<K>(key_addr<K>(addr, tl, i)) }
+                            let v = unsafe { builtin.mem.raw_read<V>(val_addr<V>(addr, tl, i)) }
+                            retire_value<K>(k);
+                            retire_value<V>(v);
+                        }
+                        i = i + 1;
+                    }
+                },
+                null => {},
+            }
+            dealloc_table<K, V, A>(alloc, addr, cap);
+        }
+    }
+}
+
+impl HashMapIter<K, V, .A = A, .allocator = alloc>
+where
+    K,
+    V,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn next_entry(*self) -> ?Tuple<K, V> {
+        let addr = self.raw_addr.*;
+        let cap = self.raw_cap.*;
+        if addr == 0 or cap == 0 {
+            return null;
+        }
+        let tl = table_layout<K, V>(cap) match {
+            v? => v,
+            null => return null,
+        }
+        var i = self.raw_cursor.*;
+        while i < cap {
+            let s_addr = state_addr(addr, i);
+            let st = unsafe { builtin.mem.raw_read<u8>(s_addr) }
+            if st == STATE_FULL {
+                unsafe {
+                    builtin.mem.raw_write<u8>(s_addr, STATE_EMPTY);
+                }
+                self.raw_cursor.* = i + 1;
+                let k = unsafe { builtin.mem.raw_read<K>(key_addr<K>(addr, tl, i)) }
+                let v = unsafe { builtin.mem.raw_read<V>(val_addr<V>(addr, tl, i)) }
+                return (k, v);
+            }
+            i = i + 1;
+        }
+        self.raw_cursor.* = cap;
+        null
+    }
+}
+
+impl Iterator for HashMapIter<K, V, .A = A, .allocator = alloc>
+where
+    K,
+    V,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Item: Type = Tuple<K, V>;
+
+    inline fn iterate(self) -> #emit_item<Tuple<K, V>> void {
+        var iter = self;
+        while true {
+            let entry = iter.ref.next_entry() match {
+                found? => found,
+                null => break,
+            }
+            emit_item<Tuple<K, V>>(entry)#;
+        }
+    }
+}
+
+impl IntoIterator for HashMap<K, V, .A = A, .allocator = alloc>
+where
+    K,
+    V,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Iter: Type = HashMapIter<K, V, .A = A, .allocator = alloc>;
+
+    fn into_iter(self) -> HashMapIter<K, V, .A = A, .allocator = alloc> {
+        var this = self;
+        let addr = this.raw_addr;
+        let cap = this.raw_cap;
+        this.raw_addr = 0;
+        this.raw_len = 0;
+        this.raw_tombstones = 0;
+        this.raw_cap = 0;
+        HashMapIter<K, V, .A = A, .allocator = alloc> {
+            raw_addr: addr,
+            raw_cursor: 0,
+            raw_cap: cap,
+        }
+    }
+}

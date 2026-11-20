@@ -1,0 +1,700 @@
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
+use mem_impl.layout.Layout;
+
+{-
+    Growable double-ended ring buffer VecDeque<T, .A, .allocator> and its
+    consuming iterator VecDequeIter<T, .A, .allocator>.
+
+    Both are affine (Once), maintain power-of-two ring capacity (or cap == 0
+    for unallocated/ZST deques), drop all initialized elements in front-to-back
+    order on destruction, and route buffer allocation/deallocation through the
+    runtime-dependent allocator clause with zero storage overhead for globals.
+-}
+pub struct VecDeque
+where
+    T,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    raw_addr: usize,
+    raw_head: usize,
+    raw_len: usize,
+    raw_cap: usize,
+}
+
+fn retire_value(value: T) where T {}
+
+fn elem_stride() -> ?usize where T {
+    let size = Type.size_of(T);
+    if size == 0 {
+        return 0;
+    }
+    let align = Type.align_of(T);
+    builtin.mem.align_up_usize(size, align)
+}
+
+fn slot_address(base: usize, index: usize) -> usize where T {
+    let stride = elem_stride<T>() match {
+        value? => value,
+        null => return Type.align_of(T),
+    }
+    if stride == 0 {
+        return Type.align_of(T);
+    }
+    let offset = builtin.mem.checked_mul_usize(index, stride) match {
+        value? => value,
+        null => return 0,
+    }
+    builtin.mem.checked_add_usize(base, offset) match {
+        addr? => addr,
+        null => 0,
+    }
+}
+
+fn buffer_layout(cap: usize) -> ?Layout where T {
+    let count_u64 = builtin.compiler.try_usize_to_u64(cap) match {
+        value? => value,
+        null => return null,
+    }
+    let layout = Layout.array<T>(count_u64) match {
+        value? => value,
+        null => return null,
+    }
+    let _ = layout.byte_size_usize() match {
+        value? => value,
+        null => return null,
+    }
+    layout
+}
+
+fn dealloc_deque_buffer(alloc: *A, addr: usize, cap: usize)
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+{
+    if Type.size_of(T) == 0 or cap == 0 or addr == 0 {
+        return;
+    }
+    let layout = buffer_layout<T>(cap) match {
+        value? => value,
+        null => return,
+    }
+    unsafe {
+        alloc
+            .as(Allocator)
+            .deallocate(RawBlock.from_raw_parts(addr, layout));
+    }
+}
+
+fn next_pow2_usize(min_cap: usize, floor_cap: usize) -> ?usize {
+    var cap: usize = if floor_cap == 0 { 1 } else { floor_cap }
+    let two: usize = 2;
+    while cap < min_cap {
+        cap = builtin.mem.checked_mul_usize(cap, two) match {
+            next? => next,
+            null => return null,
+        }
+    }
+    cap
+}
+
+pure fn ring_index(head: usize, offset: usize, cap: usize) -> usize {
+    if cap == 0 or head >= cap or offset >= cap {
+        return 0;
+    }
+    let rem = cap - head;
+    if offset < rem {
+        head + offset
+    } else {
+        offset - rem
+    }
+}
+
+pure fn ring_inc(idx: usize, cap: usize) -> usize {
+    if cap == 0 {
+        return 0;
+    }
+    let last = cap - 1;
+    if idx < last {
+        idx + 1
+    } else {
+        0
+    }
+}
+
+pure fn ring_dec(idx: usize, cap: usize) -> usize {
+    if cap == 0 {
+        return 0;
+    }
+    if idx == 0 {
+        cap - 1
+    } else {
+        idx - 1
+    }
+}
+
+impl Drop for VecDeque<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.raw_addr.*;
+        let head = self.raw_head.*;
+        let len = self.raw_len.*;
+        let cap = self.raw_cap.*;
+        self.raw_addr.* = 0;
+        self.raw_head.* = 0;
+        self.raw_len.* = 0;
+        self.raw_cap.* = 0;
+        var i: usize = 0;
+        while i < len {
+            let slot = if cap > 0 and i < cap {
+                ring_index(head, i, cap)
+            } else {
+                0
+            }
+            let elem = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr, slot)) }
+            retire_value(elem);
+            i = i + 1;
+        }
+        dealloc_deque_buffer<T, A>(alloc, addr, cap);
+    }
+}
+
+impl VecDeque<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub pure fn new() -> Self {
+        VecDeque<T, .A = A, .allocator = alloc> {
+            raw_addr: 0,
+            raw_head: 0,
+            raw_len: 0,
+            raw_cap: 0,
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> !AllocErr Self {
+        if capacity == 0 {
+            return VecDeque<T, .A = A, .allocator = alloc>.new();
+        }
+        if Type.size_of(T) == 0 {
+            let _ = Layout.of<T>() match {
+                found? => found,
+                null => return error AllocErr.InvalidLayout,
+            }
+            return VecDeque<T, .A = A, .allocator = alloc>.new();
+        }
+        let target_cap = next_pow2_usize(capacity, 4) match {
+            found? => found,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let layout = buffer_layout<T>(target_cap) match {
+            found? => found,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let block = alloc.as(Allocator).allocate(layout)!;
+        VecDeque<T, .A = A, .allocator = alloc> {
+            raw_addr: block.address(),
+            raw_head: 0,
+            raw_len: 0,
+            raw_cap: target_cap,
+        }
+    }
+
+    pub fn len(*self) -> usize {
+        self.raw_len.*
+    }
+
+    pub fn capacity(*self) -> usize {
+        if Type.size_of(T) == 0 {
+            return builtin.mem.usize_max();
+        }
+        self.raw_cap.*
+    }
+
+    pub fn is_empty(*self) -> bool {
+        self.raw_len.* == 0
+    }
+
+    pub fn reserve(*self, additional: usize) -> !AllocErr void {
+        let len = self.raw_len.*;
+        let required = builtin.mem.checked_add_usize(len, additional) match {
+            value? => value,
+            null => return error AllocErr.InvalidLayout,
+        }
+        if Type.size_of(T) == 0 {
+            let _ = Layout.of<T>() match {
+                found? => found,
+                null => return error AllocErr.InvalidLayout,
+            }
+            return;
+        }
+        let cap = self.raw_cap.*;
+        if required <= cap {
+            return;
+        }
+        let floor_cap: usize = if Type.size_of(T) == 1 { 8 } else { 4 }
+        let target_cap = next_pow2_usize(required, floor_cap) match {
+            found? => found,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let new_layout = buffer_layout<T>(target_cap) match {
+            found? => found,
+            null => return error AllocErr.InvalidLayout,
+        }
+        let head = self.raw_head.*;
+        if len > 0 {
+            if cap == 0 or head >= cap or len > cap {
+                return error AllocErr.InvalidLayout;
+            }
+            let stride = elem_stride<T>() match {
+                s? => s,
+                null => return error AllocErr.InvalidLayout,
+            }
+            let rem = cap - head;
+            if len <= rem {
+                let bytes = builtin.mem.checked_mul_usize(len, stride) match {
+                    b? => b,
+                    null => return error AllocErr.InvalidLayout,
+                }
+                let block = alloc.as(Allocator).allocate(new_layout)!;
+                let new_addr = block.address();
+                let old_addr = self.raw_addr.*;
+                unsafe {
+                    builtin
+                        .mem
+                        .copy_bytes_nonoverlapping(new_addr, slot_address<T>(old_addr, head), bytes);
+                }
+                self.raw_addr.* = new_addr;
+                self.raw_head.* = 0;
+                self.raw_cap.* = target_cap;
+                dealloc_deque_buffer<T, A>(alloc, old_addr, cap);
+                return;
+            }
+            let second_count = len - rem;
+            let bytes1 = builtin.mem.checked_mul_usize(rem, stride) match {
+                b? => b,
+                null => return error AllocErr.InvalidLayout,
+            }
+            let bytes2 = builtin.mem.checked_mul_usize(second_count, stride) match {
+                b? => b,
+                null => return error AllocErr.InvalidLayout,
+            }
+            let block = alloc.as(Allocator).allocate(new_layout)!;
+            let new_addr = block.address();
+            let old_addr = self.raw_addr.*;
+            unsafe {
+                builtin
+                    .mem
+                    .copy_bytes_nonoverlapping(new_addr, slot_address<T>(old_addr, head), bytes1);
+                builtin.mem.copy_bytes_nonoverlapping(
+                    slot_address<T>(new_addr, rem),
+                    slot_address<T>(old_addr, 0),
+                    bytes2,
+                );
+            }
+            self.raw_addr.* = new_addr;
+            self.raw_head.* = 0;
+            self.raw_cap.* = target_cap;
+            dealloc_deque_buffer<T, A>(alloc, old_addr, cap);
+            return;
+        }
+        let block = alloc.as(Allocator).allocate(new_layout)!;
+        let old_addr = self.raw_addr.*;
+        self.raw_addr.* = block.address();
+        self.raw_head.* = 0;
+        self.raw_cap.* = target_cap;
+        dealloc_deque_buffer<T, A>(alloc, old_addr, cap);
+    }
+
+    pub fn push_back(*self, value: T) -> !AllocErr void {
+        let len = self.raw_len.*;
+        let next_len = builtin.mem.checked_add_usize(len, 1) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        self.reserve(1)!;
+        let cap = self.raw_cap.*;
+        let idx = if cap > 0 and len < cap {
+            ring_index(self.raw_head.*, len, cap)
+        } else {
+            0
+        }
+        unsafe {
+            builtin
+                .mem
+                .raw_write<T>(slot_address<T>(self.raw_addr.*, idx), value);
+        }
+        self.raw_len.* = next_len;
+    }
+
+    pub fn push_front(*self, value: T) -> !AllocErr void {
+        let len = self.raw_len.*;
+        let next_len = builtin.mem.checked_add_usize(len, 1) match {
+            v? => v,
+            null => return error AllocErr.InvalidLayout,
+        }
+        self.reserve(1)!;
+        let cap = self.raw_cap.*;
+        let new_head = if cap > 0 and self.raw_head.* < cap {
+            ring_dec(self.raw_head.*, cap)
+        } else {
+            0
+        }
+        unsafe {
+            builtin
+                .mem
+                .raw_write<T>(slot_address<T>(self.raw_addr.*, new_head), value);
+        }
+        self.raw_head.* = new_head;
+        self.raw_len.* = next_len;
+    }
+
+    pub fn pop_front(*self) -> ?T {
+        let len = self.raw_len.*;
+        if len == 0 {
+            return null;
+        }
+        let cap = self.raw_cap.*;
+        let head = self.raw_head.*;
+        let slot = if cap > 0 and head < cap { head } else { 0 }
+        let value = unsafe { builtin.mem.raw_read<T>(slot_address<T>(self.raw_addr.*, slot)) }
+        self.raw_head.* = ring_inc(slot, cap);
+        self.raw_len.* = len - 1;
+        value
+    }
+
+    pub fn pop_back(*self) -> ?T {
+        let len = self.raw_len.*;
+        if len == 0 {
+            return null;
+        }
+        let new_len = len - 1;
+        let cap = self.raw_cap.*;
+        let head = self.raw_head.*;
+        let slot = if cap > 0 and head < cap and new_len < cap {
+            ring_index(head, new_len, cap)
+        } else {
+            0
+        }
+        let value = unsafe { builtin.mem.raw_read<T>(slot_address<T>(self.raw_addr.*, slot)) }
+        self.raw_len.* = new_len;
+        value
+    }
+
+    pub fn clear(*self) {
+        let len = self.raw_len.*;
+        let cap = self.raw_cap.*;
+        let head = self.raw_head.*;
+        let addr = self.raw_addr.*;
+        self.raw_head.* = 0;
+        self.raw_len.* = 0;
+        var i: usize = 0;
+        while i < len {
+            let slot = if cap > 0 and i < cap {
+                ring_index(head, i, cap)
+            } else {
+                0
+            }
+            let elem = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr, slot)) }
+            retire_value(elem);
+            i = i + 1;
+        }
+    }
+
+    pub fn swap(*self, a: usize, b: usize) -> bool {
+        let len = self.raw_len.*;
+        if a >= len or b >= len {
+            return false;
+        }
+        if a == b {
+            return true;
+        }
+        if Type.size_of(T) != 0 {
+            let cap = self.raw_cap.*;
+            let head = self.raw_head.*;
+            if cap == 0 or head >= cap or a >= cap or b >= cap {
+                return false;
+            }
+            let base = self.raw_addr.*;
+            let addr_a = slot_address<T>(base, ring_index(head, a, cap));
+            let addr_b = slot_address<T>(base, ring_index(head, b, cap));
+            let va = unsafe { builtin.mem.raw_read<T>(addr_a) }
+            let vb = unsafe { builtin.mem.raw_read<T>(addr_b) }
+            unsafe {
+                builtin.mem.raw_write<T>(addr_a, vb);
+                builtin.mem.raw_write<T>(addr_b, va);
+            }
+        }
+        true
+    }
+
+    pub fn replace(*self, index: usize, value: T) -> ?T {
+        let len = self.raw_len.*;
+        if index >= len {
+            retire_value(value);
+            return null;
+        }
+        let cap = self.raw_cap.*;
+        let slot = if cap > 0 and index < cap {
+            ring_index(self.raw_head.*, index, cap)
+        } else {
+            0
+        }
+        let addr = slot_address<T>(self.raw_addr.*, slot);
+        let old = unsafe { builtin.mem.raw_read<T>(addr) }
+        unsafe {
+            builtin.mem.raw_write<T>(addr, value);
+        }
+        old
+    }
+
+    pub fn set(*self, index: usize, value: T) -> bool {
+        let len = self.raw_len.*;
+        if index >= len {
+            retire_value(value);
+            return false;
+        }
+        let cap = self.raw_cap.*;
+        let slot = if cap > 0 and index < cap {
+            ring_index(self.raw_head.*, index, cap)
+        } else {
+            0
+        }
+        let addr = slot_address<T>(self.raw_addr.*, slot);
+        let old = unsafe { builtin.mem.raw_read<T>(addr) }
+        unsafe {
+            builtin.mem.raw_write<T>(addr, value);
+        }
+        retire_value(old);
+        true
+    }
+}
+
+impl VecDeque<T, .A = A, .allocator = alloc>
+where
+    T :- Copy,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn get(*self, index: usize) -> ?T {
+        let len = self.raw_len.*;
+        if index >= len {
+            return null;
+        }
+        let cap = self.raw_cap.*;
+        let slot = if cap > 0 and index < cap {
+            ring_index(self.raw_head.*, index, cap)
+        } else {
+            0
+        }
+        unsafe {
+            builtin
+                .mem
+                .raw_read<T>(slot_address<T>(self.raw_addr.*, slot))
+        }
+    }
+
+    pub fn front(*self) -> ?T {
+        self.get(0)
+    }
+
+    pub fn back(*self) -> ?T {
+        let len = self.raw_len.*;
+        if len == 0 {
+            return null;
+        }
+        self.get(len - 1)
+    }
+}
+
+impl VecDeque<T, .A = A, .allocator = alloc>
+where
+    T :- Clone,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn try_clone(*self) -> !AllocErr Self {
+        let len = self.raw_len.*;
+        let cap = self.raw_cap.*;
+        let head = self.raw_head.*;
+        let base = self.raw_addr.*;
+        var out = VecDeque<T, .A = A, .allocator = alloc>.with_capacity(len)!;
+        var i: usize = 0;
+        while i < len {
+            let slot = if cap > 0 and i < cap {
+                ring_index(head, i, cap)
+            } else {
+                0
+            }
+            let addr = slot_address<T>(base, slot);
+            var elem = unsafe { builtin.mem.raw_read<T>(addr) }
+            let copied = elem.as(Clone).clone();
+            unsafe {
+                builtin.mem.raw_write<T>(addr, elem);
+            }
+            out.ref.push_back(copied)!;
+            i = i + 1;
+        }
+        out
+    }
+}
+
+pub struct VecDequeIter
+where
+    T,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    raw_addr: usize,
+    raw_head: usize,
+    raw_len: usize,
+    raw_cap: usize,
+}
+
+impl Drop for VecDequeIter<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn drop(*self) {
+        let addr = self.raw_addr.*;
+        let head = self.raw_head.*;
+        let len = self.raw_len.*;
+        let cap = self.raw_cap.*;
+        self.raw_addr.* = 0;
+        self.raw_head.* = 0;
+        self.raw_len.* = 0;
+        self.raw_cap.* = 0;
+        var i: usize = 0;
+        while i < len {
+            let slot = if cap > 0 and i < cap {
+                ring_index(head, i, cap)
+            } else {
+                0
+            }
+            let elem = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr, slot)) }
+            retire_value(elem);
+            i = i + 1;
+        }
+        dealloc_deque_buffer<T, A>(alloc, addr, cap);
+    }
+}
+
+impl Iterator for VecDequeIter<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Item: Type = T;
+
+    inline fn iterate(self) -> #emit_item<T> void {
+        var iter = self;
+        let addr = iter.raw_addr;
+        let cap = iter.raw_cap;
+        while true {
+            let len = iter.raw_len;
+            if len == 0 {
+                break;
+            }
+            let head = iter.raw_head;
+            let slot = if cap > 0 and head < cap { head } else { 0 }
+            iter.raw_head = ring_inc(slot, cap);
+            iter.raw_len = len - 1;
+            let elem = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr, slot)) }
+            emit_item<T>(elem)#;
+        }
+    }
+}
+
+impl IntoIterator for VecDeque<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Iter: Type = VecDequeIter<T, .A = A, .allocator = alloc>;
+
+    fn into_iter(self) -> VecDequeIter<T, .A = A, .allocator = alloc> {
+        var this = self;
+        let addr = this.raw_addr;
+        let head = this.raw_head;
+        let len = this.raw_len;
+        let cap = this.raw_cap;
+        this.raw_addr = 0;
+        this.raw_head = 0;
+        this.raw_len = 0;
+        this.raw_cap = 0;
+        VecDequeIter<T, .A = A, .allocator = alloc> {
+            raw_addr: addr,
+            raw_head: head,
+            raw_len: len,
+            raw_cap: cap,
+        }
+    }
+}
+
+impl Eq for VecDeque<T, .A = A, .allocator = alloc>
+where
+    T :- Eq,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn eq(self, other: Self) -> bool {
+        var left_iter = self.into_iter();
+        var right_iter = other.into_iter();
+        if left_iter.raw_len != right_iter.raw_len {
+            return false;
+        }
+        let left_addr = left_iter.raw_addr;
+        let right_addr = right_iter.raw_addr;
+        let left_cap = left_iter.raw_cap;
+        let right_cap = right_iter.raw_cap;
+        while true {
+            let cur_len = left_iter.raw_len;
+            if cur_len == 0 {
+                break;
+            }
+            let l_head = left_iter.raw_head;
+            let r_head = right_iter.raw_head;
+            let l_slot = if left_cap > 0 and l_head < left_cap {
+                l_head
+            } else {
+                0
+            }
+            let r_slot = if right_cap > 0 and r_head < right_cap {
+                r_head
+            } else {
+                0
+            }
+            left_iter.raw_head = ring_inc(l_slot, left_cap);
+            right_iter.raw_head = ring_inc(r_slot, right_cap);
+            left_iter.raw_len = cur_len - 1;
+            right_iter.raw_len = cur_len - 1;
+            let left = unsafe { builtin.mem.raw_read<T>(slot_address<T>(left_addr, l_slot)) }
+            let right = unsafe { builtin.mem.raw_read<T>(slot_address<T>(right_addr, r_slot)) }
+            if not left.as(Eq).eq(right) {
+                return false;
+            }
+        }
+        true
+    }
+}

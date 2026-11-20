@@ -1,6 +1,6 @@
 {- Runtime host facilities. std.prelude is imported explicitly. -}
 pub use builtin.*;
-use collections_impl.vec;
+use collections_impl.{hash_map, hash_set, vec, vec_deque}
 use fmt_impl.arguments;
 use fmt_impl.parse;
 use fs_impl.file;
@@ -38,7 +38,10 @@ pub mod mem {
 }
 
 pub mod collections {
+    pub use hash_map.{HashMap, HashMapIter}
+    pub use hash_set.{HashSet, HashSetIter}
     pub use vec.{Vec, VecIter}
+    pub use vec_deque.{VecDeque, VecDequeIter}
 }
 
 pub mod string {

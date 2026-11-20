@@ -209,3 +209,387 @@ fn arena_allocator_composes_backing_allocator_and_drops_chunks() {
     assert_success(&output);
     assert_eq!(output.stdout, b"(bool true)\n");
 }
+
+#[test]
+fn vec_deque_ring_wrap_custom_allocator_zst_and_early_break_drop() {
+    let source = r#"
+        use std.prelude.*;
+        use std.collections.VecDeque;
+        use std.mem.{AllocErr, Allocator, FixedBufferAllocator, Layout, SystemAllocator};
+
+        fn expect_opt_u64(opt: ?u64, expected: u64) -> bool {
+            opt match {
+                v? => v == expected,
+                null => false,
+            }
+        }
+
+        fn exercise_deque(fba: *FixedBufferAllocator) -> !AllocErr bool {
+            -- 1. Wrap-around ring buffer operations & growth across wrapped tail/head boundary.
+            var dq = VecDeque<u64, .A = FixedBufferAllocator, .allocator = fba>.with_capacity(4)!;
+            dq.ref.push_back(30)!;
+            dq.ref.push_back(40)!;
+            dq.ref.push_front(20)!;
+            dq.ref.push_front(10)!;
+            -- Ring holds [10, 20, 30, 40] wrapped around cap 4; push_front(5) forces linearized growth.
+            dq.ref.push_front(5)!;
+            dq.ref.push_back(50)!;
+            if dq.ref.len() != 6
+                or not expect_opt_u64(dq.ref.front(), 5)
+                or not expect_opt_u64(dq.ref.back(), 50)
+                or not expect_opt_u64(dq.ref.get(2), 20)
+            {
+                return false;
+            }
+            if not dq.ref.swap(0, 5) or not dq.ref.set(1, 15) {
+                return false;
+            }
+            -- Expected order: [50, 15, 20, 30, 40, 5]
+            var cloned = dq.ref.try_clone()!;
+            let cloned_eq = dq.ref.try_clone()!.as(Eq).eq(cloned.ref.try_clone()!);
+            if not cloned_eq {
+                return false;
+            }
+            if not expect_opt_u64(dq.ref.pop_front(), 50)
+                or not expect_opt_u64(dq.ref.pop_back(), 5)
+                or not expect_opt_u64(dq.ref.pop_front(), 15)
+                or dq.ref.len() != 3
+            {
+                return false;
+            }
+            cloned.ref.clear();
+            if not cloned.ref.is_empty() or cloned.ref.capacity() == 0 {
+                return false;
+            }
+
+            -- 2. Zero-sized elements require no OS allocation yet track length.
+            var zv = VecDeque<void, .A = FixedBufferAllocator, .allocator = fba>.with_capacity(8)!;
+            let live_before_zst = fba.live_allocations();
+            zv.ref.push_front(())!;
+            zv.ref.push_back(())!;
+            zv.ref.push_front(())!;
+            if zv.ref.len() != 3 or fba.live_allocations() != live_before_zst {
+                return false;
+            }
+            if zv.ref.pop_back().is_none() or zv.ref.len() != 2 {
+                return false;
+            }
+
+            -- 3. Affine Box<u64, ...> elements + early-break Iterator.take(2) drop all boxes once.
+            let boxes_ok = do {
+                let start_live = fba.live_allocations();
+                var bq = VecDeque<
+                    Box<u64, .A = FixedBufferAllocator, .allocator = fba>,
+                    .A = FixedBufferAllocator,
+                    .allocator = fba,
+                >.new();
+                bq.ref.push_back(Box<u64, .A = FixedBufferAllocator, .allocator = fba>.new(100)!)!;
+                bq.ref.push_front(Box<u64, .A = FixedBufferAllocator, .allocator = fba>.new(200)!)!;
+                bq.ref.push_back(Box<u64, .A = FixedBufferAllocator, .allocator = fba>.new(300)!)!;
+                bq.ref.push_front(Box<u64, .A = FixedBufferAllocator, .allocator = fba>.new(400)!)!;
+                -- Order: [400, 200, 100, 300]
+                var sum: u64 = 0;
+                let sum_ptr = sum.ref;
+                bq.as(IntoIterator).into_iter().as(Iterator).take(2).as(Iterator).foreach(|item| {
+                    let v = item.get();
+                    if v < 10000 and sum_ptr.* < 1000000 {
+                        sum_ptr.* = sum_ptr.* + v;
+                    }
+                });
+                sum == 600 and fba.live_allocations() == start_live
+            };
+
+            -- 4. FixedBufferAllocator exhaustion preserves existing deque state cleanly.
+            var small_dq = VecDeque<u64, .A = FixedBufferAllocator, .allocator = fba>.new();
+            small_dq.ref.push_back(77)!;
+            let oom_ok = small_dq.ref.reserve(256) match {
+                _! => false,
+                error err => err match {
+                    .OutOfMemory => true,
+                    .InvalidLayout => false,
+                },
+            };
+            oom_ok and expect_opt_u64(small_dq.ref.front(), 77) and boxes_ok
+        }
+
+        fn run() -> bool {
+            let layout = Layout.new(2048, 16) match {
+                found? => found,
+                null => return false,
+            };
+            let backing = SystemAllocator.GLOBAL.ref.as(Allocator).allocate(layout) match {
+                block! => block,
+                error _ => return false,
+            };
+            var fba = FixedBufferAllocator.from_raw_block(backing);
+            let ok = exercise_deque(fba.ref) match {
+                passed! => passed,
+                error _ => false,
+            };
+            let clean = fba.ref.live_allocations() == 0;
+            unsafe {
+                SystemAllocator.GLOBAL.ref.as(Allocator).deallocate(backing);
+            }
+            ok and clean
+        }
+    "#;
+
+    let case = NativeCase::new(source);
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
+fn hash_map_probing_tombstones_rehash_affine_values_and_custom_allocator() {
+    let source = r#"
+        use std.prelude.*;
+        use std.collections.HashMap;
+        use std.mem.{AllocErr, Allocator, ArenaAllocator, FixedBufferAllocator, Layout, SystemAllocator};
+
+        fn expect_opt_u64(opt: ?u64, expected: u64) -> bool {
+            opt match {
+                v? => v == expected,
+                null => false,
+            }
+        }
+
+        fn exercise_maps(fba: *FixedBufferAllocator) -> !AllocErr bool {
+            -- 1. Probing, overwrite, tombstone reuse, and multiple rehashes with ArenaAllocator.
+            var arena = ArenaAllocator<.Backing = FixedBufferAllocator, .backing = fba>.with_chunk_size(512);
+            var map = HashMap<
+                u64,
+                u64,
+                .A = ArenaAllocator<.Backing = FixedBufferAllocator, .backing = fba>,
+                .allocator = arena.ref,
+            >.new();
+            var i: u64 = 0;
+            while i < 40 {
+                if map.ref.insert(i, i * 10)!.is_some() {
+                    return false;
+                }
+                i = i + 1;
+            }
+            if map.ref.len() != 40 or not expect_opt_u64(map.ref.get(26), 260) {
+                return false;
+            }
+            if not expect_opt_u64(map.ref.insert(26, 999)!, 260) or map.ref.len() != 40 {
+                return false;
+            }
+            -- Delete odd keys to build tombstones, verify remaining keys, then re-insert to clear/reuse.
+            var k: u64 = 1;
+            while k < 40 {
+                if not expect_opt_u64(map.ref.remove(k), k * 10) {
+                    return false;
+                }
+                k = k + 2;
+            }
+            if map.ref.len() != 20 or map.ref.contains_key(15) {
+                return false;
+            }
+            var cloned = map.ref.try_clone()!;
+            if not expect_opt_u64(cloned.ref.get(26), 999) or cloned.ref.len() != 20 {
+                return false;
+            }
+            var r: u64 = 100;
+            while r < 140 {
+                let _ = map.ref.insert(r, r + 1)!;
+                r = r + 1;
+            }
+            if map.ref.len() != 60
+                or not expect_opt_u64(map.ref.get(26), 999)
+                or not expect_opt_u64(map.ref.get(135), 136)
+            {
+                return false;
+            }
+
+            -- 2. Zero-sized value HashMap<u64, void> works cleanly without non-empty value storage.
+            var zmap = HashMap<u64, void, .A = FixedBufferAllocator, .allocator = fba>.new();
+            if zmap.ref.insert(1, ())!.is_some() or zmap.ref.insert(1, ())!.is_none() or not zmap.ref.contains_key(1) {
+                return false;
+            }
+            if zmap.ref.remove(1).is_none() or zmap.ref.len() != 0 {
+                return false;
+            }
+
+            -- 3. Strictly affine (Once, non-Copy) Box values drop on overwrite, remove, clear, and early break.
+            let affine_ok = do {
+                let base_live = fba.live_allocations();
+                var amap = HashMap<
+                    u64,
+                    Box<u64, .A = FixedBufferAllocator, .allocator = fba>,
+                    .A = FixedBufferAllocator,
+                    .allocator = fba,
+                >.with_capacity(6)!;
+                let _ = amap.ref.insert(1, Box<u64, .A = FixedBufferAllocator, .allocator = fba>.new(11)!)!;
+                let _ = amap.ref.insert(2, Box<u64, .A = FixedBufferAllocator, .allocator = fba>.new(22)!)!;
+                let _ = amap.ref.insert(3, Box<u64, .A = FixedBufferAllocator, .allocator = fba>.new(33)!)!;
+                let _ = amap.ref.insert(4, Box<u64, .A = FixedBufferAllocator, .allocator = fba>.new(44)!)!;
+                -- Replacing key 2 returns old Box, which drops immediately on scope exit.
+                let old_sum = do {
+                    let old_box = amap.ref.insert(2, Box<u64, .A = FixedBufferAllocator, .allocator = fba>.new(220)!)! match {
+                        b? => b,
+                        null => return false,
+                    };
+                    old_box.get() == 22
+                };
+                if not old_sum {
+                    return false;
+                }
+                let removed_ok = do {
+                    let rem = amap.ref.remove(4) match {
+                        b? => b,
+                        null => return false,
+                    };
+                    rem.get() == 44
+                };
+                if not removed_ok or amap.ref.len() != 3 {
+                    return false;
+                }
+                var sum: u64 = 0;
+                let sum_ptr = sum.ref;
+                amap.as(IntoIterator).into_iter().as(Iterator).take(2).as(Iterator).foreach(|pair| {
+                    let (_, boxed) = pair;
+                    let val = boxed.get();
+                    if val < 10000 and sum_ptr.* < 1000000 {
+                        sum_ptr.* = sum_ptr.* + val;
+                    }
+                });
+                fba.live_allocations() == base_live and sum > 0
+            };
+
+            -- 4. FixedBufferAllocator exhaustion leaves existing HashMap entries untouched.
+            var oom_map = HashMap<u64, u64, .A = FixedBufferAllocator, .allocator = fba>.with_capacity(4)!;
+            let _ = oom_map.ref.insert(42, 777)!;
+            let oom_ok = oom_map.ref.reserve(1024) match {
+                _! => false,
+                error err => err match {
+                    .OutOfMemory => true,
+                    .InvalidLayout => false,
+                },
+            };
+            affine_ok and oom_ok and expect_opt_u64(oom_map.ref.get(42), 777)
+        }
+
+        fn run() -> bool {
+            let layout = Layout.new(16384, 16) match {
+                found? => found,
+                null => return false,
+            };
+            let backing = SystemAllocator.GLOBAL.ref.as(Allocator).allocate(layout) match {
+                block! => block,
+                error _ => return false,
+            };
+            var fba = FixedBufferAllocator.from_raw_block(backing);
+            let ok = exercise_maps(fba.ref) match {
+                passed! => passed,
+                error _ => false,
+            };
+            let clean = fba.ref.live_allocations() == 0;
+            unsafe {
+                SystemAllocator.GLOBAL.ref.as(Allocator).deallocate(backing);
+            }
+            ok and clean
+        }
+    "#;
+
+    let case = NativeCase::new(source);
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
+fn hash_set_operations_cross_allocator_subset_disjoint_and_iteration() {
+    let source = r#"
+        use std.prelude.*;
+        use std.collections.HashSet;
+        use std.mem.{AllocErr, Allocator, FixedBufferAllocator, Layout, SystemAllocator};
+
+        fn exercise_sets(fba: *FixedBufferAllocator) -> !AllocErr bool {
+            var sys_set = HashSet<u64>.new();
+            let ins10 = sys_set.ref.insert(10)!;
+            let ins20 = sys_set.ref.insert(20)!;
+            let ins20_dup = sys_set.ref.insert(20)!;
+            let ins30 = sys_set.ref.insert(30)!;
+            if not ins10 or not ins20 or ins20_dup or not ins30 {
+                return false;
+            }
+            if sys_set.ref.len() != 3
+                or not sys_set.ref.contains(20)
+                or sys_set.ref.contains(99)
+            {
+                return false;
+            }
+
+            var fba_set = HashSet<u64, .A = FixedBufferAllocator, .allocator = fba>.with_capacity(4)!;
+            let _ = fba_set.ref.insert(10)!;
+            let _ = fba_set.ref.insert(30)!;
+            if not fba_set.ref.is_subset(sys_set.ref) or sys_set.ref.is_subset(fba_set.ref) {
+                return false;
+            }
+            if fba_set.ref.is_disjoint(sys_set.ref) {
+                return false;
+            }
+
+            var other_set = HashSet<u64, .A = FixedBufferAllocator, .allocator = fba>.new();
+            let _ = other_set.ref.insert(100)!;
+            let _ = other_set.ref.insert(200)!;
+            if not fba_set.ref.is_disjoint(other_set.ref) {
+                return false;
+            }
+
+            var cloned = fba_set.ref.try_clone()!;
+            if not cloned.ref.remove(10) or cloned.ref.remove(10) or cloned.ref.len() != 1 {
+                return false;
+            }
+
+            var early_count: u64 = 0;
+            let early_ptr = early_count.ref;
+            fba_set.ref.try_clone()!.as(IntoIterator).into_iter().as(Iterator).take(1).as(Iterator).foreach(|elem| {
+                let _ = elem;
+                if early_ptr.* < 100 {
+                    early_ptr.* = early_ptr.* + 1;
+                }
+            });
+
+            var sum: u64 = 0;
+            let sum_ptr = sum.ref;
+            sys_set.as(IntoIterator).into_iter().as(Iterator).foreach(|elem| {
+                if elem < 10000 and sum_ptr.* < 1000000 {
+                    sum_ptr.* = sum_ptr.* + elem;
+                }
+            });
+            sum == 60 and early_count == 1 and cloned.ref.contains(30)
+        }
+
+        fn run() -> bool {
+            let layout = Layout.new(2048, 16) match {
+                found? => found,
+                null => return false,
+            };
+            let backing = SystemAllocator.GLOBAL.ref.as(Allocator).allocate(layout) match {
+                block! => block,
+                error _ => return false,
+            };
+            var fba = FixedBufferAllocator.from_raw_block(backing);
+            let ok = exercise_sets(fba.ref) match {
+                passed! => passed,
+                error _ => false,
+            };
+            let clean = fba.ref.live_allocations() == 0;
+            unsafe {
+                SystemAllocator.GLOBAL.ref.as(Allocator).deallocate(backing);
+            }
+            ok and clean
+        }
+    "#;
+
+    let case = NativeCase::new(source);
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}

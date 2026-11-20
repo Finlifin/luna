@@ -1,0 +1,187 @@
+use collections_impl.hash_map.{HashMap, HashMapIter}
+use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
+
+{-
+    Hash-indexed set HashSet<T, .A, .allocator> and consuming iterator
+    HashSetIter<T, .A, .allocator>, structurally backed by
+    HashMap<T, void, .A = A, .allocator = allocator>.
+
+    Inherits structural affine Drop, zero-sized value array optimization, and
+    runtime-dependent allocator delivery with zero overhead for globals.
+-}
+pub struct HashSet
+where
+    T,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    raw_map: HashMap<T, void, .A = A, .allocator = allocator>,
+}
+
+impl HashSet<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub pure fn new() -> Self {
+        HashSet<T, .A = A, .allocator = alloc> {
+            raw_map: HashMap<T, void, .A = A, .allocator = alloc>.new(),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> !AllocErr Self {
+        let map = HashMap<T, void, .A = A, .allocator = alloc>.with_capacity(capacity)!;
+        HashSet<T, .A = A, .allocator = alloc> { raw_map: map }
+    }
+
+    pub fn len(*self) -> usize {
+        self.raw_map.len()
+    }
+
+    pub fn capacity(*self) -> usize {
+        self.raw_map.capacity()
+    }
+
+    pub fn is_empty(*self) -> bool {
+        self.raw_map.is_empty()
+    }
+
+    pub fn clear(*self) {
+        self.raw_map.clear();
+    }
+
+    pub fn reserve(*self, additional: usize) -> !AllocErr void {
+        self.raw_map.reserve(additional)
+    }
+}
+
+impl HashSet<T, .A = A, .allocator = alloc>
+where
+    T :- Eq + Hash + Clone,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn insert(*self, value: T) -> !AllocErr bool {
+        let prev = self.raw_map.insert(value, ())!;
+        prev.is_none()
+    }
+
+    pub fn remove(*self, value: T) -> bool {
+        self.raw_map.remove(value).is_some()
+    }
+
+    pub fn contains(*self, value: T) -> bool {
+        self.raw_map.contains_key(value)
+    }
+
+    pub fn is_subset(*self, other: *HashSet<T, .A = B, .allocator = other_alloc>) -> bool
+    where
+        B: Type,
+        requires B :- Allocator,
+        quote other_alloc: lift *B,
+    {
+        if self.raw_map.len() > other.raw_map.len() {
+            return false;
+        }
+        let cap = self.raw_map.bucket_count();
+        var i: usize = 0;
+        while i < cap {
+            self.raw_map.clone_key_at(i) match {
+                elem? => {
+                    if not other.raw_map.contains_key(elem) {
+                        return false;
+                    }
+                },
+                null => {},
+            }
+            i = i + 1;
+        }
+        true
+    }
+
+    pub fn is_disjoint(*self, other: *HashSet<T, .A = B, .allocator = other_alloc>) -> bool
+    where
+        B: Type,
+        requires B :- Allocator,
+        quote other_alloc: lift *B,
+    {
+        let cap = self.raw_map.bucket_count();
+        var i: usize = 0;
+        while i < cap {
+            self.raw_map.clone_key_at(i) match {
+                elem? => {
+                    if other.raw_map.contains_key(elem) {
+                        return false;
+                    }
+                },
+                null => {},
+            }
+            i = i + 1;
+        }
+        true
+    }
+}
+
+impl HashSet<T, .A = A, .allocator = alloc>
+where
+    T :- Clone,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    pub fn try_clone(*self) -> !AllocErr Self {
+        let cloned = self.raw_map.try_clone()!;
+        HashSet<T, .A = A, .allocator = alloc> { raw_map: cloned }
+    }
+}
+
+pub struct HashSetIter
+where
+    T,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    raw_iter: HashMapIter<T, void, .A = A, .allocator = allocator>,
+}
+
+impl Iterator for HashSetIter<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Item: Type = T;
+
+    inline fn iterate(self) -> #emit_item<T> void {
+        var iter = self;
+        while true {
+            let (elem, _) = iter.raw_iter.ref.next_entry() match {
+                found? => found,
+                null => break,
+            }
+            emit_item<T>(elem)#;
+        }
+    }
+}
+
+impl IntoIterator for HashSet<T, .A = A, .allocator = alloc>
+where
+    T,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Iter: Type = HashSetIter<T, .A = A, .allocator = alloc>;
+
+    fn into_iter(self) -> HashSetIter<T, .A = A, .allocator = alloc> {
+        HashSetIter<T, .A = A, .allocator = alloc> {
+            raw_iter: self.raw_map.into_iter(),
+        }
+    }
+}
