@@ -1878,8 +1878,15 @@ impl Checker<'_, '_> {
         let init = decl
             .init
             .ok_or_else(|| error(decl.span, "local const requires an initializer"))?;
+        // A source-checked closure has already checked the failure arm in
+        // its lexical return scope. Only a selected arm can acquire captures.
+        let checked_failure = self
+            .captures
+            .last()
+            .is_some_and(|frame| frame.const_regions.contains(decl.hir_id));
         let otherwise = decl
             .otherwise
+            .filter(|_| !checked_failure)
             .map(|body| self.check_failure_branch(body))
             .transpose()?;
         if otherwise.as_ref().is_some_and(|body| !is_never(&body.ty)) {
@@ -1888,6 +1895,7 @@ impl Checker<'_, '_> {
         let annotation = decl.ty.map(|ty| self.type_expr(ty)).transpose()?;
         let (data, ty) = self.required_typed_expression(init, annotation.as_ref())?;
         let value = self.materialize_local_constant(data, ty.clone(), init.span)?;
+        let failure_scope = checked_failure.then(|| (self.locals.clone(), self.context.clone()));
         self.immutable.extend(pattern_binding_ids(&decl.pattern));
         let observed = self.known_pattern_type_value(&value, init.span)?;
         let pattern = self.with_staged_input(true, |this| {
@@ -1914,7 +1922,8 @@ impl Checker<'_, '_> {
                 Ok(checked)
             })
             .transpose()?;
-        if otherwise.is_none() && (guard.is_some() || !self.pattern_exhaustive(&pattern, &ty)) {
+        if decl.otherwise.is_none() && (guard.is_some() || !self.pattern_exhaustive(&pattern, &ty))
+        {
             return Err(error(
                 decl.span,
                 "refutable const pattern requires a diverging else branch",
@@ -1994,6 +2003,15 @@ impl Checker<'_, '_> {
             ));
         };
         if selected_error.is_some() {
+            if let (Some((locals, context)), Some(body)) = (failure_scope, decl.otherwise) {
+                self.locals = locals;
+                self.context = context;
+                let branch = self.check_failure_branch(body)?;
+                if !is_never(&branch.ty) {
+                    return Err(error(decl.span, "const else branch must diverge"));
+                }
+                return Ok(branch);
+            }
             return otherwise
                 .ok_or_else(|| error(decl.span, "constant pattern failed without an else branch"));
         }

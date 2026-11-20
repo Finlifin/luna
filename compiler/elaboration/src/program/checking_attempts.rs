@@ -279,6 +279,22 @@ impl Attempt {
         checker: &mut Checker<'_, '_>,
         result: Result<T, Error>,
     ) -> Result<Option<T>, Error> {
+        // Missing context is the only recoverable absence. Domain, budget and
+        // restoration failures must still escape to the owning checking rule.
+        match self.finish_checked(checker, result) {
+            Ok(value) => Ok(Some(value)),
+            Err(failure) if failure.needs_context => Ok(None),
+            Err(failure) => Err(failure),
+        }
+    }
+
+    /// Finish a mandatory source check without discarding its contextual
+    /// diagnostic. The enclosing callable owns any retry with stronger inputs.
+    pub(super) fn finish_checked<T>(
+        self,
+        checker: &mut Checker<'_, '_>,
+        result: Result<T, Error>,
+    ) -> Result<T, Error> {
         checker.numeric_defaults = self.defaults;
         if self.disposition != Disposition::Commit || result.is_err() {
             self.lexical.restore(checker);
@@ -292,13 +308,7 @@ impl Attempt {
                 .rollback(self.generated_functions);
             self.storage.restore(checker, self.span)?;
         }
-        // Missing context is the only recoverable absence. Domain, budget and
-        // restoration failures must still escape to the owning checking rule.
-        match result {
-            Ok(value) => Ok(Some(value)),
-            Err(failure) if failure.needs_context => Ok(None),
-            Err(failure) => Err(failure),
-        }
+        result
     }
 }
 

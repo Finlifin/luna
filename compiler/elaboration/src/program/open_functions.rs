@@ -647,7 +647,7 @@ impl Checker<'_, '_> {
                 // Follow local aliases only for dependency classification.
                 // Availability and mutation are still checked by elaboration.
                 let mut aliases = Vec::new();
-                self.scan_body_requirement(root, |this, expression| {
+                self.scan_callable_requirements(root, |this, expression| {
                     if let H::Let(binding) = &expression.kind {
                         if let Some(init) = binding.init {
                             aliases.push((
@@ -676,7 +676,7 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            if self.scan_body_requirement(root, |this, expression| {
+            if self.scan_callable_requirements(root, |this, expression| {
                 let selectors: Vec<_> = match expression.kind {
                     H::InlineControl(value) => {
                         if !is_default {
@@ -1198,6 +1198,47 @@ impl Checker<'_, '_> {
         })
     }
 
+    // A residual function also forms its nested lambdas. Their local control
+    // targets stay private, but their staging may require this invocation's
+    // inputs. Keep visiting bodies iterative, including post-do suppliers.
+    fn scan_callable_requirements(
+        &mut self,
+        root: &Expr<'_>,
+        mut required: impl for<'e> FnMut(&mut Self, &Expr<'e>) -> Result<bool, Error>,
+    ) -> Result<bool, Error> {
+        let mut bodies = Vec::new();
+        let mut current = root;
+        loop {
+            if self.scan_body_requirement(current, |this, expr| {
+                if let H::Closure(_, _, body) | H::PostLambdaBody(body) = expr.kind {
+                    bodies.push(body);
+                }
+                required(this, expr)
+            })? {
+                return Ok(true);
+            }
+            let Some(id) = bodies.pop() else {
+                return Ok(false);
+            };
+            current = self
+                .package
+                .body(id)
+                .ok_or_else(|| error(root.span, "missing closure body"))?
+                .value;
+        }
+    }
+
+    pub(super) fn closure_needs_staging(
+        &mut self,
+        body: &Expr<'_>,
+        ordinary: bool,
+    ) -> Result<bool, Error> {
+        self.scan_body_requirement(body, |_, node| {
+            Ok(matches!(node.kind, H::Let(decl) if decl.comptime && (ordinary || decl.otherwise.is_some()))
+                || ordinary && matches!(node.kind, H::InlineControl(_)))
+        })
+    }
+
     fn scan_body_requirement<'h>(
         &mut self,
         value: &Expr<'h>,
@@ -1259,8 +1300,8 @@ impl Checker<'_, '_> {
                             Arg::Positional(value)
                             | Arg::Named(_, value)
                             | Arg::Expand(value)
-                            | Arg::Implicit(value) => pending.push(value),
-                            Arg::PostLambda(_) => {}
+                            | Arg::Implicit(value)
+                            | Arg::PostLambda(value) => pending.push(value),
                         }
                     }
                 }
@@ -1322,6 +1363,7 @@ impl Checker<'_, '_> {
                     pending.extend(fields.iter().map(|field| field.expr))
                 }
                 H::Semi(value)
+                | H::TacticArgument(value)
                 | H::InlineControl(value)
                 | H::Defer(value)
                 | H::TyPtr(value)
@@ -1827,15 +1869,17 @@ impl Checker<'_, '_> {
     /// first selected failure (or ordinary purity obligation) requests the
     /// same formal check as an open body.
     pub(super) fn checked_const_continuation(&mut self, block: hir::HirId) -> Result<bool, Error> {
+        if self.in_code_body {
+            return Ok(false);
+        }
+        if let Some(frame) = self.captures.last() {
+            return Ok(frame.const_regions.contains(block));
+        }
         if let Some(instance) = &self.open_instance {
             return Ok(self
                 .open_functions
                 .get(&instance.owner)
                 .is_some_and(|definition| definition.checked_const_continuation(block)));
-        }
-        // Nested code and lambdas have their own captures and return target.
-        if self.in_code_body || !self.captures.is_empty() {
-            return Ok(false);
         }
         let Some(owner) = self
             .signature_owner
@@ -1843,6 +1887,13 @@ impl Checker<'_, '_> {
         else {
             return Ok(false);
         };
+        self.check_closed_const_regions(owner)?;
+        Ok(self.closed_const_regions[&owner]
+            .const_continuation_blocks
+            .contains(&local(block)))
+    }
+
+    pub(super) fn check_closed_const_regions(&mut self, owner: OwnerId) -> Result<(), Error> {
         if !self.closed_const_regions.contains_key(&owner) {
             let Term::Function { parameters, result } = self
                 .declared_signature(owner)
@@ -1870,9 +1921,7 @@ impl Checker<'_, '_> {
             })?;
             self.closed_const_regions.insert(owner, definition.regions);
         }
-        Ok(self.closed_const_regions[&owner]
-            .const_continuation_blocks
-            .contains(&local(block)))
+        Ok(())
     }
 
     fn check_definition_source(
@@ -3678,11 +3727,10 @@ impl Checker<'_, '_> {
         let saved_spread = std::mem::replace(&mut self.describing_open_spread, false);
         let expected_description = expected.cloned().map(D::Known);
         let returns = self.control.result.clone().map(D::Known).or_else(|| {
-            matches!(
-                self.control.return_observations,
-                Some(ReturnObservations::Deferred)
-            )
-            .then_some(D::Unknown)
+            self.control
+                .return_observations
+                .as_ref()
+                .map(|_| D::Unknown)
         });
         let mut locals = self
             .locals
@@ -3822,6 +3870,9 @@ impl Checker<'_, '_> {
             .checked_add(1)
             .ok_or_else(|| error(decl.span, "constant selection identity space exhausted"))?;
         self.ordinary_behavior_inputs.insert(selector, p(P::Bool));
+        if let Some(frame) = self.captures.last_mut() {
+            frame.const_regions.record(decl.hir_id);
+        }
         Ok(n::Expr {
             source: source(decl.span),
             ty: p(P::Void),

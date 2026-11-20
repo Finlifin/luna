@@ -17309,6 +17309,102 @@ fn closed_conditional_const_checks_source_and_possible_continuations() {
 }
 
 #[test]
+fn closure_conditional_const_owns_returns_captures_and_cleanup() {
+    let source = r#"
+        struct Watch { seen: *bool }
+        impl Retire for Watch { fn drop(*self) { self.seen.*.* = true; } }
+        comptime fn checked(v: bool) -> bool { assumes v; true }
+
+        fn choose(comptime flag: bool, fallback: bool, seen: *bool) -> bool {
+            let outer = || {
+                let inner = |input: bool| {
+                    let watch = Watch { seen: seen };
+                    do {
+                        const found if found = flag else { return input; };
+                        const answer = checked(found);
+                    };
+                    true
+                };
+                not inner(fallback)
+            };
+            not outer()
+        }
+
+        pure fn enabled(comptime flag: bool) -> bool {
+            let read = || {
+                const ok if ok = flag else { return false; };
+                ok
+            };
+            read()
+        }
+        fn ordinary_const(comptime flag: bool) -> bool {
+            let read = || { const ok = checked(flag); ok };
+            read()
+        }
+        fn captureless(unused: bool) -> bool {
+            let read: fn() -> bool = || {
+                const true = true else { const bad = checked(false); return unused and bad; };
+                true
+            };
+            read()
+        }
+        fn run() -> bool {
+            var first = false;
+            var second = false;
+            not choose(false, false, first.ref) and first and
+                choose(true, false, second.ref) and second and captureless(false) and
+                enabled(true) and not enabled(false) and ordinary_const(true)
+        }
+    "#;
+    let work = Work::new(&format!("{RESOURCE_HEADER} {source}"));
+    success(&resource_build(&work));
+    let output = work.execute();
+    success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
+fn closure_conditional_const_checks_both_source_paths_before_selection() {
+    for (body, diagnostic) in [
+        (
+            "const found if found=false else {return true;};",
+            "type mismatch",
+        ),
+        (
+            "const found if found=false else {return true;}; const y=checked(v);y",
+            "unstaged local",
+        ),
+        (
+            "const found if found=false else {return true;}; inline if v {true} else {false}",
+            "unstaged local",
+        ),
+        ("const true=true else {true}; true", "must diverge"),
+        (
+            "const true=false else {const y=checked(false);return y;}; true",
+            "ProgramContractRejected",
+        ),
+        (
+            "return true; const true=false else {return true;}; const y=checked(false);y",
+            "ProgramContractRejected",
+        ),
+    ] {
+        let source = format!(
+            "comptime fn checked(v:bool)->bool {{assumes v;true}} fn run()->bool {{let f=|v:bool| {{{body}}};f(true)}}"
+        );
+        let output = Work::new(&source).build();
+        assert!(!output.status.success());
+        let message = String::from_utf8_lossy(&output.stderr);
+        assert!(message.contains(diagnostic), "{body}: {message}");
+    }
+    let source = "pure fn choose(ptr:*bool)->bool {
+        let f=|| {const true=false else {return true;};ptr.* = false;true};f()
+    } fn run()->bool {var v=true;choose(v.ref)}";
+    let output = resource_build(&Work::new(&format!("{RESOURCE_HEADER} {source}")));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("lacks P4 evidence"));
+}
+
+#[test]
 fn conditional_local_constants_failure_preserves_runtime_cleanup() {
     let source = format!(
         "{RESOURCE_HEADER} struct Watch {{target:*bool}} impl Retire for Watch {{fn drop(*self) {{self.target.*.* = true;}}}} fn run()->bool {{var seen=false;while true {{let watch=Watch {{target:seen.ref}};const true=false else {{break;}};}};seen}}"

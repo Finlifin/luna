@@ -74,7 +74,13 @@ impl BlockFrame<'_> {
     ) -> Result<CheckedBlock, Error> {
         let destination = self.progress.tail.clone();
         let selected = matches!(self.progress.phase, Phase::SelectedExit);
+        let site = self.progress.block.hir_id;
         let result = self.progress.finish(checker, value);
+        if result.is_ok()
+            && let Some(frame) = checker.captures.last_mut()
+        {
+            frame.const_regions.record(site);
+        }
         self.scope.leave(checker);
         if let Some(boundary) = self.boundary {
             boundary.leave(checker);
