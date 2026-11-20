@@ -6476,7 +6476,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     } else {
                         &[]
                     };
-                    super::memory::infer_closure_with_effect_inputs(
+                    super::memory::infer_closure_with_effect_inputs_full_context(
                         self.package
                             .ok_or_else(|| error(source, "closure memory requires a package"))?,
                         &candidate.definition,
@@ -6485,6 +6485,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         &inputs,
                         &code_inputs,
                         effect_inputs,
+                        self.declaration_source,
+                        Some(self.method_callees.as_mut()),
+                        Some(self.declarations.as_ref()),
+                        self.text_provenance,
+                        Some(self.memory_summaries.as_mut()),
                         &mut self.fuel,
                     )
                     .map(|conditional| conditional.memory)
@@ -12329,10 +12334,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     let package = this.package.ok_or_else(|| {
                         error(source, "default memory analysis requires a package")
                     })?;
-                    let argument_summary = super::memory::infer_argument(
+                    let argument_summary = super::memory::infer_argument_full_context(
                         package,
                         &argument.value,
                         &prepared,
+                        this.declaration_source,
+                        Some(this.method_callees.as_mut()),
+                        Some(this.declarations.as_ref()),
+                        this.text_provenance,
+                        Some(this.memory_summaries.as_mut()),
                         &mut this.fuel,
                     )
                     .map_err(|message| error(argument.value.source, message))?;
@@ -12350,9 +12360,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         return Ok(());
                     }
                     if !argument_summary.pointer_fields.is_empty() {
-                        let storage_paths = super::memory::conditional_pointer_storage_paths(
+                        let storage_paths = super::memory::conditional_pointer_storage_paths_for(
                             this.package,
                             &argument.value.ty,
+                            this.text_provenance,
                             &mut this.fuel,
                         )
                         .map_err(|reason| error(argument.value.source, reason))?;

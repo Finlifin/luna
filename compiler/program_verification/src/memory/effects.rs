@@ -15,6 +15,7 @@ pub struct EffectParameterAccess {
     pub read_value: bool,
     pub write: bool,
 }
+
 impl fmt::Display for EffectParameterAccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -41,6 +42,7 @@ pub struct EffectInput {
     pub owned_inputs: bool,
     pub parameter_accesses: BTreeSet<EffectParameterAccess>,
 }
+
 impl EffectInput {
     pub(crate) fn charge_parameter_accesses(&self, fuel: &mut usize) -> Result<(), String> {
         for access in &self.parameter_accesses {
@@ -51,6 +53,7 @@ impl EffectInput {
         Ok(())
     }
 }
+
 impl fmt::Display for EffectInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -78,6 +81,7 @@ impl fmt::Display for EffectInput {
         f.write_str("))")
     }
 }
+
 fn access_pointee(
     package: Option<&Package>,
     ty: &Term,
@@ -94,10 +98,12 @@ fn access_pointee(
     }
     Ok(leaf.pointee)
 }
+
 fn scalar(ty: &Term) -> bool {
     matches!(ty, Term::Primitive(_))
         && (intrinsic_pointer_value(ty) || *ty == Term::Primitive(Primitive::Void))
 }
+
 /// Values whose origins can be transported unchanged by the identity premise.
 /// This authorizes no call or dereference of the delivered value.
 pub(crate) fn effect_transfer_layout(
@@ -123,6 +129,7 @@ pub(crate) fn effect_transfer_layout(
     pointer_input_layout(package, ty, fuel)?;
     Ok(true)
 }
+
 /// Pointer-free installed values; Copy permission is checked separately.
 pub(crate) fn data_passing_signature(
     package: Option<&Package>,
@@ -296,6 +303,7 @@ fn effect_storage_layout(
     }
     Ok(true)
 }
+
 pub(super) fn charge_inputs(inputs: &[EffectInput], fuel: &mut usize) -> Result<(), String> {
     for input in inputs {
         input.charge_parameter_accesses(fuel)?;
@@ -318,6 +326,7 @@ pub(super) fn charge_inputs(inputs: &[EffectInput], fuel: &mut usize) -> Result<
     }
     Ok(())
 }
+
 pub(super) fn copy_inputs(
     inputs: &[EffectInput],
     fuel: &mut usize,
@@ -325,6 +334,7 @@ pub(super) fn copy_inputs(
     charge_inputs(inputs, fuel)?;
     Ok(inputs.to_vec())
 }
+
 pub(super) fn validate_inputs(
     package: &Package,
     inputs: &[EffectInput],
@@ -499,6 +509,7 @@ impl<'a> Infer<'a, '_> {
         self.callable_results.insert(key, previous);
         Ok(())
     }
+
     fn forward_effect_value(&mut self, destination: &Expr, value: &Expr) -> Result<(), String> {
         let key = destination as *const Expr as usize;
         let pointers = self.pointer_fields_for(value)?;
@@ -511,6 +522,7 @@ impl<'a> Infer<'a, '_> {
         self.callable_results.insert(key, callable);
         Ok(())
     }
+
     pub(super) fn bind_data_pattern(
         &mut self,
         pattern: &'a Pattern,
@@ -680,6 +692,7 @@ impl<'a> Infer<'a, '_> {
             _ => self.bind_match_subject(pattern, &None, false, ty, false, depth + 1),
         }
     }
+
     fn walk_handler(
         &mut self,
         expr: &'a Expr,
@@ -957,6 +970,7 @@ impl<'a> Infer<'a, '_> {
         self.round.effects = previous;
         walked
     }
+
     fn effect_operation(
         &mut self,
         operation: &nir::effects::Operation,
@@ -978,6 +992,7 @@ impl<'a> Infer<'a, '_> {
             arguments,
         })
     }
+
     // A worklist can retain several scoped providers for one operation. Until
     // its memory key distinguishes occurrences, conservatively join their
     // origins/obligations; picking the first premise would underapproximate.
@@ -1071,6 +1086,7 @@ impl<'a> Infer<'a, '_> {
         }
         Err("effect request requires an installed handler memory premise".into())
     }
+
     pub(super) fn effect_completion(&mut self, ty: &Term) -> Result<Term, String> {
         let ty = self.type_view(ty)?;
         if let Term::Computation { effects, result } = &ty {
@@ -1091,6 +1107,7 @@ impl<'a> Infer<'a, '_> {
         }
         Ok(ty)
     }
+
     pub(super) fn walk_effect(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         self.step(depth)?;
         match &expr.kind {
@@ -1265,6 +1282,7 @@ pub struct ConditionalClosureSummary {
     pub effect_inputs: Vec<EffectInput>,
     pub memory: ArgumentSummary,
 }
+
 impl fmt::Display for ConditionalClosureSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(conditional-closure-memory (effect-inputs")?;
@@ -1274,6 +1292,7 @@ impl fmt::Display for ConditionalClosureSummary {
         write!(f, ") {})", self.memory)
     }
 }
+
 /// Infer only under explicit handler premises, retaining them on the returned
 /// artifact. Pointer captures become virtual inputs after ordinary parameters;
 /// their real origins must still be checked at each invocation.
@@ -1287,9 +1306,42 @@ pub fn infer_closure_with_effect_inputs(
     effects: &[EffectInput],
     fuel: &mut usize,
 ) -> Result<ConditionalClosureSummary, String> {
+    infer_closure_with_effect_inputs_full_context(
+        package,
+        definition,
+        callees,
+        prepared_captures,
+        inputs,
+        code_inputs,
+        effects,
+        None,
+        None,
+        None,
+        TextProvenance::Unchecked,
+        None,
+        fuel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn infer_closure_with_effect_inputs_full_context<'a>(
+    package: &Package,
+    definition: &Expr,
+    callees: &BTreeMap<CallablePlace, CallableResult>,
+    prepared_captures: &PreparedCaptures,
+    inputs: &BTreeMap<CallableInput, CallableResult>,
+    code_inputs: &CodeInputs<'_>,
+    effects: &[EffectInput],
+    source: Option<::materialization::DeclarationSource<'a>>,
+    methods: Option<&'a mut MethodCallees>,
+    declarations: Option<&'a crate::declarations::Metadata<'a>>,
+    text_provenance: TextProvenance,
+    summary_cache: Option<&'a mut SummaryCache>,
+    fuel: &mut usize,
+) -> Result<ConditionalClosureSummary, String> {
     let effect_inputs = copy_inputs(effects, fuel)?;
     validate_inputs(package, &effect_inputs, fuel)?;
-    let memory = infer_closure_with_borrowed_effect_context(
+    let memory = infer_closure_with_borrowed_effect_context_full(
         package,
         definition,
         callees,
@@ -1297,6 +1349,11 @@ pub fn infer_closure_with_effect_inputs(
         inputs,
         code_inputs,
         &effect_inputs,
+        source,
+        methods,
+        declarations,
+        text_provenance,
+        summary_cache,
         fuel,
     )?;
     Ok(ConditionalClosureSummary {
@@ -1315,6 +1372,7 @@ pub struct HandlerParameterSummary {
     /// from operation parameters. Virtual slots exist only in `memory`.
     pub capture_accesses: Vec<(LocalId, Access)>,
 }
+
 impl fmt::Display for HandlerParameterSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(handler-parameter-memory (accesses")?;

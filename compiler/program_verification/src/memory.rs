@@ -431,7 +431,8 @@ pub use effects::{
 };
 pub(crate) use effects::{
     data_passing_signature, direct_handler_accesses_with_code_for, effect_borrowed_code_layout_for,
-    effect_data_layout, effect_data_layout_for, stationary_handler_write_sites_for,
+    effect_data_layout, effect_data_layout_for, infer_closure_with_effect_inputs_full_context,
+    stationary_handler_write_sites_for,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -9789,6 +9790,31 @@ pub fn infer_argument(
     prepared: &[(LocalId, Term, usize)],
     fuel: &mut usize,
 ) -> Result<ArgumentSummary, String> {
+    infer_argument_full_context(
+        package,
+        expression,
+        prepared,
+        None,
+        None,
+        None,
+        TextProvenance::Unchecked,
+        None,
+        fuel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn infer_argument_full_context<'a>(
+    package: &Package,
+    expression: &Expr,
+    prepared: &[(LocalId, Term, usize)],
+    source: Option<::materialization::DeclarationSource<'a>>,
+    methods: Option<&'a mut MethodCallees>,
+    declarations: Option<&'a crate::declarations::Metadata<'a>>,
+    text_provenance: TextProvenance,
+    summary_cache: Option<&'a mut SummaryCache>,
+    fuel: &mut usize,
+) -> Result<ArgumentSummary, String> {
     if !intrinsic_pointer_value(&expression.ty)
         && !matches!(
             expression.ty,
@@ -9800,12 +9826,17 @@ pub fn infer_argument(
         // The footprint only needs to rule out untracked escaping pointers.
         // Ownership, moves and cleanup are checked separately by the caller's
         // isolated default-evaluation frame, including aggregate results.
-        symbolic_pointer_fields(Some(package), &expression.ty, fuel).map_err(|reason| {
-            format!("default argument requires an ownership contract: {reason}")
-        })?;
+        symbolic_pointer_fields_for(Some(package), &expression.ty, text_provenance, fuel).map_err(
+            |reason| format!("default argument requires an ownership contract: {reason}"),
+        )?;
     }
     let mut round = Round {
         complete_calls: true,
+        source,
+        declarations,
+        text_provenance,
+        summary_cache,
+        methods: methods.map_or_else(Default::default, MethodCalleesStorage::Borrowed),
         ..Default::default()
     };
     let mut infer = Infer {
@@ -10085,10 +10116,47 @@ fn infer_closure_with_borrowed_effect_context_for(
     text_provenance: TextProvenance,
     fuel: &mut usize,
 ) -> Result<ArgumentSummary, String> {
+    infer_closure_with_borrowed_effect_context_full(
+        package,
+        definition,
+        callees,
+        prepared_captures,
+        inputs,
+        code_inputs,
+        effects,
+        None,
+        None,
+        None,
+        text_provenance,
+        None,
+        fuel,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn infer_closure_with_borrowed_effect_context_full<'a>(
+    package: &Package,
+    definition: &Expr,
+    callees: &BTreeMap<CallablePlace, CallableResult>,
+    prepared_captures: &PreparedCaptures,
+    inputs: &BTreeMap<CallableInput, CallableResult>,
+    code_inputs: &CodeInputs<'_>,
+    effects: &[EffectInput],
+    source: Option<::materialization::DeclarationSource<'a>>,
+    methods: Option<&'a mut MethodCallees>,
+    declarations: Option<&'a crate::declarations::Metadata<'a>>,
+    text_provenance: TextProvenance,
+    summary_cache: Option<&'a mut SummaryCache>,
+    fuel: &mut usize,
+) -> Result<ArgumentSummary, String> {
     let mut round = Round {
         complete_calls: true,
         effects: effects::copy_inputs(effects, fuel)?,
+        source,
+        declarations,
         text_provenance,
+        summary_cache,
+        methods: methods.map_or_else(Default::default, MethodCalleesStorage::Borrowed),
         ..Default::default()
     };
     infer_closure_with_borrowed_in_round(

@@ -2,6 +2,7 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use elaboration::verification::memory::{self, BorrowedInputLeaf};
 
 #[test]
@@ -161,5 +162,53 @@ fn text_descriptor_storage_operations_form_without_granting_resource_safety() {
             1_000_000,
         )
         .is_err()
+    );
+}
+
+#[test]
+fn closure_and_default_text_arguments_require_and_preserve_region_provenance() {
+    let package = support::compile_with_tuple(
+        "typealias str=.str'builtin;
+        trait Duplicate {}
+        trait Retire {fn drop(*self);}
+        impl Duplicate for str {}
+        impl Duplicate for bool {}
+        struct Holder {text:str}
+        fn call_with(holder:*Holder,check:%c fn(*str)->bool)->bool where c:(.Type'builtin).vars.Closure {
+            let copy:str=holder.*.text;
+            check(copy.ref)
+        }
+        fn default_text(.expected:str=\"ok\")->bool {expected == \"ok\"}
+        fn entry()->bool {
+            let holder=Holder {text:\"closure\"};
+            call_with(holder.ref,|text| text.* == \"closure\") and default_text()
+        }",
+    );
+    let call_with = package
+        .functions
+        .iter()
+        .find(|f| f.name == "call_with")
+        .unwrap();
+    let unchecked = elaboration::verification::moves::analyze_in_package(
+        &package,
+        call_with,
+        |_| Ok(elaboration::verification::moves::Delivery::Copy),
+        1_000_000,
+    )
+    .unwrap_err();
+    assert!(
+        unchecked.reason.contains("backing character storage"),
+        "{unchecked}"
+    );
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            1_000_000,
+        )
+        .unwrap(),
+        comptime_interpretor::Value::Bool(true)
     );
 }
