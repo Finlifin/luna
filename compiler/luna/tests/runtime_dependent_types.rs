@@ -945,6 +945,21 @@ fn quote_acquisition_stops_at_return_and_keeps_distinct_producer_calls() {
 }
 
 #[test]
+fn computed_quote_defaults_require_finite_observation_at_the_declaration() {
+    let source = r#"
+        struct Cell { first: i32 }
+        fn supply(p: *Cell) -> *i32 { BODY }
+        struct View where quote src: lift *Cell, quote .field: lift *i32 = supply(src) {}
+        fn run() -> bool { true }
+    "#;
+    support::compile(&source.replace("BODY", "p.first")).unwrap();
+    for body in ["p.*.first = 9; p.first", "supply(p)"] {
+        let err = support::compile(&source.replace("BODY", body)).unwrap_err();
+        assert!(err.contains("P3 stability/termination"), "{err}");
+    }
+}
+
+#[test]
 fn projected_quote_defaults_keep_the_field_and_storage_identity() {
     let source = r#"
         struct Cell {

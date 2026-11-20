@@ -172,8 +172,8 @@ impl Checker<'_, '_> {
         if self.forward_runtime_dependency(value, expected)?.is_some() {
             return Ok(());
         }
-        self.runtime_default_provider(owner, value, expected)
-            .map(|_| ())
+        let provider = self.runtime_default_provider(owner, value, expected)?;
+        self.require_stable_default(&provider.value, value.span)
     }
 
     fn runtime_default_provider(
