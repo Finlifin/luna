@@ -258,9 +258,16 @@ pub fn expression_has_contextual_types(
     steps: &mut u64,
 ) -> Result<bool, CopyBudgetExhausted> {
     let mut found = false;
-    charge_node_observed(Node::Expr(value), steps, true, None, &mut |term, _| {
-        found |= matches!(term, Term::Bound { .. } | Term::Hole { .. });
-    })?;
+    charge_node_observed(
+        Node::Expr(value),
+        steps,
+        true,
+        None,
+        &mut |term, nesting| {
+            found |= matches!(term, Term::Bound { depth, .. } if *depth >= nesting)
+                || matches!(term, Term::Hole { .. });
+        },
+    )?;
     Ok(found)
 }
 

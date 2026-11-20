@@ -110,13 +110,9 @@ impl Interpreter<'_> {
         // not just the resulting signature or the positions declared as Type.
         let persistent =
             self.abstract_type_parameters.is_empty() && self.abstract_value_parameters.is_empty();
-        let before_binding = self.budget.steps;
-        if persistent {
-            self.charge_input_binding(scope, body.source)?;
-        }
-        let binding_work = before_binding - self.budget.steps;
         if let Some(Entry::Dependent(previous)) = &cached {
             if persistent {
+                self.charge_input_binding(scope, body.source)?;
                 self.charge_input_binding(&previous.binding, body.source)?;
                 if previous.binding == *scope {
                     return Ok((previous.body.clone(), false));
@@ -140,9 +136,10 @@ impl Interpreter<'_> {
             let before = self.budget.steps;
             nir::copy_budget::charge_type_rewrite(&prepared, &mut self.budget.steps)
                 .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(body.source)))?;
-            let weight = (before - self.budget.steps)
-                .saturating_add(binding_work)
-                .saturating_add(1);
+            if dependent {
+                self.charge_input_binding(scope, body.source)?;
+            }
+            let weight = (before - self.budget.steps).saturating_add(1);
             let entry = if dependent {
                 Entry::Dependent(Arc::new(BoundBody {
                     binding: scope.clone(),
@@ -530,6 +527,42 @@ mod tests {
             Some((Entry::Dependent(_), _))
         ));
     }
+    #[test]
+    fn locally_bound_callable_code_is_shared_across_invocation_inputs() {
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let callable = |depth| Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Type,
+                ty: Term::Primitive(Primitive::Type),
+            }],
+            result: Box::new(Term::Bound {
+                depth,
+                index: 0,
+                sort: nir::Sort::Type,
+            }),
+        };
+        let local = Arc::new(body(callable(0)));
+        let outer = Arc::new(body(callable(1)));
+        let mut original = None;
+        for input in [Primitive::Bool, Primitive::Char] {
+            let binding = scope(input);
+            let (prepared, shared) = vm.prepare_owned_input_body(&local, &binding).unwrap();
+            assert!(shared);
+            assert_eq!(prepared.kind, K::TypeValue(callable(0)));
+            if let Some(previous) = original.replace(prepared.clone()) {
+                assert!(Arc::ptr_eq(&previous, &prepared));
+            }
+
+            let (prepared, shared) = vm.prepare_owned_input_body(&outer, &binding).unwrap();
+            assert!(!shared);
+            let K::TypeValue(Term::Function { result, .. }) = &prepared.kind else {
+                panic!()
+            };
+            assert_eq!(**result, Term::Primitive(input));
+        }
+    }
+
     #[test]
     fn failed_preparation_publishes_nothing_and_eviction_keeps_owned_bodies_alive() {
         let package = Package::default();
