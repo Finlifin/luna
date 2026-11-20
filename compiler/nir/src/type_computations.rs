@@ -770,24 +770,28 @@ fn visit_replacements<'a>(
     visit: &mut dyn FnMut(&Term, u32),
 ) -> Result<(), crate::copy_budget::CopyBudgetExhausted> {
     use crate::copy_budget::CopyBudgetExhausted as Limit;
-    let mut work = vec![(root, 0usize, 0u32, true)];
-    while let Some((term, depth, nesting, substitute)) = work.pop() {
+    // Keep the next visit inline. Leaves and unary paths have no siblings to store.
+    let mut next = Some((root, 0usize, 0u32, true));
+    let mut siblings = Vec::new();
+    while let Some((term, depth, nesting, substitute)) = next.take().or_else(|| siblings.pop()) {
         *fuel = fuel.checked_sub(1).ok_or(Limit::Steps)?;
         if depth >= max_depth.min(128) {
             return Err(Limit::Depth);
         }
         if substitute && let Some(value) = replacement(term, nesting) {
-            work.push((value, depth, nesting, false));
+            next = Some((value, depth, nesting, false));
             continue;
         }
         visit(term, nesting);
         crate::copy_budget::charge_term_payload(term, fuel)?;
         let child_nesting = nesting + u32::from(matches!(term, Term::Function { .. }));
         let mut push = |term| {
-            if work.len() >= *fuel {
+            if siblings.len() + usize::from(next.is_some()) >= *fuel {
                 return Err(Limit::Steps);
             }
-            work.push((term, depth + 1, child_nesting, substitute));
+            if let Some(previous) = next.replace((term, depth + 1, child_nesting, substitute)) {
+                siblings.push(previous);
+            }
             Ok(())
         };
         term.visit_children(&mut push)?;
