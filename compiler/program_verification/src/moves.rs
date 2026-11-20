@@ -2197,6 +2197,61 @@ impl SummaryCacheStorage<'_> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ReturnResultKey {
+    provenance: super::memory::TextProvenance,
+    declaration: nir::DeclarationId,
+    arguments: Vec<Term>,
+}
+
+#[derive(Clone, Debug)]
+enum CachedReturnResult {
+    Deferred {
+        signature: Term,
+    },
+    Completed {
+        signature: Term,
+        may_complete: bool,
+        result_fields: BTreeMap<Vec<usize>, Callable>,
+        result_variants: EnumDomains,
+        value: Option<Callable>,
+    },
+}
+
+impl CachedReturnResult {
+    fn signature(&self) -> &Term {
+        match self {
+            Self::Deferred { signature } | Self::Completed { signature, .. } => signature,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ReturnResultCache {
+    entries: std::collections::HashMap<ReturnResultKey, CachedReturnResult>,
+}
+
+impl ReturnResultCache {
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+enum ReturnResultCacheStorage<'a> {
+    Owned(ReturnResultCache),
+    Borrowed(&'a mut ReturnResultCache),
+}
+
+impl ReturnResultCacheStorage<'_> {
+    fn as_mut(&mut self) -> &mut ReturnResultCache {
+        match self {
+            Self::Owned(cache) => cache,
+            Self::Borrowed(cache) => cache,
+        }
+    }
+}
+
 struct Analyzer<'a, F, G> {
     // Captured in this analysis's immutable cleanup world; never grants Copy.
     trivial_cleanup_types: std::collections::HashSet<Term>,
@@ -2209,6 +2264,8 @@ struct Analyzer<'a, F, G> {
     const_globals: BTreeMap<PlaceId, Term>,
     text_provenance: super::memory::TextProvenance,
     memory_summaries: SummaryCacheStorage<'a>,
+    return_results: ReturnResultCacheStorage<'a>,
+    return_cycle_hit: bool,
     exit_contract: Option<&'a Function>,
     handler_result: Option<Term>,
     effect_return_enabled: bool,
@@ -5123,6 +5180,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         let key = (declaration, arguments.to_vec());
         if self.return_stack.contains(&key) {
+            self.return_cycle_hit = true;
             return Ok(None);
         }
         if self.return_stack.len() >= 128 || self.fuel == 0 {
@@ -5132,6 +5190,57 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         let Some(package) = self.package else {
             return Ok(None);
         };
+        let effect_inputs = self.effect_inputs_for(&callee.ty, source)?;
+        let cacheable = inputs.is_empty()
+            && enum_inputs.is_empty()
+            && borrowed_code.is_empty()
+            && effect_inputs.is_empty();
+        let cache_key = cacheable.then(|| ReturnResultKey {
+            provenance: self.text_provenance,
+            declaration,
+            arguments: arguments.to_vec(),
+        });
+        if let Some(cache_key) = &cache_key {
+            if let Some(cached) = self.return_results.as_mut().entries.get(cache_key) {
+                if cached.signature() == callee.ty.callable_signature() {
+                    let hit_cost = match cached {
+                        CachedReturnResult::Deferred { .. } => 1usize,
+                        CachedReturnResult::Completed {
+                            result_fields,
+                            result_variants,
+                            value,
+                            ..
+                        } => 1usize
+                            .saturating_add(result_fields.len())
+                            .saturating_add(
+                                result_variants
+                                    .values()
+                                    .map(|tags| tags.len().saturating_add(1))
+                                    .sum::<usize>(),
+                            )
+                            .saturating_add(usize::from(value.is_some())),
+                    };
+                    self.fuel = self.fuel.checked_sub(hit_cost).ok_or_else(|| {
+                        error(source, "callable result analysis budget exhausted")
+                    })?;
+                    return match cached {
+                        CachedReturnResult::Deferred { .. } => Ok(None),
+                        CachedReturnResult::Completed {
+                            may_complete: cached_may_complete,
+                            result_fields: cached_fields,
+                            result_variants: cached_variants,
+                            value,
+                            ..
+                        } => {
+                            *may_complete = *cached_may_complete;
+                            *result_fields = cached_fields.clone();
+                            *result_variants = cached_variants.clone();
+                            Ok(value.clone())
+                        }
+                    };
+                }
+            }
+        }
         let (original, body_arguments) = package
             .runtime_body(declaration, arguments)
             .ok_or_else(|| error(source, "callable result function is missing"))?;
@@ -5230,7 +5339,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         let mut stack = self.return_stack.clone();
         stack.push(key);
-        let effect_inputs = self.effect_inputs_for(&callee.ty, source)?;
+        let mut child_cycle_hit = false;
         let report = analyze_with_shapes_and_borrowed_code(
             Some(package),
             &function,
@@ -5253,12 +5362,25 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             Some(self.method_callees.as_mut()),
             Some(self.rejection.memo_mut()),
             self.global_runtime_deliveries,
+            Some(self.return_results.as_mut()),
+            Some(&mut child_cycle_hit),
         )?;
         self.fuel = self
             .fuel
             .checked_sub(report.entry_steps_used)
             .ok_or_else(|| error(source, "callable result analysis budget exhausted"))?;
+        self.return_cycle_hit |= child_cycle_hit;
         if !report.deferred_calls.is_empty() {
+            if !child_cycle_hit {
+                if let Some(cache_key) = cache_key {
+                    self.return_results.as_mut().entries.insert(
+                        cache_key,
+                        CachedReturnResult::Deferred {
+                            signature: callee.ty.callable_signature().clone(),
+                        },
+                    );
+                }
+            }
             return Ok(None);
         }
         // A fully analyzed callee can have only rejection/effect-escape exits.
@@ -5267,7 +5389,22 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         *may_complete = !report.exits.is_empty();
         (*result_fields, *result_variants) =
             callable_aggregate_return_summary(&report, &mut self.fuel, source)?;
-        callable_return_summary(&report, &mut self.fuel, source)
+        let returned = callable_return_summary(&report, &mut self.fuel, source)?;
+        if !child_cycle_hit {
+            if let Some(cache_key) = cache_key {
+                self.return_results.as_mut().entries.insert(
+                    cache_key,
+                    CachedReturnResult::Completed {
+                        signature: callee.ty.callable_signature().clone(),
+                        may_complete: *may_complete,
+                        result_fields: result_fields.clone(),
+                        result_variants: result_variants.clone(),
+                        value: returned.clone(),
+                    },
+                );
+            }
+        }
+        Ok(returned)
     }
 
     fn record_named_call(
@@ -14248,6 +14385,8 @@ fn analyze_with_shapes<'a>(
         None,
         None,
         None,
+        None,
+        None,
     )
 }
 
@@ -14274,6 +14413,8 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
     method_callees: Option<&'a mut super::memory::MethodCallees>,
     rejection_memo: Option<&'a mut super::rejection::Memo>,
     global_runtime_deliveries: Option<&'a BTreeMap<nir::RuntimeId, Expr>>,
+    return_results: Option<&'a mut ReturnResultCache>,
+    return_cycle_hit: Option<&mut bool>,
 ) -> Result<Report, Error> {
     // Callers supply many distinct closure types. Keep the large recursive
     // analyzer shared instead of monomorphizing it for every policy closure.
@@ -14300,7 +14441,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         collect_const_globals(function, effective_global_deliveries, &mut fuel, source)?;
     let declarations = declarations
         .unwrap_or_else(|| std::rc::Rc::new(super::declarations::Metadata::new(package)));
-    let mut analyzer = Analyzer {
+    let mut analyzer = Box::new(Analyzer {
         trivial_cleanup_types: trivial_cleanup_types.clone(),
         cleanup,
         package,
@@ -14314,6 +14455,11 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
             || SummaryCacheStorage::Owned(Default::default()),
             SummaryCacheStorage::Borrowed,
         ),
+        return_results: return_results.map_or_else(
+            || ReturnResultCacheStorage::Owned(Default::default()),
+            ReturnResultCacheStorage::Borrowed,
+        ),
+        return_cycle_hit: false,
         exit_contract: Some(function),
         handler_result: None,
         effect_return_enabled: false,
@@ -14355,7 +14501,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         },
         loops: vec![],
         pending: vec![],
-    };
+    });
     let mut flow = Flow {
         live: true,
         ..Default::default()
@@ -14711,6 +14857,9 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         analyzer.exit(&mut flow, source, CleanupReason::FunctionEnd)?;
     }
     analyzer.report.entry_steps_used = initial_fuel - analyzer.fuel;
+    if let Some(cycle_hit) = return_cycle_hit {
+        *cycle_hit |= analyzer.return_cycle_hit;
+    }
     Ok(analyzer.report)
 }
 
@@ -14962,6 +15111,8 @@ pub fn analyze_in_package_with_borrowed_code_and_text_context<'a>(
         None,
         None,
         None,
+        None,
+        None,
     )
 }
 
@@ -15004,6 +15155,8 @@ pub fn analyze_in_package_with_session<'a, 's>(
         Some(&mut session.methods),
         Some(&mut session.rejection),
         session.global_runtime_deliveries,
+        Some(&mut session.return_results),
+        None,
     )
 }
 
@@ -15045,6 +15198,8 @@ pub(crate) fn analyze_with_declarations<'a>(
         &Default::default(),
         Some(declarations),
         super::memory::TextProvenance::Unchecked,
+        None,
+        None,
         None,
         None,
         None,
@@ -18197,5 +18352,205 @@ mod optional_domain_tests {
                 .unwrap(),
             None
         );
+    }
+}
+
+#[cfg(test)]
+mod return_result_cache_tests {
+    use super::*;
+
+    fn optional_bool_fn(declaration: nir::DeclarationId, name: &str, body: Expr) -> Function {
+        let opt_bool = Term::Optional(Box::new(Term::Primitive(nir::Primitive::Bool)));
+        Function {
+            interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 1 },
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration,
+                name: name.into(),
+                parameters: vec![],
+                env_parameters: vec![],
+                defaults: vec![],
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(opt_bool),
+                },
+            },
+            body,
+            runtime_deliveries: Default::default(),
+        }
+    }
+
+    fn call_expr(target: nir::DeclarationId) -> Expr {
+        let source = SourceRange { start: 0, end: 1 };
+        let opt_bool = Term::Optional(Box::new(Term::Primitive(nir::Primitive::Bool)));
+        let sig = Term::Function {
+            parameters: vec![],
+            result: Box::new(opt_bool.clone()),
+        };
+        Expr {
+            source,
+            ty: opt_bool,
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: sig,
+                    kind: K::Function(target),
+                }),
+                arguments: vec![],
+                env_arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn return_result_cache_deduplicates_dag_calls_and_skips_cycle_truncation() {
+        let source = SourceRange { start: 0, end: 1 };
+        let boolean = Term::Primitive(nir::Primitive::Bool);
+        let opt_bool = Term::Optional(Box::new(boolean.clone()));
+        let mut dag = Package::default();
+        let levels = 6u32;
+        for level in 0..=levels {
+            let decl = nir::DeclarationId {
+                package: 1,
+                local: level,
+            };
+            let body = if level == levels {
+                Expr {
+                    source,
+                    ty: opt_bool.clone(),
+                    kind: K::OptionalPresent(Box::new(Expr {
+                        source,
+                        ty: boolean.clone(),
+                        kind: K::Literal(nir::program::Literal::Bool(true)),
+                    })),
+                }
+            } else {
+                let next = nir::DeclarationId {
+                    package: 1,
+                    local: level + 1,
+                };
+                let statements = (0..3)
+                    .map(|index| Expr {
+                        source,
+                        ty: Term::Primitive(nir::Primitive::Void),
+                        kind: K::Let {
+                            binding: LocalId {
+                                owner: level,
+                                index,
+                            },
+                            value: Box::new(call_expr(next)),
+                        },
+                    })
+                    .collect();
+                Expr {
+                    source,
+                    ty: opt_bool.clone(),
+                    kind: K::Block {
+                        statements,
+                        result: Some(Box::new(call_expr(next))),
+                    },
+                }
+            };
+            dag.functions
+                .push(optional_bool_fn(decl, &format!("dag_{level}"), body));
+        }
+
+        // Uncached analysis across a 6-level 4-way DAG would traverse 4^6 paths;
+        // memoization finishes both standalone and session runs in < 25_000 steps.
+        analyze_in_package(&dag, &dag.functions[0], |_| Ok(Delivery::Copy), 25_000).unwrap();
+
+        let mut session = crate::PackageSession::new(&dag);
+        assert!(
+            analyze_in_package_with_session(
+                &mut session,
+                &dag.functions[0],
+                |_| Ok(Delivery::Copy),
+                10,
+                None,
+                &[],
+                &[],
+                &[],
+                vec![],
+                &[],
+                &[],
+                super::super::memory::TextProvenance::Unchecked,
+            )
+            .is_err()
+        );
+        assert!(session.return_results.is_empty());
+
+        analyze_in_package_with_session(
+            &mut session,
+            &dag.functions[0],
+            |_| Ok(Delivery::Copy),
+            25_000,
+            None,
+            &[],
+            &[],
+            &[],
+            vec![],
+            &[],
+            &[],
+            super::super::memory::TextProvenance::Unchecked,
+        )
+        .unwrap();
+        assert!(!session.return_results.is_empty());
+
+        // Directly recursive callee truncates via return_stack and must not cache.
+        let rec_decl = nir::DeclarationId {
+            package: 2,
+            local: 0,
+        };
+        let rec_body = Expr {
+            source,
+            ty: opt_bool,
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: Term::Function {
+                        parameters: vec![],
+                        result: Box::new(Term::Optional(Box::new(boolean))),
+                    },
+                    kind: K::Function(rec_decl),
+                }),
+                arguments: vec![],
+                env_arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        };
+        let mut rec_pkg = Package::default();
+        rec_pkg
+            .functions
+            .push(optional_bool_fn(rec_decl, "rec", rec_body));
+        let mut rec_session = crate::PackageSession::new(&rec_pkg);
+        analyze_in_package_with_session(
+            &mut rec_session,
+            &rec_pkg.functions[0],
+            |_| Ok(Delivery::Copy),
+            25_000,
+            None,
+            &[],
+            &[],
+            &[],
+            vec![],
+            &[],
+            &[],
+            super::super::memory::TextProvenance::Unchecked,
+        )
+        .unwrap();
+        assert!(rec_session.return_results.is_empty());
     }
 }

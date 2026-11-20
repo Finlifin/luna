@@ -15,9 +15,11 @@ pub mod optimization;
 mod pattern_facts;
 pub mod purity;
 mod rejection;
+
 pub use verification_core::*;
 
 const CONST_GLOBAL_OWNER_TAG: u64 = 1u64 << 62;
+
 const CONST_GLOBAL_HASHED_OWNER_TAG: u64 = (1u64 << 62) | (1u64 << 61);
 
 pub(crate) fn const_global_place(declaration: nir::DeclarationId) -> PlaceId {
@@ -53,6 +55,7 @@ pub struct PackageSession<'a> {
     pub(crate) methods: memory::MethodCallees,
     pub(crate) summaries: memory::SummaryCache,
     pub(crate) rejection: rejection::Memo,
+    pub(crate) return_results: moves::ReturnResultCache,
 }
 
 impl<'a> PackageSession<'a> {
@@ -65,6 +68,7 @@ impl<'a> PackageSession<'a> {
             methods: memory::MethodCallees::default(),
             summaries: memory::SummaryCache::default(),
             rejection: rejection::Memo::default(),
+            return_results: moves::ReturnResultCache::default(),
         }
     }
 
