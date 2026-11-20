@@ -1763,3 +1763,45 @@ fn negative_global_const_and_drop_env_safety_rejections() {
         "Drop",
     );
 }
+
+#[test]
+fn staged_ordinary_inputs_preserve_runtime_environment_acquisition() {
+    let source = r#"
+        struct Trace { value: i32 }
+        fn mark(trace: *Trace, digit: i32) -> i32 {
+            if trace.value.* >= 0 and trace.value.* < 10000 and digit > 0 and digit < 10 {
+                trace.*.value = trace.value.* * 10 + digit;
+            }
+            digit
+        }
+        fn select(comptime first: bool, fallback: i32) -> i32
+        where quote current: lift i32
+        {
+            if first { current } else { fallback }
+        }
+        fn relay(trace: *Trace, comptime first: bool) -> i32 {
+            select<mark(trace, 2)>(first, mark(trace, 3))
+        }
+        fn run() -> bool {
+            var trace = Trace { value: 0 };
+            let a = relay(trace.ref, true);
+            let b = relay(trace.ref, false);
+            let first_trace = trace.value;
+            trace.value = 0;
+            let c = select<mark(trace.ref, 4)>(not false, mark(trace.ref, 5));
+            a == 2 and b == 3 and c == 4 and first_trace == 2323 and trace.value == 45
+        }
+    "#;
+    let case = NativeCase::new(source);
+    assert_success(&case.build());
+    let result = case.run();
+    assert_success(&result);
+    assert_eq!(result.stdout, b"(bool true)\n");
+
+    let invalid = source.replace(">(first, mark", ">(trace.value.* == 0, mark");
+    let error = support::compile(&invalid).unwrap_err();
+    assert!(
+        error.contains("runtime") && error.contains("comptime"),
+        "{error}"
+    );
+}

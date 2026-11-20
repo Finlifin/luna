@@ -2034,7 +2034,7 @@ impl Checker<'_, '_> {
             callee,
             arguments,
             parameter_bindings,
-            env_arguments,
+            ..
         } = &mut call.kind
         else {
             return Ok(call);
@@ -2045,12 +2045,8 @@ impl Checker<'_, '_> {
         if !parameters.iter().any(|p| p.sort != Sort::Runtime) {
             return Ok(call);
         }
-        if !env_arguments.is_empty() {
-            return Err(error(
-                source.span,
-                "staged call input preparation does not yet support runtime environment arguments",
-            ));
-        }
+        // Only an ordinary staged operand becomes a required root. Environment
+        // operands stay on the runtime call with their acquisition bindings.
         let mut staged_bindings: BTreeSet<_> = self
             .signature_owner
             .and_then(|owner| self.package.item(owner))
