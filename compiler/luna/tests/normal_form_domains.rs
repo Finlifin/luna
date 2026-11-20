@@ -99,3 +99,17 @@ fn dependent_domains_check_each_completed_input() {
         ));
     }
 }
+
+#[test]
+fn forward_congruence_of_an_opaque_head_is_independent_of_declaration_order() {
+    let head = "pure comptime fn Key<T> -> Type { T }";
+    let forward = "fn convert(x: Key<A>) -> Key<B> where A, B, requires A == B { x }";
+    let inverse = "fn convert(x: A) -> B where A, B, requires Key<A> == Key<B> { x }";
+    for source in [format!("{head} {forward}"), format!("{forward} {head}")] {
+        compile(&source).unwrap();
+    }
+    for source in [format!("{head} {inverse}"), format!("{inverse} {head}")] {
+        let failure = compile(&source).expect_err("opaque heads do not imply injectivity");
+        assert!(failure.contains("type mismatch"), "{failure}");
+    }
+}

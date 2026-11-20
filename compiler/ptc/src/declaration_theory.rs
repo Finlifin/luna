@@ -67,15 +67,23 @@ impl DeclarationTheory {
             *fuel = fuel
                 .checked_sub(1)
                 .ok_or(nir::normal_forms::ValidationError::Budget)?;
-            Arc::make_mut(&mut theory.constructors.congruence_heads).insert(head.declaration);
-            if head.role == nir::normal_forms::Role::TypeList {
-                Arc::make_mut(&mut theory.list_inference_heads).insert(head.declaration);
-            }
-            if head.role == nir::normal_forms::Role::Tuple {
-                Arc::make_mut(&mut theory.constructors.tuple_heads).insert(head.declaration);
-            }
+            theory.admit_normal_form_head(head.declaration, head.role);
         }
         Ok(theory)
+    }
+
+    fn admit_normal_form_head(&mut self, head: DeclarationId, role: nir::normal_forms::Role) {
+        use nir::normal_forms::Role;
+        Arc::make_mut(&mut self.constructors.congruence_heads).insert(head);
+        match role {
+            Role::Opaque => {}
+            Role::TypeList => {
+                Arc::make_mut(&mut self.list_inference_heads).insert(head);
+            }
+            Role::Tuple => {
+                Arc::make_mut(&mut self.constructors.tuple_heads).insert(head);
+            }
+        }
     }
 
     pub fn into_context(self) -> Context {
@@ -84,6 +92,14 @@ impl DeclarationTheory {
             scope: Arc::default(),
             assumptions: Arc::default(),
         }
+    }
+}
+
+impl Context {
+    /// Publish the owner's checked head contract. Congruence is forward only;
+    /// tuple classification and list inference require their own layout roles.
+    pub fn admit_normal_form_head(&mut self, head: DeclarationId, role: nir::normal_forms::Role) {
+        self.theory.admit_normal_form_head(head, role);
     }
 }
 

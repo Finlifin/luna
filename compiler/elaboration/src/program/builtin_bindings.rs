@@ -143,6 +143,7 @@ impl Checker<'_, '_> {
                 self.parameter_domain_owners.entry(id).or_insert(owner);
             }
             self.normal_parameters.insert(owner, descriptors);
+            self.publish_normal_head(owner);
         }
         self.ensure_contract(owner, span)?;
         let ty = self.normal_form_callable_type(owner, span)?;

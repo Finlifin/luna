@@ -515,7 +515,7 @@ fn elaborate_in_mode(
         invocation_steps,
     )?;
     let mut checker = Checker {
-        declared_nominals: source_declarations.nominal_context.clone(),
+        declared_theory: source_declarations.nominal_context.clone(),
         source_declarations,
         definition_identities: package
             .next_definition_index()
@@ -2314,7 +2314,7 @@ struct LocalRuntimeDelivery {
 
 struct Checker<'a, 'h> {
     // Declaration authority only. Lexical premises never enter this shared root.
-    declared_nominals: crate::ptc::Context,
+    declared_theory: crate::ptc::Context,
     source_declarations: source_declarations::SourceDeclarations<'a, 'h>,
     definition_identities: crate::definitions::DefinitionIdentities,
     delivered_types: BTreeMap<n::LocalId, (std::sync::Arc<Term>, Span)>,
@@ -2691,6 +2691,13 @@ impl Checker<'_, '_> {
         }
         let checked = self.in_declaration_scope(owner, |this| this.form_signature(owner, span));
         self.active_signatures.remove(&owner);
+        if checked.is_ok() {
+            self.publish_normal_head(owner);
+        } else {
+            // A recursive signature check can see the staged telescope. Once
+            // formation fails its provisional constructor evidence expires.
+            self.normal_parameters.remove(&owner);
+        }
         checked
     }
 
@@ -4720,30 +4727,15 @@ impl Checker<'_, '_> {
     }
 
     fn nominal_context(&self) -> crate::ptc::Context {
-        let mut context = self.declared_nominals.clone();
+        let mut context = self.declared_theory.clone();
         for declaration in &self.code_packet_nominals {
             context.admit_nominal_constructor(*declaration);
         }
-        // Only checked opaque definitions with the supported immutable input
-        // telescope receive forward congruence. No body equation or inverse
-        // constructor rule is introduced by this admission.
-        for owner in self.normal_parameters.keys() {
-            if self.is_registered_normal_form(*owner) {
-                let head = declaration(self.package, &self.package_identities, *owner);
-                context.admit_congruence(head);
-                if Some(head) == self.protocols.meta_list
-                    && self.normal_parameters[owner].len() == 1
-                    && self.normal_parameters[owner][0].2 == p(P::Type)
-                {
-                    context.admit_list_inference_head(head);
-                }
-                if Some(head) == self.protocols.tuple
-                    && self.clause_collector(*owner).is_some()
-                    && self.normal_parameters[owner].len() == 1
-                    && self.is_type_list_type(&self.normal_parameters[owner][0].2)
-                {
-                    context.admit_tuple_head(head);
-                }
+        // A recursive check may refer to an enclosing head whose telescope
+        // has been formed but whose signature has not yet been published.
+        for &owner in &self.active_signatures {
+            if let Some((head, role)) = self.normal_head_contract(owner) {
+                context.admit_normal_form_head(head, role);
             }
         }
         context

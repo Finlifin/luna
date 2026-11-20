@@ -183,13 +183,11 @@ impl Checker<'_, '_> {
         if self.context.is_list_inference_head(head) {
             return;
         }
-        let admitted = self.normal_parameters.iter().any(|(owner, parameters)| {
-            declaration(self.package, &self.package_identities, *owner) == head
-                && parameters.len() == 1
-                && parameters[0].2 == p(P::Type)
-                && self.is_registered_normal_form(*owner)
-        });
-        if admitted {
+        if let Some(owner) = self.source_declarations.owner(head)
+            && self
+                .normal_head_contract(owner)
+                .is_some_and(|(_, role)| role == nir::normal_forms::Role::TypeList)
+        {
             self.context.admit_list_inference_head(head);
         }
     }

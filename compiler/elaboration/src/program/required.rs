@@ -115,7 +115,7 @@ impl CompletedInvocation {
     pub(super) fn publish(self, checker: &mut Checker<'_, '_>) -> Result<(Value, Term), Error> {
         publication::Receiver {
             context: &mut checker.context,
-            declared_nominals: &mut checker.declared_nominals,
+            declared_nominals: &mut checker.declared_theory,
             structs: &mut checker.structs,
             enums: &mut checker.enums,
             newtypes: &mut checker.newtypes,

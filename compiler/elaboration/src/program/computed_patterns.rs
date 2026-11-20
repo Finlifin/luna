@@ -330,8 +330,7 @@ impl Checker<'_, '_> {
                     symbol_encoding: None,
                 },
             );
-            self.declared_nominals
-                .admit_nominal_constructor(declaration);
+            self.declared_theory.admit_nominal_constructor(declaration);
             self.computed_scalar_packets.insert(declaration);
             Some(declaration)
         };

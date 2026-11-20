@@ -51,6 +51,38 @@ impl Checker<'_, '_> {
                 })
     }
 
+    pub(super) fn normal_head_contract(
+        &self,
+        owner: OwnerId,
+    ) -> Option<(DeclarationId, nir::normal_forms::Role)> {
+        use nir::normal_forms::Role;
+        if !self.is_registered_normal_form(owner) {
+            return None;
+        }
+        let head = declaration(self.package, &self.package_identities, owner);
+        let parameters = &self.normal_parameters[&owner];
+        let role = match parameters.as_slice() {
+            [(_, _, ty)] if Some(head) == self.protocols.meta_list && *ty == p(P::Type) => {
+                Role::TypeList
+            }
+            [(_, _, ty)]
+                if Some(head) == self.protocols.tuple
+                    && self.clause_collector(owner).is_some()
+                    && self.is_type_list_type(ty) =>
+            {
+                Role::Tuple
+            }
+            _ => Role::Opaque,
+        };
+        Some((head, role))
+    }
+
+    pub(super) fn publish_normal_head(&mut self, owner: OwnerId) {
+        if let Some((head, role)) = self.normal_head_contract(owner) {
+            self.declared_theory.admit_normal_form_head(head, role);
+        }
+    }
+
     pub(super) fn bound_tuple_head(&mut self, span: Span) -> Result<Option<DeclarationId>, Error> {
         let Some(head) = self.protocols.tuple else {
             return Ok(None);
@@ -580,6 +612,9 @@ impl Checker<'_, '_> {
         &self,
         owner: OwnerId,
     ) -> Option<nir::normal_forms::Head> {
+        if !self.is_registered_normal_form(owner) {
+            return None;
+        }
         let parameters = self.normal_parameters.get(&owner)?;
         Some(nir::normal_forms::Head {
             collector: self
