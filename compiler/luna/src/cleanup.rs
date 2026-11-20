@@ -1,6 +1,7 @@
 //! Publish concrete cleanup operations from checked acquired responsibilities.
 //! Includes source control-flow, default, closure and concrete callback contexts.
 mod method;
+
 pub use method::{MethodCallCleanup, lower_method_call_cleanup};
 
 use elaboration::{
@@ -15,15 +16,18 @@ use elaboration::{
 };
 use nir::program::Package;
 use std::fmt;
+
 pub struct Prepared {
     pub program: iir::cleanup::Program,
     pub graph: iir::Package,
 }
+
 impl fmt::Display for Prepared {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(prepared-cleanup {} {})", self.program, self.graph)
     }
 }
+
 pub fn prepare(
     package: &Package,
     world: &World<'_>,
@@ -196,6 +200,7 @@ pub struct Executable {
     pub graph: iir::Package,
     pub schedule: iir::cleanup::Schedule,
 }
+
 impl fmt::Display for Executable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -205,6 +210,7 @@ impl fmt::Display for Executable {
         )
     }
 }
+
 fn term_contains_str(ty: &nir::Term, fuel: &mut usize) -> Result<bool, String> {
     let mut stack = vec![(ty, 0usize)];
     while let Some((term, depth)) = stack.pop() {
@@ -1710,11 +1716,8 @@ fn prepare_source_impl(
                 for instance in &graph.functions {
                     let mut contract_limits = elaboration::verification::Limits::default();
                     contract_limits.arithmetic.steps = *fuel;
-                    let checked = elaboration::verification::flow::validate_residual_contracts(
-                        package,
-                        &instance.function,
-                        &mut contract_limits,
-                    );
+                    let checked = verification_session
+                        .validate_residual_contracts(&instance.function, &mut contract_limits);
                     *fuel = contract_limits.arithmetic.steps;
                     checked.map_err(|mut error| {
                         error.source = error

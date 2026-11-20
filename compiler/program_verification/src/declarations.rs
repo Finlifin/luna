@@ -7,11 +7,23 @@ use nir::{
 };
 use std::{borrow::Cow, cell::OnceCell, collections::BTreeMap, sync::Arc};
 
+#[derive(Clone, Copy)]
+enum SourceFunctionSlot {
+    Function(usize),
+    QuoteTemplate(usize),
+    Ambiguous,
+}
+
+pub(crate) fn is_budget_error(error: &str) -> bool {
+    error.ends_with("budget exhausted")
+}
+
 pub(crate) struct Metadata<'a> {
     package: Option<&'a Package>,
     domains: OnceCell<Arc<BTreeMap<DeclarationId, Term>>>,
     sorts: OnceCell<Arc<BTreeMap<DeclarationId, Sort>>>,
     function_index: OnceCell<Arc<BTreeMap<DeclarationId, usize>>>,
+    source_function_index: OnceCell<Arc<BTreeMap<DeclarationId, SourceFunctionSlot>>>,
     runtime_instance_index: OnceCell<Arc<BTreeMap<DeclarationId, Vec<usize>>>>,
 }
 
@@ -232,6 +244,126 @@ mod tests {
             Err("runtime function instance is ambiguous or malformed")
         );
     }
+
+    #[test]
+    fn runtime_body_index_reuses_source_lookup_and_preserves_ambiguity_and_arity() {
+        let boolean = Term::Primitive(Primitive::Bool);
+        let signature = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: Sort::Runtime,
+                ty: boolean.clone(),
+            }],
+            result: Box::new(boolean.clone()),
+        };
+        let make_function =
+            |local: u32, name: &str, type_parameters: Vec<DeclarationId>| Function {
+                interface: nir::program::FunctionDeclaration {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
+                    phase: FunctionPhase::Runtime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters,
+                    declaration: id(local),
+                    name: name.to_string(),
+                    parameters: vec![nir::program::LocalId {
+                        owner: local,
+                        index: 0,
+                    }],
+                    env_parameters: vec![],
+                    defaults: vec![],
+                    signature: signature.clone(),
+                },
+                body: nir::program::Expr {
+                    source: nir::program::SourceRange { start: 0, end: 0 },
+                    ty: boolean.clone(),
+                    kind: nir::program::ExprKind::Literal(nir::program::Literal::Bool(true)),
+                },
+                runtime_deliveries: Default::default(),
+            };
+        let mut package = Package::default();
+        for local in 1..=64u32 {
+            package.functions.push(make_function(
+                local,
+                &format!("f_{local}"),
+                if local == 50 { vec![id(900)] } else { vec![] },
+            ));
+        }
+        package
+            .quote_templates
+            .push(make_function(65, "quoted_template", vec![]));
+        // Duplicate declaration id across functions and quote_templates.
+        package
+            .quote_templates
+            .push(make_function(10, "duplicate_ten", vec![]));
+        package
+            .runtime_instances
+            .push(nir::program::RuntimeInstance {
+                declaration: id(50),
+                arguments: vec![boolean.clone()],
+                function: make_function(50, "f_50_inst", vec![]),
+                cleanup_accesses: vec![],
+            });
+
+        let metadata = Metadata::new(Some(&package));
+        // Exhausting during cold index build must not cache a partial index.
+        assert_eq!(
+            metadata.runtime_body_checked(id(1), &[], &mut 4),
+            Err("source function index budget exhausted")
+        );
+        assert!(metadata.source_function_index.get().is_none());
+
+        let mut cold_fuel = 10_000;
+        let (found, args) = metadata
+            .runtime_body_checked(id(65), &[], &mut cold_fuel)
+            .unwrap();
+        assert_eq!(found.name, "quoted_template");
+        assert!(args.is_empty());
+        assert!(metadata.source_function_index.get().is_some());
+
+        // Subsequent lookups spend O(1) fuel regardless of package size.
+        let mut warm_fuel = 3;
+        let (found_warm, _) = metadata
+            .runtime_body_checked(id(42), &[], &mut warm_fuel)
+            .unwrap();
+        assert_eq!(found_warm.name, "f_42");
+        assert!(warm_fuel >= 1);
+
+        // Runtime instances take precedence and yield empty type arguments.
+        let (inst, inst_args) = metadata
+            .runtime_body_checked(id(50), std::slice::from_ref(&boolean), &mut 10)
+            .unwrap();
+        assert_eq!(inst.name, "f_50_inst");
+        assert!(inst_args.is_empty());
+
+        // Ambiguity stays scoped to the duplicated declaration id.
+        assert_eq!(
+            metadata
+                .runtime_body_checked(id(10), &[], &mut 10)
+                .unwrap_err(),
+            "function declaration is ambiguous"
+        );
+        assert_eq!(
+            metadata
+                .runtime_body_checked(id(999), &[], &mut 10)
+                .unwrap_err(),
+            "unknown function"
+        );
+        assert_eq!(
+            metadata
+                .runtime_body_checked(id(50), &[boolean.clone(), boolean], &mut 10)
+                .unwrap_err(),
+            "function type arguments have incorrect arity"
+        );
+    }
 }
 
 impl<'a> Metadata<'a> {
@@ -241,6 +373,7 @@ impl<'a> Metadata<'a> {
             domains: OnceCell::new(),
             sorts: OnceCell::new(),
             function_index: OnceCell::new(),
+            source_function_index: OnceCell::new(),
             runtime_instance_index: OnceCell::new(),
         }
     }
@@ -325,6 +458,61 @@ impl<'a> Metadata<'a> {
             return Ok(Some(&instance.function));
         }
         Ok(None)
+    }
+
+    pub(crate) fn runtime_body_checked<'b>(
+        &self,
+        declaration: DeclarationId,
+        arguments: &'b [Term],
+        fuel: &mut usize,
+    ) -> Result<(&'a Function, &'b [Term]), &'static str> {
+        let Some(package) = self.package else {
+            return Err("unknown function");
+        };
+        if let Some(instance) = self.runtime_instance_body_checked(declaration, arguments, fuel)? {
+            return Ok((instance, &[]));
+        }
+        let index = if let Some(index) = self.source_function_index.get() {
+            Arc::clone(index)
+        } else {
+            let cost = package
+                .functions
+                .len()
+                .saturating_add(package.quote_templates.len())
+                .max(1);
+            *fuel = fuel
+                .checked_sub(cost)
+                .ok_or("source function index budget exhausted")?;
+            let mut definitions: BTreeMap<DeclarationId, SourceFunctionSlot> = BTreeMap::new();
+            for (slot, function) in package.functions.iter().enumerate() {
+                definitions
+                    .entry(function.declaration)
+                    .and_modify(|existing| *existing = SourceFunctionSlot::Ambiguous)
+                    .or_insert(SourceFunctionSlot::Function(slot));
+            }
+            for (slot, function) in package.quote_templates.iter().enumerate() {
+                definitions
+                    .entry(function.declaration)
+                    .and_modify(|existing| *existing = SourceFunctionSlot::Ambiguous)
+                    .or_insert(SourceFunctionSlot::QuoteTemplate(slot));
+            }
+            let index = Arc::new(definitions);
+            let _ = self.source_function_index.set(Arc::clone(&index));
+            index
+        };
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("source function lookup budget exhausted")?;
+        let function = match index.get(&declaration).copied() {
+            Some(SourceFunctionSlot::Function(slot)) => &package.functions[slot],
+            Some(SourceFunctionSlot::QuoteTemplate(slot)) => &package.quote_templates[slot],
+            Some(SourceFunctionSlot::Ambiguous) => return Err("function declaration is ambiguous"),
+            None => return Err("unknown function"),
+        };
+        if function.type_parameters.len() != arguments.len() {
+            return Err("function type arguments have incorrect arity");
+        }
+        Ok((function, arguments))
     }
 
     /// A residual body without declaration inputs needs no copy or rewrite.

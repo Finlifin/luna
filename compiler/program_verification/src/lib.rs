@@ -153,4 +153,17 @@ impl<'a> PackageSession<'a> {
             fuel,
         )
     }
+
+    pub fn validate_residual_contracts(
+        &self,
+        function: &nir::program::Function,
+        limits: &mut Limits,
+    ) -> Result<(), flow::Error> {
+        flow::validate_residual_contracts_with_declarations(
+            self.package,
+            self.declarations.clone(),
+            function,
+            limits,
+        )
+    }
 }

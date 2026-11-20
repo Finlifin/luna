@@ -5960,6 +5960,10 @@ impl<'a> Infer<'a, '_> {
                 {
                     return Ok(());
                 }
+                if self.round.non_readonly_cleanup_types.contains(&ty) {
+                    self.may_run_cleanup = true;
+                    return Ok(());
+                }
                 if let Some(cleanup) = self.round.cleanup.as_deref_mut() {
                     if cleanup.is_memory_inert(&ty, self.fuel)? {
                         self.round.memory_inert_cleanup_types.insert(ty);
@@ -5979,6 +5983,7 @@ impl<'a> Infer<'a, '_> {
                         return Ok(());
                     }
                 }
+                self.round.non_readonly_cleanup_types.insert(ty);
                 self.may_run_cleanup = true;
             }
         }
@@ -7983,6 +7988,7 @@ struct Round<'cleanup> {
     summary_cache: Option<&'cleanup mut SummaryCache>,
     memory_inert_cleanup_types: HashSet<Term>,
     cleanup_reads: HashMap<Term, Vec<Access>>,
+    non_readonly_cleanup_types: HashSet<Term>,
     used_external_cleanup: bool,
     mutates_pointer_storage: bool,
     // All instances in one fixed point belong to the same immutable package.

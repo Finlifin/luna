@@ -731,6 +731,7 @@ pub fn analyze(function: &Function, limits: &mut Limits) -> Result<Report, Error
         None,
         None,
         None,
+        None,
         limits,
         true,
     )
@@ -747,6 +748,7 @@ pub fn analyze_in_package(
         Some(package),
         None,
         None,
+        None,
         limits,
         true,
     )
@@ -758,6 +760,16 @@ pub fn analyze_in_package(
 /// obligations retain their independent resource-verification path.
 pub fn validate_residual_contracts(
     package: &nir::program::Package,
+    function: &Function,
+    limits: &mut Limits,
+) -> Result<(), Error> {
+    let declarations = std::rc::Rc::new(crate::declarations::Metadata::new(Some(package)));
+    validate_residual_contracts_with_declarations(package, declarations, function, limits)
+}
+
+pub(crate) fn validate_residual_contracts_with_declarations<'a>(
+    package: &'a nir::program::Package,
+    declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
     function: &Function,
     limits: &mut Limits,
 ) -> Result<(), Error> {
@@ -785,18 +797,15 @@ pub fn validate_residual_contracts(
             } => (*declaration, arguments.as_slice()),
             _ => return Ok(()),
         };
-        *fuel = fuel
-            .checked_sub(
-                package
-                    .runtime_instances
-                    .len()
-                    .saturating_add(package.functions.len())
-                    .saturating_add(package.quote_templates.len()),
-            )
-            .ok_or("residual contract lookup budget exhausted")?;
-        let Some((target, _)) = package.runtime_body(declaration, arguments) else {
-            invalid_target = true;
-            return Err("residual contract target is missing or ambiguous".into());
+        let (target, _) = match declarations.runtime_body_checked(declaration, arguments, fuel) {
+            Ok(found) => found,
+            Err(error) if crate::declarations::is_budget_error(error) => {
+                return Err(error.into());
+            }
+            Err(_) => {
+                invalid_target = true;
+                return Err("residual contract target is missing or ambiguous".into());
+            }
         };
         required |= !target.preconditions.is_empty();
         Ok(())
@@ -816,6 +825,7 @@ pub fn validate_residual_contracts(
             Some(package),
             None,
             None,
+            Some(declarations),
             limits,
             false,
         )?;
@@ -846,17 +856,20 @@ pub fn prove_implication(
         package,
         None,
         None,
+        None,
         limits,
         true,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn analyze_impl<'a, 'b>(
     program: CallableProgram<'b>,
     requirements: &'b [nir::program::TypePredicate],
     package: Option<&'a nir::program::Package>,
     cache: Option<&'b mut MachineOwnerCache<'a>>,
     imports: Option<&'a RegionDeclarations>,
+    declarations: Option<std::rc::Rc<crate::declarations::Metadata<'a>>>,
     limits: &mut Limits,
     collect_points: bool,
 ) -> Result<Report, Error>
@@ -1022,7 +1035,8 @@ where
         ),
         None => (
             None,
-            std::rc::Rc::new(crate::declarations::Metadata::new(package)),
+            declarations
+                .unwrap_or_else(|| std::rc::Rc::new(crate::declarations::Metadata::new(package))),
             Default::default(),
             Default::default(),
         ),
@@ -3781,15 +3795,25 @@ impl Walker<'_> {
             } => Some((*declaration, arguments.as_slice())),
             _ => None,
         };
-        let (program, target_arguments) = match (direct, self.package) {
-            (Some((id, arguments)), Some(package)) => {
+        let (program, target_arguments) = match (direct, self.package.is_some()) {
+            (Some((id, arguments)), true) => {
+                let lookup_error = |error: &str| {
+                    if crate::declarations::is_budget_error(error) {
+                        Reason::Unknown(comptime_runtime::Error::BudgetExhausted.into())
+                    } else {
+                        Reason::InvalidSignature
+                    }
+                };
                 let selected =
                     if let Some(declaration) = self.imports.and_then(|imports| imports.get(&id)) {
-                        self.limits
-                            .step(package.runtime_instances.len().saturating_add(1))?;
-                        match package
-                            .runtime_instance_body_checked(id, arguments)
-                            .map_err(|_| Reason::InvalidSignature)?
+                        match self
+                            .declarations
+                            .runtime_instance_body_checked(
+                                id,
+                                arguments,
+                                &mut self.limits.arithmetic.steps,
+                            )
+                            .map_err(lookup_error)?
                         {
                             Some(code) => (CallableProgram::function(code), &[][..]),
                             None if declaration.type_parameters.len() == arguments.len() => {
@@ -3798,16 +3822,10 @@ impl Walker<'_> {
                             None => return Err(Reason::InvalidSignature),
                         }
                     } else {
-                        self.limits.step(
-                            package
-                                .runtime_instances
-                                .len()
-                                .saturating_add(package.functions.len())
-                                .saturating_add(package.quote_templates.len()),
-                        )?;
-                        let (code, arguments) = package
-                            .runtime_body_checked(id, arguments)
-                            .map_err(|_| Reason::InvalidSignature)?;
+                        let (code, arguments) = self
+                            .declarations
+                            .runtime_body_checked(id, arguments, &mut self.limits.arithmetic.steps)
+                            .map_err(lookup_error)?;
                         (CallableProgram::function(code), arguments)
                     };
                 (Some(selected.0), selected.1)
@@ -6291,6 +6309,7 @@ fn validate_machine_body<'a>(
             Some(package),
             cache.as_deref_mut(),
             imports,
+            None,
             &mut Limits::default(),
             false,
         )?;

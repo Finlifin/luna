@@ -11,20 +11,25 @@ pub struct CleanupReader {
     method: MethodInstance,
     accesses: Vec<memory::Access>,
 }
+
 impl CleanupReader {
     pub fn receiver_path(&self) -> &[usize] {
         &self.receiver_path
     }
+
     pub fn receiver_type(&self) -> &Term {
         &self.receiver_type
     }
+
     pub fn method(&self) -> &MethodInstance {
         &self.method
     }
+
     pub fn accesses(&self) -> &[memory::Access] {
         &self.accesses
     }
 }
+
 impl fmt::Display for CleanupReader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(cleanup-reader (receiver-path")?;
@@ -42,12 +47,14 @@ impl fmt::Display for CleanupReader {
         f.write_str("))")
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CleanupReadFootprint {
     protocol: DeclarationId,
     subject: Term,
     readers: Vec<CleanupReader>,
 }
+
 impl CleanupReadFootprint {
     // Charge the complete owned result before cloning it into or out of the
     // session cache. A cache hit avoids proof search, not traversal limits.
@@ -75,12 +82,15 @@ impl CleanupReadFootprint {
         }
         Ok(())
     }
+
     pub fn protocol(&self) -> DeclarationId {
         self.protocol
     }
+
     pub fn subject(&self) -> &Term {
         &self.subject
     }
+
     pub fn readers(&self) -> &[CleanupReader] {
         &self.readers
     }
@@ -195,6 +205,7 @@ impl CleanupReadFootprint {
         Ok(output)
     }
 }
+
 impl fmt::Display for CleanupReadFootprint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -270,6 +281,20 @@ fn collect(
     }
     Ok(true)
 }
+
+fn is_budget_or_limit_error(error: &str, fuel: usize) -> bool {
+    fuel == 0
+        || error.contains("exhausted")
+        || error.contains("Exhausted")
+        || error.contains("budget")
+        || error.contains("Budget")
+        || error.contains("exceeded")
+        || error.contains("Exceeded")
+        || error.contains("SizeLimit")
+        || error.contains("DepthLimit")
+        || error.contains("StepLimit")
+}
+
 impl CleanupSession<'_, '_> {
     /// Summarize all possible owned components in this immutable selection world.
     /// Paths use the guarded owned-layout convention (including variant markers).
@@ -282,25 +307,33 @@ impl CleanupSession<'_, '_> {
         fuel: &mut usize,
     ) -> Result<Option<CleanupReadFootprint>, String> {
         memory::bound_type(ty, fuel)?;
-        if let Some(footprint) = self.read_footprints.get(ty) {
-            footprint.charge_copy(fuel)?;
-            return Ok(Some(footprint.clone()));
+        if let Some(cached) = self.read_footprints.get(ty) {
+            if let Some(footprint) = cached {
+                footprint.charge_copy(fuel)?;
+                return Ok(Some(footprint.clone()));
+            }
+            return Ok(None);
         }
         for active in &self.read_footprint_stack {
-            memory::bound_type(active, fuel)?;
-            if active == ty {
+            memory::bound_type(&active.ty, fuel)?;
+            if active.ty == *ty {
+                self.mark_active_read_queries_provisional();
                 return Ok(None);
             }
         }
         if self.read_footprint_stack.len() >= 64 {
             return Err("cleanup read proof nesting budget exhausted".into());
         }
-        self.read_footprint_stack.push(ty.clone());
+        self.read_footprint_stack.push(super::ActiveCleanupQuery {
+            ty: ty.clone(),
+            provisional: false,
+        });
         let result = (|| {
             self.acquire(ty, fuel)?;
             let binding = self.find(ty, fuel)?.ok_or("missing acquired cleanup")?;
             let mut readers = vec![];
             if !collect(binding, &mut vec![], &mut readers, fuel, 0)? {
+                self.mark_active_read_queries_provisional();
                 return Ok(None);
             }
             let package = self.package;
@@ -323,12 +356,14 @@ impl CleanupSession<'_, '_> {
                     }
                 }
                 if missing_instance {
+                    self.mark_active_read_queries_provisional();
                     return Ok(None);
                 }
             }
             let declarations = self.declarations.clone();
             let source = self.source;
             let text_provenance = self.text_provenance;
+            let mut methods = self.methods.with_preselected();
             for reader in &mut readers {
                 let projection =
                     memory::project_owned_storage(Some(package), ty, &reader.receiver_path, fuel)?;
@@ -345,14 +380,21 @@ impl CleanupSession<'_, '_> {
                     &BTreeMap::new(),
                     Some(self),
                     source,
-                    None,
+                    Some(&mut methods),
                     Some(declarations.as_ref()),
                     text_provenance,
                     None,
                     fuel,
                 );
-                let Ok(summary) = summary else {
-                    return Ok(None);
+                let summary = match summary {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        if is_budget_or_limit_error(&error, *fuel) {
+                            self.mark_active_read_queries_provisional();
+                            return Err(error);
+                        }
+                        return Ok(None);
+                    }
                 };
                 *fuel = fuel
                     .checked_sub(summary.accesses.len())
@@ -390,11 +432,25 @@ impl CleanupSession<'_, '_> {
                 readers,
             }))
         })();
-        self.read_footprint_stack.pop();
-        if let Ok(Some(footprint)) = &result {
-            memory::bound_type(ty, fuel)?;
-            footprint.charge_copy(fuel)?;
-            self.read_footprints.insert(ty.clone(), footprint.clone());
+        let frame = self
+            .read_footprint_stack
+            .pop()
+            .expect("balanced read footprint stack");
+        if frame.provisional || result.is_err() {
+            self.mark_active_read_queries_provisional();
+        }
+        match &result {
+            Ok(Some(footprint)) => {
+                memory::bound_type(ty, fuel)?;
+                footprint.charge_copy(fuel)?;
+                self.read_footprints
+                    .insert(ty.clone(), Some(footprint.clone()));
+            }
+            Ok(None) if !frame.provisional => {
+                memory::bound_type(ty, fuel)?;
+                self.read_footprints.insert(ty.clone(), None);
+            }
+            _ => {}
         }
         result
     }

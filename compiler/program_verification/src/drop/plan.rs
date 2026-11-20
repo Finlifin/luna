@@ -1124,6 +1124,11 @@ fn plan_cleanup_with_domains_internal<'a, 'w>(
     })
 }
 
+struct ActiveCleanupQuery {
+    ty: Term,
+    provisional: bool,
+}
+
 /// Captured choices for one immutable program/implementation environment.
 /// Field moves reuse their parent's captured subtree. This arena contains no
 /// runtime environment values and cannot cross implementation worlds.
@@ -1144,12 +1149,14 @@ pub struct CleanupSession<'a, 'w> {
     // destructor is a stable negative result, unlike a failed query.
     trivial_layouts: std::collections::HashMap<Term, bool>,
     rejection_stack: Vec<Term>,
-    memory_inert_stack: Vec<Term>,
-    read_footprint_stack: Vec<Term>,
-    // Completed positive proofs only, in this immutable package/Drop world.
-    // Budget exhaustion and unresolved recursion must never become cache facts.
-    read_footprints: std::collections::HashMap<Term, CleanupReadFootprint>,
-    memory_inert_types: std::collections::HashSet<Term>,
+    memory_inert_stack: Vec<ActiveCleanupQuery>,
+    read_footprint_stack: Vec<ActiveCleanupQuery>,
+    // Completed positive and negative proofs in this immutable package/Drop world.
+    // Budget/limit exhaustion, unresolved bindings, missing runtime instances, and
+    // cycle-tainted fallbacks mark active frames provisional and must never be
+    // cached as negative facts.
+    read_footprints: std::collections::HashMap<Term, Option<CleanupReadFootprint>>,
+    memory_inert_types: std::collections::HashMap<Term, bool>,
     nonrejecting_types: std::collections::HashSet<Term>,
     verified_drops: std::collections::HashSet<(Term, DeclarationId, DeclarationId)>,
     require_runtime_instances: bool,
@@ -1245,6 +1252,15 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
         std::mem::take(&mut self.missing_runtime_instances)
     }
 
+    pub(super) fn mark_active_read_queries_provisional(&mut self) {
+        for frame in &mut self.read_footprint_stack {
+            frame.provisional = true;
+        }
+        for frame in &mut self.memory_inert_stack {
+            frame.provisional = true;
+        }
+    }
+
     fn find<'b>(
         &'b self,
         ty: &Term,
@@ -1302,19 +1318,23 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
 
     fn is_memory_inert(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
         crate::memory::bound_type(ty, fuel)?;
-        if self.memory_inert_types.contains(ty) {
-            return Ok(true);
+        if let Some(&inert) = self.memory_inert_types.get(ty) {
+            return Ok(inert);
         }
         for active in &self.memory_inert_stack {
-            crate::memory::bound_type(active, fuel)?;
-            if active == ty {
+            crate::memory::bound_type(&active.ty, fuel)?;
+            if active.ty == *ty {
+                self.mark_active_read_queries_provisional();
                 return Ok(false);
             }
         }
         if self.memory_inert_stack.len() >= 64 {
             return Err("cleanup memory proof nesting budget exhausted".into());
         }
-        self.memory_inert_stack.push(ty.clone());
+        self.memory_inert_stack.push(ActiveCleanupQuery {
+            ty: ty.clone(),
+            provisional: false,
+        });
         let result = (|| {
             let Some(footprint) = self.read_footprint(ty, fuel)? else {
                 return Ok(false);
@@ -1329,10 +1349,23 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             }
             Ok(true)
         })();
-        self.memory_inert_stack.pop();
-        if matches!(result, Ok(true)) {
-            crate::memory::bound_type(ty, fuel)?;
-            self.memory_inert_types.insert(ty.clone());
+        let frame = self
+            .memory_inert_stack
+            .pop()
+            .expect("balanced memory inert stack");
+        if frame.provisional || result.is_err() {
+            self.mark_active_read_queries_provisional();
+        }
+        match &result {
+            Ok(true) => {
+                crate::memory::bound_type(ty, fuel)?;
+                self.memory_inert_types.insert(ty.clone(), true);
+            }
+            Ok(false) if !frame.provisional => {
+                crate::memory::bound_type(ty, fuel)?;
+                self.memory_inert_types.insert(ty.clone(), false);
+            }
+            _ => {}
         }
         result
     }
@@ -1377,6 +1410,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
         for active in &self.rejection_stack {
             crate::memory::bound_type(active, fuel)?;
             if active == ty {
+                self.mark_active_read_queries_provisional();
                 return Ok(true);
             }
         }
@@ -1406,6 +1440,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
             Ok(())
         })?;
         if unresolved {
+            self.mark_active_read_queries_provisional();
             return Ok(true);
         }
         if self.require_runtime_instances {
@@ -1428,6 +1463,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
                 }
             }
             if missing_instance {
+                self.mark_active_read_queries_provisional();
                 return Ok(true);
             }
         }
@@ -1984,5 +2020,237 @@ mod verified_drop_cache_tests {
             warm_cost < cold_cost,
             "warm cost {warm_cost} should be strictly less than cold cost {cold_cost}"
         );
+    }
+
+    #[test]
+    fn cleanup_session_caches_non_readonly_read_footprints_only_when_complete() {
+        use nir::program::Literal;
+
+        let id = |local| DeclarationId { package: 1, local };
+        let drop_trait_id = id(1);
+        let self_param = id(2);
+        let member_id = id(3);
+        let writer_id = id(4);
+        let impl_id = id(5);
+        let body_id = id(6);
+        let source = SourceRange { start: 0, end: 1 };
+        let void = Term::Primitive(Primitive::Void);
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let ptr_bool_ty = Term::Pointer(Box::new(bool_ty.clone()));
+        let ptr_ptr_bool_ty = Term::Pointer(Box::new(ptr_bool_ty.clone()));
+        let writer_ty = Term::Nominal {
+            declaration: writer_id,
+            arguments: vec![],
+        };
+        let ptr_writer_ty = Term::Pointer(Box::new(writer_ty.clone()));
+        let self_param_ty = Term::Pointer(Box::new(Term::Rigid {
+            declaration: self_param,
+            sort: Sort::Type,
+        }));
+        let concrete_sig = Term::Function {
+            parameters: vec![Parameter {
+                sort: Sort::Runtime,
+                ty: ptr_writer_ty.clone(),
+            }],
+            result: Box::new(void.clone()),
+        };
+        let receiver_binding = LocalId { owner: 1, index: 0 };
+        let package = Package {
+            structs: vec![Struct {
+                capabilities: vec![],
+                packed: false,
+                declaration: writer_id,
+                name: "Writer".into(),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                fields: vec![("target".into(), ptr_bool_ty.clone())],
+                requirements: vec![],
+            }],
+            traits: vec![Trait {
+                comptime_only: false,
+                parameter_types: vec![],
+                associated: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                type_parameters: vec![],
+                declaration: drop_trait_id,
+                parents: vec![],
+                self_parameter: self_param,
+                name: "Drop".into(),
+                methods: vec![MethodContract {
+                    source,
+                    phase: TraitPhase::Runtime,
+                    is_quote: false,
+                    pure: false,
+                    is_unsafe: false,
+                    type_arguments: vec![],
+                    type_parameters: vec![],
+                    capabilities: vec![],
+                    program: ProgramContract::default(),
+                    parameter_bindings: vec![receiver_binding],
+                    by_value_receiver: false,
+                    by_reference_receiver: true,
+                    declaration: member_id,
+                    name: "drop".into(),
+                    signature: nir::code_interfaces::MethodSignature::Callable(Term::Function {
+                        parameters: vec![Parameter {
+                            sort: Sort::Runtime,
+                            ty: self_param_ty,
+                        }],
+                        result: Box::new(void.clone()),
+                    }),
+                    requirements: vec![],
+                    default: None,
+                }],
+            }],
+            implementations: vec![Implementation {
+                phases: Default::default(),
+                parameter_types: vec![],
+                associated: vec![],
+                associated_initializers: vec![],
+                interface_arguments: vec![],
+                capabilities: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                declaration: impl_id,
+                subject: writer_ty.clone(),
+                interface: Some(drop_trait_id),
+                methods: vec![("drop".into(), body_id)],
+            }],
+            functions: vec![Function {
+                interface: FunctionDeclaration {
+                    source,
+                    phase: FunctionPhase::Runtime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    declaration: body_id,
+                    name: "drop".into(),
+                    parameters: vec![receiver_binding],
+                    env_parameters: vec![],
+                    defaults: vec![],
+                    signature: concrete_sig,
+                },
+                body: Expr {
+                    source,
+                    ty: void,
+                    kind: ExprKind::WritePointer {
+                        pointer: Box::new(Expr {
+                            source,
+                            ty: ptr_bool_ty,
+                            kind: ExprKind::ReadPointer(Box::new(Expr {
+                                source,
+                                ty: ptr_ptr_bool_ty,
+                                kind: ExprKind::PointerField {
+                                    pointer: Box::new(Expr {
+                                        source,
+                                        ty: ptr_writer_ty,
+                                        kind: ExprKind::Local(receiver_binding),
+                                    }),
+                                    declaration: writer_id,
+                                    index: 0,
+                                },
+                            })),
+                        }),
+                        value: Box::new(Expr {
+                            source,
+                            ty: bool_ty,
+                            kind: ExprKind::Literal(Literal::Bool(true)),
+                        }),
+                    },
+                },
+                runtime_deliveries: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let mut index = crate::implementation::Index::default();
+        index.sync_nominal_layouts(&package.structs, &package.enums, &package.newtypes);
+        index
+            .insert(
+                ImplementationHead {
+                    parameter_types: vec![],
+                    type_parameters: vec![],
+                    requirements: vec![],
+                    declaration: impl_id,
+                    interface: Some(drop_trait_id),
+                    interface_arguments: vec![],
+                    subject: writer_ty.clone(),
+                },
+                Budget::default(),
+            )
+            .unwrap();
+        let context = Context::default();
+        let world = World {
+            index: &index,
+            implementations: &package.implementations,
+            traits: &package.traits,
+            assumptions: &[],
+            context: &context,
+        };
+
+        // Missing runtime instances make read_footprint / is_memory_inert provisional:
+        // neither negative result may enter the session cache.
+        let mut strict_session =
+            CleanupSession::new(&package, &world, drop_trait_id, Budget::default())
+                .require_runtime_instances();
+        assert!(
+            !strict_session
+                .is_memory_inert(&writer_ty, &mut 10_000)
+                .unwrap()
+        );
+        assert!(!strict_session.missing_runtime_instances().is_empty());
+        assert!(strict_session.read_footprints.is_empty());
+        assert!(strict_session.memory_inert_types.is_empty());
+
+        // Budget exhaustion during inference must fail and must never cache None/false.
+        let mut session = CleanupSession::new(&package, &world, drop_trait_id, Budget::default());
+        session.acquire(&writer_ty, &mut 10_000).unwrap();
+        assert!(session.is_memory_inert(&writer_ty, &mut 10).is_err());
+        assert!(session.read_footprints.is_empty());
+        assert!(session.memory_inert_types.is_empty());
+
+        // Completed proof establishes non-inert / None and caches both cleanly.
+        let mut cold_fuel = 10_000;
+        assert!(!session.is_memory_inert(&writer_ty, &mut cold_fuel).unwrap());
+        let cold_cost = 10_000 - cold_fuel;
+        assert_eq!(session.read_footprints.get(&writer_ty), Some(&None));
+        assert_eq!(session.memory_inert_types.get(&writer_ty), Some(&false));
+
+        let mut warm_inert_fuel = 10_000;
+        assert!(
+            !session
+                .is_memory_inert(&writer_ty, &mut warm_inert_fuel)
+                .unwrap()
+        );
+        let warm_inert_cost = 10_000 - warm_inert_fuel;
+        assert!(
+            warm_inert_cost < cold_cost,
+            "warm is_memory_inert cost {warm_inert_cost} should be less than cold {cold_cost}"
+        );
+
+        let mut warm_read_fuel = 10_000;
+        assert_eq!(
+            session
+                .read_footprint(&writer_ty, &mut warm_read_fuel)
+                .unwrap(),
+            None
+        );
+        let warm_read_cost = 10_000 - warm_read_fuel;
+        assert!(
+            warm_read_cost < cold_cost,
+            "warm read_footprint cost {warm_read_cost} should be less than cold {cold_cost}"
+        );
+
+        assert!(session.is_memory_inert(&writer_ty, &mut 0).is_err());
+        assert!(session.read_footprint(&writer_ty, &mut 0).is_err());
     }
 }
