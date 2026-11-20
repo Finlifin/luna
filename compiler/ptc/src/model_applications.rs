@@ -63,6 +63,9 @@ fn argument_with_types(term: &Term, type_leaf: &impl Fn(&Term) -> bool) -> bool 
             | Term::Symbol(_)
             | Term::BitVec(_)
             | Term::Runtime(_) => true,
+            Term::RuntimeField { base, .. } => {
+                base.sort() == Sort::Runtime && visit(base, depth + 1, remaining, type_leaf)
+            }
             // These are already frozen declaration identities, not executable
             // bodies or a claim about extensional/program equality. Formation,
             // invocation and method dispatch stay with the receiving world.

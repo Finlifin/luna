@@ -2040,6 +2040,9 @@ fn match_default_strategy_term(
                 _ => Ok(false),
             }
         }
+        (Term::RuntimeField { base: a, index: i }, Term::RuntimeField { base: b, index: j }) => {
+            Ok(i == j && match_default_strategy_term(a, b, params, bindings, fuel)?)
+        }
         (Term::Optional(a), Term::Optional(b))
         | (Term::Pointer(a), Term::Pointer(b))
         | (Term::Lift(a), Term::Lift(b))
@@ -2279,32 +2282,19 @@ enum GlobalRuntimeOrigin {
     ConstAddress {
         declaration: DeclarationId,
         ty: Term,
-        fields: Vec<usize>,
     },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum LocalRuntimeOrigin {
-    AddressOf {
-        base: n::LocalId,
-        fields: Vec<usize>,
-    },
-    LocalValue {
-        binding: n::LocalId,
-        epoch: u64,
-        fields: Vec<usize>,
-    },
-    Projection(std::sync::Arc<runtime_origins::Projection>),
-    Ephemeral {
-        occurrence: u32,
-        site: n::LocalId,
-    },
+    AddressOf { base: n::LocalId },
+    LocalValue { binding: n::LocalId, epoch: u64 },
+    Ephemeral { occurrence: u32, site: n::LocalId },
 }
 
 #[derive(Clone, Debug)]
 struct LocalRuntimeDelivery {
     producer_site: Option<n::LocalId>,
-    projection: Option<std::sync::Arc<runtime_origins::Projection>>,
     expr: n::Expr,
     checked_epoch: Option<(n::LocalId, u64)>,
 }
@@ -2573,6 +2563,11 @@ impl Checker<'_, '_> {
                 };
                 self.record_runtime_expr_captures(&expr, span)?;
                 Ok(expr)
+            }
+            Term::RuntimeField { .. } => {
+                let value = self.deliver_runtime_field(term, span)?;
+                self.require_expression(&value.ty, expected_inner, span)?;
+                Ok(value)
             }
             Term::Runtime(id) => {
                 let delivered = if let Some(entry) = self.local_runtime_deliveries.get(id) {
@@ -3943,7 +3938,7 @@ impl Checker<'_, '_> {
         let ty = self.type_expr(callee)?;
         let outer = self.locals.clone();
         let result = (|| {
-            let acquisition = self.acquire_constructor_inputs(callee, &ty)?;
+            let acquisition = self.acquire_constructor_inputs(callee)?;
             let record = self.construct_typed(expr, ty, args, expected)?;
             acquisition.finish(self, record, expr.span)
         })();

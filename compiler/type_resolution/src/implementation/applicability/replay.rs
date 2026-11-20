@@ -99,7 +99,17 @@ impl ImplementationHead {
             let template = substitution.instantiate_bounded(template, &mut domain_fuel)?;
             if template == *actual
                 && (matches!(actual, Term::Rigid { declaration, sort: Sort::ComptimeValue | Sort::Runtime } if domains.contains_key(declaration))
-                    || matches!(actual, Term::Runtime(id) if runtime_domains.contains_key(id)))
+                    || matches!(actual, Term::Runtime(id) if runtime_domains.contains_key(id))
+                    || (matches!(actual, Term::RuntimeField { .. })
+                        && nir::runtime_fields::declared_domain(
+                            actual,
+                            domains,
+                            runtime_domains,
+                            layouts,
+                            context.scope(),
+                            &mut domain_fuel,
+                        )?
+                        .is_some()))
             {
                 continue;
             }

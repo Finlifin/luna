@@ -8,7 +8,6 @@ impl Checker<'_, '_> {
     pub(super) fn acquire_constructor_inputs(
         &mut self,
         head: &Expr<'_>,
-        ty: &Term,
     ) -> Result<Acquisition, Error> {
         let mut statements = Vec::new();
         let H::NFApplication(_, args) = &head.kind else {
@@ -18,7 +17,7 @@ impl Checker<'_, '_> {
             .required_steps
             .checked_sub(args.len() as u64)
             .ok_or_else(|| error(head.span, "constructor input inspection budget exhausted"))?;
-        let mut captured = BTreeSet::new();
+
         for arg in *args {
             let (Arg::Positional(value)
             | Arg::Named(_, value)
@@ -56,37 +55,8 @@ impl Checker<'_, '_> {
                 .acquired_bindings
                 .insert(binding, id);
             self.local_runtime_deliveries.get_mut(&id).unwrap().expr = operand;
-            captured.insert(id);
-        }
-        if !captured.is_empty() {
-            let dependencies = self.result_dependencies(ty, head.span)?;
-            self.rebase_environment_projections(&dependencies, &captured, head.span)?;
         }
         Ok(Acquisition(statements))
-    }
-
-    pub(super) fn rebase_environment_projections(
-        &mut self,
-        dependencies: &BTreeSet<nir::RuntimeId>,
-        captured: &BTreeSet<nir::RuntimeId>,
-        span: Span,
-    ) -> Result<(), Error> {
-        for id in dependencies {
-            let Some(entry) = self.local_runtime_deliveries.get(id) else {
-                continue;
-            };
-            let Some(path) = entry.projection.as_ref() else {
-                continue;
-            };
-            if captured.contains(&path.root) {
-                let root = &self.local_runtime_deliveries[&path.root].expr;
-                constants::charge_copy(root, &mut self.required_steps, span)?;
-                let placed =
-                    path.apply(&entry.expr, root.clone(), &mut self.required_steps, span)?;
-                self.local_runtime_deliveries.get_mut(id).unwrap().expr = placed;
-            }
-        }
-        Ok(())
     }
 
     /// Transfer acquired bindings to the value's consumer. Direct record

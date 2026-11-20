@@ -432,6 +432,12 @@ pub enum Term {
         sort: Sort,
     },
     Runtime(RuntimeId),
+    /// Identity of a field address rooted in a runtime dependency. Substitution
+    /// acts on the root; computing the identity never loads the target.
+    RuntimeField {
+        base: Box<Term>,
+        index: usize,
+    },
     Unit,
     Bool(bool),
     Char(char),
@@ -690,7 +696,8 @@ impl Term {
                     pending.push(*signature);
                     pending.extend(environment);
                 }
-                Self::Optional(inner)
+                Self::RuntimeField { base: inner, .. }
+                | Self::Optional(inner)
                 | Self::Pointer(inner)
                 | Self::Lift(inner)
                 | Self::ComptimeFunction(inner)
@@ -1040,7 +1047,7 @@ impl Term {
             | Self::Bound { sort, .. }
             | Self::Rigid { sort, .. }
             | Self::NormalForm { sort, .. } => *sort,
-            Self::Runtime(_) => Sort::Runtime,
+            Self::Runtime(_) | Self::RuntimeField { .. } => Sort::Runtime,
             Self::OptionalValue { .. }
             | Self::ErrorValue { .. }
             | Self::NominalValue { .. }
@@ -1598,6 +1605,10 @@ impl Term {
                 Self::UnsafeFunction(Box::new(inner.rewrite(nesting, leaf)?))
             }
             Self::Optional(inner) => Self::Optional(Box::new(inner.rewrite(nesting, leaf)?)),
+            Self::RuntimeField { base, index } => Self::RuntimeField {
+                base: Box::new(base.rewrite(nesting, leaf)?),
+                index: *index,
+            },
             Self::Pointer(inner) => Self::Pointer(Box::new(inner.rewrite(nesting, leaf)?)),
             Self::Lift(inner) => Self::Lift(Box::new(inner.rewrite(nesting, leaf)?)),
             Self::Function { parameters, result } => {
@@ -2224,6 +2235,10 @@ fn validate<'term>(
             }
             validate(signature, holes, frames, allow_free, core)?;
         }
+        Term::RuntimeField { base, .. } => {
+            require_sort(base, Sort::Runtime)?;
+            validate(base, holes, frames, allow_free, core)?;
+        }
         Term::Runtime(id) if core => return Err(TypeError::RuntimeInCore(*id)),
         Term::Function { parameters, result } => {
             frames.nested.push(&[]);
@@ -2708,6 +2723,7 @@ impl fmt::Display for Term {
                 write!(f, "(rigid (id {declaration}) (sort {sort}))")
             }
             Self::Runtime(id) => write!(f, "{id}"),
+            Self::RuntimeField { base, index } => write!(f, "(runtime-field {base} {index})"),
             Self::Bool(value) => write!(f, "(bool {value})"),
             Self::Unit => f.write_str("(unit-value)"),
             Self::BitVec(value) => write!(f, "{value}"),

@@ -5438,6 +5438,7 @@ fn scoped_term_value_work_with_evidence(
         parameters,
         value_parameters,
         &BTreeMap::new(),
+        None,
         |_, _, _| Err("nominal layout unavailable during structural inspection".into()),
         |_, _, _| Ok(None),
         None,

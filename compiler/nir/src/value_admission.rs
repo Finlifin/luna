@@ -113,6 +113,7 @@ fn validate_value(
     if matches!(
         argument,
         Term::Runtime(_)
+            | Term::RuntimeField { .. }
             | Term::Rigid {
                 sort: Sort::Runtime,
                 ..

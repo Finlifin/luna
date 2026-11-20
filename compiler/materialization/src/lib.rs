@@ -619,33 +619,6 @@ struct BuildResult {
     type_cores: nir::TypeInterner,
 }
 
-fn declared_runtime_domain(
-    world: &DeclarationWorld<'_>,
-    argument: &Term,
-    domain: &Term,
-    fuel: &mut usize,
-) -> bool {
-    if nir::type_computations::charge_term(domain, fuel).is_err() {
-        return false;
-    }
-    match argument {
-        Term::Runtime(id) => world
-            .index()
-            .runtime_domains()
-            .get(id)
-            .is_some_and(|declared| declared == domain),
-        Term::Rigid {
-            declaration,
-            sort: nir::Sort::Runtime,
-        } => world
-            .index()
-            .parameter_domains()
-            .get(declaration)
-            .is_some_and(|declared| declared == domain),
-        _ => false,
-    }
-}
-
 struct DispatchContext<'a> {
     types: &'a Context,
     assumptions: &'a [n::TraitRequirement],
@@ -3297,24 +3270,18 @@ impl Builder<'_> {
                     .find(|s| s.declaration == *declaration)
                 {
                     if self.instances.is_some() {
-                        let world = &self.world;
-                        let package = self.package;
-                        nir::validate_declaration_arguments_with_collections_in(
-                            &s.type_parameters,
-                            &s.parameter_types,
-                            arguments,
-                            &mut self.fuel,
-                            |ty, variant, fuel| {
-                                nir::normal_forms::query_value_fields(package, ty, variant, fuel)
-                            },
-                            |argument, domain, fuel| {
-                                declared_runtime_domain(world, argument, domain, fuel)
-                            },
-                            |domain, fuel| {
-                                nir::normal_forms::list_element_budgeted(package, domain, fuel)
-                            },
-                            package.target,
-                        )?;
+                        self.world.with_admission_queries(|queries| {
+                            nir::admit_declaration_inputs(
+                                &s.type_parameters,
+                                &s.parameter_types,
+                                arguments,
+                                nir::DeclarationInputScope::Caller(&[]),
+                                0,
+                                &mut self.fuel,
+                                queries,
+                            )
+                            .map_err(|failure| failure.reason)
+                        })?;
                     }
                     let substitution = nir::DeclarationSubstitution::bounded(
                         &s.type_parameters,
@@ -3371,24 +3338,18 @@ impl Builder<'_> {
                     .find(|e| e.declaration == *declaration)
                 {
                     if self.instances.is_some() {
-                        let world = &self.world;
-                        let package = self.package;
-                        nir::validate_declaration_arguments_with_collections_in(
-                            &e.type_parameters,
-                            &e.parameter_types,
-                            arguments,
-                            &mut self.fuel,
-                            |ty, variant, fuel| {
-                                nir::normal_forms::query_value_fields(package, ty, variant, fuel)
-                            },
-                            |argument, domain, fuel| {
-                                declared_runtime_domain(world, argument, domain, fuel)
-                            },
-                            |domain, fuel| {
-                                nir::normal_forms::list_element_budgeted(package, domain, fuel)
-                            },
-                            package.target,
-                        )?;
+                        self.world.with_admission_queries(|queries| {
+                            nir::admit_declaration_inputs(
+                                &e.type_parameters,
+                                &e.parameter_types,
+                                arguments,
+                                nir::DeclarationInputScope::Caller(&[]),
+                                0,
+                                &mut self.fuel,
+                                queries,
+                            )
+                            .map_err(|failure| failure.reason)
+                        })?;
                     }
                     let substitution = nir::DeclarationSubstitution::bounded(
                         &e.type_parameters,
@@ -3451,22 +3412,9 @@ impl Builder<'_> {
                     // value admission belongs to concrete materialization, as
                     // for struct and enum; invocation checks scoped evidence.
                     if self.instances.is_some() {
-                        let world = &self.world;
-                        let package = self.package;
-                        n.validate_completed_arguments_with_collections_in(
-                            arguments,
-                            &mut self.fuel,
-                            |ty, variant, fuel| {
-                                nir::normal_forms::query_value_fields(package, ty, variant, fuel)
-                            },
-                            |argument, domain, fuel| {
-                                declared_runtime_domain(world, argument, domain, fuel)
-                            },
-                            |domain, fuel| {
-                                nir::normal_forms::list_element_budgeted(package, domain, fuel)
-                            },
-                            package.target,
-                        )?;
+                        self.world.with_admission_queries(|queries| {
+                            n.admit_arguments_in_scope(arguments, &[], &mut self.fuel, queries)
+                        })?;
                     }
                     let substitution = nir::DeclarationSubstitution::bounded(
                         &n.type_parameters,

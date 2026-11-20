@@ -366,6 +366,16 @@ impl<'a> DeclarationWorld<'a> {
             declared: &mut |argument, domain, fuel| {
                 nir::type_computations::charge_term(domain, fuel)?;
                 match argument {
+                    Term::RuntimeField { .. } => Ok(nir::runtime_fields::declared_domain(
+                        argument,
+                        self.index().parameter_domains(),
+                        self.index().runtime_domains(),
+                        Some(self.scope.source.package()),
+                        &[],
+                        fuel,
+                    )?
+                    .as_ref()
+                        == Some(domain)),
                     Term::Runtime(id) => Ok(self
                         .index()
                         .runtime_domains()

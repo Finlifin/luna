@@ -735,6 +735,7 @@ impl ImplementationHead {
                 && !matches!(
                     term,
                     Term::Runtime(_)
+                        | Term::RuntimeField { .. }
                         | Term::Rigid {
                             sort: Sort::ComptimeValue | Sort::Runtime,
                             ..
@@ -883,14 +884,14 @@ impl ImplementationHead {
             .enumerate()
         {
             if template.sort() == Sort::Runtime && actual.sort() == Sort::Runtime {
-                if let (Term::Runtime(expected), Term::Runtime(provided)) = (template, actual) {
-                    if expected != provided {
-                        return Err(TypeAssessment::ValueIndexMismatch {
-                            position,
-                            expected: template.clone(),
-                            actual: actual.clone(),
-                        });
-                    }
+                if nir::runtime_fields::distinct(template, actual, &mut head_budget.steps)
+                    .map_err(|_| TypeAssessment::BudgetExhausted)?
+                {
+                    return Err(TypeAssessment::ValueIndexMismatch {
+                        position,
+                        expected: template.clone(),
+                        actual: actual.clone(),
+                    });
                 }
                 continue;
             }
@@ -916,15 +917,8 @@ impl ImplementationHead {
         {
             if template.sort() == Sort::Runtime && actual.sort() == Sort::Runtime {
                 match (template, actual) {
-                    (Term::Runtime(expected), Term::Runtime(provided)) if expected == provided => {
+                    (Term::Runtime(_) | Term::RuntimeField { .. }, _) if template == actual => {
                         continue;
-                    }
-                    (Term::Runtime(_), Term::Runtime(_)) => {
-                        return Err(TypeAssessment::ValueIndexMismatch {
-                            position,
-                            expected: template.clone(),
-                            actual: actual.clone(),
-                        });
                     }
                     (
                         Term::Rigid {
@@ -960,10 +954,9 @@ impl ImplementationHead {
                         if bound == *actual {
                             continue;
                         }
-                        if matches!(
-                            (&bound, actual),
-                            (Term::Runtime(a), Term::Runtime(b)) if a != b
-                        ) {
+                        if nir::runtime_fields::distinct(&bound, actual, &mut head_budget.steps)
+                            .map_err(|_| TypeAssessment::BudgetExhausted)?
+                        {
                             return Err(TypeAssessment::ValueIndexMismatch {
                                 position,
                                 expected: bound,
@@ -1966,11 +1959,23 @@ fn validate_head_arguments_with_runtime_domains(
             }
         }
         let mut symbolic = |value: &Term, expected: &Term, fuel: &mut usize| {
+            let projected;
             let actual = match value {
                 Term::Rigid {
                     declaration,
                     sort: Sort::ComptimeValue | Sort::Runtime,
                 } => evidence.get(declaration),
+                Term::RuntimeField { .. } => {
+                    projected = nir::runtime_fields::declared_domain(
+                        value,
+                        evidence,
+                        runtime_domains,
+                        layouts,
+                        frames,
+                        fuel,
+                    )?;
+                    projected.as_ref()
+                }
                 Term::Runtime(id) => runtime_domains.get(id),
                 _ => return Ok(false),
             };

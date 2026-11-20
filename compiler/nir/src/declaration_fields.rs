@@ -44,6 +44,42 @@ fn prepare<'a>(
 }
 
 impl Struct {
+    pub fn addressed_field(
+        &self,
+        index: usize,
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Term, crate::NominalAdmissionError> {
+        if self.packed {
+            return Err("cannot take an aligned pointer to a field of a packed struct".into());
+        }
+        Ok(self.instantiate_field_bounded(index, arguments, frames, fuel)?)
+    }
+
+    /// Instantiate one selected field without visiting unrelated payloads.
+    pub fn instantiate_field_bounded(
+        &self,
+        index: usize,
+        arguments: &[Term],
+        frames: &[Vec<Sort>],
+        fuel: &mut usize,
+    ) -> Result<Term, Error> {
+        let substitution = prepare(
+            &self.type_parameters,
+            &self.parameter_types,
+            arguments,
+            frames,
+            1,
+            fuel,
+        )?;
+        let (_, field) = self
+            .fields
+            .get(index)
+            .ok_or_else(|| Error::Structure("field index outside struct layout".into()))?;
+        substitution.instantiate_bounded(field, fuel)
+    }
+
     /// Named payload view in caller frames. Contracts and declaration headers
     /// are not copied; defaults and formation stay with the consumer.
     pub fn instantiate_fields_bounded(

@@ -2,12 +2,6 @@
 //! checked field indices. Reading a pointer binding also fixes its write epoch.
 use super::*;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct Projection {
-    pub(super) root: nir::RuntimeId,
-    pub(super) fields: Vec<usize>,
-}
-
 /// Occurrences and identities have the same lexical and speculative lifetime.
 #[derive(Default, Clone)]
 pub(super) struct LocalOrigins {
@@ -28,7 +22,6 @@ impl Checker<'_, '_> {
         mut expr: &n::Expr,
         span: Span,
     ) -> Result<Option<Place>, Error> {
-        let mut fields = Vec::new();
         let mut address = false;
         loop {
             self.required_steps = self
@@ -36,45 +29,33 @@ impl Checker<'_, '_> {
                 .checked_sub(1)
                 .ok_or_else(|| error(span, "runtime place inspection budget exhausted"))?;
             match &expr.kind {
-                K::PointerField { pointer, index, .. }
-                | K::PointerAnonymousField { pointer, index, .. }
+                K::PointerField { pointer, .. } | K::PointerAnonymousField { pointer, .. }
                     if !address =>
                 {
-                    fields.push(*index);
                     expr = pointer;
                 }
                 K::AddressOf(place) if !address => {
                     address = true;
                     expr = place;
                 }
-                K::Field { value, index, .. } | K::AnonymousField { value, index, .. }
-                    if address =>
-                {
-                    fields.push(*index);
+                K::Field { value, .. } | K::AnonymousField { value, .. } if address => {
                     expr = value;
                 }
                 K::Local(binding) => {
-                    fields.reverse();
                     let origin = if address {
-                        LocalRuntimeOrigin::AddressOf {
-                            base: *binding,
-                            fields,
-                        }
+                        LocalRuntimeOrigin::AddressOf { base: *binding }
                     } else {
                         LocalRuntimeOrigin::LocalValue {
                             binding: *binding,
                             epoch: self.local_write_versions.get(binding).copied().unwrap_or(0),
-                            fields,
                         }
                     };
                     return Ok(Some(Place::Local(origin)));
                 }
                 K::ConstAddress { declaration, .. } if !address => {
-                    fields.reverse();
                     return Ok(Some(Place::Global(GlobalRuntimeOrigin::ConstAddress {
                         declaration: *declaration,
                         ty: self.copy_alias_type(&expr.ty, span)?,
-                        fields,
                     })));
                 }
                 _ => return Ok(None),
@@ -103,6 +84,70 @@ impl Checker<'_, '_> {
         supplier: &Expr<'_>,
         span: Span,
     ) -> Result<Term, Error> {
+        let mut root = expr;
+        let mut fields = Vec::new();
+        loop {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(span, "runtime field identity budget exhausted"))?;
+            match root.kind {
+                K::PointerField { pointer, index, .. }
+                | K::PointerAnonymousField { pointer, index, .. } => {
+                    fields.push(index);
+                    root = *pointer;
+                }
+                K::AddressOf(mut place) => {
+                    while let K::Field { value, index, .. }
+                    | K::AnonymousField { value, index, .. } = place.kind
+                    {
+                        self.required_steps =
+                            self.required_steps.checked_sub(1).ok_or_else(|| {
+                                error(span, "runtime field identity budget exhausted")
+                            })?;
+                        fields.push(index);
+                        place = value;
+                    }
+                    let ty = declaration_inputs::copy_input_domain(
+                        &place.ty,
+                        &mut self.required_steps,
+                        span,
+                    )?;
+                    root.ty = Term::Pointer(Box::new(ty));
+                    root.kind = K::AddressOf(place);
+                    break;
+                }
+                _ => break,
+            }
+        }
+        let base = self.intern_runtime_root(root, supplier, span)?;
+        Ok(fields
+            .into_iter()
+            .rev()
+            .fold(base, |base, index| Term::RuntimeField {
+                base: Box::new(base),
+                index,
+            }))
+    }
+
+    fn intern_runtime_root(
+        &mut self,
+        expr: n::Expr,
+        supplier: &Expr<'_>,
+        span: Span,
+    ) -> Result<Term, Error> {
+        if let K::Local(binding) = expr.kind {
+            if let Some((&declaration, _)) = self
+                .active_env_parameters
+                .iter()
+                .find(|(_, (id, _))| *id == binding)
+            {
+                return Ok(Term::Rigid {
+                    declaration,
+                    sort: Sort::Runtime,
+                });
+            }
+        }
         let origin = match self.runtime_place(&expr, span)? {
             Some(Place::Global(origin)) => {
                 return self
@@ -132,10 +177,6 @@ impl Checker<'_, '_> {
             _ => None,
         };
         let id = self.intern_runtime_id(Term::Lift(Box::new(expr.ty.clone())), span)?;
-        let projection = match &origin {
-            LocalRuntimeOrigin::Projection(path) => Some(path.clone()),
-            _ => None,
-        };
         let producer_site = match &origin {
             LocalRuntimeOrigin::Ephemeral { site, .. } => Some(*site),
             _ => None,
@@ -147,7 +188,6 @@ impl Checker<'_, '_> {
                 producer_site,
                 expr,
                 checked_epoch,
-                projection,
             },
         );
         Ok(Term::Runtime(id))

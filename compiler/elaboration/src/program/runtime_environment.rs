@@ -196,65 +196,7 @@ impl Acquisition {
 /// The outer field operations keep their checked layout and payload domains.
 struct EnvironmentSlot {
     operand: usize,
-    projection: Option<nir::RuntimeId>,
-}
-
-impl runtime_origins::Projection {
-    /// Copy only the checked field path. The producer under it has already
-    /// been evaluated in the caller and can be arbitrarily large.
-    pub(super) fn apply(
-        &self,
-        mut template: &n::Expr,
-        mut base: n::Expr,
-        steps: &mut u64,
-        span: Span,
-    ) -> Result<n::Expr, Error> {
-        *steps = steps
-            .checked_sub(self.fields.len() as u64)
-            .ok_or_else(|| error(span, "runtime projection budget exhausted"))?;
-        let mut path = Vec::with_capacity(self.fields.len());
-        for expected in self.fields.iter().rev() {
-            path.push(template);
-            template = match &template.kind {
-                K::PointerField { pointer, index, .. }
-                | K::PointerAnonymousField { pointer, index, .. }
-                    if index == expected =>
-                {
-                    pointer
-                }
-                _ => {
-                    return Err(error(
-                        span,
-                        "runtime projection disagrees with its field path",
-                    ));
-                }
-            };
-        }
-        for field in path.into_iter().rev() {
-            let pointer = Box::new(base);
-            let kind = match &field.kind {
-                K::PointerField {
-                    declaration, index, ..
-                } => K::PointerField {
-                    pointer,
-                    declaration: *declaration,
-                    index: *index,
-                },
-                K::PointerAnonymousField { name, index, .. } => K::PointerAnonymousField {
-                    pointer,
-                    name: name.clone(),
-                    index: *index,
-                },
-                _ => unreachable!("validated field path"),
-            };
-            base = n::Expr {
-                kind,
-                source: field.source,
-                ty: declaration_inputs::copy_input_domain(&field.ty, steps, span)?,
-            };
-        }
-        Ok(base)
-    }
+    fields: Vec<usize>,
 }
 
 impl Checker<'_, '_> {
@@ -329,33 +271,19 @@ impl Checker<'_, '_> {
         let mut slots = Vec::new();
         let mut operands: Vec<n::Expr> = Vec::new();
         let mut bind = receiver_prefixes.iter().any(|prefix| !prefix.is_empty());
-        for (mut identity, mut domain) in inputs {
-            let mut projection = None;
-            if let Term::Runtime(id) = &identity
-                && let Some(entry) = self.local_runtime_deliveries.get(id)
-                && let Some(path) = &entry.projection
-            {
-                self.require_expression(&entry.expr.ty, &domain, site.span)?;
-                let Some(Term::Lift(inner)) = self.runtime_domains.get(&path.root) else {
-                    return Err(error(
-                        site.span,
-                        "runtime projection root has no payload domain",
-                    ));
-                };
-                domain = declaration_inputs::copy_input_domain(
-                    inner,
-                    &mut self.required_steps,
-                    site.span,
-                )?;
-                projection = Some(*id);
-                identity = Term::Runtime(path.root);
+        for (identity, mut domain) in inputs {
+            let (root, fields) = self.runtime_field_path(&identity, site.span)?;
+            if !fields.is_empty() {
+                domain = self.runtime_root_payload(root, site.span)?;
                 bind = true;
             }
+            let identity =
+                declaration_inputs::copy_input_domain(root, &mut self.required_steps, site.span)?;
             if let Some(&slot) = identities.get(&identity) {
                 self.require_expression(&operands[slot].ty, &domain, site.span)?;
                 slots.push(EnvironmentSlot {
                     operand: slot,
-                    projection,
+                    fields,
                 });
                 continue;
             }
@@ -371,7 +299,7 @@ impl Checker<'_, '_> {
             let slot = operands.len();
             slots.push(EnvironmentSlot {
                 operand: slot,
-                projection,
+                fields,
             });
             identities.insert(identity, slot);
             operands.push(value);
@@ -423,15 +351,10 @@ impl Checker<'_, '_> {
                 }
             }
             order.extend((0..operands.len()).filter(|&slot| !acquired[slot]));
-            let mut captured = BTreeSet::new();
-            let mut result_ids = BTreeSet::new();
+
             if !producers.is_empty() {
-                result_ids = self.result_dependencies(&call.ty, site.span)?;
-                let roots: BTreeSet<_> = result_ids
-                    .iter()
-                    .map(|&id| self.dependency_root(id))
-                    .collect();
-                producers.retain(|_, id| roots.contains(id));
+                let result_ids = self.result_dependencies(&call.ty, site.span)?;
+                producers.retain(|_, id| result_ids.contains(id));
             }
             for slot in order {
                 // The enclosing source argument establishes this binding at
@@ -452,25 +375,13 @@ impl Checker<'_, '_> {
                         .acquired_bindings
                         .insert(binding, id);
                     self.immutable.insert(binding);
-                    captured.insert(id);
                 }
-            }
-            if !captured.is_empty() {
-                self.rebase_environment_projections(&result_ids, &captured, site.span)?;
             }
         }
         for slot in slots {
             let base = &operands[slot.operand];
             constants::charge_copy(base, &mut self.required_steps, site.span)?;
-            let mut value = base.clone();
-            if let Some(id) = slot.projection {
-                let entry = &self.local_runtime_deliveries[&id];
-                let path = entry
-                    .projection
-                    .as_ref()
-                    .expect("checked environment projection");
-                value = path.apply(&entry.expr, value, &mut self.required_steps, site.span)?;
-            }
+            let value = self.apply_runtime_fields(base.clone(), slot.fields, site.span)?;
             env_arguments.push(value);
         }
         Ok(CallEnvironment {

@@ -242,56 +242,13 @@ pub(super) fn check_access_with_context(
     if function.parameters != selected.parameters || program != selected.program {
         return Err("captured Drop body contract changed".into());
     }
-    let mut expected_env = Vec::with_capacity(function.env_parameters.len());
-    let mut existing_envs = Vec::with_capacity(function.env_parameters.len());
-    for env in &function.env_parameters {
-        let substituted = substitution
-            .instantiate_bounded(
-                &Term::Rigid {
-                    declaration: env.declaration,
-                    sort: Sort::Runtime,
-                },
-                fuel,
-            )
-            .map_err(|e| e.to_string())?;
-        let (declaration, runtime_id) = match substituted {
-            Term::Runtime(id) => (env.declaration, Some(id)),
-            Term::Rigid {
-                declaration: next,
-                sort: Sort::Runtime,
-            } => (next, env.runtime_id),
-            _ => return Err("captured Drop environment parameter disagrees with body".into()),
-        };
-        let ty = substitution
-            .instantiate_bounded(&env.ty, fuel)
-            .map_err(|e| e.to_string())?;
-        existing_envs.push(nir::program::RuntimeEnvParameter {
-            declaration,
-            runtime_id,
-            binding: env.binding,
-            ty: ty.clone(),
-        });
-        expected_env.push(DropEnvRequirement {
-            declaration,
-            runtime_id,
-            binding: env.binding,
-            ty,
-        });
-    }
-    let implicit_envs = nir::program::implicit_runtime_env_parameters(
-        &package.runtime_domains,
-        &package.global_runtime_deliveries,
+    let expected_env = drop_environment(
+        package,
+        function,
+        &substitution,
         &selected.method.arguments,
-        &existing_envs,
+        fuel,
     )?;
-    for env in implicit_envs {
-        expected_env.push(DropEnvRequirement {
-            declaration: env.declaration,
-            runtime_id: env.runtime_id,
-            binding: env.binding,
-            ty: env.ty,
-        });
-    }
     if expected_env != selected.env_requirements {
         return Err("captured Drop body environment contract changed".into());
     }
@@ -306,13 +263,17 @@ pub(super) fn check_access_with_context(
             .ok_or("Drop runtime environment requires an active call-site environment context")?;
         for req in &selected.env_requirements {
             charge(fuel, 1)?;
+            let (root, fields) = nir::runtime_fields::path(&req.identity, fuel)?;
             let delivered = env_ctx
                 .env_parameters
                 .iter()
-                .find(|ep| match (req.runtime_id, ep.runtime_id) {
-                    (Some(req_id), Some(ep_id)) => req_id == ep_id,
-                    (None, _) => ep.declaration == req.declaration,
-                    (Some(_), None) => false,
+                .find(|ep| match root {
+                    Term::Runtime(id) => ep.runtime_id == Some(*id),
+                    Term::Rigid {
+                        declaration,
+                        sort: Sort::Runtime,
+                    } => ep.declaration == *declaration,
+                    _ => false,
                 })
                 .map(|ep| nir::program::Expr {
                     source: env_ctx.fallback_source,
@@ -320,15 +281,23 @@ pub(super) fn check_access_with_context(
                     kind: nir::program::ExprKind::Local(ep.binding),
                 })
                 .or_else(|| {
-                    req.runtime_id.and_then(|id| {
-                        env_ctx
-                            .runtime_deliveries
-                            .get(&id)
-                            .or_else(|| env_ctx.global_runtime_deliveries.get(&id))
-                            .cloned()
-                    })
+                    let Term::Runtime(id) = root else { return None };
+                    env_ctx
+                        .runtime_deliveries
+                        .get(id)
+                        .or_else(|| env_ctx.global_runtime_deliveries.get(id))
+                        .cloned()
                 })
                 .ok_or("Drop runtime environment argument is not deliverable in this scope")?;
+            let delivered = nir::runtime_fields::address(
+                delivered,
+                &fields,
+                env_ctx.fallback_source,
+                fuel,
+                |ty, index, fuel| {
+                    nir::runtime_fields::struct_field(ty, index, Some(package), &[], fuel)
+                },
+            )?;
             if delivered.ty != req.ty {
                 return Err(
                     "Drop runtime environment argument type disagrees with requirement".into(),
@@ -615,6 +584,27 @@ fn resolve_env_pointer_targets(
 ) -> Result<BTreeSet<Place>, String> {
     use nir::program::ExprKind as K;
     match &delivered.kind {
+        K::PointerField { pointer, index, .. } | K::PointerAnonymousField { pointer, index, .. } => {
+            let Term::Pointer(base) = &pointer.ty else {
+                return Err("Drop field address requires a pointer".into());
+            };
+            let bases = resolve_env_pointer_targets(package, pointer, base, state, pointers, variant_layouts, fuel)?;
+            let mut targets = BTreeSet::new();
+            for mut place in bases {
+                charge(fuel, 1)?;
+                place.fields.push(*index);
+                if !crate::is_const_global_place(place.root) {
+                    check_retired(pointers.retired, &place, fuel)?;
+                    state.require_present(&place).map_err(|e| format!("Drop environment field is unavailable: {e:?}"))?;
+                }
+                if (!crate::is_const_global_place(place.root) || pointers.types.contains_key(&place.root))
+                    && place_type(package, pointers.types, &place, variant_layouts, fuel)? != *pointee {
+                    return Err("Drop field address has the wrong target type".into());
+                }
+                targets.insert(place);
+            }
+            Ok(targets)
+        }
         K::ConstAddress { declaration, value } => {
             if &value.ty != pointee {
                 return Err(

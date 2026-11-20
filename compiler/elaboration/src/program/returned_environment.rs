@@ -30,13 +30,6 @@ impl Checker<'_, '_> {
         .map_err(|e| error(span, e.to_string()))
     }
 
-    pub(super) fn dependency_root(&self, id: nir::RuntimeId) -> nir::RuntimeId {
-        self.local_runtime_deliveries
-            .get(&id)
-            .and_then(|entry| entry.projection.as_ref())
-            .map_or(id, |path| path.root)
-    }
-
     pub(super) fn take_returned_environment(
         &mut self,
         value: &mut n::Expr,
@@ -44,8 +37,7 @@ impl Checker<'_, '_> {
     ) -> Result<Vec<n::Expr>, Error> {
         let dependencies = self.result_dependencies(&value.ty, span)?;
         let mut escaping = BTreeSet::new();
-        for id in dependencies {
-            let root = self.dependency_root(id);
+        for root in dependencies {
             if let Some(entry) = self.local_runtime_deliveries.get(&root)
                 && let K::Local(binding) = entry.expr.kind
                 && self
@@ -126,7 +118,6 @@ impl Checker<'_, '_> {
 
         let cuts: Vec<_> = regions.into_iter().map(<[_]>::len).collect();
         let mut prefix = Vec::new();
-        let mut transferred = BTreeSet::new();
         let mut cursor = value;
         for cut in cuts {
             let (K::CallPreparation {
@@ -171,7 +162,6 @@ impl Checker<'_, '_> {
                         self.local_runtime_origins
                             .acquired_bindings
                             .insert(*binding, id);
-                        transferred.insert(id);
                     }
                     statements.push(n::Expr {
                         ty: stmt.ty.clone(),
@@ -190,24 +180,6 @@ impl Checker<'_, '_> {
             }
             statements.extend(tail);
             cursor = body;
-        }
-        if !transferred.is_empty() {
-            self.required_steps = self
-                .required_steps
-                .checked_sub(self.local_runtime_deliveries.len() as u64)
-                .ok_or_else(|| error(span, "returned environment projection budget exhausted"))?;
-            let projections = self
-                .local_runtime_deliveries
-                .iter()
-                .filter_map(|(id, entry)| {
-                    entry
-                        .projection
-                        .as_ref()
-                        .filter(|path| transferred.contains(&path.root))
-                        .map(|_| *id)
-                })
-                .collect();
-            self.rebase_environment_projections(&projections, &transferred, span)?;
         }
         Ok(prefix)
     }

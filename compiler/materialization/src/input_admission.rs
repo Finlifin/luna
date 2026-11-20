@@ -61,6 +61,18 @@ impl Builder<'_> {
                 arguments,
                 budget,
                 &mut |value, domain, fuel| {
+                    if matches!(value, Term::RuntimeField { .. }) {
+                        return Ok(nir::runtime_fields::declared_domain(
+                            value,
+                            &self.value_scope.0,
+                            &self.package.runtime_domains,
+                            Some(self.package),
+                            &[],
+                            fuel,
+                        )?
+                        .as_ref()
+                            == Some(domain));
+                    }
                     if let Term::Runtime(id) = value {
                         nir::type_computations::charge_term(domain, fuel)?;
                         return Ok(self

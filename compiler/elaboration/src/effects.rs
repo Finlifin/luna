@@ -250,6 +250,7 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
             terms(environment, fuel, depth - 1)
         }
         Term::Optional(inner)
+        | Term::RuntimeField { base: inner, .. }
         | Term::Pointer(inner)
         | Term::Lift(inner)
         | Term::ComptimeFunction(inner)

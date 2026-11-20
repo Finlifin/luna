@@ -80,7 +80,8 @@ macro_rules! visit_children {
                 }
                 $visit(value)?;
             }
-            Self::Optional(inner)
+            Self::RuntimeField { base: inner, .. }
+            | Self::Optional(inner)
             | Self::Pointer(inner)
             | Self::Lift(inner)
             | Self::ComptimeFunction(inner)

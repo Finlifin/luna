@@ -3,9 +3,9 @@
 use super::{Sort, Term, UnknownReason};
 
 pub(super) fn distinct(left: &Term, right: &Term, fuel: &mut usize) -> Result<bool, UnknownReason> {
-    if let (Term::Runtime(left), Term::Runtime(right)) = (left, right) {
-        *fuel = fuel.checked_sub(1).ok_or(UnknownReason::BudgetExhausted)?;
-        return Ok(left != right);
+    if left.sort() == Sort::Runtime && right.sort() == Sort::Runtime {
+        return nir::runtime_fields::distinct(left, right, fuel)
+            .map_err(|_| UnknownReason::BudgetExhausted);
     }
     if left.sort() != Sort::ComptimeValue || right.sort() != Sort::ComptimeValue {
         return Ok(false);

@@ -1,7 +1,6 @@
 //! Runtime default providers are checked with the payload domains of their
 //! lexical quote inputs. These temporary locals belong to the provider only.
 use super::*;
-use runtime_origins::Place;
 
 struct Provider {
     value: n::Expr,
@@ -9,6 +8,160 @@ struct Provider {
 }
 
 impl Checker<'_, '_> {
+    /// Rebuild a checked address in the active lexical environment. A
+    /// projected identity can occur in a signature without such an environment.
+    pub(super) fn deliver_runtime_field(
+        &mut self,
+        term: &Term,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let (root, fields) = self.runtime_field_path(term, span)?;
+        let domain = self.runtime_root_payload(root, span)?;
+        let base = self.deliver_runtime_dependency(root, &domain, span)?;
+        self.apply_runtime_fields(base, fields, span)
+    }
+
+    pub(super) fn runtime_field_path<'a>(
+        &mut self,
+        term: &'a Term,
+        span: Span,
+    ) -> Result<(&'a Term, Vec<usize>), Error> {
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let result = nir::runtime_fields::path(term, &mut fuel);
+        self.required_steps -= (before - fuel) as u64;
+        result.map_err(|e| error(span, e.to_string()))
+    }
+
+    pub(super) fn runtime_root_payload(&mut self, root: &Term, span: Span) -> Result<Term, Error> {
+        let domain = match root {
+            Term::Runtime(id) => self.runtime_domains.get(id).and_then(|ty| match ty {
+                Term::Lift(inner) => Some(inner.as_ref()),
+                _ => None,
+            }),
+            Term::Rigid {
+                declaration,
+                sort: Sort::Runtime,
+            } => self
+                .active_env_parameters
+                .get(declaration)
+                .map(|(_, ty)| ty),
+            _ => None,
+        }
+        .ok_or_else(|| error(span, "runtime projection root is unavailable"))?;
+        declaration_inputs::copy_input_domain(domain, &mut self.required_steps, span)
+    }
+
+    pub(super) fn apply_runtime_fields(
+        &mut self,
+        base: n::Expr,
+        fields: Vec<usize>,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        if fields.is_empty() {
+            return Ok(base);
+        }
+        let frames = self.call_input_frames();
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let result = nir::runtime_fields::address(
+            base,
+            &fields,
+            source(span),
+            &mut fuel,
+            |ty, index, fuel| {
+                let Term::Nominal {
+                    declaration,
+                    arguments,
+                } = ty
+                else {
+                    return Err("field requires a struct".into());
+                };
+                let def = self
+                    .structs
+                    .get(declaration)
+                    .ok_or("missing struct descriptor")?;
+                def.addressed_field(index, arguments, &frames, fuel)
+            },
+        );
+        self.required_steps -= (before - fuel) as u64;
+        result.map_err(|e| error(span, e.to_string()))
+    }
+
+    /// Interpret only field-address selections on a provider's quote inputs.
+    /// The provider locals are discarded after checking and never escape as
+    /// runtime identities.
+    fn provider_identity(
+        &mut self,
+        provider: &Provider,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        let mut fields = Vec::new();
+        let mut root = &provider.value;
+        loop {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(span, "runtime projection budget exhausted"))?;
+            match &root.kind {
+                K::PointerField { pointer, index, .. }
+                | K::PointerAnonymousField { pointer, index, .. } => {
+                    fields.push(*index);
+                    root = pointer;
+                }
+                K::Local(binding) => {
+                    let Some(id) = provider.inputs.get(binding) else {
+                        return Ok(None);
+                    };
+                    let identity = match self.alias_substitution.get(id) {
+                        Some(term) if term.sort() == Sort::Runtime => {
+                            declaration_inputs::copy_input_domain(
+                                term,
+                                &mut self.required_steps,
+                                span,
+                            )?
+                        }
+                        Some(_) => {
+                            return Err(error(span, "quote input requires a runtime identity"));
+                        }
+                        None => Term::Rigid {
+                            declaration: *id,
+                            sort: Sort::Runtime,
+                        },
+                    };
+                    return Ok(Some(fields.into_iter().rev().fold(
+                        identity,
+                        |base, index| Term::RuntimeField {
+                            base: Box::new(base),
+                            index,
+                        },
+                    )));
+                }
+                _ => return Ok(None),
+            }
+        }
+    }
+
+    pub(super) fn signature_runtime_projection(
+        &mut self,
+        value: &Expr<'_>,
+        expected: &Term,
+    ) -> Result<Option<Term>, Error> {
+        let mut root = value;
+        while let H::Projection(base, _) = root.kind {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(value.span, "runtime projection budget exhausted"))?;
+            root = base;
+        }
+        if !matches!(root.kind, H::ResolvedClauseParam(..)) {
+            return Ok(None);
+        }
+        let provider = self.runtime_default_provider(value.hir_id.owner, value, Some(expected))?;
+        self.provider_identity(&provider, value.span)
+    }
+
     pub(super) fn check_runtime_default(
         &mut self,
         owner: OwnerId,
@@ -103,100 +256,28 @@ impl Checker<'_, '_> {
             return Ok(Term::Runtime(existing));
         }
         let expected_inner = self.callable_input_view(expected_inner, value.span)?;
-        let Provider {
-            value: mut checked,
-            inputs,
-        } = self.runtime_default_provider(owner, value, Some(&expected_inner))?;
+        let provider = self.runtime_default_provider(owner, value, Some(&expected_inner))?;
+        if let Some(identity) = self.provider_identity(&provider, value.span)? {
+            return Ok(identity);
+        }
+        let checked = provider.value;
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = fuel;
         let free = nir::free_bindings::collect(&checked, &mut fuel);
         self.required_steps -= (before - fuel) as u64;
-        let free = free.map_err(|reason| error(value.span, reason.to_string()))?;
-        if !free.is_empty() {
-            let mut fields = Vec::new();
-            let mut root = &mut checked;
-            let binding = loop {
-                match root.kind {
-                    K::PointerField {
-                        ref mut pointer,
-                        index,
-                        ..
-                    }
-                    | K::PointerAnonymousField {
-                        ref mut pointer,
-                        index,
-                        ..
-                    } => {
-                        fields.push(index);
-                        root = pointer;
-                    }
-                    K::Local(binding) => break binding,
-                    _ => {
-                        return Err(error(
-                            value.span,
-                            "computed quote default requires a scoped runtime operand",
-                        ));
-                    }
-                }
-            };
-            let id = inputs.get(&binding).ok_or_else(|| {
-                error(value.span, "runtime default refers to an unavailable input")
-            })?;
-            let identity = self
-                .alias_substitution
-                .get(id)
-                .cloned()
-                .unwrap_or(Term::Rigid {
-                    declaration: *id,
-                    sort: Sort::Runtime,
-                });
-            let base = self.deliver_runtime_dependency(&identity, &root.ty, span)?;
-            // A lexical temporary is a delivery location. Projection identity
-            // still follows the original supplier even after acquisition.
-            let computed_root = match &identity {
-                Term::Runtime(id) => self.local_runtime_deliveries.get(id).is_some_and(|entry| {
-                    entry.producer_site.is_some() || entry.projection.is_some()
-                }),
-                _ => false,
-            };
-            let stable_place = !computed_root && self.runtime_place(&base, span)?.is_some();
-            *root = base;
-            if !stable_place {
-                let Term::Runtime(id) = identity else {
-                    return Err(error(
-                        span,
-                        "computed runtime dependency has no producer identity",
-                    ));
-                };
-                fields.reverse();
-                let mut path = runtime_origins::Projection {
-                    root: id,
-                    fields: Vec::new(),
-                };
-                if let Some(parent) = self
-                    .local_runtime_deliveries
-                    .get(&id)
-                    .and_then(|d| d.projection.as_ref())
-                {
-                    self.required_steps = self
-                        .required_steps
-                        .checked_sub(parent.fields.len() as u64)
-                        .ok_or_else(|| error(span, "runtime projection path budget exhausted"))?;
-                    path.root = parent.root;
-                    path.fields.extend_from_slice(&parent.fields);
-                }
-                path.fields.extend(fields);
-                return self.intern_local_runtime_operand(
-                    LocalRuntimeOrigin::Projection(std::sync::Arc::new(path)),
-                    checked,
-                    span,
-                );
-            }
+        if !free
+            .map_err(|reason| error(value.span, reason.to_string()))?
+            .is_empty()
+        {
+            return Err(error(
+                value.span,
+                "computed quote default requires a scoped runtime operand",
+            ));
+        }
+        if self.runtime_place(&checked, span)?.is_some() {
             return self.intern_runtime_operand(checked, value, span);
         }
-        let id = if let Some(Place::Global(origin)) = self.runtime_place(&checked, span)? {
-            self.intern_global_runtime_operand(origin, checked, span)?
-        } else {
+        let id = {
             let id = self.intern_runtime_id(Term::Lift(Box::new(checked.ty.clone())), span)?;
             self.global_runtime_deliveries.insert(id, checked);
             id

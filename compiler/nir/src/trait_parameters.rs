@@ -747,6 +747,31 @@ impl Trait {
                 value if value.scalar_index_domain().is_some() => {
                     Term::Primitive(value.scalar_index_domain().unwrap())
                 }
+                Term::RuntimeField { .. } => crate::runtime_fields::domain(
+                    argument,
+                    fuel,
+                    |root, fuel| match root {
+                        Term::Runtime(id) => {
+                            let domain = layouts.and_then(|pkg| pkg.runtime_domains.get(id));
+                            if let Some(ty) = domain {
+                                crate::type_computations::charge_term(ty, fuel)?;
+                            }
+                            Ok(domain.cloned())
+                        }
+                        Term::Rigid {
+                            declaration,
+                            sort: Sort::Runtime,
+                        } => {
+                            declared_value_domain(*declaration, declarations, domains, scope, fuel)
+                                .map(Some)
+                        }
+                        _ => Ok(None),
+                    },
+                    |ty, index, fuel| {
+                        crate::runtime_fields::struct_field(ty, index, layouts, scope, fuel)
+                    },
+                )?
+                .ok_or("trait runtime field requires declared domain evidence")?,
                 Term::Runtime(id) => layouts
                     .and_then(|package| package.runtime_domains.get(id))
                     .cloned()

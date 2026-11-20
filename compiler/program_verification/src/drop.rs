@@ -19,16 +19,14 @@ pub use evidence::SelectionEvidence;
 #[derive(Clone, Debug, PartialEq)]
 pub struct DropEnvRequirement {
     pub declaration: DeclarationId,
-    pub runtime_id: Option<nir::RuntimeId>,
+    pub identity: Term,
     pub binding: LocalId,
     pub ty: Term,
 }
 impl fmt::Display for DropEnvRequirement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(drop-env (declaration {})", self.declaration)?;
-        if let Some(id) = self.runtime_id {
-            write!(f, " (runtime-id {id})")?;
-        }
+        write!(f, " (identity {})", self.identity)?;
         write!(f, " (binding {}) (type {}))", self.binding, self.ty)
     }
 }
@@ -403,60 +401,13 @@ pub fn select(
         &mut preparation_fuel,
     )
     .map_err(|e| e.to_string())?;
-    let mut env_requirements = Vec::with_capacity(function.env_parameters.len());
-    let mut existing_envs = Vec::with_capacity(function.env_parameters.len());
-    for env in &function.env_parameters {
-        let substituted = scoped
-            .instantiate_bounded(
-                &Term::Rigid {
-                    declaration: env.declaration,
-                    sort: Sort::Runtime,
-                },
-                &mut preparation_fuel,
-            )
-            .map_err(|e| e.to_string())?;
-        let (declaration, runtime_id) = match substituted {
-            Term::Runtime(id) => (env.declaration, Some(id)),
-            Term::Rigid {
-                declaration: next,
-                sort: Sort::Runtime,
-            } => (next, env.runtime_id),
-            _ => {
-                return Err(
-                    "Drop environment parameter did not instantiate to a runtime identity".into(),
-                );
-            }
-        };
-        let ty = scoped
-            .instantiate_bounded(&env.ty, &mut preparation_fuel)
-            .map_err(|e| e.to_string())?;
-        existing_envs.push(nir::program::RuntimeEnvParameter {
-            declaration,
-            runtime_id,
-            binding: env.binding,
-            ty: ty.clone(),
-        });
-        env_requirements.push(DropEnvRequirement {
-            declaration,
-            runtime_id,
-            binding: env.binding,
-            ty,
-        });
-    }
-    let implicit_envs = nir::program::implicit_runtime_env_parameters(
-        &package.runtime_domains,
-        &package.global_runtime_deliveries,
+    let env_requirements = drop_environment(
+        package,
+        function,
+        &scoped,
         &arguments,
-        &existing_envs,
+        &mut preparation_fuel,
     )?;
-    for env in implicit_envs {
-        env_requirements.push(DropEnvRequirement {
-            declaration: env.declaration,
-            runtime_id: env.runtime_id,
-            binding: env.binding,
-            ty: env.ty,
-        });
-    }
     for requirement in &function.requirements {
         let requirement = scoped
             .instantiate_predicate_bounded(requirement, &mut preparation_fuel)
@@ -529,3 +480,71 @@ pub use plan::{
     RequiredDropInstance, VariantCleanup, acquire_cleanup, plan_cleanup, plan_cleanup_with_memory,
     plan_cleanup_with_variants,
 };
+
+fn drop_environment(
+    package: &Package,
+    function: &nir::program::Function,
+    substitution: &nir::DeclarationSubstitution<'_>,
+    arguments: &[Term],
+    fuel: &mut usize,
+) -> Result<Vec<DropEnvRequirement>, String> {
+    let mut env_requirements = Vec::with_capacity(function.env_parameters.len());
+    let mut existing_envs = Vec::with_capacity(function.env_parameters.len());
+    for env in &function.env_parameters {
+        let substituted = substitution
+            .instantiate_bounded(
+                &Term::Rigid {
+                    declaration: env.declaration,
+                    sort: Sort::Runtime,
+                },
+                fuel,
+            )
+            .map_err(|e| e.to_string())?;
+        let (declaration, runtime_id) = match &substituted {
+            Term::Runtime(id) => (env.declaration, Some(*id)),
+            Term::Rigid {
+                declaration: next,
+                sort: Sort::Runtime,
+            } => (*next, env.runtime_id),
+            Term::RuntimeField { .. } => (env.declaration, None),
+            _ => {
+                return Err(
+                    "Drop environment parameter did not instantiate to a runtime identity".into(),
+                );
+            }
+        };
+        let ty = substitution
+            .instantiate_bounded(&env.ty, fuel)
+            .map_err(|e| e.to_string())?;
+        existing_envs.push(nir::program::RuntimeEnvParameter {
+            declaration,
+            runtime_id,
+            binding: env.binding,
+            ty: ty.clone(),
+        });
+        env_requirements.push(DropEnvRequirement {
+            declaration,
+            identity: runtime_id.map_or(substituted, Term::Runtime),
+            binding: env.binding,
+            ty,
+        });
+    }
+    let implicit_envs = nir::program::implicit_runtime_env_parameters(
+        &package.runtime_domains,
+        &package.global_runtime_deliveries,
+        arguments,
+        &existing_envs,
+    )?;
+    for env in implicit_envs {
+        env_requirements.push(DropEnvRequirement {
+            declaration: env.declaration,
+            identity: Term::Runtime(
+                env.runtime_id
+                    .ok_or("implicit environment requires a runtime identity")?,
+            ),
+            binding: env.binding,
+            ty: env.ty,
+        });
+    }
+    Ok(env_requirements)
+}

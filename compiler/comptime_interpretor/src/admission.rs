@@ -55,6 +55,9 @@ impl Interpreter<'_> {
                     self.runtime_domains(),
                     value,
                     domain,
+                    Some(&|ty, index, frames, fuel| {
+                        self.runtime_struct_field(ty, index, frames, fuel)
+                    }),
                     fuel,
                 )
             },
@@ -111,6 +114,42 @@ impl Interpreter<'_> {
         let value = self.normal_pattern_value_at(term, ty, 0, false)?;
         self.validate_immutable_input(&value, ty)?;
         Ok(value)
+    }
+
+    pub(super) fn runtime_struct_field(
+        &self,
+        ty: &Term,
+        index: usize,
+        frames: &[Vec<nir::Sort>],
+        fuel: &mut usize,
+    ) -> Result<Term, nir::NominalAdmissionError> {
+        nir::type_computations::charge_term(ty, fuel)?;
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return Err("runtime field requires a struct".into());
+        };
+        if self.graph.is_some() {
+            let Some(ConcreteNominal::Struct(def)) = self.concrete_nominal(ty) else {
+                return Err("runtime field requires an admitted struct instance".into());
+            };
+            if def.packed {
+                return Err("packed struct field cannot supply an aligned address".into());
+            }
+            let (_, field) = def
+                .fields
+                .get(index)
+                .ok_or("field index outside struct instance")?;
+            nir::type_computations::charge_term(field, fuel)?;
+            return Ok(field.clone());
+        }
+        let def = self
+            .structs
+            .get(declaration)
+            .ok_or("runtime field requires a struct declaration")?;
+        def.addressed_field(index, arguments, frames, fuel)
     }
 
     pub(super) fn admitted_nominal_layout(

@@ -36,6 +36,7 @@ impl Interpreter<'_> {
             &self.abstract_type_parameters,
             &self.abstract_value_parameters,
             self.runtime_domains(),
+            Some(&|ty, index, frames, fuel| self.runtime_struct_field(ty, index, frames, fuel)),
             |ty, variant, fuel| self.query_normal_value_fields(ty, variant, fuel),
             |value, frames, fuel| self.admitted_callable_signature(value, frames, fuel),
             self.target,
@@ -56,6 +57,7 @@ impl Interpreter<'_> {
             &BTreeSet::new(),
             &BTreeMap::new(),
             self.runtime_domains(),
+            Some(&|ty, index, frames, fuel| self.runtime_struct_field(ty, index, frames, fuel)),
             |ty, variant, fuel| self.query_normal_value_fields(ty, variant, fuel),
             |value, frames, fuel| self.admitted_callable_signature(value, frames, fuel),
             self.target,
@@ -169,19 +171,19 @@ impl<'t> Telescope<'t> {
 
 /// Resolve just the requested value binder. A parameter domain is relative to
 /// its declaration frame, so lift its outer references to the observation site.
-pub(super) fn declared_domain_matches(
-    frames: &[&[nir::Parameter]],
-    values: &BTreeMap<DeclarationId, Term>,
-    runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
+type StructField<'a> =
+    dyn Fn(&Term, usize, &[Vec<nir::Sort>], &mut usize) -> Result<Term, AdmissionError> + 'a;
+
+fn declared_domain<'a>(
+    frames: &[&'a [nir::Parameter]],
+    values: &'a BTreeMap<DeclarationId, Term>,
+    runtime_domains: &'a BTreeMap<nir::RuntimeId, Term>,
     value: &Term,
-    domain: &Term,
-    fuel: &mut usize,
-) -> Result<bool, AdmissionError> {
-    *fuel = fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
-    let (expected, distance) = match value {
+) -> Option<(&'a Term, u32)> {
+    Some(match value {
         Term::Runtime(id) => {
             let Some(expected) = runtime_domains.get(id) else {
-                return Ok(false);
+                return None;
             };
             (expected, 0)
         }
@@ -190,14 +192,14 @@ pub(super) fn declared_domain_matches(
             sort: nir::Sort::ComptimeValue | nir::Sort::Runtime,
         } => {
             let Some(expected) = values.get(declaration) else {
-                return Ok(false);
+                return None;
             };
             let rigid = Term::Rigid {
                 declaration: *declaration,
                 sort: nir::Sort::of_comptime_domain(expected),
             };
             if rigid != *value {
-                return Ok(false);
+                return None;
             }
             (expected, 0)
         }
@@ -216,11 +218,60 @@ pub(super) fn declared_domain_matches(
                 .nth(*depth as usize)
                 .and_then(|frame| frame.get(*index));
             let Some(parameter) = parameter.filter(|p| p.sort == expected_sort) else {
-                return Ok(false);
+                return None;
             };
             (&parameter.ty, *depth)
         }
-        _ => return Ok(false),
+        _ => return None,
+    })
+}
+
+fn projected_domain(
+    frames: &[&[nir::Parameter]],
+    values: &BTreeMap<DeclarationId, Term>,
+    runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
+    value: &Term,
+    field: Option<&StructField<'_>>,
+    fuel: &mut usize,
+) -> Result<Option<Term>, AdmissionError> {
+    nir::runtime_fields::domain(
+        value,
+        fuel,
+        |root, fuel| {
+            let Some((ty, distance)) = declared_domain(frames, values, runtime_domains, root)
+            else {
+                return Ok(None);
+            };
+            nir::type_computations::charge_term(ty, fuel)?;
+            Ok(Some(ty.under_binders(distance).map_err(|e| e.to_string())?))
+        },
+        |ty, index, fuel| {
+            let field = field.ok_or("struct field requires declaration evidence")?;
+            let scope = Telescope::enclosing(frames, fuel).map_err(|_| AdmissionError::Budget)?;
+            field(ty, index, &scope.sorts, fuel)
+        },
+    )
+}
+
+pub(super) fn declared_domain_matches(
+    frames: &[&[nir::Parameter]],
+    values: &BTreeMap<DeclarationId, Term>,
+    runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
+    value: &Term,
+    domain: &Term,
+    field: Option<&StructField<'_>>,
+    fuel: &mut usize,
+) -> Result<bool, AdmissionError> {
+    *fuel = fuel.checked_sub(1).ok_or(AdmissionError::Budget)?;
+    if matches!(value, Term::RuntimeField { .. }) {
+        nir::type_computations::charge_term(domain, fuel)?;
+        return Ok(
+            projected_domain(frames, values, runtime_domains, value, field, fuel)?.as_ref()
+                == Some(domain),
+        );
+    }
+    let Some((expected, distance)) = declared_domain(frames, values, runtime_domains, value) else {
+        return Ok(false);
     };
     nir::type_computations::charge_term(expected, fuel)?;
     nir::type_computations::charge_term(domain, fuel)?;
@@ -249,6 +300,7 @@ pub(super) fn inspect_data_term(
         parameters,
         value_parameters,
         runtime_domains,
+        None,
         |_, _, _| Err("nominal layout unavailable during structural inspection".into()),
         |_, _, _| Ok(None),
         None,
@@ -264,6 +316,7 @@ pub(super) fn inspect<'signature>(
     parameters: &BTreeSet<DeclarationId>,
     value_parameters: &BTreeMap<DeclarationId, Term>,
     runtime_domains: &BTreeMap<nir::RuntimeId, Term>,
+    field: Option<&StructField<'_>>,
     nominal_fields: impl Fn(&Term, Option<u32>, &mut usize) -> Result<Vec<Term>, AdmissionError>,
     callable_signature: impl Fn(
         nir::CallableValueRef<'_>,
@@ -371,7 +424,8 @@ pub(super) fn inspect<'signature>(
             Term::Closure { environment, .. } => environment.len().saturating_add(1),
             Term::ContextualClosure { .. } => 2,
             Term::Function { parameters, .. } => parameters.len().saturating_add(1),
-            Term::Optional(_)
+            Term::RuntimeField { .. }
+            | Term::Optional(_)
             | Term::Pointer(_)
             | Term::Lift(_)
             | Term::ComptimeFunction(_)
@@ -442,6 +496,7 @@ pub(super) fn inspect<'signature>(
                                     runtime_domains,
                                     value,
                                     domain,
+                                    field,
                                     fuel,
                                 )
                             },
@@ -506,6 +561,26 @@ pub(super) fn inspect<'signature>(
             } if value_parameters
                 .get(declaration)
                 .is_some_and(|domain| matches!(domain, Term::Lift(_))) => {}
+            Term::RuntimeField { .. } => {
+                let (root, fields) =
+                    nir::runtime_fields::path(ty, fuel).map_err(|_| ErrorKind::StepsExhausted)?;
+                projected_domain(
+                    &scope.parameters,
+                    value_parameters,
+                    runtime_domains,
+                    ty,
+                    field,
+                    fuel,
+                )
+                .map_err(|e| match e {
+                    AdmissionError::Budget => ErrorKind::StepsExhausted,
+                    AdmissionError::Unresolved(_) => ErrorKind::TypeContractUnresolved,
+                    AdmissionError::Invalid(_) => ErrorKind::Type,
+                })?
+                .ok_or(ErrorKind::Type)?;
+                work = work.saturating_add(fields.len() - 1);
+                pending.push(Work::Visit(root, depth + fields.len()));
+            }
             Term::Runtime(id) if runtime_domains.contains_key(id) => {}
             Term::AssociatedType { .. } => return Err(ErrorKind::UnmaterializedDispatch),
             Term::Rigid { .. } | Term::Runtime(_) | Term::Value { .. } | Term::Hole { .. } => {

@@ -100,3 +100,4 @@ mod method_identity;
 pub use method_identity::{CallableValueRef, TraitMethodIdentity};
 
 pub mod declaration_fields;
+pub mod runtime_fields;

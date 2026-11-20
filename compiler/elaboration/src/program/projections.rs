@@ -1653,13 +1653,11 @@ impl Checker<'_, '_> {
                 .iter()
                 .position(|(name, _)| name == field.name.as_str())
                 .ok_or_else(|| error(field.span, format!("unknown struct field {}", field.name)))?;
-            let ty = self.instantiate_declaration_type(
-                &def.fields[index].1,
-                &def.type_parameters,
-                &def.parameter_types,
-                arguments,
-                expr.span,
-            )?;
+            let frames = self.call_input_frames();
+            let ty = nominal_fields::metered(&mut self.required_steps, |fuel| {
+                def.instantiate_field_bounded(index, arguments, &frames, fuel)
+            })
+            .map_err(|e| error(expr.span, e.to_string()))?;
             let ty = self.callable_input_view(&ty, expr.span)?;
             let declaration = *declaration;
             if pointer_projection {

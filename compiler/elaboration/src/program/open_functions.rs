@@ -8026,7 +8026,6 @@ impl Checker<'_, '_> {
                         rt_id,
                         LocalRuntimeDelivery {
                             producer_site: None,
-                            projection: None,
                             expr: n::Expr {
                                 source: source(span),
                                 ty: inner_ty.clone(),

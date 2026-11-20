@@ -980,14 +980,18 @@ fn projected_quote_defaults_keep_the_field_and_storage_identity() {
             projected<src>()
         }
 
+        fn forward_view(v: View<src>) -> View<src, .field = src.first> where quote src: lift *Cell {
+            v
+        }
+
         fn run() -> bool {
             var a = Cell { first: 17, second: 32 };
             var b = Cell { first: 42, second: 17 };
             let left = View<a.ref> {};
             let right = View<b.ref> {};
             let global = View<Cell.GLOBAL.ref> {};
-            read_view<a.ref, a.first.ref>(left) == 17
-                and read_view<b.ref, b.first.ref>(right) == 42
+            read_view<a.ref, a.first.ref>(forward_view<a.ref>(left)) == 17
+                and read_view<b.ref, b.first.ref>(forward_view(right)) == 42
                 and read_view<Cell.GLOBAL.ref, Cell.GLOBAL.ref.first>(global) == 97
                 and forward<a.ref>() == 17 and projected<b.ref>() == 42
         }
@@ -999,11 +1003,36 @@ fn projected_quote_defaults_keep_the_field_and_storage_identity() {
     assert_eq!(output.stdout, b"(bool true)\n");
 
     for other in ["a.second.ref", "b.first.ref"] {
-        let error =
-            support::compile(&source.replace("a.first.ref>(left)", &format!("{other}>(left)")))
-                .unwrap_err();
+        let invalid = source.replace("a.ref, a.first.ref>", &format!("a.ref, {other}>"));
+        let error = support::compile(&invalid).unwrap_err();
         assert!(error.contains("type mismatch"), "{error}");
     }
+}
+
+#[test]
+fn implicit_drop_delivers_the_projected_field_and_preserves_its_sibling() {
+    let case = NativeCase::new(
+        r#"
+        struct Counters { left: i32, right: i32 }
+        struct Guard where quote dst: lift *i32 {}
+        impl Drop for Guard<dst> where quote dst: lift *i32 {
+            fn drop(*self) {
+                if dst.* >= 0 and dst.* < 100 { dst.* = dst.* + 1; }
+            }
+        }
+        fn release(g: Guard<dst>) where quote dst: lift *i32 {}
+        fn run() -> bool {
+            var counters = Counters { left: 6, right: 20 };
+            do { let g = Guard<counters.left.ref> {}; };
+            release(Guard<counters.right.ref> {});
+            counters.left == 7 and counters.right == 21
+        }
+    "#,
+    );
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
 }
 
 #[test]

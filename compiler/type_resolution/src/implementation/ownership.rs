@@ -140,7 +140,8 @@ fn local_identity(
                 work.extend(fields.iter().rev().map(|(_, ty)| (ty, depth + 1)));
                 continue;
             }
-            Term::Optional(inner)
+            Term::RuntimeField { base: inner, .. }
+            | Term::Optional(inner)
             | Term::Pointer(inner)
             | Term::Lift(inner)
             | Term::ComptimeFunction(inner)

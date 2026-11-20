@@ -398,6 +398,27 @@ impl Checker<'_, '_> {
         let declaration = self.visible_clause_input(id, value.span)?;
         let substitution = self.alias_substitution.get(&declaration);
         let binder = match substitution {
+            Some(projected @ Term::RuntimeField { .. }) => {
+                let identity = declaration_inputs::copy_input_domain(
+                    projected,
+                    &mut self.required_steps,
+                    value.span,
+                )?;
+                if let Some(expected) = expected {
+                    // The binder's lifted payload was checked when this identity
+                    // was supplied. Substitute its declaration domain in the
+                    // caller telescope, without acquiring the projected value.
+                    let Some(Term::Lift(inner)) = self.trait_input_domain(declaration) else {
+                        return Err(error(
+                            value.span,
+                            "forwarded runtime dependency domain is missing",
+                        ));
+                    };
+                    let actual = self.substituted_trait_domain(&inner, value.span)?;
+                    self.require(&actual, expected, value.span)?;
+                }
+                return Ok(Some(identity));
+            }
             Some(Term::Runtime(id)) => {
                 let Some(Term::Lift(inner)) = self.runtime_domains.get(id) else {
                     return Err(error(
@@ -455,9 +476,10 @@ impl Checker<'_, '_> {
         expected_inner: &Term,
     ) -> Result<Term, Error> {
         if let Some(identity) = self.forward_runtime_dependency(value, Some(expected_inner))? {
+            let (root, _) = self.runtime_field_path(&identity, value.span)?;
             self.local_runtime_origins
                 .sources
-                .insert(value.hir_id, identity.clone());
+                .insert(value.hir_id, root.clone());
             return Ok(identity);
         }
         if matches!(value.kind, H::ResolvedClauseParam(..)) {
@@ -482,6 +504,9 @@ impl Checker<'_, '_> {
                         })
                 }));
         if !in_runtime_body {
+            if let Some(identity) = self.signature_runtime_projection(value, expected_inner)? {
+                return Ok(identity);
+            }
             return Err(error(
                 value.span,
                 "runtime quote argument requires a runtime function body or enclosing quote parameter",
@@ -501,9 +526,10 @@ impl Checker<'_, '_> {
             ));
         }
         let identity = self.intern_runtime_operand(checked, value, value.span)?;
+        let (root, _) = self.runtime_field_path(&identity, value.span)?;
         self.local_runtime_origins
             .sources
-            .insert(value.hir_id, identity.clone());
+            .insert(value.hir_id, root.clone());
         Ok(identity)
     }
 }

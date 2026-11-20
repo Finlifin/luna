@@ -111,6 +111,7 @@ fn nf_description_queries_preserve_typed_failures_with_positive_fuel() {
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            None,
             |_, _, fuel| {
                 calls.set(calls.get() + 1);
                 *fuel -= 7;
@@ -133,6 +134,7 @@ fn nf_description_queries_preserve_typed_failures_with_positive_fuel() {
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            None,
             |_, _, _| Ok(vec![Term::Primitive(Primitive::Bool)]),
             |_, _, _| Ok(None),
             None,
@@ -155,6 +157,7 @@ fn expensive_queries_do_not_change_the_structural_size_of_an_nf_description() {
         &BTreeSet::new(),
         &BTreeMap::new(),
         &BTreeMap::new(),
+        None,
         |_, _, fuel| {
             *fuel = fuel.checked_sub(150_000).ok_or(AdmissionError::Budget)?;
             Ok(vec![Term::Primitive(Primitive::Bool)])
@@ -174,6 +177,7 @@ fn expensive_queries_do_not_change_the_structural_size_of_an_nf_description() {
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
+            None,
             |_, _, fuel| {
                 *fuel = fuel.checked_sub(150_000).ok_or(AdmissionError::Budget)?;
                 Ok(vec![Term::Primitive(Primitive::Bool)])
@@ -360,4 +364,87 @@ fn registered_runtime_dependency_in_type_description_is_admitted_and_domain_chec
         vm.admit_type(&unregistered_ty, 0).unwrap_err().kind,
         ErrorKind::Type
     );
+}
+
+#[test]
+fn projected_indices_require_an_admitted_root_field_and_lifted_domain() {
+    let ptr = |ty| Term::Pointer(Box::new(ty));
+    let lift = |ty| Term::Lift(Box::new(ty));
+    let field = |base, index| Term::RuntimeField {
+        base: Box::new(base),
+        index,
+    };
+    let boolean = Term::Primitive(Primitive::Bool);
+    let byte = Term::Primitive(Primitive::U8);
+    let root = nir::RuntimeId {
+        instance: 1,
+        local: 7,
+    };
+    let nested = Term::Record(vec![("flag".into(), boolean.clone())]);
+    let mut package = Package::default();
+    package.structs.push(nir::program::Struct {
+        declaration: id(10),
+        name: "Choice".into(),
+        packed: false,
+        type_parameters: vec![id(11)],
+        parameter_types: vec![lift(ptr(boolean.clone()))],
+        requirements: vec![],
+        capabilities: vec![],
+        fields: vec![],
+    });
+    package.runtime_domains.insert(
+        root,
+        lift(ptr(Term::Record(vec![
+            ("inner".into(), nested),
+            ("byte".into(), byte),
+        ]))),
+    );
+    let choice = |value| Term::Nominal {
+        declaration: id(10),
+        arguments: vec![value],
+    };
+    let base = Term::Runtime(root);
+    let packed = nir::RuntimeId {
+        instance: 3,
+        local: 7,
+    };
+    package.structs.push(nir::program::Struct {
+        declaration: id(20),
+        name: "Packed".into(),
+        packed: true,
+        type_parameters: vec![],
+        parameter_types: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+        fields: vec![("flag".into(), boolean)],
+    });
+    package.runtime_domains.insert(
+        packed,
+        lift(ptr(Term::Nominal {
+            declaration: id(20),
+            arguments: vec![],
+        })),
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    vm.admit_type(&choice(field(field(base.clone(), 0), 0)), 0)
+        .unwrap();
+    for value in [
+        field(base.clone(), 1),
+        field(base.clone(), 3),
+        field(field(base, 1), 0),
+        field(
+            Term::Runtime(nir::RuntimeId {
+                instance: 2,
+                local: 7,
+            }),
+            0,
+        ),
+        field(Term::Bool(true), 0),
+        field(Term::Runtime(packed), 0),
+    ] {
+        assert_eq!(
+            vm.admit_type(&choice(value), 0).unwrap_err().kind,
+            ErrorKind::Type
+        );
+    }
 }

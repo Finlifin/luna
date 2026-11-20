@@ -781,6 +781,40 @@ fn abstracting_runtime_objects_shares_structure_and_preserves_aliases() {
 }
 
 #[test]
+fn projected_runtime_indices_share_only_the_core_and_preserve_the_field_path() {
+    let field = |base, index| Term::RuntimeField {
+        base: Box::new(base),
+        index,
+    };
+    let first = RuntimeId {
+        instance: 1,
+        local: 0,
+    };
+    let second = RuntimeId {
+        instance: 2,
+        local: 0,
+    };
+    let project = |id, index| Term::Nominal {
+        declaration: SENSOR,
+        arguments: vec![field(field(Term::Runtime(id), 0), index)],
+    };
+    let mut pool = TypeInterner::default();
+    let mut intern = |id, index| {
+        pool.abstract_runtime(&project(id, index), &[(id, calibration())])
+            .unwrap()
+    };
+    let a = intern(first, 1);
+    let b = intern(second, 1);
+    let c = intern(first, 2);
+    assert!(Arc::ptr_eq(a.core(), b.core()));
+    assert!(!Arc::ptr_eq(a.core(), c.core()));
+    assert_ne!(a, b);
+    assert_eq!(a.materialize().unwrap(), project(first, 1));
+    assert_eq!(b.materialize().unwrap(), project(second, 1));
+    assert!(field(Term::Bool(true), 0).check_scope(&[]).is_err());
+}
+
+#[test]
 fn abstraction_checks_ordered_contracts_and_does_not_intern_failures() {
     let mut interner = TypeInterner::default();
     let first = RuntimeId {
