@@ -6,6 +6,7 @@
 mod defaults;
 mod observations;
 mod type_domains;
+
 use crate::control;
 use crate::memory::{CallableInput, CallablePlace};
 pub use defaults::{copy_scalar, stable_default};
@@ -17,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 fn p(value: P) -> Term {
     Term::Primitive(value)
 }
+
 fn is_never(ty: &Term) -> bool {
     *ty == p(P::Never)
 }
@@ -33,6 +35,7 @@ pub struct Error {
     pub source: n::SourceRange,
     pub message: String,
 }
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -42,7 +45,9 @@ impl std::fmt::Display for Error {
         )
     }
 }
+
 impl std::error::Error for Error {}
+
 fn error(source: n::SourceRange, message: impl Into<String>) -> Error {
     Error {
         source,
@@ -56,6 +61,7 @@ fn code_root(binding: n::LocalId) -> CallablePlace {
         fields: vec![],
     }
 }
+
 // Shared owned-path encoding: a variant marker, its index, then payload field.
 const VARIANT_FIELD: usize = usize::MAX;
 
@@ -64,12 +70,15 @@ enum CodeKey {
     Named(DeclarationId, Vec<Term>),
     Closure(usize),
 }
+
 type Inputs = BTreeMap<CallableInput, Vec<CodeKey>>;
+
 #[derive(Clone, Debug, PartialEq)]
 struct BehaviorCode {
     definition: n::Expr,
     captures: BTreeMap<CallablePlace, Vec<CodeKey>>,
 }
+
 impl BehaviorCode {
     fn plain(definition: n::Expr) -> Self {
         Self {
@@ -77,6 +86,7 @@ impl BehaviorCode {
             captures: BTreeMap::new(),
         }
     }
+
     fn charge(&self, fuel: &mut usize) -> bool {
         let mut tree_fuel = *fuel as u64;
         let valid = nir::copy_budget::charge_expression(&self.definition, &mut tree_fuel).is_ok();
@@ -108,17 +118,22 @@ impl BehaviorCode {
         true
     }
 }
+
 impl std::ops::Deref for BehaviorCode {
     type Target = n::Expr;
+
     fn deref(&self) -> &n::Expr {
         &self.definition
     }
 }
+
 type Codes = Vec<BehaviorCode>;
+
 enum ReturnedCodeSource<'a> {
     Named(DeclarationId, &'a [Term]),
     Closure(&'a BehaviorCode),
 }
+
 /// Bottom is a pending loop equation, never evidence that a variant is absent.
 #[derive(Clone, Debug, PartialEq)]
 enum LoopCode {
@@ -126,6 +141,7 @@ enum LoopCode {
     Known(Codes),
     Unknown,
 }
+
 impl std::fmt::Display for LoopCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -142,6 +158,7 @@ impl std::fmt::Display for LoopCode {
         }
     }
 }
+
 fn copy_loop_code(code: &LoopCode, fuel: &mut usize) -> Option<LoopCode> {
     *fuel = fuel.checked_sub(1)?;
     Some(match code {
@@ -159,6 +176,7 @@ fn copy_codes(codes: &Codes, fuel: &mut usize) -> Option<Codes> {
     }
     Some(codes.clone())
 }
+
 impl std::fmt::Display for CodeKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -173,6 +191,7 @@ impl std::fmt::Display for CodeKey {
         }
     }
 }
+
 impl std::fmt::Display for BehaviorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -198,6 +217,7 @@ impl std::fmt::Display for BehaviorCode {
 #[cfg(test)]
 mod behavior_code_snapshot_tests {
     use super::*;
+
     #[test]
     fn capture_initializers_keep_evaluated_code_before_later_updates() {
         let source = n::SourceRange { start: 0, end: 1 };
@@ -395,6 +415,7 @@ mod behavior_code_snapshot_tests {
             }
         }
     }
+
     #[test]
     fn later_absent_variant_cannot_prune_earlier_pattern_computation() {
         let package = n::Package::default();
@@ -647,9 +668,11 @@ mod behavior_code_snapshot_tests {
         assert!(projected.charge(&mut 1000));
     }
 }
+
 type Key = (DeclarationId, Vec<Term>, Inputs);
 
 const PER_FUNCTION_FUEL: usize = 100_000;
+
 const MAX_PREPARATION_FUEL: usize = 16_000_000;
 
 fn package_preparation_fuel(package: &n::Package) -> usize {
@@ -2662,41 +2685,52 @@ impl<'a> Analysis<'a> {
                 enum_captures: evidence.enum_captures,
             });
         }
-        // P3 checks a body under valid runtime inputs. Give pointer parameters
-        // conditional pointee roots, including pointers wrapped by newtypes.
-        // This report only proves purity/cleanup; it is never published as an
-        // unconditional memory contract. Resource checking at each actual call
-        // still establishes the footprint and lifetime of the supplied targets.
+        // Both P3 and P4 check bodies under valid runtime pointer inputs.
+        // P4 still enforces its prohibition on external memory reads/writes in
+        // `expression()` while `moves::analyze` enforces ownership and rejects
+        // escaping local addresses or impure cleanup. This report only proves
+        // purity/cleanup; it is never published as an unconditional contract.
         let mut borrowed_parameters = Vec::new();
         let mut borrowed_fields = Vec::new();
-        if self.finite {
-            let Term::Function { parameters, .. } = function.signature.callable_signature() else {
-                return false;
+        let Term::Function { parameters, .. } = function.signature.callable_signature() else {
+            return false;
+        };
+        for (slot, ty) in parameters
+            .iter()
+            .map(|parameter| &parameter.ty)
+            .chain(function.env_parameters.iter().map(|env| &env.ty))
+            .enumerate()
+        {
+            match crate::memory::pointer_representation(Some(self.package), ty, &mut self.fuel) {
+                Ok(Some((_, subject))) => borrowed_parameters.push((slot, subject)),
+                Ok(None) => {}
+                Err(_) => return false,
+            }
+            let layout = if self.finite {
+                crate::memory::pointer_input_layout(Some(self.package), ty, &mut self.fuel)
+            } else {
+                crate::memory::pointer_input_layout_for(
+                    Some(self.package),
+                    ty,
+                    crate::memory::TextProvenance::VerifiedByRegionAnalysis,
+                    &mut self.fuel,
+                )
             };
-            for (slot, parameter) in parameters.iter().enumerate() {
-                match crate::memory::pointer_representation(
-                    Some(self.package),
-                    &parameter.ty,
-                    &mut self.fuel,
-                ) {
-                    Ok(Some((_, subject))) => borrowed_parameters.push((slot, subject)),
-                    Ok(None) => {}
-                    Err(_) => return false,
+            match layout {
+                Ok(layout) => {
+                    for leaf in layout {
+                        if !leaf.input_fields.is_empty() {
+                            borrowed_fields.push(moves::BorrowedField {
+                                parameter: slot,
+                                fields: leaf.input_fields,
+                                pointee: leaf.pointee,
+                            });
+                        }
+                    }
                 }
-                let Ok(layout) = crate::memory::pointer_input_layout(
-                    Some(self.package),
-                    &parameter.ty,
-                    &mut self.fuel,
-                ) else {
-                    return false;
-                };
-                for leaf in layout {
-                    if !leaf.input_fields.is_empty() {
-                        borrowed_fields.push(moves::BorrowedField {
-                            parameter: slot,
-                            fields: leaf.input_fields,
-                            pointee: leaf.pointee,
-                        });
+                Err(reason) => {
+                    if self.finite || reason.contains("budget") {
+                        return false;
                     }
                 }
             }
@@ -2942,6 +2976,7 @@ impl<'a> Analysis<'a> {
             _ => None,
         }
     }
+
     fn project_private_targets(
         &mut self,
         pointer: &n::Expr,
@@ -2980,6 +3015,7 @@ impl<'a> Analysis<'a> {
             })
             .collect()
     }
+
     fn private_owned_place(&mut self, mut value: &n::Expr, private: &BTreeSet<n::LocalId>) -> bool {
         loop {
             if self.fuel == 0 {
@@ -2995,6 +3031,7 @@ impl<'a> Analysis<'a> {
             }
         }
     }
+
     fn stable_place_read(&mut self, mut value: &n::Expr) -> bool {
         loop {
             if self.fuel == 0 {
@@ -5064,5 +5101,242 @@ mod resource_world_tests {
         });
         let err = validate_runtime_promises(&package, &protocols).unwrap_err();
         assert!(err.message.contains("invalid_tail"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod pointer_projection_p4_tests {
+    use super::*;
+
+    fn i32_ty() -> Term {
+        Term::Primitive(P::I32)
+    }
+
+    fn pair_decl() -> DeclarationId {
+        DeclarationId {
+            package: 1,
+            local: 50,
+        }
+    }
+
+    fn pair_ty() -> Term {
+        Term::Nominal {
+            declaration: pair_decl(),
+            arguments: vec![],
+        }
+    }
+
+    fn src(start: u32, end: u32) -> n::SourceRange {
+        n::SourceRange { start, end }
+    }
+
+    fn base_package_with_pair() -> n::Package {
+        let mut package = n::Package::default();
+        package.structs.push(n::Struct {
+            declaration: pair_decl(),
+            name: "Pair".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            fields: vec![("first".into(), i32_ty()), ("second".into(), i32_ty())],
+            packed: false,
+        });
+        package
+    }
+
+    fn pure_fn(
+        local: u32,
+        name: &str,
+        parameters: Vec<(n::LocalId, Term)>,
+        result: Term,
+        body: n::Expr,
+    ) -> n::Function {
+        let sig_params = parameters
+            .iter()
+            .map(|(_, ty)| nir::Parameter {
+                sort: Sort::Runtime,
+                ty: ty.clone(),
+            })
+            .collect();
+        n::Function {
+            interface: nir::program::FunctionDeclaration {
+                source: body.source,
+                phase: n::FunctionPhase::Runtime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                declaration: DeclarationId { package: 1, local },
+                name: name.into(),
+                signature: Term::Function {
+                    parameters: sig_params,
+                    result: Box::new(result),
+                },
+                parameters: parameters.into_iter().map(|(id, _)| id).collect(),
+                env_parameters: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                defaults: vec![],
+            },
+            body,
+            runtime_deliveries: Default::default(),
+        }
+    }
+
+    #[test]
+    fn p4_accepts_pure_pointer_field_projection() {
+        let mut package = base_package_with_pair();
+        let p_id = n::LocalId { owner: 1, index: 0 };
+        let ptr_pair = Term::Pointer(Box::new(pair_ty()));
+        let ptr_i32 = Term::Pointer(Box::new(i32_ty()));
+        let field_proj = n::Expr {
+            source: src(10, 17),
+            ty: ptr_i32.clone(),
+            kind: K::PointerField {
+                pointer: Box::new(n::Expr {
+                    source: src(10, 11),
+                    ty: ptr_pair.clone(),
+                    kind: K::Local(p_id),
+                }),
+                declaration: pair_decl(),
+                index: 0,
+            },
+        };
+        package.functions.push(pure_fn(
+            1,
+            "first",
+            vec![(p_id, ptr_pair)],
+            ptr_i32,
+            field_proj,
+        ));
+        validate_runtime_promises(&package, &Protocols::default()).unwrap();
+    }
+
+    #[test]
+    fn p4_rejects_external_pointer_field_read_and_write() {
+        let p_id = n::LocalId { owner: 1, index: 0 };
+        let ptr_pair = Term::Pointer(Box::new(pair_ty()));
+        let ptr_i32 = Term::Pointer(Box::new(i32_ty()));
+        let field_proj = n::Expr {
+            source: src(10, 17),
+            ty: ptr_i32.clone(),
+            kind: K::PointerField {
+                pointer: Box::new(n::Expr {
+                    source: src(10, 11),
+                    ty: ptr_pair.clone(),
+                    kind: K::Local(p_id),
+                }),
+                declaration: pair_decl(),
+                index: 0,
+            },
+        };
+
+        let mut read_pkg = base_package_with_pair();
+        read_pkg.functions.push(pure_fn(
+            1,
+            "read_first",
+            vec![(p_id, ptr_pair.clone())],
+            i32_ty(),
+            n::Expr {
+                source: src(10, 19),
+                ty: i32_ty(),
+                kind: K::ReadPointer(Box::new(field_proj.clone())),
+            },
+        ));
+        let err = validate_runtime_promises(&read_pkg, &Protocols::default()).unwrap_err();
+        assert!(err.message.contains("read_first"), "{err}");
+
+        let mut write_pkg = base_package_with_pair();
+        write_pkg.functions.push(pure_fn(
+            2,
+            "write_first",
+            vec![(p_id, ptr_pair)],
+            Term::Primitive(P::Void),
+            n::Expr {
+                source: src(20, 32),
+                ty: Term::Primitive(P::Void),
+                kind: K::WritePointer {
+                    pointer: Box::new(field_proj),
+                    value: Box::new(n::Expr {
+                        source: src(30, 31),
+                        ty: i32_ty(),
+                        kind: K::Literal(n::Literal::SignedInteger(1)),
+                    }),
+                },
+            },
+        ));
+        let err = validate_runtime_promises(&write_pkg, &Protocols::default()).unwrap_err();
+        assert!(err.message.contains("write_first"), "{err}");
+    }
+
+    #[test]
+    fn p4_rejects_escaping_projected_local_pointer() {
+        let mut package = base_package_with_pair();
+        let pair_id = n::LocalId { owner: 2, index: 0 };
+        let ptr_pair = Term::Pointer(Box::new(pair_ty()));
+        let ptr_i32 = Term::Pointer(Box::new(i32_ty()));
+        let pair_literal = n::Expr {
+            source: src(10, 20),
+            ty: pair_ty(),
+            kind: K::Record {
+                declaration: pair_decl(),
+                fields: vec![
+                    n::Expr {
+                        source: src(12, 13),
+                        ty: i32_ty(),
+                        kind: K::Literal(n::Literal::SignedInteger(7)),
+                    },
+                    n::Expr {
+                        source: src(15, 17),
+                        ty: i32_ty(),
+                        kind: K::Literal(n::Literal::SignedInteger(42)),
+                    },
+                ],
+            },
+        };
+        let escaping = n::Expr {
+            source: src(21, 35),
+            ty: ptr_i32.clone(),
+            kind: K::PointerField {
+                pointer: Box::new(n::Expr {
+                    source: src(21, 29),
+                    ty: ptr_pair,
+                    kind: K::AddressOf(Box::new(n::Expr {
+                        source: src(21, 25),
+                        ty: pair_ty(),
+                        kind: K::Local(pair_id),
+                    })),
+                }),
+                declaration: pair_decl(),
+                index: 0,
+            },
+        };
+        let body = n::Expr {
+            source: src(1, 36),
+            ty: ptr_i32.clone(),
+            kind: K::Block {
+                statements: vec![n::Expr {
+                    source: src(5, 20),
+                    ty: Term::Primitive(P::Void),
+                    kind: K::Let {
+                        binding: pair_id,
+                        value: Box::new(pair_literal),
+                    },
+                }],
+                result: Some(Box::new(escaping)),
+            },
+        };
+        package
+            .functions
+            .push(pure_fn(3, "escape_local", vec![], ptr_i32, body));
+        let err = validate_runtime_promises(&package, &Protocols::default()).unwrap_err();
+        assert!(err.message.contains("escape_local"), "{err}");
     }
 }
