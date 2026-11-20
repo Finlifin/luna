@@ -1,8 +1,8 @@
 # 格式协议
 
-`builtin.fmt.Display` 和 `builtin.fmt.ByteWriter` 是不依赖 std、String 或
-allocator 的 runtime 协议。Display 同时进入 builtin.prelude；ByteWriter
-通过具名导入使用。std.fmt.Display 与 std.io.ByteWriter 只是同一声明的再导出。
+`builtin.fmt.Display`、`builtin.fmt.Debug` 和 `builtin.fmt.ByteWriter` 是不依赖 std、String 或
+allocator 的 runtime 协议。Display 和 Debug 同时进入 builtin.prelude；ByteWriter
+通过具名导入使用。std.fmt.Display、std.fmt.Debug 与 std.io.ByteWriter 只是同一声明的再导出。
 
 ```flurry
 use builtin.fmt.ByteWriter;

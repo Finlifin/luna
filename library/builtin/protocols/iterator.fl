@@ -3,9 +3,13 @@
     an item does not allocate a resumable iterator state. Implementations and
     adapters expose their bodies for joint expansion with the consumer.
 -}
+use mem_impl.raw.checked_add_usize;
+use numeric.comparison.{Ord, Order}
 use primitives.Type as IterationType;
 use primitives.usize as IterationIndex;
 use primitives.void as IterationUnit;
+use protocols.resources.Copy;
+use types.tuple.Tuple;
 
 pub inline effect emit_item(value: T) where T;
 
@@ -94,6 +98,14 @@ pub trait Iterator {
 
     inline fn skip(self, count: IterationIndex) -> SkipIterator<Self> {
         SkipIterator<Self> { iter: self, count: count }
+    }
+
+    inline fn enumerate(self) -> EnumerateIterator<Self> {
+        EnumerateIterator<Self> { iter: self }
+    }
+
+    inline fn step_by(self, step: IterationIndex) -> StepByIterator<Self> {
+        StepByIterator<Self> { iter: self, step: step }
     }
 
     inline fn flat_map(
@@ -315,6 +327,123 @@ pub trait Iterator {
             },
         }
         accumulator
+    }
+
+    inline fn count(self) -> IterationIndex {
+        var total: IterationIndex = 0;
+        self.iterate()# {
+            emit_item<Item>(_value) => {
+                checked_add_usize(total, 1) match {
+                    next? => {
+                        total = next;
+                    },
+                    null => {},
+                }
+            },
+        }
+        total
+    }
+
+    inline fn position(
+        self,
+        pred: %c fn(*Item) -> bool,
+    ) -> ?IterationIndex where c: IterationType.vars.Closure {
+        var index: IterationIndex = 0;
+        var exhausted = false;
+        self.iterate()# {
+            emit_item<Item>(value) => {
+                var item = value;
+                if not exhausted {
+                    if pred(item.ref) {
+                        return index;
+                    }
+                    checked_add_usize(index, 1) match {
+                        next? => {
+                            index = next;
+                        },
+                        null => {
+                            exhausted = true;
+                        },
+                    }
+                }
+            },
+        }
+        null
+    }
+
+    inline fn min_by(
+        self,
+        compare: %c fn(*Item, *Item) -> Order,
+    ) -> ?Item where c: IterationType.vars.Closure {
+        var best: ?Item = null;
+        self.iterate()# {
+            emit_item<Item>(value) => {
+                let prev = best;
+                best = null;
+                best = prev match {
+                    current? => {
+                        var cur = current;
+                        var cand = value;
+                        compare(cand.ref, cur.ref) match {
+                            .less => cand,
+                            _ => cur,
+                        }
+                    },
+                    null => value,
+                }
+            },
+        }
+        best
+    }
+
+    inline fn max_by(
+        self,
+        compare: %c fn(*Item, *Item) -> Order,
+    ) -> ?Item where c: IterationType.vars.Closure {
+        var best: ?Item = null;
+        self.iterate()# {
+            emit_item<Item>(value) => {
+                let prev = best;
+                best = null;
+                best = prev match {
+                    current? => {
+                        var cur = current;
+                        var cand = value;
+                        compare(cand.ref, cur.ref) match {
+                            .less => cur,
+                            .equal => cand,
+                            .greater => cand,
+                        }
+                    },
+                    null => value,
+                }
+            },
+        }
+        best
+    }
+
+    inline fn min(self) -> ?Item
+    where
+        requires Item :- Ord,
+        requires Item :- Copy,
+    {
+        self.min_by(|a, b| {
+            let left: Item = a.*;
+            let right: Item = b.*;
+            left.as(Ord).cmp(right)
+        })
+    }
+
+    inline fn max(self) -> ?Item
+    where
+        requires Item :- Ord,
+        requires Item :- Copy,
+    {
+        self.max_by(|a, b| {
+            let left: Item = a.*;
+            let right: Item = b.*;
+            left.as(Ord).cmp(right)
+        })
     }
 }
 
@@ -721,6 +850,60 @@ impl Iterator
                         return;
                     },
                 },
+        }
+    }
+}
+
+pub struct EnumerateIterator where I :- Iterator {
+    iter: I,
+}
+
+impl Iterator for EnumerateIterator<I> where I :- Iterator {
+    assoc Item: IterationType = Tuple<IterationIndex, I.as(Iterator).Item>;
+
+    inline fn iterate(self) -> #emit_item<Item> IterationUnit {
+        var index: IterationIndex = 0;
+        self.iter.as(Iterator).iterate()# {
+            emit_item<I.as(Iterator).Item>(value) => {
+                let current = index;
+                emit_item<Item>((current, value))#;
+                checked_add_usize(current, 1) match {
+                    next? => {
+                        index = next;
+                    },
+                    null => {
+                        return;
+                    },
+                }
+            },
+        }
+    }
+}
+
+pub struct StepByIterator where I :- Iterator {
+    iter: I,
+    step: IterationIndex,
+}
+
+impl Iterator for StepByIterator<I> where I :- Iterator {
+    assoc Item: IterationType = I.as(Iterator).Item;
+
+    inline fn iterate(self) -> #emit_item<Item> IterationUnit {
+        if self.step == 0 {
+            return;
+        }
+        let stride_minus_one = self.step - 1;
+        var skip_remaining: IterationIndex = 0;
+        self.iter.as(Iterator).iterate()# {
+            emit_item<Item>(value) => {
+                if skip_remaining == 0 {
+                    emit_item<Item>(value)#;
+                    skip_remaining = stride_minus_one;
+                } else {
+                    assumes skip_remaining > 0;
+                    skip_remaining = skip_remaining - 1;
+                }
+            },
         }
     }
 }

@@ -1,4 +1,4 @@
-use builtin.fmt.ByteWriter;
+use builtin.fmt.{ByteWriter, Debug, Display}
 use collections_impl.vec.Vec;
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
 
@@ -29,6 +29,14 @@ impl Eq for Utf8Err {
 impl Utf8Err {
     pub pure fn valid_up_to(self) -> usize {
         self.valid_up_to_offset
+    }
+}
+
+impl Debug for Utf8Err {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("Utf8Err { valid_up_to: ")!;
+        self.valid_up_to_offset.*.as(Display).write(output)!;
+        output.write_str(" }")
     }
 }
 
@@ -819,5 +827,62 @@ where
     fn hash(self) -> u64 {
         var this = self;
         this.ref.hash_bytes()
+    }
+}
+
+fn debug_hex_digit(nibble: u8) -> u8 {
+    if nibble <= 9 {
+        48 + nibble
+    } else if nibble <= 15 {
+        87 + nibble
+    } else {
+        48
+    }
+}
+
+fn write_debug_escaped_byte(
+    byte: u8,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if byte == 0 {
+        output.write_str("\\0")
+    } else if byte == 9 {
+        output.write_str("\\t")
+    } else if byte == 10 {
+        output.write_str("\\n")
+    } else if byte == 13 {
+        output.write_str("\\r")
+    } else if byte == 92 {
+        output.write_str("\\\\")
+    } else if byte == 34 {
+        output.write_str("\\\"")
+    } else if byte < 32 or byte == 127 {
+        output.write_str("\\x")!;
+        output.write_byte(debug_hex_digit(byte / 16))!;
+        output.write_byte(debug_hex_digit(byte % 16))
+    } else {
+        output.write_byte(byte)
+    }
+}
+
+impl Debug for String<.A = A, .allocator = a>
+where
+    A: Type,
+    requires A :- Allocator,
+    quote a: lift *A,
+{
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_byte(34)!;
+        let len = self.len();
+        var i: usize = 0;
+        while i < len {
+            let byte = self.byte(i) match {
+                v? => v,
+                null => break,
+            }
+            write_debug_escaped_byte(byte, output)!;
+            i = i + 1;
+        }
+        output.write_byte(34)
     }
 }

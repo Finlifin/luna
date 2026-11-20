@@ -1,3 +1,5 @@
+use builtin.fmt.{ByteWriter, Debug, Display}
+
 {-
     Allocation layouts validate arithmetic before a future allocator receives
     a request. Sizes use u64; host allocation must additionally check its
@@ -151,4 +153,14 @@ impl Layout {
 
 fn usize_to_u64(value: usize) -> ?u64 {
     builtin.compiler.try_usize_to_u64(value)
+}
+
+impl Debug for Layout {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_str("Layout { size: ")!;
+        self.size.*.as(Display).write(output)!;
+        output.write_str(", align: ")!;
+        self.alignment.*.as(Display).write(output)!;
+        output.write_str(" }")
+    }
 }

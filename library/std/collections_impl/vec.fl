@@ -1,4 +1,4 @@
-use builtin.fmt.ByteWriter;
+use builtin.fmt.{ByteWriter, Debug}
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock, ReallocErr}
 use mem_impl.layout.Layout;
 
@@ -799,5 +799,35 @@ where
             self.push(byte)!;
             index = index + 1;
         }
+    }
+}
+
+impl Debug for Vec<T, .A = A, .allocator = alloc>
+where
+    T :- Debug,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_byte(91)!;
+        let len = self.raw_len.*;
+        let base = self.raw_addr.*;
+        var i: usize = 0;
+        while i < len {
+            if i > 0 {
+                output.write_byte(44)!;
+                output.write_byte(32)!;
+            }
+            let addr = slot_address<T>(base, i);
+            var elem = unsafe { builtin.mem.raw_read<T>(addr) }
+            let res = elem.ref.as(Debug).write_debug(output);
+            unsafe {
+                builtin.mem.raw_write<T>(addr, elem);
+            }
+            res!;
+            i = i + 1;
+        }
+        output.write_byte(93)
     }
 }

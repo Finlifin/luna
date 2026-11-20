@@ -1,3 +1,5 @@
+use builtin.fmt.{ByteWriter, Debug, Display}
+
 pub enum IoErr {
     Os(i64),
     WriteZero,
@@ -37,6 +39,20 @@ impl Eq for IoErr {
                     .WriteZero => false,
                     .UnexpectedEof => true,
                 },
+        }
+    }
+}
+
+impl Debug for IoErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .Os(code) => {
+                output.write_str("IoErr.Os(")!;
+                code.as(Display).write(output)!;
+                output.write_byte(41)
+            },
+            .WriteZero => output.write_str("IoErr.WriteZero"),
+            .UnexpectedEof => output.write_str("IoErr.UnexpectedEof"),
         }
     }
 }

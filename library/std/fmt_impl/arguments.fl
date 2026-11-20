@@ -1,4 +1,4 @@
-use builtin.fmt.{ByteWriter, Display}
+use builtin.fmt.{ByteWriter, Debug, Display}
 use collections_impl.vec.Vec;
 use fmt_impl.parse.{FormatPlan, Parse}
 use io_impl.errors.IoErr;
@@ -111,4 +111,18 @@ pub fn println_value(value: T) -> !IoErr void where T :- Display {
     var output = stdout();
     value.write(output.ref)!;
     output.write_byte(10)
+}
+
+pub fn format_debug(
+    value: *T,
+) -> !AllocErr String<.A = A, .allocator = allocator>
+where
+    T :- Debug,
+    .A: Type = DefaultAllocator,
+    requires A :- Allocator,
+    quote .allocator: lift *A = DefaultAllocator.GLOBAL.ref,
+{
+    var bytes = Vec<u8, .A = A, .allocator = allocator>.new();
+    value.as(Debug).write_debug(bytes.ref)!;
+    String<.A = A, .allocator = allocator>.from_utf8_lossy(bytes)
 }

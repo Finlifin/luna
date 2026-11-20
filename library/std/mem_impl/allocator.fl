@@ -1,3 +1,5 @@
+use builtin.fmt.ByteWriter;
+use builtin.fmt.Debug;
 use mem_impl.layout.Layout;
 use std.os.linux;
 
@@ -40,6 +42,15 @@ impl Eq for AllocErr {
     }
 }
 
+impl Debug for AllocErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .OutOfMemory => output.write_str("AllocErr.OutOfMemory"),
+            .InvalidLayout => output.write_str("AllocErr.InvalidLayout"),
+        }
+    }
+}
+
 pub enum ReallocErr {
     OutOfMemory,
     InvalidLayout,
@@ -69,6 +80,15 @@ impl Eq for ReallocErr {
                     .OutOfMemory => false,
                     .InvalidLayout => true,
                 },
+        }
+    }
+}
+
+impl Debug for ReallocErr {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        self.* match {
+            .OutOfMemory => output.write_str("ReallocErr.OutOfMemory"),
+            .InvalidLayout => output.write_str("ReallocErr.InvalidLayout"),
         }
     }
 }

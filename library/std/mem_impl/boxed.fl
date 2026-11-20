@@ -1,3 +1,4 @@
+use builtin.fmt.{ByteWriter, Debug}
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock}
 use mem_impl.layout.Layout;
 
@@ -111,6 +112,16 @@ where
     pub fn layout(*self) -> Layout {
         self.raw_layout.*
     }
+
+    pub fn with_ref(*self, f: %c fn(*T) -> R) -> R where R, c: Type.vars.Closure {
+        let addr = self.raw_addr.*;
+        var val = unsafe { builtin.mem.raw_read<T>(addr) }
+        let res = f(val.ref);
+        unsafe {
+            builtin.mem.raw_write<T>(addr, val);
+        }
+        res
+    }
 }
 
 impl Box<T, .A = A, .allocator = alloc>
@@ -122,5 +133,23 @@ where
 {
     pub fn get(*self) -> T {
         unsafe { builtin.mem.raw_read<T>(self.raw_addr.*) }
+    }
+}
+
+impl Debug for Box<T, .A = A, .allocator = alloc>
+where
+    T :- Debug,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        let addr = self.raw_addr.*;
+        var val = unsafe { builtin.mem.raw_read<T>(addr) }
+        let res = val.ref.as(Debug).write_debug(output);
+        unsafe {
+            builtin.mem.raw_write<T>(addr, val);
+        }
+        res
     }
 }
