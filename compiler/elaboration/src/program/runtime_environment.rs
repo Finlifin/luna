@@ -160,23 +160,36 @@ impl CallEnvironment {
     ) -> Result<n::Expr, Error> {
         let call =
             checker.stage_collected_call(call, routes, offset, site, self.argument_prefixes)?;
-        Ok(self.before_arguments.finish(call))
+        if self.before_arguments.0.is_empty() {
+            return Ok(call);
+        }
+        let region = self.before_arguments.finish(checker, call, site.span)?;
+        checker
+            .local_runtime_origins
+            .call_regions
+            .insert(region.source, ());
+        Ok(region)
     }
 }
 
 impl Acquisition {
-    pub(super) fn finish(self, call: n::Expr) -> n::Expr {
+    pub(super) fn finish(
+        self,
+        checker: &mut Checker<'_, '_>,
+        call: n::Expr,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
         if self.0.is_empty() {
-            return call;
+            return Ok(call);
         }
-        n::Expr {
-            source: call.source,
+        Ok(n::Expr {
+            source: checker.generated_expression_source(call.source, span)?,
             ty: call.ty.clone(),
             kind: K::Block {
                 statements: self.0,
                 result: Some(Box::new(call)),
             },
-        }
+        })
     }
 }
 
@@ -268,7 +281,7 @@ impl Checker<'_, '_> {
         site: &Expr<'_>,
     ) -> Result<CallEnvironment, Error> {
         let mut statements = Vec::new();
-        if inputs.is_empty() {
+        if inputs.is_empty() && self.local_runtime_origins.acquired_bindings.is_empty() {
             return Ok(CallEnvironment {
                 before_arguments: Acquisition(statements),
                 argument_prefixes: BTreeMap::new(),
@@ -286,11 +299,11 @@ impl Checker<'_, '_> {
         let mut receiver_prefixes = Vec::with_capacity(receiver_count);
         for arg in arguments.iter_mut().take(receiver_count) {
             let value = arguments::reference_base(&mut arg.value);
-            receiver_prefixes.push(self.take_constructor_environment(value, site.span)?);
+            receiver_prefixes.push(self.take_value_environment(value, site.span)?);
         }
         let mut argument_prefixes = BTreeMap::new();
         let mut argument_bindings = BTreeSet::new();
-        if !self.local_runtime_origins.constructor_bindings.is_empty() {
+        if !self.local_runtime_origins.acquired_bindings.is_empty() {
             self.visit_routed_arguments(
                 arguments,
                 routes,
@@ -298,7 +311,7 @@ impl Checker<'_, '_> {
                 site.span,
                 false,
                 |checker, value, position, _| {
-                    let prefix = checker.take_constructor_environment(value, site.span)?;
+                    let prefix = checker.take_value_environment(value, site.span)?;
                     if !prefix.is_empty() {
                         argument_bindings.extend(prefix.iter().filter_map(
                             |stmt| match stmt.kind {
@@ -382,6 +395,7 @@ impl Checker<'_, '_> {
             // Acquire the written inputs first, then any remaining default or
             // inherited dependencies in telescope order. A reused origin can
             // have a different source occurrence at each call.
+            let mut producers = BTreeMap::new();
             let mut order = Vec::with_capacity(operands.len());
             let mut acquired = vec![false; operands.len()];
             if let H::Application(head, _) | H::ExtendedApplication(head, _) = &site.kind
@@ -398,10 +412,27 @@ impl Checker<'_, '_> {
                         && !std::mem::replace(&mut acquired[slot], true)
                     {
                         order.push(slot);
+                        if let Term::Runtime(id) = identity
+                            && self.local_runtime_deliveries.get(id).is_some_and(|entry| {
+                                entry.producer_site == Some(local(value.hir_id))
+                            })
+                        {
+                            producers.insert(slot, *id);
+                        }
                     }
                 }
             }
             order.extend((0..operands.len()).filter(|&slot| !acquired[slot]));
+            let mut captured = BTreeSet::new();
+            let mut result_ids = BTreeSet::new();
+            if !producers.is_empty() {
+                result_ids = self.result_dependencies(&call.ty, site.span)?;
+                let roots: BTreeSet<_> = result_ids
+                    .iter()
+                    .map(|&id| self.dependency_root(id))
+                    .collect();
+                producers.retain(|_, id| roots.contains(id));
+            }
             for slot in order {
                 // The enclosing source argument establishes this binding at
                 // its own position, after explicit quote suppliers have run.
@@ -410,6 +441,22 @@ impl Checker<'_, '_> {
                     continue;
                 }
                 statements.push(self.prepare_call_operand(&mut operands[slot], site.span)?);
+                if let Some(&id) = producers.get(&slot) {
+                    let operand = &operands[slot];
+                    let K::Local(binding) = operand.kind else {
+                        unreachable!("prepared quote operand")
+                    };
+                    constants::charge_copy(operand, &mut self.required_steps, site.span)?;
+                    self.local_runtime_deliveries.get_mut(&id).unwrap().expr = operand.clone();
+                    self.local_runtime_origins
+                        .acquired_bindings
+                        .insert(binding, ());
+                    self.immutable.insert(binding);
+                    captured.insert(id);
+                }
+            }
+            if !captured.is_empty() {
+                self.rebase_environment_projections(&result_ids, &captured, site.span)?;
             }
         }
         for slot in slots {

@@ -13,7 +13,8 @@ pub(super) struct Projection {
 pub(super) struct LocalOrigins {
     pub(super) ids: BTreeMap<LocalRuntimeOrigin, nir::RuntimeId>,
     pub(super) sources: SourceBindings<Term>,
-    pub(super) constructor_bindings: LocalBindings<()>,
+    pub(super) acquired_bindings: LocalBindings<()>,
+    pub(super) call_regions: super::local_bindings::Bindings<n::SourceRange, ()>,
 }
 
 pub(super) enum Place {

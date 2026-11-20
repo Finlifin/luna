@@ -2,13 +2,13 @@
 use super::*;
 
 impl Checker<'_, '_> {
-    pub(in crate::program) fn discard_generated_source(
+    pub(in crate::program) fn generated_expression_source(
         &mut self,
         original: n::SourceRange,
         span: Span,
     ) -> Result<n::SourceRange, Error> {
         let index = u32::try_from(self.expansion_sources.len())
-            .map_err(|_| error(span, "discard statement source space exhausted"))?;
+            .map_err(|_| error(span, "generated expression source space exhausted"))?;
         self.expansion_sources.push(n::ExpansionSource {
             original,
             site: source(span),
@@ -24,7 +24,7 @@ impl Checker<'_, '_> {
         if is_never(&value.ty) || value.ty == p(P::Void) {
             return Ok(value);
         }
-        let source = self.discard_generated_source(value.source, span)?;
+        let source = self.generated_expression_source(value.source, span)?;
         Ok(n::Expr {
             ty: p(P::Void),
             source,
@@ -50,7 +50,7 @@ impl Checker<'_, '_> {
                 let mut discard =
                     self.finish_value_expression(expr, expected, ty, K::Discard(Box::new(value)))?;
                 if !discard.shares_discard_temporary_boundary() {
-                    discard.source = self.discard_generated_source(discard.source, expr.span)?;
+                    discard.source = self.generated_expression_source(discard.source, expr.span)?;
                 }
                 return Ok(discard);
             }

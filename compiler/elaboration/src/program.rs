@@ -71,6 +71,7 @@ mod normal;
 mod open_functions;
 mod operators;
 mod pattern_checking;
+mod returned_environment;
 mod runtime_defaults;
 mod runtime_environment;
 mod runtime_origins;
@@ -3940,7 +3941,8 @@ impl Checker<'_, '_> {
         let outer = self.locals.clone();
         let result = (|| {
             let acquisition = self.acquire_constructor_inputs(callee, &ty)?;
-            Ok(acquisition.finish(self.construct_typed(expr, ty, args, expected)?))
+            let record = self.construct_typed(expr, ty, args, expected)?;
+            acquisition.finish(self, record, expr.span)
         })();
         self.locals = outer;
         result

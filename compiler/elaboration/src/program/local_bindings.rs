@@ -12,6 +12,11 @@ impl BindingKey for hir::HirId {
         super::local(self).bits()
     }
 }
+impl BindingKey for nir::program::SourceRange {
+    fn bits(self) -> u128 {
+        u128::from(self.start) << 32 | u128::from(self.end)
+    }
+}
 impl BindingKey for LocalId {
     fn bits(self) -> u128 {
         u128::from(self.owner) << 32 | u128::from(self.index)

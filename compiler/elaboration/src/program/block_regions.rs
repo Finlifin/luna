@@ -154,7 +154,7 @@ impl<'h, T: Tail> Progress<'h, T> {
         let statement = &self.block.stmts[self.next_statement];
         if let K::Let { value: init, .. } | K::LetPattern { value: init, .. } = &mut value.kind {
             self.statements
-                .extend(checker.take_constructor_environment(init, statement.span)?);
+                .extend(checker.take_value_environment(init, statement.span)?);
         }
         let initialized = if let K::LetPattern {
             pattern,

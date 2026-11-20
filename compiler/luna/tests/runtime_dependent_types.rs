@@ -644,6 +644,122 @@ fn record_acquires_computed_environment_before_fields_and_preserves_it_for_reads
 }
 
 #[test]
+fn returned_environments_preserve_argument_order_cleanup_and_projected_storage() {
+    let case = NativeCase::new(
+        r#"
+        struct Cell { value: i32 }
+        fn mark(t: *Cell, digit: i32) -> i32 {
+            if t.value.* >= 0 and t.value.* < 10000 and digit > 0 and digit < 10 {
+                t.*.value = t.value.* * 10 + digit;
+            }
+            digit
+        }
+        struct Guard where quote trace: lift *Cell {}
+        impl Drop for Guard<trace> where quote trace: lift *Cell {
+            fn drop(*self) { mark(trace, 4); }
+        }
+        fn first() -> Guard<trace> where quote trace: lift *Cell {
+            mark(trace, 1);
+            Guard<trace> {}
+        }
+        struct View where quote src: lift *Cell, quote .field: lift *i32 = src.value {}
+        impl View<src, .field = field> where quote src: lift *Cell, quote field: lift *i32 {
+            fn read(*self) -> i32 { field.* }
+        }
+        fn choose(trace: *Cell, target: *Cell) -> *Cell {
+            mark(trace, 2);
+            target
+        }
+        fn forward(guard: Guard<trace>, v: View<src, .field = field>, last: i32)
+            -> View<src, .field = field>
+        where quote trace: lift *Cell, quote src: lift *Cell, quote field: lift *i32
+        {
+            v
+        }
+        fn identity(v: T) -> T where T { v }
+        fn stop(trace: *Cell, data: *Cell) -> bool {
+            let v = forward(first<trace>(), View<do {
+                if trace.value.* == 1 { return true; }
+                choose(trace, data)
+            }> {}, mark(trace, 3));
+            false
+        }
+        fn run() -> bool {
+            var trace = Cell { value: 0 };
+            var data = Cell { value: 17 };
+            var v = identity(forward(first<trace.ref>(),
+                View<choose(trace.ref, data.ref)> {}, mark(trace.ref, 3)));
+            let before = v.ref.read();
+            data.value = 29;
+            var early = Cell { value: 0 };
+            let stopped = stop(early.ref, data.ref);
+            trace.value == 1234 and before == 17 and v.ref.read() == 29
+                and stopped and early.value == 14
+        }
+    "#,
+    );
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
+fn returned_environments_reuse_explicit_runtime_inputs_after_the_call() {
+    let case = NativeCase::new(
+        r#"
+        struct Cell { value: i32 }
+        fn choose(calls: *Cell, target: *Cell) -> *Cell {
+            if calls.value.* >= 0 and calls.value.* < 100 {
+                calls.*.value = calls.value.* + 1;
+            }
+            target
+        }
+        struct View where quote src: lift *Cell {}
+        impl View<src> where quote src: lift *Cell {
+            fn read(self) -> i32 { src.value.* }
+        }
+        fn make() -> View<src> where quote src: lift *Cell { View<src> {} }
+        fn run() -> bool {
+            var calls = Cell { value: 0 };
+            var data = Cell { value: 17 };
+            let v = make<choose(calls.ref, data.ref)>();
+            let val = v.read();
+            val == 17 and calls.value == 1
+        }
+    "#,
+    );
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
+fn returning_a_dependent_call_does_not_export_a_nested_local() {
+    let err = support::compile(
+        r#"
+        struct Cell { value: i32 }
+        struct View where quote src: lift *Cell {}
+        impl View<src> where quote src: lift *Cell {
+            fn read(self) -> i32 { src.value.* }
+        }
+        fn choose(src: *Cell) -> *Cell { src }
+        fn forward(v: T) -> T where T { v }
+        fn run() -> i32 {
+            let v = do {
+                var inner_cell = Cell { value: 17 };
+                forward(View<choose(inner_cell.ref)> {})
+            };
+            v.read()
+        }
+    "#,
+    )
+    .unwrap_err();
+    assert!(err.contains("no longer in scope"), "{err}");
+}
+
+#[test]
 fn named_quote_inputs_run_between_the_receiver_and_ordinary_arguments() {
     let case = NativeCase::new(
         r#"
@@ -992,6 +1108,8 @@ fn drop_delivers_global_and_local_stateful_allocator_environments() {
             quote a: lift *A,
         {}
 
+        fn relay(value: T) -> T where T { value }
+
         fn select(calls: *i32, allocator: *CountingAlloc) -> *CountingAlloc {
             if calls.* >= 0 and calls.* < 100 { calls.* = calls.* + 1; }
             allocator
@@ -1024,13 +1142,17 @@ fn drop_delivers_global_and_local_stateful_allocator_environments() {
                     .allocator = select(selections.ref, alloc.ref)> { value: 5 };
             };
 
+            do {
+                let relayed = relay(OwnedBox<i32, .A = CountingAlloc,
+                    .allocator = select(selections.ref, alloc.ref)> { value: 7 });
+            };
             size_ok
-                and selections == 1
+                and selections == 2
                 and default_v == 99
                 and after_local_drops == 1
                 and after_local_sum == 10
-                and alloc.drops == 3
-                and alloc.sum == 40
+                and alloc.drops == 4
+                and alloc.sum == 47
         }
     "#;
 
