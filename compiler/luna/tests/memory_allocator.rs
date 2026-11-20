@@ -411,7 +411,7 @@ fn system_allocator_raw_block_and_unix_raw_io_work_end_to_end() {
     let source = format!(
         r#"
         use std.prelude.*;
-        use std.mem.{{AllocError, Allocator, Layout, RawBlock, ReallocError, SystemAllocator}};
+        use std.mem.{{AllocErr, Allocator, Layout, RawBlock, ReallocErr, SystemAllocator}};
         use std.os.{{linux, unix}};
 
         fn addr_offset(base: usize, delta: usize) -> usize {{
@@ -467,8 +467,8 @@ fn system_allocator_raw_block_and_unix_raw_io_work_end_to_end() {
                     return false;
                 }},
                 error err => err match {{
-                    .out_of_memory => true,
-                    .invalid_layout => false,
+                    .OutOfMemory => true,
+                    .InvalidLayout => false,
                 }},
             }};
 

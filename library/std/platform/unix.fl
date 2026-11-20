@@ -3,14 +3,14 @@
     Linux host adapter; another Unix target must supply its own platform ABI.
     No operation retries close: a released descriptor may already be reused.
 -}
-use io_impl.errors.{Error, check}
+use io_impl.errors.{IoErr, check}
 use std.os.linux;
 
 pub const stdin: i32 = 0;
 pub const stdout: i32 = 1;
 pub const stderr: i32 = 2;
 
-pub fn write(fd: i32, offset: u64) -> !Error u64 where text: str {
+pub fn write(fd: i32, offset: u64) -> !IoErr u64 where text: str {
     while true {
         let result = linux.write<text>(fd, offset);
         if result != linux.interrupted {
@@ -19,7 +19,7 @@ pub fn write(fd: i32, offset: u64) -> !Error u64 where text: str {
     }
 }
 
-pub fn write_str(fd: i32, text: str, offset: u64) -> !Error u64 {
+pub fn write_str(fd: i32, text: str, offset: u64) -> !IoErr u64 {
     while true {
         let result = linux.write_str(fd, text, offset);
         if result != linux.interrupted {
@@ -28,20 +28,20 @@ pub fn write_str(fd: i32, text: str, offset: u64) -> !Error u64 {
     }
 }
 
-pub fn write_byte(fd: i32, byte: u8) -> !Error void {
+pub fn write_byte(fd: i32, byte: u8) -> !IoErr void {
     while true {
         let result = linux.write_byte(fd, byte);
         if result != linux.interrupted {
             let count = check(result)!;
             if count == 0 {
-                return error Error.write_zero;
+                return error IoErr.WriteZero;
             }
             return;
         }
     }
 }
 
-pub fn read_byte(fd: i32) -> !Error ?u8 {
+pub fn read_byte(fd: i32) -> !IoErr ?u8 {
     while true {
         let result = linux.read_byte(fd);
         if result != linux.interrupted {
@@ -54,7 +54,7 @@ pub fn read_byte(fd: i32) -> !Error ?u8 {
     }
 }
 
-pub fn close(fd: i32) -> !Error void {
+pub fn close(fd: i32) -> !IoErr void {
     let result = check(linux.close(fd))!;
 }
 
@@ -62,7 +62,7 @@ pub fn getpid() -> i64 {
     linux.getpid()
 }
 
-pub unsafe fn write_raw(fd: i32, addr: usize, len: u64) -> !Error u64 {
+pub unsafe fn write_raw(fd: i32, addr: usize, len: u64) -> !IoErr u64 {
     while true {
         let result = linux.write_raw(fd, addr, len);
         if result != linux.interrupted {
@@ -71,7 +71,7 @@ pub unsafe fn write_raw(fd: i32, addr: usize, len: u64) -> !Error u64 {
     }
 }
 
-pub unsafe fn read_raw(fd: i32, addr: usize, len: u64) -> !Error u64 {
+pub unsafe fn read_raw(fd: i32, addr: usize, len: u64) -> !IoErr u64 {
     while true {
         let result = linux.read_raw(fd, addr, len);
         if result != linux.interrupted {

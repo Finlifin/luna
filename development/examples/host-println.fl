@@ -8,7 +8,7 @@ pure comptime fn status_format(verbose: bool) -> str {
     }
 }
 
-fn demo() -> !std.io.Error void {
+fn demo() -> !std.io.IoErr void {
     println("你好，Flurry！")!;
     let answer: u32 = 42;
     println(status_format(false), answer)!;

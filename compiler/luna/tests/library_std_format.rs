@@ -69,15 +69,15 @@ fn format_plan_rejects_malformed_fields_at_utf8_byte_offsets() {
     assert_eq!(
         support::run(
             r#"
-            use std.fmt.{FormatPlan, FormatError};
+            use std.fmt.{FormatPlan, FormatErr};
             comptime fn inspect() -> bool {
-                (FormatPlan.parse("界{") matches error FormatError.unclosed_field(3)) and
-                (FormatPlan.parse("}") matches error FormatError.unmatched_close(0)) and
-                (FormatPlan.parse("{{}") matches error FormatError.unmatched_close(2)) and
-                (FormatPlan.parse("{0}") matches error FormatError.unsupported_field(0)) and
-                (FormatPlan.parse("{:x}") matches error FormatError.unsupported_field(0)) and
-                (FormatPlan.parse("{name}") matches error FormatError.unsupported_field(0)) and
-                (FormatPlan.parse("{}}") matches error FormatError.unmatched_close(2))
+                (FormatPlan.parse("界{") matches error FormatErr.UnclosedField(3)) and
+                (FormatPlan.parse("}") matches error FormatErr.UnmatchedClose(0)) and
+                (FormatPlan.parse("{{}") matches error FormatErr.UnmatchedClose(2)) and
+                (FormatPlan.parse("{0}") matches error FormatErr.UnsupportedField(0)) and
+                (FormatPlan.parse("{:x}") matches error FormatErr.UnsupportedField(0)) and
+                (FormatPlan.parse("{name}") matches error FormatErr.UnsupportedField(0)) and
+                (FormatPlan.parse("{}}") matches error FormatErr.UnmatchedClose(2))
             }
             fn run() -> bool { inspect() }
             "#,
@@ -161,7 +161,7 @@ fn deferred_format_parameters_accept_complete_packs_and_check_each_field() {
         ),
     ] {
         let invalid = format!(
-            "struct Unknown {{}} fn run() -> !std.io.Error void {{ let byte:u8 = 42; {call} }}"
+            "struct Unknown {{}} fn run() -> !std.io.IoErr void {{ let byte:u8 = 42; {call} }}"
         );
         let error = support::compile(&invalid).unwrap_err();
         assert!(error.contains(diagnostic), "{error}");
@@ -173,7 +173,7 @@ fn println_requires_the_format_before_it_can_admit_runtime_fields() {
     let error = support::compile(
         r#"
         use std.prelude.*;
-        fn show(format: str, value: u32) -> !std.io.Error void {
+        fn show(format: str, value: u32) -> !std.io.IoErr void {
             println(format, value)
         }
         "#,
@@ -341,7 +341,7 @@ fn std_fmt_write_fmt_println_and_eprintln_cover_zero_single_escaped_and_heteroge
         r#"
         use std.prelude.*;
         use std.fmt.write_fmt;
-        fn exercise() -> !std.io.Error void {
+        fn exercise() -> !std.io.IoErr void {
             var out = std.io.stdout();
             write_fmt(out.ref, "empty")!;
             write_fmt(out.ref, "{{escaped}}")!;
@@ -370,7 +370,7 @@ fn std_fmt_write_fmt_println_and_eprintln_cover_zero_single_escaped_and_heteroge
         r#"std.fmt.write_fmt(w.ref, "{}", Unknown {})"#,
     ] {
         let invalid = format!(
-            "use std.prelude.*; struct Unknown {{}} fn run() -> !std.io.Error void {{ var w = std.io.stdout(); {call} }}"
+            "use std.prelude.*; struct Unknown {{}} fn run() -> !std.io.IoErr void {{ var w = std.io.stdout(); {call} }}"
         );
         assert!(support::compile(&invalid).is_err(), "{call}");
     }

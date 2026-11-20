@@ -7,11 +7,11 @@ use primitives.{str, u64, u8, void}
     The receiver is borrowed, so stateful sinks need neither Clone nor Copy.
 -}
 pub trait ByteWriter {
-    assoc Error: Type;
+    assoc Err: Type;
 
-    fn write_byte(*self, byte: u8) -> !Error void;
+    fn write_byte(*self, byte: u8) -> !Err void;
 
-    fn write_str(*self, text: str) -> !Error void {
+    fn write_str(*self, text: str) -> !Err void {
         let length = str_byte_length(text);
         var index: u64 = 0;
         while index < length {

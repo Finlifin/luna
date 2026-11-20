@@ -1,12 +1,12 @@
 use builtin.fmt.{ByteWriter, Display}
 use collections_impl.vec.Vec;
 use fmt_impl.parse.{FormatPlan, Parse}
-use io_impl.errors.Error;
+use io_impl.errors.IoErr;
 use io_impl.writer.{stderr, stdout, write_all}
-use mem_impl.allocator.AllocError;
+use mem_impl.allocator.AllocErr;
 use string_impl.string.String;
 
-pub fn print(comptime text: str) -> !Error void {
+pub fn print(comptime text: str) -> !IoErr void {
     write_all<text>(1)
 }
 
@@ -14,7 +14,7 @@ pub fn print(comptime text: str) -> !Error void {
 fn write_segment(
     output: *W,
     index: usize,
-) -> !W.as(ByteWriter).Error void where W :- ByteWriter, segments: meta.List<str> {
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter, segments: meta.List<str> {
     inline for i in 0..segments.length() {
         const segment_index: usize = i.to_usize();
         if index == segment_index {
@@ -31,7 +31,7 @@ fn write_fmt_tuple(
     output: *W,
     comptime format: str,
     values: defer Parse(format),
-) -> !W.as(ByteWriter).Error void where W :- ByteWriter {
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
     const segments = FormatPlan.literal_segments_for(format);
     const segment_count: usize = segments.length().to_usize();
     var index: usize = 0;
@@ -52,11 +52,11 @@ pub fn write_fmt(
     output: *W,
     comptime format: str,
     ...varargs: defer Parse(format),
-) -> !W.as(ByteWriter).Error void where W :- ByteWriter {
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
     write_fmt_tuple(output, format, varargs)
 }
 
-pub fn format(comptime format: str, ...varargs: defer Parse(format)) -> !AllocError String {
+pub fn format(comptime format: str, ...varargs: defer Parse(format)) -> !AllocErr String {
     var bytes = Vec<u8>.new();
     write_fmt_tuple(bytes.ref, format, varargs)!;
     String.from_utf8_lossy(bytes)
@@ -66,35 +66,35 @@ pub fn format_into(
     target: *String,
     comptime format: str,
     ...varargs: defer Parse(format),
-) -> !AllocError void {
+) -> !AllocErr void {
     var bytes = Vec<u8>.new();
     write_fmt_tuple(bytes.ref, format, varargs)!;
     var formatted = String.from_utf8_lossy(bytes)!;
     target.push_string(formatted.ref)
 }
 
-pub fn println(comptime format: str, ...varargs: defer Parse(format)) -> !Error void {
+pub fn println(comptime format: str, ...varargs: defer Parse(format)) -> !IoErr void {
     var output = stdout();
     write_fmt_tuple(output.ref, format, varargs)!;
     output.write_byte(10)
 }
 
-pub fn eprint(comptime text: str) -> !Error void {
+pub fn eprint(comptime text: str) -> !IoErr void {
     write_all<text>(2)
 }
 
-pub fn eprintln(comptime format: str, ...varargs: defer Parse(format)) -> !Error void {
+pub fn eprintln(comptime format: str, ...varargs: defer Parse(format)) -> !IoErr void {
     var output = stderr();
     write_fmt_tuple(output.ref, format, varargs)!;
     output.write_byte(10)
 }
 
-pub fn print_value(value: T) -> !Error void where T :- Display {
+pub fn print_value(value: T) -> !IoErr void where T :- Display {
     var output = stdout();
     value.write(output.ref)
 }
 
-pub fn println_value(value: T) -> !Error void where T :- Display {
+pub fn println_value(value: T) -> !IoErr void where T :- Display {
     var output = stdout();
     value.write(output.ref)!;
     output.write_byte(10)

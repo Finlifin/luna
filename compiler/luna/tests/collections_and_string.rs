@@ -1,5 +1,5 @@
 //! End-to-end Milestone D tests for `u32 -> ?char` conversions, `std.collections.Vec<T>`,
-//! `std.string.{String, Utf8Error}`, and generic `std.fmt.{write_fmt, format, format_into}`.
+//! `std.string.{String, Utf8Err}`, and generic `std.fmt.{write_fmt, format, format_into}`.
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod support;
@@ -145,9 +145,9 @@ fn char_from_u32_and_try_from_work_at_runtime_and_comptime() {
 fn vec_operations_growth_mutation_and_clone_work_natively() {
     let source = r#"
         use std.prelude.*;
-        use std.mem.AllocError;
+        use std.mem.AllocErr;
 
-        fn exercise_vec() -> !AllocError bool {
+        fn exercise_vec() -> !AllocErr bool {
             var empty = Vec<u32>.new();
             if not empty.ref.is_empty() or empty.ref.len() != 0 or empty.ref.capacity() != 0 {
                 return false;
@@ -235,17 +235,17 @@ fn vec_operations_growth_mutation_and_clone_work_natively() {
                 }
             });
             -- Now [21, 701, 101, 100].
-            let try_ok = v.ref.try_for_each_ref(|item| -> !AllocError void {
+            let try_ok = v.ref.try_for_each_ref(|item| -> !AllocErr void {
                 if item.* == 0 {
-                    return error AllocError.invalid_layout;
+                    return error AllocErr.InvalidLayout;
                 }
             }) match {
                 _! => true,
                 error _ => false,
             };
-            let try_err = v.ref.try_for_each_ref(|item| -> !AllocError void {
+            let try_err = v.ref.try_for_each_ref(|item| -> !AllocErr void {
                 if item.* == 101 {
-                    return error AllocError.invalid_layout;
+                    return error AllocErr.InvalidLayout;
                 }
             }) match {
                 _! => false,
@@ -319,7 +319,7 @@ fn vec_operations_growth_mutation_and_clone_work_natively() {
 fn vec_affine_zst_nested_and_iterator_drops_fire_exactly_once() {
     let source = r#"
         use std.prelude.*;
-        use std.mem.{AllocError, Allocator, Layout, SystemAllocator};
+        use std.mem.{AllocErr, Allocator, Layout, SystemAllocator};
 
         struct TrackDrop {
             id: u64,
@@ -574,9 +574,9 @@ fn vec_affine_zst_nested_and_iterator_drops_fire_exactly_once() {
 fn string_utf8_validation_mutation_search_and_protocols_work_natively() {
     let source = r#"
         use std.prelude.*;
-        use std.mem.AllocError;
+        use std.mem.AllocErr;
 
-        fn push_all(target: *Vec<u8>, byte_count: u8, b0: u8, b1: u8, b2: u8, b3: u8) -> !AllocError void {
+        fn push_all(target: *Vec<u8>, byte_count: u8, b0: u8, b1: u8, b2: u8, b3: u8) -> !AllocErr void {
             if byte_count >= 1 {
                 target.push(b0)!;
             }
@@ -598,7 +598,7 @@ fn string_utf8_validation_mutation_search_and_protocols_work_natively() {
             }
         }
 
-        fn exercise_string() -> !AllocError bool {
+        fn exercise_string() -> !AllocErr bool {
             let empty = String.new();
             let cap_init = String.with_capacity(16)!;
             if empty.ref.len() != 0 or not empty.ref.is_empty() or cap_init.ref.capacity() < 16 {
@@ -789,9 +789,9 @@ fn std_fmt_format_and_generic_write_fmt_work_across_vec_string_writer_and_file()
         use builtin.fmt.ByteWriter;
         use std.fs.{File, remove_file};
         use std.io.Writer;
-        use std.mem.AllocError;
+        use std.mem.AllocErr;
 
-        fn probe_bool_display(buf: *Vec<u8>, comptime T: Type, v: T) -> !AllocError bool {
+        fn probe_bool_display(buf: *Vec<u8>, comptime T: Type, v: T) -> !AllocErr bool {
             inline if T :- Display {
                 v.write(buf)!;
                 true
@@ -804,7 +804,7 @@ fn std_fmt_format_and_generic_write_fmt_work_across_vec_string_writer_and_file()
             output: *W,
             label: str,
             ch: char,
-        ) -> !W.as(ByteWriter).Error void
+        ) -> !W.as(ByteWriter).Err void
         where W :- ByteWriter
         {
             const prefix = "gen";

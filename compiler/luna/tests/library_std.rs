@@ -69,7 +69,7 @@ fn println_and_display_preserve_bytes_and_external_effects() {
         use std.prelude.*;
         struct Label { value: u32 }
         impl Display for Label {
-            fn write(self, output: *W) -> !W.as(std.io.ByteWriter).Error void
+            fn write(self, output: *W) -> !W.as(std.io.ByteWriter).Err void
             where W :- std.io.ByteWriter
             {
                 output.write_byte(99)!;
@@ -88,7 +88,7 @@ fn println_and_display_preserve_bytes_and_external_effects() {
             counter.* = previous + 1;
             previous
         }
-        fn output() -> !std.io.Error void {
+        fn output() -> !std.io.IoErr void {
             println("Hello, Flurry! 世界")!;
             print("embedded\0NUL")!;
             println("")!;
@@ -123,7 +123,7 @@ fn files_round_trip_and_close_without_retiring_a_reused_descriptor() {
         r#"
         use std.fs.File;
         use std.os.linux;
-        fn exercise() -> !std.io.Error bool {
+        fn exercise() -> !std.io.IoErr bool {
             var file = File.create<"bytes.dat">()!;
             file.write_all<"A\0Z">()!;
             file.close()!;
@@ -218,8 +218,8 @@ fn writes_retry_interruption_and_short_transfers_but_propagate_failure() {
         fn run() -> bool {
             println("hello") match {
                 _! => true,
-                error std.io.Error.write_zero => false,
-                error std.io.Error.os(code) => code != 5,
+                error std.io.IoErr.WriteZero => false,
+                error std.io.IoErr.Os(code) => code != 5,
             }
         }
     "#,
@@ -286,7 +286,7 @@ fn file_scope_exit_closes_owned_descriptor() {
         r#"
         use std.fs.File;
         use std.os.linux;
-        fn exercise() -> !std.io.Error bool {
+        fn exercise() -> !std.io.IoErr bool {
             let raw = linux.open<"drop.dat">(65, 438);
             assumes raw >= 0 and raw <= 2147483647;
             let fd = raw'bitvec[0..32].as(i32);
@@ -329,21 +329,21 @@ fn builtin_display_borrows_stateful_writers_and_preserves_their_errors() {
     let case = Case::new(
         r#"
         use builtin.fmt.ByteWriter;
-        enum SinkError { full(u8) }
+        enum SinkErr { Full(u8) }
         struct Sink { count: u64, limit: u64, bytes: u64, attempts: u64 }
         impl ByteWriter for Sink {
-            assoc Error: Type = SinkError;
-            fn write_byte(*self, byte: u8) -> !SinkError void {
+            assoc Err: Type = SinkErr;
+            fn write_byte(*self, byte: u8) -> !SinkErr void {
                 assumes self.attempts.* < 16;
                 self.attempts.* = self.attempts.* + 1;
-                if self.count.* >= self.limit.* { return error SinkError.full(byte); }
+                if self.count.* >= self.limit.* { return error SinkErr.Full(byte); }
                 assumes self.count.* < 8;
                 assumes self.bytes.* <= 72057594037927935;
                 self.bytes.* = self.bytes.* * 256 + byte'bitvec.as(u64);
                 self.count.* = self.count.* + 1;
             }
         }
-        fn render(value: T, sink: *W) -> !W.as(ByteWriter).Error void
+        fn render(value: T, sink: *W) -> !W.as(ByteWriter).Err void
         where T :- Display, W :- ByteWriter
         {
             value.write(sink)
@@ -353,7 +353,7 @@ fn builtin_display_borrows_stateful_writers_and_preserves_their_errors() {
             let value: u32 = 12345;
             let failed = render(value, sink.ref) match {
                 _! => false,
-                error SinkError.full(byte) => byte == 51,
+                error SinkErr.Full(byte) => byte == 51,
             };
             let prefix = sink.count == 2 and sink.attempts == 3 and sink.bytes == 12594;
             sink.limit = 8;
@@ -362,7 +362,7 @@ fn builtin_display_borrows_stateful_writers_and_preserves_their_errors() {
             let text = render(true, sink.ref) match { _! => true, error _ => false };
             let full = render(false, sink.ref) match {
                 _! => false,
-                error SinkError.full(byte) => byte == 102,
+                error SinkErr.Full(byte) => byte == 102,
             };
             failed and prefix and resumed and text and full and sink.count == 8
                 and sink.attempts == 10 and sink.bytes == 3544945572894111077
@@ -382,7 +382,7 @@ fn display_writes_through_a_borrowed_file_without_transferring_ownership() {
     let case = Case::new(
         r#"
         use std.fs.File;
-        fn exercise() -> !std.io.Error bool {
+        fn exercise() -> !std.io.IoErr bool {
             var file = File.create<"formatted.txt">()!;
             let value: u32 = 42;
             value.write(file.ref)!;

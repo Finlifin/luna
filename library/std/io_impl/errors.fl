@@ -1,13 +1,13 @@
-pub enum Error {
-    os(i64),
-    write_zero,
+pub enum IoErr {
+    Os(i64),
+    WriteZero,
 }
 
 -- Preserve the platform error before another operation changes errno.
-pub fn check(result: i64) -> !Error i64 {
+pub fn check(result: i64) -> !IoErr i64 {
     if result < 0 {
         assumes result != -9223372036854775808;
-        error Error.os(-result)
+        error IoErr.Os(-result)
     } else {
         result
     }

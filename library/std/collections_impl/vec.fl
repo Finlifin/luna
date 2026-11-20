@@ -1,5 +1,5 @@
 use builtin.fmt.ByteWriter;
-use mem_impl.allocator.{AllocError, Allocator, RawBlock, ReallocError, SystemAllocator}
+use mem_impl.allocator.{AllocErr, Allocator, RawBlock, ReallocErr, SystemAllocator}
 use mem_impl.layout.Layout;
 
 {-
@@ -78,10 +78,10 @@ fn dealloc_vec_buffer(addr: usize, cap: usize) where T {
     }
 }
 
-fn map_realloc_error(err: ReallocError) -> AllocError {
+fn map_realloc_error(err: ReallocErr) -> AllocErr {
     err match {
-        .out_of_memory => AllocError.out_of_memory,
-        .invalid_layout => AllocError.invalid_layout,
+        .OutOfMemory => AllocErr.OutOfMemory,
+        .InvalidLayout => AllocErr.InvalidLayout,
     }
 }
 
@@ -112,20 +112,20 @@ impl Vec<T> where T {
         }
     }
 
-    pub fn with_capacity(capacity: usize) -> !AllocError Self {
+    pub fn with_capacity(capacity: usize) -> !AllocErr Self {
         if capacity == 0 {
             return Vec<T>.new();
         }
         if Type.size_of(T) == 0 {
             let _ = Layout.of<T>() match {
                 found? => found,
-                null => return error AllocError.invalid_layout,
+                null => return error AllocErr.InvalidLayout,
             }
             return Vec<T>.new();
         }
         let layout = buffer_layout<T>(capacity) match {
             found? => found,
-            null => return error AllocError.invalid_layout,
+            null => return error AllocErr.InvalidLayout,
         }
         let alloc = SystemAllocator {}
         let block = alloc.as(Allocator).allocate(layout)!;
@@ -158,16 +158,16 @@ impl Vec<T> where T {
         self.raw_addr.*
     }
 
-    pub fn reserve(*self, additional: usize) -> !AllocError void {
+    pub fn reserve(*self, additional: usize) -> !AllocErr void {
         let len = self.raw_len.*;
         let required = builtin.mem.checked_add_usize(len, additional) match {
             value? => value,
-            null => return error AllocError.invalid_layout,
+            null => return error AllocErr.InvalidLayout,
         }
         if Type.size_of(T) == 0 {
             let _ = Layout.of<T>() match {
                 found? => found,
-                null => return error AllocError.invalid_layout,
+                null => return error AllocErr.InvalidLayout,
             }
             return;
         }
@@ -196,7 +196,7 @@ impl Vec<T> where T {
         }
         let new_layout = buffer_layout<T>(target_cap) match {
             found? => found,
-            null => return error AllocError.invalid_layout,
+            null => return error AllocErr.InvalidLayout,
         }
         let alloc = SystemAllocator {}
         if cap == 0 {
@@ -206,7 +206,7 @@ impl Vec<T> where T {
         } else {
             let old_layout = buffer_layout<T>(cap) match {
                 found? => found,
-                null => return error AllocError.invalid_layout,
+                null => return error AllocErr.InvalidLayout,
             }
             let old_block = RawBlock.from_raw_parts(self.raw_addr.*, old_layout);
             let new_block = unsafe { alloc.as(Allocator).reallocate(old_block, new_layout) } match {
@@ -218,7 +218,7 @@ impl Vec<T> where T {
         }
     }
 
-    pub fn shrink_to_fit(*self) -> !AllocError void {
+    pub fn shrink_to_fit(*self) -> !AllocErr void {
         if Type.size_of(T) == 0 {
             return;
         }
@@ -236,11 +236,11 @@ impl Vec<T> where T {
         }
         let old_layout = buffer_layout<T>(cap) match {
             found? => found,
-            null => return error AllocError.invalid_layout,
+            null => return error AllocErr.InvalidLayout,
         }
         let new_layout = buffer_layout<T>(len) match {
             found? => found,
-            null => return error AllocError.invalid_layout,
+            null => return error AllocErr.InvalidLayout,
         }
         let alloc = SystemAllocator {}
         let new_block = unsafe {
@@ -255,11 +255,11 @@ impl Vec<T> where T {
         self.raw_cap.* = len;
     }
 
-    pub fn push(*self, value: T) -> !AllocError void {
+    pub fn push(*self, value: T) -> !AllocErr void {
         let len = self.raw_len.*;
         let next_len = builtin.mem.checked_add_usize(len, 1) match {
             v? => v,
-            null => return error AllocError.invalid_layout,
+            null => return error AllocErr.InvalidLayout,
         }
         self.reserve(1)!;
         let addr = self.raw_addr.*;
@@ -282,7 +282,7 @@ impl Vec<T> where T {
         }
     }
 
-    pub fn insert(*self, index: usize, value: T) -> !AllocError bool {
+    pub fn insert(*self, index: usize, value: T) -> !AllocErr bool {
         let len = self.raw_len.*;
         if index > len {
             retire_value(value);
@@ -290,19 +290,19 @@ impl Vec<T> where T {
         }
         let next_len = builtin.mem.checked_add_usize(len, 1) match {
             v? => v,
-            null => return error AllocError.invalid_layout,
+            null => return error AllocErr.InvalidLayout,
         }
         self.reserve(1)!;
         let addr = self.raw_addr.*;
         if Type.size_of(T) != 0 and index < len {
             let stride = elem_stride<T>() match {
                 s? => s,
-                null => return error AllocError.invalid_layout,
+                null => return error AllocErr.InvalidLayout,
             }
             let tail_count = len - index;
             let bytes = builtin.mem.checked_mul_usize(tail_count, stride) match {
                 b? => b,
-                null => return error AllocError.invalid_layout,
+                null => return error AllocErr.InvalidLayout,
             }
             let src = slot_address<T>(addr, index);
             let dst = slot_address<T>(addr, index + 1);
@@ -459,7 +459,7 @@ impl Vec<T> where T {
         }
     }
 
-    pub fn append(*self, other: *Self) -> !AllocError void {
+    pub fn append(*self, other: *Self) -> !AllocErr void {
         let other_len = other.raw_len.*;
         if other_len == 0 {
             return;
@@ -467,17 +467,17 @@ impl Vec<T> where T {
         let self_len = self.raw_len.*;
         let next_len = builtin.mem.checked_add_usize(self_len, other_len) match {
             v? => v,
-            null => return error AllocError.invalid_layout,
+            null => return error AllocErr.InvalidLayout,
         }
         self.reserve(other_len)!;
         if Type.size_of(T) != 0 {
             let stride = elem_stride<T>() match {
                 s? => s,
-                null => return error AllocError.invalid_layout,
+                null => return error AllocErr.InvalidLayout,
             }
             let bytes = builtin.mem.checked_mul_usize(other_len, stride) match {
                 b? => b,
-                null => return error AllocError.invalid_layout,
+                null => return error AllocErr.InvalidLayout,
             }
             let dst = slot_address<T>(self.raw_addr.*, self_len);
             let src = slot_address<T>(other.raw_addr.*, 0);
@@ -581,7 +581,7 @@ impl Vec<T> where T :- Copy + Eq {
 }
 
 impl Vec<T> where T :- Clone {
-    pub fn try_clone(*self) -> !AllocError Self {
+    pub fn try_clone(*self) -> !AllocErr Self {
         let len = self.raw_len.*;
         var out = Vec<T>.with_capacity(len)!;
         let base = self.raw_addr.*;
@@ -693,17 +693,17 @@ impl Eq for Vec<T> where T :- Eq {
 }
 
 impl ByteWriter for Vec<u8> {
-    assoc Error: Type = AllocError;
+    assoc Err: Type = AllocErr;
 
-    fn write_byte(*self, byte: u8) -> !AllocError void {
+    fn write_byte(*self, byte: u8) -> !AllocErr void {
         self.push(byte)
     }
 
-    fn write_str(*self, text: str) -> !AllocError void {
+    fn write_str(*self, text: str) -> !AllocErr void {
         let len = builtin.compiler.str_byte_length(text);
         let len_usize = builtin.compiler.try_u64_to_usize(len) match {
             value? => value,
-            null => return error AllocError.invalid_layout,
+            null => return error AllocErr.InvalidLayout,
         }
         self.reserve(len_usize)!;
         var index: u64 = 0;

@@ -1,6 +1,6 @@
 use std.prelude.*;
 
-fn demo() -> !std.io.Error void {
+fn demo() -> !std.io.IoErr void {
     println("你好，Flurry！")!;
     print("answer = ")!;
     let answer: u32 = 42;

@@ -21,7 +21,7 @@ pub mod os {
 
 pub mod io {
     pub use builtin.fmt.ByteWriter;
-    pub use errors.Error;
+    pub use errors.IoErr;
     pub use unix_impl.read_byte;
     pub use writer.{Writer, stderr, stdout, write_all, write_all_raw, write_all_str}
 }
@@ -41,7 +41,7 @@ pub mod collections {
 }
 
 pub mod string {
-    pub use string_mod.{String, Utf8Error}
+    pub use string_mod.{String, Utf8Err}
 }
 
 pub mod fmt {
@@ -57,7 +57,7 @@ pub mod fmt {
         write_fmt,
     }
     pub use builtin.fmt.Display;
-    pub use parse.{FormatError, FormatPiece, FormatPlan, Parse}
+    pub use parse.{FormatErr, FormatPiece, FormatPlan, Parse}
 }
 
 pub mod prelude {

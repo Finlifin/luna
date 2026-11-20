@@ -1,32 +1,32 @@
 use builtin.fmt.ByteWriter;
 use collections_impl.vec.Vec;
-use mem_impl.allocator.AllocError;
+use mem_impl.allocator.AllocErr;
 
 {-
     Byte offset at which UTF-8 validation first failed. All preceding bytes in
     [0, valid_up_to()) form valid UTF-8.
 -}
-pub struct Utf8Error {
+pub struct Utf8Err {
     valid_up_to_offset: usize,
 }
 
-impl Clone for Utf8Error {
+impl Clone for Utf8Err {
     fn clone(*self) -> Self {
-        Utf8Error {
+        Utf8Err {
             valid_up_to_offset: self.valid_up_to_offset.*,
         }
     }
 }
 
-impl Copy for Utf8Error {}
+impl Copy for Utf8Err {}
 
-impl Eq for Utf8Error {
+impl Eq for Utf8Err {
     fn eq(self, other: Self) -> bool {
         self.valid_up_to_offset == other.valid_up_to_offset
     }
 }
 
-impl Utf8Error {
+impl Utf8Err {
     pub pure fn valid_up_to(self) -> usize {
         self.valid_up_to_offset
     }
@@ -229,27 +229,27 @@ impl String {
         String { bytes: Vec<u8>.new() }
     }
 
-    pub fn with_capacity(capacity: usize) -> !AllocError Self {
+    pub fn with_capacity(capacity: usize) -> !AllocErr Self {
         let bytes = Vec<u8>.with_capacity(capacity)!;
         String { bytes: bytes }
     }
 
-    pub fn from_str(text: str) -> !AllocError Self {
+    pub fn from_str(text: str) -> !AllocErr Self {
         var out = String.new();
         out.ref.push_str(text)!;
         out
     }
 
-    pub fn from_utf8(bytes: Vec<u8>) -> !Utf8Error Self {
+    pub fn from_utf8(bytes: Vec<u8>) -> !Utf8Err Self {
         var owned = bytes;
         validate_utf8(owned.ref) match {
-            offset? => return error Utf8Error { valid_up_to_offset: offset },
+            offset? => return error Utf8Err { valid_up_to_offset: offset },
             null => {},
         }
         String { bytes: owned }
     }
 
-    pub fn from_utf8_lossy(bytes: Vec<u8>) -> !AllocError Self {
+    pub fn from_utf8_lossy(bytes: Vec<u8>) -> !AllocErr Self {
         var owned = bytes;
         validate_utf8(owned.ref) match {
             null => return String { bytes: owned },
@@ -328,11 +328,11 @@ impl String {
         self.bytes
     }
 
-    pub fn reserve(*self, additional: usize) -> !AllocError void {
+    pub fn reserve(*self, additional: usize) -> !AllocErr void {
         self.bytes.reserve(additional)
     }
 
-    pub fn shrink_to_fit(*self) -> !AllocError void {
+    pub fn shrink_to_fit(*self) -> !AllocErr void {
         self.bytes.shrink_to_fit()
     }
 
@@ -340,11 +340,11 @@ impl String {
         self.bytes.clear();
     }
 
-    pub fn push_str(*self, text: str) -> !AllocError void {
+    pub fn push_str(*self, text: str) -> !AllocErr void {
         self.bytes.write_str(text)
     }
 
-    pub fn push_string(*self, other: *String) -> !AllocError void {
+    pub fn push_string(*self, other: *String) -> !AllocErr void {
         let other_len = other.len();
         if other_len == 0 {
             return;
@@ -361,7 +361,7 @@ impl String {
         }
     }
 
-    pub fn push_char(*self, ch: char) -> !AllocError void {
+    pub fn push_char(*self, ch: char) -> !AllocErr void {
         let code = ch'bitvec.as(u32);
         if code <= 127 {
             self.bytes.push(code'bitvec[0..8].as(u8))
@@ -448,7 +448,7 @@ impl String {
         true
     }
 
-    pub fn try_clone(*self) -> !AllocError Self {
+    pub fn try_clone(*self) -> !AllocErr Self {
         let cloned = self.bytes.try_clone()!;
         String { bytes: cloned }
     }
@@ -653,7 +653,7 @@ impl String {
         state
     }
 
-    pub fn write_to(*self, output: *W) -> !W.as(ByteWriter).Error void where W :- ByteWriter {
+    pub fn write_to(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
         let len = self.len();
         var i: usize = 0;
         while i < len {
@@ -668,7 +668,7 @@ impl String {
 }
 
 impl Display for String {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Error void where W :- ByteWriter {
+    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
         var this = self;
         this.ref.write_to(output)
     }

@@ -7,67 +7,67 @@ use std.os.linux;
     implicit drop so owned wrappers like Box<T> and Vec<T> manage lifetimes
     and initialization explicitly.
 -}
-pub enum AllocError {
-    out_of_memory,
-    invalid_layout,
+pub enum AllocErr {
+    OutOfMemory,
+    InvalidLayout,
 }
 
-impl Clone for AllocError {
+impl Clone for AllocErr {
     fn clone(*self) -> Self {
         self.* match {
-            .out_of_memory => .out_of_memory,
-            .invalid_layout => .invalid_layout,
+            .OutOfMemory => .OutOfMemory,
+            .InvalidLayout => .InvalidLayout,
         }
     }
 }
 
-impl Copy for AllocError {}
+impl Copy for AllocErr {}
 
-impl Eq for AllocError {
+impl Eq for AllocErr {
     fn eq(self, other: Self) -> bool {
         self match {
-            .out_of_memory =>
+            .OutOfMemory =>
                 other match {
-                    .out_of_memory => true,
-                    .invalid_layout => false,
+                    .OutOfMemory => true,
+                    .InvalidLayout => false,
                 },
-            .invalid_layout =>
+            .InvalidLayout =>
                 other match {
-                    .out_of_memory => false,
-                    .invalid_layout => true,
+                    .OutOfMemory => false,
+                    .InvalidLayout => true,
                 },
         }
     }
 }
 
-pub enum ReallocError {
-    out_of_memory,
-    invalid_layout,
+pub enum ReallocErr {
+    OutOfMemory,
+    InvalidLayout,
 }
 
-impl Clone for ReallocError {
+impl Clone for ReallocErr {
     fn clone(*self) -> Self {
         self.* match {
-            .out_of_memory => .out_of_memory,
-            .invalid_layout => .invalid_layout,
+            .OutOfMemory => .OutOfMemory,
+            .InvalidLayout => .InvalidLayout,
         }
     }
 }
 
-impl Copy for ReallocError {}
+impl Copy for ReallocErr {}
 
-impl Eq for ReallocError {
+impl Eq for ReallocErr {
     fn eq(self, other: Self) -> bool {
         self match {
-            .out_of_memory =>
+            .OutOfMemory =>
                 other match {
-                    .out_of_memory => true,
-                    .invalid_layout => false,
+                    .OutOfMemory => true,
+                    .InvalidLayout => false,
                 },
-            .invalid_layout =>
+            .InvalidLayout =>
                 other match {
-                    .out_of_memory => false,
-                    .invalid_layout => true,
+                    .OutOfMemory => false,
+                    .InvalidLayout => true,
                 },
         }
     }
@@ -129,10 +129,10 @@ impl RawBlock {
 }
 
 pub trait Allocator {
-    fn allocate(*self, layout: Layout) -> !AllocError RawBlock;
-    fn allocate_zeroed(*self, layout: Layout) -> !AllocError RawBlock;
+    fn allocate(*self, layout: Layout) -> !AllocErr RawBlock;
+    fn allocate_zeroed(*self, layout: Layout) -> !AllocErr RawBlock;
     unsafe fn deallocate(*self, block: RawBlock);
-    unsafe fn reallocate(*self, block: RawBlock, new_layout: Layout) -> !ReallocError RawBlock;
+    unsafe fn reallocate(*self, block: RawBlock, new_layout: Layout) -> !ReallocErr RawBlock;
 }
 
 pub struct SystemAllocator {}
@@ -159,19 +159,19 @@ fn valid_usize_layout(layout: Layout) -> bool {
     }
 }
 
-fn system_allocate(layout: Layout) -> !AllocError RawBlock {
+fn system_allocate(layout: Layout) -> !AllocErr RawBlock {
     if not valid_usize_layout(layout) {
-        return error AllocError.invalid_layout;
+        return error AllocErr.InvalidLayout;
     }
     if layout.byte_size() == 0 {
         return RawBlock.dangling(layout) match {
             empty? => empty,
-            null => error AllocError.invalid_layout,
+            null => error AllocErr.InvalidLayout,
         }
     }
     let addr = unsafe { linux.alloc(layout.byte_size(), layout.byte_alignment()) }
     if addr == 0 {
-        return error AllocError.out_of_memory;
+        return error AllocErr.OutOfMemory;
     }
     RawBlock {
         raw_addr: addr,
@@ -190,17 +190,17 @@ fn system_deallocate(block: RawBlock) {
 }
 
 impl Allocator for SystemAllocator {
-    fn allocate(*self, layout: Layout) -> !AllocError RawBlock {
+    fn allocate(*self, layout: Layout) -> !AllocErr RawBlock {
         system_allocate(layout)
     }
 
-    fn allocate_zeroed(*self, layout: Layout) -> !AllocError RawBlock {
+    fn allocate_zeroed(*self, layout: Layout) -> !AllocErr RawBlock {
         let block = system_allocate(layout)!;
         let size = layout.byte_size_usize() match {
             bytes? => bytes,
             null => {
                 system_deallocate(block);
-                return error AllocError.invalid_layout;
+                return error AllocErr.InvalidLayout;
             },
         }
         if size > 0 {
@@ -215,23 +215,23 @@ impl Allocator for SystemAllocator {
         system_deallocate(block);
     }
 
-    unsafe fn reallocate(*self, block: RawBlock, new_layout: Layout) -> !ReallocError RawBlock {
+    unsafe fn reallocate(*self, block: RawBlock, new_layout: Layout) -> !ReallocErr RawBlock {
         if not valid_usize_layout(new_layout) {
-            return error ReallocError.invalid_layout;
+            return error ReallocErr.InvalidLayout;
         }
         let new_size = new_layout.byte_size_usize() match {
             bytes? => bytes,
-            null => return error ReallocError.invalid_layout,
+            null => return error ReallocErr.InvalidLayout,
         }
         let old_size = block.layout().byte_size_usize() match {
             bytes? => bytes,
-            null => return error ReallocError.invalid_layout,
+            null => return error ReallocErr.InvalidLayout,
         }
         if new_size == 0 {
             system_deallocate(block);
             return RawBlock.dangling(new_layout) match {
                 empty? => empty,
-                null => error ReallocError.invalid_layout,
+                null => error ReallocErr.InvalidLayout,
             }
         }
         system_allocate(new_layout) match {
@@ -255,8 +255,8 @@ impl Allocator for SystemAllocator {
             },
             error reason =>
                 reason match {
-                    .out_of_memory => error ReallocError.out_of_memory,
-                    .invalid_layout => error ReallocError.invalid_layout,
+                    .OutOfMemory => error ReallocErr.OutOfMemory,
+                    .InvalidLayout => error ReallocErr.InvalidLayout,
                 },
         }
     }

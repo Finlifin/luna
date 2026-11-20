@@ -1,4 +1,4 @@
-use mem_impl.allocator.{AllocError, Allocator, RawBlock, SystemAllocator}
+use mem_impl.allocator.{AllocErr, Allocator, RawBlock, SystemAllocator}
 use mem_impl.layout.Layout;
 
 {-
@@ -41,10 +41,10 @@ impl Box<T> where T {
         RawBlock.from_raw_parts(addr, layout)
     }
 
-    pub fn new(value: T) -> !AllocError Self {
+    pub fn new(value: T) -> !AllocErr Self {
         let layout = Layout.of<T>() match {
             found? => found,
-            null => return error AllocError.invalid_layout,
+            null => return error AllocErr.InvalidLayout,
         }
         let alloc = SystemAllocator {}
         let block = alloc.as(Allocator).allocate(layout)!;

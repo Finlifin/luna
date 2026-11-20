@@ -7,7 +7,7 @@ allocator 的 runtime 协议。Display 同时进入 builtin.prelude；ByteWriter
 ```flurry
 use builtin.fmt.ByteWriter;
 
-fn write_value(value: T, output: *W) -> !W.as(ByteWriter).Error void
+fn write_value(value: T, output: *W) -> !W.as(ByteWriter).Err void
 where T :- Display, W :- ByteWriter
 {
     value.write(output)
@@ -16,7 +16,7 @@ where T :- Display, W :- ByteWriter
 
 ByteWriter 借用接收者，不要求 Clone/Copy。write_byte 成功恰好接受一个字节；
 失败时不接受本次字节，前面已经接受的字节保持有效，错误域由具体 writer 的
-关联 Error 决定。Display 不把错误转换成 std.io.Error，也不消费 writer。
+关联 Err 决定。Display 不把错误转换成 std.io.IoErr，也不消费 writer。
 
 当前协议只承诺单字节操作；多字节格式化按顺序调用，首次失败即停止，不回滚
 已写前缀，也不返回已写长度。调用者不能在失败后盲目重试整个格式化操作；恢复

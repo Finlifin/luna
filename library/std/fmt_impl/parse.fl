@@ -12,10 +12,10 @@ pub enum FormatPiece {
     argument(Integer),
 }
 
-pub enum FormatError {
-    unclosed_field(u64),
-    unmatched_close(u64),
-    unsupported_field(u64),
+pub enum FormatErr {
+    UnclosedField(u64),
+    UnmatchedClose(u64),
+    UnsupportedField(u64),
 }
 
 pub struct FormatPlan {
@@ -24,7 +24,7 @@ pub struct FormatPlan {
 }
 
 impl FormatPlan {
-    pub pure comptime fn parse(format: str) -> !FormatError Self {
+    pub pure comptime fn parse(format: str) -> !FormatErr Self {
         var pieces: meta.List<FormatPiece> = [];
         var arguments: Integer = 0;
         var cursor: u64 = 0;
@@ -33,7 +33,7 @@ impl FormatPlan {
         while cursor < length {
             let byte = format.byte(cursor) match {
                 value? => value,
-                null => return error FormatError.unclosed_field(cursor),
+                null => return error FormatErr.UnclosedField(cursor),
             }
             if byte == 123 or byte == 125 {
                 if start < cursor {
@@ -50,15 +50,15 @@ impl FormatPlan {
                             pieces = pieces.concat([FormatPiece.argument(arguments)]);
                             arguments = arguments + 1;
                         },
-                        null => return error FormatError.unclosed_field(cursor),
-                        _? => return error FormatError.unsupported_field(cursor),
+                        null => return error FormatErr.UnclosedField(cursor),
+                        _? => return error FormatErr.UnsupportedField(cursor),
                     };
                 } else {
                     following match {
                         125? => {
                             pieces = pieces.concat([FormatPiece.text(cursor, next)]);
                         },
-                        _ => return error FormatError.unmatched_close(cursor),
+                        _ => return error FormatErr.UnmatchedClose(cursor),
                     };
                 }
 

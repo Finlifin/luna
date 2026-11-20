@@ -461,7 +461,7 @@ fn std_mem_layout_and_builtin_display_ord_work_natively() {
                 and (err_small.as(Ord).cmp(err_small) matches .equal)
         }
 
-        fn check_fmt() -> !std.io.Error bool {
+        fn check_fmt() -> !std.io.IoErr bool {
             println("chars:{}:{}:{}:{}", 'A', 'é', '中', '🦀')!;
             true
         }
