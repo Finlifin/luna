@@ -636,3 +636,41 @@ fn forwarded_type_results_use_the_supplied_ordinary_slot_identity() {
         );
     }
 }
+
+#[test]
+fn deferred_type_result_equality_restores_sparse_source_parameters() {
+    let producer = r#"
+        pure comptime fn Echo(flag: bool, comptime T: Type) -> R: Type
+        where ensures R == T
+        {
+            T
+        }
+    "#;
+    let consumer = r#"
+        fn count(comptime Y: Type, comptime flag: bool, comptime X: Type, ...items: defer Echo(flag, X)) -> u8
+        where requires Type.predicates.is_tuple(X)
+        {
+            var n: u8 = 0;
+            inline for _ in items'tuple_enumerate { assumes n < 255; n = n + 1; };
+            n
+        }
+    "#;
+    let entry = "fn run() -> bool { count(u8, false, Tuple<bool>, true) == 1 }";
+    // The runtime consumer prepares a sparse capture frame. The ordinary
+    // flag of the comptime consumer suspends the same annotation instead.
+    let suspended = consumer
+        .replace("fn count", "comptime fn count")
+        .replace("comptime flag: bool", "flag: bool");
+    for consumer in [consumer, suspended.as_str()] {
+        assert_eq!(
+            support::run(&format!("{producer}{consumer}{entry}")),
+            Value::Bool(true)
+        );
+        let wrong = consumer.replace("Echo(flag, X)", "Echo(flag, Y)");
+        let error = support::compile(&format!("{producer}{wrong}")).unwrap_err();
+        assert!(
+            error.contains("tuple_enumerate requires a proven tuple"),
+            "{error}"
+        );
+    }
+}

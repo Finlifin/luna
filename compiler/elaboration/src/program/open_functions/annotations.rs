@@ -161,7 +161,7 @@ impl Checker<'_, '_> {
             if target == *owner {
                 return Ok(None);
             }
-            self.source_result_facts(target, operands, &[], &mut fuel)
+            self.source_result_facts(target, operands, &self.call_input_frames(), &mut fuel)
         })();
         self.required_steps -= (before - fuel) as u64;
         facts.map_err(|e| error(source.span, e))

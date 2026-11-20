@@ -64,22 +64,77 @@ impl PreparedRequired {
                 .map_err(|e| e.to_string())?;
         let clauses =
             clause_inputs::ResultClauses::new(&target.type_parameters, &domains, operands, fuel)?;
-        let observe = |demanded: &BTreeMap<usize, Sort>, fuel: &mut usize| {
-            *fuel = fuel
-                .checked_sub(self.inputs.len())
-                .ok_or("result capture budget exhausted")?;
-            let captures: BTreeMap<_, _> = self
-                .inputs
-                .iter()
-                .filter_map(|(id, _, value)| value.as_ref().map(|value| (*id, value)))
-                .collect();
-            clause_inputs::ordinary_identities(call, demanded, |id| captures.get(id).copied(), fuel)
+        // Entry slots are compacted. A capture can refer to a later slot of
+        // the original declaration even when it is the first entry parameter.
+        let Term::Function { parameters, .. } = entry.signature.callable_signature() else {
+            return Err("deferred result entry requires a function signature".into());
         };
+        if self.inputs.len() != parameters.len()
+            || self.scope.parameter_slots.len() != parameters.len()
+        {
+            return Err("deferred result entry capture arity mismatch".into());
+        }
+        *fuel = fuel
+            .checked_sub(parameters.len())
+            .ok_or("result capture budget exhausted")?;
+        let entry_frames = [parameters.iter().map(|parameter| parameter.sort).collect()];
+        let source_frame = self.scope.input_frames.last();
+        let mut captured = BTreeMap::new();
+        let mut actuals = Vec::with_capacity(parameters.len());
+        for (index, ((id, _, frozen), source_slot)) in self
+            .inputs
+            .iter()
+            .zip(&self.scope.parameter_slots)
+            .enumerate()
+        {
+            if entry.parameters.get(index) != Some(id) {
+                return Err("deferred result entry capture binding mismatch".into());
+            }
+            let sort = parameters[index].sort;
+            captured.insert(
+                *id,
+                Term::Bound {
+                    depth: 0,
+                    index,
+                    sort,
+                },
+            );
+            let value = frozen.as_ref().map(std::borrow::Cow::Borrowed).or_else(|| {
+                let slot = (*source_slot)?;
+                (sort != Sort::Runtime && source_frame?.get(slot) == Some(&sort)).then_some(
+                    std::borrow::Cow::Owned(Term::Bound {
+                        depth: 0,
+                        index: slot,
+                        sort,
+                    }),
+                )
+            });
+            actuals.push(value);
+        }
+        let supplied = actuals
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, value)| Some((slot, value.as_deref()?)))
+            .collect();
+        let observe = |demanded: &BTreeMap<usize, Sort>, fuel: &mut usize| {
+            clause_inputs::ordinary_identities(call, demanded, |id| captured.get(id), fuel)
+        };
+        let restore =
+            nir::DeclarationSubstitution::bounded(&[], &[], &[], &self.scope.input_frames, fuel)
+                .map_err(|e| e.to_string())?;
         let mut facts = Vec::new();
         for predicate in &target.result_guarantees {
-            let Some(mut fact) = clauses.specialize(predicate, observe, &[], fuel)? else {
+            let Some(compact) = clauses.specialize(predicate, observe, &entry_frames, fuel)? else {
                 continue;
             };
+            let mut fact =
+                match restore.instantiate_call_predicate_bounded(&compact, &supplied, fuel) {
+                    Ok(fact) => fact,
+                    Err(nir::type_computations::Error::Scope(nir::TypeError::MissingArgument(
+                        _,
+                    ))) => continue,
+                    Err(failure) => return Err(failure.to_string()),
+                };
             if !self.scope.scoped_parameters.is_empty() {
                 nir::copy_budget::charge_predicate_substitution(
                     &fact,
@@ -96,15 +151,7 @@ impl PreparedRequired {
                     )
                     .map_err(|e| e.to_string())?;
             }
-            // The receiving refinement owns a separate result binder. A free
-            // ordinary slot cannot be imported there by numerical coincidence.
-            match nir::copy_budget::predicate_capture_slots(&fact, &[], fuel) {
-                Ok(_) => facts.push(fact),
-                Err(nir::type_computations::Error::Scope(nir::TypeError::InvalidBound {
-                    ..
-                })) => {}
-                Err(failure) => return Err(failure.to_string()),
-            }
+            facts.push(fact);
         }
         Ok((!facts.is_empty()).then_some((binder, facts)))
     }

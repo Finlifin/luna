@@ -189,21 +189,19 @@ impl Checker<'_, '_> {
             declaration: subject_binder.declaration,
             sort: subject_binder.sort,
         };
-        let formal = [nir::DeclarationParameter {
-            declaration: binder,
-            sort: Sort::Type,
-        }];
-        let actual = [subject.clone()];
+        let frames = self.call_input_frames();
         for guarantee in guarantees {
-            let predicate = super::required::map_requirement(
-                guarantee,
-                &mut |ty| {
-                    ty.instantiate_parameters(&formal, &actual)
-                        .map_err(|e| error(span, e.to_string()))
-                },
-                span,
-                0,
-            )?;
+            let predicate = nominal_fields::metered(&mut self.required_steps, |fuel| {
+                let sub = nir::DeclarationSubstitution::bounded(
+                    &[binder],
+                    &[p(P::Type)],
+                    std::slice::from_ref(&subject),
+                    &frames,
+                    fuel,
+                )?;
+                sub.instantiate_predicate_bounded(guarantee, fuel)
+            })
+            .map_err(|failure| error(span, failure.to_string()))?;
             let fact = crate::ptc::Formula::from_predicate(&predicate);
             self.context
                 .validate_formula(&fact, &mut crate::ptc::Budget::default())
