@@ -10,6 +10,7 @@ pub enum Error {
         message: &'static str,
     },
 }
+
 impl From<crate::visit::Error> for Error {
     fn from(error: crate::visit::Error) -> Self {
         match error {
@@ -21,6 +22,7 @@ impl From<crate::visit::Error> for Error {
         }
     }
 }
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -38,7 +40,9 @@ impl std::fmt::Display for Error {
         }
     }
 }
+
 impl std::error::Error for Error {}
+
 impl From<Error> for String {
     fn from(error: Error) -> Self {
         error.to_string()
@@ -53,16 +57,21 @@ pub fn validate_program(
     function: crate::contracts::CallableProgram<'_>,
     fuel: &mut usize,
 ) -> Result<(), Error> {
-    if function.signature.is_unsafe_callable() {
+    validate_signature(function.signature)?;
+    validate_parts(function.parts, fuel)
+}
+
+pub(crate) fn validate_signature(signature: &crate::Term) -> Result<(), Error> {
+    if signature.is_unsafe_callable() {
         return Err(Error::Invalid {
             source: None,
             message: "function declaration requires an unqualified parameter/result telescope",
         });
     }
-    validate_parts(function.parts, fuel)
+    Ok(())
 }
 
-pub(crate) fn validate_parts(
+fn validate_parts(
     function: crate::contracts::ProgramParts<'_>,
     fuel: &mut usize,
 ) -> Result<(), Error> {
@@ -72,27 +81,35 @@ pub(crate) fn validate_parts(
         .pop()
         .or_else(|| roots.next().map(|root| (root, function.is_unsafe)))
     {
-        crate::visit::expression_pruned_checked(root, fuel, |expr, _| {
+        crate::visit::expression_pruned_checked(root, fuel, |expr, _| -> Result<bool, Error> {
             if let K::UnsafeScope(body) = &expr.kind {
                 pending.push((body, true));
                 return Ok(false);
             }
-            if matches!(expr.kind, K::Intrinsic { .. }) && !permitted {
-                return Err(Error::Invalid {
-                    source: Some(expr.source),
-                    message: "intrinsic requires an unsafe boundary",
-                });
-            }
-            if let K::Call { callee, .. } = &expr.kind {
-                if callee.ty.is_unsafe_callable() && !permitted {
-                    return Err(Error::Invalid {
-                        source: Some(expr.source),
-                        message: "unsafe function call requires an unsafe boundary",
-                    });
-                }
-            }
+            validate_operation(expr, permitted)?;
             Ok(true)
         })?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_operation(
+    expr: &crate::program::Expr,
+    permitted: bool,
+) -> Result<(), Error> {
+    if matches!(expr.kind, K::Intrinsic { .. }) && !permitted {
+        return Err(Error::Invalid {
+            source: Some(expr.source),
+            message: "intrinsic requires an unsafe boundary",
+        });
+    }
+    if let K::Call { callee, .. } = &expr.kind {
+        if callee.ty.is_unsafe_callable() && !permitted {
+            return Err(Error::Invalid {
+                source: Some(expr.source),
+                message: "unsafe function call requires an unsafe boundary",
+            });
+        }
     }
     Ok(())
 }

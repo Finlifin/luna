@@ -1551,6 +1551,55 @@ fn unsafe_callable_calls_are_checked_against_lexical_scope_and_target_identity()
 }
 
 #[test]
+fn an_unsafe_sibling_cannot_authorize_a_pattern_guard() {
+    use nir::program::{MatchArm, Pattern};
+    let mut target = function(901, Phase::Runtime, &[]);
+    target.is_unsafe = true;
+    let with_boundary = || flag(K::UnsafeScope(Box::new(call(&target, vec![]))));
+    let source = SourceRange { start: 30, end: 40 };
+    let mut guard = call(&target, vec![]);
+    guard.source = source;
+    for permitted in [false, true] {
+        let mut caller = function(902, Phase::Runtime, &[]);
+        caller.body = flag(K::Match {
+            value: Box::new(with_boundary()),
+            arms: vec![MatchArm {
+                pattern: Pattern::Guard {
+                    pattern: Box::new(Pattern::Wild),
+                    condition: Box::new(if permitted {
+                        with_boundary()
+                    } else {
+                        guard.clone()
+                    }),
+                },
+                guard: None,
+                body: with_boundary(),
+            }],
+        });
+        let separate = nir::call_safety::validate(&caller, &mut 1000);
+        let package = Package {
+            functions: vec![caller, target.clone()],
+            ..Default::default()
+        };
+        let checked = nir::phases::validate(&package);
+        if permitted {
+            separate.unwrap();
+            checked.unwrap();
+        } else {
+            let error = checked.unwrap_err();
+            assert_eq!(error.source, source);
+            assert_eq!(
+                error.message,
+                "unsafe function call requires an unsafe boundary"
+            );
+            assert!(
+                matches!(separate, Err(nir::call_safety::Error::Invalid { source: Some(at), .. }) if at == source)
+            );
+        }
+    }
+}
+
+#[test]
 fn declaration_responsibility_survives_specialization_without_wrapping_its_telescope() {
     for phase in [Phase::Runtime, Phase::Comptime] {
         let mut original = function(903, phase, &[Sort::Runtime]);

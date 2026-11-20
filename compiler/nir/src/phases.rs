@@ -347,8 +347,6 @@ impl<'a> PhaseContext<'a> {
             if self.inspect_parts(parts, frame, fuel)? {
                 machine_owners.functions.insert(method.declaration);
             }
-            crate::call_safety::validate_parts(parts, fuel)
-                .map_err(|failure| Error::call_safety(parts.source, failure))?;
         }
         *fuel = fuel
             .checked_sub(self.package.implementations.len())
@@ -472,7 +470,7 @@ impl<'a> PhaseContext<'a> {
         let inspection = parameters::InspectionFrame::new(function, inspection_fuel)
             .map_err(parameters::Failure::into_diagnostic)?;
         let arithmetic = self.inspect_parts(function.parts, inspection, inspection_fuel)?;
-        crate::call_safety::validate_program(function, inspection_fuel)
+        crate::call_safety::validate_signature(function.signature)
             .map_err(|failure| Error::call_safety(function.parts.source, failure))?;
         Ok(arithmetic)
     }
@@ -531,7 +529,8 @@ impl<'a> PhaseContext<'a> {
                     .map_err(|error| Error::storage(function.source, error))?;
             }
         }
-        let mut work = Worklist::new(function.source);
+        let mut work = Worklist::new(function.source, function.is_unsafe);
+        let mut safety_error = None;
         work.extend(
             function
                 .body
@@ -572,6 +571,7 @@ impl<'a> PhaseContext<'a> {
         )?;
         while let Some(node) = work.pop() {
             match node {
+                Work::Argument(input, ct) => work.argument_children(input, ct, inspection_fuel)?,
                 Work::Pattern(pattern, ct, source) => match pattern {
                     Pattern::NominalType { fields, .. } => {
                         if !ct {
@@ -619,8 +619,15 @@ impl<'a> PhaseContext<'a> {
                     Pattern::OptionalPresent(inner) | Pattern::ErrorResult { inner, .. } => {
                         work.push(Work::Pattern(inner, ct, source), inspection_fuel)?
                     }
+                    Pattern::AnonymousRecord { names, fields } => {
+                        crate::visit::validate_record_pattern(names, fields.len(), inspection_fuel)
+                            .map_err(|e| Error::call_safety(source, e.into()))?;
+                        work.extend(
+                            fields.iter().map(|p| Work::Pattern(p, ct, source)),
+                            inspection_fuel,
+                        )?;
+                    }
                     Pattern::Record { fields, .. }
-                    | Pattern::AnonymousRecord { fields, .. }
                     | Pattern::Variant { fields, .. }
                     | Pattern::NormalForm {
                         arguments: fields, ..
@@ -644,6 +651,10 @@ impl<'a> PhaseContext<'a> {
                     | Pattern::Literal(_) => {}
                 },
                 Work::Expr(expr, _callee, ct) => {
+                    if safety_error.is_none() {
+                        safety_error =
+                            crate::call_safety::validate_operation(expr, work.permits_unsafe).err();
+                    }
                     let written = match &expr.kind {
                         K::Let { binding, .. } => Some(*binding),
                         K::Assign { place, .. }
@@ -747,6 +758,7 @@ impl<'a> PhaseContext<'a> {
                         return Err(error(message));
                     }
                     if let K::UnsafeScope(body) = &expr.kind {
+                        work.permits_unsafe = true;
                         if body.ty != expr.ty {
                             return Err(error("unsafe scope changes its body type"));
                         }
@@ -827,6 +839,7 @@ impl<'a> PhaseContext<'a> {
                                 return Err(error("comptime effect handlers are not implemented"));
                             }
                             work.push(Work::Expr(computation, false, ct), inspection_fuel)?;
+                            Worklist::charge(inspection_fuel, handlers.len(), expr.source)?;
                             for handler in handlers {
                                 for arm in &handler.arms {
                                     work.push(
@@ -1075,18 +1088,6 @@ impl<'a> PhaseContext<'a> {
                                     "ordinary call cannot invoke a normal-form head",
                                 ));
                             }
-                            for argument in arguments {
-                                if argument.passing != crate::program::ArgumentPassing::Value
-                                    && (!ct
-                                        || !callee.ty.is_comptime_callable()
-                                        || argument.is_default
-                                        || argument.parameter != 0)
-                                {
-                                    return Err(error(
-                                        "value-reference transport requires an explicit comptime receiver",
-                                    ));
-                                }
-                            }
                             if ct != callee.ty.is_comptime_callable()
                                 && !matches!(
                                     callee.kind,
@@ -1107,6 +1108,11 @@ impl<'a> PhaseContext<'a> {
                                     "call argument count does not match parameter frame",
                                 ));
                             }
+                            Worklist::charge(
+                                inspection_fuel,
+                                parameter_bindings.len(),
+                                expr.source,
+                            )?;
                             if !parameter_bindings.is_empty()
                                 && (parameter_bindings.len() != parameters.len()
                                     || parameter_bindings.iter().collect::<BTreeSet<_>>().len()
@@ -1142,6 +1148,16 @@ impl<'a> PhaseContext<'a> {
                             let mut available = BTreeSet::new();
                             let mut last_default = None;
                             for argument in arguments {
+                                if argument.passing != crate::program::ArgumentPassing::Value
+                                    && (!ct
+                                        || !callee.ty.is_comptime_callable()
+                                        || argument.is_default
+                                        || argument.parameter != 0)
+                                {
+                                    return Err(error(
+                                        "value-reference transport requires an explicit comptime receiver",
+                                    ));
+                                }
                                 let parameter =
                                     parameters.get(argument.parameter).ok_or_else(|| {
                                         error("call argument parameter index out of range")
@@ -1239,6 +1255,11 @@ impl<'a> PhaseContext<'a> {
                             if inputs.len() != parameters.len() {
                                 return Err(error("closure parameter frame arity mismatch"));
                             }
+                            Worklist::charge(
+                                inspection_fuel,
+                                captures.len().saturating_add(parameters.len()),
+                                expr.source,
+                            )?;
                             let mut identities = BTreeSet::new();
                             if parameters.iter().any(|id| !identities.insert(*id))
                                 || captures
@@ -1293,13 +1314,6 @@ impl<'a> PhaseContext<'a> {
                                     .map(|p| Work::Expr(&p.expression, false, ct)),
                                 inspection_fuel,
                             )?;
-                            work.extend(
-                                arguments
-                                    .iter()
-                                    .flat_map(|a| a.patterns())
-                                    .map(|pattern| Work::Pattern(pattern, ct, expr.source)),
-                                inspection_fuel,
-                            )?;
                             if !ct {
                                 return Err(error(
                                     "normal-form type construction requires comptime",
@@ -1340,10 +1354,7 @@ impl<'a> PhaseContext<'a> {
                                 ));
                             }
                             work.extend(
-                                arguments
-                                    .iter()
-                                    .flat_map(|a| a.expressions())
-                                    .map(|e| Work::Expr(e, false, ct)),
+                                arguments.iter().map(|a| Work::Argument(a, ct)),
                                 inspection_fuel,
                             )?;
                         }
@@ -1419,17 +1430,7 @@ impl<'a> PhaseContext<'a> {
                                 inspection_fuel,
                             )?;
                             work.extend(
-                                arguments
-                                    .iter()
-                                    .flat_map(|a| a.expressions())
-                                    .map(|e| Work::Expr(e, false, ct)),
-                                inspection_fuel,
-                            )?;
-                            work.extend(
-                                arguments
-                                    .iter()
-                                    .flat_map(|a| a.patterns())
-                                    .map(|p| Work::Pattern(p, ct, expr.source)),
+                                arguments.iter().map(|a| Work::Argument(a, ct)),
                                 inspection_fuel,
                             )?;
                         }
@@ -1444,23 +1445,13 @@ impl<'a> PhaseContext<'a> {
                                     .map(|p| Work::Expr(&p.expression, false, ct)),
                                 inspection_fuel,
                             )?;
-                            work.extend(
-                                arguments
-                                    .iter()
-                                    .flat_map(|a| a.patterns())
-                                    .map(|pattern| Work::Pattern(pattern, ct, expr.source)),
-                                inspection_fuel,
-                            )?;
                             if !ct {
                                 return Err(error(
                                     "nominal type construction requires comptime execution",
                                 ));
                             }
                             work.extend(
-                                arguments
-                                    .iter()
-                                    .flat_map(|a| a.expressions())
-                                    .map(|e| Work::Expr(e, false, ct)),
+                                arguments.iter().map(|a| Work::Argument(a, ct)),
                                 inspection_fuel,
                             )?;
                         }
@@ -1641,17 +1632,7 @@ impl<'a> PhaseContext<'a> {
                                         inspection_fuel,
                                     )?;
                                     work.extend(
-                                        arguments
-                                            .iter()
-                                            .flat_map(|a| a.patterns())
-                                            .map(|p| Work::Pattern(p, true, expr.source)),
-                                        inspection_fuel,
-                                    )?;
-                                    work.extend(
-                                        arguments
-                                            .iter()
-                                            .flat_map(|a| a.expressions())
-                                            .map(|e| Work::Expr(e, false, true)),
+                                        arguments.iter().map(|a| Work::Argument(a, true)),
                                         inspection_fuel,
                                     )?;
                                 }
@@ -2086,6 +2067,9 @@ impl<'a> PhaseContext<'a> {
                     .check_comptime(domain, inspection_fuel)
                     .map_err(|error| Error::storage(function.source, error))?;
             }
+        }
+        if let Some(failure) = safety_error {
+            return Err(Error::call_safety(function.source, failure));
         }
         Ok(arithmetic)
     }

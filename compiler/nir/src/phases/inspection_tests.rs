@@ -9,6 +9,7 @@ fn flag() -> Expr {
         kind: K::Literal(Literal::Bool(true)),
     }
 }
+
 fn function(local: u32, phase: Phase) -> Function {
     Function {
         interface: crate::program::FunctionDeclaration {
@@ -40,6 +41,7 @@ fn function(local: u32, phase: Phase) -> Function {
         runtime_deliveries: Default::default(),
     }
 }
+
 fn run(package: &Package, fuel: &mut usize) -> Result<BTreeSet<crate::DeclarationId>, Error> {
     arithmetic_obligations_with_budgets(package, &mut 1_000_000, fuel)
         .map(|obligations| obligations.functions)
@@ -205,8 +207,11 @@ fn storage_and_call_safety_consume_the_same_inspection_allowance() {
         run(&package, &mut exact).unwrap();
         assert_eq!(exact, 0);
         let error = run(&package, &mut (cost - 1)).unwrap_err();
-        assert_eq!(error.message, "call safety validation budget exhausted");
-        assert_eq!(error.source, package.functions[0].source);
+        assert_eq!(error.kind, ErrorKind::Budget);
+        assert!(
+            error.source == package.functions[0].source
+                || error.source == package.functions[0].body.source
+        );
         let mut twice = package.clone();
         twice.functions.push(function(2, phase));
         assert!(

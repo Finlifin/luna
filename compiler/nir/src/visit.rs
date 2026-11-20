@@ -897,7 +897,11 @@ fn walk_mut(
     Ok(())
 }
 
-fn validate_record_pattern(names: &[String], fields: usize, fuel: &mut usize) -> Result<(), Error> {
+pub(crate) fn validate_record_pattern(
+    names: &[String],
+    fields: usize,
+    fuel: &mut usize,
+) -> Result<(), Error> {
     if names.len() != fields {
         return Err(Error::Invalid("anonymous record pattern arity mismatch"));
     }
