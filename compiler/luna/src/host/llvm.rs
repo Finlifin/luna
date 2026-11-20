@@ -14,13 +14,16 @@ mod memory;
 mod named_calls;
 mod optional;
 mod platform;
+
 use bits::bit_width;
+
 mod decimal;
 mod patterns;
 mod pointers;
 mod records;
 mod strings;
 mod text_queries;
+
 use nir::program::{Expr, ExprKind as K, Function, IntegerOp as Op, Literal, LocalId};
 use nir::{Primitive as P, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,6 +54,7 @@ enum Ty {
     Record(std::sync::Arc<Vec<Ty>>),
     PackedRecord(std::sync::Arc<Vec<Ty>>),
 }
+
 impl Ty {
     fn llvm(&self) -> String {
         match self {
@@ -131,10 +135,12 @@ impl Ty {
             Self::Int(bits, _) => format!("i{bits}"),
         }
     }
+
     fn signed(&self) -> bool {
         matches!(self, Self::Int(_, true))
     }
 }
+
 struct HostLayoutWorld<'a>(&'a iir::Package);
 
 impl nir::LayoutWorld for HostLayoutWorld<'_> {
@@ -216,6 +222,7 @@ fn return_repr(graph: &iir::Package, ty: &Term, checked: bool) -> Result<Ty, Str
         repr(graph, ty, checked)
     }
 }
+
 // Bound expansion as well as depth: a small DAG of nominal declarations can
 // describe an exponentially large by-value physical tree.
 const MAX_LAYOUT_NODES: usize = 65_536;
@@ -224,6 +231,7 @@ fn repr(graph: &iir::Package, ty: &Term, checked: bool) -> Result<Ty, String> {
     let mut remaining = MAX_LAYOUT_NODES;
     repr_at(graph, ty, 0, checked, &mut remaining)
 }
+
 fn repr_at(
     graph: &iir::Package,
     ty: &Term,
@@ -382,6 +390,7 @@ fn repr_at(
         )),
     }
 }
+
 fn tuple_layout(
     graph: &iir::Package,
     fields: &[Term],
@@ -399,11 +408,13 @@ fn tuple_layout(
             .collect::<Result<Vec<_>, _>>()?,
     )))
 }
+
 #[derive(Clone)]
 struct Value {
     ty: Ty,
     text: String,
 }
+
 impl Value {
     fn unit() -> Self {
         Self {
@@ -412,12 +423,14 @@ impl Value {
         }
     }
 }
+
 #[derive(Clone)]
 struct Slot {
     ty: Ty,
     pointer: String,
     align: Option<u64>,
 }
+
 struct Emitter<'a> {
     graph: &'a iir::Package,
     cleanup: Option<&'a iir::cleanup::FunctionSchedule>,
@@ -452,16 +465,19 @@ struct Emitter<'a> {
     terminated: bool,
     fuel: &'a mut usize,
 }
+
 impl Emitter<'_> {
     fn fresh(&mut self) -> String {
         self.serial += 1;
         format!("v{}", self.serial)
     }
+
     fn line(&mut self, s: impl AsRef<str>) {
         self.body.push_str("  ");
         self.body.push_str(s.as_ref());
         self.body.push('\n');
     }
+
     fn instruction(&mut self, ty: Ty, rhs: String) -> Value {
         let name = self.fresh();
         self.line(format!("%{name} = {rhs}"));
@@ -470,6 +486,7 @@ impl Emitter<'_> {
             text: format!("%{name}"),
         }
     }
+
     fn slot(&mut self, ty: Ty) -> Slot {
         let name = self.fresh();
         let align = matches!(ty, Ty::PackedRecord(_)).then_some(1);
@@ -488,6 +505,7 @@ impl Emitter<'_> {
             align,
         }
     }
+
     fn store(&mut self, slot: &Slot, value: &Value) -> Result<(), String> {
         if slot.ty != value.ty {
             return Err("host LLVM store representation mismatch".into());
@@ -506,6 +524,7 @@ impl Emitter<'_> {
         }
         Ok(())
     }
+
     fn load(&mut self, slot: &Slot) -> Value {
         if slot.ty == Ty::Unit {
             Value::unit()
@@ -524,6 +543,7 @@ impl Emitter<'_> {
             )
         }
     }
+
     fn is_packed_pointer_field(&self, expr: &Expr) -> bool {
         match &expr.kind {
             K::PointerField {
@@ -544,6 +564,7 @@ impl Emitter<'_> {
             _ => false,
         }
     }
+
     fn bind(&mut self, id: LocalId, value: &Value) -> Result<(), String> {
         let slot = self.slot(value.ty.clone());
         self.store(&slot, value)?;
@@ -551,17 +572,21 @@ impl Emitter<'_> {
         self.set_live(id, &[], true)?;
         Ok(())
     }
+
     fn branch(&mut self, label: &str) {
         self.line(format!("br label %{label}"));
         self.terminated = true;
     }
+
     fn label(&mut self, label: &str) {
         self.body.push_str(&format!("{label}:\n"));
         self.terminated = false;
     }
+
     fn guard(&mut self, condition: &Value) -> Result<(), String> {
         self.guard_at(condition, None)
     }
+
     fn guard_at(
         &mut self,
         condition: &Value,
@@ -572,6 +597,7 @@ impl Emitter<'_> {
             predicate_source.map(|source| (source, iir::cleanup::Boundary::PredicateFailure)),
         )
     }
+
     fn guard_with_cleanup(
         &mut self,
         condition: &Value,
@@ -579,6 +605,7 @@ impl Emitter<'_> {
     ) -> Result<(), String> {
         self.guard_with_diagnostic(condition, cleanup, None)
     }
+
     fn guard_with_diagnostic(
         &mut self,
         condition: &Value,
@@ -621,6 +648,7 @@ impl Emitter<'_> {
         self.label(&good);
         Ok(())
     }
+
     fn report_predicate_failure(
         &mut self,
         source: nir::program::SourceRange,
@@ -660,6 +688,7 @@ impl Emitter<'_> {
         ));
         Ok(())
     }
+
     fn ret(
         &mut self,
         value: &Value,
@@ -734,6 +763,7 @@ impl Emitter<'_> {
         self.terminated = true;
         Ok(())
     }
+
     fn choice(
         &mut self,
         condition: &Value,
@@ -744,6 +774,7 @@ impl Emitter<'_> {
     ) -> Result<Value, String> {
         self.choice_with_effects(condition, yes, no, ty, depth, None)
     }
+
     fn choice_with_effects(
         &mut self,
         condition: &Value,
@@ -791,6 +822,7 @@ impl Emitter<'_> {
         self.label(&end);
         Ok(self.load(&result))
     }
+
     fn compare(&mut self, op: &str, a: Value, b: Value) -> Result<Value, String> {
         if a.ty == b.ty && matches!(a.ty, Ty::String | Ty::Symbol) {
             if !matches!(op, "eq" | "ne") {
@@ -820,6 +852,7 @@ impl Emitter<'_> {
             format!("icmp {op} {} {}, {}", a.ty.llvm(), a.text, b.text),
         ))
     }
+
     fn integer(&mut self, op: Op, a: Value, b: Value) -> Result<Value, String> {
         if a.ty != b.ty {
             return Err("host integer operand representation mismatch".into());
@@ -909,9 +942,11 @@ impl Emitter<'_> {
             }
         }
     }
+
     fn expr(&mut self, expr: &Expr, depth: usize) -> Result<Value, String> {
         self.expr_with_effects(expr, depth, None)
     }
+
     fn expr_with_effects(
         &mut self,
         expr: &Expr,
@@ -953,6 +988,7 @@ impl Emitter<'_> {
         }
         result.map_err(|e| format!("{}..{}: {e}", expr.source.start, expr.source.end))
     }
+
     #[inline(never)]
     fn inner(
         &mut self,
@@ -1269,7 +1305,17 @@ impl Emitter<'_> {
             );
         }
         let function = self.specialize_closure_call(expr.source, function)?;
-        let function = self.specialize_named_call(expr.source, function)?;
+        let specialized_named = self.specialize_named_call(expr.source, function.clone())?;
+        let ext_closure_envs = self.call_external_cleanup_env_slots(expr.source)?;
+        if !ext_closure_envs.is_empty()
+            && (!env_arguments.is_empty() || specialized_named.text != function.text)
+        {
+            return Err(
+                "host mixed named and closure dispatch with external cleanup environments is not supported"
+                    .into(),
+            );
+        }
+        let function = specialized_named;
         let Term::Function { parameters, result } = callee.ty.callable_signature() else {
             return Err("host callee has no concrete function signature".into());
         };
@@ -1341,6 +1387,19 @@ impl Emitter<'_> {
             if value.ty != Ty::Unit {
                 args.push(format!("{} {}", value.ty.llvm(), value.text));
             }
+        }
+        for (binding, term) in ext_closure_envs {
+            let slot = self
+                .locals
+                .get(&binding)
+                .cloned()
+                .ok_or("host closure call missing external cleanup environment slot")?;
+            if slot.ty != repr(self.graph, &term, self.checked)? {
+                return Err(
+                    "host closure call external cleanup environment representation mismatch".into(),
+                );
+            }
+            args.push(format!("ptr {}", slot.pointer));
         }
         let (row, logical_result) = effects::row_result(result);
         args.extend(self.effect_arguments(row, selected)?);
@@ -2593,6 +2652,23 @@ pub(super) fn emit_with_result_output(
                 )?;
             }
         }
+        if let (Some(_), Some(scope), Some(schedule)) = (closure, closure_scope, schedule) {
+            let ext_envs =
+                closures::scope_external_cleanup_env_slots(graph, schedule, scope, e.fuel)?;
+            for (i, (binding, term)) in ext_envs.into_iter().enumerate() {
+                let ty = repr(graph, &term, checked)?;
+                let align = matches!(ty, Ty::PackedRecord(_)).then_some(1);
+                inputs.push(format!("ptr %ext_env{i}"));
+                e.locals.insert(
+                    binding,
+                    Slot {
+                        ty,
+                        pointer: format!("%ext_env{i}"),
+                        align,
+                    },
+                );
+            }
+        }
         e.bind_effect_parameters(&contracts, effect_row, &mut inputs)?;
         if let Some(f) = metadata {
             for snapshot in &f.entry_snapshots {
@@ -2613,15 +2689,30 @@ pub(super) fn emit_with_result_output(
                 )?;
             }
         }
-        let value = e.expr(body, 0)?;
-        if !e.terminated {
-            if never_returns {
-                return Err("host Never function has a normal completion path".into());
+        let trap_unscoped_closure = checked
+            && closure_scope.is_none()
+            && matches!(
+                (closure, schedule),
+                (Some(node), Some(schedule))
+                    if closures::lambda_requires_external_cleanup_envs(
+                        graph, schedule, node, e.fuel
+                    )?
+            );
+        if trap_unscoped_closure {
+            e.line("call void @llvm.trap()");
+            e.line("unreachable");
+            e.terminated = true;
+        } else {
+            let value = e.expr(body, 0)?;
+            if !e.terminated {
+                if never_returns {
+                    return Err("host Never function has a normal completion path".into());
+                }
+                if value.ty != result {
+                    return Err("host return representation mismatch".into());
+                }
+                e.ret(&value, None)?;
             }
-            if value.ty != result {
-                return Err("host return representation mismatch".into());
-            }
-            e.ret(&value, None)?;
         }
         functions.push_str(&format!(
             "define internal {} @{symbol}({}) {{\nentry:\n{}{}}}\n\n",

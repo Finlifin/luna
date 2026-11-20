@@ -2378,6 +2378,40 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         Ok(())
     }
 
+    fn collect_delivery_locals(
+        &mut self,
+        expr: &Expr,
+        out: &mut Vec<LocalId>,
+        source: SourceRange,
+        depth: usize,
+    ) -> Result<(), Error> {
+        if depth >= 128 || self.fuel == 0 {
+            return Err(error(source, "runtime env delivery scan budget exhausted"));
+        }
+        self.fuel -= 1;
+        match &expr.kind {
+            K::Local(id) => {
+                if !out.contains(id) {
+                    out.push(*id);
+                }
+                Ok(())
+            }
+            K::AddressOf(inner)
+            | K::ReadPointer(inner)
+            | K::NewtypeConvert(inner)
+            | K::UnsafeScope(inner)
+            | K::Snapshot(inner) => self.collect_delivery_locals(inner, out, source, depth + 1),
+            K::PointerField { pointer: inner, .. }
+            | K::PointerAnonymousField { pointer: inner, .. }
+            | K::Field { value: inner, .. }
+            | K::AnonymousField { value: inner, .. } => {
+                self.collect_delivery_locals(inner, out, source, depth + 1)
+            }
+            K::ConstAddress { .. } | K::Literal(_) | K::Unit => Ok(()),
+            _ => Ok(()),
+        }
+    }
+
     pub(super) fn predeclare_function_env_parameters(
         &mut self,
         frame: &mut Flow,
@@ -2386,12 +2420,30 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         source: SourceRange,
     ) -> Result<Vec<(PlaceId, PlaceId, Term)>, Error> {
         let env_parameters = self.function_env_parameters;
+        let delivery_exprs: Vec<&Expr> = self.function_runtime_deliveries.values().collect();
+        let mut delivery_locals = Vec::new();
+        for expr in delivery_exprs {
+            self.collect_delivery_locals(expr, &mut delivery_locals, source, 0)?;
+        }
+        let mut seen_candidates = BTreeSet::new();
+        let mut candidates = Vec::with_capacity(env_parameters.len() + delivery_locals.len());
+        for env in env_parameters {
+            let id = root(env.binding);
+            if seen_candidates.insert(id) {
+                candidates.push((id, false));
+            }
+        }
+        for local in delivery_locals {
+            let id = root(local);
+            if seen_candidates.insert(id) {
+                candidates.push((id, true));
+            }
+        }
         let mut remapped_roots: BTreeMap<PlaceId, PlaceId> = BTreeMap::new();
         let mut remapped = Vec::new();
         let mut imported_owners = BTreeSet::new();
         let mut pending = Vec::new();
-        for env in env_parameters {
-            let id = root(env.binding);
+        for (id, from_runtime_delivery) in candidates {
             if frame.types.contains_key(&id) {
                 continue;
             }
@@ -2408,9 +2460,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             {
                 continue;
             }
-            // Enclosing runtime environment parameters belong to the outer function frame:
-            // preserve their state for pointer/drop lookups without adding them to
-            // this sub-frame's own cleanup ownership order.
+            // Enclosing runtime environment parameters and delivery locals belong
+            // to the outer function frame: preserve their state for pointer/drop
+            // lookups without adding them to this sub-frame's cleanup order.
             frame
                 .state
                 .import_position(
@@ -2425,6 +2477,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 .map_err(|reason| error(source, format!("runtime env import: {reason:?}")))?;
             frame.types.insert(id, ty.clone());
             frame.stable_handler_slots.insert(id);
+            if remap_borrowed_roots && from_runtime_delivery && !matches!(ty, Term::Pointer(_)) {
+                remapped.push((id, id, ty.clone()));
+            }
             pending.push((id, id));
         }
         while let Some((outer_owner, frame_owner)) = pending.pop() {
@@ -2469,11 +2524,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         imported_targets.insert(target.clone());
                         continue;
                     }
+                    let is_synthetic_borrowed = matches!(
+                        target.root.owner,
+                        x if x == u64::MAX - 1 || x == u64::MAX - 2 || x == u64::MAX - 4
+                    );
                     let dest_root = if remap_borrowed_roots
-                        && matches!(
-                            target.root.owner,
-                            x if x == u64::MAX - 1 || x == u64::MAX - 2 || x == u64::MAX - 4
-                        ) {
+                        && !crate::is_const_global_place(target.root)
+                        && (is_synthetic_borrowed
+                            || remapped_roots.contains_key(&target.root)
+                            || !frame.types.contains_key(&target.root))
+                    {
                         if let Some(&mapped) = remapped_roots.get(&target.root) {
                             mapped
                         } else {
@@ -19078,5 +19138,126 @@ mod env_parameter_frame_tests {
         assert_eq!(exported.len(), 1);
         assert_eq!(exported[0].target.parameter, env_slot_base);
         assert!(exported[0].write);
+
+        // Runtime deliveries (`function_runtime_deliveries`): imports both a
+        // pointer local targeting an outer local (remapped to u64::MAX - 4) and
+        // a non-pointer outer local passed by `AddressOf` (exported directly).
+        let outer_ptr_local = LocalId { owner: 4, index: 0 };
+        let outer_val_local = LocalId { owner: 4, index: 1 };
+        let outer_target_local = LocalId { owner: 4, index: 2 };
+        let mut delivery_map = BTreeMap::new();
+        delivery_map.insert(
+            nir::RuntimeId {
+                instance: 0,
+                local: 10,
+            },
+            Expr {
+                source,
+                ty: ptr_u64.clone(),
+                kind: K::Local(outer_ptr_local),
+            },
+        );
+        delivery_map.insert(
+            nir::RuntimeId {
+                instance: 0,
+                local: 11,
+            },
+            Expr {
+                source,
+                ty: ptr_u64.clone(),
+                kind: K::AddressOf(Box::new(Expr {
+                    source,
+                    ty: u64_ty.clone(),
+                    kind: K::Local(outer_val_local),
+                })),
+            },
+        );
+        let delivery_decls = std::rc::Rc::new(crate::declarations::Metadata::new(None));
+        let mut delivery_analyzer = test_analyzer(&[], &delivery_map, delivery_decls);
+        let mut outer_delivery_flow = Flow::default();
+        for (id, ty) in [
+            (root(outer_ptr_local), &ptr_u64),
+            (root(outer_val_local), &u64_ty),
+            (root(outer_target_local), &u64_ty),
+        ] {
+            outer_delivery_flow
+                .state
+                .declare(id, &Shape::Value, true, &mut delivery_analyzer.fuel)
+                .unwrap();
+            outer_delivery_flow.types.insert(id, ty.clone());
+        }
+        let ptr_slot = Place {
+            root: root(outer_ptr_local),
+            fields: vec![],
+        };
+        let target_place = Place {
+            root: root(outer_target_local),
+            fields: vec![],
+        };
+        outer_delivery_flow
+            .pointers
+            .insert(ptr_slot.clone(), BTreeSet::from([target_place]));
+
+        let mut delivery_closure_frame = Flow::default();
+        let remapped_deliveries = delivery_analyzer
+            .predeclare_function_env_parameters(
+                &mut delivery_closure_frame,
+                &outer_delivery_flow,
+                true,
+                source,
+            )
+            .unwrap();
+        assert_eq!(remapped_deliveries.len(), 2);
+        assert!(remapped_deliveries.iter().any(|(dest, orig, ty)| {
+            *dest == root(outer_val_local) && *orig == root(outer_val_local) && *ty == u64_ty
+        }));
+        let mapped_ptr_target = delivery_closure_frame
+            .pointers
+            .get(&ptr_slot)
+            .and_then(|targets| targets.iter().next())
+            .expect("remapped delivery pointer target")
+            .clone();
+        assert_eq!(mapped_ptr_target.root.owner, u64::MAX - 4);
+        assert!(remapped_deliveries.iter().any(|(dest, orig, ty)| {
+            *dest == mapped_ptr_target.root && *orig == root(outer_target_local) && *ty == u64_ty
+        }));
+
+        let access = crate::memory::Access {
+            target: crate::memory::ParameterPlace {
+                parameter: 0,
+                input_fields: vec![],
+                through: vec![],
+                conditions: Default::default(),
+                fields: vec![],
+            },
+            ty: u64_ty.clone(),
+            write: true,
+            read_value: true,
+        };
+        let mut delivery_report = Report::default();
+        delivery_report.cleanup_call_accesses.push((
+            access,
+            BTreeSet::from([
+                Place {
+                    root: root(outer_val_local),
+                    fields: vec![],
+                },
+                mapped_ptr_target,
+            ]),
+        ));
+        for (offset, (dest_root, _, target_ty)) in remapped_deliveries.into_iter().enumerate() {
+            delivery_report.borrowed_roots.insert(
+                dest_root,
+                BorrowedRoot::Parameter {
+                    parameter: env_slot_base + offset,
+                    input_fields: vec![],
+                    pointee: target_ty,
+                },
+            );
+        }
+        let delivery_exported = delivery_report
+            .cleanup_memory_accesses(&dummy_package, &mut 1_000)
+            .unwrap();
+        assert_eq!(delivery_exported.len(), 2);
     }
 }

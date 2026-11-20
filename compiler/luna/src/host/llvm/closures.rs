@@ -148,7 +148,378 @@ pub(super) fn schedules_for<'a>(
     Ok(selected)
 }
 
+fn collect_pattern_bound_locals(
+    pattern: &nir::program::Pattern,
+    bound: &mut BTreeSet<LocalId>,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    use nir::program::Pattern as P;
+    let mut stack = vec![(pattern, 0usize)];
+    while let Some((pattern, depth)) = stack.pop() {
+        if depth >= 128 {
+            return Err("host closure pattern local scan nesting exhausted".into());
+        }
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("host closure pattern local scan budget exhausted")?;
+        match pattern {
+            P::Binding { binding, inner } | P::Observe { binding, inner } => {
+                bound.insert(*binding);
+                stack.push((inner, depth + 1));
+            }
+            P::CodeEvidence { outputs } => {
+                for (id, _) in outputs {
+                    bound.insert(*id);
+                }
+            }
+            P::Remap { pattern, bindings } => {
+                for (from, to) in bindings {
+                    bound.insert(*from);
+                    bound.insert(*to);
+                }
+                stack.push((pattern, depth + 1));
+            }
+            P::OptionalPresent(inner)
+            | P::ErrorResult { inner, .. }
+            | P::Guard { pattern: inner, .. } => {
+                stack.push((inner, depth + 1));
+            }
+            P::Then { first, next, .. } => {
+                stack.push((next, depth + 1));
+                stack.push((first, depth + 1));
+            }
+            P::AnonymousRecord { fields, .. }
+            | P::Record { fields, .. }
+            | P::Tuple(fields)
+            | P::TypeTuple(fields)
+            | P::NominalType { fields, .. }
+            | P::NormalForm {
+                arguments: fields, ..
+            }
+            | P::Variant { fields, .. }
+            | P::Or(fields) => {
+                *fuel = fuel
+                    .checked_sub(fields.len())
+                    .ok_or("host closure pattern local scan budget exhausted")?;
+                for field in fields {
+                    stack.push((field, depth + 1));
+                }
+            }
+            P::OptionalAbsent | P::Wild | P::Unit | P::Literal(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn collect_closure_bound_locals(
+    node: &Expr,
+    fuel: &mut usize,
+) -> Result<BTreeSet<LocalId>, String> {
+    let K::Closure {
+        parameters,
+        captures,
+        body,
+    } = &node.kind
+    else {
+        return Err("host closure bound locals scan requires a closure node".into());
+    };
+    let mut bound = BTreeSet::new();
+    for capture in captures {
+        bound.insert(capture.binding);
+    }
+    for parameter in parameters {
+        bound.insert(*parameter);
+    }
+    nir::visit::expression_in_closure_environment(body, fuel, |expr, fuel| {
+        match &expr.kind {
+            K::Let { binding, .. } => {
+                bound.insert(*binding);
+            }
+            K::LetPattern { pattern, .. } => {
+                collect_pattern_bound_locals(pattern, &mut bound, fuel)?;
+            }
+            K::Match { arms, .. } => {
+                for arm in arms {
+                    collect_pattern_bound_locals(&arm.pattern, &mut bound, fuel)?;
+                }
+            }
+            K::EffectHandle { handlers, .. } => {
+                for handler in handlers {
+                    for arm in &handler.arms {
+                        collect_pattern_bound_locals(&arm.pattern, &mut bound, fuel)?;
+                    }
+                }
+            }
+            K::Call {
+                parameter_bindings, ..
+            } => {
+                bound.extend(parameter_bindings.iter().copied());
+            }
+            K::Loop { identity, .. } => {
+                bound.insert(*identity);
+            }
+            K::NominalType {
+                bindings: Some(bindings),
+                ..
+            }
+            | K::CheckTypeAlias {
+                bindings: Some(bindings),
+                ..
+            } => {
+                bound.extend(bindings.iter().copied());
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+    Ok(bound)
+}
+
+fn collect_env_expr_locals(
+    expr: &Expr,
+    out: &mut BTreeMap<LocalId, Term>,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<(), String> {
+    if depth >= 128 {
+        return Err("host cleanup environment nesting budget exhausted".into());
+    }
+    *fuel = fuel
+        .checked_sub(1)
+        .ok_or("host closure external cleanup environment budget exhausted")?;
+    match &expr.kind {
+        K::Local(binding) => {
+            if let Some(existing) = out.get(binding) {
+                if existing != &expr.ty {
+                    return Err("host closure external cleanup environment type mismatch".into());
+                }
+            } else {
+                out.insert(*binding, expr.ty.clone());
+            }
+            Ok(())
+        }
+        K::AddressOf(inner)
+        | K::ReadPointer(inner)
+        | K::NewtypeConvert(inner)
+        | K::UnsafeScope(inner)
+        | K::Snapshot(inner) => collect_env_expr_locals(inner, out, fuel, depth + 1),
+        K::PointerField { pointer: inner, .. }
+        | K::PointerAnonymousField { pointer: inner, .. }
+        | K::Field { value: inner, .. }
+        | K::AnonymousField { value: inner, .. } => {
+            collect_env_expr_locals(inner, out, fuel, depth + 1)
+        }
+        K::ConstAddress { .. } | K::Literal(_) | K::Unit => Ok(()),
+        _ => Err("host cleanup environment argument requires a pure expression".into()),
+    }
+}
+
+fn collect_step_env_locals(
+    steps: &[iir::cleanup::Step],
+    out: &mut BTreeMap<LocalId, Term>,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<(), String> {
+    use iir::cleanup::Step;
+    if depth >= 128 {
+        return Err("host cleanup step nesting budget exhausted".into());
+    }
+    for step in steps {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("host closure external cleanup step budget exhausted")?;
+        match step {
+            Step::Invoke { env_arguments, .. } => {
+                for arg in env_arguments {
+                    collect_env_expr_locals(arg, out, fuel, 0)?;
+                }
+            }
+            Step::Select { cases } => {
+                for case in cases {
+                    collect_step_env_locals(&case.steps, out, fuel, depth + 1)?;
+                }
+            }
+            Step::IfConstructed { steps, .. } => {
+                collect_step_env_locals(steps, out, fuel, depth + 1)?;
+            }
+            Step::Switch { branches, .. } => {
+                for branch in branches {
+                    collect_step_env_locals(branch, out, fuel, depth + 1)?;
+                }
+            }
+            Step::Release { .. } => {}
+        }
+    }
+    Ok(())
+}
+
+fn collect_function_schedule_env_locals(
+    desc: &iir::cleanup::FunctionSchedule,
+    out: &mut BTreeMap<LocalId, Term>,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    for site in &desc.sites {
+        for action in &site.actions {
+            collect_step_env_locals(&action.program.steps, out, fuel, 0)?;
+        }
+    }
+    for discard in &desc.discards {
+        collect_step_env_locals(&discard.program.steps, out, fuel, 0)?;
+    }
+    Ok(())
+}
+
+pub(super) fn schedule_cleanup_env_locals(
+    schedule: &iir::cleanup::Schedule,
+    instance: &iir::InstanceKey,
+    prefix: &[iir::cleanup::ContextKey],
+    fuel: &mut usize,
+) -> Result<BTreeMap<LocalId, Term>, String> {
+    use iir::cleanup::ContextKey;
+    let mut locals: BTreeMap<LocalId, Term> = BTreeMap::new();
+    for desc in &schedule.functions {
+        *fuel = fuel
+            .checked_sub(1 + desc.context.len())
+            .ok_or("host closure external env scan budget exhausted")?;
+        if &desc.instance != instance || !desc.context.starts_with(prefix) {
+            continue;
+        }
+        let suffix = &desc.context[prefix.len()..];
+        if suffix
+            .iter()
+            .any(|key| matches!(key, ContextKey::Function { .. }))
+        {
+            continue;
+        }
+        collect_function_schedule_env_locals(desc, &mut locals, fuel)?;
+    }
+    Ok(locals)
+}
+
+pub(super) fn scope_external_cleanup_env_slots(
+    graph: &iir::Package,
+    schedule: &iir::cleanup::Schedule,
+    scope: &iir::cleanup::FunctionSchedule,
+    fuel: &mut usize,
+) -> Result<Vec<(LocalId, Term)>, String> {
+    use iir::cleanup::ContextKey;
+    let Some(ContextKey::Closure { call, .. }) = scope.context.last() else {
+        return Err("host closure scope context missing".into());
+    };
+    let parent_context = &scope.context[..scope.context.len() - 1];
+    let mut external: BTreeMap<LocalId, Term> = BTreeMap::new();
+    for candidate in &schedule.functions {
+        *fuel = fuel
+            .checked_sub(1 + candidate.context.len())
+            .ok_or("host closure external env lookup budget exhausted")?;
+        if candidate.instance != scope.instance
+            || candidate.context.len() != parent_context.len() + 1
+            || !candidate.context.starts_with(parent_context)
+            || !matches!(
+                candidate.context.last(),
+                Some(ContextKey::Closure { call: c, .. }) if c == call
+            )
+        {
+            continue;
+        }
+        let cand_node = definition(graph, schedule, candidate, &candidate.context, fuel)?;
+        let bound = collect_closure_bound_locals(cand_node, fuel)?;
+        for desc in &schedule.functions {
+            *fuel = fuel
+                .checked_sub(1 + desc.context.len())
+                .ok_or("host closure external env scan budget exhausted")?;
+            if desc.instance != candidate.instance || !desc.context.starts_with(&candidate.context)
+            {
+                continue;
+            }
+            let suffix = &desc.context[candidate.context.len()..];
+            if suffix
+                .iter()
+                .any(|key| matches!(key, ContextKey::Function { .. }))
+            {
+                continue;
+            }
+            let nested_bound = if suffix
+                .iter()
+                .any(|key| matches!(key, ContextKey::Closure { .. }))
+            {
+                let mut combined = bound.clone();
+                for (offset, key) in suffix.iter().enumerate() {
+                    if matches!(key, ContextKey::Closure { .. }) {
+                        let prefix = &desc.context[..candidate.context.len() + offset + 1];
+                        let nested_node = definition(graph, schedule, desc, prefix, fuel)?;
+                        combined.extend(collect_closure_bound_locals(nested_node, fuel)?);
+                    }
+                }
+                Some(combined)
+            } else {
+                None
+            };
+            let desc_bound = nested_bound.as_ref().unwrap_or(&bound);
+            let mut desc_locals = BTreeMap::new();
+            collect_function_schedule_env_locals(desc, &mut desc_locals, fuel)?;
+            for (local, ty) in desc_locals {
+                if desc_bound.contains(&local) {
+                    continue;
+                }
+                if let Some(existing) = external.get(&local) {
+                    if existing != &ty {
+                        return Err(
+                            "host closure external cleanup environment type mismatch".into()
+                        );
+                    }
+                } else {
+                    external.insert(local, ty);
+                }
+            }
+        }
+    }
+    Ok(external.into_iter().collect())
+}
+
+pub(super) fn lambda_requires_external_cleanup_envs(
+    graph: &iir::Package,
+    schedule: &iir::cleanup::Schedule,
+    node: &Expr,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    for (_, scope) in schedules_for(graph, schedule, node, fuel)? {
+        if !scope_external_cleanup_env_slots(graph, schedule, scope, fuel)?.is_empty() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl Emitter<'_> {
+    pub(super) fn call_external_cleanup_env_slots(
+        &mut self,
+        source: nir::program::SourceRange,
+    ) -> Result<Vec<(LocalId, Term)>, String> {
+        let (Some(parent), Some(schedule)) = (self.cleanup, self.schedules) else {
+            return Ok(vec![]);
+        };
+        for candidate in &schedule.functions {
+            *self.fuel = self
+                .fuel
+                .checked_sub(1)
+                .ok_or("host closure dispatch env budget exhausted")?;
+            if candidate.instance == parent.instance
+                && candidate.context.len() == parent.context.len() + 1
+                && candidate.context.starts_with(&parent.context)
+                && matches!(
+                    candidate.context.last(),
+                    Some(iir::cleanup::ContextKey::Closure { call, .. }) if *call == source
+                )
+            {
+                return scope_external_cleanup_env_slots(
+                    self.graph, schedule, candidate, self.fuel,
+                );
+            }
+        }
+        Ok(vec![])
+    }
+
     /// Code identity stays stored in the closure. Only this invocation selects
     /// a machine body using its already checked resource context.
     pub(super) fn specialize_closure_call(
@@ -544,5 +915,397 @@ mod state_count_tests {
             nested = Ty::Record(Arc::new(vec![nested]));
         }
         assert_eq!(state_count(&Arc::new(vec![nested])), 102);
+    }
+
+    #[test]
+    fn scope_external_cleanup_env_slots_merges_siblings_descendants_and_excludes_locals() {
+        use iir::cleanup::{
+            Action, Boundary, ClosureDefinition, ContextKey, DiscardCleanup, FunctionSchedule,
+            Program, Schedule, Site, Step, Target,
+        };
+        use nir::program::{Capture, FunctionDeclaration, FunctionPhase, SourceRange};
+
+        let src = |start| SourceRange {
+            start,
+            end: start + 1,
+        };
+        let u64_ty = Term::Primitive(P::U64);
+        let ptr_u64 = Term::Pointer(Box::new(u64_ty.clone()));
+        let decl = nir::DeclarationId {
+            package: 0,
+            local: 1,
+        };
+        let instance = iir::InstanceKey {
+            declaration: decl,
+            arguments: vec![].into(),
+        };
+        let call_src = src(100);
+        let cap_local = LocalId { owner: 1, index: 0 };
+        let param_local = LocalId { owner: 1, index: 1 };
+        let inner_let = LocalId { owner: 1, index: 2 };
+        let ext_a = LocalId {
+            owner: nir::program::IMPLICIT_RUNTIME_ENV_OWNER,
+            index: 4,
+        };
+        let ext_b = LocalId { owner: 9, index: 7 };
+
+        let make_closure = |def_src: SourceRange, body_let: LocalId| Expr {
+            source: def_src,
+            ty: Term::Closure {
+                environment: vec![u64_ty.clone()],
+                signature: Box::new(Term::Function {
+                    parameters: vec![nir::Parameter {
+                        sort: Sort::Runtime,
+                        ty: u64_ty.clone(),
+                    }],
+                    result: Box::new(Term::Primitive(P::Void)),
+                }),
+            },
+            kind: K::Closure {
+                parameters: vec![param_local],
+                captures: vec![Capture {
+                    binding: cap_local,
+                    ty: u64_ty.clone(),
+                    value: None,
+                }],
+                body: std::sync::Arc::new(Expr {
+                    source: src(200),
+                    ty: Term::Primitive(P::Void),
+                    kind: K::Let {
+                        binding: body_let,
+                        value: Box::new(Expr {
+                            source: src(201),
+                            ty: u64_ty.clone(),
+                            kind: K::Literal(Literal::UnsignedInteger(0)),
+                        }),
+                    },
+                }),
+            },
+        };
+
+        let def_a_src = src(10);
+        let def_b_src = src(20);
+        let closure_a = make_closure(def_a_src, inner_let);
+        let closure_b = make_closure(def_b_src, LocalId { owner: 2, index: 0 });
+        let wrapper_body = Expr {
+            source: src(50),
+            ty: Term::Primitive(P::Void),
+            kind: K::Block {
+                statements: vec![closure_a.clone()],
+                result: Some(Box::new(closure_b.clone())),
+            },
+        };
+        let graph = iir::Package {
+            functions: vec![iir::FunctionInstance {
+                key: instance.clone(),
+                function: Function {
+                    interface: FunctionDeclaration {
+                        source: src(0),
+                        declaration: decl,
+                        name: "caller".into(),
+                        phase: FunctionPhase::Runtime,
+                        inline: false,
+                        pure: false,
+                        is_unsafe: false,
+                        type_parameters: vec![],
+                        parameters: vec![],
+                        env_parameters: vec![],
+                        defaults: vec![],
+                        preconditions: vec![],
+                        postconditions: vec![],
+                        result_binding: None,
+                        result_type_binder: None,
+                        result_guarantees: vec![],
+                        entry_snapshots: vec![],
+                        capabilities: vec![],
+                        requirements: vec![],
+                        signature: Term::Function {
+                            parameters: vec![],
+                            result: Box::new(Term::Primitive(P::Void)),
+                        },
+                    },
+                    body: wrapper_body,
+                    runtime_deliveries: Default::default(),
+                },
+            }],
+            ..Default::default()
+        };
+
+        let ctx_a = vec![ContextKey::Closure {
+            call: call_src,
+            definition: def_a_src,
+        }];
+        let ctx_a_desc = vec![
+            ContextKey::Closure {
+                call: call_src,
+                definition: def_a_src,
+            },
+            ContextKey::Default {
+                construction: src(250),
+                parameter: 0,
+            },
+        ];
+        let ctx_b = vec![ContextKey::Closure {
+            call: call_src,
+            definition: def_b_src,
+        }];
+        let invoke_step = |local: LocalId, ty: Term| Step::Invoke {
+            path: vec![],
+            subject: u64_ty.clone(),
+            method: instance.clone(),
+            env_arguments: vec![Expr {
+                source: src(300),
+                ty,
+                kind: K::Local(local),
+            }],
+        };
+
+        let schedule_a = FunctionSchedule {
+            instance: instance.clone(),
+            context: ctx_a.clone(),
+            sites: vec![Site {
+                source: src(200),
+                boundary: Boundary::FunctionEnd,
+                actions: vec![Action {
+                    target: Target::Local {
+                        binding: cap_local,
+                        fields: vec![],
+                    },
+                    program: Program {
+                        ty: u64_ty.clone(),
+                        guards: vec![],
+                        steps: vec![
+                            invoke_step(cap_local, u64_ty.clone()),
+                            invoke_step(param_local, u64_ty.clone()),
+                            invoke_step(inner_let, u64_ty.clone()),
+                            invoke_step(ext_a, ptr_u64.clone()),
+                        ],
+                    },
+                }],
+            }],
+            discards: vec![],
+            transfers: vec![],
+            copies: vec![],
+            pattern_transfers: vec![],
+            pattern_orders: vec![],
+        };
+        let schedule_a_desc = FunctionSchedule {
+            instance: instance.clone(),
+            context: ctx_a_desc,
+            sites: vec![],
+            discards: vec![DiscardCleanup {
+                source: src(260),
+                value_source: src(261),
+                program: Program {
+                    ty: u64_ty.clone(),
+                    guards: vec![],
+                    steps: vec![Step::IfConstructed {
+                        path: vec![],
+                        steps: vec![invoke_step(ext_b, u64_ty.clone())],
+                    }],
+                },
+            }],
+            transfers: vec![],
+            copies: vec![],
+            pattern_transfers: vec![],
+            pattern_orders: vec![],
+        };
+        let schedule_b = FunctionSchedule {
+            instance: instance.clone(),
+            context: ctx_b.clone(),
+            sites: vec![],
+            discards: vec![],
+            transfers: vec![],
+            copies: vec![],
+            pattern_transfers: vec![],
+            pattern_orders: vec![],
+        };
+        let fn_local_ignored = LocalId { owner: 7, index: 3 };
+        let mut ctx_a_fn = ctx_a.clone();
+        ctx_a_fn.push(ContextKey::Function {
+            call: src(270),
+            callee: instance.clone(),
+        });
+        let schedule_a_fn = FunctionSchedule {
+            instance: instance.clone(),
+            context: ctx_a_fn,
+            sites: vec![],
+            discards: vec![DiscardCleanup {
+                source: src(271),
+                value_source: src(272),
+                program: Program {
+                    ty: u64_ty.clone(),
+                    guards: vec![],
+                    steps: vec![invoke_step(fn_local_ignored, u64_ty.clone())],
+                },
+            }],
+            transfers: vec![],
+            copies: vec![],
+            pattern_transfers: vec![],
+            pattern_orders: vec![],
+        };
+
+        let schedule = Schedule {
+            closure_definitions: vec![
+                ClosureDefinition {
+                    instance: instance.clone(),
+                    context: ctx_a,
+                    definition: closure_a.clone(),
+                },
+                ClosureDefinition {
+                    instance: instance.clone(),
+                    context: ctx_b,
+                    definition: closure_b,
+                },
+            ],
+            borrowed_callable_functions: vec![],
+            functions: vec![
+                schedule_a.clone(),
+                schedule_a_desc,
+                schedule_a_fn,
+                schedule_b.clone(),
+            ],
+            aliases: vec![],
+        };
+
+        let slots_b =
+            scope_external_cleanup_env_slots(&graph, &schedule, &schedule_b, &mut 10_000).unwrap();
+        assert_eq!(
+            slots_b,
+            vec![(ext_b, u64_ty.clone()), (ext_a, ptr_u64.clone())]
+        );
+        let slots_a =
+            scope_external_cleanup_env_slots(&graph, &schedule, &schedule_a, &mut 10_000).unwrap();
+        assert_eq!(slots_a, slots_b);
+        assert!(
+            lambda_requires_external_cleanup_envs(&graph, &schedule, &closure_a, &mut 10_000)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn schedule_cleanup_env_locals_collects_handler_and_nested_closures_skipping_functions() {
+        use iir::cleanup::{
+            Action, Boundary, ContextKey, DiscardCleanup, FunctionSchedule, Program, Schedule,
+            Site, Step, Target,
+        };
+        use nir::program::SourceRange;
+
+        let src = |start| SourceRange {
+            start,
+            end: start + 1,
+        };
+        let u64_ty = Term::Primitive(P::U64);
+        let ptr_u64 = Term::Pointer(Box::new(u64_ty.clone()));
+        let instance = iir::InstanceKey {
+            declaration: nir::DeclarationId {
+                package: 0,
+                local: 9,
+            },
+            arguments: vec![].into(),
+        };
+        let arm_prefix = vec![ContextKey::EffectHandler {
+            installation: src(10),
+            handler: 0,
+            arm: 1,
+        }];
+        let mut nested_closure_ctx = arm_prefix.clone();
+        nested_closure_ctx.push(ContextKey::Closure {
+            call: src(20),
+            definition: src(30),
+        });
+        let mut nested_fn_ctx = nested_closure_ctx.clone();
+        nested_fn_ctx.push(ContextKey::Function {
+            call: src(40),
+            callee: instance.clone(),
+        });
+
+        let arm_local = LocalId { owner: 9, index: 1 };
+        let nested_closure_local = LocalId { owner: 9, index: 2 };
+        let fn_local_ignored = LocalId { owner: 9, index: 3 };
+
+        let invoke_step = |local: LocalId, ty: Term| Step::Invoke {
+            path: vec![],
+            subject: u64_ty.clone(),
+            method: instance.clone(),
+            env_arguments: vec![Expr {
+                source: src(2),
+                ty,
+                kind: K::Local(local),
+            }],
+        };
+
+        let arm_schedule = FunctionSchedule {
+            instance: instance.clone(),
+            context: arm_prefix.clone(),
+            sites: vec![Site {
+                source: src(11),
+                boundary: Boundary::HandlerEnd,
+                actions: vec![Action {
+                    target: Target::Local {
+                        binding: arm_local,
+                        fields: vec![],
+                    },
+                    program: Program {
+                        ty: u64_ty.clone(),
+                        guards: vec![],
+                        steps: vec![invoke_step(arm_local, u64_ty.clone())],
+                    },
+                }],
+            }],
+            discards: vec![],
+            transfers: vec![],
+            copies: vec![],
+            pattern_transfers: vec![],
+            pattern_orders: vec![],
+        };
+        let nested_closure_schedule = FunctionSchedule {
+            instance: instance.clone(),
+            context: nested_closure_ctx,
+            sites: vec![],
+            discards: vec![DiscardCleanup {
+                source: src(21),
+                value_source: src(22),
+                program: Program {
+                    ty: ptr_u64.clone(),
+                    guards: vec![],
+                    steps: vec![invoke_step(nested_closure_local, ptr_u64.clone())],
+                },
+            }],
+            transfers: vec![],
+            copies: vec![],
+            pattern_transfers: vec![],
+            pattern_orders: vec![],
+        };
+        let nested_fn_schedule = FunctionSchedule {
+            instance: instance.clone(),
+            context: nested_fn_ctx,
+            sites: vec![],
+            discards: vec![DiscardCleanup {
+                source: src(41),
+                value_source: src(42),
+                program: Program {
+                    ty: u64_ty.clone(),
+                    guards: vec![],
+                    steps: vec![invoke_step(fn_local_ignored, u64_ty.clone())],
+                },
+            }],
+            transfers: vec![],
+            copies: vec![],
+            pattern_transfers: vec![],
+            pattern_orders: vec![],
+        };
+
+        let schedule = Schedule {
+            closure_definitions: vec![],
+            borrowed_callable_functions: vec![],
+            functions: vec![arm_schedule, nested_closure_schedule, nested_fn_schedule],
+            aliases: vec![],
+        };
+
+        let locals =
+            schedule_cleanup_env_locals(&schedule, &instance, &arm_prefix, &mut 10_000).unwrap();
+        let expected = BTreeMap::from([(arm_local, u64_ty), (nested_closure_local, ptr_u64)]);
+        assert_eq!(locals, expected);
     }
 }

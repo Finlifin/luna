@@ -393,12 +393,14 @@ impl Emitter<'_> {
 mod frame_tests;
 
 pub(super) type Environment = [Arc<DirectHandler>];
+
 pub(super) fn row_result(ty: &Term) -> (&[nir::effects::Operation], &Term) {
     match ty {
         Term::Computation { effects, result } => (effects, result),
         _ => (&[], ty),
     }
 }
+
 impl Emitter<'_> {
     pub(super) fn bind_effect_parameters(
         &mut self,
@@ -456,6 +458,7 @@ impl Emitter<'_> {
         }
         Ok(())
     }
+
     pub(super) fn effect_arguments(
         &mut self,
         row: &[nir::effects::Operation],
@@ -519,6 +522,7 @@ impl Emitter<'_> {
     fn outline_direct(&mut self, entry: &Arc<DirectHandler>) -> Result<(String, String), String> {
         self.outline_direct_at(entry, 0)
     }
+
     fn outline_direct_at(
         &mut self,
         entry: &Arc<DirectHandler>,
@@ -642,6 +646,27 @@ impl Emitter<'_> {
                 }
                 Ok(())
             })?;
+        }
+        if let (Some(scope), Some(schedule)) = (&entry.scope, self.schedules) {
+            for arm_index in 0..entry.handler.arms.len() {
+                let mut arm_context = scope.context.clone();
+                arm_context.push(iir::cleanup::ContextKey::EffectHandler {
+                    installation: scope.installation,
+                    handler: scope.handler,
+                    arm: arm_index,
+                });
+                let env_locals = closures::schedule_cleanup_env_locals(
+                    schedule,
+                    &scope.instance,
+                    &arm_context,
+                    self.fuel,
+                )?;
+                for id in env_locals.keys() {
+                    if entry.locals.contains_key(id) {
+                        captures.insert(*id);
+                    }
+                }
+            }
         }
         let captures = captures
             .into_iter()
@@ -1113,9 +1138,11 @@ mod destination_tests {
             kind,
         }
     }
+
     fn id(index: u32) -> LocalId {
         LocalId { owner: 0, index }
     }
+
     fn handler(body: Expr) -> Expr {
         expr(K::EffectHandle {
             computation: Box::new(expr(K::Unit)),
@@ -1142,6 +1169,7 @@ mod destination_tests {
             outer: vec![],
         })
     }
+
     fn loop_body(identity: LocalId, body: Expr) -> Expr {
         expr(K::Loop {
             identity,
