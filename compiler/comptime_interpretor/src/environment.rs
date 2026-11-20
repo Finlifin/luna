@@ -79,11 +79,12 @@ impl Environment {
         for (id, change) in self.scopes.pop().expect("active lexical scope") {
             match change {
                 Membership::Added => {
-                    self.remove_register(&id);
+                    self.take_register(&id);
                 }
                 Membership::Removed => self.record(id, change),
             }
         }
+        self.compact();
     }
     // A successful let-pattern delivers its bindings into the enclosing scope.
     pub fn commit_scope(&mut self) {
@@ -179,14 +180,33 @@ impl Environment {
         map.insert(id, value)
     }
     pub fn remove(&mut self, id: &LocalId) -> Option<Value> {
-        let value = self.remove_register(id);
+        let value = self.take_register(id);
         if value.is_some() {
             self.record(*id, Membership::Removed);
+            self.compact();
         }
         value
     }
-    fn remove_register(&mut self, id: &LocalId) -> Option<Value> {
-        let value = match &mut self.registers {
+
+    /// Move a batch to its bytecode slots. Compact after the handoff: a dense
+    /// environment being emptied need never be rebuilt as a sparse tree.
+    pub(super) fn take_bindings(
+        &mut self,
+        layout: &[(LocalId, usize)],
+        mut receive: impl FnMut(usize, usize, Option<Value>),
+    ) {
+        for (index, &(id, slot)) in layout.iter().enumerate() {
+            let value = self.take_register(&id);
+            if value.is_some() {
+                self.record(id, Membership::Removed);
+            }
+            receive(index, slot, value);
+        }
+        self.compact();
+    }
+
+    fn take_register(&mut self, id: &LocalId) -> Option<Value> {
+        match &mut self.registers {
             Registers::Slots { entries, live } => {
                 let offset = Self::offset(entries, id)?;
                 let value = entries.get_mut(offset)?.1.take();
@@ -196,9 +216,7 @@ impl Environment {
                 value
             }
             Registers::Sparse(map) => map.remove(id),
-        };
-        self.compact();
-        value
+        }
     }
     fn compact(&mut self) {
         if let Registers::Slots { entries, live } = &mut self.registers {

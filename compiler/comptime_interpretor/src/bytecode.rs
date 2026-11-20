@@ -14,7 +14,7 @@ pub(super) use preparation::{MethodContinuation, MethodWait, Preparation};
 pub(super) struct Frame {
     code: Arc<Program>,
     environment: Environment,
-    imported: Vec<(LocalId, usize)>,
+    imported: bindings::Imports,
     exports: Option<Arc<BoundExports>>,
     terminal: bool,
     interface: Option<Box<interface::InterfaceCall>>,
@@ -277,7 +277,7 @@ impl fmt::Display for Frame {
             write!(f, "))")?;
         }
         write!(f, ") (imported")?;
-        for (binding, slot) in &self.imported {
+        for (binding, slot) in self.imported.bindings(&self.code) {
             write!(f, " ({binding} {slot})")?;
         }
         write!(f, ") (binding-exports")?;
@@ -462,10 +462,10 @@ impl Frame {
         };
         self.environment = environment;
         let mut missing = false;
-        for (binding, slot) in borrowed {
-            self.slots[slot] = self.environment.remove(&binding);
-            missing |= self.slots[slot].is_none();
-        }
+        self.environment.take_bindings(&borrowed, |_, slot, value| {
+            missing |= value.is_none();
+            self.slots[slot] = value;
+        });
         if missing {
             return Err(Error {
                 kind: ErrorKind::MissingBinding,
@@ -547,7 +547,7 @@ impl Frame {
         while !self.scopes.is_empty() {
             self.leave_scope().expect("existing scope");
         }
-        for (binding, slot) in self.imported {
+        for (binding, slot) in self.imported.bindings(&self.code) {
             if let Some(value) = self.slots[slot].take() {
                 self.environment.insert(binding, value);
             }
@@ -1036,7 +1036,7 @@ impl<'a> Interpreter<'a> {
         let mut frame = Frame {
             code: code.clone(),
             environment: std::mem::take(environment),
-            imported: Vec::new(),
+            imported: bindings::Imports::default(),
             exports: None,
             terminal: false,
             interface: None,
@@ -1059,12 +1059,14 @@ impl<'a> Interpreter<'a> {
             slots: (0..code.registers()).map(|_| None).collect(),
             prepared_types: (0..code.prepared_type_count()).map(|_| None).collect(),
         };
-        for &(binding, slot) in code.locals() {
-            if let Some(value) = frame.environment.remove(&binding) {
-                frame.imported.push((binding, slot));
-                frame.slots[slot] = Some(value);
-            }
-        }
+        frame
+            .environment
+            .take_bindings(code.locals(), |index, slot, value| {
+                if let Some(value) = value {
+                    frame.imported.record(index);
+                    frame.slots[slot] = Some(value);
+                }
+            });
         Ok(frame)
     }
 
