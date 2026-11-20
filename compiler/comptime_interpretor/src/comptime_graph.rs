@@ -63,7 +63,18 @@ impl Interpreter<'_> {
         source: SourceRange,
         depth: usize,
     ) -> Result<(), Error> {
-        self.check_comptime_graph_inner(value, source, depth, &mut HashSet::new())
+        let mut seen = HashSet::new();
+        self.check_comptime_graph_with_seen(value, source, depth, &mut seen)
+    }
+
+    pub(super) fn check_comptime_graph_with_seen(
+        &mut self,
+        value: &Value,
+        source: SourceRange,
+        depth: usize,
+        seen: &mut HashSet<(u8, usize)>,
+    ) -> Result<(), Error> {
+        self.check_comptime_graph_inner(value, source, depth, seen)
     }
 
     fn check_comptime_graph_inner(
@@ -130,10 +141,22 @@ impl Interpreter<'_> {
                 let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
                 let mut fuel = before;
                 let charged = arguments.iter().try_for_each(|argument| {
-                    nir::type_computations::charge_term(argument, &mut fuel)
+                    nir::copy_budget::charge_term_copy(argument, &mut fuel, 128)
                 });
                 self.budget.steps -= (before - fuel) as u64;
-                charged.map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+                charged.map_err(|error| {
+                    self.failure(
+                        match error {
+                            nir::copy_budget::CopyBudgetExhausted::Steps => {
+                                ErrorKind::StepsExhausted
+                            }
+                            nir::copy_budget::CopyBudgetExhausted::Depth => {
+                                ErrorKind::DepthExhausted
+                            }
+                        },
+                        Some(source),
+                    )
+                })?;
                 self.check_comptime_domain(
                     &Term::Nominal {
                         declaration: *declaration,

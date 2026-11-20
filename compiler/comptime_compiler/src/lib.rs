@@ -299,6 +299,7 @@ pub enum Op {
     },
     TypeDescription(Register),
     TypeIdentity(Register),
+    CheckBool(Register),
     TypeEqual {
         destination: Register,
         left: Register,
@@ -961,6 +962,7 @@ impl fmt::Display for Program {
                     inputs[0], inputs[1]
                 )?,
                 Op::TypeIdentity(value) => write!(f, "(type-identity %{value})")?,
+                Op::CheckBool(value) => write!(f, "(check-bool %{value})")?,
                 Op::TypeDescription(value) => write!(f, "(type-description %{value})")?,
                 Op::TypeEqual {
                     destination,
@@ -2506,7 +2508,7 @@ fn compile_root<'a>(
                                 operand: slot,
                             },
                         );
-                        emit(&mut work, Op::TypeIdentity(slot));
+                        emit(&mut work, Op::TypeDescription(slot));
                         work.push(Work::Expression(operand, slot));
                         emit(
                             &mut work,
@@ -3159,11 +3161,19 @@ fn compile_root<'a>(
                         work.push(Work::Expression(left, lhs));
                     }
                     K::And(left, right) | K::Or(left, right)
-                        if left.ty == Term::Primitive(Primitive::Bool) =>
+                        if matches!(
+                            left.ty,
+                            Term::Primitive(Primitive::Bool | Primitive::Never)
+                        ) || (matches!(left.ty, Term::AssociatedType { .. })
+                            && matches!(
+                                expr.ty,
+                                Term::Primitive(Primitive::Bool | Primitive::Never)
+                            )) =>
                     {
                         let done = labels.len();
                         labels.push(None);
                         work.push(Work::Label(done));
+                        emit(&mut work, Op::CheckBool(dst));
                         work.push(Work::Expression(right, dst));
                         emit(
                             &mut work,

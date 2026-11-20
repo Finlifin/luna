@@ -83,14 +83,9 @@ fn optional_type_admission_meters_payloads_and_recovers_with_sufficient_budget()
         functions: vec![function(0, value(nested.clone()))],
         ..Default::default()
     };
-    let mut low = Interpreter::for_comptime(
-        &package,
-        Budget {
-            steps: 8,
-            depth: 128,
-        },
-    )
-    .unwrap();
+    let mut low = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    low.charge_preparation(low.remaining_steps() as usize - 8)
+        .unwrap();
     assert_eq!(
         low.invoke(id(0), vec![]).unwrap_err().kind,
         ErrorKind::StepsExhausted
@@ -195,14 +190,9 @@ fn optional_constructor_specializes_without_mutating_template_and_is_metered() {
         functions: vec![function(0, body)],
         ..Default::default()
     };
-    let mut low = Interpreter::for_comptime(
-        &package,
-        Budget {
-            steps: 2,
-            depth: 128,
-        },
-    )
-    .unwrap();
+    let mut low = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    low.charge_preparation(low.remaining_steps() as usize - 2)
+        .unwrap();
     assert_eq!(
         low.invoke(id(0), vec![]).unwrap_err().kind,
         ErrorKind::StepsExhausted

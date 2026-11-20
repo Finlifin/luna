@@ -108,39 +108,41 @@ impl Interpreter<'_> {
                 .complete_list_index(snapshot, value, source)
                 .map(Flow::Value);
         }
-        let storage = if let Value::Storage(storage) = local {
-            Some(
-                storage
-                    .0
-                    .try_lock()
-                    .map_err(|_| self.failure(ErrorKind::InvalidPointer, Some(value_source)))?,
-            )
-        } else {
-            None
-        };
-        let referenced = if let Value::ComptimeReference(reference) = local {
-            Some(
-                reference
-                    .borrow(&mut self.budget.steps)
-                    .map_err(|kind| self.failure(kind, Some(source)))?,
-            )
-        } else {
-            None
-        };
-        let list = referenced
-            .as_ref()
-            .map(|v| v.value())
-            .unwrap_or_else(|| storage.as_deref().unwrap_or(local));
-        let length = self.index_list_length(list, ty, source)?;
+        let (length, values) =
+            {
+                let storage =
+                    if let Value::Storage(storage) = local {
+                        Some(storage.0.try_lock().map_err(|_| {
+                            self.failure(ErrorKind::InvalidPointer, Some(value_source))
+                        })?)
+                    } else {
+                        None
+                    };
+                let referenced = if let Value::ComptimeReference(reference) = local {
+                    Some(
+                        reference
+                            .borrow(&mut self.budget.steps)
+                            .map_err(|kind| self.failure(kind, Some(value_source)))?,
+                    )
+                } else {
+                    None
+                };
+                let list = referenced
+                    .as_ref()
+                    .map(|v| v.value())
+                    .unwrap_or_else(|| storage.as_deref().unwrap_or(local));
+                let length = self.index_list_length(list, ty, source)?;
+                let Value::List { values, .. } = list else {
+                    unreachable!()
+                };
+                (length, values.clone())
+            };
         let value = match index(self)? {
             Flow::Value(value) => value,
             flow => return Ok(flow),
         };
         let position = self.list_position(value, length, source)?;
-        let value = match list {
-            Value::List { values, .. } => self.read_list_element(values, position, source)?,
-            _ => unreachable!(),
-        };
+        let value = self.read_list_element(&values, position, source)?;
         Ok(Flow::Value(value))
     }
     pub(super) fn eval_type_list_index(

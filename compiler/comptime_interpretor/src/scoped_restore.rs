@@ -128,7 +128,7 @@ impl Restore<'_> {
             Value::AbstractValue { declaration, ty } => {
                 let symbol = self.ty(&Term::Rigid {
                     declaration: *declaration,
-                    sort: nir::Sort::ComptimeValue,
+                    sort: nir::Sort::of_comptime_domain(ty),
                 })?;
                 let Term::Rigid { declaration, .. } = symbol else {
                     // An outer telescope slot has no standalone invocation
@@ -168,6 +168,7 @@ impl Restore<'_> {
             Value::Pointer(_) | Value::ComptimeReference(_) => {
                 return Err(ErrorKind::Unsupported);
             }
+            Value::Description(_) => return Err(ErrorKind::TypeContractUnresolved),
             Value::List { .. }
             | Value::Tuple(_)
             | Value::AnonymousRecord(_)

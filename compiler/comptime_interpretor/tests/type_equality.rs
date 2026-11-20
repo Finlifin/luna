@@ -239,7 +239,7 @@ fn runtime_direct_calls_prove_residual_clauses_and_recover_after_rejection() {
         // Without a supplied solver, distinct types do not manufacture a
         // disequality proof; preserve the existing unknown result.
         (3, ErrorKind::TypeContractUnresolved),
-        (4, ErrorKind::InvalidCallPlan),
+        (4, ErrorKind::TypeContractUnresolved),
         (5, ErrorKind::Type),
     ] {
         assert_eq!(vm.invoke(id(local), vec![]).unwrap_err().kind, expected);

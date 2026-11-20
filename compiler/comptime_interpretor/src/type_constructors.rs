@@ -96,7 +96,7 @@ impl Interpreter<'_> {
     }
 
     pub(super) fn check_type_constructor_input(
-        &self,
+        &mut self,
         kind: &Kind,
         index: usize,
         count: usize,
@@ -104,11 +104,25 @@ impl Interpreter<'_> {
         source: SourceRange,
     ) -> Result<Term, Error> {
         let ty = self.type_identity_term(value, source)?;
+        self.check_type_description(&ty, Some(source))?;
         let valid = match kind {
             Kind::Result if index == 0 => matches!(ty.callable_signature(), Term::Function { .. }),
             Kind::Closure if count > 1 && index + 1 == count => matches!(
                 ty,
                 Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+            ),
+            Kind::Pointer => !matches!(
+                ty,
+                Term::Primitive(
+                    Primitive::Type
+                        | Primitive::Object
+                        | Primitive::Integer
+                        | Primitive::Float
+                        | Primitive::Unit
+                ) | Term::Lift(_)
+                    | Term::ComptimeFunction(_)
+                    | Term::NormalFormFunction(_, _)
+                    | Term::ClosureContextType
             ),
             _ => true,
         };

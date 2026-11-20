@@ -40,6 +40,9 @@ impl Interpreter<'_> {
         values: &[Value],
         source: SourceRange,
     ) -> Result<Value, Error> {
+        for value in values {
+            Self::concrete_value(value, source)?;
+        }
         if binding.operation() == Op::FusedMultiplyAdd {
             use comptime_runtime::float16::Float16Format as F;
             let half = match values {
@@ -71,22 +74,76 @@ impl Interpreter<'_> {
     }
 }
 
-// Scale in bounded exact power-of-two steps; never first form an overflowing
-// or underflowing 2^exponent. The last multiplication alone may be subnormal.
+fn scale_ieee_pow2(bits: u64, power: i32, fraction: u32, exp_bits: u32) -> u64 {
+    let total_bits = 1 + exp_bits + fraction;
+    let sign_bit = 1u64 << (total_bits - 1);
+    let exp_mask = ((1u64 << exp_bits) - 1) << fraction;
+    let mant_mask = (1u64 << fraction) - 1;
+    let sign = bits & sign_bit;
+    let magnitude = bits & (sign_bit - 1);
+    if magnitude >= exp_mask {
+        return if magnitude == exp_mask {
+            bits
+        } else {
+            bits | (1u64 << (fraction - 1))
+        };
+    }
+    if magnitude == 0 {
+        return bits;
+    }
+    let bias = ((1u64 << (exp_bits - 1)) - 1) as i64;
+    let raw_exp = magnitude >> fraction;
+    let (mantissa, exponent) = if raw_exp == 0 {
+        (magnitude, 1 - bias - i64::from(fraction))
+    } else {
+        (
+            (1u64 << fraction) | (magnitude & mant_mask),
+            raw_exp as i64 - bias - i64::from(fraction),
+        )
+    };
+    let exponent = exponent + i64::from(power);
+    let leading = 63 - mantissa.leading_zeros();
+    let normalized = exponent + i64::from(leading);
+    if normalized > bias {
+        return sign | exp_mask;
+    }
+    if normalized >= 1 - bias {
+        let significand = mantissa << (fraction - leading);
+        return sign | (((normalized + bias) as u64) << fraction) | (significand & mant_mask);
+    }
+    let shift = 1 - bias - i64::from(fraction) - exponent;
+    if shift <= 0 {
+        return sign | (mantissa << (-shift));
+    }
+    if shift > i64::from(leading) + 1 {
+        return sign;
+    }
+    let quotient = mantissa >> shift;
+    let remainder = mantissa & ((1u64 << shift) - 1);
+    let halfway = 1u64 << (shift - 1);
+    let increment = remainder > halfway || (remainder == halfway && quotient & 1 != 0);
+    sign | (quotient + u64::from(increment))
+}
+
+fn scale_f32(bits: u32, power: i32) -> u32 {
+    scale_ieee_pow2(u64::from(bits), power, 23, 8) as u32
+}
+
+fn scale_f64(bits: u64, power: i32) -> u64 {
+    scale_ieee_pow2(bits, power, 52, 11)
+}
+
 macro_rules! float_math {
-    ($kind:ident, $float:ty, $values:ident, $op:ident, $large:expr, $small:expr, $step:expr) => {{
-        let Value::$kind(bits) = $values.first()? else {
-            return None;
+    ($kind:ident, $float:ty, $values:ident, $op:ident, $scale:ident) => {{
+        let read = |index| match $values.get(index)? {
+            Value::$kind(bits) => Some(<$float>::from_bits(*bits)),
+            _ => None,
         };
-        let a = <$float>::from_bits(*bits);
-        let b = match $values.get(1) {
-            Some(Value::$kind(bits)) => <$float>::from_bits(*bits),
-            _ => 0.0,
+        let a_bits = match $values.first()? {
+            Value::$kind(bits) => *bits,
+            _ => return None,
         };
-        let c = match $values.get(2) {
-            Some(Value::$kind(bits)) => <$float>::from_bits(*bits),
-            _ => 0.0,
-        };
+        let a = <$float>::from_bits(a_bits);
         let predicate = match $op {
             Op::IsNan => Some(a.is_nan()),
             Op::IsInfinite => Some(a.is_infinite()),
@@ -99,10 +156,16 @@ macro_rules! float_math {
         if let Some(value) = predicate {
             return Some(Value::Bool(value));
         }
+        if $op == Op::ScaleByPowerOfTwo {
+            let Some(Value::SignedInteger(n)) = $values.get(1) else {
+                return None;
+            };
+            return Some(Value::$kind($scale(a_bits, i32::try_from(*n).ok()?)));
+        }
         let value: $float = match $op {
-            Op::FusedMultiplyAdd => a.mul_add(b, c),
+            Op::FusedMultiplyAdd => a.mul_add(read(1)?, read(2)?),
             Op::SquareRoot => a.sqrt(),
-            Op::CopySign => a.copysign(b),
+            Op::CopySign => a.copysign(read(1)?),
             Op::Floor => a.floor(),
             Op::Ceiling => a.ceil(),
             Op::Truncate => a.trunc(),
@@ -116,33 +179,15 @@ macro_rules! float_math {
             Op::NaturalLog => a.ln(),
             Op::Log2 => a.log2(),
             Op::Log10 => a.log10(),
-            Op::Power => a.powf(b),
+            Op::Power => a.powf(read(1)?),
             Op::IntegerPower => {
                 let Some(Value::SignedInteger(n)) = $values.get(1) else {
                     return None;
                 };
                 a.powi(i32::try_from(*n).ok()?)
             }
-            Op::ScaleByPowerOfTwo => {
-                let Some(Value::SignedInteger(n)) = $values.get(1) else {
-                    return None;
-                };
-                let mut n = i32::try_from(*n).ok()?;
-                let mut value = a;
-                // Two steps suffice to exhaust any finite input's exponent.
-                for _ in 0..2 {
-                    if n > $step {
-                        value *= $large;
-                        n -= $step;
-                    }
-                    if n < -$step {
-                        value *= $small;
-                        n += $step;
-                    }
-                }
-                value * (2.0 as $float).powi(n.clamp(-$step, $step))
-            }
             Op::Minimum | Op::Maximum | Op::MinimumNumber | Op::MaximumNumber => {
+                let b = read(1)?;
                 let minimum = matches!($op, Op::Minimum | Op::MinimumNumber);
                 let propagate = matches!($op, Op::Minimum | Op::Maximum);
                 if a.is_nan() {
@@ -170,27 +215,14 @@ macro_rules! float_math {
 }
 
 fn scalar(op: Op, values: &[Value], width: Option<u32>) -> Option<Value> {
+    if values.len() != op.operand_count() {
+        return None;
+    }
     match values.first()? {
         Value::Float16(_) => half_scalar(op, values, false),
         Value::BFloat16(_) => half_scalar(op, values, true),
-        Value::Float32(_) => float_math!(
-            Float32,
-            f32,
-            values,
-            op,
-            2.0f32.powi(102),
-            2.0f32.powi(-102),
-            102
-        ),
-        Value::Float64(_) => float_math!(
-            Float64,
-            f64,
-            values,
-            op,
-            2.0f64.powi(969),
-            2.0f64.powi(-969),
-            969
-        ),
+        Value::Float32(_) => float_math!(Float32, f32, values, op, scale_f32),
+        Value::Float64(_) => float_math!(Float64, f64, values, op, scale_f64),
         Value::SignedInteger(_) | Value::UnsignedInteger(_) => integer(op, values, width?),
         _ => None,
     }
@@ -201,9 +233,13 @@ fn integer(op: Op, values: &[Value], width: u32) -> Option<Value> {
         return None;
     }
     let mask = u128::MAX >> (128 - width);
+    let lo = i128::MIN >> (128 - width);
+    let hi = i128::MAX >> (128 - width);
     let signed = matches!(values.first()?, Value::SignedInteger(_));
     let read = |index| match values.get(index)? {
-        Value::SignedInteger(value) if signed => Some(*value as u128 & mask),
+        Value::SignedInteger(value) if signed && *value >= lo && *value <= hi => {
+            Some(*value as u128 & mask)
+        }
         Value::UnsignedInteger(value) if !signed && *value <= mask => Some(*value),
         _ => None,
     };
@@ -211,8 +247,6 @@ fn integer(op: Op, values: &[Value], width: u32) -> Option<Value> {
     let b = if values.len() > 1 { read(1)? } else { 0 };
     let extend = |value: u128| ((value << (128 - width)) as i128) >> (128 - width);
     let (sa, sb) = (extend(a), extend(b));
-    let lo = i128::MIN >> (128 - width);
-    let hi = i128::MAX >> (128 - width);
     let bits = match op {
         Op::BitAnd => a & b,
         Op::BitOr => a | b,
@@ -360,4 +394,164 @@ fn half_scalar(op: Op, values: &[Value], bfloat: bool) -> Option<Value> {
     } else {
         Value::Float16(result)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nir::intrinsics::{Operation as Op, Registry, Tag};
+    use nir::program::{Enum, Variant, VariantShape};
+
+    #[test]
+    fn scalar_math_rejects_wrong_arity_types_and_signed_out_of_range() {
+        let src = SourceRange { start: 1, end: 2 };
+        let fam_id = DeclarationId {
+            package: 9,
+            local: 1,
+        };
+        let intrinsic_enum = Enum {
+            is_intrinsic: true,
+            parameter_types: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+            type_parameters: vec![],
+            declaration: fam_id,
+            name: "Math".into(),
+            variants: vec![
+                Variant {
+                    name: "fma".into(),
+                    shape: VariantShape::Unit,
+                    fields: vec![],
+                },
+                Variant {
+                    name: "copysign".into(),
+                    shape: VariantShape::Unit,
+                    fields: vec![],
+                },
+                Variant {
+                    name: "iabs".into(),
+                    shape: VariantShape::Unit,
+                    fields: vec![],
+                },
+            ],
+            groups: vec![],
+            encoding: None,
+            symbol_encoding: None,
+        };
+        let mut pkg = Package::default();
+        pkg.enums.push(intrinsic_enum);
+        let reg = Registry::new(
+            &pkg,
+            &[
+                (
+                    Tag {
+                        family: fam_id,
+                        variant: 0,
+                    },
+                    Op::FusedMultiplyAdd,
+                ),
+                (
+                    Tag {
+                        family: fam_id,
+                        variant: 1,
+                    },
+                    Op::CopySign,
+                ),
+                (
+                    Tag {
+                        family: fam_id,
+                        variant: 2,
+                    },
+                    Op::WrappingAbsoluteValue,
+                ),
+            ],
+        )
+        .unwrap();
+        let fma = reg
+            .check(
+                Tag {
+                    family: fam_id,
+                    variant: 0,
+                },
+                &[
+                    Term::Primitive(Primitive::F32),
+                    Term::Primitive(Primitive::F32),
+                    Term::Primitive(Primitive::F32),
+                ],
+                &Term::Primitive(Primitive::F32),
+            )
+            .unwrap()
+            .for_comptime();
+        let copysign = reg
+            .check(
+                Tag {
+                    family: fam_id,
+                    variant: 1,
+                },
+                &[
+                    Term::Primitive(Primitive::F32),
+                    Term::Primitive(Primitive::F32),
+                ],
+                &Term::Primitive(Primitive::F32),
+            )
+            .unwrap()
+            .for_comptime();
+        let iabs = reg
+            .check(
+                Tag {
+                    family: fam_id,
+                    variant: 2,
+                },
+                &[Term::Primitive(Primitive::I8)],
+                &Term::Primitive(Primitive::I8),
+            )
+            .unwrap()
+            .for_comptime();
+
+        let mut vm = Interpreter::for_comptime(&pkg, Budget::default()).unwrap();
+        let one = Value::Float32(1.0f32.to_bits());
+        assert_eq!(
+            vm.scalar_math_values(&fma, &[one.clone(), one.clone()], src)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+        assert_eq!(
+            vm.scalar_math_values(&fma, &[one.clone(), one.clone(), Value::Bool(false)], src)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+        assert_eq!(
+            vm.scalar_math_values(&copysign, &[one.clone(), Value::Float64(0)], src)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+        assert_eq!(
+            vm.scalar_math_values(
+                &copysign,
+                &[
+                    one,
+                    Value::AbstractValue {
+                        declaration: DeclarationId {
+                            package: 9,
+                            local: 99,
+                        },
+                        ty: Term::Primitive(Primitive::F32),
+                    }
+                ],
+                src,
+            )
+            .unwrap_err()
+            .kind,
+            ErrorKind::AbstractValueUnresolved
+        );
+        assert_eq!(
+            vm.scalar_math_values(&iabs, &[Value::SignedInteger(200)], src)
+                .unwrap_err()
+                .kind,
+            ErrorKind::Type
+        );
+    }
 }

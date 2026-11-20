@@ -284,7 +284,9 @@ pub(crate) fn validate_frame<'a>(
     fuel: &mut usize,
 ) -> Result<&'a [crate::Parameter], Error> {
     program.validate_input_frame(fuel).map_err(|failure| {
-        if failure.is_budget() {
+        if failure.is_depth() {
+            Error::depth(failure.source, failure.message(quote))
+        } else if failure.is_budget() {
             Error::budget(failure.source, failure.message(quote))
         } else {
             Error::invalid(failure.source, failure.message(quote))

@@ -276,12 +276,13 @@ impl Interpreter<'_> {
                 let declaration = match value {
                     Value::TypeParameter(_)
                     | Value::Type(Term::Rigid { .. })
-                    | Value::AbstractValue { .. } => {
+                    | Value::AbstractValue { .. }
+                    | Value::Description(_) => {
                         return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
                     }
                     Value::Type(Term::Nominal { declaration, .. }) => Some(declaration),
                     Value::Type(Term::NormalForm { head, .. }) => Some(head),
-                    Value::Type(_) | Value::Description(_) => None,
+                    Value::Type(_) => None,
                     Value::Function(declaration) | Value::FunctionInstance { declaration, .. } => {
                         Some(declaration)
                     }

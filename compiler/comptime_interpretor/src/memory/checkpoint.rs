@@ -67,9 +67,12 @@ impl OwnedGraphCheckpoint {
 fn term(value: &Term, fuel: &mut u64) -> Result<(), ErrorKind> {
     let before = usize::try_from(*fuel).unwrap_or(usize::MAX);
     let mut remaining = before;
-    let result = nir::type_computations::charge_term(value, &mut remaining);
+    let result = nir::copy_budget::charge_term_copy(value, &mut remaining, 128);
     *fuel -= (before - remaining) as u64;
-    result.map_err(|_| ErrorKind::StepsExhausted)
+    result.map_err(|limit| match limit {
+        nir::copy_budget::CopyBudgetExhausted::Steps => ErrorKind::StepsExhausted,
+        nir::copy_budget::CopyBudgetExhausted::Depth => ErrorKind::DepthExhausted,
+    })
 }
 
 // Exhaustive accounting for the actual derived Clone, not value interpretation.

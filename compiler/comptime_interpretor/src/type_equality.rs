@@ -125,29 +125,18 @@ impl Interpreter<'_> {
         Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)))
     }
 
-    pub(super) fn eval_type_kind(
+    pub(super) fn complete_type_kind_value(
         &mut self,
-        expr: &Expr,
-        environment: &mut Environment,
-    ) -> Result<Flow, Error> {
-        let K::TypeKind { kind, operand } = &expr.kind else {
-            unreachable!()
-        };
-        self.prepare_type_kind(&expr.ty, &operand.ty, expr.source)?;
-        let operand = value!(self.eval(operand, environment));
+        kind: nir::TypeKind,
+        operand: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
         if let Value::Description(ref data) = operand {
             if !self.admits_description(data) {
-                return Err(self.failure(ErrorKind::Type, Some(expr.source)));
+                return Err(self.failure(ErrorKind::Type, Some(source)));
             }
             let Some(world) = self.declaration_world else {
-                return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(expr.source)));
-            };
-            let subject_term = Term::Rigid {
-                declaration: DeclarationId {
-                    package: u64::MAX,
-                    local: 0,
-                },
-                sort: nir::Sort::Type,
+                return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
             };
             let before = self.budget.steps;
             let subject = world
@@ -160,9 +149,15 @@ impl Interpreter<'_> {
                         } else {
                             ErrorKind::Type
                         },
-                        Some(expr.source),
+                        Some(source),
                     )
                 })?;
+            let subject_id =
+                self.query_admission(Some(source), |_, fuel| Ok(subject.fresh_subject_id(fuel)?))?;
+            let subject_term = Term::Rigid {
+                declaration: subject_id,
+                sort: nir::Sort::Type,
+            };
             let mut premises = Vec::new();
             if let Some(app) = subject.application
                 && self
@@ -176,12 +171,35 @@ impl Interpreter<'_> {
                 ));
             }
             for req in subject.requirements() {
-                let instantiated = self.query_admission(Some(expr.source), |_, fuel| {
+                let instantiated = self.query_admission(Some(source), |_, fuel| {
                     Ok(req.instantiate(&subject_term, &[], fuel)?)
                 })?;
                 premises.push(instantiated);
             }
-            let target = nir::program::TypePredicate::Kind(subject_term, *kind);
+            let mut conjunctions: Vec<&nir::program::TypePredicate> = premises.iter().collect();
+            while let Some(premise) = conjunctions.pop() {
+                self.tick(Some(source))?;
+                match premise {
+                    nir::program::TypePredicate::And(parts) => {
+                        conjunctions.extend(parts.iter());
+                    }
+                    nir::program::TypePredicate::Kind(s, k) if s == &subject_term => {
+                        if let Some(result) = k.consequence(true, kind) {
+                            return Ok(Value::Bool(result));
+                        }
+                    }
+                    nir::program::TypePredicate::Not(inner) => {
+                        if let nir::program::TypePredicate::Kind(s, k) = inner.as_ref()
+                            && s == &subject_term
+                            && let Some(result) = k.consequence(false, kind)
+                        {
+                            return Ok(Value::Bool(result));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let target = nir::program::TypePredicate::Kind(subject_term, kind);
             let implies = |consequent: nir::program::TypePredicate| {
                 if premises.is_empty() {
                     consequent
@@ -195,30 +213,43 @@ impl Interpreter<'_> {
                 }
             };
             let pos = implies(target.clone());
-            self.tick(Some(expr.source))?;
+            self.tick(Some(source))?;
             if pos.trivial_truth() == Some(true)
                 || premises.iter().any(|p| p == &target)
                 || self
                     .solve_type_predicate(&pos)
-                    .map_err(|k| self.failure(k, Some(expr.source)))?
+                    .map_err(|k| self.failure(k, Some(source)))?
                     == ContractOutcome::Satisfied
             {
-                return Ok(Flow::Value(Value::Bool(true)));
+                return Ok(Value::Bool(true));
             }
             let neg = implies(nir::program::TypePredicate::Not(Box::new(target)));
-            self.tick(Some(expr.source))?;
+            self.tick(Some(source))?;
             if neg.trivial_truth() == Some(true)
                 || self
                     .solve_type_predicate(&neg)
-                    .map_err(|k| self.failure(k, Some(expr.source)))?
+                    .map_err(|k| self.failure(k, Some(source)))?
                     == ContractOutcome::Satisfied
             {
-                return Ok(Flow::Value(Value::Bool(false)));
+                return Ok(Value::Bool(false));
             }
-            return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(expr.source)));
+            return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
         }
-        let operand = self.type_identity_term(operand, expr.source)?;
-        self.complete_type_kind(*kind, operand, expr.source)
+        let operand = self.type_identity_term(operand, source)?;
+        self.complete_type_kind(kind, operand, source)
+    }
+
+    pub(super) fn eval_type_kind(
+        &mut self,
+        expr: &Expr,
+        environment: &mut Environment,
+    ) -> Result<Flow, Error> {
+        let K::TypeKind { kind, operand } = &expr.kind else {
+            unreachable!()
+        };
+        self.prepare_type_kind(&expr.ty, &operand.ty, expr.source)?;
+        let operand = value!(self.eval(operand, environment));
+        self.complete_type_kind_value(*kind, operand, expr.source)
             .map(Flow::Value)
     }
 }

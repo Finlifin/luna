@@ -29,34 +29,40 @@ impl Interpreter<'_> {
                 Value::Object(_) | Value::Storage(_) | Value::ComptimeReference(_)
             )
         {
-            let root;
-            let reference = match receiver {
-                Value::Storage(storage) => {
-                    root = value_reference::ValueReference::root(storage.clone());
-                    Some(&root)
+            let owned_object = {
+                let root;
+                let reference = match receiver {
+                    Value::Storage(storage) => {
+                        root = value_reference::ValueReference::root(storage.clone());
+                        Some(&root)
+                    }
+                    Value::ComptimeReference(reference) => Some(reference),
+                    _ => None,
+                };
+                let contents = reference
+                    .map(|reference| {
+                        reference
+                            .borrow(&mut self.budget.steps)
+                            .map_err(|kind| Error {
+                                kind,
+                                source: Some(receiver_source),
+                            })
+                    })
+                    .transpose()?;
+                let value = contents
+                    .as_ref()
+                    .map_or(receiver, |contents| contents.value());
+                self.check_borrowed_representation(value, receiver_source, 0)?;
+                match value {
+                    Value::Object(object) => Some(object.clone()),
+                    _ => None,
                 }
-                Value::ComptimeReference(reference) => Some(reference),
-                _ => None,
             };
-            let contents = reference
-                .map(|reference| {
-                    reference
-                        .borrow(&mut self.budget.steps)
-                        .map_err(|kind| Error {
-                            kind,
-                            source: Some(receiver_source),
-                        })
-                })
-                .transpose()?;
-            let value = contents
-                .as_ref()
-                .map_or(receiver, |contents| contents.value());
-            self.check_borrowed_representation(value, receiver_source, 0)?;
             let mut selectors = selectors.into_iter();
             let first = self.read_leaf_selector(selectors.next().unwrap())?;
             let second = self.read_leaf_selector(selectors.next().unwrap())?;
             self.tick(Some(source))?;
-            let Value::Object(object) = value else {
+            let Some(object) = owned_object.as_ref() else {
                 return Err(self.failure(ErrorKind::Type, Some(source)));
             };
             return match access.operation {
@@ -193,27 +199,33 @@ impl Interpreter<'_> {
             vm.depth += 1;
             vm.tick(Some(fields[0].source))?;
             vm.depth += 1;
-            let root;
-            let reference = match local {
-                Value::Storage(storage) => {
-                    root = value_reference::ValueReference::root(storage.clone());
-                    Some(&root)
+            let owned_object = {
+                let root;
+                let reference = match local {
+                    Value::Storage(storage) => {
+                        root = value_reference::ValueReference::root(storage.clone());
+                        Some(&root)
+                    }
+                    Value::ComptimeReference(reference) => Some(reference),
+                    _ => None,
+                };
+                let contents = reference
+                    .map(|reference| {
+                        reference
+                            .borrow(&mut vm.budget.steps)
+                            .map_err(|kind| Error {
+                                kind,
+                                source: Some(fields[0].source),
+                            })
+                    })
+                    .transpose()?;
+                let value = contents.as_ref().map_or(local, |contents| contents.value());
+                vm.check_borrowed_representation(value, fields[0].source, 0)?;
+                match value {
+                    Value::Object(object) => Some(object.clone()),
+                    _ => None,
                 }
-                Value::ComptimeReference(reference) => Some(reference),
-                _ => None,
             };
-            let contents = reference
-                .map(|reference| {
-                    reference
-                        .borrow(&mut vm.budget.steps)
-                        .map_err(|kind| Error {
-                            kind,
-                            source: Some(fields[0].source),
-                        })
-                })
-                .transpose()?;
-            let value = contents.as_ref().map_or(local, |contents| contents.value());
-            vm.check_borrowed_representation(value, fields[0].source, 0)?;
             vm.depth -= 1;
             let selector = if length {
                 None
@@ -234,7 +246,7 @@ impl Interpreter<'_> {
                 })
             };
             vm.depth = depth;
-            let Value::Object(object) = value else {
+            let Some(object) = owned_object.as_ref() else {
                 return Err(vm.failure(ErrorKind::Type, Some(expr.source)));
             };
             vm.query_object(*query, &expr.ty, object, selector, expr.source)
@@ -272,11 +284,13 @@ impl Interpreter<'_> {
         if *ty == Term::Primitive(Primitive::Never) {
             return Err(failure());
         }
+        let packet = Self::concrete_value(packet, source)?;
         let Value::Tuple(packet) = packet else {
             return Err(failure());
         };
         let mut packet = packet.into_iter();
-        let Some(Value::Object(object)) = packet.next() else {
+        let receiver = Self::concrete_value(packet.next().ok_or_else(failure)?, source)?;
+        let Value::Object(object) = receiver else {
             return Err(failure());
         };
         let selector = packet.next();
@@ -308,7 +322,8 @@ impl Interpreter<'_> {
             )));
         }
         if query == Q::NamedValue {
-            let Some(Value::Symbol(key)) = selector else {
+            let selector = Self::concrete_value(selector.ok_or_else(failure)?, source)?;
+            let Value::Symbol(key) = selector else {
                 return Err(failure());
             };
             let Term::Optional(target) = ty else {
@@ -333,7 +348,8 @@ impl Interpreter<'_> {
                 value,
             }));
         }
-        let Some(Value::Integer(index)) = selector else {
+        let selector = Self::concrete_value(selector.ok_or_else(failure)?, source)?;
+        let Value::Integer(index) = selector else {
             return Err(failure());
         };
         let index = index

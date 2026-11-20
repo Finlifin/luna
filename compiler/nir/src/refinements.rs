@@ -76,6 +76,74 @@ impl<'a> Subject<'a> {
     pub fn requirements(self) -> impl DoubleEndedIterator<Item = BoundRequirement<'a>> {
         self.requirements.into_iter().rev()
     }
+
+    /// Choose a rigid `DeclarationId` under `package = u64::MAX` that does not
+    /// collide with any binder or free `u64::MAX` declaration in this subject's
+    /// requirements.
+    pub fn fresh_subject_id(
+        &self,
+        fuel: &mut usize,
+    ) -> Result<crate::DeclarationId, crate::type_computations::Error> {
+        let mut used = std::collections::BTreeSet::new();
+        let mut predicates = Vec::with_capacity(self.requirements.len());
+        let mut terms = Vec::new();
+        for req in &self.requirements {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or(crate::type_computations::Error::Budget)?;
+            if req.0.binder.declaration.package == u64::MAX {
+                used.insert(req.0.binder.declaration.local);
+            }
+            predicates.push(&req.0.requirement);
+        }
+        while let Some(predicate) = predicates.pop() {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or(crate::type_computations::Error::Budget)?;
+            match predicate {
+                TypePredicate::Bool(_) => {}
+                TypePredicate::Trait(req) => {
+                    terms.push(&req.subject);
+                    terms.extend(&req.interface_arguments);
+                }
+                TypePredicate::Equal(left, right) => {
+                    terms.push(left);
+                    terms.push(right);
+                }
+                TypePredicate::Kind(ty, _) => terms.push(ty),
+                TypePredicate::Not(inner) => predicates.push(inner),
+                TypePredicate::And(parts) | TypePredicate::Or(parts) => {
+                    predicates.extend(parts.iter());
+                }
+            }
+        }
+        while let Some(term) = terms.pop() {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or(crate::type_computations::Error::Budget)?;
+            if let crate::Term::Rigid { declaration, .. } = term
+                && declaration.package == u64::MAX
+            {
+                used.insert(declaration.local);
+            }
+            term.visit_children::<crate::type_computations::Error>(|child| {
+                terms.push(child);
+                Ok(())
+            })?;
+        }
+        for local in 0..=u32::MAX {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or(crate::type_computations::Error::Budget)?;
+            if !used.contains(&local) {
+                return Ok(crate::DeclarationId {
+                    package: u64::MAX,
+                    local,
+                });
+            }
+        }
+        Err(crate::type_computations::Error::Budget)
+    }
 }
 
 /// Immutable snapshots share the published prefix. An independent compilation

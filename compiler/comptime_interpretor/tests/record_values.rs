@@ -150,9 +150,20 @@ fn deeply_nested_record_inputs_are_bounded() {
         value = Value::AnonymousRecord(vec![("next".into(), value)]);
     }
     let package = identity(ty);
-    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
     assert_eq!(
-        vm.invoke(package.functions[0].declaration, vec![value])
+        Interpreter::new(&package, Budget::default())
+            .err()
+            .expect("deep signature should hit structural depth limit")
+            .kind,
+        ErrorKind::DepthExhausted
+    );
+    let shallow = identity(Term::Record(vec![(
+        "next".into(),
+        Term::Primitive(P::Bool),
+    )]));
+    let mut vm = Interpreter::new(&shallow, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(shallow.functions[0].declaration, vec![value])
             .unwrap_err()
             .kind,
         ErrorKind::DepthExhausted
@@ -267,14 +278,10 @@ fn unused_wide_arguments_still_pay_for_invocation_preparation() {
         } else {
             value
         };
-        let mut limited = Interpreter::new(
-            &package,
-            Budget {
-                steps: 8,
-                depth: 128,
-            },
-        )
-        .unwrap();
+        let mut limited = Interpreter::new(&package, Budget::default()).unwrap();
+        limited
+            .charge_preparation(limited.remaining_steps() as usize - 8)
+            .unwrap();
         assert_eq!(
             limited.invoke(id, vec![value.clone()]).unwrap_err().kind,
             ErrorKind::StepsExhausted

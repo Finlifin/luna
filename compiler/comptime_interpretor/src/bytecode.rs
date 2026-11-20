@@ -1851,6 +1851,14 @@ impl<'a> Interpreter<'a> {
                     let value = frame.slots[*slot].take().ok_or_else(missing)?;
                     frame.slots[*slot] = Some(Value::Type(self.type_identity_term(value, source)?));
                 }
+                Op::CheckBool(slot) => {
+                    let value = frame.slots[*slot].as_ref().ok_or_else(missing)?;
+                    self.check_retained_value(
+                        value,
+                        &Term::Primitive(Primitive::Bool),
+                        Some(source),
+                    )?;
+                }
                 Op::TypeEqual {
                     destination,
                     left,
@@ -1873,11 +1881,9 @@ impl<'a> Interpreter<'a> {
                     kind,
                     operand,
                 } => {
-                    let Some(Value::Type(operand)) = frame.slots[*operand].take() else {
-                        return Err(self.failure(ErrorKind::Type, Some(source)));
-                    };
+                    let operand = frame.slots[*operand].take().ok_or_else(missing)?;
                     frame.slots[*destination] =
-                        Some(self.complete_type_kind(*kind, operand, source)?);
+                        Some(self.complete_type_kind_value(*kind, operand, source)?);
                 }
                 Op::PrepareObjectAccess(access) => {
                     use comptime_compiler::objects::ObjectOperation;
@@ -2096,6 +2102,16 @@ impl<'a> Interpreter<'a> {
                     {
                         return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
                     }
+                    let restored_previous: BTreeMap<usize, Option<Value>> = sources
+                        .difference(&targets)
+                        .filter_map(|from| {
+                            frame
+                                .scopes
+                                .last()
+                                .and_then(|scope| scope.previous.get(from))
+                                .map(|prev| (*from, prev.clone()))
+                        })
+                        .collect();
                     let values = pairs
                         .iter()
                         .map(|(from, to)| {
@@ -2109,7 +2125,12 @@ impl<'a> Interpreter<'a> {
                         frame.pattern_binding(slot, Some(value), true)?;
                     }
                     for from in sources.difference(&targets) {
-                        frame.pattern_binding(*from, None, false)?;
+                        let restored = restored_previous.get(from).cloned().flatten();
+                        frame.pattern_binding(*from, restored, false)?;
+                        if let Some(scope) = frame.scopes.last_mut() {
+                            scope.exports.remove(from);
+                            scope.previous.remove(from);
+                        }
                     }
                 }
                 Op::InvalidControlFlow => {
@@ -4154,6 +4175,62 @@ mod tests {
             vm.execute_code(&code, &mut environment).unwrap(),
             Flow::Value(Value::Bool(false))
         ));
+    }
+
+    #[test]
+    fn check_bool_rejects_forged_rhs_and_allows_associated_lhs_short_circuit() {
+        let package = Package::default();
+        let source = SourceRange { start: 1, end: 2 };
+        let flag = LocalId { owner: 1, index: 0 };
+        let assoc_ty = Term::AssociatedType {
+            origin: Box::new(nir::AssociatedTypeOrigin {
+                interface: DeclarationId {
+                    package: 1,
+                    local: 1,
+                },
+                member: DeclarationId {
+                    package: 1,
+                    local: 2,
+                },
+            }),
+            arguments: vec![],
+            subject: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let bad_rhs = Expr {
+            source,
+            ty: bool_ty.clone(),
+            kind: K::ComptimeValue(Term::Unit),
+        };
+        for is_or in [false, true] {
+            let lhs = Expr {
+                source,
+                ty: assoc_ty.clone(),
+                kind: K::Local(flag),
+            };
+            let body = Expr {
+                source,
+                ty: bool_ty.clone(),
+                kind: if is_or {
+                    K::Or(Box::new(lhs), Box::new(bad_rhs.clone()))
+                } else {
+                    K::And(Box::new(lhs), Box::new(bad_rhs.clone()))
+                },
+            };
+            let code = Arc::new(comptime_compiler::compile(&body, &mut 10_000).unwrap());
+            assert!(code.to_string().contains("(check-bool"));
+            let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+            let mut short_env = Environment::from([(flag, Value::Bool(is_or))]);
+            assert!(matches!(
+                vm.execute_code(&code, &mut short_env).unwrap(),
+                Flow::Value(Value::Bool(v)) if v == is_or
+            ));
+            let mut bad_env = Environment::from([(flag, Value::Bool(!is_or))]);
+            assert_eq!(
+                vm.execute_code(&code, &mut bad_env).unwrap_err().kind,
+                ErrorKind::Type
+            );
+        }
     }
 }
 

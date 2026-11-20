@@ -31,6 +31,7 @@ pub struct Error {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     Budget,
+    Depth,
     Invalid,
 }
 
@@ -46,6 +47,14 @@ impl Error {
     pub(crate) fn budget(source: SourceRange, message: &'static str) -> Self {
         Self {
             kind: ErrorKind::Budget,
+            source,
+            message,
+        }
+    }
+
+    pub(crate) fn depth(source: SourceRange, message: &'static str) -> Self {
+        Self {
+            kind: ErrorKind::Depth,
             source,
             message,
         }

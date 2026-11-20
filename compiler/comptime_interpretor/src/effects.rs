@@ -273,7 +273,7 @@ impl Interpreter<'_> {
                         };
                         let value = value!(provided);
                         self.check_retained_value(&value, result, Some(expr.source))?;
-                        *entry.activation.provided.lock().map_err(|_| {
+                        *entry.activation.provided.try_lock().map_err(|_| {
                             self.failure(ErrorKind::InvalidControlFlow, Some(expr.source))
                         })? = Some(value);
                     }
@@ -481,7 +481,7 @@ impl Interpreter<'_> {
                 }
                 let mut slot = activation
                     .provided
-                    .lock()
+                    .try_lock()
                     .map_err(|_| self.failure(ErrorKind::InvalidControlFlow, Some(source)))?;
                 let copy = activation.copy_provided;
                 if copy {

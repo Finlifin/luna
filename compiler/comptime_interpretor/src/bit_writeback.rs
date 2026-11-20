@@ -43,7 +43,7 @@ impl Interpreter<'_> {
             .map(|storage| {
                 storage
                     .0
-                    .lock()
+                    .try_lock()
                     .map_err(|_| self.failure(ErrorKind::InvalidPointer, Some(source)))
             })
             .transpose()?;

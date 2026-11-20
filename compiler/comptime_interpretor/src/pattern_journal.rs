@@ -80,6 +80,32 @@ impl PatternJournal {
             self.bindings.1.remove(&id),
         ));
     }
+    pub fn restore_outer(&mut self, id: LocalId, mark: usize, env: &mut Environment) {
+        if let Some((_, old_val, old_origin, old_rank)) = self
+            .changes
+            .get(mark..)
+            .and_then(|slice| slice.iter().find(|entry| entry.0 == id))
+            .cloned()
+        {
+            self.changes.push((
+                id,
+                env.remove(&id),
+                self.bindings.0.remove(&id),
+                self.bindings.1.remove(&id),
+            ));
+            if let Some(value) = old_val {
+                env.insert(id, value);
+            }
+            if let Some(origin) = old_origin {
+                self.bindings.0.insert(id, origin);
+            }
+            if let Some(rank) = old_rank {
+                self.bindings.1.insert(id, rank);
+            }
+        } else {
+            self.remove(id, env);
+        }
+    }
     pub fn rollback(&mut self, mark: usize, env: &mut Environment) {
         while self.changes.len() > mark {
             let (id, value, origin, rank) = self.changes.pop().unwrap();

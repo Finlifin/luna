@@ -94,6 +94,7 @@ impl Interpreter<'_> {
         if *ty == Term::Primitive(Primitive::Never) {
             return Err(failure());
         }
+        let packet = Self::concrete_value(packet, source)?;
         let Value::Tuple(packet) = packet else {
             return Err(failure());
         };
@@ -101,16 +102,25 @@ impl Interpreter<'_> {
             return Err(failure());
         }
         let mut packet = packet.into_iter();
-        let Some(Value::Object(object)) = packet.next() else {
+        let receiver = Self::concrete_value(packet.next().ok_or_else(failure)?, source)?;
+        let Value::Object(object) = receiver else {
             return Err(failure());
         };
         let operand = packet.next().ok_or_else(failure)?;
         let mut entries = object.into_entries();
         match operation {
             O::Concat => {
+                let operand = Self::concrete_value(operand, source)?;
                 let Value::Object(right) = operand else {
                     return Err(failure());
                 };
+                entries
+                    .len()
+                    .checked_add(right.entries().len())
+                    .filter(|len| *len <= 100_000)
+                    .ok_or_else(|| {
+                        self.failure(ErrorKind::RepresentationSizeLimit, Some(source))
+                    })?;
                 let work = entries
                     .len()
                     .saturating_add(right.entries().len())
@@ -122,6 +132,15 @@ impl Interpreter<'_> {
                 let value = packet.next().ok_or_else(failure)?;
                 let ty = &domains[2];
                 self.check_type_description(ty, Some(source))?;
+                self.check_comptime_domain(ty, source)?;
+                self.check_comptime_graph(&value, source, 0)?;
+                self.admit_embedded_type_descriptions(&value, 0)
+                    .map_err(|mut error| {
+                        if error.source.is_none() {
+                            error.source = Some(source);
+                        }
+                        error
+                    })?;
                 self.integer_operation(Some(source), |budget| {
                     budget.consume(entries.len().saturating_add(1))
                 })?;
@@ -131,6 +150,14 @@ impl Interpreter<'_> {
                     value,
                 };
                 if operation == O::Append {
+                    entries
+                        .len()
+                        .checked_add(1)
+                        .filter(|len| *len <= 100_000)
+                        .ok_or_else(|| {
+                            self.failure(ErrorKind::RepresentationSizeLimit, Some(source))
+                        })?;
+                    let operand = Self::concrete_value(operand, source)?;
                     let Value::Optional { ty, value: key } = operand else {
                         return Err(failure());
                     };
@@ -140,7 +167,8 @@ impl Interpreter<'_> {
                     entries.push(match key {
                         None => ObjectEntry::Value(value),
                         Some(key) => {
-                            let Value::Symbol(key) = *key else {
+                            let key = Self::concrete_value(*key, source)?;
+                            let Value::Symbol(key) = key else {
                                 return Err(failure());
                             };
                             self.integer_operation(Some(source), |budget| {
@@ -231,6 +259,7 @@ impl Interpreter<'_> {
         inclusive: bool,
         source: SourceRange,
     ) -> Result<usize, Error> {
+        let value = Self::concrete_value(value, source)?;
         let Value::Integer(index) = value else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };

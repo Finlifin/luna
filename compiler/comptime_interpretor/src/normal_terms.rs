@@ -564,7 +564,10 @@ impl Value {
                 return Err(ErrorKind::DepthExhausted);
             }
             if let Value::RuntimeTraitMethod(method) = value {
-                value.validate_callable_identity_snapshot(budget, scope.type_parameters)?;
+                charge(budget, 1)?;
+                for term in method.terms() {
+                    scope.inspect_term(term, budget)?;
+                }
                 return Ok(Term::MethodValue(method.clone()));
             }
             if scope.invocation {
@@ -576,7 +579,10 @@ impl Value {
                     });
                 }
                 if let Some((declaration, arguments)) = value.declaration_instance() {
-                    value.validate_callable_identity_snapshot(budget, scope.type_parameters)?;
+                    charge(budget, 1)?;
+                    for term in arguments {
+                        scope.inspect_term(term, budget)?;
+                    }
                     return Ok(Term::FunctionValue {
                         declaration,
                         arguments: arguments.to_vec(),
@@ -920,6 +926,91 @@ mod borrowed_input_tests {
             if carrier != 0 {
                 assert_eq!(*storage.0.lock().unwrap(), new);
             }
+        }
+    }
+
+    #[test]
+    fn callable_identity_exports_preserve_runtime_domains_and_value_parameters() {
+        let rt_id = nir::RuntimeId {
+            instance: 9,
+            local: 3,
+        };
+        let vp_id = DeclarationId {
+            package: 42,
+            local: 7,
+        };
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let value_parameters = BTreeMap::from([(vp_id, bool_ty.clone())]);
+        let runtime_domains = BTreeMap::from([(rt_id, bool_ty.clone())]);
+        let empty_rt = BTreeMap::new();
+        let empty_vp = BTreeMap::new();
+
+        let fn_val = Value::FunctionInstance {
+            declaration: DeclarationId {
+                package: 1,
+                local: 2,
+            },
+            arguments: vec![
+                Term::Runtime(rt_id),
+                Term::Rigid {
+                    declaration: vp_id,
+                    sort: nir::Sort::ComptimeValue,
+                },
+            ],
+        };
+        let trait_val = Value::RuntimeTraitMethod(Box::new(TraitMethodIdentity {
+            interface: InterfaceInstance {
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 4,
+                },
+                arguments: vec![Term::Rigid {
+                    declaration: vp_id,
+                    sort: nir::Sort::ComptimeValue,
+                }],
+            },
+            subject: Term::Runtime(rt_id),
+            member: DeclarationId {
+                package: 1,
+                local: 5,
+            },
+            method_arguments: vec![],
+        }));
+
+        for val in [fn_val, trait_val] {
+            let mut budget = comptime_runtime::Budget::default();
+            assert!(
+                val.to_scoped_term(
+                    &mut budget,
+                    &BTreeSet::new(),
+                    &value_parameters,
+                    &runtime_domains,
+                    true,
+                )
+                .is_ok()
+            );
+            assert_eq!(
+                val.to_scoped_term(
+                    &mut budget,
+                    &BTreeSet::new(),
+                    &value_parameters,
+                    &empty_rt,
+                    true,
+                )
+                .unwrap_err(),
+                ErrorKind::Type
+            );
+            assert_eq!(
+                val.to_scoped_term(
+                    &mut budget,
+                    &BTreeSet::new(),
+                    &empty_vp,
+                    &runtime_domains,
+                    true,
+                )
+                .unwrap_err(),
+                ErrorKind::Type
+            );
         }
     }
 }

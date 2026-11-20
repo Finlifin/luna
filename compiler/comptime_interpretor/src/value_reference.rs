@@ -250,7 +250,7 @@ impl crate::Interpreter<'_> {
         value: Value,
         source: crate::SourceRange,
     ) -> Result<(), crate::Error> {
-        self.validate_container_replacement(&value, source)?;
+        self.validate_container_replacement(&value, source, None)?;
         let reference = match target {
             Value::ComptimeReference(reference) => Some(
                 reference
@@ -264,11 +264,12 @@ impl crate::Interpreter<'_> {
             _ => None,
         };
         if let Some(reference) = reference {
+            let locked_addr = std::sync::Arc::as_ptr(&reference.storage.0) as usize;
             {
                 let contents = reference
                     .borrow(&mut self.budget.steps)
                     .map_err(|kind| self.failure(kind, Some(source)))?;
-                self.validate_container_replacement(contents.value(), source)?;
+                self.validate_container_replacement(contents.value(), source, Some(locked_addr))?;
             }
 
             return reference
@@ -299,7 +300,7 @@ impl crate::Interpreter<'_> {
             }
             .ok_or_else(|| self.failure(ErrorKind::Type, Some(source)))?;
         }
-        self.validate_container_replacement(target, source)?;
+        self.validate_container_replacement(target, source, None)?;
         *target = value;
         Ok(())
     }

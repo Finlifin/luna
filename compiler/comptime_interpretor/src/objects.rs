@@ -73,6 +73,9 @@ impl Interpreter<'_> {
         if names != fields || *ty != expected {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         }
+        if fields > 100_000 {
+            return Err(self.failure(ErrorKind::RepresentationSizeLimit, Some(source)));
+        }
         self.integer_operation(Some(source), |budget| budget.consume(fields))
     }
 
@@ -83,8 +86,17 @@ impl Interpreter<'_> {
         name: Option<&str>,
         source: SourceRange,
     ) -> Result<(), Error> {
-        self.check_value_type(value, ty, Some(source))?;
-        self.charge_object_entry(ty, name, source)
+        self.charge_object_entry(ty, name, source)?;
+        self.check_comptime_domain(ty, source)?;
+        self.check_comptime_graph(value, source, 0)?;
+        self.admit_embedded_type_descriptions(value, 0)
+            .map_err(|mut error| {
+                if error.source.is_none() {
+                    error.source = Some(source);
+                }
+                error
+            })?;
+        self.check_value_type(value, ty, Some(source))
     }
 
     pub(super) fn charge_object_entry(
@@ -123,9 +135,8 @@ impl Interpreter<'_> {
                     Flow::Value(value) => value,
                     transfer => return Ok(transfer),
                 };
-                this.check_value_type(&value, &field.ty, Some(field.source))?;
+                this.check_object_entry(&value, &field.ty, name.as_deref(), field.source)?;
                 this.retain_prepared(slot, field.source, &value)?;
-                this.charge_object_entry(&field.ty, name.as_deref(), field.source)?;
                 let value = ObjectValue {
                     ty: field.ty.clone(),
                     value,

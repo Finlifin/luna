@@ -17,6 +17,7 @@ pub enum InputFrameErrorKind {
     UnavailableDefaultBinding,
     Budget,
     DefaultBudget,
+    Depth,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +32,10 @@ impl InputFrameError {
             self.kind,
             InputFrameErrorKind::Budget | InputFrameErrorKind::DefaultBudget
         )
+    }
+
+    pub fn is_depth(self) -> bool {
+        matches!(self.kind, InputFrameErrorKind::Depth)
     }
 
     pub fn message(self, quote: bool) -> &'static str {
@@ -50,6 +55,7 @@ impl InputFrameError {
             }
             (Budget, _) => "function parameter frame validation budget exhausted",
             (DefaultBudget, _) => "function default binding analysis budget exhausted",
+            (Depth, _) => "function parameter frame exceeded structural depth limit",
         }
     }
 }
@@ -86,8 +92,12 @@ impl<'a> CallableProgram<'a> {
         *fuel = fuel
             .checked_sub(self.parts.defaults.len())
             .ok_or_else(|| failure(K::Budget))?;
-        crate::type_computations::charge_term(self.signature, fuel)
-            .map_err(|_| failure(K::Budget))?;
+        crate::copy_budget::charge_term_copy(self.signature, fuel, 128).map_err(|limit| {
+            failure(match limit {
+                crate::copy_budget::CopyBudgetExhausted::Steps => K::Budget,
+                crate::copy_budget::CopyBudgetExhausted::Depth => K::Depth,
+            })
+        })?;
         let Term::Function { parameters, .. } = self.signature.callable_signature() else {
             return Err(failure(K::Signature));
         };

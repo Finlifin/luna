@@ -141,8 +141,12 @@ fn inputs_execute_once_in_order_and_preserve_the_opaque_type_head() {
 fn malformed_fields_fail_and_a_later_valid_invocation_recovers() {
     let mut wrong_output = construction(vec![value(p(P::Bool))]);
     wrong_output.ty = p(P::Bool);
+    let wrong_package = world(vec![function(0, wrong_output)], 1);
+    assert!(matches!(
+        Interpreter::for_comptime(&wrong_package, Budget::default()),
+        Err(error) if matches!(error.kind, ErrorKind::InvalidPhase(_))
+    ));
     for (malformed, expected) in [
-        (wrong_output, ErrorKind::Type),
         // A value-shaped operand lacks the Type evidence required by the
         // ordinary normal-form input compiler. It must not fall back to a tree.
         (

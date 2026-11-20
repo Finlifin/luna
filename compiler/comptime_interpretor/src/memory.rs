@@ -132,7 +132,7 @@ impl Storage {
     pub fn read(&self) -> Result<Value, ErrorKind> {
         Ok(self
             .0
-            .lock()
+            .try_lock()
             .map_err(|_| ErrorKind::InvalidPointer)?
             .clone())
     }
@@ -152,7 +152,7 @@ impl Storage {
         pointee: Term,
         fields: &[(nir::program::FieldOwner, usize)],
     ) -> Result<PointerValue, ErrorKind> {
-        let value = self.0.lock().map_err(|_| ErrorKind::InvalidPointer)?;
+        let value = self.0.try_lock().map_err(|_| ErrorKind::InvalidPointer)?;
         let mut target = &*value;
         let mut projections = vec![];
         for (owner, index) in fields {
@@ -195,7 +195,7 @@ impl Storage {
         if depth >= 128 {
             return Err(ErrorKind::DepthExhausted);
         }
-        let storage = self.0.lock().map_err(|_| ErrorKind::InvalidPointer)?;
+        let storage = self.0.try_lock().map_err(|_| ErrorKind::InvalidPointer)?;
         let mut target = &*storage;
         let mut fields = vec![];
         for (position, index) in path.iter().enumerate() {
@@ -395,7 +395,7 @@ impl PointerValue {
         operation: impl FnOnce(&mut Value, &[usize], &[usize]) -> Result<T, ErrorKind>,
     ) -> Result<T, ErrorKind> {
         let storage = self.target.upgrade().ok_or(ErrorKind::ExpiredPointer)?;
-        let mut value = storage.lock().map_err(|_| ErrorKind::InvalidPointer)?;
+        let mut value = storage.try_lock().map_err(|_| ErrorKind::InvalidPointer)?;
         let mut target = &mut *value;
         let mut path = Vec::with_capacity(self.fields.len());
         let mut arities = Vec::with_capacity(self.fields.len());
@@ -531,7 +531,7 @@ impl PointerValue {
                 .upgrade()
                 .ok_or(ErrorKind::ExpiredPointer)?;
             let mut responsibility = responsibility
-                .lock()
+                .try_lock()
                 .map_err(|_| ErrorKind::InvalidPointer)?;
             operation(value, responsibility.position(path))
         })
@@ -545,7 +545,7 @@ impl PointerValue {
     fn ownership_guards_live(&self) -> Result<bool, ErrorKind> {
         for (owner, path) in self.ownership_guards.iter().rev() {
             let owner = owner.upgrade().ok_or(ErrorKind::ExpiredPointer)?;
-            let mut owner = owner.lock().map_err(|_| ErrorKind::InvalidPointer)?;
+            let mut owner = owner.try_lock().map_err(|_| ErrorKind::InvalidPointer)?;
             if !owner.position(path).constructed {
                 return Ok(false);
             }
@@ -585,14 +585,15 @@ impl PointerValue {
         value: Value,
         check: impl FnOnce(&Value) -> Result<(), ErrorKind>,
     ) -> Result<(), ErrorKind> {
+        let old = self.read()?;
+        check(&old)?;
         self.with_position(|target, path, arities| {
-            check(target)?;
             let responsibility = self
                 .responsibility
                 .upgrade()
                 .ok_or(ErrorKind::ExpiredPointer)?;
             let mut responsibility = responsibility
-                .lock()
+                .try_lock()
                 .map_err(|_| ErrorKind::InvalidPointer)?;
             *target = value;
             *responsibility.position(path) = Responsibility::new(true);

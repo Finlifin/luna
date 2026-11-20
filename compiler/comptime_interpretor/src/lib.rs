@@ -573,6 +573,7 @@ impl Error {
             source: Some(error.source),
             kind: match error.kind {
                 nir::phases::ErrorKind::Budget => ErrorKind::StepsExhausted,
+                nir::phases::ErrorKind::Depth => ErrorKind::DepthExhausted,
                 nir::phases::ErrorKind::Invalid => ErrorKind::InvalidPhase(error),
             },
         }
@@ -886,10 +887,10 @@ impl<'a> Interpreter<'a> {
                 let result = nir::callable_source::Callables::new(package, &mut fuel);
                 budget.steps -= (before - fuel) as u64;
                 result.map_err(|failure| Error {
-                    kind: if failure.kind == nir::phases::ErrorKind::Budget {
-                        ErrorKind::StepsExhausted
-                    } else {
-                        ErrorKind::InvalidCallPlan
+                    kind: match failure.kind {
+                        nir::phases::ErrorKind::Budget => ErrorKind::StepsExhausted,
+                        nir::phases::ErrorKind::Depth => ErrorKind::DepthExhausted,
+                        nir::phases::ErrorKind::Invalid => ErrorKind::InvalidCallPlan,
                     },
                     source: Some(failure.source),
                 })?
@@ -2058,23 +2059,24 @@ impl<'a> Interpreter<'a> {
             {
                 // Ordinary inputs do not materialize dependent terms. Inspect
                 // owned values directly or hold a short receiver borrow, then
-                // retain the original argument for the body. Owned storage
-                // still uses its checked read below; no result is cached here.
-                let contents = match &argument {
-                    Value::ComptimeReference(reference) => Some(
-                        reference
+                // release the lock before contract/type-description checks so
+                // re-entrant lookups cannot fail on a held borrow.
+                let snapshot = match &argument {
+                    Value::ComptimeReference(reference) => {
+                        let contents = reference
                             .borrow(&mut self.budget.steps)
-                            .map_err(|kind| self.failure(kind, Some(source)))?,
-                    ),
+                            .map_err(|kind| self.failure(kind, Some(source)))?;
+                        self.check_borrowed_representation(contents.value(), source, 0)?;
+                        Some(contents.value().clone())
+                    }
                     _ => None,
                 };
-                let representation = contents
-                    .as_ref()
-                    .map_or(&argument, |contents| contents.value());
-                self.check_borrowed_representation(representation, source, 0)?;
+                if snapshot.is_none() {
+                    self.check_borrowed_representation(&argument, source, 0)?;
+                }
+                let representation = snapshot.as_ref().unwrap_or(&argument);
                 self.check_value_type(representation, &expected, Some(source))?;
                 self.admit_embedded_type_descriptions(representation, 0)?;
-                drop(contents);
                 self.commit_input_domain(
                     builder.as_mut(),
                     observed.as_deref_mut(),
@@ -3146,8 +3148,13 @@ impl<'a> Interpreter<'a> {
             return self.literal_constant(&literal, ty, source);
         }
         if let Literal::PendingFloat { spelling, negative } = literal {
-            let Term::Primitive(domain @ (Primitive::Float | Primitive::F32 | Primitive::F64)) =
-                *ty
+            let Term::Primitive(
+                domain @ (Primitive::Float
+                | Primitive::F16
+                | Primitive::Bf16
+                | Primitive::F32
+                | Primitive::F64),
+            ) = *ty
             else {
                 return Err(self.failure(ErrorKind::Type, Some(source)));
             };
@@ -3779,6 +3786,9 @@ impl<'a> Interpreter<'a> {
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
+        if self.comptime_only {
+            return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
+        }
         let K::BitWritePointer {
             pointer,
             selections,
@@ -3818,9 +3828,10 @@ impl<'a> Interpreter<'a> {
         if rhs.width() != end - start || expr.ty != Term::Primitive(Primitive::Void) {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         }
-        let changed = target
-            .inspect(|old| self.replaced_bit_value(expr.source, storage_type, old, start, &rhs))
-            .map_err(|kind| self.failure(kind, Some(expr.source)))??;
+        let old = target
+            .read()
+            .map_err(|kind| self.failure(kind, Some(expr.source)))?;
+        let changed = self.replaced_bit_value(expr.source, storage_type, &old, start, &rhs)?;
         target
             .write(changed, |old| {
                 self.check_retained_value(old, storage_type, Some(expr.source))
@@ -5095,7 +5106,7 @@ impl Interpreter<'_> {
                     }
                     for (from, _) in bindings {
                         if !targets.contains(from) {
-                            undo.remove(*from, environment);
+                            undo.restore_outer(*from, candidate_start, environment);
                         }
                     }
                     true
@@ -6749,5 +6760,48 @@ mod predicate_shape_budget_tests {
             vm.events.as_slice(),
             [Event::CheckPredicate { passed: true, .. }]
         ));
+    }
+
+    #[test]
+    fn bit_write_pointer_rejects_comptime_without_mutating_storage() {
+        let source = SourceRange { start: 10, end: 20 };
+        let mut runtime_budget = comptime_runtime::Budget::default();
+        let initial =
+            comptime_runtime::bitvec::BitVec::from_words(4, &[0b0101], &mut runtime_budget)
+                .unwrap();
+        let rhs =
+            comptime_runtime::bitvec::BitVec::from_words(2, &[0b11], &mut runtime_budget).unwrap();
+        let cell = Storage::new(Value::BitVec(initial.clone()));
+        let ptr_local = LocalId { owner: 1, index: 0 };
+        let bv4 = Term::Primitive(Primitive::BitVec(4));
+        let bv2 = Term::Primitive(Primitive::BitVec(2));
+        let expr = Expr {
+            source,
+            ty: Term::Primitive(Primitive::Void),
+            kind: K::BitWritePointer {
+                pointer: Box::new(Expr {
+                    source,
+                    ty: Term::Pointer(Box::new(bv4.clone())),
+                    kind: K::Local(ptr_local),
+                }),
+                selections: vec![nir::program::BitSelection::Static { start: 0, end: 2 }],
+                value: Box::new(Expr {
+                    source,
+                    ty: bv2,
+                    kind: K::Literal(Literal::BitVec {
+                        width: 2,
+                        words: rhs.words().to_vec(),
+                    }),
+                }),
+            },
+        };
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
+        let mut env = Environment::from([(ptr_local, Value::Pointer(cell.pointer(bv4, vec![])))]);
+        assert_eq!(
+            vm.eval(&expr, &mut env).unwrap_err().kind,
+            ErrorKind::PhaseMismatch
+        );
+        assert_eq!(cell.read().unwrap(), Value::BitVec(initial));
     }
 }
