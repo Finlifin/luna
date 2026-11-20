@@ -527,33 +527,14 @@ impl<'a> Interpreter<'a> {
         self.clone_representation(value, source, 0, true)
     }
 
-    /// Observe a checkpoint without retaining its snapshot. Immutable aggregates
-    /// and type descriptions are walked in place; resource representations retain
-    /// the existing checkpoint path. No source code runs while borrowed.
+    /// Validate a checkpoint in place. Inspecting an input pays the same
+    /// representation budget as retaining it, without constructing a copy.
     pub(super) fn check_borrowed_representation(
         &mut self,
         value: &Value,
         source: SourceRange,
         depth: usize,
     ) -> Result<(), Error> {
-        if !matches!(
-            value,
-            Value::Object(_)
-                | Value::List { .. }
-                | Value::Tuple(_)
-                | Value::AnonymousRecord(_)
-                | Value::Record { .. }
-                | Value::Variant { .. }
-                | Value::Optional { .. }
-                | Value::ErrorResult { .. }
-                | Value::Newtype { .. }
-                | Value::Type(_)
-                | Value::AbstractValue { .. }
-        ) {
-            return self
-                .clone_representation(value, source, depth, true)
-                .map(drop);
-        }
         self.check_representation_depth(source, depth)?;
         match value {
             Value::Object(object) => {
@@ -582,9 +563,6 @@ impl<'a> Interpreter<'a> {
                 for value in values {
                     self.check_borrowed_representation(value, source, depth + 1)?;
                 }
-            }
-            Value::Type(ty) | Value::AbstractValue { ty, .. } => {
-                self.copy_invocation_type_work(ty, source, true)?;
             }
             Value::Tuple(values) => {
                 self.copy_work(values.len(), source)?;
@@ -621,7 +599,7 @@ impl<'a> Interpreter<'a> {
                 self.copy_invocation_type_work(ty, source, true)?;
                 self.check_borrowed_representation(value, source, depth + 1)?;
             }
-            _ => unreachable!(),
+            leaf => self.check_leaf_representation(leaf, source, depth, true)?,
         }
         Ok(())
     }
@@ -639,6 +617,87 @@ impl<'a> Interpreter<'a> {
                 .is_none_or(|depth| depth >= self.budget.depth)
         {
             return Err(self.failure(ErrorKind::DepthExhausted, Some(source)));
+        }
+        Ok(())
+    }
+
+    /// Check the payload and phase rules for a value copied with its Rust
+    /// representation. Mutable storage and closures reach here only when a
+    /// checkpoint preserves their identities; an owning copy rebuilds them.
+    fn check_leaf_representation(
+        &mut self,
+        value: &Value,
+        source: SourceRange,
+        depth: usize,
+        preserve_identity: bool,
+    ) -> Result<(), Error> {
+        match value {
+            Value::Code(code) => self.check_code_copy(code, source)?,
+            Value::ComptimeReference(reference) => {
+                if !self.comptime_only || !preserve_identity {
+                    return Err(self.failure(ErrorKind::Unsupported, Some(source)));
+                }
+                self.copy_work(reference.metadata_work(), source)?;
+            }
+            Value::Storage(_) | Value::Closure(_) => {
+                debug_assert!(preserve_identity);
+                if self.comptime_only {
+                    self.check_comptime_graph(value, source, depth)?;
+                }
+            }
+            Value::Pointer(pointer) => {
+                if self.comptime_only {
+                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
+                }
+                self.copy_type_work(&pointer.pointee, source)?;
+                self.copy_work(
+                    pointer.copy_metadata_work().ok_or_else(|| {
+                        self.failure(ErrorKind::RepresentationSizeLimit, Some(source))
+                    })?,
+                    source,
+                )?;
+            }
+            Value::Type(ty) | Value::AbstractValue { ty, .. } => {
+                self.copy_invocation_type_work(ty, source, preserve_identity)?;
+            }
+            Value::FunctionInstance { arguments, .. } => {
+                self.check_instance_arguments(arguments, source)?
+            }
+            Value::RuntimeTraitMethod(method) => {
+                self.copy_invocation_type_work(&method.subject, source, true)?;
+                self.check_instance_arguments(&method.interface.arguments, source)?;
+                self.check_instance_arguments(&method.method_arguments, source)?;
+            }
+            Value::Float(number) => {
+                self.copy_work(number.digits().len(), source)?;
+                self.copy_work(number.exponent().bit_len().div_ceil(32), source)?;
+            }
+            Value::Integer(integer) => self.copy_work(integer.bit_len().div_ceil(32), source)?,
+            Value::BitVec(bits) => self.copy_work(bits.words().len(), source)?,
+            Value::Unit
+            | Value::Bool(_)
+            | Value::Char(_)
+            | Value::String(_)
+            | Value::Symbol(_)
+            | Value::SignedInteger(_)
+            | Value::UnsignedInteger(_)
+            | Value::Float16(_)
+            | Value::BFloat16(_)
+            | Value::Float32(_)
+            | Value::Float64(_)
+            | Value::IirCallable(_)
+            | Value::Function(_)
+            | Value::Description(_)
+            | Value::TypeParameter(_) => {}
+            Value::Object(_)
+            | Value::List { .. }
+            | Value::Tuple(_)
+            | Value::AnonymousRecord(_)
+            | Value::Record { .. }
+            | Value::Variant { .. }
+            | Value::Optional { .. }
+            | Value::ErrorResult { .. }
+            | Value::Newtype { .. } => unreachable!("structural representation"),
         }
         Ok(())
     }
@@ -668,7 +727,6 @@ impl<'a> Interpreter<'a> {
         }
         self.check_representation_depth(source, depth)?;
         Ok(match value {
-            Value::Code(code) => self.copy_code_value(code, source)?,
             Value::Object(object) => {
                 if !self.comptime_only {
                     return Err(self.failure(ErrorKind::Unsupported, Some(source)));
@@ -699,21 +757,7 @@ impl<'a> Interpreter<'a> {
                 }
                 Value::Object(Object::from_entries(entries))
             }
-            Value::ComptimeReference(reference) => {
-                if !self.comptime_only || !preserve_identity {
-                    return Err(self.failure(ErrorKind::Unsupported, Some(source)));
-                }
-                self.copy_work(reference.metadata_work(), source)?;
-                value.clone()
-            }
-            Value::IirCallable(handle) => Value::IirCallable(handle.clone()),
-            Value::Storage(_) | Value::Closure(_) if preserve_identity => {
-                if self.comptime_only {
-                    self.check_comptime_graph(value, source, depth)?;
-                }
-                value.clone()
-            }
-            Value::Storage(storage) => {
+            Value::Storage(storage) if !preserve_identity => {
                 let limit = self
                     .budget
                     .depth
@@ -728,7 +772,7 @@ impl<'a> Interpreter<'a> {
                     preserve_identity,
                 )?))
             }
-            Value::Closure(closure) => {
+            Value::Closure(closure) if !preserve_identity => {
                 self.copy_work(closure.environment.len(), source)?;
                 self.copy_work(closure.parameters.len(), source)?;
                 self.copy_work(closure.capture_order.len(), source)?;
@@ -856,23 +900,6 @@ impl<'a> Interpreter<'a> {
                         .collect::<Result<_, _>>()?,
                 }
             }
-            Value::Pointer(pointer) => {
-                if self.comptime_only {
-                    return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
-                }
-                self.copy_type_work(&pointer.pointee, source)?;
-                self.copy_work(
-                    pointer.copy_metadata_work().ok_or_else(|| {
-                        self.failure(ErrorKind::RepresentationSizeLimit, Some(source))
-                    })?,
-                    source,
-                )?;
-                value.clone()
-            }
-            Value::Type(ty) | Value::AbstractValue { ty, .. } => {
-                self.copy_invocation_type_work(ty, source, preserve_identity)?;
-                value.clone()
-            }
             Value::List { ty, values } => {
                 self.copy_invocation_type_work(ty, source, preserve_identity)?;
                 self.copy_work(values.len(), source)?;
@@ -887,44 +914,10 @@ impl<'a> Interpreter<'a> {
                     values: values.into(),
                 }
             }
-            Value::FunctionInstance {
-                declaration,
-                arguments,
-            } => Value::FunctionInstance {
-                declaration: *declaration,
-                arguments: self.copy_instance_arguments(arguments, source)?,
-            },
-            Value::RuntimeTraitMethod(method) => {
-                self.copy_invocation_type_work(&method.subject, source, true)?;
-                let interface_arguments =
-                    self.copy_instance_arguments(&method.interface.arguments, source)?;
-                let method_arguments =
-                    self.copy_instance_arguments(&method.method_arguments, source)?;
-                Value::RuntimeTraitMethod(Box::new(TraitMethodIdentity {
-                    interface: InterfaceInstance {
-                        declaration: method.interface.declaration,
-                        arguments: interface_arguments,
-                    },
-                    subject: method.subject.clone(),
-                    member: method.member,
-                    method_arguments,
-                }))
+            leaf => {
+                self.check_leaf_representation(leaf, source, depth, preserve_identity)?;
+                leaf.clone()
             }
-            Value::Float(number) => {
-                self.copy_work(number.digits().len(), source)?;
-                self.copy_work(number.exponent().bit_len().div_ceil(32), source)?;
-                value.clone()
-            }
-            Value::Integer(integer) => {
-                self.copy_work(integer.bit_len().div_ceil(32), source)?;
-                value.clone()
-            }
-            Value::BitVec(bits) => {
-                self.copy_work(bits.words().len(), source)?;
-                value.clone()
-            }
-            // Strings and code bodies are immutable shared representations.
-            value => value.clone(),
         })
     }
     pub(super) fn cleanup_transfer(
@@ -2652,6 +2645,43 @@ mod borrowed_checkpoint_tests {
                 }
                 assert_eq!(storage.read().unwrap(), original);
             }
+        }
+    }
+
+    #[test]
+    fn borrowed_numeric_payloads_charge_their_full_representation() {
+        use comptime_runtime::{Integer, bitvec::BitVec, decimal::DecimalValue};
+
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let source = SourceRange { start: 5, end: 11 };
+        let mut construction = comptime_runtime::Budget::default();
+        let integer = Value::Integer(Integer::from_u128(u128::MAX));
+        let bits =
+            Value::BitVec(BitVec::from_words(96, &[u32::MAX; 3], &mut construction).unwrap());
+        let decimal =
+            Value::Float(DecimalValue::parse_literal("123.45e100", &mut construction).unwrap());
+        let tuple = Value::Tuple(vec![integer.clone(), bits.clone(), decimal.clone()]);
+
+        // Each visit costs one step, followed by limbs, decimal digits and
+        // exponent limbs, or one step per tuple slot.
+        for (value, cost) in [(integer, 5), (bits, 4), (decimal, 7), (tuple, 20)] {
+            for steps in 0..cost {
+                vm.budget.steps = steps;
+                let error = vm
+                    .check_borrowed_representation(&value, source, 0)
+                    .unwrap_err();
+                assert_eq!(
+                    (error.kind, error.source),
+                    (ErrorKind::StepsExhausted, Some(source))
+                );
+            }
+            vm.budget.steps = cost;
+            vm.check_borrowed_representation(&value, source, 0).unwrap();
+            assert_eq!(vm.remaining_steps(), 0);
+            vm.budget.steps = cost;
+            assert_eq!(vm.checkpoint_representation(&value, source).unwrap(), value);
+            assert_eq!(vm.remaining_steps(), 0);
         }
     }
 

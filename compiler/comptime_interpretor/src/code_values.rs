@@ -114,17 +114,16 @@ impl CodeValue {
 }
 
 impl Interpreter<'_> {
-    pub(super) fn copy_code_value(
+    pub(super) fn check_code_copy(
         &mut self,
         code: &CodeValue,
         source: SourceRange,
-    ) -> Result<Value, Error> {
+    ) -> Result<(), Error> {
         if !self.comptime_only {
             return Err(self.failure(ErrorKind::PhaseMismatch, Some(source)));
         }
         code.charge(&mut self.budget.steps)
-            .map_err(|kind| self.failure(kind, Some(source)))?;
-        Ok(Value::Code(code.clone()))
+            .map_err(|kind| self.failure(kind, Some(source)))
     }
 }
 
