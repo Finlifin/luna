@@ -1089,6 +1089,65 @@ fn nested_type_inputs_acquire_each_application_in_written_order() {
 }
 
 #[test]
+fn explicit_function_type_inputs_run_between_the_receiver_and_arguments() {
+    let case = NativeCase::new(
+        r#"
+        struct Trace { value: i32 }
+        fn mark(t: *Trace, digit: i32) -> i32 {
+            if t.value.* >= 0 and t.value.* < 10000 and digit > 0 and digit < 10 {
+                t.*.value = t.value.* * 10 + digit;
+            }
+            digit
+        }
+        fn select(t: *Trace) -> *Trace { mark(t, 3); t }
+        fn read(t: *Trace) -> i32 { t.value.* }
+        enum Sample where quote src: lift *Trace, quote .saved: lift i32 = read(src) { empty, tagged(bool), }
+        fn saved(v: Sample<src, .saved = n>) -> i32
+        where quote src: lift *Trace, quote n: lift i32
+        {
+            n
+        }
+        struct Gauge {}
+        fn receiver(t: *Trace) -> Gauge { mark(t, 1); Gauge {} }
+        impl Gauge {
+            fn choose(self, v: T, ignored: i32) -> T
+            where .T: Type = bool, quote .left: lift i32 = 0, quote .right: lift i32 = 0
+            {
+                v
+            }
+        }
+
+        fn choose(v: T, ignored: U) -> T where T, U { v }
+        fn staged(comptime keep: bool, v: T, ignored: i32) -> T where T {
+            inline if keep { v } else { v }
+        }
+        fn pair(v: T, n: i32, flag: bool) -> T where T { v }
+        fn packet(t: *Trace) -> Tuple<i32, bool> { (mark(t, 5), true) }
+        fn run() -> bool {
+            var trace = Trace { value: 0 };
+            let v = receiver(trace.ref).choose<
+                .right = mark(trace.ref, 2), .T = Sample<select(trace.ref)>, .left = mark(trace.ref, 4)
+            >(.tagged(true), mark(trace.ref, 5));
+            let interleaved = saved(v) == 123 and trace.value == 12345;
+            trace.value = 0;
+            let a = choose<Sample<select(trace.ref)>>(.empty, mark(trace.ref, 5));
+            let inferred = saved(a) == 3 and trace.value == 35;
+            trace.value = 0;
+            let b = staged<Sample<select(trace.ref)>>(true, .tagged(false), mark(trace.ref, 5));
+            let specialized = saved(b) == 3 and trace.value == 35;
+            trace.value = 0;
+            let c = pair<Sample<select(trace.ref)>>(.empty, ...packet(trace.ref));
+            interleaved and inferred and specialized and saved(c) == 3 and trace.value == 35
+        }
+    "#,
+    );
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
 fn computed_default_identities_are_per_acquisition_and_cannot_export_dead_storage() {
     let definitions = r#"
         struct Pair { first: i32 }

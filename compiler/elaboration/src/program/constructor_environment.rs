@@ -48,7 +48,6 @@ impl Checker<'_, '_> {
         {
             return Ok(Acquisition(Vec::new()));
         }
-        let mut statements = Vec::new();
         // A variant or group qualifies its nominal head with member projections.
         let mut subject = head;
         while let H::Projection(base, _) = subject.kind {
@@ -71,14 +70,23 @@ impl Checker<'_, '_> {
             };
             std::sync::Arc::new(self.ordered_type_inputs(args, Some(ty), 0, &[], head.span)?)
         };
+        self.acquire_type_input_plan(&plan, head.span)
+    }
+
+    pub(super) fn acquire_type_input_plan(
+        &mut self,
+        plan: &[nir::RuntimeId],
+        span: Span,
+    ) -> Result<Acquisition, Error> {
+        let mut statements = Vec::new();
         for &id in plan.iter() {
             self.required_steps = self
                 .required_steps
                 .checked_sub(1)
-                .ok_or_else(|| error(head.span, "constructor acquisition budget exhausted"))?;
+                .ok_or_else(|| error(span, "runtime type acquisition budget exhausted"))?;
             if self.local_runtime_origins.defaults.contains_key(&id) {
-                statements.push(self.acquire_runtime_default(id, |_| None, head.span)?);
-            } else if let Some(statement) = self.acquire_explicit_type_input(id, head.span)? {
+                statements.push(self.acquire_runtime_default(id, |_| None, span)?);
+            } else if let Some(statement) = self.acquire_explicit_type_input(id, span)? {
                 statements.push(statement);
             }
         }

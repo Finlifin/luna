@@ -123,6 +123,7 @@ enum Phase {
 }
 
 struct Completion<'h> {
+    written_types: runtime_environment::WrittenTypes,
     site: CallSite<'h>,
     retained_callable: Term,
     parameter_bindings: Vec<n::LocalId>,
@@ -334,6 +335,7 @@ impl Completion<'_> {
         offset: usize,
     ) -> Result<n::Expr, Error> {
         let Self {
+            written_types,
             site,
             retained_callable,
             parameter_bindings,
@@ -377,8 +379,14 @@ impl Completion<'_> {
                 parameter_bindings,
             },
         };
-        let environment =
-            checker.prepare_call_environment(&mut call, inputs, offset, &site.routes, expr)?;
+        let environment = checker.prepare_call_environment(
+            &mut call,
+            inputs,
+            written_types,
+            offset,
+            &site.routes,
+            expr,
+        )?;
         let call = checker.freeze_staged_call_inputs(call, expr)?;
         environment.finish(checker, call, &site.routes, offset, expr)
     }
@@ -401,12 +409,14 @@ impl Checker<'_, '_> {
         for (slot, value) in prefix.into_iter().enumerate() {
             prepared.values[slot] = Some(value);
         }
+        let written_types = self.acquire_written_call_types(&site.source)?;
         let dependencies = tasks::Frame::new(self, callable, &site, &assigned, offset, prepared)?;
         let expected = expected
             .map(|ty| self.copy_alias_type(ty, site.source.span))
             .transpose()?;
         Ok(CallPlan::Inputs(Box::new(CallInputs {
             completion: Some(Completion {
+                written_types,
                 site,
                 retained_callable,
                 parameter_bindings,

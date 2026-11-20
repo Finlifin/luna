@@ -7250,6 +7250,7 @@ impl Checker<'_, '_> {
         checked: StagedInputs,
         formed: BTreeMap<usize, CompletedType>,
     ) -> Result<n::Expr, Error> {
+        let written_types = self.acquire_written_call_types(expr)?;
         self.check_open_definition(owner)?;
         let mut definition = self.open_functions[&owner].clone();
         for (slot, data) in formed {
@@ -7643,7 +7644,8 @@ impl Checker<'_, '_> {
                     .collect(),
             },
         };
-        let environment = self.prepare_call_environment(&mut call, inputs, 0, &routes, expr)?;
+        let environment =
+            self.prepare_call_environment(&mut call, inputs, written_types, 0, &routes, expr)?;
         let call = environment.finish(self, call, &routes, 0, expr)?;
         if live_bindings.is_empty() {
             return Ok(call);

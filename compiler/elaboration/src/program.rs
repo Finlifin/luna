@@ -5870,6 +5870,7 @@ impl Checker<'_, '_> {
         if self.is_quote_function(owner) {
             self.record_quote_application(expr.span)?;
         }
+        let written_types = self.acquire_written_call_types(expr)?;
         let structural_result = self
             .structural_result_context
             .as_ref()
@@ -6458,7 +6459,7 @@ impl Checker<'_, '_> {
             },
         };
         let environment =
-            self.prepare_call_environment(&mut call, inputs, offset, &routes, expr)?;
+            self.prepare_call_environment(&mut call, inputs, written_types, offset, &routes, expr)?;
         let call = self.freeze_staged_call_inputs(call, expr)?;
         environment.finish(self, call, &routes, offset, expr)
     }

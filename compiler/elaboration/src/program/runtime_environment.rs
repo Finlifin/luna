@@ -206,17 +206,75 @@ struct EnvironmentSlot {
     fields: Vec<usize>,
 }
 
+/// Each group belongs to one written clause argument. Keep the statements in
+/// the call frame until the receiver and hidden ABI operands have been routed.
+pub(super) type WrittenTypes = BTreeMap<usize, Acquisition>;
+
+enum InputStep {
+    Type(Acquisition),
+    Operand(usize),
+}
+
 impl Checker<'_, '_> {
+    pub(super) fn acquire_written_call_types(
+        &mut self,
+        site: &Expr<'_>,
+    ) -> Result<WrittenTypes, Error> {
+        let mut groups = WrittenTypes::new();
+        if self.local_runtime_origins.type_inputs.is_empty() {
+            return Ok(groups);
+        }
+        let (H::Application(head, _) | H::ExtendedApplication(head, _)) = site.kind else {
+            return Ok(groups);
+        };
+        let H::NFApplication(_, args) = head.kind else {
+            return Ok(groups);
+        };
+        for (position, arg) in args.iter().enumerate() {
+            let (Arg::Positional(value)
+            | Arg::Named(_, value)
+            | Arg::Expand(value)
+            | Arg::Implicit(value)
+            | Arg::PostLambda(value)) = arg;
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(site.span, "call type input inspection budget exhausted"))?;
+            if let Some(plan) = self
+                .local_runtime_origins
+                .type_inputs
+                .shared(&value.hir_id)
+                .cloned()
+            {
+                let group = self.acquire_type_input_plan(&plan, value.span)?;
+                if !group.0.is_empty() {
+                    groups.insert(position, group);
+                }
+            }
+        }
+        Ok(groups)
+    }
+
     pub(super) fn prepare_call_environment(
         &mut self,
         call: &mut n::Expr,
         inputs: Vec<(Term, Term)>,
+        written_types: WrittenTypes,
         receiver_count: usize,
         routes: &[RoutedArgument<'_>],
         site: &Expr<'_>,
     ) -> Result<CallEnvironment, Error> {
-        let outer = self.locals.clone();
-        let result = self.acquire_call_inputs(call, inputs, receiver_count, routes, site);
+        let mut outer = self.locals.clone();
+        for group in written_types.values() {
+            for statement in &group.0 {
+                let K::Let { binding, .. } = statement.kind else {
+                    unreachable!("acquired type operand")
+                };
+                outer.remove(&binding);
+            }
+        }
+        let result =
+            self.acquire_call_inputs(call, inputs, written_types, receiver_count, routes, site);
         self.locals = outer;
         result
     }
@@ -225,12 +283,16 @@ impl Checker<'_, '_> {
         &mut self,
         call: &mut n::Expr,
         inputs: Vec<(Term, Term)>,
+        mut written_types: WrittenTypes,
         receiver_count: usize,
         routes: &[RoutedArgument<'_>],
         site: &Expr<'_>,
     ) -> Result<CallEnvironment, Error> {
         let mut statements = Vec::new();
-        if inputs.is_empty() && self.local_runtime_origins.acquired_bindings.is_empty() {
+        if inputs.is_empty()
+            && written_types.is_empty()
+            && self.local_runtime_origins.acquired_bindings.is_empty()
+        {
             return Ok(CallEnvironment {
                 before_arguments: Acquisition(statements),
                 argument_prefixes: BTreeMap::new(),
@@ -279,7 +341,8 @@ impl Checker<'_, '_> {
         let mut defaults = BTreeMap::new();
         let mut slots = Vec::new();
         let mut operands: Vec<n::Expr> = Vec::new();
-        let mut bind = receiver_prefixes.iter().any(|prefix| !prefix.is_empty());
+        let mut bind =
+            !written_types.is_empty() || receiver_prefixes.iter().any(|prefix| !prefix.is_empty());
         for (identity, mut domain) in inputs {
             let (root, fields) = self.runtime_field_path(&identity, site.span)?;
             if !fields.is_empty() {
@@ -347,7 +410,10 @@ impl Checker<'_, '_> {
             if let H::Application(head, _) | H::ExtendedApplication(head, _) = &site.kind
                 && let H::NFApplication(_, args) = &head.kind
             {
-                for arg in *args {
+                for (position, arg) in args.iter().enumerate() {
+                    if let Some(group) = written_types.remove(&position) {
+                        order.push(InputStep::Type(group));
+                    }
                     let (Arg::Positional(value)
                     | Arg::Named(_, value)
                     | Arg::Expand(value)
@@ -357,7 +423,7 @@ impl Checker<'_, '_> {
                         && let Some(&slot) = identities.get(identity)
                         && !std::mem::replace(&mut acquired[slot], true)
                     {
-                        order.push(slot);
+                        order.push(InputStep::Operand(slot));
                         if let Term::Runtime(id) = identity
                             && self.local_runtime_deliveries.get(id).is_some_and(|entry| {
                                 entry.producer_site == Some(local(value.hir_id))
@@ -368,13 +434,24 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-            order.extend((0..operands.len()).filter(|&slot| !acquired[slot]));
+            order.extend(
+                (0..operands.len())
+                    .filter(|&slot| !acquired[slot])
+                    .map(InputStep::Operand),
+            );
 
             if !producers.is_empty() {
                 let result_ids = self.result_dependencies(&call.ty, site.span)?;
                 producers.retain(|_, id| result_ids.contains(id));
             }
-            for slot in order {
+            for step in order {
+                let slot = match step {
+                    InputStep::Type(group) => {
+                        statements.extend(group.0);
+                        continue;
+                    }
+                    InputStep::Operand(slot) => slot,
+                };
                 // The enclosing source argument establishes this binding at
                 // its own position, after explicit quote suppliers have run.
                 if defaults.contains_key(&slot)
