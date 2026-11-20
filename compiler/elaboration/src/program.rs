@@ -1490,7 +1490,7 @@ fn elaborate_candidate<'a, 'h>(
             continue;
         }
         let signature = checker.signatures[&owner].clone();
-        let mut function = checker.check_source_function(
+        let function = checker.check_source_function(
             owner,
             signature,
             function_bodies::SourceBody::Package,
@@ -1500,18 +1500,6 @@ fn elaborate_candidate<'a, 'h>(
             continue;
         }
         if sig.modifiers.is_function_template {
-            let inputs = checker.abstract_code_inputs(&function.body, item.span)?;
-            let Term::Function { parameters, .. } = &mut function.signature else {
-                unreachable!()
-            };
-            parameters.extend(inputs.values().cloned().map(|ty| Parameter {
-                sort: Sort::Runtime,
-                ty,
-            }));
-            function.parameters.extend(inputs.keys().copied());
-            function.inline = false;
-            function.defaults.clear();
-            function.name.push_str(" [template]");
             checker.ordinary_behavior_functions.push(function);
         } else {
             output.functions.push(function);

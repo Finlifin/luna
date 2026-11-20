@@ -102,6 +102,25 @@ impl Checker<'_, '_> {
             }
             let body = this.function_body(owner, body.value, result)?;
             this.verify_returned_type_guarantees(&body, span)?;
+            if matches!(request, SourceBody::Package)
+                && sig.modifiers.is_function_template
+                && sig.modifiers.is_pure
+            {
+                // Abstract splice locals belong to this body frame. Bind their
+                // results on the analysis witness before leaving the frame.
+                let inputs = this.abstract_code_inputs(&body, span)?;
+                let Term::Function { parameters, .. } = &mut interface.signature else {
+                    unreachable!()
+                };
+                parameters.extend(inputs.values().cloned().map(|ty| Parameter {
+                    sort: Sort::Runtime,
+                    ty,
+                }));
+                interface.parameters.extend(inputs.keys().copied());
+                interface.inline = false;
+                interface.defaults.clear();
+                interface.name.push_str(" [template]");
+            }
             let runtime_deliveries = this
                 .local_runtime_deliveries
                 .iter()
