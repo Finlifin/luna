@@ -31,6 +31,7 @@ struct CallableCompletion {
 
 impl declaration_inputs::Completion for CallableCompletion {
     const CHECKING: declaration_inputs::InputChecking = declaration_inputs::InputChecking::Typed;
+
     type Output = CallableClausePacket;
 
     fn finish(
@@ -42,39 +43,9 @@ impl declaration_inputs::Completion for CallableCompletion {
     ) -> Result<Self::Output, Error> {
         let (declaration, prefix) =
             domain_checks::Declaration::from_telescope(self.owner, telescope);
-        let prefix_count = prefix.len();
-        let parent_inputs = declaration
-            .parameters
-            .iter()
-            .zip(&declaration.domains)
-            .zip(prefix)
-            .map(|((&id, domain), value)| (nir::DeclarationParameter::comptime(id, domain), value));
         let prepared = inputs.into_typed(&mut checker.required_steps, span)?;
-        let observations = prepared.observations.with_prefix(parent_inputs);
-        let frames = checker.call_input_frames();
-        let (bindings, mut formation) = observations.bind(
-            &declaration.domains,
-            frames,
-            &mut checker.required_steps,
-            span,
-        )?;
-        let mut prefix_operands = Vec::with_capacity(prefix_count);
-        for (domain, value) in declaration.domains[..prefix_count]
-            .iter()
-            .zip(&formation.terms)
-        {
-            let ty = bindings.instantiate(domain, &mut checker.required_steps, span)?;
-            let value = checker.copy_alias_type(value, span)?;
-            prefix_operands.push(n::Expr {
-                source: source(span),
-                kind: if ty == p(P::Type) {
-                    K::TypeValue(value)
-                } else {
-                    K::ComptimeValue(value)
-                },
-                ty,
-            });
-        }
+        let (bindings, formation, prefix_operands) =
+            declaration.bind_inputs(checker, prefix, prepared.observations, span)?;
         let mut inputs = prepared.operands;
         inputs.arguments.splice(..0, prefix_operands);
         let mut steps = checker.required_steps;
@@ -88,21 +59,74 @@ impl declaration_inputs::Completion for CallableCompletion {
         );
         checker.required_steps = steps;
         checked?;
-        formation.deferred.extend(
-            declaration
-                .parameters
-                .iter()
-                .zip(&declaration.domains)
-                .filter_map(|(id, domain)| (*domain != p(P::Type)).then_some(*id)),
-        );
-        let formation_deferred = !formation.deferred.is_empty();
-        checker.check_formation_application(self.owner, formation, span)?;
+        let formation_deferred = declaration.check_formation(checker, formation, span)?;
         Ok(CallableClausePacket {
             declaration,
             inputs,
             bindings,
             formation_deferred,
         })
+    }
+}
+
+impl domain_checks::Declaration {
+    fn bind_inputs(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        prefix: Vec<Term>,
+        observations: declaration_inputs::Observations,
+        span: Span,
+    ) -> Result<
+        (
+            declaration_inputs::CallableBindings,
+            FormationInputs,
+            Vec<n::Expr>,
+        ),
+        Error,
+    > {
+        let prefix_count = prefix.len();
+        let parent_inputs = self
+            .parameters
+            .iter()
+            .zip(&self.domains)
+            .zip(prefix)
+            .map(|((&id, domain), value)| (nir::DeclarationParameter::comptime(id, domain), value));
+        let observations = observations.with_prefix(parent_inputs);
+        let frames = checker.call_input_frames();
+        let (bindings, formation) =
+            observations.bind(&self.domains, frames, &mut checker.required_steps, span)?;
+        let mut prefix_operands = Vec::with_capacity(prefix_count);
+        for (domain, value) in self.domains[..prefix_count].iter().zip(&formation.terms) {
+            let ty = bindings.instantiate(domain, &mut checker.required_steps, span)?;
+            let value = checker.copy_alias_type(value, span)?;
+            prefix_operands.push(n::Expr {
+                source: source(span),
+                kind: if ty == p(P::Type) {
+                    K::TypeValue(value)
+                } else {
+                    K::ComptimeValue(value)
+                },
+                ty,
+            });
+        }
+        Ok((bindings, formation, prefix_operands))
+    }
+
+    fn check_formation(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        mut formation: FormationInputs,
+        span: Span,
+    ) -> Result<bool, Error> {
+        formation.deferred.extend(
+            self.parameters
+                .iter()
+                .zip(&self.domains)
+                .filter_map(|(id, domain)| (*domain != p(P::Type)).then_some(*id)),
+        );
+        let formation_deferred = !formation.deferred.is_empty();
+        checker.check_formation_application(self.owner, formation, span)?;
+        Ok(formation_deferred)
     }
 }
 
@@ -124,7 +148,9 @@ pub(super) struct InstanceCompletion<'h> {
 }
 
 impl declaration_inputs::Completion for InstanceCompletion<'_> {
-    const CHECKING: declaration_inputs::InputChecking = declaration_inputs::InputChecking::Typed;
+    const CHECKING: declaration_inputs::InputChecking =
+        declaration_inputs::InputChecking::Contextual;
+
     type Output = n::Expr;
 
     fn finish(
@@ -135,15 +161,71 @@ impl declaration_inputs::Completion for InstanceCompletion<'_> {
         span: Span,
     ) -> Result<n::Expr, Error> {
         let owner = self.packet.owner;
-        let packet = self.packet.finish(checker, telescope, inputs, span)?;
-        let value = checker.finish_comptime_function_instance(
-            &self.expr,
-            owner,
-            self.signature,
-            packet,
-            self.expected.as_ref(),
-            self.allow_optional,
-        )?;
+        let value = if inputs
+            .arguments
+            .iter()
+            .all(|arg| matches!(arg, n::NormalFormArgument::Value(_)))
+        {
+            let packet = self.packet.finish(checker, telescope, inputs, span)?;
+            checker.finish_comptime_function_instance(
+                &self.expr,
+                owner,
+                self.signature,
+                packet,
+                self.expected.as_ref(),
+                self.allow_optional,
+            )?
+        } else {
+            let (contract, prefix) = domain_checks::Declaration::from_telescope(owner, telescope);
+            let declaration_inputs::PreparedDeclarationInputs {
+                mut plan,
+                mut arguments,
+                observations,
+            } = inputs;
+            let (bindings, formation, prefix) =
+                contract.bind_inputs(checker, prefix, observations, span)?;
+            let count = prefix.len();
+            for index in &mut plan.order {
+                *index += count;
+            }
+            for preparation in &mut plan.preparations {
+                preparation.before += count;
+            }
+            plan.order.splice(..0, 0..count);
+            let captured = (0..count)
+                .map(|_| checker.spread_binding(span))
+                .collect::<Result<Vec<_>, _>>()?;
+            plan.bindings.splice(..0, captured);
+            arguments.splice(..0, prefix.into_iter().map(n::NormalFormArgument::Value));
+            let mut steps = checker.required_steps;
+            let checked = contract.check_contextual_domains(
+                checker, &bindings, &formation, &arguments, &mut steps, span,
+            );
+            checker.required_steps = steps;
+            checked?;
+            contract.check_formation(checker, formation, span)?;
+            if bindings.awaits_input(&self.signature, &mut checker.required_steps, span)? {
+                return Err(error(
+                    span,
+                    "comptime callable signature still depends on an invocation-time clause input",
+                ));
+            }
+            let signature =
+                bindings.instantiate(&self.signature, &mut checker.required_steps, span)?;
+            let ty = checker.callable_type(owner, signature);
+            if let Some(expected) = &self.expected {
+                checker.require(&ty, expected, span)?;
+            }
+            n::Expr {
+                source: source(span),
+                ty,
+                kind: K::PlannedFunctionInstance {
+                    declaration: declaration(checker.package, &checker.package_identities, owner),
+                    arguments,
+                    plan: Some(plan),
+                },
+            }
+        };
         let Some(preserve_effect) = self.delivery else {
             return Ok(value);
         };

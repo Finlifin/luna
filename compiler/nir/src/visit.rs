@@ -1,8 +1,10 @@
 //! Bounded traversal of the structured operations shared with normalization.
 use crate::program::{Expr, ExprKind as K, Function, Pattern as P};
+
 #[cfg(test)]
 mod tests;
 mod work;
+
 use work::Work;
 
 // Queue space is bounded by the remaining minimum node work. Actual node
@@ -12,6 +14,7 @@ macro_rules! push {
         $work.push($node, *$fuel)?
     };
 }
+
 macro_rules! extend {
     ($work:expr, $fuel:expr, $nodes:expr $(,)?) => {
         $work.extend($nodes, *$fuel)?
@@ -26,6 +29,7 @@ pub enum Error {
     Budget(&'static str),
     Invalid(&'static str),
 }
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -33,7 +37,9 @@ impl std::fmt::Display for Error {
         }
     }
 }
+
 impl std::error::Error for Error {}
+
 impl From<Error> for String {
     fn from(error: Error) -> Self {
         error.to_string()
@@ -49,6 +55,7 @@ pub fn expressions<'a>(
 ) -> Result<(), String> {
     walk(function, fuel, visit, true)
 }
+
 /// Preserve typed visitor and traversal failures across all function roots.
 pub fn expressions_checked<'a, E: From<Error>>(
     function: &'a Function,
@@ -57,6 +64,7 @@ pub fn expressions_checked<'a, E: From<Error>>(
 ) -> Result<(), E> {
     walk(function, fuel, visit, true)
 }
+
 /// Inspect original declaration/contract expressions without materializing a
 /// synthetic function. Root references are consumed lazily, in work-stack order.
 pub fn program_expressions<'a>(
@@ -72,6 +80,7 @@ pub fn program_expressions<'a>(
         true,
     )
 }
+
 /// Visit one runtime environment, excluding defaults, closure bodies and
 /// handler arms evaluated in their own resource contexts.
 pub fn expressions_in_scope<'a>(
@@ -81,6 +90,7 @@ pub fn expressions_in_scope<'a>(
 ) -> Result<(), String> {
     walk(function, fuel, visit, false)
 }
+
 /// Include candidate computations belonging to this runtime scope, without
 /// treating them as preconditions or entering nested handler/closure scopes.
 pub fn expressions_in_scope_with_observations<'a>(
@@ -147,6 +157,7 @@ pub fn into_pattern_observations(pattern: P, fuel: &mut usize) -> Result<Vec<Exp
     }
     Ok(roots)
 }
+
 /// Borrow pattern computation roots in structural evaluation order. This does
 /// not decide which alternatives execute; callers retain that obligation.
 pub fn pattern_observations<'a>(pattern: &'a P, fuel: &mut usize) -> Result<Vec<&'a Expr>, String> {
@@ -203,6 +214,7 @@ pub fn pattern_observations<'a>(pattern: &'a P, fuel: &mut usize) -> Result<Vec<
     }
     Ok(roots)
 }
+
 /// Visit the evaluations in one expression's current runtime scope. Closure
 /// bodies, handler arms and call defaults have independent analysis contexts.
 pub fn expression_in_scope<'a>(
@@ -218,6 +230,7 @@ pub fn expression_in_scope<'a>(
         false,
     )
 }
+
 /// Visit accesses to the current closure environment. Handler arms, defaults,
 /// and capture initializers remain visible, but newly constructed closure bodies
 /// operate on their own owned capture cells and are not entered.
@@ -234,6 +247,7 @@ pub fn expression_in_closure_environment<'a>(
         false,
     )
 }
+
 /// Visit a complete expression tree, including nested closure bodies and defaults.
 pub fn expression<'a>(
     expression: &'a Expr,
@@ -248,6 +262,7 @@ pub fn expression<'a>(
         true,
     )
 }
+
 /// Returning false delegates this subtree to a scope-aware validator.
 pub fn expression_pruned<'a>(
     expression: &'a Expr,
@@ -256,6 +271,7 @@ pub fn expression_pruned<'a>(
 ) -> Result<(), String> {
     walk_roots(std::iter::once(expression), fuel, visit, true, true)
 }
+
 /// Preserve the callback's error type and explicitly convert traversal failures.
 pub fn expression_checked<'a, E: From<Error>>(
     expression: &'a Expr,
@@ -266,6 +282,7 @@ pub fn expression_checked<'a, E: From<Error>>(
         visit(expr, fuel).map(|_| true)
     })
 }
+
 /// The typed counterpart of `expression_pruned`; both use the same traversal.
 pub fn expression_pruned_checked<'a, E: From<Error>>(
     expression: &'a Expr,
@@ -274,6 +291,7 @@ pub fn expression_pruned_checked<'a, E: From<Error>>(
 ) -> Result<(), E> {
     walk_roots(std::iter::once(expression), fuel, visit, true, true)
 }
+
 fn walk<'a, E: From<Error>>(
     function: &'a Function,
     fuel: &mut usize,
@@ -298,6 +316,7 @@ fn walk<'a, E: From<Error>>(
         include_defaults,
     )
 }
+
 pub(crate) enum Node<'a> {
     Expr(&'a Expr),
     Pattern(&'a P),
@@ -604,9 +623,14 @@ fn walk_mut(
                                 .map(Node::Expr),
                         );
                     }
-                    kind @ (K::NormalFormType { .. } | K::ApplyNormalForm { .. }) => {
+                    kind @ (K::PlannedFunctionInstance { .. }
+                    | K::NormalFormType { .. }
+                    | K::ApplyNormalForm { .. }) => {
                         let (callee, arguments, plan) = match kind {
-                            K::NormalFormType {
+                            K::PlannedFunctionInstance {
+                                arguments, plan, ..
+                            }
+                            | K::NormalFormType {
                                 arguments, plan, ..
                             } => (None, arguments, plan),
                             K::ApplyNormalForm {

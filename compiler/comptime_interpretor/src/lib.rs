@@ -13,16 +13,23 @@ mod bytecode;
 mod cleanup;
 mod closure_identity;
 mod code_values;
+
 #[cfg(test)]
 mod execution_test_support;
 mod representation;
+
 pub use representation::ImmutableSize;
+
 mod literal_values;
 mod type_descriptions;
 mod value_types;
+
 pub use closure_identity::ClosureIdentity;
+
 mod scoped_restore;
+
 pub use code_values::CodeValue;
+
 mod bit_operations;
 mod bit_representation;
 mod bit_writeback;
@@ -36,18 +43,25 @@ mod environment;
 mod field_access;
 mod function_inputs;
 mod function_instances;
+
 pub use function_inputs::{FunctionInputRejection, InputAdmissionStage};
+
 mod iir_execution;
+
 use iir_execution::ConcreteNominal;
+
 mod expression_invocation;
 mod host_budget;
+
 pub use host_budget::checked as with_host_selection_budget;
+
 mod immutable_storage;
 mod input_bodies;
 mod input_collection;
 mod input_dependencies;
 mod input_domains;
 mod invocation;
+
 pub use invocation::AdmittedCall;
 pub use invocation::definition_host::{
     DefinitionHostRequest, DefinitionHostResponse, RejectedDefinitionResponse,
@@ -57,18 +71,21 @@ pub use invocation::host::{
     RejectedHostResponse,
 };
 pub use invocation::method_host::{MethodHostRequest, MethodHostResponse, RejectedMethodResponse};
+
+mod declaration_inputs;
+mod declaration_plan;
 mod invocation_contracts;
 mod list_append;
 mod list_index;
 mod list_operations;
 mod memory;
 mod native_depth;
-mod nominal_inputs;
-mod nominal_plan;
 mod normal_inputs;
 mod request_identity;
 mod retained_contracts;
+
 use normal_inputs::InputKey;
+
 mod input_bindings;
 mod normal_plan;
 mod normal_terms;
@@ -76,6 +93,7 @@ mod normal_types;
 mod normal_values;
 mod object_edits;
 mod object_queries;
+
 #[cfg(test)]
 mod object_values;
 mod objects;
@@ -83,39 +101,61 @@ mod scalar_math;
 mod staged_bytecode;
 mod trait_methods;
 mod value_reference;
+
 pub use objects::ObjectProperty;
 pub use value_reference::ValueReference;
+
 mod definition_installation;
 mod generated_newtypes;
+
 pub use generated_newtypes::NewtypePublicationError;
+
 mod generated_enums;
+
 pub use generated_enums::EnumPublicationError;
+
 mod generated_structs;
+
 pub use generated_structs::{
     DefinitionAdmissionSession, PreparedEnumAdmission, PreparedNewtypeAdmission,
     PreparedStructAdmission, StructAdmissionSession, StructPublicationError,
 };
+
 mod definition_diagnostics;
+
 pub use definition_diagnostics::DefinitionBuildError;
+
 mod enum_build;
+
 pub use enum_build::{EnumBuildRequest, PreparedEnumBuild};
+
 mod definition_build;
+
 pub use definition_build::{DefinitionBuildRequest, PreparedDefinitionBuild};
+
 mod newtype_build;
+
 pub use newtype_build::{NewtypeBuildRequest, PreparedNewtypeBuild};
+
 mod struct_build;
+
 pub use struct_build::{PreparedStructBuild, StructBuildRequest};
+
 mod reflection;
+
 pub use reflection::{
     CallableReflection, EnumReflection, NewtypeReflection, ReflectedField, ReflectedVariant,
     StructReflection,
 };
+
 mod float_operations;
 mod leaf_inputs;
 mod scalar_operations;
+
 #[cfg(test)]
 mod scoped_work;
 mod selected_types;
+
 pub use comptime_runtime::object::{Entry as ObjectEntry, Object};
 pub use memory::{OwnedGraphCheckpoint, PointerValue, Storage};
 
@@ -127,12 +167,14 @@ use std::fmt;
 use std::sync::Arc;
 
 use environment::Environment;
+
 // Invocation-local contextual interpretation choices; no active state is stored
 // in the owned NIR or reused across calls.
 enum PreparedNormalInput {
     Value(Value),
     ListType(Term),
 }
+
 /// Invocation-only input transport. Live graphs retain their storage identity;
 /// normal terms are reconstructed in the invocation's checked environment.
 /// This transport is neither a type identity nor a serializable IR node.
@@ -227,6 +269,7 @@ pub enum Value {
     RuntimeTraitMethod(Box<TraitMethodIdentity>),
     Closure(Arc<Closure>),
 }
+
 /// Preserve the original entry domain, including opaque normal-form identity.
 /// Constructing this host representation does not establish its validity.
 #[derive(Clone, Debug, PartialEq)]
@@ -234,6 +277,7 @@ pub struct ObjectValue {
     pub ty: Term,
     pub value: Value,
 }
+
 impl fmt::Display for ObjectValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -243,7 +287,9 @@ impl fmt::Display for ObjectValue {
         )
     }
 }
+
 pub use nir::TraitMethodIdentity;
+
 impl Value {
     /// An ordinary binding can carry this Type, but a structural pattern
     /// cannot select a branch from its representation.
@@ -380,6 +426,7 @@ impl Value {
     ) -> Result<Term, ErrorKind> {
         self.into_scoped_normal_term(budget, &BTreeSet::new())
     }
+
     /// Freeze an invocation input, retaining named callable declaration identities
     /// inside immutable aggregates. Captured environments remain live values;
     /// this path never serializes their storage or execution state.
@@ -398,6 +445,7 @@ impl Value {
             true,
         )
     }
+
     /// Validate immutable callable declaration inputs for capture snapshots.
     /// This checks data shape only; the receiving VM still checks invocation authority.
     pub fn validate_callable_identity_snapshot(
@@ -422,6 +470,7 @@ impl Value {
         }
         Ok(())
     }
+
     /// Freeze a substitution value within an explicitly supplied Type scope.
     /// Immutable export must use `into_normal_term`, which remains closed.
     pub fn into_scoped_normal_term(
@@ -459,6 +508,7 @@ impl Value {
         )
     }
 }
+
 /// A graph position is meaningful only in the admitting VM. Frozen data
 /// carries the declaration and arguments, never the position or local handle.
 #[derive(Debug, PartialEq)]
@@ -467,10 +517,12 @@ pub struct IirCallable {
     key: iir::InstanceKey,
     ty: Term,
 }
+
 impl IirCallable {
     pub fn key(&self) -> &iir::InstanceKey {
         &self.key
     }
+
     pub fn ty(&self) -> &Term {
         &self.ty
     }
@@ -485,17 +537,21 @@ pub struct Closure {
     body: Arc<Expr>,
     ty: Term,
 }
+
 impl Closure {
     pub fn parameters(&self) -> &[LocalId] {
         &self.parameters
     }
+
     pub fn body(&self) -> &Arc<Expr> {
         &self.body
     }
+
     /// The checked callable type, including capture domains and phase.
     pub fn ty(&self) -> &Term {
         &self.ty
     }
+
     /// Capture slots in semantic field order, independent of caller locals.
     /// Slots may be Storage cells: constant materializers must snapshot their
     /// current values rather than persist these interpreter handles.
@@ -505,6 +561,7 @@ impl Closure {
             .map(|id| (*id, &self.environment[id]))
     }
 }
+
 #[derive(Clone, Copy, Debug)]
 pub struct Budget {
     pub steps: u64,
@@ -512,6 +569,7 @@ pub struct Budget {
     /// inspection additionally obey a conservative host-stack depth bound.
     pub depth: usize,
 }
+
 impl Default for Budget {
     fn default() -> Self {
         Self {
@@ -520,6 +578,7 @@ impl Default for Budget {
         }
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorKind {
     FunctionInputRejected(Box<FunctionInputRejection>),
@@ -562,11 +621,13 @@ pub enum ErrorKind {
     EffectControlTransfer,
     EffectValueConsumed,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     pub kind: ErrorKind,
     pub source: Option<SourceRange>,
 }
+
 impl Error {
     fn phase(error: nir::phases::Error) -> Self {
         Self {
@@ -579,6 +640,7 @@ impl Error {
         }
     }
 }
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
@@ -605,7 +667,9 @@ impl fmt::Display for Error {
         Ok(())
     }
 }
+
 impl std::error::Error for Error {}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
     CheckPredicate {
@@ -622,6 +686,7 @@ pub enum Event {
         captures: usize,
     },
 }
+
 #[derive(Clone, Debug)]
 enum Flow {
     Value(Value),
@@ -630,10 +695,12 @@ enum Flow {
     Continue(LocalId),
     EffectResume(u64, Value),
 }
+
 enum SelectedBitRange {
     Range(usize, usize),
     Control(Flow),
 }
+
 // Prepared actual values are owned here; the cleanup frame remains installed
 // across preparation and invocation. Preparation temporaries do not occupy
 // every recursive caller's host stack while the callee executes.
@@ -643,6 +710,7 @@ struct InterfaceExit {
     environment: Environment,
     result_slot: usize,
 }
+
 enum PreparedCall {
     Invoke {
         interface_exit: Option<Box<InterfaceExit>>,
@@ -666,17 +734,22 @@ mod associated_catalog;
 mod associated_dispatch;
 mod associated_execution;
 mod code_session;
+
 use code_session::CodeOrigin;
+
 mod contextual_code;
 mod declaration_index;
 mod layout_catalog;
 mod list_values;
 mod source_resolution;
 mod source_state;
+
 pub use list_values::{ListIntoIter, ListIter, ListValues};
 use source_resolution::SourceDispatch;
 pub use source_resolution::{BudgetedTypeSolver, SourceResolvers};
+
 mod method_catalog;
+
 pub use code_session::CodeSession;
 
 mod invocation_budget;
@@ -803,6 +876,7 @@ pub struct Interpreter<'a> {
     invocation_depth_limit: usize,
     events: Vec<Event>,
 }
+
 impl<'a> Interpreter<'a> {
     pub(crate) fn runtime_domains(&self) -> &'a BTreeMap<nir::RuntimeId, Term> {
         static EMPTY: std::sync::OnceLock<BTreeMap<nir::RuntimeId, Term>> =
@@ -827,6 +901,7 @@ impl<'a> Interpreter<'a> {
     pub fn new(package: &'a Package, budget: Budget) -> Result<Self, Error> {
         Self::with_assumptions(package, &[], budget)
     }
+
     fn with_assumptions(
         package: &'a Package,
         assumptions: &[nir::program::TraitRequirement],
@@ -1492,6 +1567,7 @@ impl<'a> Interpreter<'a> {
         }
         Ok(interpreter)
     }
+
     /// A phase-checked entrypoint for concrete first-order comptime functions.
     /// Resource/effect verification remains the caller's separate obligation.
     pub fn for_comptime(package: &'a Package, budget: Budget) -> Result<Self, Error> {
@@ -1513,6 +1589,7 @@ impl<'a> Interpreter<'a> {
         self.bytecode_enabled = false;
         self
     }
+
     /// Evaluate under caller-established trait premises. Premises discharge
     /// obligations only; they provide neither method bodies nor associated values.
     /// They belong to this interpreter and never mutate the source package.
@@ -1563,6 +1640,7 @@ impl<'a> Interpreter<'a> {
         interpreter.comptime_only = true;
         Ok(interpreter)
     }
+
     /// Prepare a comptime world using a caller-owned construction allowance.
     /// Success reports the remaining steps. Failure (including unwinding) keeps
     /// the allowance reserved: a failed constructor cannot report a trustworthy
@@ -1770,6 +1848,7 @@ impl<'a> Interpreter<'a> {
         }
         result
     }
+
     fn query_normal_value_fields(
         &self,
         ty: &Term,
@@ -1861,6 +1940,7 @@ impl<'a> Interpreter<'a> {
             )
         }
     }
+
     fn admits_description(&self, data: &nir::program::DescriptionLiteral) -> bool {
         self.comptime_only
             && self
@@ -1883,15 +1963,18 @@ impl<'a> Interpreter<'a> {
             _ => Err(self.failure(ErrorKind::Type, Some(source))),
         }
     }
+
     fn type_identity_term(&self, value: Value, source: SourceRange) -> Result<Term, Error> {
         match self.type_data(value, source)? {
             Value::Type(ty) => Ok(ty),
             _ => Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source))),
         }
     }
+
     pub fn events(&self) -> &[Event] {
         &self.events
     }
+
     /// Account for host-side argument preparation against this invocation's
     /// budget. Hosts can consume fuel here but cannot replenish it.
     pub fn charge_preparation(&mut self, work: usize) -> Result<(), Error> {
@@ -1904,9 +1987,11 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, None))?;
         Ok(())
     }
+
     pub fn remaining_steps(&self) -> u64 {
         self.budget.steps
     }
+
     fn charge_copy_work(
         &mut self,
         source: Option<SourceRange>,
@@ -1926,6 +2011,7 @@ impl<'a> Interpreter<'a> {
             )
         })
     }
+
     fn instantiate_activation_code(
         &mut self,
         expression: &Expr,
@@ -1973,6 +2059,7 @@ impl<'a> Interpreter<'a> {
         }
         self.invoke_value(Value::Function(function), arguments)
     }
+
     fn concrete_value<V: std::borrow::Borrow<Value>>(
         value: V,
         source: SourceRange,
@@ -1986,9 +2073,11 @@ impl<'a> Interpreter<'a> {
             Ok(value)
         }
     }
+
     fn failure(&self, kind: ErrorKind, source: Option<SourceRange>) -> Error {
         Error { kind, source }
     }
+
     fn tick(&mut self, source: Option<SourceRange>) -> Result<(), Error> {
         if self.budget.steps == 0 {
             return Err(self.failure(ErrorKind::StepsExhausted, source));
@@ -1999,9 +2088,11 @@ impl<'a> Interpreter<'a> {
         }
         Ok(())
     }
+
     fn invoke_value(&mut self, function: Value, arguments: Vec<Value>) -> Result<Value, Error> {
         self.invoke_value_scoped(function, arguments, None)
     }
+
     // Finish binding before recursive body evaluation so its temporary values
     // do not accumulate in every invocation frame on small host stacks.
     #[inline(never)]
@@ -2193,6 +2284,7 @@ impl<'a> Interpreter<'a> {
             Ok(ty)
         })
     }
+
     fn clone_invocation_environment(
         &mut self,
         environment: &Environment,
@@ -2219,6 +2311,7 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| self.failure(ErrorKind::MissingBinding, source))?;
         self.invocation_slot_value(value, source)
     }
+
     fn invocation_slot_value(
         &mut self,
         value: &Value,
@@ -2247,6 +2340,7 @@ impl<'a> Interpreter<'a> {
             value => self.checkpoint_representation(value, location),
         }
     }
+
     fn eval_pointer(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
         if self.comptime_only {
             return Err(self.failure(ErrorKind::PhaseMismatch, Some(expr.source)));
@@ -2366,9 +2460,11 @@ impl<'a> Interpreter<'a> {
         };
         Ok(Flow::Value(result))
     }
+
     fn eval(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
         self.eval_in_position(expr, environment, false)
     }
+
     fn eval_in_position(
         &mut self,
         expr: &Expr,
@@ -2392,6 +2488,7 @@ impl<'a> Interpreter<'a> {
         });
         self.finish_evaluation(expr, environment, result)
     }
+
     // Mapped computation evaluation must use the same delivery/control hooks
     // as ordinary evaluation. Transparent effect wrappers share their child's
     // source identity and must not deliver or retire that value a second time.
@@ -2461,6 +2558,7 @@ impl<'a> Interpreter<'a> {
         }
         result
     }
+
     fn integer_operation<T>(
         &mut self,
         source: Option<SourceRange>,
@@ -2485,6 +2583,7 @@ impl<'a> Interpreter<'a> {
             )
         })
     }
+
     fn integer_literal(
         &mut self,
         spelling: &str,
@@ -2503,6 +2602,7 @@ impl<'a> Interpreter<'a> {
             }
         })
     }
+
     fn bit_operation<T>(
         &mut self,
         source: SourceRange,
@@ -2532,6 +2632,7 @@ impl<'a> Interpreter<'a> {
             )
         })
     }
+
     // Keep the recursive dispatcher small. A monolithic debug-build match
     // reserves stack for temporaries from every arm at each recursive level,
     // exhausting the host stack before the logical depth budget can fire.
@@ -2557,8 +2658,10 @@ impl<'a> Interpreter<'a> {
             K::OptionalType(..) | K::PointerType(..) | K::ClosureType { .. } => {
                 self.eval_type_constructor(expr, environment)
             }
-            K::NominalType { .. } => self.eval_nominal_type(expr, environment),
-            K::CheckTypeAlias { .. } => self.eval_nominal_type(expr, environment),
+            K::PlannedFunctionInstance { .. } | K::NominalType { .. } => {
+                self.eval_declaration_plan(expr, environment)
+            }
+            K::CheckTypeAlias { .. } => self.eval_declaration_plan(expr, environment),
             K::ScalarEqual(..)
             | K::ScalarLessEqual(..)
             | K::ScalarLess(..)
@@ -2653,6 +2756,7 @@ impl<'a> Interpreter<'a> {
             }
         }
     }
+
     #[inline(never)]
     fn eval_leaf(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
         let result = match &expr.kind {
@@ -2674,6 +2778,7 @@ impl<'a> Interpreter<'a> {
         };
         Ok(Flow::Value(result))
     }
+
     fn freeze_normal_argument(
         &mut self,
         value: &Value,
@@ -2765,6 +2870,7 @@ impl<'a> Interpreter<'a> {
             )
         })
     }
+
     fn complete_normal_type(
         &mut self,
         head: DeclarationId,
@@ -3048,6 +3154,7 @@ impl<'a> Interpreter<'a> {
         };
         Ok(Flow::Value(value))
     }
+
     fn frozen_constant(
         &mut self,
         value: &Term,
@@ -3070,6 +3177,7 @@ impl<'a> Interpreter<'a> {
         })?;
         self.normal_pattern_value(value, ty)
     }
+
     fn type_constant(
         &mut self,
         ty: &Term,
@@ -3111,13 +3219,16 @@ impl<'a> Interpreter<'a> {
     }
 
     #[inline(never)]
-    fn eval_nominal_type(
+    fn eval_declaration_plan(
         &mut self,
         expr: &Expr,
         environment: &mut Environment,
     ) -> Result<Flow, Error> {
-        let mut frame =
-            nominal_plan::Frame::new(self, input_collection::Plan::borrowed(expr), environment)?;
+        let mut frame = declaration_plan::Frame::new(
+            self,
+            input_collection::Plan::borrowed(expr),
+            environment,
+        )?;
         let result = self.run_type_plan(&mut frame, environment);
         input_collection::InputPlan::cleanup(&frame, environment);
         result
@@ -3131,6 +3242,7 @@ impl<'a> Interpreter<'a> {
         self.literal_constant(literal, &expr.ty, expr.source)
             .map(Flow::Value)
     }
+
     fn literal_constant(
         &mut self,
         literal: &Literal,
@@ -3411,6 +3523,7 @@ impl<'a> Interpreter<'a> {
             Ok(Flow::Value(result))
         })
     }
+
     #[inline(never)]
     fn eval_tuple(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
         self.with_prepared_frame(expr.source, |this| {
@@ -3441,6 +3554,7 @@ impl<'a> Interpreter<'a> {
         self.match_arm_guard_with_bindings(pattern, guard, value, environment)
             .map(|(flow, _)| flow)
     }
+
     fn match_arm_guard_with_bindings(
         &mut self,
         pattern: &nir::program::Pattern,
@@ -4260,6 +4374,7 @@ impl<'a> Interpreter<'a> {
             None => Ok((Default::default(), None)),
         }
     }
+
     fn interface_method_contract(
         &mut self,
         method: comptime_compiler::methods::View<'_>,
@@ -4553,10 +4668,12 @@ impl<'a> Interpreter<'a> {
             context: invocation_context,
         })
     }
+
     #[inline(never)]
     fn eval_call(&mut self, expr: &Expr, environment: &mut Environment) -> Result<Flow, Error> {
         self.eval_call_with_effects(expr, environment, None)
     }
+
     fn eval_call_with_effects(
         &mut self,
         expr: &Expr,
@@ -4735,10 +4852,12 @@ impl fmt::Display for Value {
 #[cfg(test)]
 mod pattern_budget_tests;
 mod pattern_journal;
+
 #[cfg(test)]
 mod pattern_remap_tests;
 mod pattern_structure;
 mod type_patterns;
+
 use pattern_journal::{PatternBindings, PatternJournal};
 
 impl Interpreter<'_> {
@@ -4752,6 +4871,7 @@ impl Interpreter<'_> {
         self.match_pattern_with_bindings(pattern, value, environment)
             .map(|(flow, _)| flow)
     }
+
     fn match_pattern_with_bindings(
         &mut self,
         pattern: &nir::program::Pattern,
@@ -4762,6 +4882,7 @@ impl Interpreter<'_> {
         let flow = self.match_pattern_node(pattern, value, environment, &mut journal)?;
         Ok((flow, journal.bindings))
     }
+
     fn match_pattern_node(
         &mut self,
         pattern: &nir::program::Pattern,
@@ -4778,6 +4899,7 @@ impl Interpreter<'_> {
         }
         result
     }
+
     fn match_pattern_inner(
         &mut self,
         pattern: &nir::program::Pattern,
@@ -4862,6 +4984,7 @@ impl Interpreter<'_> {
         };
         Ok(Flow::Value(Value::Bool(matched)))
     }
+
     #[inline(never)]
     fn match_literal_value(&mut self, literal: &Literal, input: &Value) -> Result<bool, Error> {
         let matched = match literal {
@@ -5270,6 +5393,7 @@ fn scoped_type_value_work(
 ) -> Option<usize> {
     scoped_type_value_work_with_evidence(ty, heads, parameters, &BTreeMap::new())
 }
+
 #[cfg(test)]
 fn scoped_type_value_work_with_evidence(
     ty: &Term,
@@ -6254,6 +6378,7 @@ mod block_continuation_tests {
 #[cfg(test)]
 mod pointer_copy_budget_tests {
     use super::*;
+
     #[test]
     fn pointer_write_proof_uses_live_fuel_before_mutation_and_can_retry() {
         let ty = Term::Tuple(vec![Term::Primitive(Primitive::Bool)]);
@@ -6477,6 +6602,7 @@ mod live_graph_tests {
 #[cfg(test)]
 mod invocation_environment_tests {
     use super::*;
+
     #[test]
     fn failed_capture_preparation_restores_frame_and_can_resume_with_fresh_budget() {
         let package = Package::default();

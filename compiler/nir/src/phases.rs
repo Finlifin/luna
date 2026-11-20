@@ -8,16 +8,21 @@ mod comptime_storage;
 pub(crate) mod contextual;
 mod declarations;
 mod inspection;
+
 pub use inspection::{Inspection, PhaseCheckedPackage};
+
 #[cfg(test)]
 mod inspection_tests;
+
 use crate::member_types;
+
 mod parameters;
 mod storage_cache;
 mod storage_domains;
 mod storage_error;
 mod trait_index;
 mod worklist;
+
 pub use storage_error::StorageError;
 use worklist::{Work, Worklist};
 
@@ -131,6 +136,7 @@ impl ArithmeticObligations {
     pub fn functions(&self) -> &BTreeSet<crate::DeclarationId> {
         &self.functions
     }
+
     pub fn initializers(&self) -> &BTreeSet<(crate::DeclarationId, crate::DeclarationId)> {
         &self.initializers
     }
@@ -152,6 +158,7 @@ impl std::fmt::Display for ArithmeticObligations {
 pub fn validate(package: &Package) -> Result<(), Error> {
     machine_arithmetic_obligations(package).map(|_| ())
 }
+
 /// Full phase traversal, also collecting owners whose bodies/defaults contain
 /// machine arithmetic (including nested closures and patterns).
 pub fn machine_arithmetic_functions(
@@ -238,6 +245,7 @@ struct PhaseContext<'a> {
     callables: declarations::Interfaces<'a>,
     storage_queries: storage_cache::StorageQueries<'a>,
 }
+
 impl<'a> PhaseContext<'a> {
     fn new(package: &'a Package, declarations: &'a declarations::Declarations) -> Self {
         Self {
@@ -1107,7 +1115,10 @@ impl<'a> PhaseContext<'a> {
                             }
                             if !parameter_bindings.is_empty() {
                                 let target = match &callee.kind {
-                                    K::ComptimeFunctionInstance {
+                                    K::PlannedFunctionInstance {
+                                        declaration: id, ..
+                                    }
+                                    | K::ComptimeFunctionInstance {
                                         declaration: id, ..
                                     }
                                     | K::Function(id)
@@ -1557,10 +1568,8 @@ impl<'a> PhaseContext<'a> {
                             }
                             work.push(Work::Expr(condition, false, ct), inspection_fuel)?;
                         }
-                        K::ComptimeFunctionInstance {
-                            declaration,
-                            inputs,
-                        } => {
+                        K::ComptimeFunctionInstance { declaration, .. }
+                        | K::PlannedFunctionInstance { declaration, .. } => {
                             let member = trait_index
                                 .retained_method(package, *declaration, inspection_fuel)
                                 .map_err(|failure| Error::member(expr.source, failure))?;
@@ -1601,8 +1610,51 @@ impl<'a> PhaseContext<'a> {
                                     ));
                                 }
                             }
-                            for input in inputs.expressions().rev() {
-                                work.push(Work::Expr(input, false, true), inspection_fuel)?;
+                            match &expr.kind {
+                                K::ComptimeFunctionInstance { inputs, .. } => {
+                                    for input in inputs.expressions().rev() {
+                                        work.push(Work::Expr(input, false, true), inspection_fuel)?;
+                                    }
+                                }
+                                K::PlannedFunctionInstance {
+                                    arguments, plan, ..
+                                } => {
+                                    if member.is_some() {
+                                        return Err(error(
+                                            "named callable input plan cannot select a trait member",
+                                        ));
+                                    }
+                                    let target =
+                                        callables.source.declaration(declaration).ok_or_else(
+                                            || error("callable input declaration is missing"),
+                                        )?;
+                                    if arguments.len() != target.type_parameters.len() {
+                                        return Err(error(
+                                            "callable declaration input count mismatch",
+                                        ));
+                                    }
+                                    work.extend(
+                                        plan.iter()
+                                            .flat_map(|p| &p.preparations)
+                                            .map(|p| Work::Expr(&p.expression, false, true)),
+                                        inspection_fuel,
+                                    )?;
+                                    work.extend(
+                                        arguments
+                                            .iter()
+                                            .flat_map(|a| a.patterns())
+                                            .map(|p| Work::Pattern(p, true, expr.source)),
+                                        inspection_fuel,
+                                    )?;
+                                    work.extend(
+                                        arguments
+                                            .iter()
+                                            .flat_map(|a| a.expressions())
+                                            .map(|e| Work::Expr(e, false, true)),
+                                        inspection_fuel,
+                                    )?;
+                                }
+                                _ => unreachable!(),
                             }
                         }
                         K::BuildStruct(value)
@@ -2092,6 +2144,7 @@ pub fn validate_comptime_storage_with_layouts(
 
 type NominalStorageResolver<'a> =
     Option<&'a dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, StorageError>>;
+
 fn validate_runtime_storage_inner(
     ty: &Term,
     package: &Package,

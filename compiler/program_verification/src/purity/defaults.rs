@@ -25,6 +25,7 @@ fn stable_pattern(pattern: &n::Pattern) -> bool {
         _ => true,
     }
 }
+
 pub fn copy_scalar(ty: &Term) -> bool {
     match ty {
         Term::Primitive(
@@ -60,9 +61,11 @@ pub fn copy_scalar(ty: &Term) -> bool {
         _ => false,
     }
 }
+
 fn stable_observation(expr: &n::Expr) -> bool {
     copy_scalar(&expr.ty) && stable_default(expr)
 }
+
 // A later constructor field must not fail after an earlier owned field was
 // acquired: that would execute hidden partial-construction cleanup. Until the
 // general totality prover supplies evidence, use this finite infallible subset.
@@ -120,6 +123,7 @@ fn total_default_field(expr: &n::Expr) -> bool {
         _ => false,
     }
 }
+
 pub fn stable_default(expr: &n::Expr) -> bool {
     match &expr.kind {
         K::Literal(n::Literal::String(_)) => return expr.ty == p(P::Str),
@@ -280,6 +284,7 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::EnumStructure { .. }
         | K::ObjectQuery { .. }
         | K::ObjectEdit { .. }
+        | K::PlannedFunctionInstance { .. }
         | K::ComptimeFunctionInstance { .. }
         | K::StructFieldNames(_)
         | K::ListConcat(..)

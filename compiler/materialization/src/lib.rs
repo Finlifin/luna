@@ -1,9 +1,12 @@
 //! Compile-time closure of concrete function/interface dependencies. Templates
 //! stay in NIR; only fixed selections are exported to the execution table.
 mod associated_selection;
+
 #[cfg(test)]
 mod callable_tests;
+
 pub use associated_selection::resolve_associated_value_for_invocation;
+
 mod captured_templates;
 mod conditional_calls;
 mod dead_tails;
@@ -12,17 +15,22 @@ mod mutable_callbacks;
 mod publication;
 mod query_budget;
 mod source_queries;
+
 pub use source_queries::{
     AssociatedAnswer, SelectedSourceRequest, SourceInvocationQueries, check_world_predicate,
     resolve_method_for_invocation,
 };
+
 mod recursive_factories;
 mod staged;
 mod template_factories;
+
 use crate::ptc::{Budget, Context};
 use type_resolution::{associated, capabilities, ptc};
+
 mod dispatch_function;
 mod expansion;
+
 pub use expansion::Expansion;
 use nir::program::{self as n, ExprKind as K, Pattern as P};
 use nir::{DeclarationId as Id, Term};
@@ -95,6 +103,7 @@ enum Task {
     Interface(n::InterfaceInstance, Term),
     Type(Term),
 }
+
 struct Builder<'a> {
     expansion: Option<&'a dyn Expansion>,
     quote_cursor: u32,
@@ -137,6 +146,7 @@ struct Builder<'a> {
     )>,
     active_closure_scopes: Vec<BTreeSet<n::LocalId>>,
 }
+
 /// Bounded, transactional: failure returns no partially materialized world.
 pub fn dispatch_instances(
     package: &n::Package,
@@ -153,6 +163,7 @@ pub fn dispatch_instances(
     )
     .map(|result| result.dispatch)
 }
+
 /// Prepare transitive dispatch dependencies of explicit entry points and the
 /// parent/capability closure of concrete implementations retained by the NIR VM.
 /// Unrelated function bodies remain unvisited.
@@ -253,13 +264,17 @@ pub fn resolve_method_identity_in_context(
 /// code, selecting bodies or publishing an executable instance. Unresolved
 /// definition-side projections remain views; opaque heads retain identity.
 struct StagingAnnotationRewriter<F>(F);
+
 impl<F: FnMut(&Term) -> Result<Term, String>> n::Rewriter for StagingAnnotationRewriter<F> {
     const SPECIALIZE: bool = true;
+
     type Error = String;
+
     fn ty(&mut self, ty: &mut Term) -> Result<(), String> {
         *ty = (self.0)(ty)?;
         Ok(())
     }
+
     fn expression(&mut self, expression: &mut n::Expr) -> Result<bool, String> {
         // An interface reference retains the declaration-side signature. Its
         // associated result is normalized on the enclosing call, not erased
@@ -373,6 +388,7 @@ pub fn dispatch_instances_in_context(
         }
     }
 }
+
 /// Materialize an explicit set of function instances. Failure publishes no
 /// partial graph; recursive calls reuse the same instance identity.
 pub fn instantiate(
@@ -585,6 +601,7 @@ enum Roots<'a> {
     Method(&'a n::Expr, &'a mut Option<n::MethodInstance>),
     QuoteMethod(&'a n::Expr, &'a mut Option<n::MethodInstance>),
 }
+
 // The immutable type arena belongs to the entire materialization, including
 // the storage pass that runs after dependency discovery. Analysis-only callers
 // discard this private result; no active inference state is retained here.
@@ -915,6 +932,7 @@ fn build(
         type_cores: builder.type_cores,
     })
 }
+
 impl Builder<'_> {
     fn tick(&mut self, depth: usize) -> Result<(), String> {
         if depth >= self.budget.max_depth.min(128) || self.fuel == 0 {
@@ -923,9 +941,11 @@ impl Builder<'_> {
         self.fuel -= 1;
         Ok(())
     }
+
     fn input_binders(&self, parameters: &[Id]) -> Vec<nir::DeclarationParameter> {
         self.world.input_binders(parameters)
     }
+
     fn function(&mut self, id: Id, arguments: Vec<Term>) -> Result<(), String> {
         // Dispatch-only traversal can encounter ever-growing generic recursion
         // even when argument types do not occur in the function signature.
@@ -1377,6 +1397,7 @@ impl Builder<'_> {
         }
         Ok(slot)
     }
+
     fn specialize_method(
         &mut self,
         slot: usize,
@@ -1458,6 +1479,7 @@ impl Builder<'_> {
         }
         Ok(method)
     }
+
     fn predicate_dependencies(
         &mut self,
         predicate: &n::TypePredicate,
@@ -1494,6 +1516,7 @@ impl Builder<'_> {
         }
         Ok(())
     }
+
     fn prove_requirement(
         &mut self,
         requirement: &n::TypePredicate,
@@ -1509,6 +1532,7 @@ impl Builder<'_> {
             world.check_predicate_metered(requirement, budget)
         })
     }
+
     fn callable_formation(
         &mut self,
         formation: nir::callable_source::Formation<'_>,
@@ -1538,6 +1562,7 @@ impl Builder<'_> {
         }
         Ok(())
     }
+
     fn formation_requirement(&mut self, requirement: &n::TypePredicate) -> Result<(), String> {
         self.tick(0)?;
         if self.instances.is_none() {
@@ -1554,6 +1579,7 @@ impl Builder<'_> {
         }
         Ok(())
     }
+
     fn normalize_method_contract(&mut self, method: &mut n::MethodContract) -> Result<(), String> {
         method.signature = self
             .normalized_type(method.signature.ordinary().map_err(|e| e.to_string())?)?
@@ -1577,6 +1603,7 @@ impl Builder<'_> {
         }
         Ok(())
     }
+
     fn normalize_expression(&mut self, expression: &mut n::Expr) -> Result<(), String> {
         // Private working copies are discarded on any failure. Selected values
         // are substituted before dependency discovery, including nested patterns.
@@ -2387,6 +2414,7 @@ impl Builder<'_> {
         }
         Ok(true)
     }
+
     fn check_expanded_requirements(
         &mut self,
         function: &n::Function,
@@ -2925,6 +2953,7 @@ impl Builder<'_> {
             )?,
         })
     }
+
     fn normalized_predicate(
         &mut self,
         predicate: &n::TypePredicate,
@@ -2954,6 +2983,7 @@ impl Builder<'_> {
             }
         })
     }
+
     fn admit_nominal_index(&mut self, input: &Term) -> Result<bool, String> {
         let Term::NominalValue { ty, .. } = input else {
             return Ok(false);
@@ -2990,6 +3020,7 @@ impl Builder<'_> {
             "interface value input normalization requires domain evidence: {input}"
         ))
     }
+
     fn retain_associated_supply(
         &mut self,
         slot: usize,
@@ -3053,6 +3084,7 @@ impl Builder<'_> {
             .normalized_type(ty, self.budget, &mut self.fuel)
             .map_err(String::from)
     }
+
     fn staging_term_view(&mut self, term: &Term) -> Result<Term, String> {
         let mut budget = Budget {
             steps: self.fuel,
@@ -3595,6 +3627,7 @@ impl Builder<'_> {
         self.queue.extend(children.into_iter().map(Task::Type));
         Ok(())
     }
+
     fn pattern(&mut self, pattern: &P, depth: usize, comptime: bool) -> Result<(), String> {
         self.tick(depth)?;
         match pattern {
@@ -3636,6 +3669,7 @@ impl Builder<'_> {
         }
         Ok(())
     }
+
     fn expr(&mut self, expr: &n::Expr, depth: usize, comptime: bool) -> Result<(), String> {
         // Ordinary operation children use a heap frontier. Preserve preorder,
         // type dependencies and semantic depth, without retaining the large
@@ -4011,12 +4045,20 @@ impl Builder<'_> {
                 }
                 self.expr(body, depth + 1, comptime)?;
             }
-            K::NormalFormType {
+            K::PlannedFunctionInstance {
+                arguments, plan, ..
+            }
+            | K::NormalFormType {
                 arguments, plan, ..
             }
             | K::ApplyNormalForm {
                 arguments, plan, ..
             } => {
+                if matches!(expr.kind, K::PlannedFunctionInstance { .. })
+                    && self.instances.is_some()
+                {
+                    return Err("contextual callable inputs require comptime execution before IIR instantiation".into());
+                }
                 if let K::ApplyNormalForm { callee, .. } = &expr.kind {
                     self.expr(callee, depth + 1, comptime)?;
                 }

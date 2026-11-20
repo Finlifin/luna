@@ -4,12 +4,15 @@ use nir::program::{NormalFormInputPlan, Place};
 use std::cell::RefCell;
 
 const SOURCE: SourceRange = SourceRange { start: 4, end: 9 };
+
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 94, local }
 }
+
 fn local(index: u32) -> LocalId {
     LocalId { owner: 94, index }
 }
+
 fn expression(ty: Term, kind: K) -> Expr {
     Expr {
         ty,
@@ -25,18 +28,22 @@ struct Observed<S> {
     queries: RefCell<Vec<usize>>,
     bindings: Vec<usize>,
 }
+
 impl<S: Source> fmt::Display for Observed<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.inner.fmt(f)
     }
 }
+
 impl<S: Source> Source for Observed<S> {
     fn plan(&self) -> &input_collection::Plan<'_> {
         self.inner.plan()
     }
+
     fn substitutions(&self) -> Option<&input_bindings::Bindings> {
         self.inner.substitutions()
     }
+
     fn pending_inputs(
         &self,
         vm: &mut Interpreter<'_>,
@@ -45,9 +52,11 @@ impl<S: Source> Source for Observed<S> {
         self.queries.borrow_mut().push(slot);
         self.inner.pending_inputs(vm, slot)
     }
+
     fn expected(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Term, Error> {
         self.inner.expected(vm, slot)
     }
+
     fn check_input(
         &self,
         vm: &mut Interpreter<'_>,
@@ -59,18 +68,22 @@ impl<S: Source> Source for Observed<S> {
         self.inner
             .check_input(vm, slot, operand, substitutions, expected)
     }
+
     fn bind(&mut self, vm: &mut Interpreter<'_>, slot: usize, value: Value) -> Result<(), Error> {
         self.inner.bind(vm, slot, value)?;
         self.bindings.push(slot);
         Ok(())
     }
+
     fn complete(&mut self, vm: &mut Interpreter<'_>) -> Result<Progress, Error> {
         self.inner.complete(vm)
     }
+
     fn cleanup(&self, env: &mut Environment) {
         self.inner.cleanup(env);
     }
 }
+
 fn observed<S: Source>(source: S) -> Frame<Observed<S>> {
     Frame::from_source(Observed {
         inner: source,
@@ -78,6 +91,7 @@ fn observed<S: Source>(source: S) -> Frame<Observed<S>> {
         bindings: vec![],
     })
 }
+
 fn run<S: Source>(
     frame: &mut Frame<S>,
     vm: &mut Interpreter<'_>,
@@ -253,7 +267,7 @@ fn only_observed_completions_recheck_nominal_and_normal_domains() {
             let locals = Plan::borrowed(&nominal)
                 .admit_scope(&mut vm, &Environment::new())
                 .unwrap();
-            let source = nominal_inputs::Source::new(
+            let source = declaration_inputs::Source::new(
                 input_collection::Plan::borrowed(&nominal),
                 parameters.clone(),
                 domains.clone(),
@@ -327,7 +341,7 @@ fn transitive_completions_wake_dependents_and_cycles_remain_unresolved() {
             let locals = Plan::borrowed(&input)
                 .admit_scope(&mut vm, &Environment::new())
                 .unwrap();
-            let source = nominal_inputs::Source::new(
+            let source = declaration_inputs::Source::new(
                 input_collection::Plan::borrowed(&input),
                 parameters.clone(),
                 domains,

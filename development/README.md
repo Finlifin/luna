@@ -58,7 +58,7 @@
 | 类型与跨阶段值 | 闭合 TypeRef 有 IIR 消费者；comptime 调用结果可通过已选择的 Splice 交付 runtime 值 | 有洞类型需要带域的环境计划；普通参数的异构交付仍有缺口。[类型引用](type-references-and-environments.md) · [跨阶段值交付](runtime-value-delivery.md) |
 | 六包与可执行产物 | Linux 上已有文件、字节 I/O、Layout、逐字段检查 Display 的异构变参 println；luna 提供 build、fmt 与 lsp 入口 | runtime 文本的内存来源、分配与更多 Display 实现仍待接通。[标准库演示](std-host-foundation.md) |
 
-当前可复现的断点是 `type_input_execution_order` 中的三条路径。域已知时可在两种执行入口观察写入顺序、早退和旧值；将域改为普通调用 `Byte()` 后，检查器在列表文字处索取尚未取得的上下文。这批结果界定的是源码和 VM 的接口缺口。P3 证明、资源检查与求解器模型各有自己的交付条件。[用例与复现命令](audit-reply.md#一次调用内的恢复)
+普通 comptime 函数的子句实参可以等待后序调用交付的 Type。列表之前的写入在原位执行，提前 return 会跳过余下实参和函数体。公开签名本身也依赖该 Type 时，源码检查器仍缺少恢复路径，见 `computed_type_wait_preserves_earlier_value_before_later_write`。[用例与复现命令](audit-reply.md#一次调用内的恢复)
 
 ## 开发入口
 

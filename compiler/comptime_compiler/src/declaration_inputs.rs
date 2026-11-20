@@ -17,6 +17,7 @@ pub enum Target<S, I, B> {
         input_ids: I,
     },
     Nominal(DeclarationId),
+    Callable(DeclarationId),
     Alias {
         declaration: DeclarationId,
         body: Option<B>,
@@ -44,6 +45,7 @@ impl<'a> PlanView<'a> {
                 signature: &callee.ty,
                 input_ids: input_ids.as_slice(),
             },
+            K::PlannedFunctionInstance { declaration, .. } => Target::Callable(*declaration),
             K::NominalType { declaration, .. } => Target::Nominal(*declaration),
             K::CheckTypeAlias {
                 declaration, body, ..
@@ -111,6 +113,7 @@ impl DeclarationInputPlan {
         let target = match view.target {
             Target::Normal(id) => Target::Normal(id),
             Target::Nominal(id) => Target::Nominal(id),
+            Target::Callable(id) => Target::Callable(id),
             Target::Selected {
                 signature,
                 source,
@@ -148,6 +151,7 @@ impl DeclarationInputPlan {
         let target = match &self.target {
             Target::Normal(id) => Target::Normal(*id),
             Target::Nominal(id) => Target::Nominal(*id),
+            Target::Callable(id) => Target::Callable(*id),
             Target::Selected {
                 signature,
                 source,
@@ -178,6 +182,7 @@ impl DeclarationInputPlan {
     pub fn inputs_diverge(&self) -> bool {
         self.inputs_diverge
     }
+
     pub fn locals(&self) -> &Arc<[LocalId]> {
         &self.locals
     }
@@ -193,6 +198,7 @@ impl fmt::Display for PlanView<'_> {
         match self.target {
             Target::Normal(id) => write!(f, "(normal {id})")?,
             Target::Nominal(id) => write!(f, "(nominal {id})")?,
+            Target::Callable(id) => write!(f, "(callable {id})")?,
             Target::Alias { declaration, body } => {
                 write!(f, "(alias {declaration}")?;
                 if let Some(body) = body {

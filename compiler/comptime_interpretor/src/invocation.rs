@@ -1,14 +1,18 @@
 //! Invocation admission, owned frame state, delivery and caller restoration.
 //! These boundaries are shared by the migration interpreter and linear bodies.
 use super::*;
+
 mod admitted;
+
 pub use admitted::AdmittedCall;
+
 mod contracts;
 pub(super) mod definition_host;
 pub(super) mod host;
 pub(super) mod method_host;
 mod session;
 mod target;
+
 use session::Session;
 use target::Target;
 
@@ -16,6 +20,7 @@ pub(super) enum Body<'a> {
     Package(&'a Expr),
     Owned(Arc<Expr>),
 }
+
 impl Body<'_> {
     pub(super) fn expression(&self) -> &Expr {
         match self {
@@ -24,6 +29,7 @@ impl Body<'_> {
         }
     }
 }
+
 impl fmt::Display for Body<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -143,6 +149,7 @@ struct PlanActivation<'a> {
     frame: Box<dyn input_collection::InputPlan + 'a>,
     environment: Environment,
 }
+
 impl<'a> PlanActivation<'a> {
     fn complete(mut self, flow: Result<Flow, Error>) -> Completion<'a> {
         self.frame.cleanup(&mut self.environment);
@@ -152,10 +159,12 @@ impl<'a> PlanActivation<'a> {
         }
     }
 }
+
 enum StackEntry<'a> {
     Code(StackContext<'a>, bytecode::Frame),
     Plan(Box<PlanActivation<'a>>),
 }
+
 impl StackEntry<'_> {
     fn code(&mut self) -> Option<&mut bytecode::Frame> {
         match self {
@@ -236,6 +245,7 @@ impl<'a> Interpreter<'a> {
             .run()?
             .ok_or_else(|| self.failure(ErrorKind::InvalidControlFlow, None))
     }
+
     fn start_type_plan(
         &mut self,
         plan: input_collection::Plan<'a>,
@@ -247,18 +257,18 @@ impl<'a> Interpreter<'a> {
             Target::Normal(_) | Target::Selected { .. } => Ok(Box::new(
                 normal_plan::Frame::application(self, plan, environment, selected)?,
             )),
-            Target::Nominal(_) | Target::Alias { .. } => {
-                Ok(Box::new(nominal_plan::Frame::new(self, plan, environment)?))
-            }
+            Target::Callable(_) | Target::Nominal(_) | Target::Alias { .. } => Ok(Box::new(
+                declaration_plan::Frame::new(self, plan, environment)?,
+            )),
         }
     }
 
     /// None means all inputs are ready for declaration admission. A flow is an
     /// early transfer, never a fabricated value standing in for the input list.
     #[cfg(test)]
-    pub(super) fn run_nominal_inputs(
+    pub(super) fn run_declaration_inputs(
         &mut self,
-        frame: &mut nominal_inputs::Frame<'_>,
+        frame: &mut declaration_inputs::Frame<'_>,
         environment: &mut Environment,
     ) -> Result<Option<Flow>, Error> {
         Session::plan(self, frame, environment).run()
@@ -851,6 +861,7 @@ mod tests {
         assert_eq!(vm.effect_state.invocation, 5);
         assert_eq!(vm.effect_state.next_identity, 11);
     }
+
     #[test]
     fn prepared_closure_survives_nested_failed_delivery() {
         let package = Package::default();

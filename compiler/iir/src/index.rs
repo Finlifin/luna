@@ -151,12 +151,19 @@ impl CallableLinks<'_> {
         }
         Ok(())
     }
+
     fn validate_clause(
         &self,
         expr: &nir::program::Expr,
         comptime: bool,
         fuel: &mut usize,
     ) -> Result<(), String> {
+        if matches!(
+            expr.kind,
+            nir::program::ExprKind::PlannedFunctionInstance { .. }
+        ) {
+            return Err("IIR contains a source callable with unresolved clause inputs".into());
+        }
         let nir::program::ExprKind::ComptimeFunctionInstance {
             declaration,
             inputs,
@@ -182,6 +189,7 @@ impl CallableLinks<'_> {
         Ok(())
     }
 }
+
 impl Package {
     pub fn validate_index(&self) -> Result<(), String> {
         self.validate_index_with_budget(&mut 100_000)
@@ -456,16 +464,19 @@ fn spend(fuel: &mut usize, work: usize) -> Result<(), String> {
     *fuel = fuel.checked_sub(work).ok_or("IIR index budget exhausted")?;
     Ok(())
 }
+
 fn term(value: &Term, fuel: &mut usize) -> Result<(), String> {
     nir::type_computations::charge_term(value, fuel)
         .map_err(|e| format!("IIR index key budget: {e}"))
 }
+
 pub(super) fn terms(values: &[Term], fuel: &mut usize) -> Result<(), String> {
     for value in values {
         term(value, fuel)?;
     }
     Ok(())
 }
+
 fn key(value: &InstanceKey, fuel: &mut usize) -> Result<(), String> {
     spend(fuel, 1)?;
     terms(&value.arguments, fuel)

@@ -1,4 +1,4 @@
-//! Nominal/alias input policies over the shared invocation scheduler.
+//! Named declaration input policies over the shared invocation scheduler.
 use super::*;
 use nir::program::NormalFormArgument as A;
 
@@ -7,7 +7,7 @@ pub(super) struct Source<'e> {
     specialize: bool,
     parameters: Vec<nir::DeclarationParameter>,
     domains: Vec<Term>,
-    alias: bool,
+    check_annotation: bool,
     locals: Arc<[LocalId]>,
     completed: input_bindings::Bindings,
 }
@@ -18,8 +18,8 @@ impl fmt::Display for Source<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(nominal-input-source (alias {}) {})",
-            self.alias, self.completed
+            "(declaration-input-source (check-annotation {}) {})",
+            self.check_annotation, self.completed
         )
     }
 }
@@ -34,6 +34,7 @@ impl<'e> Frame<'e> {
     ) -> Self {
         Self::from_source(Source::new(plan, parameters, domains, specialize, locals))
     }
+
     pub fn finish(self) -> Option<Vec<Term>> {
         self.source.completed.finish()
     }
@@ -50,13 +51,17 @@ impl<'e> Source<'e> {
         Self {
             locals,
             specialize,
-            alias: matches!(plan.view().target, input_collection::Target::Alias { .. }),
+            check_annotation: matches!(
+                plan.view().target,
+                input_collection::Target::Alias { .. } | input_collection::Target::Callable(_)
+            ),
             completed: input_bindings::Bindings::admitted(parameters.iter().map(|p| p.declaration)),
             plan,
             parameters,
             domains,
         }
     }
+
     fn domain(&self, slot: usize) -> &Term {
         self.domains
             .get(slot)
@@ -68,9 +73,11 @@ impl input_collection::Source for Source<'_> {
     fn plan(&self) -> &input_collection::Plan<'_> {
         &self.plan
     }
+
     fn substitutions(&self) -> Option<&input_bindings::Bindings> {
         self.specialize.then_some(&self.completed)
     }
+
     fn pending_inputs(
         &self,
         vm: &mut Interpreter<'_>,
@@ -79,10 +86,12 @@ impl input_collection::Source for Source<'_> {
         self.completed
             .pending_inputs(vm, self.domain(slot), self.input(slot).source())
     }
+
     fn expected(&self, vm: &mut Interpreter<'_>, slot: usize) -> Result<Term, Error> {
         self.completed
             .instantiate(vm, self.domain(slot), self.input(slot).source())
     }
+
     fn check_input(
         &self,
         vm: &mut Interpreter<'_>,
@@ -93,13 +102,13 @@ impl input_collection::Source for Source<'_> {
     ) -> Result<(), Error> {
         let type_slot = self.parameters[slot].sort == nir::Sort::Type;
         if let A::Value(value) = operand
-            && (type_slot || self.alias && expected.is_some())
+            && (type_slot || self.check_annotation && expected.is_some())
         {
             let ty = input_domains::annotation(vm, bindings, &value.ty, value.source)?;
             if type_slot && !matches!(*ty, Term::Primitive(Primitive::Type | Primitive::Never)) {
                 return Err(vm.failure(ErrorKind::Type, Some(value.source)));
             }
-            if self.alias
+            if self.check_annotation
                 && let Some(expected) = expected
                 && *ty != *expected
                 && *ty != Term::Primitive(Primitive::Never)
@@ -109,6 +118,7 @@ impl input_collection::Source for Source<'_> {
         }
         Ok(())
     }
+
     fn bind(&mut self, vm: &mut Interpreter<'_>, slot: usize, value: Value) -> Result<(), Error> {
         let source = self.input(slot).source();
         let domain = self
@@ -124,12 +134,14 @@ impl input_collection::Source for Source<'_> {
             source,
         )
     }
+
     fn complete(&mut self, vm: &mut Interpreter<'_>) -> Result<input_collection::Progress, Error> {
         if self.completed.len() != self.inputs().0.len() {
             return Err(vm.failure(ErrorKind::Type, Some(self.plan.view().source)));
         }
         Ok(input_collection::Progress::InputsComplete)
     }
+
     fn cleanup(&self, environment: &mut Environment) {
         for binding in self.locals.iter() {
             environment.remove(binding);
@@ -217,7 +229,7 @@ mod tests {
                     true,
                     locals,
                 );
-                let result = vm.run_nominal_inputs(&mut frame, &mut environment);
+                let result = vm.run_declaration_inputs(&mut frame, &mut environment);
                 if spelling == "256" {
                     assert!(
                         result.is_err(),
@@ -335,7 +347,7 @@ mod tests {
         );
         let mut frame = Box::new(frame);
         assert!(
-            vm.run_nominal_inputs(&mut frame, &mut environment)
+            vm.run_declaration_inputs(&mut frame, &mut environment)
                 .unwrap()
                 .is_none()
         );

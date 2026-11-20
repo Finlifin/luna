@@ -158,7 +158,10 @@ impl<'a> CheckedInputSchedule<'a> {
 impl ExprKind {
     pub fn declaration_inputs(&self) -> Option<(&[NormalFormArgument], InputSchedule<'_>)> {
         match self {
-            Self::NormalFormType {
+            Self::PlannedFunctionInstance {
+                arguments, plan, ..
+            }
+            | Self::NormalFormType {
                 arguments, plan, ..
             }
             | Self::ApplyNormalForm {

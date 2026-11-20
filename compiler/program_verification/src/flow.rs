@@ -3,6 +3,7 @@
 //! verifier. Unsupported constructs return an explicit analysis limitation.
 mod bit_indices;
 mod copies;
+
 #[cfg(test)]
 mod declaration_tests;
 mod error_results;
@@ -15,6 +16,7 @@ mod operators;
 mod paths;
 mod patterns;
 mod stores;
+
 use paths::{Component, FieldPath, Projection, record_path};
 
 use super::{
@@ -38,6 +40,7 @@ pub struct Report {
     pub points: Vec<Point>,
     pub exit: Facts,
 }
+
 pub struct Point {
     pub source: SourceRange,
     pub kind: PointKind,
@@ -49,6 +52,7 @@ pub struct Point {
     aggregate_snapshots: BTreeMap<PlaceId, Value>,
     field_paths: BTreeMap<FieldPath, ValueId>,
 }
+
 /// Optional proof queries use an explicit caller budget, independently of the
 /// mandatory arithmetic analysis. Unknown leaves the executable check intact.
 pub struct CheckInput {
@@ -58,11 +62,13 @@ pub struct CheckInput {
     pub condition: Condition,
     pub facts: Facts,
 }
+
 impl CheckInput {
     pub fn prove(&self, limits: &mut Limits) -> Result<super::PredicateProof, Unknown> {
         self.facts.prove_condition(&self.condition, true, limits)
     }
 }
+
 impl fmt::Display for CheckInput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -82,11 +88,13 @@ pub enum PointKind {
     BitIndex,
     BitWindow,
 }
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct Error {
     pub source: SourceRange,
     pub reason: Reason,
 }
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Reason {
     Unknown(Unknown),
@@ -102,6 +110,7 @@ pub enum Reason {
     Phase(&'static str),
     IntegerFormation(String),
 }
+
 // Declaration structure errors reject the interface; exhausted inspection
 // supplies no conclusion about its validity or the program contract.
 fn declaration_failure(error: nir::type_computations::Error) -> Reason {
@@ -165,6 +174,7 @@ impl fmt::Display for Error {
         f.write_str("))")
     }
 }
+
 impl fmt::Display for Report {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(program-flow (points")?;
@@ -174,6 +184,7 @@ impl fmt::Display for Report {
         write!(f, ") (exit {}))", self.exit)
     }
 }
+
 impl fmt::Display for Point {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -217,14 +228,19 @@ impl fmt::Display for Point {
         f.write_str("))")
     }
 }
+
 type ChangedPlaces = BTreeSet<(LocalId, Vec<(nir::program::FieldOwner, usize)>)>;
+
 type InvariantLoads<'a> = Option<(&'a State, &'a ChangedPlaces)>;
+
 type InputPointerPlaces = BTreeMap<(usize, Vec<usize>), Vec<nir::program::Place>>;
+
 #[derive(Clone)]
 enum PointerOrigin {
     Local(nir::program::Place),
     External(Projection),
 }
+
 impl PointerOrigin {
     fn path_len(&self) -> usize {
         match self {
@@ -232,12 +248,14 @@ impl PointerOrigin {
             Self::External(p) => p.path.fields.len(),
         }
     }
+
     fn current(&self, state: &State) -> bool {
         match self {
             Self::Local(_) => true,
             Self::External(p) => state.facts.value(p.path.root) == Some(p.root_version),
         }
     }
+
     fn project(&mut self, fields: &[(nir::program::FieldOwner, usize)]) {
         match self {
             Self::Local(place) => place.fields.extend_from_slice(fields),
@@ -245,6 +263,7 @@ impl PointerOrigin {
         }
     }
 }
+
 impl fmt::Display for PointerOrigin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -253,6 +272,7 @@ impl fmt::Display for PointerOrigin {
         }
     }
 }
+
 #[derive(Default)]
 struct Value {
     // Mathematical Integer can carry scalar facts without a finite interval.
@@ -272,6 +292,7 @@ struct Value {
     aggregate_kind: Option<AggregateKind>,
     nominal_type: Option<std::sync::Arc<Term>>,
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum AggregateKind {
     AnonymousRecord,
@@ -284,6 +305,7 @@ enum AggregateKind {
     ErrorResult(usize),
     ErrorTag,
 }
+
 impl fmt::Display for AggregateKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -299,10 +321,12 @@ impl fmt::Display for AggregateKind {
         }
     }
 }
+
 enum Scalar {
     Local(ValueId),
     Constant(Integer),
 }
+
 struct State {
     target: Option<nir::target::TargetData>,
     frame: u64,
@@ -318,6 +342,7 @@ struct State {
     // Copy-time pointer identities. Both binding versions must still match.
     read_aliases: BTreeMap<PlaceId, (FieldPath, ValueId, ValueId)>,
 }
+
 impl State {
     fn fork(&self, limits: &mut Limits) -> Result<Self, Unknown> {
         limits.step(self.frozen.len())?;
@@ -339,6 +364,7 @@ impl State {
             read_aliases: self.read_aliases.clone(),
         })
     }
+
     fn charge_read_paths(&self, limits: &mut Limits) -> Result<(), Unknown> {
         for (path, _, _) in self.read_aliases.values() {
             limits.step(path.fields.len().saturating_add(1))?;
@@ -348,14 +374,17 @@ impl State {
         }
         Ok(())
     }
+
     fn forget_reads(&mut self, limits: &mut Limits) -> Result<(), Unknown> {
         limits.step(self.reads.len())?;
         self.reads.clear();
         Ok(())
     }
+
     fn havoc(&mut self, limits: &mut Limits) -> Result<(), Unknown> {
         self.havoc_with_private_scalars(None, limits)
     }
+
     fn havoc_with_private_scalars(
         &mut self,
         addressed: Option<&BTreeSet<LocalId>>,
@@ -364,6 +393,7 @@ impl State {
         self.havoc_with_retained_reads(addressed, BTreeMap::new(), limits)
     }
 }
+
 /// Conservative entry stability for a repeatedly callable environment. This
 /// is a program-state footprint, independent of trait/type proposition solving.
 fn mutable_capture_paths(
@@ -510,12 +540,14 @@ fn direct_pointer_place(
 ) -> Result<Option<nir::program::Place>, String> {
     syntactic_place(expr, fuel, true)
 }
+
 fn field_owner_kind(owner: nir::program::FieldOwner) -> AggregateKind {
     match owner {
         nir::program::FieldOwner::Nominal(id) => AggregateKind::Record(id),
         nir::program::FieldOwner::Anonymous => AggregateKind::AnonymousRecord,
     }
 }
+
 fn syntactic_place(
     expr: &Expr,
     fuel: &mut usize,
@@ -579,9 +611,11 @@ fn syntactic_place(
     }
     Ok(None)
 }
+
 fn domain(ty: &Term, limits: &mut Limits) -> Result<Option<Interval>, Unknown> {
     domain_in(ty, None, limits)
 }
+
 fn domain_in(
     ty: &Term,
     target: Option<nir::target::TargetData>,
@@ -616,6 +650,7 @@ fn domain_in(
         .map(|(signed, width)| Interval::machine(width as u16, signed, limits))
         .transpose()
 }
+
 fn hull(a: &Interval, b: &Interval, limits: &mut Limits) -> Result<Interval, Unknown> {
     let lower = if limits.compare(a.lower(), b.lower())?.is_lt() {
         a.lower()
@@ -629,6 +664,7 @@ fn hull(a: &Interval, b: &Interval, limits: &mut Limits) -> Result<Interval, Unk
     };
     Interval::new(limits.integer(lower)?, limits.integer(upper)?, limits)
 }
+
 fn bind(
     state: &mut State,
     local: LocalId,
@@ -638,6 +674,7 @@ fn bind(
 ) -> Result<(), Unknown> {
     bind_place(state, place(local), ty, bound, limits)
 }
+
 fn bind_place(
     state: &mut State,
     place: PlaceId,
@@ -698,6 +735,7 @@ pub fn analyze(function: &Function, limits: &mut Limits) -> Result<Report, Error
         true,
     )
 }
+
 pub fn analyze_in_package(
     package: &nir::program::Package,
     function: &Function,
@@ -784,6 +822,7 @@ pub fn validate_residual_contracts(
     }
     Ok(())
 }
+
 /// Prove entry predicates imply the listed conclusions in the same parameter
 /// state. No executable body, return value or exit snapshot is manufactured.
 /// Preconditions and conclusions must already be checked program predicates.
@@ -1089,6 +1128,7 @@ struct ExitContract<'a> {
     binding: Option<LocalId>,
     ty: &'a Term,
 }
+
 struct CallMemoryPlan {
     writes: Vec<(nir::program::Place, Term)>,
     returned: Option<Vec<nir::program::Place>>,
@@ -1098,11 +1138,13 @@ enum SummaryCacheStorage<'a> {
     Owned(super::memory::SummaryCache),
     Borrowed(&'a mut super::memory::SummaryCache),
 }
+
 impl Default for SummaryCacheStorage<'_> {
     fn default() -> Self {
         Self::Owned(Default::default())
     }
 }
+
 impl SummaryCacheStorage<'_> {
     fn as_ref(&self) -> &super::memory::SummaryCache {
         match self {
@@ -1110,27 +1152,32 @@ impl SummaryCacheStorage<'_> {
             Self::Borrowed(cache) => cache,
         }
     }
+
     fn as_mut(&mut self) -> &mut super::memory::SummaryCache {
         match self {
             Self::Owned(cache) => cache,
             Self::Borrowed(cache) => cache,
         }
     }
+
     #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.as_ref().is_empty()
     }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.as_ref().len()
     }
 }
+
 struct MachineOwnerCache<'a> {
     source: type_resolution::dispatch::DeclarationSource<'a>,
     declarations: std::rc::Rc<crate::declarations::Metadata<'a>>,
     method_callees: super::memory::MethodCallees,
     memory_summaries: super::memory::SummaryCache,
 }
+
 impl<'a> MachineOwnerCache<'a> {
     fn new(
         package: &'a nir::program::Package,
@@ -1180,10 +1227,12 @@ struct Walker<'a> {
     closure_context: Vec<SourceRange>,
     single_pass_exits: BTreeMap<LocalId, Vec<State>>,
 }
+
 impl Walker<'_> {
     fn target(&self) -> Option<nir::target::TargetData> {
         self.package.and_then(|package| package.target)
     }
+
     fn integer_layout(&self, primitive: nir::Primitive) -> Option<(bool, u32)> {
         self.target().map_or_else(
             || primitive.fixed_integer_layout(),
@@ -1336,9 +1385,11 @@ impl Walker<'_> {
             .filter(|view| matches!(view, Term::Primitive(_)))
             .unwrap_or_else(|| ty.clone()))
     }
+
     fn external_read_path(&mut self, pointer: &Expr) -> Result<Option<FieldPath>, Reason> {
         Ok(external_read_path(pointer, self.limits)?)
     }
+
     fn aliased_read_path(
         &mut self,
         pointer: &Expr,
@@ -1349,6 +1400,7 @@ impl Walker<'_> {
         };
         self.canonical_read_path(path, state).map(Some)
     }
+
     fn canonical_read_path(
         &mut self,
         mut path: FieldPath,
@@ -1376,6 +1428,7 @@ impl Walker<'_> {
         }
         Ok(path)
     }
+
     fn pointer_value_origins(
         &mut self,
         value: &Value,
@@ -1411,6 +1464,7 @@ impl Walker<'_> {
             .value(path.root)
             .map(|root_version| vec![PointerOrigin::External(Projection { root_version, path })]))
     }
+
     fn pointer_input_origins(
         &mut self,
         value: &Value,
@@ -1461,6 +1515,7 @@ impl Walker<'_> {
             state,
         )
     }
+
     fn pointer_value_path(
         &mut self,
         value: &Value,
@@ -1487,6 +1542,7 @@ impl Walker<'_> {
         };
         self.observe_external_path(address, ty, state)
     }
+
     fn observe_external_path(
         &mut self,
         address: FieldPath,
@@ -1937,6 +1993,7 @@ impl Walker<'_> {
             }
         }
     }
+
     fn read_pointer_place(
         &mut self,
         state: &mut State,
@@ -1959,11 +2016,13 @@ impl Walker<'_> {
         }
         Ok(current)
     }
+
     fn fresh_frame(&mut self) -> Result<u64, Unknown> {
         let frame = self.next_frame;
         self.next_frame = frame.checked_add(1).ok_or(Unknown::VersionExhausted)?;
         Ok(frame)
     }
+
     fn call_preserves_memory(
         &mut self,
         callee: &Expr,
@@ -1975,6 +2034,7 @@ impl Walker<'_> {
         }
         self.defaults_preserve_memory(callee, arguments, bindings, false)
     }
+
     // Input observations also require the prepared parameter bindings to retain
     // their identities. A memory-readonly default may still rebind a parameter.
     fn defaults_preserve_memory(
@@ -3384,6 +3444,7 @@ impl Walker<'_> {
         }
         Ok(())
     }
+
     fn check_exit(
         &mut self,
         value: Value,
@@ -3434,6 +3495,7 @@ impl Walker<'_> {
         }
         self.check_conclusions(conditions, state, depth)
     }
+
     fn check_conclusions(
         &mut self,
         conditions: &[Expr],
@@ -3462,6 +3524,7 @@ impl Walker<'_> {
         self.failure_source = None;
         Ok(())
     }
+
     fn check_machine(
         &mut self,
         expr: &Expr,
@@ -3492,6 +3555,7 @@ impl Walker<'_> {
             reason,
         })
     }
+
     fn child(&mut self, expr: &Expr, state: &mut State, depth: usize) -> Result<Value, Reason> {
         let result = self.inner(expr, state, depth).and_then(|mut value| {
             if matches!(expr.ty, Term::Pointer(_)) && value.pointer_origins.is_none() {
@@ -3506,6 +3570,7 @@ impl Walker<'_> {
             reason
         })
     }
+
     fn record(
         &mut self,
         expr: &Expr,
@@ -3529,6 +3594,7 @@ impl Walker<'_> {
         });
         Ok(())
     }
+
     #[inline(never)]
     fn inner(&mut self, expr: &Expr, state: &mut State, depth: usize) -> Result<Value, Reason> {
         self.limits.step(1)?;
@@ -3644,6 +3710,7 @@ impl Walker<'_> {
         }
         Ok(())
     }
+
     #[inline(never)]
     fn call_expression(
         &mut self,
@@ -4746,6 +4813,7 @@ impl Walker<'_> {
         }
         Ok(result)
     }
+
     #[inline(never)]
     fn closure_expression(
         &mut self,
@@ -4897,6 +4965,7 @@ impl Walker<'_> {
         }
         Ok(result)
     }
+
     fn known_branch(
         &mut self,
         condition: Option<&Condition>,
@@ -4978,6 +5047,7 @@ impl Walker<'_> {
         }
         Ok(result)
     }
+
     #[inline(never)]
     fn loop_expression(
         &mut self,
@@ -5053,6 +5123,7 @@ impl Walker<'_> {
         }
         Ok(())
     }
+
     fn integer_spelling(&mut self, text: &str) -> Result<Integer, Reason> {
         // NIR constants and patterns can carry a materialized sign even though
         // lexical integer tokens are unsigned. Both consumers share the same
@@ -5246,6 +5317,7 @@ impl Walker<'_> {
         }
         Ok(result)
     }
+
     // Recursive scopes must not reserve all completed-value decoding scratch
     // space at every nesting level in unoptimized compiler builds.
     #[inline(never)]
@@ -5309,6 +5381,7 @@ impl Walker<'_> {
         }
         Ok(Value::default())
     }
+
     fn completed_aggregate_value(
         &mut self,
         value: &Term,
@@ -5445,6 +5518,7 @@ impl Walker<'_> {
             Ok(value)
         }
     }
+
     fn normal_input_value(
         &mut self,
         input: &nir::program::NormalFormArgument,
@@ -5930,7 +6004,8 @@ impl Walker<'_> {
             K::Closure { .. } | K::UnsafeScope(_) | K::Discard(_) => {
                 self.transparent_expression(expr, state, depth)
             }
-            K::ApplyNormalForm { .. }
+            K::PlannedFunctionInstance { .. }
+            | K::ApplyNormalForm { .. }
             | K::NormalFormType { .. }
             | K::NominalType { .. }
             | K::CheckTypeAlias { .. }
@@ -5959,6 +6034,7 @@ impl Walker<'_> {
         }
     }
 }
+
 impl From<Unknown> for Reason {
     fn from(value: Unknown) -> Self {
         Self::Unknown(value)
@@ -6097,6 +6173,7 @@ pub fn validate_machine_operations_checked(
 
 #[cfg(test)]
 mod phase_evidence_tests;
+
 #[cfg(test)]
 mod scalar_observation_tests;
 
@@ -6227,6 +6304,7 @@ impl Value {
     fn unknown(ty: &Term, limits: &mut Limits) -> Result<Self, Unknown> {
         Self::unknown_at(ty, limits, 0)
     }
+
     fn unknown_at(ty: &Term, limits: &mut Limits, depth: usize) -> Result<Self, Unknown> {
         limits.step(1)?;
         if depth >= 128 {
@@ -6272,6 +6350,7 @@ impl Value {
             ..Self::default()
         })
     }
+
     fn forget_observations(&mut self, limits: &mut Limits) -> Result<bool, Unknown> {
         limits.step(1)?;
         self.pointer_target = None;
@@ -6294,6 +6373,7 @@ impl Value {
         self.aggregate_kind = None;
         Ok(self.nominal_type.is_some() || self.unbounded_integer)
     }
+
     fn clear_evidence(&mut self, limits: &mut Limits) -> Result<(), Unknown> {
         limits.step(1)?;
         self.evidence = None;
@@ -6304,6 +6384,7 @@ impl Value {
         }
         Ok(())
     }
+
     fn copy_pointer_origins(
         &self,
         limits: &mut Limits,
@@ -6322,6 +6403,7 @@ impl Value {
             }))
         }
     }
+
     fn snapshot(&self, limits: &mut Limits, depth: usize) -> Result<Self, Unknown> {
         struct Frame<'a> {
             partial: Value,
@@ -6410,6 +6492,7 @@ impl Value {
         }
         unreachable!("snapshot loop always returns when root frame completes")
     }
+
     fn join(&self, other: &Self, limits: &mut Limits, depth: usize) -> Result<Self, Unknown> {
         struct Frame<'a> {
             partial: Value,
@@ -6553,6 +6636,7 @@ impl Value {
         unreachable!("join loop always returns when root frame completes")
     }
 }
+
 fn insert_pointer_origin(
     targets: &mut Vec<PointerOrigin>,
     target: PointerOrigin,
@@ -6574,6 +6658,7 @@ fn insert_pointer_origin(
     targets.push(target);
     Ok(())
 }
+
 fn copy_aggregates(
     aggregates: &BTreeMap<PlaceId, Value>,
     limits: &mut Limits,
@@ -6590,6 +6675,7 @@ fn copy_aggregates(
     }
     Ok(result)
 }
+
 fn bind_value(
     state: &mut State,
     local: LocalId,
@@ -6599,6 +6685,7 @@ fn bind_value(
 ) -> Result<(), Unknown> {
     bind_value_place(state, place(local), ty, value, limits)
 }
+
 fn bind_value_place(
     state: &mut State,
     root: PlaceId,
@@ -6625,6 +6712,7 @@ fn bind_value_place(
     }
     Ok(())
 }
+
 impl State {
     fn join_aggregates(&mut self, other: &Self, limits: &mut Limits) -> Result<(), Unknown> {
         if !self.facts.is_reachable() {
@@ -6645,6 +6733,7 @@ impl State {
         Ok(())
     }
 }
+
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -6761,6 +6850,7 @@ impl Value {
         }
         Ok(self.pointer_target.clone())
     }
+
     fn polynomial(&self, limits: &mut Limits) -> Result<Option<Polynomial>, Unknown> {
         if let Some(p) = &self.polynomial {
             return Ok(Some(p.copy(limits)?));
@@ -6774,6 +6864,7 @@ impl Value {
         }
     }
 }
+
 fn combine_polynomials(
     a: &Value,
     b: &Value,
@@ -6794,6 +6885,7 @@ fn combine_polynomials(
         Err(e) => Err(e),
     }
 }
+
 impl Walker<'_> {
     fn refine_polynomial(
         &mut self,
@@ -7999,6 +8091,7 @@ fn invariant_storage_unchanged(
 #[cfg(test)]
 mod tuple_storage_tests {
     use super::*;
+
     #[test]
     fn tuple_pointer_reads_writes_keep_paths_and_opaque_identity() {
         let head = nir::DeclarationId {

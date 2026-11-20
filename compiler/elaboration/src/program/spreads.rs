@@ -2,6 +2,7 @@
 //! preparation scope. Packet storage is not a new full-expression boundary.
 use super::*;
 use crate::calls::InputContext as Input;
+
 mod inputs;
 mod layout;
 
@@ -306,6 +307,7 @@ impl Checker<'_, '_> {
         };
         Ok(Some(selected))
     }
+
     pub(super) fn spread_input_symbol(
         &mut self,
         binding: n::LocalId,
@@ -325,6 +327,7 @@ impl Checker<'_, '_> {
         }
         self.required_normal_term(selected, source.span).map(Some)
     }
+
     pub(super) fn spread_binding(&mut self, span: Span) -> Result<n::LocalId, Error> {
         let index = self.next_temporary_binding;
         self.next_temporary_binding = index
@@ -901,7 +904,10 @@ impl Checker<'_, '_> {
                 return Err(error(span, "method receiver count mismatch"));
             }
             let direct = match callee.kind {
-                K::ComptimeFunctionInstance {
+                K::PlannedFunctionInstance {
+                    declaration: id, ..
+                }
+                | K::ComptimeFunctionInstance {
                     declaration: id, ..
                 }
                 | K::Function(id)

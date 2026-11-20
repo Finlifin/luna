@@ -349,6 +349,7 @@ impl<'a> Walk<'a> {
             }
             K::NominalType { .. }
             | K::CheckTypeAlias { .. }
+            | K::PlannedFunctionInstance { .. }
             | K::NormalFormType { .. }
             | K::ApplyNormalForm { .. } => {
                 self.tasks.push(Step::Inputs(expr));

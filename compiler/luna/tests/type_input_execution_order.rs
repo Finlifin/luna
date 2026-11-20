@@ -63,9 +63,44 @@ fn observed_type_identity_keeps_collector_prefix_execution_in_place() {
 }
 
 #[test]
-#[ignore = "source checking must resume the collector after its Type producer completes"]
 fn computed_type_wait_preserves_earlier_collector_prefix_and_source_order() {
     check_twice(&ordered_collector("Byte()"), &["check", "Byte", "count"]);
+}
+
+#[test]
+fn contextual_callable_inputs_reach_required_invocation_and_reject_bad_values() {
+    let source = ordered_collector("Byte()");
+    let program = format!("{source} fn run() -> bool {{ check() }}");
+    assert_eq!(sysroot::run(&program), Value::Bool(true));
+    let invalid = program.replace("[1, 255]", "[1, 256]");
+    let error = sysroot::compile(&invalid).unwrap_err();
+    assert!(
+        error.contains("required comptime evaluation failed: interpretation Type"),
+        "{error}"
+    );
+}
+
+#[test]
+fn contextual_callable_fields_and_ordinary_defaults_share_the_instance() {
+    let source = ordered_collector("Byte()")
+        .replace("fn count()", "fn count(.size: Integer = values.length())")
+        .replace("{ values.length() }", "{ size }");
+    check_twice(&source, &["check", "Byte", "count"]);
+}
+
+#[test]
+fn contextual_packet_fields_constrain_the_same_pending_type_as_other_slots() {
+    let program = "
+        comptime fn Domain() -> Type { assumes false; bool }
+        comptime fn accept() -> bool
+        where T, tag: T, ...fields: meta.List<T>
+        { true }
+        comptime fn unused(byte: u8) -> bool {
+            accept<.fields = [byte], Domain(), true>()
+        }";
+    let error = sysroot::compile(program).unwrap_err();
+    assert!(error.contains("no common substitution"), "{error}");
+    sysroot::compile(&program.replace("Domain(), true", "Domain(), byte")).unwrap();
 }
 
 fn exiting_collector(type_producer: &str) -> String {
@@ -91,7 +126,6 @@ fn observed_type_identity_does_not_execute_inputs_after_return() {
 }
 
 #[test]
-#[ignore = "pending source checks must preserve return before the later Type producer"]
 fn computed_type_wait_cannot_execute_later_producer_after_return() {
     check_twice(&exiting_collector("Byte()"), &["check"]);
 }

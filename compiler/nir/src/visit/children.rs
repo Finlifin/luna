@@ -127,7 +127,10 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
                         .map(Node::Expr),
                 );
             }
-            K::NormalFormType {
+            K::PlannedFunctionInstance {
+                arguments, plan, ..
+            }
+            | K::NormalFormType {
                 arguments, plan, ..
             }
             | K::ApplyNormalForm {

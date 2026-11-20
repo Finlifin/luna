@@ -122,6 +122,9 @@ impl Discovery<'_> {
         let result = nir::visit::retained_expressions_checked(roots, &mut fuel, |expr, fuel| {
             match &expr.kind {
                 K::Function(id)
+                | K::PlannedFunctionInstance {
+                    declaration: id, ..
+                }
                 | K::ComptimeFunctionInstance {
                     declaration: id, ..
                 } => {
@@ -416,6 +419,7 @@ mod tests {
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 5, local }
     }
+
     fn expr(kind: K) -> n::Expr {
         n::Expr {
             source: n::SourceRange { start: 1, end: 2 },
@@ -423,6 +427,7 @@ mod tests {
             kind,
         }
     }
+
     fn function() -> n::Function {
         n::Function {
             interface: nir::program::FunctionDeclaration {

@@ -158,12 +158,14 @@ pub(super) enum Projection {
     // not an invocation: control() accounts for execution separately.
     Returned,
 }
+
 #[derive(Clone)]
 struct Alias<'a> {
     value: &'a Expr,
     path: Vec<Projection>,
     remapped_from: Option<LocalId>,
 }
+
 fn structural_bindings<'a>(
     pattern: &'a Pattern,
     value: &'a Expr,
@@ -282,6 +284,7 @@ fn structural_bindings<'a>(
     }
     Ok(Some(result))
 }
+
 fn register_pattern<'a>(
     pattern: &'a Pattern,
     value: &'a Expr,
@@ -305,11 +308,13 @@ fn register_pattern<'a>(
     }
     Ok(())
 }
+
 /// Borrowed definitions only: no summary survives a fixed-point iteration or
 /// crosses an instance graph. Mutation exposure is stable for this graph.
 pub(super) struct Aliases<'a> {
     definitions: BTreeMap<LocalId, Vec<Alias<'a>>>,
 }
+
 impl<'a> Aliases<'a> {
     pub(super) fn prepare(function: &'a Function, fuel: &mut usize) -> Result<Self, String> {
         step(fuel, function.parameters.len())?;
@@ -335,7 +340,9 @@ impl<'a> Aliases<'a> {
                 K::LetPattern { pattern, value, .. } => {
                     register_pattern(pattern, value, &mut definitions, &mut exposed, fuel)?;
                 }
-                K::ApplyNormalForm { arguments, .. } | K::NormalFormType { arguments, .. } => {
+                K::PlannedFunctionInstance { arguments, .. }
+                | K::ApplyNormalForm { arguments, .. }
+                | K::NormalFormType { arguments, .. } => {
                     argument_binds(arguments, &mut exposed, fuel)?
                 }
                 K::Match { value, arms } => {
@@ -417,6 +424,7 @@ impl<'a> Aliases<'a> {
         Ok(Self { definitions })
     }
 }
+
 impl Analyzer<'_, '_, '_, '_> {
     pub(super) fn field_callable(
         &mut self,

@@ -137,6 +137,7 @@ impl Walker<'_> {
         }
         Ok(result)
     }
+
     #[inline(never)]
     pub(super) fn pointer_read_expression(
         &mut self,
@@ -251,6 +252,7 @@ impl Walker<'_> {
         }
         Ok(result)
     }
+
     #[inline(never)]
     pub(super) fn write_expression(
         &mut self,
@@ -401,6 +403,7 @@ impl Walker<'_> {
         }
         Ok(result)
     }
+
     #[inline(never)]
     pub(super) fn transparent_expression(
         &mut self,
@@ -423,6 +426,7 @@ impl Walker<'_> {
         }
         Ok(result)
     }
+
     #[inline(never)]
     pub(super) fn formation_expression(
         &mut self,
@@ -432,7 +436,8 @@ impl Walker<'_> {
     ) -> Result<Value, Reason> {
         let result = Value::default();
         match &expr.kind {
-            K::ApplyNormalForm { .. }
+            K::PlannedFunctionInstance { .. }
+            | K::ApplyNormalForm { .. }
             | K::NormalFormType { .. }
             | K::NominalType { .. }
             | K::CheckTypeAlias { .. } => {
@@ -504,6 +509,9 @@ impl Walker<'_> {
                 {
                     self.child(body, state, depth)?;
                 }
+                if matches!(expr.kind, K::PlannedFunctionInstance { .. }) {
+                    return self.unknown_value(&expr.ty);
+                }
             }
             K::TypeList(arguments)
             | K::FunctionType {
@@ -554,6 +562,7 @@ impl Walker<'_> {
         }
         Ok(result)
     }
+
     #[inline(never)]
     pub(super) fn aggregate_expression(
         &mut self,

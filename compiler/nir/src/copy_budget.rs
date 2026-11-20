@@ -1,7 +1,9 @@
 //! Shared preflight for materialized constants and contextual input templates.
 use crate::{Term, program as n, program::ExprKind as K};
+
 mod callable_inputs;
 mod package;
+
 pub use callable_inputs::retained_program_inputs;
 pub use package::{
     charge_implementation_metadata, charge_normal_form_payload, charge_representation_metadata,
@@ -222,6 +224,7 @@ pub fn charge_argument_type_rewrite(
 ) -> Result<(), CopyBudgetExhausted> {
     charge_node(Node::Argument(value), steps, true, None)
 }
+
 pub(crate) enum Node<'a> {
     Region(&'a n::DefinitionRegion),
     Function(&'a n::Function),
@@ -749,7 +752,10 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                             .map_or(0, Vec::len)
                             .saturating_add(bindings.as_ref().map_or(0, Vec::len))
                     }
-                    K::NormalFormType {
+                    K::PlannedFunctionInstance {
+                        arguments, plan, ..
+                    }
+                    | K::NormalFormType {
                         arguments, plan, ..
                     }
                     | K::ApplyNormalForm {

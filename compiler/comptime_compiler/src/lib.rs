@@ -6,7 +6,9 @@ pub mod bits;
 pub mod closures;
 pub mod constants;
 pub mod declaration_inputs;
+
 pub use declaration_inputs::DeclarationInputPlan;
+
 pub mod definitions;
 pub mod instances;
 pub mod leaf_inputs;
@@ -22,6 +24,7 @@ mod preparation;
 pub mod scalar;
 pub mod staged_inputs;
 pub mod type_constructors;
+
 use nir::program::{ArgumentPassing, Expr, ExprKind as K, FieldOwner, LocalId, SourceRange};
 use nir::{Primitive, Term};
 use scalar::{OwnedScalar, Scalar};
@@ -37,6 +40,7 @@ pub struct ErrorConversion {
     pub input: Term,
     pub output: Term,
 }
+
 impl fmt::Display for ErrorConversion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -512,11 +516,13 @@ pub enum Op {
         explicit: bool,
     },
 }
+
 #[derive(Debug)]
 pub struct Instruction {
     pub source: SourceRange,
     pub op: Op,
 }
+
 #[derive(Debug)]
 pub struct Program {
     constants: Vec<Arc<constants::Constant>>,
@@ -529,12 +535,14 @@ pub struct Program {
     prepared_type_count: usize,
     storage_work: usize,
 }
+
 #[derive(Debug, Clone, Copy)]
 pub struct LoopRegion {
     pub start: usize,
     pub end: usize,
     pub scope_depth: usize,
 }
+
 impl Program {
     /// Repeated lowerings may reuse an identity in disjoint instruction ranges.
     pub fn enclosing_loop(&self, identity: LocalId, suspended_at: usize) -> Option<LoopRegion> {
@@ -544,23 +552,29 @@ impl Program {
             .map(|(_, region)| *region)
             .filter(|region| suspended_at < region.end)
     }
+
     pub fn constants(&self) -> &[Arc<constants::Constant>] {
         &self.constants
     }
+
     pub fn instructions(&self) -> &[Instruction] {
         &self.instructions
     }
+
     pub fn locals(&self) -> &[(LocalId, Register)] {
         &self.locals
     }
+
     /// Conservative retention charge, including copied payloads and lowering work.
     /// These units bound storage; they are not a byte-size or timing measurement.
     pub fn storage_work(&self) -> usize {
         self.storage_work
     }
+
     pub fn registers(&self) -> usize {
         self.registers
     }
+
     /// Compact frame-local slots for observed domains; ordinary value registers
     /// do not allocate Type storage. The index table is shared with the code.
     pub fn prepared_type_slot(&self, register: Register) -> Option<usize> {
@@ -569,10 +583,12 @@ impl Program {
             .copied()
             .filter(|slot| *slot != usize::MAX)
     }
+
     pub fn prepared_type_count(&self) -> usize {
         self.prepared_type_count
     }
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Unsupported(SourceRange),
@@ -1323,6 +1339,7 @@ pub struct CompilationSession {
     preparations: preparation::Cache,
     concrete_instances: bool,
 }
+
 impl CompilationSession {
     pub fn for_concrete_graph() -> Self {
         Self {
@@ -1334,6 +1351,7 @@ impl CompilationSession {
     pub fn compile(&mut self, body: &Expr, fuel: &mut usize) -> Result<Program, Error> {
         compile_root(Root::Expression(body), fuel, self).map(|(program, _)| program)
     }
+
     /// A checked input expression executes in its source activation's lexical context.
     pub fn compile_lexical_expression(
         &mut self,
@@ -1342,6 +1360,7 @@ impl CompilationSession {
     ) -> Result<Program, Error> {
         compile_root(Root::LexicalExpression(body), fuel, self).map(|(program, _)| program)
     }
+
     pub fn compile_staged_input(
         &mut self,
         input: &nir::program::NormalFormArgument,
@@ -1350,6 +1369,7 @@ impl CompilationSession {
         compile_root(Root::Staged(input), fuel, self)
             .map(|(program, shape)| (program, shape.unwrap()))
     }
+
     pub fn compile_contextual_input(
         &mut self,
         input: &nir::program::NormalFormArgument,
@@ -1391,6 +1411,7 @@ enum Root<'a> {
     Staged(&'a nir::program::NormalFormArgument),
     Contextual(&'a nir::program::NormalFormArgument, &'a Term),
 }
+
 fn compile_root<'a>(
     root: Root<'a>,
     fuel: &mut usize,
@@ -2171,6 +2192,7 @@ fn compile_root<'a>(
                     }
                     K::NormalFormType { .. }
                     | K::ApplyNormalForm { .. }
+                    | K::PlannedFunctionInstance { .. }
                     | K::NominalType { .. }
                     | K::CheckTypeAlias { .. } => {
                         let (plan, imports) = DeclarationInputPlan::compile(expr, fuel)?;
@@ -3324,6 +3346,7 @@ fn copy_error(error: nir::copy_budget::CopyBudgetExhausted, source: SourceRange)
         nir::copy_budget::CopyBudgetExhausted::Depth => Error::Depth(source),
     }
 }
+
 fn copy_term(ty: &Term, fuel: &mut usize, source: SourceRange) -> Result<Term, Error> {
     nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel)
         .map_err(|error| copy_error(error, source))?;

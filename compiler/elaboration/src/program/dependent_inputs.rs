@@ -1,6 +1,7 @@
 //! Prepare the compile-time dependencies of ordinary call input types.
 //! Checking order does not change the source-ordered runtime argument plan.
 use super::*;
+
 pub(super) mod tasks;
 
 /// Borrow the selected function telescope, including its result under the
@@ -545,7 +546,9 @@ impl Checker<'_, '_> {
             })?
             .clone();
         let (parameters, arguments) = match &callee.kind {
-            K::ComptimeFunctionInstance { .. } | K::FunctionInstance { .. } => (
+            K::PlannedFunctionInstance { .. }
+            | K::ComptimeFunctionInstance { .. }
+            | K::FunctionInstance { .. } => (
                 self.type_parameters[&owner].clone(),
                 self.method_instantiation_inputs(callee, span)?
                     .ok_or_else(|| error(span, "invalid callable clause input packet"))?

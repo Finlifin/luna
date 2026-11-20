@@ -190,6 +190,7 @@ impl Checker<'_, '_> {
 enum CallableClauseView<'v> {
     Fixed(&'v [Term]),
     Prepared(&'v n::ClauseOperands),
+    Contextual(&'v [n::NormalFormArgument]),
     Member {
         subject: &'v Term,
         interface: &'v [Term],
@@ -202,6 +203,7 @@ impl CallableClauseView<'_> {
         match self {
             Self::Fixed(values) => values.len(),
             Self::Prepared(inputs) => inputs.arguments.len(),
+            Self::Contextual(inputs) => inputs.len(),
             Self::Member {
                 interface, method, ..
             } => 1 + interface.len() + method.len(),
@@ -212,6 +214,10 @@ impl CallableClauseView<'_> {
         match self {
             Self::Fixed(values) => values.get(slot),
             Self::Prepared(inputs) => inputs.observed_argument(slot),
+            Self::Contextual(inputs) => match &inputs.get(slot)?.expression()?.kind {
+                K::TypeValue(ty) | K::ComptimeValue(ty) => Some(ty),
+                _ => None,
+            },
             Self::Member { subject, .. } if slot == 0 => Some(subject),
             Self::Member {
                 interface, method, ..
@@ -233,6 +239,11 @@ impl Checker<'_, '_> {
         value: &'v n::Expr,
     ) -> Option<(OwnerId, CallableClauseView<'v>)> {
         let (id, view) = match &value.kind {
+            K::PlannedFunctionInstance {
+                declaration,
+                arguments,
+                ..
+            } => (*declaration, CallableClauseView::Contextual(arguments)),
             K::ComptimeFunctionInstance {
                 declaration,
                 inputs,
@@ -277,8 +288,10 @@ impl Checker<'_, '_> {
             return Ok(None);
         };
         let width = view.len();
-        if matches!(view, CallableClauseView::Prepared(_))
-            && self.type_parameters[&owner].len() != width
+        if matches!(
+            view,
+            CallableClauseView::Prepared(_) | CallableClauseView::Contextual(_)
+        ) && self.type_parameters[&owner].len() != width
         {
             return Err(error(span, "invalid comptime clause input packet"));
         }

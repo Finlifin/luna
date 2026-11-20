@@ -350,7 +350,7 @@ LocalId 及其寄存器。后续迭代从同一编译会话按声明输入计划
 这份代码。缓存按权重限额保留成功产物，预算耗尽后仍可重试；相同的源码范围可以
 出现在不同实例中，不能据此共享代码。别名体若要把已准入的参数代入类型后才能执行，
 其代码身份还依赖这组替换，仅凭声明计划与位置不足以选中它。
-[片段编译](../compiler/comptime_compiler/src/preparation.rs) · [别名体的实例化](../compiler/comptime_interpretor/src/nominal_plan.rs)
+[片段编译](../compiler/comptime_compiler/src/preparation.rs) · [别名体的实例化](../compiler/comptime_interpretor/src/declaration_plan.rs)
 
 在 `Group<parent()>.Entry<255, .T = Byte()>` 中，若成员声明为
 `newtype Entry<.T: Type = bool, value: T>`，先取得父实例，再按源码顺序处理

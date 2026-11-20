@@ -24,6 +24,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             block_regions::ExplicitInstance::Ready(value) => Ok(value),
         }
     }
+
     fn select_explicit_instance<'h>(
         &mut self,
         expr: &Expr<'h>,
@@ -147,6 +148,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             self.callable_value_view(value, expected, expr.span)
         }
     }
+
     pub(super) fn call(
         &mut self,
         expr: &Expr<'_>,
@@ -277,7 +279,12 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
-        if prefix.is_empty() || !matches!(callee.kind, K::ComptimeFunctionInstance { .. }) {
+        if prefix.is_empty()
+            || !matches!(
+                callee.kind,
+                K::PlannedFunctionInstance { .. } | K::ComptimeFunctionInstance { .. }
+            )
+        {
             return self.finish_prepared_call(
                 expr,
                 callee,
@@ -363,7 +370,10 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                 .map(block_regions::CallPlan::Ready);
         }
         let direct_id = match &callee.kind {
-            K::ComptimeFunctionInstance {
+            K::PlannedFunctionInstance {
+                declaration: id, ..
+            }
+            | K::ComptimeFunctionInstance {
                 declaration: id, ..
             }
             | K::Function(id)

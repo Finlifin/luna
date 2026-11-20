@@ -41,13 +41,13 @@ NF 的隐式声明顺序与显式计划现由同一输入帧执行。旧字节�
 4. **保留退出目标。** 如果第一个实参执行了外层 return，后一个实参和 callee 均不会执行。break 和 continue 回到词法目标，错误随原调用传播，等待该路径的检查结果不得触发再次执行。静态上可判定的定义错误仍由定义检查负责。
 5. **区分可延后的检查与尚不能执行的操作。** 上例可以延后文字的域检查。若先前操作本身的选择或副作用取决于后续 Type，分割前必须说明在语言求值次序下能先观察什么。当前三个例子没有给出这种依赖环的普遍解法，不能据此授权重排、投机或增设拒绝规则。
 
-[源码顺序用例](../compiler/luna/tests/type_input_execution_order.rs)逐项区分三种观察：最终 `trace == 12` 且 `Byte` 与 `count` 各进入一次；早退时两者均不进入；较早读取保留 7 且最终局部值为 9。已知域及类型已确定的参数包提供对照。以下命令显式运行待实现用例。此次工作区得到 11 通过、3 失败；三项都在列表缺少元素类型上下文时停止，尚未执行到 VM。这与后面依赖任务拒绝越序执行是两个不同位置。
+普通 comptime 函数的签名已确定时，源码检查器把仍需上下文的子句实参和求值顺序一起交给 VM。树解释与字节码均在原调用中完成列表文字的域检查，`trace == 12`，`Byte` 和 `count` 各进入一次。前序实参提前 return 时两者均不进入。若函数的返回类型本身取决于待交付的 Type，例如 `first() -> T`，源码检查器仍停在签名发布处。下面的命令同时运行这条待实现路径和已接通的对照用例。[源码顺序用例](../compiler/luna/tests/type_input_execution_order.rs)
 
 ```sh
 python3 -B development/check.py --timeout 900 -- test -p luna --test type_input_execution_order -- --include-ignored
 ```
 
-动态 NF 已能在原调用内交付这类 Type。对于 `factory<...prefix(), 1, 255>`，先求得 factory 的实际声明，再运行一次 `prefix()`。包中的 `u8` 决定收集元素的域。树解释与字节码均可得到与按声明直接构造相同的 NF。此处复用声明输入帧即可闭合依赖，而上面的普通调用还需要把结果交还给源码列表的检查位置。[函数值入口](../compiler/elaboration/src/program/normal/dynamic_inputs.rs) · [动态 NF 用例](../compiler/luna/tests/normal_input_plans.rs)
+动态 NF 已能在原调用内交付这类 Type。对于 `factory<...prefix(), 1, 255>`，先求得 factory 的实际声明，再运行一次 `prefix()`。包中的 `u8` 决定收集元素的域。树解释与字节码均可得到与按声明直接构造相同的 NF。两种构造共享声明输入帧。NF 形成不透明头，普通函数交付经过声明域和形成条件检查的函数实例。[函数值入口](../compiler/elaboration/src/program/normal/dynamic_inputs.rs) · [动态 NF 用例](../compiler/luna/tests/normal_input_plans.rs)
 
 另一个对照是[名义值参数组](../compiler/luna/tests/nominal_value_parameters.rs)。在独立的 `3b4b54d9` 源码快照中运行整组，297 项通过、11 项失败。失败涉及开放父参数的成员域、别名文字的整数域要求、required 输入可用性及旧用例缺少 Splice 协议。复核输入恢复时，应按用例和诊断与这个基线比较。
 

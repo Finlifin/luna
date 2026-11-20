@@ -1,4 +1,4 @@
-//! Owned nominal/alias plans separate input collection, admission and body execution.
+//! Named declarations collect contextual inputs in the caller before forming their result.
 use super::*;
 use input_collection::{InputPlan, Plan, PlanView, Progress, Target};
 
@@ -8,6 +8,7 @@ enum Contract<'a> {
     Enum(generated_enums::EnumDefinition<'a>),
     Newtype(generated_newtypes::NewtypeDefinition<'a>),
 }
+
 macro_rules! contract_data {
     ($value:expr, $def:ident, $body:expr) => {
         match $value {
@@ -18,42 +19,52 @@ macro_rules! contract_data {
         }
     };
 }
+
 impl Contract<'_> {
     fn parameters(&self) -> Result<Vec<nir::DeclarationParameter>, nir::TypeError> {
         contract_data!(self, def, def.parameter_binders())
     }
+
     fn domains(&self) -> &[Term] {
         contract_data!(self, def, &def.parameter_types)
     }
+
     fn requirements(&self) -> &[nir::program::TypePredicate] {
         contract_data!(self, def, &def.requirements)
     }
+
     fn capabilities(&self) -> &[nir::program::TraitRequirement] {
         contract_data!(self, def, &def.capabilities)
     }
+}
+
+enum Receiver<'a> {
+    Type(Contract<'a>),
+    Callable(dynamic_instances::FunctionTarget),
 }
 
 enum Admitted {
     Value(Value),
     Body(Arc<Expr>),
 }
+
 pub(super) struct Frame<'a, 'e> {
     plan: Plan<'e>,
-    contract: Contract<'a>,
-    inputs: Option<nominal_inputs::Frame<'e>>,
+    inputs: Option<(Receiver<'a>, declaration_inputs::Frame<'e>)>,
     locals: Arc<[LocalId]>,
     body: Option<Arc<Expr>>,
     waiting_body: bool,
     terminal: bool,
 }
+
 impl fmt::Display for Frame<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(nominal-plan-frame (terminal {}) (waiting-body {})",
+            "(declaration-plan-frame (terminal {}) (waiting-body {})",
             self.terminal, self.waiting_body
         )?;
-        if let Some(inputs) = &self.inputs {
+        if let Some((_, inputs)) = &self.inputs {
             write!(f, " {inputs}")?;
         }
         if let Some(body) = &self.body {
@@ -62,6 +73,7 @@ impl fmt::Display for Frame<'_, '_> {
         write!(f, ")")
     }
 }
+
 impl<'a, 'e> Frame<'a, 'e> {
     pub(super) fn new(
         vm: &mut Interpreter<'a>,
@@ -69,84 +81,64 @@ impl<'a, 'e> Frame<'a, 'e> {
         environment: &Environment,
     ) -> Result<Self, Error> {
         let view = plan.view();
-        let declaration = match view.target {
-            Target::Nominal(id)
-            | Target::Alias {
-                declaration: id, ..
-            } => id,
-            _ => unreachable!("nominal target"),
-        };
         let locals = plan.admit_scope(vm, environment)?;
-        let contract = if matches!(view.target, Target::Alias { .. }) {
-            Contract::Alias(
-                vm.alias_contracts
-                    .get(&declaration)
-                    .ok_or_else(|| vm.failure(ErrorKind::Type, Some(view.source)))?,
-            )
-        } else if let Some(def) = vm.structs.get(&declaration) {
-            Contract::Struct(def.clone())
-        } else if let Some(def) = vm.enums.get(&declaration) {
-            Contract::Enum(def.clone())
-        } else if let Some(def) = vm.newtypes.handle(&declaration) {
-            Contract::Newtype(def)
-        } else {
-            return Err(vm.failure(ErrorKind::Type, Some(view.source)));
-        };
-        let parameters = contract
-            .parameters()
-            .map_err(|_| vm.failure(ErrorKind::Type, Some(view.source)))?;
-        let domains = contract.domains();
-        let expected = if plan.inputs_diverge() {
-            Primitive::Never
-        } else if let Target::Alias { body, .. } = view.target {
-            match body {
-                None => Primitive::Void,
-                Some(body) if body.ty == Term::Primitive(Primitive::Type) => Primitive::Type,
-                Some(body) if body.ty == Term::Primitive(Primitive::Never) => Primitive::Never,
-                _ => return Err(vm.failure(ErrorKind::Type, Some(view.source))),
+        let (receiver, parameters, domains, referenced) = match view.target {
+            Target::Callable(declaration) => {
+                let target = vm.admit_dynamic_function_instance(
+                    declaration,
+                    view.arguments.len(),
+                    None,
+                    view.ty,
+                    view.source,
+                )?;
+                let definition = vm
+                    .functions
+                    .declaration(&declaration)
+                    .expect("source declaration admitted for contextual formation");
+                let (domains, referenced) = vm.query_admission(Some(view.source), |vm, fuel| {
+                    let borrowed = function_inputs::input_domains(
+                        &vm.declaration_parameter_domains,
+                        &definition.type_parameters,
+                        fuel,
+                    )?;
+                    copy_domains(view, &borrowed, fuel)
+                })?;
+                let parameters = nir::declaration_parameters(&definition.type_parameters, &domains)
+                    .map_err(|_| vm.failure(ErrorKind::Type, Some(view.source)))?;
+                (Receiver::Callable(target), parameters, domains, referenced)
             }
-        } else {
-            Primitive::Type
+            Target::Alias { .. } | Target::Nominal(_) => {
+                let contract = Contract::open(vm, view, plan.inputs_diverge())?;
+                let parameters = contract
+                    .parameters()
+                    .map_err(|_| vm.failure(ErrorKind::Type, Some(view.source)))?;
+                let (domains, referenced) = vm.query_admission(Some(view.source), |_, fuel| {
+                    copy_domains(view, contract.domains(), fuel)
+                })?;
+                (Receiver::Type(contract), parameters, domains, referenced)
+            }
+            _ => unreachable!("named declaration input receiver"),
         };
-        if view.arguments.len() != parameters.len() || *view.ty != Term::Primitive(expected) {
+        if view.arguments.len() != parameters.len() {
             return Err(vm.failure(ErrorKind::Type, Some(view.source)));
         }
         vm.integer_operation(Some(view.source), |budget| {
             budget.consume(view.arguments.len().saturating_add(1))
         })?;
-        let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
-        let mut remaining = before;
-        let mut referenced = BTreeSet::new();
-        let charged = domains.iter().try_for_each(|domain| {
-            if view.schedule.bindings.is_some() {
-                nir::type_computations::charge_term(domain, &mut remaining)
-            } else {
-                // The copy preflight also observes rigid inputs. A domain can
-                // contain them beneath an opaque head or in a closure snapshot.
-                nir::type_computations::rigid_declarations_bounded(
-                    domain,
-                    &mut remaining,
-                    &mut referenced,
-                )
-            }
-        });
-        vm.budget.steps -= (before - remaining) as u64;
-        charged.map_err(|_| vm.failure(ErrorKind::StepsExhausted, Some(view.source)))?;
         let specialize = view.schedule.bindings.is_some()
             || parameters
                 .iter()
                 .any(|p| referenced.contains(&p.declaration));
-        let inputs = nominal_inputs::Frame::new(
+        let inputs = declaration_inputs::Frame::new(
             plan.clone(),
             parameters,
-            domains.to_vec(),
+            domains,
             specialize,
             locals.clone(),
         );
         Ok(Self {
             plan,
-            contract,
-            inputs: Some(inputs),
+            inputs: Some((receiver, inputs)),
             locals,
             body: None,
             waiting_body: false,
@@ -154,6 +146,75 @@ impl<'a, 'e> Frame<'a, 'e> {
         })
     }
 }
+
+/// Observe dependencies during the copy preflight. Explicit lexical bindings
+/// already require specialization, so their domains only need the copy charge.
+fn copy_domains<D: std::borrow::Borrow<Term>>(
+    view: PlanView<'_>,
+    domains: &[D],
+    fuel: &mut usize,
+) -> Result<(Vec<Term>, BTreeSet<DeclarationId>), nir::NominalAdmissionError> {
+    let mut referenced = BTreeSet::new();
+    let copied = domains
+        .iter()
+        .map(|domain| {
+            let domain = domain.borrow();
+            if view.schedule.bindings.is_some() {
+                nir::type_computations::charge_term(domain, fuel)?;
+            } else {
+                nir::type_computations::rigid_declarations_bounded(domain, fuel, &mut referenced)?;
+            }
+            Ok(domain.clone())
+        })
+        .collect::<Result<_, nir::NominalAdmissionError>>()?;
+    Ok((copied, referenced))
+}
+
+impl<'a> Contract<'a> {
+    fn open(vm: &Interpreter<'a>, view: PlanView<'_>, diverges: bool) -> Result<Self, Error> {
+        let (contract, result) = match view.target {
+            Target::Alias { declaration, body } => {
+                let result = match body {
+                    _ if diverges => Primitive::Never,
+                    None => Primitive::Void,
+                    Some(body) if body.ty == Term::Primitive(Primitive::Type) => Primitive::Type,
+                    Some(body) if body.ty == Term::Primitive(Primitive::Never) => Primitive::Never,
+                    _ => return Err(vm.failure(ErrorKind::Type, Some(view.source))),
+                };
+                let alias = vm
+                    .alias_contracts
+                    .get(&declaration)
+                    .ok_or_else(|| vm.failure(ErrorKind::Type, Some(view.source)))?;
+                (Self::Alias(alias), result)
+            }
+            Target::Nominal(id) => {
+                let contract = if let Some(def) = vm.structs.get(&id) {
+                    Self::Struct(def.clone())
+                } else if let Some(def) = vm.enums.get(&id) {
+                    Self::Enum(def.clone())
+                } else if let Some(def) = vm.newtypes.handle(&id) {
+                    Self::Newtype(def)
+                } else {
+                    return Err(vm.failure(ErrorKind::Type, Some(view.source)));
+                };
+                (
+                    contract,
+                    if diverges {
+                        Primitive::Never
+                    } else {
+                        Primitive::Type
+                    },
+                )
+            }
+            _ => unreachable!("nominal or alias contract"),
+        };
+        if *view.ty != Term::Primitive(result) {
+            return Err(vm.failure(ErrorKind::Type, Some(view.source)));
+        }
+        Ok(contract)
+    }
+}
+
 impl Contract<'_> {
     fn finish(
         &self,
@@ -243,18 +304,23 @@ impl Frame<'_, '_> {
         if self.terminal || self.waiting_body {
             return Err(vm.failure(ErrorKind::InvalidControlFlow, Some(self.plan.view().source)));
         }
-        if let Some(inputs) = &mut self.inputs {
+        if let Some((_, inputs)) = &mut self.inputs {
             match inputs.next_input(vm, environment)? {
                 Progress::InputsComplete => {}
                 progress => return Ok(progress),
             }
-            let types = self
-                .inputs
-                .take()
-                .unwrap()
+            let (receiver, inputs) = self.inputs.take().expect("completed declaration inputs");
+            let view = self.plan.view();
+            let types = inputs
                 .finish()
-                .ok_or_else(|| vm.failure(ErrorKind::Type, Some(self.plan.view().source)))?;
-            match self.contract.finish(vm, self.plan.view(), types)? {
+                .ok_or_else(|| vm.failure(ErrorKind::Type, Some(view.source)))?;
+            let admitted = match receiver {
+                Receiver::Type(contract) => contract.finish(vm, view, types)?,
+                Receiver::Callable(target) => Admitted::Value(
+                    vm.finish_dynamic_function_instance(target, &types, view.ty, view.source)?,
+                ),
+            };
+            match admitted {
                 Admitted::Value(value) => return Ok(Progress::Complete(Flow::Value(value))),
                 Admitted::Body(body) => self.body = Some(body),
             }
@@ -269,6 +335,7 @@ impl Frame<'_, '_> {
         vm.eval(body, environment).map(Progress::Complete)
     }
 }
+
 impl InputPlan for Frame<'_, '_> {
     fn cancel(&mut self, environment: &mut Environment) {
         self.terminal = true;
@@ -286,6 +353,7 @@ impl InputPlan for Frame<'_, '_> {
         }
         result
     }
+
     fn accept_input(
         &mut self,
         vm: &mut Interpreter<'_>,
@@ -303,6 +371,7 @@ impl InputPlan for Frame<'_, '_> {
         let result = self
             .inputs
             .as_mut()
+            .map(|(_, inputs)| inputs)
             .ok_or_else(|| {
                 vm.failure(ErrorKind::InvalidControlFlow, Some(self.plan.view().source))
             })?
@@ -312,6 +381,7 @@ impl InputPlan for Frame<'_, '_> {
         }
         result
     }
+
     fn cleanup(&self, environment: &mut Environment) {
         for binding in self.locals.iter() {
             environment.remove(binding);

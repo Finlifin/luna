@@ -86,8 +86,108 @@ impl Declaration {
         steps: &mut u64,
         span: Span,
     ) -> Result<(), Error> {
+        self.check_operand_domains(
+            checker,
+            bindings,
+            formation,
+            operands.iter().zip(&self.domains),
+            steps,
+            span,
+        )
+    }
+
+    pub(super) fn check_contextual_domains(
+        &self,
+        checker: &Checker<'_, '_>,
+        bindings: &CallableBindings,
+        formation: &FormationInputs,
+        operands: &[n::NormalFormArgument],
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<(), Error> {
+        use n::NormalFormArgument as A;
+        if operands.len() != self.domains.len() {
+            return Err(error(span, "clause input packet domain arity mismatch"));
+        }
+        let mut charge = |count: usize| {
+            *steps = steps
+                .checked_sub(count as u64)
+                .ok_or_else(|| error(span, "contextual input domain budget exhausted"))?;
+            Ok::<(), Error>(())
+        };
+        charge(operands.len())?;
+        let mut work: Vec<_> = operands.iter().zip(&self.domains).collect();
+        let mut typed = Vec::new();
+        while let Some((operand, domain)) = work.pop() {
+            match operand {
+                A::Value(expr) | A::ListSpread(expr) => typed.push((expr, domain)),
+                A::Block { result, .. } => {
+                    if let Some(result) = result.as_deref() {
+                        charge(1)?;
+                        work.push((result, domain));
+                    }
+                }
+                A::If {
+                    then_input,
+                    else_input,
+                    ..
+                } => {
+                    charge(2)?;
+                    work.push((then_input, domain));
+                    work.push((else_input, domain));
+                }
+                A::Match { arms, .. } => {
+                    charge(arms.len())?;
+                    work.extend(arms.iter().map(|arm| (&arm.body, domain)));
+                }
+                A::List { items, .. } => {
+                    if let Some(element) = checker.list_element_type(domain) {
+                        charge(items.len())?;
+                        work.extend(items.iter().map(|item| {
+                            (
+                                item,
+                                if matches!(item, A::ListSpread(_)) {
+                                    domain
+                                } else {
+                                    element
+                                },
+                            )
+                        }));
+                    }
+                }
+                A::Tuple { items, .. } => {
+                    if let Some(fields) =
+                        checker
+                            .bound_tuple_elements(domain)
+                            .or_else(|| match domain {
+                                Term::Tuple(fields) => Some(fields.as_slice()),
+                                _ => None,
+                            })
+                    {
+                        if fields.len() != items.len() {
+                            return Err(error(span, "contextual tuple arity mismatch"));
+                        }
+                        charge(items.len())?;
+                        work.extend(items.iter().zip(fields));
+                    }
+                }
+                A::Unit { .. } | A::Null { .. } | A::Integer { .. } => {}
+            }
+        }
+        self.check_operand_domains(checker, bindings, formation, typed, steps, span)
+    }
+
+    fn check_operand_domains<'a>(
+        &self,
+        checker: &Checker<'_, '_>,
+        bindings: &CallableBindings,
+        formation: &FormationInputs,
+        operands: impl IntoIterator<Item = (&'a n::Expr, &'a Term)>,
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<(), Error> {
         let mut pending = Vec::new();
-        for (operand, template) in operands.iter().zip(&self.domains) {
+        for (operand, template) in operands {
             if !bindings.awaits_input(template, steps, span)? {
                 let domain = bindings.instantiate(template, steps, span)?;
                 checker.require(&operand.ty, &domain, span)?;

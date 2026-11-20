@@ -45,6 +45,7 @@ struct Renamer<'a> {
     locations: BTreeMap<(u32, u32), n::SourceRange>,
     span: n::SourceRange,
 }
+
 impl Renamer<'_> {
     fn fresh(&mut self) -> Result<n::LocalId, String> {
         let fresh = n::LocalId {
@@ -57,6 +58,7 @@ impl Renamer<'_> {
             .ok_or_else(|| "code expansion identity space exhausted".to_string())?;
         Ok(fresh)
     }
+
     fn rename(&mut self, id: &mut n::LocalId) -> Result<(), String> {
         let mapped = if let Some(mapped) = self.bindings.get(id) {
             *mapped
@@ -69,8 +71,10 @@ impl Renamer<'_> {
         Ok(())
     }
 }
+
 impl n::Rewriter for Renamer<'_> {
     type Error = String;
+
     fn ty(&mut self, ty: &mut Term) -> Result<(), String> {
         let runtime_slots = ty
             .substitution_parameters()
@@ -82,6 +86,7 @@ impl n::Rewriter for Renamer<'_> {
         }
         Ok(())
     }
+
     fn expression(&mut self, expression: &mut n::Expr) -> Result<bool, String> {
         let original = expression.source;
         // Staged binding can wrap a body in another block with the same
@@ -191,7 +196,10 @@ impl n::Rewriter for Renamer<'_> {
                     self.rename(id)?;
                 }
             }
-            K::NormalFormType {
+            K::PlannedFunctionInstance {
+                plan: Some(plan), ..
+            }
+            | K::NormalFormType {
                 plan: Some(plan), ..
             }
             | K::ApplyNormalForm {
@@ -205,6 +213,7 @@ impl n::Rewriter for Renamer<'_> {
         }
         Ok(true)
     }
+
     fn pattern(&mut self, pattern: &mut n::Pattern) -> Result<(), String> {
         match pattern {
             n::Pattern::CodeEvidence { outputs } => {
@@ -244,6 +253,7 @@ pub fn pattern(
         span: site,
     })
 }
+
 /// Copy-local identities change; lexical inputs and transfers to an enclosing
 /// loop keep their identities. Used when materialization duplicates a branch.
 pub fn copied_expression(

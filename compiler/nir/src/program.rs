@@ -6,14 +6,20 @@ use crate::types::ParameterSubstitution;
 use crate::{DeclarationId, Term};
 use std::fmt;
 use std::sync::Arc;
+
 mod input_schedule;
+
 pub use input_schedule::{CheckedInputSchedule, InputPath, InputSchedule, InputStep};
+
 mod function;
+
 pub use function::{
     DefinitionRegion, Function, FunctionDeclaration, IMPLICIT_RUNTIME_ENV_OWNER,
     IMPLICIT_RUNTIME_ENV_PACKAGE, RuntimeEnvParameter, implicit_runtime_env_parameters,
 };
+
 mod predicate_shape;
+
 pub use predicate_shape::{PredicateShapeError, checkable_predicate, predicate_call_candidate};
 
 /// Relative selections of a writable bit view, in source order.
@@ -30,6 +36,7 @@ pub enum BitSelection {
         width: usize,
     },
 }
+
 /// Expression-free selection shape shared by typed IR and bytecode admission.
 #[derive(Clone, Debug)]
 pub enum BitSelectionLayout<T> {
@@ -37,6 +44,7 @@ pub enum BitSelectionLayout<T> {
     Index(T),
     Window { start: T, end: T, width: usize },
 }
+
 impl<T> BitSelectionLayout<T> {
     pub fn output_width(&self, input: usize) -> Option<usize> {
         match self {
@@ -45,6 +53,7 @@ impl<T> BitSelectionLayout<T> {
             Self::Window { width, .. } => (*width <= input).then_some(*width),
         }
     }
+
     pub fn inputs(&self) -> impl Iterator<Item = &T> {
         match self {
             Self::Static { .. } => [None, None],
@@ -55,6 +64,7 @@ impl<T> BitSelectionLayout<T> {
         .flatten()
     }
 }
+
 impl<T: fmt::Display> fmt::Display for BitSelectionLayout<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -66,6 +76,7 @@ impl<T: fmt::Display> fmt::Display for BitSelectionLayout<T> {
         }
     }
 }
+
 impl BitSelection {
     pub fn expressions(&self) -> impl Iterator<Item = &Expr> {
         match self {
@@ -76,6 +87,7 @@ impl BitSelection {
         .into_iter()
         .flatten()
     }
+
     pub fn expressions_mut(&mut self) -> impl Iterator<Item = &mut Expr> {
         match self {
             Self::Static { .. } => [None, None],
@@ -85,6 +97,7 @@ impl BitSelection {
         .into_iter()
         .flatten()
     }
+
     pub fn layout(&self) -> BitSelectionLayout<&Term> {
         match self {
             Self::Static { start, end } => BitSelectionLayout::Static {
@@ -99,10 +112,12 @@ impl BitSelection {
             },
         }
     }
+
     pub fn output_width(&self, input: usize) -> Option<usize> {
         self.layout().output_width(input)
     }
 }
+
 impl fmt::Display for BitSelection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -120,11 +135,13 @@ pub struct LocalId {
     pub owner: u32,
     pub index: u32,
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceRange {
     pub start: u32,
     pub end: u32,
 }
+
 impl SourceRange {
     /// Generated locations are IR identities, not offsets into a source file.
     /// Their origin and connection site live in the package's expansion table.
@@ -134,9 +151,11 @@ impl SourceRange {
             end: index,
         }
     }
+
     pub fn expansion_index(self) -> Option<u32> {
         (self.start == u32::MAX).then_some(self.end)
     }
+
     /// Recover a source location without erasing the generated IR identity.
     /// Missing entries and cycles are invalid provenance, not file offsets.
     pub fn original(self, expansions: &[ExpansionSource]) -> Option<Self> {
@@ -150,11 +169,13 @@ impl SourceRange {
         None
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExpansionSource {
     pub original: SourceRange,
     pub site: SourceRange,
 }
+
 impl fmt::Display for ExpansionSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -164,6 +185,7 @@ impl fmt::Display for ExpansionSource {
         )
     }
 }
+
 /// Completed descriptions are data of domain Type, separate from identity terms.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum DescriptionLiteral {
@@ -171,6 +193,7 @@ pub enum DescriptionLiteral {
     Refined(crate::refinements::Refinement),
     Application(crate::described_applications::DescribedApplication),
 }
+
 impl fmt::Display for DescriptionLiteral {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -180,6 +203,7 @@ impl fmt::Display for DescriptionLiteral {
         }
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Literal {
     Description(DescriptionLiteral),
@@ -209,6 +233,7 @@ pub enum Literal {
     Integer(String),
     Float(String),
 }
+
 impl Literal {
     /// Check the intrinsic domain and fixed-integer range without evaluating
     /// or parsing a literal. Spelling and bit payload admission remain separate.
@@ -261,6 +286,7 @@ impl Literal {
         }
     }
 }
+
 /// A lexical preparation in source evaluation order followed by the checked
 /// operand for each declaration slot. Temporaries are private to this scope.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -332,6 +358,7 @@ pub struct Expr {
     pub source: SourceRange,
     pub kind: ExprKind,
 }
+
 /// Invocation-local evaluation order and bindings for head inputs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NormalFormInputPlan {
@@ -341,11 +368,13 @@ pub struct NormalFormInputPlan {
     /// `order.len()` preserves trailing empty packets as well.
     pub preparations: Vec<NormalFormPreparation>,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NormalFormPreparation {
     pub before: usize,
     pub expression: Expr,
 }
+
 impl NormalFormPreparation {
     /// Export only the outer binding or the fields unpacked by its tuple
     /// pattern. Callers discard the collected exports if the plan is invalid.
@@ -381,11 +410,13 @@ impl NormalFormPreparation {
         Ok(true)
     }
 }
+
 impl fmt::Display for NormalFormInputPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         InputSchedule::normal(Some(self)).fmt(f)
     }
 }
+
 /// A head input may need its earlier Type inputs before literal conversion.
 #[derive(Clone, Debug, PartialEq)]
 pub enum NormalFormArgument {
@@ -430,12 +461,14 @@ pub enum NormalFormArgument {
         arms: Vec<NormalMatchArm>,
     },
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NormalMatchArm {
     pub pattern: Pattern,
     pub guard: Option<Expr>,
     pub body: NormalFormArgument,
 }
+
 impl fmt::Display for NormalMatchArm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(contextual-match-arm (pattern {}) (guard", self.pattern)?;
@@ -445,6 +478,7 @@ impl fmt::Display for NormalMatchArm {
         write!(f, ") (body {}))", self.body)
     }
 }
+
 impl NormalFormArgument {
     pub fn expression(&self) -> Option<&Expr> {
         match self {
@@ -452,12 +486,14 @@ impl NormalFormArgument {
             _ => None,
         }
     }
+
     pub fn expression_mut(&mut self) -> Option<&mut Expr> {
         match self {
             Self::ListSpread(value) | Self::Value(value) => Some(value),
             _ => None,
         }
     }
+
     pub fn expressions(&self) -> Vec<&Expr> {
         let mut pending = vec![self];
         let mut result = Vec::new();
@@ -501,6 +537,7 @@ impl NormalFormArgument {
         }
         result
     }
+
     pub fn expressions_mut(&mut self) -> Vec<&mut Expr> {
         let mut pending = vec![self];
         let mut result = Vec::new();
@@ -544,6 +581,7 @@ impl NormalFormArgument {
         }
         result
     }
+
     pub fn patterns(&self) -> Vec<&Pattern> {
         let mut pending = vec![self];
         let mut patterns = Vec::new();
@@ -575,6 +613,7 @@ impl NormalFormArgument {
         }
         patterns
     }
+
     pub fn patterns_mut(&mut self) -> Vec<&mut Pattern> {
         let mut pending = vec![self];
         let mut patterns = Vec::new();
@@ -606,6 +645,7 @@ impl NormalFormArgument {
         }
         patterns
     }
+
     /// Whether an ordinary expression that this node executes unconditionally
     /// has no normal result. Contextual children own their own return checks.
     pub fn has_diverging_operand(&self) -> bool {
@@ -695,6 +735,7 @@ impl NormalFormArgument {
             }
         }
     }
+
     pub fn source(&self) -> SourceRange {
         match self {
             Self::ListSpread(value) | Self::Value(value) => value.source,
@@ -709,6 +750,7 @@ impl NormalFormArgument {
         }
     }
 }
+
 impl fmt::Display for NormalFormArgument {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -800,6 +842,7 @@ pub enum IntegerOp {
     Greater,
     GreaterEqual,
 }
+
 impl IntegerOp {
     /// Canonical scalar evaluation shared by interpretation and static identity
     /// recovery. Never proves a type relation or reduces an opaque head.
@@ -834,6 +877,7 @@ impl IntegerOp {
             }
         })
     }
+
     pub fn is_comparison(self) -> bool {
         !matches!(
             self,
@@ -841,6 +885,7 @@ impl IntegerOp {
         )
     }
 }
+
 impl fmt::Display for IntegerOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -858,6 +903,7 @@ impl fmt::Display for IntegerOp {
         })
     }
 }
+
 /// IEEE binary arithmetic; each node rounds at its operand precision.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FloatOp {
@@ -866,6 +912,7 @@ pub enum FloatOp {
     Multiply,
     Divide,
 }
+
 impl FloatOp {
     pub fn evaluate_half(
         self,
@@ -887,6 +934,7 @@ impl FloatOp {
             budget,
         )
     }
+
     pub fn evaluate_f32(self, left: u32, right: u32) -> u32 {
         let (left, right) = (f32::from_bits(left), f32::from_bits(right));
         let value = match self {
@@ -902,6 +950,7 @@ impl FloatOp {
             value.to_bits()
         }
     }
+
     pub fn evaluate_f64(self, left: u64, right: u64) -> u64 {
         let (left, right) = (f64::from_bits(left), f64::from_bits(right));
         let value = match self {
@@ -917,6 +966,7 @@ impl FloatOp {
         }
     }
 }
+
 impl fmt::Display for FloatOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -938,6 +988,7 @@ pub struct EffectHandler {
     pub arms: Vec<MatchArm>,
     pub fallback: Option<usize>,
 }
+
 impl fmt::Display for EffectHandler {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -965,6 +1016,7 @@ pub enum ObjectEditKind {
     Replace,
     Remove,
 }
+
 impl fmt::Display for ObjectEditKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -1030,6 +1082,7 @@ pub enum TextQueryKind {
     Slice,
     Concat,
 }
+
 impl fmt::Display for TextQueryKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -1042,16 +1095,20 @@ impl fmt::Display for TextQueryKind {
         })
     }
 }
+
 impl TextQueryKind {
     pub fn is_length(self) -> bool {
         matches!(self, Self::ByteLength | Self::SymbolByteLength)
     }
+
     pub fn is_symbol(self) -> bool {
         matches!(self, Self::SymbolByteLength | Self::SymbolByte)
     }
+
     pub fn is_comptime_only(self) -> bool {
         matches!(self, Self::Slice | Self::Concat)
     }
+
     pub fn validate(self, packet: &Term, result: &Term) -> bool {
         use crate::Primitive as P;
         let Term::Tuple(inputs) = packet else {
@@ -1095,6 +1152,7 @@ pub enum ObjectQueryKind {
     Value,
     NamedValue,
 }
+
 impl fmt::Display for ObjectQueryKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -1115,6 +1173,7 @@ pub enum EnumBitQuery {
     Values,
     Offsets,
 }
+
 impl fmt::Display for EnumBitQuery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -1138,6 +1197,7 @@ pub enum EnumStructureQuery {
     SymbolValues,
     BitEncoding(EnumBitQuery),
 }
+
 impl fmt::Display for EnumStructureQuery {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Self::BitEncoding(query) = self {
@@ -1241,6 +1301,12 @@ pub enum ExprKind {
     ComptimeFunctionInstance {
         declaration: DeclarationId,
         inputs: ClauseOperands,
+    },
+    /// Form a named comptime callable from source-ordered contextual operands.
+    PlannedFunctionInstance {
+        declaration: DeclarationId,
+        arguments: Vec<NormalFormArgument>,
+        plan: Option<NormalFormInputPlan>,
     },
     ObjectEdit {
         subject: Box<Expr>,
@@ -1552,6 +1618,7 @@ pub enum ExprKind {
     And(Box<Expr>, Box<Expr>),
     Or(Box<Expr>, Box<Expr>),
 }
+
 /// Layout family for a field in a program place. Anonymous records have no
 /// declaration identity; their slot is interpreted in the root's checked type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1559,6 +1626,7 @@ pub enum FieldOwner {
     Nominal(DeclarationId),
     Anonymous,
 }
+
 impl fmt::Display for FieldOwner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1567,11 +1635,13 @@ impl fmt::Display for FieldOwner {
         }
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Place {
     pub root: LocalId,
     pub fields: Vec<(FieldOwner, usize)>,
 }
+
 impl fmt::Display for Place {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(place (root {}) (fields", self.root)?;
@@ -1581,12 +1651,14 @@ impl fmt::Display for Place {
         f.write_str("))")
     }
 }
+
 impl Place {
     /// Locate a syntactic place; no expression evaluation is hidden here.
     pub fn is_root(&self) -> bool {
         self.fields.is_empty()
     }
 }
+
 /// Argument transport is distinct from the source type. Comptime references
 /// carry invocation-local storage; they never introduce a pointer type.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1597,6 +1669,7 @@ pub enum ArgumentPassing {
     /// Alias a let binding without granting whole-value replacement.
     ComptimeReferenceNoRebind,
 }
+
 impl fmt::Display for ArgumentPassing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -1606,6 +1679,7 @@ impl fmt::Display for ArgumentPassing {
         })
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallArgument {
     pub passing: ArgumentPassing,
@@ -1613,6 +1687,7 @@ pub struct CallArgument {
     pub value: Expr,
     pub is_default: bool,
 }
+
 impl fmt::Display for CallArgument {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -1622,6 +1697,7 @@ impl fmt::Display for CallArgument {
         )
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Capture {
     pub binding: LocalId,
@@ -1630,6 +1706,7 @@ pub struct Capture {
     /// value, without looking up or overwriting a caller-local binding.
     pub value: Option<Box<Expr>>,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pattern {
     /// Match one existing optional layer and expose its whole payload.
@@ -1698,12 +1775,14 @@ pub enum Pattern {
     },
     Or(Vec<Pattern>),
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MatchArm {
     pub pattern: Pattern,
     pub guard: Option<Expr>,
     pub body: Expr,
 }
+
 impl fmt::Display for Pattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1822,6 +1901,7 @@ impl fmt::Display for Pattern {
         }
     }
 }
+
 impl fmt::Display for MatchArm {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(arm (pattern {}) (guard", self.pattern)?;
@@ -1831,6 +1911,7 @@ impl fmt::Display for MatchArm {
         write!(f, ") (body {}))", self.body)
     }
 }
+
 impl fmt::Display for Capture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(capture (binding {}) (type {})", self.binding, self.ty)?;
@@ -1840,6 +1921,7 @@ impl fmt::Display for Capture {
         f.write_str(")")
     }
 }
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum FunctionPhase {
     #[default]
@@ -1848,6 +1930,7 @@ pub enum FunctionPhase {
     /// Opaque identity: a checked definition, never an ordinary invocation entry.
     NormalForm,
 }
+
 impl fmt::Display for FunctionPhase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -1857,11 +1940,13 @@ impl fmt::Display for FunctionPhase {
         })
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EntrySnapshot {
     pub parameter: LocalId,
     pub binding: LocalId,
 }
+
 impl fmt::Display for EntrySnapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -1871,11 +1956,13 @@ impl fmt::Display for EntrySnapshot {
         )
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct InterfaceInstance {
     pub declaration: DeclarationId,
     pub arguments: Vec<Term>,
 }
+
 impl From<DeclarationId> for InterfaceInstance {
     fn from(declaration: DeclarationId) -> Self {
         Self {
@@ -1884,6 +1971,7 @@ impl From<DeclarationId> for InterfaceInstance {
         }
     }
 }
+
 impl InterfaceInstance {
     pub(crate) fn try_map_types<E>(
         &self,
@@ -1933,6 +2021,7 @@ impl InterfaceInstance {
         self.try_map_types(&mut |ty| substitution.term(ty))
     }
 }
+
 impl fmt::Display for InterfaceInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(interface-instance {} (arguments", self.declaration)?;
@@ -1942,12 +2031,14 @@ impl fmt::Display for InterfaceInstance {
         write!(f, "))")
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraitRequirement {
     pub interface_arguments: Vec<Term>,
     pub subject: Term,
     pub interface: DeclarationId,
 }
+
 impl TraitRequirement {
     pub(crate) fn try_map_types<E>(
         &self,
@@ -1982,12 +2073,14 @@ impl TraitRequirement {
                 .iter()
                 .any(|argument| argument.mentions_rigid(declaration))
     }
+
     pub fn interface_instance(&self) -> InterfaceInstance {
         InterfaceInstance {
             declaration: self.interface,
             arguments: self.interface_arguments.clone(),
         }
     }
+
     pub fn instantiate_types(
         &self,
         parameters: &[DeclarationId],
@@ -2012,6 +2105,7 @@ impl TraitRequirement {
         self.try_map_types(&mut |ty| substitution.term(ty))
     }
 }
+
 impl fmt::Display for TraitRequirement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2022,6 +2116,7 @@ impl fmt::Display for TraitRequirement {
         )
     }
 }
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
     pub refinements: crate::refinements::Refinements,
@@ -2092,6 +2187,7 @@ pub struct RuntimeCleanupAccess {
     pub ty: Term,
     pub conditions: std::collections::BTreeMap<usize, Vec<(Vec<usize>, usize)>>,
 }
+
 impl fmt::Display for RuntimeCleanupAccess {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2133,6 +2229,7 @@ impl fmt::Display for RuntimeCleanupAccess {
         )
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimeInstance {
     pub declaration: DeclarationId,
@@ -2140,6 +2237,7 @@ pub struct RuntimeInstance {
     pub function: Function,
     pub cleanup_accesses: Vec<RuntimeCleanupAccess>,
 }
+
 impl fmt::Display for RuntimeInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(runtime-instance {} (arguments", self.declaration)?;
@@ -2153,6 +2251,7 @@ impl fmt::Display for RuntimeInstance {
         write!(f, ") {})", self.function)
     }
 }
+
 impl Package {
     /// Return the exact residual body when present. Completed bodies have no
     /// remaining clause substitutions; their invocation identity stays in the key.
@@ -2250,6 +2349,7 @@ pub struct RuntimeFunctionIdentity {
     pub type_parameters: Vec<DeclarationId>,
     pub signature: Term,
 }
+
 impl fmt::Display for RuntimeFunctionIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2290,6 +2390,7 @@ pub struct DispatchInstance {
         crate::associated_initializers::AssociatedInitializer,
     )>,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MethodInstance {
     pub method_arguments: Vec<Term>,
@@ -2297,6 +2398,7 @@ pub struct MethodInstance {
     pub body: DeclarationId,
     pub arguments: Vec<Term>,
 }
+
 impl DispatchInstance {
     pub fn interface_instance(&self) -> InterfaceInstance {
         InterfaceInstance {
@@ -2305,6 +2407,7 @@ impl DispatchInstance {
         }
     }
 }
+
 impl Implementation {
     pub fn interface_instance(&self) -> Option<InterfaceInstance> {
         self.interface.map(|declaration| InterfaceInstance {
@@ -2313,6 +2416,7 @@ impl Implementation {
         })
     }
 }
+
 impl Trait {
     pub fn parameters_with_self(&self) -> Vec<DeclarationId> {
         std::iter::once(self.self_parameter)
@@ -2320,6 +2424,7 @@ impl Trait {
             .collect()
     }
 }
+
 impl fmt::Display for DispatchInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2350,6 +2455,7 @@ impl fmt::Display for DispatchInstance {
         write!(f, "))")
     }
 }
+
 impl fmt::Display for MethodInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2375,6 +2481,7 @@ pub enum TraitPhase {
     Runtime,
     Comptime,
 }
+
 impl fmt::Display for TraitPhase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -2390,6 +2497,7 @@ pub struct ImplementationPhases {
     pub runtime: bool,
     pub comptime: bool,
 }
+
 impl Default for ImplementationPhases {
     fn default() -> Self {
         Self {
@@ -2398,6 +2506,7 @@ impl Default for ImplementationPhases {
         }
     }
 }
+
 impl ImplementationPhases {
     pub fn contains(self, phase: TraitPhase) -> bool {
         match phase {
@@ -2406,6 +2515,7 @@ impl ImplementationPhases {
         }
     }
 }
+
 impl fmt::Display for ImplementationPhases {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2425,6 +2535,7 @@ pub struct AssociatedContract {
     pub ty: Term,
     pub default: Option<Expr>,
 }
+
 impl fmt::Display for AssociatedContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2438,6 +2549,7 @@ impl fmt::Display for AssociatedContract {
         write!(f, "))")
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Trait {
     /// All interface members belong to the comptime phase; not function purity.
@@ -2456,6 +2568,7 @@ pub struct Trait {
     pub name: String,
     pub methods: Vec<MethodContract>,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct MethodContract {
     pub source: SourceRange,
@@ -2483,6 +2596,7 @@ pub struct MethodContract {
     pub requirements: Vec<TypePredicate>,
     pub default: Option<DeclarationId>,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Implementation {
     pub phases: ImplementationPhases,
@@ -2550,6 +2664,7 @@ impl fmt::Display for Trait {
         write!(f, "))")
     }
 }
+
 impl fmt::Display for MethodContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2592,11 +2707,13 @@ impl fmt::Display for MethodContract {
         write!(f, "))")
     }
 }
+
 impl Implementation {
     pub fn parameter_binders(&self) -> Result<Vec<crate::DeclarationParameter>, crate::TypeError> {
         crate::declaration_parameters(&self.type_parameters, &self.parameter_types)
     }
 }
+
 impl fmt::Display for Implementation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -2645,6 +2762,7 @@ impl fmt::Display for Implementation {
         write!(f, "))")
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Enum {
     /// Source-declared operation-label family. Target support needs a separate binding.
@@ -2662,18 +2780,21 @@ pub struct Enum {
     pub encoding: Option<crate::enum_encoding::Representation>,
     pub symbol_encoding: Option<crate::enum_encoding::SymbolRepresentation>,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Variant {
     pub name: String,
     pub shape: VariantShape,
     pub fields: Vec<Term>,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum VariantShape {
     Unit,
     Tuple,
     Named(Vec<String>),
 }
+
 impl Enum {
     /// Check completed indices before constructing a concrete layout instance.
     pub fn validate_completed_arguments(
@@ -2692,6 +2813,7 @@ impl Enum {
     pub fn parameter_binders(&self) -> Result<Vec<crate::DeclarationParameter>, crate::TypeError> {
         crate::nominal_parameters::binders(&self.type_parameters, &self.parameter_types)
     }
+
     pub fn validate_encoding(&self) -> Result<(), &'static str> {
         self.validate_encoding_in(None)
     }
@@ -2789,6 +2911,7 @@ impl Enum {
         Ok(())
     }
 }
+
 impl fmt::Display for Enum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(enum (id {}) (name ", self.declaration)?;
@@ -2848,6 +2971,7 @@ impl fmt::Display for Enum {
         f.write_str("))")
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Struct {
     /// Ordered declaration input domains; empty is the compact all-Type form.
@@ -2860,6 +2984,7 @@ pub struct Struct {
     pub fields: Vec<(String, Term)>,
     pub packed: bool,
 }
+
 impl Struct {
     /// Check completed indices before constructing a concrete layout instance.
     pub fn validate_completed_arguments(
@@ -2879,6 +3004,7 @@ impl Struct {
         crate::nominal_parameters::binders(&self.type_parameters, &self.parameter_types)
     }
 }
+
 impl fmt::Display for Struct {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(struct (id {}) (name ", self.declaration)?;
@@ -2918,6 +3044,7 @@ impl fmt::Display for LocalId {
         write!(f, "(local {} {})", self.owner, self.index)
     }
 }
+
 impl fmt::Display for SourceRange {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(index) = self.expansion_index() {
@@ -2927,6 +3054,7 @@ impl fmt::Display for SourceRange {
         }
     }
 }
+
 impl fmt::Display for Literal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2972,11 +3100,13 @@ impl fmt::Display for Literal {
         }
     }
 }
+
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(expr (type {}) {} {})", self.ty, self.source, self.kind)
     }
 }
+
 impl fmt::Display for ExprKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -3337,13 +3467,19 @@ impl fmt::Display for ExprKind {
                 }
                 f.write_str("))")
             }
-            Self::NormalFormType {
+            Self::PlannedFunctionInstance {
+                arguments, plan, ..
+            }
+            | Self::NormalFormType {
                 arguments, plan, ..
             }
             | Self::ApplyNormalForm {
                 arguments, plan, ..
             } => {
                 match self {
+                    Self::PlannedFunctionInstance { declaration, .. } => {
+                        write!(f, "(planned-function-instance (declaration {declaration})")?
+                    }
                     Self::NormalFormType { head, .. } => {
                         write!(f, "(normal-form-type-value (head {head})")?
                     }
@@ -3591,6 +3727,7 @@ impl fmt::Display for ExprKind {
         }
     }
 }
+
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(nir-package")?;
@@ -3789,6 +3926,7 @@ impl Expr {
         value.rewrite_types(&mut |ty| ty.instantiate_types(parameters, arguments))?;
         Ok(value)
     }
+
     /// Substitute annotations with explicit caller frames without changing term identity.
     pub fn instantiate_types_in_scope(
         &self,
@@ -3802,6 +3940,7 @@ impl Expr {
         })?;
         Ok(value)
     }
+
     /// Rewrite every type-bearing annotation and operand in deterministic structural order.
     /// The callback owns recursive Term rewriting. On error this working copy
     /// may be partially changed; callers must discard it rather than publish it.
@@ -3811,6 +3950,7 @@ impl Expr {
     ) -> Result<(), E> {
         self.rewrite_with(&mut TypeRewriter(transform))
     }
+
     /// Move annotations between equivalent binding frames. Only use for maps
     /// that rename references; supplying values requires ordinary specialization.
     pub fn relocate_slots(
@@ -3819,6 +3959,7 @@ impl Expr {
     ) -> Result<(), crate::TypeError> {
         self.rewrite_with(&mut SlotRelocation(slots))
     }
+
     /// Rewrite a private expression tree, including binding/control identities.
     /// Callbacks run before children. This deliberately shares the exhaustive
     /// traversal used by type substitution so new operations cannot be skipped.
@@ -4314,7 +4455,9 @@ impl Expr {
                 }
                 Arc::make_mut(body).rewrite_with(rewriter)?;
             }
-            kind @ (ExprKind::NormalFormType { .. } | ExprKind::ApplyNormalForm { .. }) => {
+            kind @ (ExprKind::PlannedFunctionInstance { .. }
+            | ExprKind::NormalFormType { .. }
+            | ExprKind::ApplyNormalForm { .. }) => {
                 let (inputs, plan) = match kind {
                     ExprKind::ApplyNormalForm {
                         callee,
@@ -4325,7 +4468,10 @@ impl Expr {
                         Arc::make_mut(callee).rewrite_with(rewriter)?;
                         (arguments, plan)
                     }
-                    ExprKind::NormalFormType {
+                    ExprKind::PlannedFunctionInstance {
+                        arguments, plan, ..
+                    }
+                    | ExprKind::NormalFormType {
                         arguments, plan, ..
                     } => (arguments, plan),
                     _ => unreachable!(),
@@ -4620,6 +4766,7 @@ pub enum TypePredicate {
     And(Vec<TypePredicate>),
     Or(Vec<TypePredicate>),
 }
+
 impl TypePredicate {
     pub(crate) fn try_map_types<E>(
         &self,
@@ -4713,6 +4860,7 @@ impl TypePredicate {
             .into_iter()
             .any(|term| term.mentions_rigid(declaration))
     }
+
     pub fn instantiate_types(
         &self,
         parameters: &[DeclarationId],
@@ -4739,6 +4887,7 @@ impl TypePredicate {
         let substitution = ParameterSubstitution::for_fragments(parameters, arguments)?;
         self.try_map_types(&mut |ty| substitution.term(ty))
     }
+
     pub fn instantiate_rigids(
         &self,
         parameters: &[DeclarationId],
@@ -4747,6 +4896,7 @@ impl TypePredicate {
         self.try_map_types(&mut |ty| ty.instantiate_rigids(parameters, arguments))
     }
 }
+
 impl fmt::Display for TypePredicate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -4776,21 +4926,29 @@ impl fmt::Display for TypePredicate {
 pub trait Rewriter {
     /// Specialization can change residual value and error-pattern categories.
     const SPECIALIZE: bool = false;
+
     type Error;
+
     fn ty(&mut self, _ty: &mut Term) -> Result<(), Self::Error> {
         Ok(())
     }
+
     fn expression(&mut self, _expression: &mut Expr) -> Result<bool, Self::Error> {
         Ok(true)
     }
+
     fn pattern(&mut self, _pattern: &mut Pattern) -> Result<(), Self::Error> {
         Ok(())
     }
 }
+
 struct TypeRewriter<'a, T>(&'a mut T);
+
 impl<E, T: FnMut(&Term) -> Result<Term, E>> Rewriter for TypeRewriter<'_, T> {
     const SPECIALIZE: bool = true;
+
     type Error = E;
+
     fn ty(&mut self, ty: &mut Term) -> Result<(), E> {
         *ty = (self.0)(ty)?;
         Ok(())
@@ -4798,8 +4956,10 @@ impl<E, T: FnMut(&Term) -> Result<Term, E>> Rewriter for TypeRewriter<'_, T> {
 }
 
 struct SlotRelocation<'a>(&'a [Option<(usize, crate::Sort)>]);
+
 impl Rewriter for SlotRelocation<'_> {
     type Error = crate::TypeError;
+
     fn ty(&mut self, ty: &mut Term) -> Result<(), Self::Error> {
         ty.relocate_slots_in_place(self.0)
     }
@@ -4814,9 +4974,11 @@ impl Pattern {
     ) -> Result<(), E> {
         self.rewrite_with(&mut TypeRewriter(transform))
     }
+
     pub fn rewrite_with<R: Rewriter>(&mut self, rewriter: &mut R) -> Result<(), R::Error> {
         self.rewrite_with_domain(rewriter, None)
     }
+
     /// Carry the original subject domain through structural patterns. Only
     /// explicit field layouts are used; opaque nominal/normal heads stay opaque.
     fn rewrite_with_domain<R: Rewriter>(
