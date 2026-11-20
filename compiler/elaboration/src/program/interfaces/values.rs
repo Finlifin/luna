@@ -185,73 +185,12 @@ impl Checker<'_, '_> {
     }
 }
 
-/// The source interface can inspect arity without copying identities or
-/// interpreting a producer. Public members include Self before either tuple.
-enum CallableClauseView<'v> {
-    Fixed(&'v [Term]),
-    Prepared(&'v n::ClauseOperands),
-    Contextual(&'v [n::NormalFormArgument]),
-    Member {
-        subject: &'v Term,
-        interface: &'v [Term],
-        method: &'v [Term],
-    },
-}
-
-impl CallableClauseView<'_> {
-    fn len(&self) -> usize {
-        match self {
-            Self::Fixed(values) => values.len(),
-            Self::Prepared(inputs) => inputs.arguments.len(),
-            Self::Contextual(inputs) => inputs.len(),
-            Self::Member {
-                interface, method, ..
-            } => 1 + interface.len() + method.len(),
-        }
-    }
-
-    fn identity(&self, slot: usize) -> Option<&Term> {
-        match self {
-            Self::Fixed(values) => values.get(slot),
-            Self::Prepared(inputs) => inputs.observed_argument(slot),
-            Self::Contextual(inputs) => match &inputs.get(slot)?.expression()?.kind {
-                K::TypeValue(ty) | K::ComptimeValue(ty) => Some(ty),
-                _ => None,
-            },
-            Self::Member { subject, .. } if slot == 0 => Some(subject),
-            Self::Member {
-                interface, method, ..
-            } => {
-                let slot = slot - 1;
-                if slot < interface.len() {
-                    interface.get(slot)
-                } else {
-                    method.get(slot - interface.len())
-                }
-            }
-        }
-    }
-}
-
 impl Checker<'_, '_> {
     fn method_input_view<'v>(
         &self,
         value: &'v n::Expr,
     ) -> Option<(OwnerId, CallableClauseView<'v>)> {
         let (id, view) = match &value.kind {
-            K::PlannedFunctionInstance {
-                declaration,
-                arguments,
-                ..
-            } => (*declaration, CallableClauseView::Contextual(arguments)),
-            K::ComptimeFunctionInstance {
-                declaration,
-                inputs,
-            } => (*declaration, CallableClauseView::Prepared(inputs)),
-            K::FunctionInstance {
-                declaration,
-                arguments,
-            } => (*declaration, CallableClauseView::Fixed(arguments)),
             K::TraitMethod {
                 member,
                 subject,
@@ -266,7 +205,8 @@ impl Checker<'_, '_> {
                     method: method_arguments,
                 },
             ),
-            _ => return None,
+            K::Function(_) => return None,
+            _ => CallableClauseView::direct(value)?,
         };
         Some((self.source_declarations.owner(id)?, view))
     }

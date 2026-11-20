@@ -498,3 +498,68 @@ fn a_returned_signed_description_establishes_integer_without_selecting_a_width()
     let error = support::compile(&invalid).unwrap_err();
     assert!(error.contains("refinement requirement"), "{error}");
 }
+
+#[test]
+fn type_producer_contracts_specialize_observed_value_clauses() {
+    let source = r#"
+        struct Tag where Domain: Type, mark: Domain { ready: bool, }
+        pure comptime fn Select(input: Type) -> R: Type
+        where Domain: Type, mark: Domain, ensures R == Tag<Domain, mark>
+        {
+            Tag<Domain, mark>
+        }
+        pure comptime fn Relay(input: Type) -> R: Type
+        where ensures R == Tag<bool, true>
+        {
+            Select<bool, true>(input)
+        }
+        fn take(comptime X: Type, tagged: defer Select<bool, true>(X)) -> bool {
+            let x: Tag<bool, true> = tagged;
+            x.ready
+        }
+        pure comptime fn Shape(T: Type) -> R: Type
+        where one: bool, ensures Type.predicates.is_tuple(R)
+        {
+            if one { Tuple<T> } else { Tuple<T, T> }
+        }
+        pure comptime fn invert(flag: bool) -> bool { not flag }
+        fn count(comptime X: Type, comptime flag: bool, ...values: defer Shape<invert(flag)>(X)) -> u8 {
+            var n: u8 = 0;
+            inline for value in values'tuple_enumerate {
+                assumes n < 255;
+                n = n + 1;
+            }
+            n
+        }
+        fn run() -> bool {
+            const relay_ok = Relay(bool) == Tag<bool, true>;
+            relay_ok and take(u8, Tag<bool, true> { ready: true })
+                and count(bool, false, true) == 1 and count(bool, true, true, false) == 2
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+
+    let wrong_identity = source.replace("let x: Tag<bool, true>", "let x: Tag<bool, false>");
+    let error = support::compile(&wrong_identity).unwrap_err();
+    assert!(error.contains("type mismatch"), "{error}");
+
+    let undocumented = source.replace(
+        "where one: bool, ensures Type.predicates.is_tuple(R)",
+        "where one: bool",
+    );
+    let error = support::compile(&undocumented).unwrap_err();
+    assert!(
+        error.contains("tuple_enumerate requires a proven tuple"),
+        "{error}"
+    );
+
+    let wrong_relay = source.replace(
+        "where ensures R == Tag<bool, true>",
+        "where ensures R == Tag<bool, false>",
+    );
+    let error = support::compile(&wrong_relay).unwrap_err();
+    assert!(
+        error.contains("result guarantee contract is not established"),
+        "{error}"
+    );
+}

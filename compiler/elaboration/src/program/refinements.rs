@@ -1552,64 +1552,66 @@ impl Checker<'_, '_> {
                     declaration: binder,
                     sort: Sort::Type,
                 };
-                let (callee_id, type_args) = match &callee.kind {
-                    K::Function(id) => (Some(*id), None),
-                    K::FunctionInstance {
-                        declaration,
-                        arguments,
-                        ..
-                    } => (Some(*declaration), Some(arguments.as_slice())),
-                    _ => (None, None),
-                };
-                if let Some(callee_owner) =
-                    callee_id.and_then(|id| self.source_declarations.owner(id))
+                if let Some((id, operands)) = CallableClauseView::direct(callee)
+                    && let Some(owner) = self.source_declarations.owner(id)
                     && let Some((callee_binder, callee_guarantees)) =
-                        self.result_guarantees.get(&callee_owner).cloned()
+                        self.result_guarantees.get(&owner)
                 {
                     let frames = self.call_input_frames();
                     let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                     let before = fuel;
-                    let owner_params = self.type_parameters.get(&callee_owner).cloned();
-                    for guarantee in &callee_guarantees {
-                        let mut pred = guarantee.clone();
-                        if let (Some(params), Some(args)) = (&owner_params, type_args)
-                            && params.len() == args.len()
-                            && !params.is_empty()
-                        {
-                            let domains: Vec<_> = params
-                                .iter()
-                                .map(|id| {
-                                    self.trait_input_domain(*id).unwrap_or_else(|| p(P::Type))
+                    let checked = (|| -> Result<(), Error> {
+                        let parameters = self
+                            .type_parameters
+                            .get(&owner)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        let mut domains = Vec::new();
+                        for id in parameters {
+                            let domain = self
+                                .observe_input_domain(*id, || {
+                                    fuel = fuel
+                                        .checked_sub(1)
+                                        .ok_or(nir::type_computations::Error::Budget)?;
+                                    Ok(())
                                 })
-                                .collect();
-                            let sub = nir::DeclarationSubstitution::bounded(
-                                params, &domains, args, &frames, &mut fuel,
-                            )
-                            .map_err(|e| error(span, e.to_string()))?;
-                            pred = sub
-                                .instantiate_predicate_bounded(&pred, &mut fuel)
                                 .map_err(|e| error(span, e.to_string()))?;
+                            domains.push(domain.unwrap_or(&Term::Primitive(P::Type)));
                         }
-                        if callee_binder != binder {
-                            let sub = nir::DeclarationSubstitution::bounded(
-                                &[callee_binder],
-                                &[p(P::Type)],
-                                std::slice::from_ref(&subject_term),
-                                &frames,
-                                &mut fuel,
-                            )
-                            .map_err(|e| error(span, e.to_string()))?;
-                            pred = sub
-                                .instantiate_predicate_bounded(&pred, &mut fuel)
+                        let clauses = clause_inputs::ResultClauses::new(
+                            parameters, &domains, operands, &mut fuel,
+                        )
+                        .map_err(|e| error(span, e))?;
+                        for guarantee in callee_guarantees {
+                            let Some(mut pred) = clauses
+                                .specialize(guarantee, &frames, &mut fuel)
+                                .map_err(|e| error(span, e))?
+                            else {
+                                continue;
+                            };
+                            if *callee_binder != binder {
+                                let sub = nir::DeclarationSubstitution::bounded(
+                                    std::slice::from_ref(callee_binder),
+                                    &[p(P::Type)],
+                                    std::slice::from_ref(&subject_term),
+                                    &frames,
+                                    &mut fuel,
+                                )
                                 .map_err(|e| error(span, e.to_string()))?;
+                                pred = sub
+                                    .instantiate_predicate_bounded(&pred, &mut fuel)
+                                    .map_err(|e| error(span, e.to_string()))?;
+                            }
+                            let fact = crate::ptc::Formula::from_predicate(&pred);
+                            local_context
+                                .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                                .map_err(|failure| error(span, failure.to_string()))?;
+                            local_context.assume(fact);
                         }
-                        let fact = crate::ptc::Formula::from_predicate(&pred);
-                        local_context
-                            .validate_formula(&fact, &mut crate::ptc::Budget::default())
-                            .map_err(|failure| error(span, failure.to_string()))?;
-                        local_context.assume(fact);
-                    }
+                        Ok(())
+                    })();
                     self.required_steps -= (before - fuel) as u64;
+                    checked?;
                 }
                 self.prove_guarantees_for_term(
                     &local_context,

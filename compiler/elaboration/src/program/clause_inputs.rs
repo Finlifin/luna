@@ -1,5 +1,7 @@
 //! Source-order preparation of ordinary clause inputs and collection values.
 use super::*;
+mod result_contracts;
+pub(super) use result_contracts::ResultClauses;
 
 /// HIR supplies only entry declarations; no input values or domains are routed here.
 pub(super) fn entries(
@@ -280,5 +282,74 @@ impl Checker<'_, '_> {
             kind: K::TypeList(Vec::new()),
         });
         Ok(value)
+    }
+}
+
+/// The source interface can inspect arity without copying identities or
+/// interpreting a producer. Public members include Self before either tuple.
+#[derive(Clone, Copy)]
+pub(super) enum CallableClauseView<'v> {
+    Fixed(&'v [Term]),
+    Prepared(&'v n::ClauseOperands),
+    Contextual(&'v [n::NormalFormArgument]),
+    Member {
+        subject: &'v Term,
+        interface: &'v [Term],
+        method: &'v [Term],
+    },
+}
+
+impl<'v> CallableClauseView<'v> {
+    pub(super) fn direct(callee: &'v n::Expr) -> Option<(DeclarationId, Self)> {
+        Some(match &callee.kind {
+            K::Function(id) => (*id, Self::Fixed(&[])),
+            K::PlannedFunctionInstance {
+                declaration,
+                arguments,
+                ..
+            } => (*declaration, Self::Contextual(arguments)),
+            K::ComptimeFunctionInstance {
+                declaration,
+                inputs,
+            } => (*declaration, Self::Prepared(inputs)),
+            K::FunctionInstance {
+                declaration,
+                arguments,
+            } => (*declaration, Self::Fixed(arguments)),
+            _ => return None,
+        })
+    }
+
+    pub(super) fn len(&self) -> usize {
+        match *self {
+            Self::Fixed(values) => values.len(),
+            Self::Prepared(inputs) => inputs.arguments.len(),
+            Self::Contextual(inputs) => inputs.len(),
+            Self::Member {
+                interface, method, ..
+            } => 1 + interface.len() + method.len(),
+        }
+    }
+
+    pub(super) fn identity(&self, slot: usize) -> Option<&'v Term> {
+        match *self {
+            Self::Fixed(values) => values.get(slot),
+            Self::Prepared(inputs) => inputs.observed_argument(slot),
+            Self::Contextual(inputs) => match &inputs.get(slot)?.expression()?.kind {
+                K::TypeValue(ty) | K::ComptimeValue(ty) => Some(ty),
+                _ => None,
+            },
+            Self::Member { subject, .. } if slot == 0 => Some(subject),
+            Self::Member {
+                interface, method, ..
+            } => {
+                let slot = slot - 1;
+                if slot < interface.len() {
+                    interface.get(slot)
+                } else {
+                    method.get(slot - interface.len())
+                }
+            }
+        }
     }
 }

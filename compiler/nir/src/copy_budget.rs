@@ -378,6 +378,15 @@ pub fn term_inputs(value: &Term, steps: &mut u64) -> Result<TermInputs, InputObs
     observe_inputs(Node::Type(value), steps, true)
 }
 
+/// Declaration inputs and free ordinary slots of a result contract, in the
+/// producer's original telescope. Nested callable binders remain local.
+pub fn predicate_inputs(
+    value: &n::TypePredicate,
+    steps: &mut u64,
+) -> Result<TermInputs, InputObservationError> {
+    observe_inputs(Node::Predicate(value), steps, true)
+}
+
 /// Observe the outer substitution frame of every embedded term, accounting
 /// for nested function binders. This never rewrites a value or clones shared
 /// bodies. All embedded terms must agree on the sort of each outer slot.

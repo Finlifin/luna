@@ -6,6 +6,7 @@ use crate::materialization::{DeclarationSnapshot, DeclarationSource};
 use comptime_interpretor::{CodeSession, InvocationValue};
 use std::sync::{Arc, Mutex, OnceLock};
 mod inputs;
+mod result_guarantees;
 
 /// Own the declarations and their derived index together. Once published into
 /// a preparation, this world is immutable; invocation state lives elsewhere.
@@ -209,135 +210,6 @@ pub(super) struct InvocationScope {
 impl PreparedRequired {
     pub(in crate::program) fn definition_identity_cursor(&self) -> u32 {
         self.world.package().definition_identity_cursor
-    }
-
-    /// Read the declared result binder and PTC guarantees of a directly
-    /// called Type-producing entry function without peeking into its body.
-    pub(in crate::program) fn direct_call_result_guarantees(
-        &self,
-        steps: &mut u64,
-        span: Span,
-    ) -> Result<Option<(DeclarationId, Vec<n::TypePredicate>)>, Error> {
-        let package = self.world.package();
-        let Some(entry) = package
-            .functions
-            .iter()
-            .find(|f| f.declaration == self.entry)
-        else {
-            return Ok(None);
-        };
-        let mut expr = &entry.body;
-        loop {
-            match &expr.kind {
-                K::Return(Some(inner)) => expr = inner,
-                K::Block {
-                    statements,
-                    result: Some(inner),
-                }
-                | K::CallPreparation {
-                    statements,
-                    result: Some(inner),
-                } if statements.is_empty() => {
-                    expr = inner;
-                }
-                _ => break,
-            }
-        }
-        let K::Call { callee, .. } = &expr.kind else {
-            return Ok(None);
-        };
-        let (target_id, type_args): (DeclarationId, &[Term]) = match &callee.kind {
-            K::Function(id) => (*id, &[]),
-            K::FunctionInstance {
-                declaration,
-                arguments,
-            } => (*declaration, arguments),
-            _ => return Ok(None),
-        };
-        let Some(target) = package
-            .functions
-            .iter()
-            .find(|f| f.declaration == target_id)
-        else {
-            return Ok(None);
-        };
-        let Some(binder) = target.result_type_binder else {
-            return Ok(None);
-        };
-        if target.result_guarantees.is_empty() {
-            return Ok(None);
-        }
-        if target.type_parameters.len() != type_args.len()
-            || type_args.iter().any(|arg| arg.check_scope(&[]).is_err())
-        {
-            return Ok(None);
-        }
-        let before = usize::try_from(*steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let guarantees = (|| -> Result<Vec<n::TypePredicate>, String> {
-            let mut result = if target.type_parameters.is_empty() {
-                target.result_guarantees.clone()
-            } else {
-                let domains = vec![p(P::Type); target.type_parameters.len()];
-                let substitution = nir::DeclarationSubstitution::bounded(
-                    &target.type_parameters,
-                    &domains,
-                    type_args,
-                    &[],
-                    &mut fuel,
-                )
-                .map_err(|e| e.to_string())?;
-                target
-                    .result_guarantees
-                    .iter()
-                    .map(|g| {
-                        substitution
-                            .instantiate_predicate_bounded(g, &mut fuel)
-                            .map_err(|e| e.to_string())
-                    })
-                    .collect::<Result<Vec<_>, _>>()?
-            };
-            if !self.scope.scoped_parameters.is_empty() {
-                for g in &mut result {
-                    nir::copy_budget::charge_predicate_substitution(
-                        g,
-                        &self.scope.scoped_parameters,
-                        &self.scope.scoped_arguments,
-                        &mut fuel,
-                    )
-                    .map_err(|e| format!("{e:?}"))?;
-                    *g = g
-                        .instantiate_parameters_in_scope(
-                            &self.scope.scoped_parameters,
-                            &self.scope.scoped_arguments,
-                            &self.scope.input_frames,
-                        )
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-            if result.iter().any(|g| {
-                super::map_requirement(
-                    g,
-                    &mut |ty| {
-                        ty.check_scope(&[])
-                            .map_err(|e| error(span, e.to_string()))?;
-                        Ok(ty.clone())
-                    },
-                    span,
-                    0,
-                )
-                .is_err()
-            }) {
-                return Ok(Vec::new());
-            }
-            Ok(result)
-        })();
-        *steps -= (before - fuel) as u64;
-        let guarantees = guarantees.map_err(|reason| error(span, reason))?;
-        if guarantees.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some((binder, guarantees)))
     }
 
     /// Observe the carried invocation inputs and code without consulting a

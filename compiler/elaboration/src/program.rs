@@ -42,6 +42,7 @@ mod checking_attempts;
 mod closure_bodies;
 use closure_bodies::ClosureConstRegions;
 mod clause_inputs;
+use clause_inputs::CallableClauseView;
 
 use checking_attempts::Disposition as CheckingDisposition;
 
