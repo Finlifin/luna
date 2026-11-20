@@ -320,11 +320,14 @@ impl Polynomial {
         facts: &Facts,
         limits: &mut Limits,
     ) -> Result<(Interval, BTreeMap<ValueId, Interval>), Unknown> {
-        let (mut enclosure, premises) = self.enclosure(facts, limits)?;
+        let (mut enclosure, mut premises) = self.enclosure(facts, limits)?;
         if enclosure.within(target, limits)? {
             return Ok((enclosure, premises));
         }
-        self.refine_monotone_enclosure(&mut enclosure, &premises, facts, limits)?;
+        self.refine_row_difference_enclosure(&mut enclosure, &mut premises, target, facts, limits)?;
+        if !enclosure.within(target, limits)? {
+            self.refine_monotone_enclosure(&mut enclosure, &premises, facts, limits)?;
+        }
         if !enclosure.within(target, limits)? {
             self.refine_finite_enclosure(&mut enclosure, facts, limits)?;
         }
@@ -332,6 +335,90 @@ impl Polynomial {
             self.refine_semidefinite_target(&mut enclosure, target, limits)?;
         }
         Ok((enclosure, premises))
+    }
+
+    fn overlaps_nonconstant_monomial(
+        &self,
+        row: &Polynomial,
+        limits: &mut Limits,
+    ) -> Result<bool, Unknown> {
+        for factors in self.terms.keys().filter(|factors| !factors.is_empty()) {
+            limits.step(
+                factors
+                    .len()
+                    .saturating_add(row.terms.len().max(1).ilog2() as usize)
+                    .saturating_add(1),
+            )?;
+            if row.terms.contains_key(factors) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Compose one current inequality row `row <= 0` with `DifferenceBounds`
+    /// closure on `self +/- row` when direct enclosure missed `target`.
+    pub(super) fn refine_row_difference_enclosure(
+        &self,
+        enclosure: &mut Interval,
+        premises: &mut BTreeMap<ValueId, Interval>,
+        target: &Interval,
+        facts: &Facts,
+        limits: &mut Limits,
+    ) -> Result<(), Unknown> {
+        if facts.inequalities.is_empty()
+            || limits.compare(&enclosure.lower, &enclosure.upper)?.is_eq()
+        {
+            return Ok(());
+        }
+        let Some(graph) = super::differences::DifferenceBounds::build(facts, limits)? else {
+            return Ok(());
+        };
+        if graph.contradiction() {
+            return Err(Unknown::UnreachablePath);
+        }
+        for row in &facts.inequalities {
+            if !self.overlaps_nonconstant_monomial(row, limits)? {
+                continue;
+            }
+            limits.step(1)?;
+            if !facts.relation_is_current(row, limits)? {
+                continue;
+            }
+            let (_, dependencies) = row.interval_enclosure(facts, limits)?;
+            premises.extend(dependencies);
+            for subtract in [true, false] {
+                let remainder = if subtract {
+                    self.subtract(row, limits)
+                } else {
+                    self.add(row, limits)
+                };
+                let remainder = match remainder {
+                    Ok(p) => p,
+                    Err(Unknown::TermLimit) => continue,
+                    Err(e) => return Err(e),
+                };
+                let (mut bound, dependencies) = remainder.interval_enclosure(facts, limits)?;
+                premises.extend(dependencies);
+                graph.enclose(&remainder, facts, &mut bound, limits)?;
+                if limits.compare(&bound.lower, &bound.upper)?.is_gt() {
+                    return Err(Unknown::InsufficientBounds);
+                }
+                if subtract && limits.compare(&bound.upper, &enclosure.upper)?.is_lt() {
+                    enclosure.upper = bound.upper;
+                }
+                if !subtract && limits.compare(&bound.lower, &enclosure.lower)?.is_gt() {
+                    enclosure.lower = bound.lower;
+                }
+                if limits.compare(&enclosure.lower, &enclosure.upper)?.is_gt() {
+                    return Err(Unknown::InsufficientBounds);
+                }
+                if enclosure.within(target, limits)? {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The caller keeps the complete original premises for replay, including
@@ -805,20 +892,7 @@ impl Polynomial {
             // With no shared nonconstant monomial, interval evaluation of
             // q +/- row cannot improve q using row <= 0. Keep the complete
             // relation set for the transitive closure below.
-            let mut overlaps = false;
-            for factors in self.terms.keys().filter(|factors| !factors.is_empty()) {
-                limits.step(
-                    factors
-                        .len()
-                        .saturating_add(row.terms.len().max(1).ilog2() as usize)
-                        .saturating_add(1),
-                )?;
-                if row.terms.contains_key(factors) {
-                    overlaps = true;
-                    break;
-                }
-            }
-            if !overlaps {
+            if !self.overlaps_nonconstant_monomial(row, limits)? {
                 continue;
             }
 
@@ -1416,5 +1490,220 @@ mod relation_store_tests {
         let (actual, premises) = query.enclosure(&facts, &mut limits).unwrap();
         assert_eq!(actual, range);
         assert_eq!(premises.keys().copied().collect::<Vec<_>>(), vec![x]);
+    }
+
+    #[test]
+    fn row_difference_composition_proves_bounded_sum_and_replays() {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let u64_range = Interval::machine(64, false, &mut limits).unwrap();
+        let cap_range = Interval::new(
+            Integer::from_u128(1),
+            Integer::from_u128(u64::MAX as u128),
+            &mut limits,
+        )
+        .unwrap();
+        let head = facts
+            .assign(
+                PlaceId {
+                    owner: 42,
+                    local: 0,
+                },
+                u64_range.clone(),
+            )
+            .unwrap();
+        let offset = facts
+            .assign(
+                PlaceId {
+                    owner: 42,
+                    local: 1,
+                },
+                u64_range.clone(),
+            )
+            .unwrap();
+        let cap = facts
+            .assign(
+                PlaceId {
+                    owner: 42,
+                    local: 2,
+                },
+                cap_range,
+            )
+            .unwrap();
+        let rem = facts
+            .assign(
+                PlaceId {
+                    owner: 42,
+                    local: 3,
+                },
+                u64_range.clone(),
+            )
+            .unwrap();
+
+        let head_p = Polynomial::variable(head, &mut limits).unwrap();
+        let offset_p = Polynomial::variable(offset, &mut limits).unwrap();
+        let cap_p = Polynomial::variable(cap, &mut limits).unwrap();
+        let rem_p = Polynomial::variable(rem, &mut limits).unwrap();
+        let one = Polynomial::constant(Integer::from_u128(1), &mut limits).unwrap();
+
+        // Establish head < cap, rem == cap - head, and offset < rem.
+        facts
+            .inequalities
+            .insert(
+                head_p
+                    .subtract(&cap_p, &mut limits)
+                    .unwrap()
+                    .add(&one, &mut limits)
+                    .unwrap(),
+                &mut limits,
+            )
+            .unwrap();
+        let cap_minus_head = cap_p.subtract(&head_p, &mut limits).unwrap();
+        facts
+            .inequalities
+            .insert(
+                rem_p.subtract(&cap_minus_head, &mut limits).unwrap(),
+                &mut limits,
+            )
+            .unwrap();
+        facts
+            .inequalities
+            .insert(
+                cap_minus_head.subtract(&rem_p, &mut limits).unwrap(),
+                &mut limits,
+            )
+            .unwrap();
+        facts
+            .inequalities
+            .insert(
+                offset_p
+                    .subtract(&rem_p, &mut limits)
+                    .unwrap()
+                    .add(&one, &mut limits)
+                    .unwrap(),
+                &mut limits,
+            )
+            .unwrap();
+
+        let query = head_p.add(&offset_p, &mut limits).unwrap();
+        let Outcome::Proven(proof) = query.prove_within(&u64_range, &facts, &mut limits) else {
+            panic!("row + difference composition must prove head + offset fits in u64");
+        };
+        proof.replay(&facts, &mut limits).unwrap();
+
+        let mut widened = facts.fork(&mut limits).unwrap();
+        widened.assign(offset.place, u64_range).unwrap();
+        assert!(proof.replay(&widened, &mut limits).is_err());
+    }
+
+    #[test]
+    fn row_difference_composition_rejects_unbounded_sum_and_handles_budget() {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let u64_range = Interval::machine(64, false, &mut limits).unwrap();
+        let cap_range = Interval::new(
+            Integer::from_u128(1),
+            Integer::from_u128(u64::MAX as u128),
+            &mut limits,
+        )
+        .unwrap();
+        let head = facts
+            .assign(
+                PlaceId {
+                    owner: 43,
+                    local: 0,
+                },
+                u64_range.clone(),
+            )
+            .unwrap();
+        let offset = facts
+            .assign(
+                PlaceId {
+                    owner: 43,
+                    local: 1,
+                },
+                u64_range.clone(),
+            )
+            .unwrap();
+        let cap = facts
+            .assign(
+                PlaceId {
+                    owner: 43,
+                    local: 2,
+                },
+                cap_range,
+            )
+            .unwrap();
+        let rem = facts
+            .assign(
+                PlaceId {
+                    owner: 43,
+                    local: 3,
+                },
+                u64_range.clone(),
+            )
+            .unwrap();
+
+        let head_p = Polynomial::variable(head, &mut limits).unwrap();
+        let offset_p = Polynomial::variable(offset, &mut limits).unwrap();
+        let cap_p = Polynomial::variable(cap, &mut limits).unwrap();
+        let rem_p = Polynomial::variable(rem, &mut limits).unwrap();
+        let one = Polynomial::constant(Integer::from_u128(1), &mut limits).unwrap();
+
+        // Weakening `offset < rem` to `offset <= rem + 1` permits u64::MAX + 1.
+        facts
+            .inequalities
+            .insert(
+                head_p
+                    .subtract(&cap_p, &mut limits)
+                    .unwrap()
+                    .add(&one, &mut limits)
+                    .unwrap(),
+                &mut limits,
+            )
+            .unwrap();
+        let cap_minus_head = cap_p.subtract(&head_p, &mut limits).unwrap();
+        facts
+            .inequalities
+            .insert(
+                rem_p.subtract(&cap_minus_head, &mut limits).unwrap(),
+                &mut limits,
+            )
+            .unwrap();
+        facts
+            .inequalities
+            .insert(
+                cap_minus_head.subtract(&rem_p, &mut limits).unwrap(),
+                &mut limits,
+            )
+            .unwrap();
+        facts
+            .inequalities
+            .insert(
+                offset_p
+                    .subtract(&rem_p, &mut limits)
+                    .unwrap()
+                    .subtract(&one, &mut limits)
+                    .unwrap(),
+                &mut limits,
+            )
+            .unwrap();
+
+        let query = head_p.add(&offset_p, &mut limits).unwrap();
+        assert_eq!(
+            query.prove_within(&u64_range, &facts, &mut limits),
+            Outcome::Unknown(Unknown::InsufficientBounds)
+        );
+
+        let mut tiny = Limits::default();
+        tiny.arithmetic.steps = 1;
+        assert_eq!(
+            query.enclosure_for_target(&u64_range, &facts, &mut tiny),
+            Err(Unknown::Arithmetic(ArithmeticError::BudgetExhausted))
+        );
+        assert_eq!(
+            query.prove_within(&u64_range, &facts, &mut limits),
+            Outcome::Unknown(Unknown::InsufficientBounds)
+        );
     }
 }
