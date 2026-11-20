@@ -570,15 +570,12 @@ impl<'a> Interpreter<'a> {
             }
             Value::List { ty, values } => {
                 self.copy_invocation_type_work(ty, source, true)?;
-                if self.comptime_only
-                    && values
-                        .summary()
-                        .is_some_and(|summary| summary.uniform_scalar.is_some())
-                {
-                    // These immutable leaves have no nested type or storage
-                    // identities. Recheck current depth, without making or
-                    // charging a checkpoint copy of the entire payload.
-                    self.check_representation_depth(source, depth + 1)?;
+                if self.comptime_only && values.has_flat_checkpoint() {
+                    // The persistent payload is shared. Its root type was
+                    // checked above, and its leaves must fit this VM frame.
+                    if !values.is_empty() {
+                        self.check_representation_depth(source, depth + 1)?;
+                    }
                     return Ok(());
                 }
                 self.copy_work(values.len(), source)?;

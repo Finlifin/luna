@@ -45,11 +45,25 @@ pub(super) fn scalar_tag(value: &Value) -> Option<std::mem::Discriminant<Value>>
 pub struct ListValues {
     values: storage::Storage,
     summary: OnceLock<Summary>,
+    /// Every element can be checkpointed at depth one in any comptime scope.
+    /// Learned while walking the payload. This grants no formation evidence.
+    flat_checkpoint: OnceLock<()>,
 }
 impl ListValues {
+    pub(super) fn has_flat_checkpoint(&self) -> bool {
+        self.flat_checkpoint.get().is_some()
+            || self
+                .summary()
+                .is_some_and(|summary| summary.uniform_scalar.is_some())
+    }
+    pub(super) fn remember_flat_checkpoint(&self) {
+        let _ = self.flat_checkpoint.set(());
+    }
     /// Share immutable payloads and charge the newly allocated tree paths.
     /// Concatenation does not recursively copy either input's elements.
     pub(crate) fn append_payload(&mut self, other: Self) -> usize {
+        let flat = (self.is_empty() || self.has_flat_checkpoint())
+            && (other.is_empty() || other.has_flat_checkpoint());
         let combined = self
             .summary()
             .zip(other.summary())
@@ -66,8 +80,12 @@ impl ListValues {
                     },
                 })
             });
+        self.flat_checkpoint.take();
         self.summary.take();
         let moved = self.values.append(other.values);
+        if flat {
+            self.remember_flat_checkpoint();
+        }
         if let Some(summary) = combined {
             self.remember(summary);
         }
@@ -94,6 +112,7 @@ impl ListValues {
         self.values.element(index)
     }
     pub fn truncate(&mut self, len: usize) {
+        self.flat_checkpoint.take();
         self.summary.take();
         self.values.truncate(len);
     }
@@ -114,6 +133,7 @@ impl From<Vec<Value>> for ListValues {
         Self {
             values: values.into(),
             summary: OnceLock::new(),
+            flat_checkpoint: OnceLock::new(),
         }
     }
 }
@@ -130,6 +150,7 @@ impl Deref for ListValues {
 }
 impl DerefMut for ListValues {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        self.flat_checkpoint.take();
         self.summary.take();
         self.values.flat_mut()
     }

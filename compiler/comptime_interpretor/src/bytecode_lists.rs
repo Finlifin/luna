@@ -52,6 +52,60 @@ fn run(
 }
 
 #[test]
+fn admitted_flat_checkpoints_share_work_and_invalidate_on_change() {
+    let package = package();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let ty = list(Primitive::Type);
+    let primitive = Value::Type(Term::Primitive(Primitive::Bool));
+    let mut long = Value::List {
+        ty: ty.clone(),
+        values: vec![primitive; 256].into(),
+    };
+    vm.validate_immutable_input(&long, &ty).unwrap();
+    vm.budget.steps = 32;
+    let snapshot = vm.checkpoint_representation(&long, SOURCE).unwrap();
+
+    vm.budget.depth = 1;
+    assert_eq!(
+        vm.checkpoint_representation(&long, SOURCE)
+            .unwrap_err()
+            .kind,
+        ErrorKind::DepthExhausted
+    );
+    vm.budget = Budget::default();
+    let bad = Value::Type(Term::Bool(true));
+    let suffix = Value::List {
+        ty: ty.clone(),
+        values: vec![bad.clone()].into(),
+    };
+    let result = memory::append_list_checked(&mut long, suffix, |combined, _| {
+        vm.checkpoint_representation(combined, SOURCE)
+            .map(drop)
+            .map_err(|e| e.kind)
+    });
+    assert_eq!(result, Err(ErrorKind::Type));
+    vm.budget.steps = 32;
+    assert_eq!(
+        vm.checkpoint_representation(&long, SOURCE).unwrap(),
+        snapshot
+    );
+
+    let Value::List { values, .. } = &mut long else {
+        unreachable!()
+    };
+    values[0] = bad;
+    vm.budget = Budget::default();
+    assert_eq!(
+        vm.checkpoint_representation(&long, SOURCE)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Type
+    );
+    vm.budget.steps = 32;
+    assert!(vm.checkpoint_representation(&snapshot, SOURCE).is_ok());
+}
+
+#[test]
 fn list_identity_checks_precede_concat_suffix_and_length_reads() {
     let package = package();
     let input = LocalId { owner: 1, index: 0 };

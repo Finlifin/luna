@@ -309,8 +309,20 @@ impl Interpreter<'_> {
                 {
                     return Ok(());
                 }
+                let mut flat = true;
                 for value in values {
                     self.admit_value_types(value, depth + 1)?;
+                    flat &= list_values::scalar_tag(value).is_some()
+                        || matches!(
+                            value,
+                            Value::SignedInteger(_)
+                                | Value::UnsignedInteger(_)
+                                | Value::BitVec(_)
+                                | Value::Type(Term::Primitive(_))
+                        );
+                }
+                if flat {
+                    values.remember_flat_checkpoint();
                 }
             }
             Value::Optional { ty, value } => {

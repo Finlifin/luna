@@ -1461,7 +1461,7 @@ pub(super) fn append_list_checked(
     suffix: Value,
     check: impl FnOnce(&Value, usize) -> Result<(), ErrorKind>,
 ) -> Result<(), ErrorKind> {
-    let (original, summary, moved) = match (&mut *target, suffix) {
+    let (original, summary, flat_checkpoint, moved) = match (&mut *target, suffix) {
         (
             Value::List {
                 ty: left_ty,
@@ -1477,8 +1477,9 @@ pub(super) fn append_list_checked(
                 return Err(ErrorKind::RepresentationSizeLimit);
             }
             let summary = left.summary();
+            let flat_checkpoint = left.has_flat_checkpoint();
             let moved = left.append_payload(right);
-            (original, summary, moved)
+            (original, summary, flat_checkpoint, moved)
         }
         _ => return Err(ErrorKind::Type),
     };
@@ -1488,6 +1489,7 @@ pub(super) fn append_list_checked(
         target: &'a mut Value,
         original: usize,
         summary: Option<super::list_values::Summary>,
+        flat_checkpoint: bool,
         committed: bool,
     }
     impl Drop for PendingAppend<'_> {
@@ -1497,6 +1499,9 @@ pub(super) fn append_list_checked(
                     values.truncate(self.original);
                     // The check only borrowed the value; the entire prefix is
                     // unchanged, so its pre-append summary remains valid.
+                    if self.flat_checkpoint {
+                        values.remember_flat_checkpoint();
+                    }
                     if let Some(summary) = self.summary {
                         values.remember(summary);
                     }
@@ -1508,6 +1513,7 @@ pub(super) fn append_list_checked(
         target,
         original,
         summary,
+        flat_checkpoint,
         committed: false,
     };
     check(pending.target, moved)?;
