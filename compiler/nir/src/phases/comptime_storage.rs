@@ -48,7 +48,14 @@ impl<'a> Query<'a> {
     }
 
     fn check(&mut self, ty: &Term, fuel: &mut usize, depth: usize) -> Result<(), StorageError> {
+        // Pay once for this complete input, including descriptive payloads and
+        // keys used to recognize recursive layouts. A resolved field supplies
+        // a new input. Ordinary structural children borrow this same tree.
         crate::type_computations::charge_term(ty, fuel)?;
+        self.inspect(ty, fuel, depth)
+    }
+
+    fn inspect(&mut self, ty: &Term, fuel: &mut usize, depth: usize) -> Result<(), StorageError> {
         if depth > 128 {
             return Err(StorageError::Budget);
         }
@@ -61,17 +68,19 @@ impl<'a> Query<'a> {
             | Term::Closure {
                 environment: fields,
                 ..
-            } => self.fields(fields, fuel, next),
-            Term::Record(fields) => self.fields(fields.iter().map(|(_, ty)| ty), fuel, next),
+            } => self.inspect_fields(fields, fuel, next),
+            Term::Record(fields) => {
+                self.inspect_fields(fields.iter().map(|(_, ty)| ty), fuel, next)
+            }
             Term::Optional(inner) | Term::Computation { result: inner, .. } => {
-                self.check(inner, fuel, next)
+                self.inspect(inner, fuel, next)
             }
             Term::ErrorResult { errors, result } => {
-                self.fields(errors, fuel, next)?;
-                self.check(result, fuel, next)
+                self.inspect_fields(errors, fuel, next)?;
+                self.inspect(result, fuel, next)
             }
             Term::ContextualClosure { context, .. } => match context.as_ref() {
-                Term::ClosureContextValue(fields) => self.fields(fields, fuel, next),
+                Term::ClosureContextValue(fields) => self.inspect_fields(fields, fuel, next),
                 // A scoped context is completed and checked on specialization.
                 _ => Ok(()),
             },
@@ -88,9 +97,21 @@ impl<'a> Query<'a> {
         }
     }
 
-    fn fields<'f>(
+    fn inspect_fields<'f>(
         &mut self,
         fields: impl IntoIterator<Item = &'f Term>,
+        fuel: &mut usize,
+        depth: usize,
+    ) -> Result<(), StorageError> {
+        for field in fields {
+            self.inspect(field, fuel, depth)?;
+        }
+        Ok(())
+    }
+
+    fn check_layout_fields(
+        &mut self,
+        fields: &[Term],
         fuel: &mut usize,
         depth: usize,
     ) -> Result<(), StorageError> {
@@ -108,7 +129,7 @@ impl<'a> Query<'a> {
     ) -> Result<(), StorageError> {
         if let (Some(package), Term::NormalForm { .. }) = (self.package, ty) {
             if let Some(fields) = crate::normal_forms::tuple_fields(Some(package), ty) {
-                return self.fields(fields, fuel, depth);
+                return self.check_layout_fields(fields, fuel, depth);
             }
             if let Some(element) = crate::normal_forms::list_element_budgeted(package, ty, fuel)? {
                 return self.check(&element, fuel, depth);
@@ -117,7 +138,7 @@ impl<'a> Query<'a> {
             return Ok(());
         }
         if let Some(resolve) = self.resolve {
-            return self.fields(&resolve(ty, fuel)?, fuel, depth);
+            return self.check_layout_fields(&resolve(ty, fuel)?, fuel, depth);
         }
         let (
             Some(package),
@@ -135,12 +156,12 @@ impl<'a> Query<'a> {
             .find(|d| d.declaration == *declaration)
         {
             let fields = definition.instantiate_stored_fields(arguments, self.frames, fuel)?;
-            self.fields(&fields, fuel, depth)
+            self.check_layout_fields(&fields, fuel, depth)
         } else if let Some(definition) =
             package.enums.iter().find(|d| d.declaration == *declaration)
         {
             let fields = definition.instantiate_stored_fields(arguments, self.frames, fuel)?;
-            self.fields(&fields, fuel, depth)
+            self.check_layout_fields(&fields, fuel, depth)
         } else if let Some(definition) = package
             .newtypes
             .iter()
@@ -159,6 +180,48 @@ mod tests {
     use super::*;
     use crate::{DeclarationId, Primitive};
     use std::cell::Cell;
+
+    #[test]
+    fn nested_structural_storage_has_linear_cost_and_checks_the_innermost_value() {
+        let levels = 64;
+        let nest = |leaf| (0..levels).fold(leaf, |ty, _| Term::Optional(Box::new(ty)));
+        let leaf = Term::Primitive(Primitive::Bool);
+        let resolve = |_: &Term, _: &mut usize| unreachable!("no named layouts");
+        let safe = nest(leaf.clone());
+        let check = |ty: &Term, mut fuel| validate_layouts(ty, &[], &resolve, &mut fuel);
+        let linear_budget = 3 * (levels + 2);
+        check(&safe, linear_budget).unwrap();
+        assert_eq!(check(&safe, 10), Err(StorageError::Budget));
+        let pointer = nest(Term::Pointer(Box::new(leaf)));
+        assert_eq!(
+            check(&pointer, linear_budget),
+            Err(StorageError::Invalid(
+                "runtime pointer values cannot inhabit comptime storage",
+            )),
+        );
+    }
+
+    #[test]
+    fn newly_resolved_field_payloads_have_their_own_budget() {
+        let nominal = Term::Nominal {
+            declaration: DeclarationId {
+                package: 1,
+                local: 7,
+            },
+            arguments: vec![],
+        };
+        let resolve = |_: &Term, _: &mut usize| {
+            Ok(vec![Term::Record(vec![(
+                "x".repeat(100),
+                Term::Optional(Box::new(Term::Primitive(Primitive::Bool))),
+            )])])
+        };
+        assert_eq!(
+            validate_layouts(&nominal, &[], &resolve, &mut 100),
+            Err(StorageError::Budget),
+        );
+        validate_layouts(&nominal, &[], &resolve, &mut 110).unwrap();
+    }
 
     #[test]
     fn recursive_layouts_visit_each_instance_and_check_later_fields() {
