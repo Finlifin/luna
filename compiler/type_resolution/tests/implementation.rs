@@ -3108,6 +3108,39 @@ fn disjoint_open_nominal_impls_select_and_infer_their_value_arguments() {
 }
 
 #[test]
+fn dispatch_keys_for_field_indices_preserve_open_roots_inside_opaque_heads() {
+    let project = |base| Term::RuntimeField {
+        base: Box::new(base),
+        index: 1,
+    };
+    let opaque = |arg| Term::NormalForm {
+        head: id(91),
+        sort: Sort::Type,
+        arguments: vec![arg],
+    };
+    let open = project(Term::Rigid {
+        declaration: id(2),
+        sort: Sort::Runtime,
+    });
+    let closed = project(Term::Runtime(nir::RuntimeId {
+        instance: 1,
+        local: 2,
+    }));
+    for term in [open.clone(), opaque(open)] {
+        assert_eq!(
+            Key::from_type(&term, Budget::default()).unwrap(),
+            Key::Wildcard
+        );
+    }
+    for term in [closed.clone(), opaque(closed)] {
+        assert_eq!(
+            Key::from_type(&term, Budget::default()).unwrap(),
+            Key::Leaf(term)
+        );
+    }
+}
+
+#[test]
 fn opaque_index_keys_see_open_inputs_inside_error_results() {
     let opaque = |argument| Term::NormalForm {
         head: id(91),

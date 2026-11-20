@@ -30,6 +30,34 @@ fn row() -> Term {
 }
 
 #[test]
+fn closed_field_indices_distinguish_effect_labels() {
+    let project = |base, index| Term::RuntimeField {
+        base: Box::new(base),
+        index,
+    };
+    let root = |instance| Term::Runtime(nir::RuntimeId { instance, local: 0 });
+    let row = |arg| Term::computation(vec![op(1, vec![arg])], ty(P::Bool));
+    let context = Context::default();
+    let first = row(project(root(1), 0));
+    for other in [project(root(2), 0), project(root(1), 1)] {
+        let goal = F::equal(first.clone(), row(other)).negate();
+        let Outcome::Entailed(proof) = context.prove(goal, Budget::default()) else {
+            panic!("different closed field indices must distinguish effect labels")
+        };
+        context.verify_proof(&proof, Budget::default()).unwrap();
+    }
+    let open = Term::Rigid {
+        declaration: id(3),
+        sort: Sort::Runtime,
+    };
+    let unresolved = F::equal(first, row(project(open, 0))).negate();
+    assert!(!matches!(
+        context.prove(unresolved, Budget::default()),
+        Outcome::Entailed(_)
+    ));
+}
+
+#[test]
 fn explicit_effect_type_models_retain_repeated_occurrences() {
     let context = Context::default();
     let constraint = F::equal(variable(), row());

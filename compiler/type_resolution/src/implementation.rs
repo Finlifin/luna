@@ -180,7 +180,8 @@ impl Key {
                         .chain(std::iter::once(result.as_ref()))
                         .collect(),
                 ),
-                Term::OptionalValue { .. }
+                Term::RuntimeField { .. }
+                | Term::OptionalValue { .. }
                 | Term::ErrorValue { .. }
                 | Term::NominalValue { .. }
                 | Term::NormalForm { .. }
@@ -261,7 +262,8 @@ impl Key {
                                 work.push((result, d + 1));
                                 work.extend(errors.iter().map(|ty| (ty, d + 1)));
                             }
-                            Term::Optional(t)
+                            Term::RuntimeField { base: t, .. }
+                            | Term::Optional(t)
                             | Term::Pointer(t)
                             | Term::Lift(t)
                             | Term::ComptimeFunction(t)

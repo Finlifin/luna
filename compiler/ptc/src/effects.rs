@@ -218,6 +218,9 @@ impl<'a> Search<'a> {
                 return Ok(Relation::Different);
             }
             if a.sort() != Sort::Type {
+                if a.sort() == Sort::Runtime && value_indices::distinct(a, b, &mut self.steps)? {
+                    return Ok(Relation::Different);
+                }
                 // Value identity is not a PTC proposition. Only immutable
                 // builtin scalar inequality is known here; other values wait.
                 if matches!(
@@ -232,7 +235,6 @@ impl<'a> Search<'a> {
                         | (Term::BFloat16(_), Term::BFloat16(_))
                         | (Term::Float32(_), Term::Float32(_))
                         | (Term::Float64(_), Term::Float64(_))
-                        | (Term::Runtime(_), Term::Runtime(_))
                 ) {
                     return Ok(Relation::Different);
                 }
