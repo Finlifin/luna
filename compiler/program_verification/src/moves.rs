@@ -2384,9 +2384,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         outer: &Flow,
         remap_borrowed_roots: bool,
         source: SourceRange,
-    ) -> Result<(), Error> {
+    ) -> Result<Vec<(PlaceId, PlaceId, Term)>, Error> {
         let env_parameters = self.function_env_parameters;
         let mut remapped_roots: BTreeMap<PlaceId, PlaceId> = BTreeMap::new();
+        let mut remapped = Vec::new();
         let mut imported_owners = BTreeSet::new();
         let mut pending = Vec::new();
         for env in env_parameters {
@@ -2494,6 +2495,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                                 }
                             };
                             remapped_roots.insert(target.root, mapped);
+                            remapped.push((mapped, target.root, target_ty.clone()));
                             mapped
                         }
                     } else {
@@ -2547,7 +2549,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 }
             }
         }
-        Ok(())
+        Ok(remapped)
     }
 
     fn select_method_callee(&mut self, callee: &Expr, source: SourceRange) -> Result<Expr, Error> {
@@ -7265,10 +7267,35 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 )?;
             }
         }
-        self.predeclare_function_env_parameters(&mut inner, flow, true, source)?;
+        let remapped_env_roots =
+            self.predeclare_function_env_parameters(&mut inner, flow, true, source)?;
         let effect_inputs = self.effect_inputs_for(&callable.definition.ty, source)?;
         let memory_inputs = self.copy_effect_memory_inputs(source)?;
         self.conditional_handler_borrows(&mut inner, &borrowed_roots, source)?;
+        let env_slot_base = parameters.len().saturating_add(captures.len());
+        for (offset, (dest_root, orig_root, target_ty)) in
+            remapped_env_roots.into_iter().enumerate()
+        {
+            let slot = env_slot_base.saturating_add(offset);
+            cleanup_targets.insert(
+                slot,
+                BTreeMap::from([(
+                    vec![],
+                    BTreeSet::from([Place {
+                        root: orig_root,
+                        fields: vec![],
+                    }]),
+                )]),
+            );
+            borrowed_roots.insert(
+                dest_root,
+                BorrowedRoot::Parameter {
+                    parameter: slot,
+                    input_fields: vec![],
+                    pointee: target_ty,
+                },
+            );
+        }
         let outer_report = std::mem::take(&mut self.report);
         self.report.borrowed_roots = borrowed_roots;
         let outer_captured_callables = std::mem::replace(
@@ -18933,9 +18960,10 @@ mod env_parameter_frame_tests {
         handler_frame.roots.insert(root(env_captured));
         handler_frame.order.push(root(env_captured));
 
-        analyzer
+        let handler_remapped = analyzer
             .predeclare_function_env_parameters(&mut handler_frame, &outer, false, source)
             .unwrap();
+        assert!(handler_remapped.is_empty());
 
         assert!(handler_frame.state.require_present(&live_slot).is_ok());
         assert!(handler_frame.state.require_present(&borrowed_place).is_ok());
@@ -18975,7 +19003,7 @@ mod env_parameter_frame_tests {
             .unwrap();
         closure_frame.types.insert(borrowed_target, bool_ty);
 
-        analyzer
+        let remapped_env_roots = analyzer
             .predeclare_function_env_parameters(&mut closure_frame, &outer, true, source)
             .unwrap();
 
@@ -18988,6 +19016,10 @@ mod env_parameter_frame_tests {
             .get(&live_slot)
             .and_then(|targets| targets.iter().next())
             .expect("remapped env target");
+        assert_eq!(remapped_env_roots.len(), 1);
+        assert_eq!(remapped_env_roots[0].0, mapped_place.root);
+        assert_eq!(remapped_env_roots[0].1, borrowed_target);
+        assert_eq!(remapped_env_roots[0].2, u64_ty);
         assert_eq!(mapped_place.root.owner, u64::MAX - 4);
         assert_eq!(closure_frame.types.get(&mapped_place.root), Some(&u64_ty));
         assert!(closure_frame.effect_borrows.contains(&mapped_place.root));
@@ -19000,5 +19032,51 @@ mod env_parameter_frame_tests {
                 .and_then(|entries| entries.get(mapped_place)),
             Some(&vec![(vec![0], 1)])
         );
+
+        let dummy_package = Package::default();
+        let access = crate::memory::Access {
+            target: crate::memory::ParameterPlace {
+                parameter: 0,
+                input_fields: vec![],
+                through: vec![],
+                conditions: Default::default(),
+                fields: vec![],
+            },
+            ty: u64_ty.clone(),
+            write: true,
+            read_value: true,
+        };
+        let mut unmapped_report = Report::default();
+        unmapped_report
+            .cleanup_call_accesses
+            .push((access.clone(), BTreeSet::from([mapped_place.clone()])));
+        assert_eq!(
+            unmapped_report
+                .cleanup_memory_accesses(&dummy_package, &mut 1_000)
+                .unwrap_err(),
+            "cleanup memory origin requires its enclosing invocation context"
+        );
+
+        let env_slot_base = 2usize;
+        let mut mapped_report = Report::default();
+        mapped_report
+            .cleanup_call_accesses
+            .push((access, BTreeSet::from([mapped_place.clone()])));
+        for (offset, (dest_root, _, target_ty)) in remapped_env_roots.into_iter().enumerate() {
+            mapped_report.borrowed_roots.insert(
+                dest_root,
+                BorrowedRoot::Parameter {
+                    parameter: env_slot_base + offset,
+                    input_fields: vec![],
+                    pointee: target_ty,
+                },
+            );
+        }
+        let exported = mapped_report
+            .cleanup_memory_accesses(&dummy_package, &mut 1_000)
+            .unwrap();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].target.parameter, env_slot_base);
+        assert!(exported[0].write);
     }
 }
