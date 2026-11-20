@@ -289,25 +289,46 @@ impl Checker<'_, '_> {
         source_expr: &Expr<'_>,
     ) -> Result<Vec<n::Expr>, Error> {
         let mut statements = Vec::new();
-        for (id, ty, value) in self.inline_pattern_inputs(bindings, source_expr.span)? {
+        for (id, ty, symbol) in self.inline_pattern_inputs(bindings, source_expr.span)? {
             let root = n::Expr {
                 source: source(source_expr.span),
                 ty: ty.clone(),
                 kind: K::Local(id),
             };
-            let (value, _) =
-                self.required_normal_input(source_expr, root, vec![(id, ty.clone(), value)])?;
+            let (value, _) = self.required_normal_input(
+                source_expr,
+                root,
+                vec![(id, ty.clone(), symbol.clone())],
+            )?;
             let value = self.materialize_local_constant(value, ty, source_expr.span)?;
-            self.generator_data.insert(id, Some(value.clone()));
             // Immutable comptime descriptions and exact scalar literals are
             // substituted into the selected body. Emitting an additional let
             // would incorrectly require runtime storage for these domains.
             // Keep aggregate/pointer reconstruction and resource storage intact.
-            if matches!(value.kind, K::TypeValue(_))
-                || (matches!(value.kind, K::Literal(_))
-                    && matches!(value.ty, Term::Primitive(P::Integer | P::Float)))
-            {
+            let inline_only = matches!(
+                value.kind,
+                K::TypeValue(_) | K::Literal(n::Literal::Description(_))
+            ) || (matches!(value.kind, K::Literal(_))
+                && matches!(value.ty, Term::Primitive(P::Integer | P::Float)));
+            if inline_only {
+                self.generator_data.insert(id, Some(value));
                 continue;
+            }
+            // Runtime-materialized bindings must read from their single Let so
+            // affine `Once` move/drop checks cannot be bypassed by expression
+            // cloning at every use site.
+            self.generator_data.insert(id, None);
+            if self.immutable.contains(&id) {
+                self.input_facts
+                    .partial
+                    .insert(id, constants::PartialStagedValue::known(symbol.clone()));
+                if symbol.sort() == Sort::Type {
+                    self.input_facts.types.insert(id, symbol);
+                } else if symbol.sort() == Sort::ComptimeValue {
+                    self.input_facts
+                        .values
+                        .insert(id, (symbol, value.ty.clone()));
+                }
             }
             statements.push(n::Expr {
                 source: source(source_expr.span),

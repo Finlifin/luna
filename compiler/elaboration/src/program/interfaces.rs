@@ -2,10 +2,15 @@
 //! required declarations never enter its callable-body table.
 use super::*;
 use crate::ptc::{Budget, Formula, Outcome};
+
 mod associated;
+
 pub(super) use associated::associated_source;
+
 mod contracts;
+
 pub(super) use contracts::CheckedTraits;
+
 mod declarations;
 mod discovery;
 mod early_inherent;
@@ -528,6 +533,11 @@ impl Checker<'_, '_> {
                     interface_arguments: interface_arguments.clone(),
                     requirements: requirements.clone(),
                 };
+                if matches!(subject, Term::NormalForm { .. }) {
+                    let normal_forms = self.normal_form_metadata();
+                    index.set_normal_form_metadata(normal_forms.clone());
+                    inherent_index.set_normal_form_metadata(normal_forms);
+                }
                 let phase = match &item.kind {
                     ItemKind::Impl(def) => def.phase,
                     _ => hir::ImplementationPhase::Runtime,
@@ -541,6 +551,11 @@ impl Checker<'_, '_> {
                         })?;
                 relationships.insert(own, relationship);
             } else {
+                if matches!(subject, Term::NormalForm { .. }) {
+                    let normal_forms = self.normal_form_metadata();
+                    index.set_normal_form_metadata(normal_forms.clone());
+                    inherent_index.set_normal_form_metadata(normal_forms);
+                }
                 inherent_index
                     .check_ownership(
                         &subject,
@@ -2832,6 +2847,7 @@ impl Checker<'_, '_> {
         }
         assumptions
     }
+
     pub(super) fn resolve_trait_capability(
         &self,
         interface: &n::InterfaceInstance,
@@ -2840,6 +2856,7 @@ impl Checker<'_, '_> {
     ) -> Result<crate::implementation::TypeResolution, nir::NominalAdmissionError> {
         self.resolve_trait_capability_metered(interface, subject, &mut { budget })
     }
+
     pub(super) fn resolve_trait_capability_metered(
         &self,
         interface: &n::InterfaceInstance,
@@ -2857,6 +2874,7 @@ impl Checker<'_, '_> {
         .resolve_instance_metered(interface, subject, budget)
         .map(|r| r.types)
     }
+
     pub(super) fn resolve_inherent_capability(
         &self,
         name: &str,
@@ -2899,6 +2917,7 @@ impl Checker<'_, '_> {
         }
         value
     }
+
     pub(super) fn contextual_method_instance(
         &mut self,
         expr: &Expr<'_>,
@@ -2923,6 +2942,7 @@ impl Checker<'_, '_> {
             expr.span,
         )
     }
+
     pub(super) fn invocation_callee(&mut self, callee: &Expr<'_>) -> Result<n::Expr, Error> {
         if self.protocols.splice.is_some()
             && self.runtime_value_context()

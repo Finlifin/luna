@@ -139,9 +139,11 @@ impl Checker<'_, '_> {
         // This is a type position: computed member receivers are required
         // inputs, not runtime values to deliver through Splice. Ordinary
         // expression projections retain the caller's phase in their probe.
+        let saved_code = std::mem::replace(&mut self.in_code_body, false);
         let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
         let projected = self.projected_member_data(expr);
         self.in_required_comptime = saved_mode;
+        self.in_code_body = saved_code;
         if let Some(data) = projected? {
             return Ok(data);
         }

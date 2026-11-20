@@ -195,7 +195,72 @@ impl Checker<'_, '_> {
                             }
                             Ok(())
                         },
-                    );
+                    )
+                    .and_then(|()| {
+                        nir::visit::expression(closure.body(), &mut fuel, |expr, fuel| {
+                            let mut check_term = |term: &Term| -> Result<(), String> {
+                                let mut budget = comptime_runtime::Budget {
+                                    steps: *fuel,
+                                    max_limbs: 4096,
+                                };
+                                let validated = comptime_interpretor::validate_snapshot_term(
+                                    term,
+                                    &mut budget,
+                                    type_scope,
+                                );
+                                *fuel = budget.steps;
+                                validated.map_err(|cause| {
+                                    format!("closure snapshot body retains out-of-scope term: {cause:?}")
+                                })
+                            };
+                            check_term(&expr.ty)?;
+                            match &expr.kind {
+                                K::TypeValue(term)
+                                | K::ComptimeValue(term)
+                                | K::StagedValue(term) => check_term(term)?,
+                                K::FunctionInstance { arguments, .. } => {
+                                    for arg in arguments {
+                                        check_term(arg)?;
+                                    }
+                                }
+                                K::TraitMethod {
+                                    method_arguments,
+                                    interface_arguments,
+                                    subject,
+                                    ..
+                                } => {
+                                    check_term(subject)?;
+                                    for arg in method_arguments.iter().chain(interface_arguments) {
+                                        check_term(arg)?;
+                                    }
+                                }
+                                K::AssociatedValue {
+                                    interface, subject, ..
+                                } => {
+                                    check_term(subject)?;
+                                    for arg in &interface.arguments {
+                                        check_term(arg)?;
+                                    }
+                                }
+                                K::BitUpdate { storage_type, .. }
+                                | K::BitAssign { storage_type, .. } => check_term(storage_type)?,
+                                K::Closure { captures, .. } => {
+                                    for capture in captures {
+                                        check_term(&capture.ty)?;
+                                    }
+                                }
+                                K::BuildMetadata { entries, .. } => {
+                                    for (_, _, value) in entries {
+                                        if let Some(term) = value {
+                                            check_term(term)?;
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                            Ok(())
+                        })
+                    });
                     self.required_steps -= (before - fuel) as u64;
                     checked.map_err(|message| error(span, message))
                 })();

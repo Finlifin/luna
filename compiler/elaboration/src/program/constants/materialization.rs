@@ -149,6 +149,8 @@ impl Checker<'_, '_> {
                 type_scope.clone(),
             )?;
             let factory = self.generated_functions.fresh_identity(span)?;
+            let (requirements, capabilities) =
+                self.snapshot_contract_in_scope(&type_scope, span)?;
             self.generated_functions.publish(n::Function {
                 interface: nir::program::FunctionDeclaration {
                     source: source(span),
@@ -171,8 +173,8 @@ impl Checker<'_, '_> {
                     result_type_binder: None,
                     result_guarantees: vec![],
                     type_parameters: type_scope.iter().copied().collect(),
-                    requirements: vec![],
-                    capabilities: vec![],
+                    requirements,
+                    capabilities,
                     defaults: vec![],
                 },
                 body: expression.clone(),
@@ -203,12 +205,216 @@ impl Checker<'_, '_> {
         }
         Ok((value, symbol))
     }
+
     fn charge_constant_type_copy(&mut self, ty: &Term, span: Span) -> Result<(), Error> {
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = fuel;
         let checked = nir::type_computations::charge_term(ty, &mut fuel);
         self.required_steps -= (before - fuel) as u64;
         checked.map_err(|cause| error(span, cause.to_string()))
+    }
+
+    fn collect_contract_in_scope(
+        &mut self,
+        type_scope: &BTreeSet<DeclarationId>,
+        require_scope_mention: bool,
+        include_local_context_traits: bool,
+        span: Span,
+    ) -> Result<(Vec<n::TypePredicate>, Vec<n::TraitRequirement>), Error> {
+        fn term_in_scope(
+            term: &Term,
+            type_scope: &BTreeSet<DeclarationId>,
+            required_steps: &mut u64,
+            span: Span,
+        ) -> Result<(bool, bool), Error> {
+            let mut fuel = usize::try_from(*required_steps).unwrap_or(usize::MAX);
+            let before = fuel;
+            let charged = nir::type_computations::charge_term(term, &mut fuel);
+            *required_steps -= (before - fuel) as u64;
+            charged.map_err(|cause| error(span, cause.to_string()))?;
+            let rigids = term
+                .rigid_parameters()
+                .map_err(|cause| error(span, cause.to_string()))?;
+            let mut mentions = false;
+            for (id, sort) in rigids {
+                if sort != Sort::Type || !type_scope.contains(&id) {
+                    return Ok((false, false));
+                }
+                mentions = true;
+            }
+            Ok((true, mentions))
+        }
+        fn req_in_scope(
+            req: &n::TraitRequirement,
+            type_scope: &BTreeSet<DeclarationId>,
+            require_scope_mention: bool,
+            required_steps: &mut u64,
+            span: Span,
+        ) -> Result<bool, Error> {
+            let (in_scope, mut mentions) =
+                term_in_scope(&req.subject, type_scope, required_steps, span)?;
+            if !in_scope {
+                return Ok(false);
+            }
+            for arg in &req.interface_arguments {
+                let (arg_in_scope, arg_mentions) =
+                    term_in_scope(arg, type_scope, required_steps, span)?;
+                if !arg_in_scope {
+                    return Ok(false);
+                }
+                mentions |= arg_mentions;
+            }
+            Ok(!require_scope_mention || mentions)
+        }
+        fn pred_in_scope(
+            root: &n::TypePredicate,
+            type_scope: &BTreeSet<DeclarationId>,
+            require_scope_mention: bool,
+            required_steps: &mut u64,
+            span: Span,
+        ) -> Result<bool, Error> {
+            let mut pending = vec![root];
+            let mut mentions = false;
+            while let Some(pred) = pending.pop() {
+                *required_steps = required_steps
+                    .checked_sub(1)
+                    .ok_or_else(|| error(span, "snapshot contract inspection budget exhausted"))?;
+                match pred {
+                    n::TypePredicate::Bool(_) => {}
+                    n::TypePredicate::Equal(left, right) => {
+                        let (left_ok, left_mentions) =
+                            term_in_scope(left, type_scope, required_steps, span)?;
+                        let (right_ok, right_mentions) =
+                            term_in_scope(right, type_scope, required_steps, span)?;
+                        if !left_ok || !right_ok {
+                            return Ok(false);
+                        }
+                        mentions |= left_mentions || right_mentions;
+                    }
+                    n::TypePredicate::Kind(ty, _) => {
+                        let (ty_ok, ty_mentions) =
+                            term_in_scope(ty, type_scope, required_steps, span)?;
+                        if !ty_ok {
+                            return Ok(false);
+                        }
+                        mentions |= ty_mentions;
+                    }
+                    n::TypePredicate::Trait(req) => {
+                        let (subject_ok, subject_mentions) =
+                            term_in_scope(&req.subject, type_scope, required_steps, span)?;
+                        if !subject_ok {
+                            return Ok(false);
+                        }
+                        mentions |= subject_mentions;
+                        for arg in &req.interface_arguments {
+                            let (arg_ok, arg_mentions) =
+                                term_in_scope(arg, type_scope, required_steps, span)?;
+                            if !arg_ok {
+                                return Ok(false);
+                            }
+                            mentions |= arg_mentions;
+                        }
+                    }
+                    n::TypePredicate::Not(inner) => pending.push(inner),
+                    n::TypePredicate::And(parts) | n::TypePredicate::Or(parts) => {
+                        *required_steps = required_steps
+                            .checked_sub(parts.len() as u64)
+                            .ok_or_else(|| {
+                                error(span, "snapshot contract inspection budget exhausted")
+                            })?;
+                        pending.extend(parts);
+                    }
+                }
+            }
+            Ok(!require_scope_mention || mentions)
+        }
+
+        let mut candidate_requirements = Vec::new();
+        if let Some(owner) = self.signature_owner {
+            for req in self.definition_requirements(owner) {
+                if !candidate_requirements.contains(&req) {
+                    candidate_requirements.push(req);
+                }
+            }
+            if let Some(parent_reqs) = self
+                .self_containers
+                .get(&owner)
+                .and_then(|parent| self.requirements.get(parent))
+                .cloned()
+            {
+                for req in parent_reqs {
+                    if !candidate_requirements.contains(&req) {
+                        candidate_requirements.push(req);
+                    }
+                }
+            }
+        }
+        let mut requirements = Vec::new();
+        for req in candidate_requirements {
+            if pred_in_scope(
+                &req,
+                type_scope,
+                require_scope_mention,
+                &mut self.required_steps,
+                span,
+            )? && !requirements.contains(&req)
+            {
+                requirements.push(req);
+            }
+        }
+
+        let candidate_capabilities = if include_local_context_traits {
+            self.capability_assumptions()
+        } else {
+            let mut caps = if let Some(capabilities) = &self.open_instance_capabilities {
+                capabilities.clone()
+            } else {
+                self.signature_owner
+                    .map(|owner| self.binder_assumptions(owner))
+                    .unwrap_or_default()
+            };
+            if let Some(implementation) = self.initializer_implementation() {
+                for cap in &implementation.capabilities {
+                    if !caps.contains(cap) {
+                        caps.push(cap.clone());
+                    }
+                }
+            }
+            caps
+        };
+        let mut capabilities = Vec::new();
+        for cap in candidate_capabilities {
+            if req_in_scope(
+                &cap,
+                type_scope,
+                require_scope_mention,
+                &mut self.required_steps,
+                span,
+            )? && !capabilities.contains(&cap)
+            {
+                capabilities.push(cap);
+            }
+        }
+        Ok((requirements, capabilities))
+    }
+
+    fn snapshot_contract_in_scope(
+        &mut self,
+        type_scope: &BTreeSet<DeclarationId>,
+        span: Span,
+    ) -> Result<(Vec<n::TypePredicate>, Vec<n::TraitRequirement>), Error> {
+        self.collect_contract_in_scope(type_scope, false, true, span)
+    }
+
+    pub(in crate::program) fn caller_signature_contract_in_scope(
+        &mut self,
+        type_scope: &BTreeSet<DeclarationId>,
+        span: Span,
+    ) -> Result<(Vec<n::TypePredicate>, Vec<n::TraitRequirement>), Error> {
+        if type_scope.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        self.collect_contract_in_scope(type_scope, true, false, span)
     }
 
     pub(super) fn constant_expression(

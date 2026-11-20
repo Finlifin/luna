@@ -2,11 +2,15 @@
 //! graphs; active inference, caller premises and interpreter storage do not enter.
 use super::*;
 use comptime_interpretor::Value;
+
 mod initializers;
 mod materialization;
+
 use materialization::Materialization;
+
 mod observations;
 mod prepared_observations;
+
 use observations::ObservationScope;
 pub(super) use prepared_observations::PreparedObservations;
 
@@ -42,12 +46,14 @@ pub(super) struct PartialStagedValue {
     depth: usize,
     data: PartialStagedData,
 }
+
 #[derive(Debug, PartialEq)]
 enum PartialStagedData {
     Unknown,
     Known(std::sync::Arc<Term>),
     Aggregate(PartialStagedShape, Vec<std::sync::Arc<PartialStagedValue>>),
 }
+
 #[derive(Clone, Debug, PartialEq)]
 enum PartialStagedShape {
     Tuple,
@@ -57,6 +63,7 @@ enum PartialStagedShape {
     Variant(DeclarationId, usize),
     AnonymousRecord(Vec<String>),
 }
+
 impl PartialStagedValue {
     fn unknown() -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
@@ -64,18 +71,21 @@ impl PartialStagedValue {
             data: PartialStagedData::Unknown,
         })
     }
-    fn known(value: impl Into<std::sync::Arc<Term>>) -> std::sync::Arc<Self> {
+
+    pub(super) fn known(value: impl Into<std::sync::Arc<Term>>) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             depth: 0,
             data: PartialStagedData::Known(value.into()),
         })
     }
+
     fn known_term(&self) -> Option<&Term> {
         match &self.data {
             PartialStagedData::Known(term) => Some(term.as_ref()),
             _ => None,
         }
     }
+
     fn charge(&self, fuel: &mut usize) -> Result<(), String> {
         let mut pending = vec![self];
         while let Some(value) = pending.pop() {
@@ -108,6 +118,7 @@ impl PartialStagedValue {
         Ok(())
     }
 }
+
 impl std::fmt::Display for PartialStagedValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.data {
@@ -2557,7 +2568,9 @@ mod tests {
         assert_eq!(unknown.to_string(), "(unknown)");
         assert_eq!(value.to_string(), dump);
     }
+
     use super::*;
+
     #[test]
     fn cached_value_copies_are_bounded() {
         let value = n::Expr {
@@ -2570,6 +2583,7 @@ mod tests {
         charge_copy(&value, &mut steps, Span::default()).unwrap();
         assert_eq!(steps, 0);
     }
+
     #[test]
     fn graph_snapshot_copy_budget_visits_bound_values() {
         let binding = n::LocalId {

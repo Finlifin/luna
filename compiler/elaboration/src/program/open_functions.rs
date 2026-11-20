@@ -25,11 +25,13 @@ pub(super) struct LoopTransfers {
     breaks: bool,
     continues: bool,
 }
+
 impl LoopTransfers {
     fn include(&mut self, other: Self) {
         self.breaks |= other.breaks;
         self.continues |= other.continues;
     }
+
     fn any(self) -> bool {
         self.breaks || self.continues
     }
@@ -156,10 +158,12 @@ pub(super) struct Definition {
     checked_tuple_loops: BTreeSet<n::LocalId>,
     checked: bool,
 }
+
 impl Definition {
     pub(super) fn checked_empty_iteration(&self, site: hir::HirId) -> bool {
         self.checked && self.checked_tuple_loops.contains(&local(site))
     }
+
     pub(super) fn input_domain_refs(&self) -> lexical_domains::InputDomains<'_> {
         lexical_domains::InputDomains::Open(self.parameters.iter())
     }
@@ -169,10 +173,12 @@ impl Definition {
             .map(|(sort, ty)| (sort, ty.cloned()))
             .collect()
     }
+
     pub(super) fn input_sorts(&self) -> Vec<Sort> {
         self.parameters.iter().map(|(sort, _)| *sort).collect()
     }
 }
+
 impl std::fmt::Display for Definition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "(open-function (parameters")?;
@@ -7921,6 +7927,13 @@ impl Checker<'_, '_> {
                 domains: captures.iter().map(|(_, domain)| domain.clone()).collect(),
             },
         );
+        let capture_type_scope: std::collections::BTreeSet<DeclarationId> = captures
+            .iter()
+            .filter(|(parameter, _)| parameter.sort == Sort::Type)
+            .map(|(parameter, _)| parameter.declaration)
+            .collect();
+        let (caller_requirements, caller_capabilities) =
+            self.caller_signature_contract_in_scope(&capture_type_scope, span)?;
         self.open_instantiation_depth += 1;
         let body = self.in_open_function_scope(owner, Some(Arc::clone(&instance)), |this| {
             let signature = &instance.signature;
@@ -7937,10 +7950,23 @@ impl Checker<'_, '_> {
             let Term::Function { parameters, result } = signature else {
                 unreachable!()
             };
-            let specialized_assumptions =
+            let mut specialized_assumptions =
                 this.specialized_open_binder_assumptions(owner, symbols, span)?;
-            let requirements = this.specialized_open_requirements(owner, symbols, span)?;
-            let capabilities = this.specialized_open_capabilities(owner, symbols, span)?;
+            let mut requirements = this.specialized_open_requirements(owner, symbols, span)?;
+            let mut capabilities = this.specialized_open_capabilities(owner, symbols, span)?;
+            for capability in caller_capabilities {
+                if !specialized_assumptions.contains(&capability) {
+                    specialized_assumptions.push(capability.clone());
+                }
+                if !capabilities.contains(&capability) {
+                    capabilities.push(capability);
+                }
+            }
+            for requirement in caller_requirements {
+                if !requirements.contains(&requirement) {
+                    requirements.push(requirement);
+                }
+            }
             this.open_instance_capabilities = Some(specialized_assumptions.clone());
             let mut context = this
                 .nominal_context()

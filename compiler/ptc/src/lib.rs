@@ -7,30 +7,45 @@
 mod boolean;
 mod conflicts;
 mod congruence;
+
 use conflicts::Conflict;
+
 mod effects;
 mod error_results;
 mod learning;
 mod model_applications;
 mod model_domain;
 mod model_effects;
+
 use model_domain::closed_type;
+
 mod model_search;
 mod search;
 mod type_candidates;
 mod type_inputs;
 mod value_indices;
+
 pub use model_applications::TypeApplication;
 pub use type_inputs::{TypeInputOutcome, TypeInputSolution};
+
 mod declaration_theory;
+
 pub use declaration_theory::{ConstructorContracts, DeclarationTheory};
+
 mod theory_state;
+
 use theory_state::Classes;
+
 mod traits;
+
 pub use traits::TraitQuery;
+
 mod classification;
+
 pub use classification::{KindQuery, TypeKind};
+
 mod integer;
+
 pub use integer::{IntLe, IntegerBoundProof, IntegerTerm};
 
 use nir::{DeclarationId, Primitive, Sort, Term};
@@ -40,6 +55,7 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Equality(pub Term, pub Term);
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Atom {
     TypeEqual(Equality),
@@ -47,6 +63,7 @@ pub enum Atom {
     Kind(KindQuery),
     Trait(TraitQuery),
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Formula {
     True,
@@ -59,6 +76,7 @@ pub enum Formula {
     And(Vec<Formula>),
     Or(Vec<Formula>),
 }
+
 impl Formula {
     pub fn from_predicate(predicate: &nir::program::TypePredicate) -> Self {
         use nir::program::TypePredicate as P;
@@ -73,22 +91,77 @@ impl Formula {
             P::Or(items) => Self::Or(items.iter().map(Self::from_predicate).collect()),
         }
     }
+
     pub fn equal(left: Term, right: Term) -> Self {
         Self::Equal(Equality(left, right))
     }
+
     pub fn int_le(left: IntegerTerm, right: IntegerTerm) -> Self {
         Self::IntLe(IntLe { left, right })
     }
+
     pub fn kind(ty: Term, kind: TypeKind) -> Self {
         Self::Kind(KindQuery { ty, kind })
     }
+
     pub fn negate(self) -> Self {
         Self::Not(Box::new(self))
     }
+
     pub fn implies(self, consequence: Formula) -> Self {
         Self::Or(vec![self.negate(), consequence])
     }
+
+    /// Return true when this proposition mentions any De Bruijn bound slot or
+    /// unresolved hole, so callers never copy frame-relative premises into an
+    /// unrelated definition scope.
+    pub fn has_bound_or_hole(&self) -> bool {
+        let mut pending = vec![self];
+        while let Some(formula) = pending.pop() {
+            match formula {
+                Self::Equal(Equality(left, right)) => {
+                    if term_has_bound_or_hole(left) || term_has_bound_or_hole(right) {
+                        return true;
+                    }
+                }
+                Self::Kind(KindQuery { ty, .. }) => {
+                    if term_has_bound_or_hole(ty) {
+                        return true;
+                    }
+                }
+                Self::Trait(TraitQuery {
+                    subject, arguments, ..
+                }) => {
+                    if term_has_bound_or_hole(subject)
+                        || arguments.iter().any(term_has_bound_or_hole)
+                    {
+                        return true;
+                    }
+                }
+                Self::Not(inner) => pending.push(inner),
+                Self::And(parts) | Self::Or(parts) => pending.extend(parts),
+                Self::True | Self::False | Self::IntLe(_) => {}
+            }
+        }
+        false
+    }
 }
+
+fn term_has_bound_or_hole(root: &Term) -> bool {
+    let mut pending = vec![root];
+    while let Some(term) = pending.pop() {
+        if matches!(term, Term::Bound { .. } | Term::Hole { .. }) {
+            return true;
+        }
+        term.visit_children(|child| {
+            pending.push(child);
+            Ok::<_, std::convert::Infallible>(())
+        })
+        .unwrap_or_else(|never| match never {});
+    }
+    false
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Context {
     // Branches share immutable snapshots. Each mutation detaches only its own
@@ -97,6 +170,7 @@ pub struct Context {
     assumptions: Arc<Vec<Formula>>,
     theory: DeclarationTheory,
 }
+
 #[derive(Clone, Copy, Debug)]
 pub struct Budget {
     pub steps: usize,
@@ -104,6 +178,7 @@ pub struct Budget {
     /// literals consume steps without introducing another decision level.
     pub max_depth: usize,
 }
+
 impl Default for Budget {
     fn default() -> Self {
         Self {
@@ -112,6 +187,7 @@ impl Default for Budget {
         }
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UnknownReason {
     BudgetExhausted,
@@ -121,11 +197,13 @@ pub enum UnknownReason {
     /// The explanation is diagnostic data, never a negative proposition.
     UnresolvedPrerequisite(String),
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValidationError {
     BudgetExhausted,
     IllFormed(String),
 }
+
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -134,7 +212,9 @@ impl fmt::Display for ValidationError {
         }
     }
 }
+
 impl std::error::Error for ValidationError {}
+
 #[derive(Clone, Debug)]
 pub enum Outcome {
     Entailed(Proof),
@@ -145,6 +225,7 @@ pub enum Outcome {
     },
     IllFormed(String),
 }
+
 #[derive(Clone, Debug)]
 pub struct Proof {
     pub scope: Vec<Vec<Sort>>,
@@ -154,6 +235,7 @@ pub struct Proof {
     pub constructors: ConstructorContracts,
     pub tree: ProofTree,
 }
+
 /// Immutable proof DAG payloads. Cloning a root shares its subproofs and terms;
 /// sharing never bypasses independent replay under the proof's own premises.
 #[derive(Clone, Debug)]
@@ -175,6 +257,7 @@ pub enum ProofTree {
         positive: Arc<ProofTree>,
     },
 }
+
 /// A Type input in the surrounding lexical scope, indexed from its innermost
 /// frame. This is model evidence, never a declaration identity or a new axiom.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -182,6 +265,7 @@ pub struct TypeBinder {
     pub depth: u32,
     pub index: usize,
 }
+
 impl TypeBinder {
     fn term(self) -> Term {
         Term::Bound {
@@ -191,6 +275,7 @@ impl TypeBinder {
         }
     }
 }
+
 impl fmt::Display for TypeBinder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -212,12 +297,14 @@ pub struct Witness {
     pub assumptions: Vec<Formula>,
     pub goal: Formula,
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProofError {
     Invalid,
     BudgetExhausted,
     ArithmeticRange,
 }
+
 impl Context {
     /// An explicit lexical type-input scope. The default context remains closed.
     /// Each frame lists its binding sorts, outermost first. Proofs retain these
@@ -228,6 +315,7 @@ impl Context {
             ..Self::default()
         }
     }
+
     /// Copy admitted global theory into a newly declared lexical scope.
     /// Local assumptions must be supplied explicitly in that scope.
     pub fn theory_in_scope(&self, scope: Vec<Vec<Sort>>) -> Self {
@@ -237,31 +325,39 @@ impl Context {
             theory: self.theory.clone(),
         }
     }
+
     pub fn scope(&self) -> &[Vec<Sort>] {
         &self.scope
     }
+
     pub fn admit_tuple_head(&mut self, head: DeclarationId) {
         Arc::make_mut(&mut self.theory.constructors.tuple_heads).insert(head);
     }
+
     pub fn admit_list_inference_head(&mut self, head: DeclarationId) {
         Arc::make_mut(&mut self.theory.list_inference_heads).insert(head);
     }
+
     pub fn is_list_inference_head(&self, head: DeclarationId) -> bool {
         self.theory.list_inference_heads.contains(&head)
     }
+
     /// Recognize the compiler-bound List domain without unfolding its head.
     pub fn is_list_type(&self, ty: &Term) -> bool {
         matches!(ty, Term::NormalForm { head, sort: Sort::Type, arguments }
             if self.is_list_inference_head(*head) && arguments.len() == 1
                 && arguments[0].sort() == Sort::Type)
     }
+
     pub fn is_tuple_head(&self, head: DeclarationId) -> bool {
         self.theory.constructors.tuple_heads.contains(&head)
     }
+
     pub fn is_tuple_type(&self, ty: &Term) -> bool {
         matches!(ty, Term::NormalForm { head, sort: Sort::Type, arguments }
             if self.is_tuple_head(*head) && arguments.len() == 1 && arguments[0].sort() == Sort::ComptimeValue)
     }
+
     fn evaluate_kind(&self, kind: TypeKind, ty: &Term) -> Option<bool> {
         evaluate_kind_with_heads(
             kind,
@@ -270,9 +366,11 @@ impl Context {
             &self.theory.constructors.tuple_heads,
         )
     }
+
     pub fn assumptions(&self) -> &[Formula] {
         &self.assumptions
     }
+
     /// Restore declaration theory from checked owned NIR, without importing any
     /// caller assumptions or equations from function bodies. External head
     /// descriptors are compiler-issued contracts, as in required computation.
@@ -288,6 +386,7 @@ impl Context {
     ) -> Result<Self, nir::normal_forms::ValidationError> {
         DeclarationTheory::from_package_metered(package, fuel).map(DeclarationTheory::into_context)
     }
+
     /// Replay a refutation against this exact scope and its admitted contracts.
     /// This checks the tree, not merely whether a fresh search proves the goal.
     pub fn verify_proof(&self, proof: &Proof, budget: Budget) -> Result<(), ProofError> {
@@ -352,11 +451,13 @@ impl Context {
         budget.steps = steps;
         result
     }
+
     /// Validate a concrete counterexample against this exact scope, without
     /// rerunning proof search or trusting the producer's Boolean assignment.
     pub fn verify_witness(&self, witness: &Witness, budget: Budget) -> Result<(), ProofError> {
         self.verify_witness_metered(witness, &mut { budget })
     }
+
     /// Replay consumes the caller's shared search allowance, including failures.
     pub fn verify_witness_metered(
         &self,
@@ -462,6 +563,7 @@ impl Context {
         *fuel = evaluation_fuel.get();
         result
     }
+
     /// Recover an already-mentioned structural type using equality evidence.
     /// This is an operation-local view, never normal-form reduction. Candidates
     /// under binders are not exported and disjunctions are proved, not guessed.
@@ -571,32 +673,38 @@ impl Context {
     pub fn assume(&mut self, fact: Formula) {
         Arc::make_mut(&mut self.assumptions).push(fact);
     }
+
     /// The caller supplies the audited head contract, never just a purity flag.
     pub fn admit_congruence(&mut self, head: DeclarationId) {
         Arc::make_mut(&mut self.theory.constructors.congruence_heads).insert(head);
     }
+
     /// Register a generative nominal declaration whose semantic arguments are
     /// part of its identity. This does not admit any normal-form inverse.
     pub fn admit_nominal_constructor(&mut self, declaration: DeclarationId) {
         Arc::make_mut(&mut self.theory.constructors.nominal_constructors).insert(declaration);
     }
+
     pub fn is_nominal_constructor(&self, declaration: DeclarationId) -> bool {
         self.theory
             .constructors
             .nominal_constructors
             .contains(&declaration)
     }
+
     /// Branch facts are isolated by copy-on-write ownership. Read-only forks
     /// do not copy formulas or declaration sets. Dropping a fork cannot leave
     /// equalities or learned clauses in its parent.
     pub fn fork(&self) -> Self {
         self.clone()
     }
+
     /// Global declaration checks retain admitted theory identities but may not
     /// rely on a particular caller's local premises (even a false premise).
     pub fn theory_context(&self) -> Self {
         self.theory.clone().into_context()
     }
+
     pub fn prove(&self, goal: Formula, mut budget: Budget) -> Outcome {
         self.prove_metered(goal, &mut budget)
     }
@@ -726,9 +834,11 @@ enum Input<'a> {
     Predicate(&'a nir::program::TypePredicate),
     Term(&'a Term),
 }
+
 pub fn within_limits(formula: &Formula, limit: usize, fuel: &mut usize) -> bool {
     within_input_limits(Input::Formula(formula), limit, fuel)
 }
+
 fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool {
     use nir::program::TypePredicate as P;
     let mut pending = vec![(input, 0usize)];
@@ -814,6 +924,7 @@ struct Terms {
     ids: HashMap<Term, usize>,
     children: Vec<Vec<usize>>,
 }
+
 impl Terms {
     fn insert(&mut self, term: &Term) -> usize {
         if let Some(id) = self.ids.get(term) {
@@ -842,6 +953,7 @@ impl Terms {
         id
     }
 }
+
 fn subterms(term: &Term) -> Vec<&Term> {
     match term {
         Term::MethodValue(method) => method.terms().collect(),
@@ -913,6 +1025,7 @@ fn subterms(term: &Term) -> Vec<&Term> {
         _ => vec![],
     }
 }
+
 fn has_bound(term: &Term) -> bool {
     match term {
         Term::MethodValue(method) => method.terms().any(has_bound),
@@ -972,6 +1085,7 @@ fn has_bound(term: &Term) -> bool {
         _ => false,
     }
 }
+
 // Shared admission rules for validation-only checks and proof collection.
 fn validate_atom_inputs(formula: &Formula, scope: &[Vec<Sort>]) -> Result<(), String> {
     match formula {
@@ -1000,6 +1114,7 @@ fn validate_atom_inputs(formula: &Formula, scope: &[Vec<Sort>]) -> Result<(), St
     }
     Ok(())
 }
+
 fn collect(
     formula: &Formula,
     atoms: &mut Vec<Atom>,
@@ -1054,6 +1169,7 @@ fn collect(
     }
     Ok(())
 }
+
 fn evaluate(formula: &Formula, atom_value: &impl Fn(&Atom) -> Option<bool>) -> Option<bool> {
     match formula {
         Formula::True => Some(true),
@@ -1102,6 +1218,7 @@ enum Head {
     Closure(usize),
     Nominal(DeclarationId, usize),
 }
+
 fn constructor(term: &Term) -> Option<Head> {
     match term {
         Term::Primitive(p) if *p != Primitive::Unit => Some(Head::Primitive(*p)),
@@ -1183,6 +1300,7 @@ mod outer_type_head_tests {
         ));
     }
 }
+
 impl Context {
     /// Forward congruence premises for an admitted pair of heads. Consumers
     /// must prove every returned pair equal; this does not grant injectivity or
@@ -1291,6 +1409,7 @@ fn same_congruent_head(a: &Term, b: &Term, context: &Context) -> bool {
     }
     matches!((a, b), (Term::NormalForm { head: a, sort: sa, arguments: aa }, Term::NormalForm { head: b, sort: sb, arguments: ab }) if a == b && sa == sb && aa.len() == ab.len() && context.theory.constructors.congruence_heads.contains(a))
 }
+
 struct Search<'a> {
     boolean: Option<boolean::Circuit>,
     theory_state: Option<theory_state::State>,
@@ -1302,22 +1421,26 @@ struct Search<'a> {
     steps: usize,
     max_depth: usize,
 }
+
 struct Model {
     applications: Vec<TypeApplication>,
     types: BTreeMap<DeclarationId, Term>,
     bound_types: BTreeMap<TypeBinder, Term>,
     integers: BTreeMap<DeclarationId, i128>,
 }
+
 struct TheoryModel {
     classes: Classes,
     kinds: Vec<(usize, TypeKind, bool)>,
     integers: BTreeMap<DeclarationId, i128>,
 }
+
 enum SearchResult {
     Unsat(Conflict),
     Model(Model),
     Unknown(UnknownReason),
 }
+
 impl Search<'_> {
     fn check_tree(
         &mut self,
@@ -1403,6 +1526,7 @@ impl Search<'_> {
             }
         }
     }
+
     fn tick(&mut self) -> Result<(), ()> {
         if self.steps == 0 {
             Err(())
@@ -1411,6 +1535,7 @@ impl Search<'_> {
             Ok(())
         }
     }
+
     fn boolean_reason(
         &mut self,
         index: usize,
@@ -1432,6 +1557,7 @@ impl Search<'_> {
             support,
         }
     }
+
     fn theory(
         &mut self,
         assignment: &[Option<bool>],
@@ -1463,6 +1589,7 @@ impl Search<'_> {
             integers,
         }))
     }
+
     fn type_theory_with_classes(
         &mut self,
         assignment: &[Option<bool>],
@@ -1643,6 +1770,7 @@ impl Search<'_> {
         Ok(Some(kinds))
     }
 }
+
 fn evaluate_kind_with_heads(
     kind: TypeKind,
     ty: &Term,
@@ -1683,6 +1811,7 @@ fn evaluate_model(
         )
     })
 }
+
 fn model_atom(
     atom: &Atom,
     types: &BTreeMap<DeclarationId, Term>,
@@ -1834,6 +1963,7 @@ fn reify(
     active.remove(&root);
     result
 }
+
 fn rebuild(
     term: &Term,
     nominal: &BTreeSet<DeclarationId>,
@@ -1948,6 +2078,7 @@ fn rebuild(
         _ => None,
     }
 }
+
 fn substitute_types(
     term: &Term,
     types: &BTreeMap<DeclarationId, Term>,
@@ -2022,11 +2153,13 @@ impl fmt::Display for Atom {
         }
     }
 }
+
 impl fmt::Display for Equality {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(type-eq {} {})", self.0, self.1)
     }
 }
+
 impl fmt::Display for Formula {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2051,6 +2184,7 @@ impl fmt::Display for Formula {
         }
     }
 }
+
 impl fmt::Display for ProofTree {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2088,6 +2222,7 @@ impl fmt::Display for ProofTree {
         }
     }
 }
+
 impl fmt::Display for Outcome {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2664,5 +2799,73 @@ mod tuple_classification_tests {
         let lift_ptr = Term::Lift(Box::new(Term::Pointer(Box::new(boolean.clone()))));
         let raw_ptr = Term::Pointer(Box::new(boolean));
         assert!(distinct_outer_type_heads(&lift_ptr, &raw_ptr));
+    }
+
+    #[test]
+    fn formula_has_bound_or_hole_detects_nested_frame_references() {
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let rigid = Term::Rigid {
+            declaration: DeclarationId {
+                package: 1,
+                local: 1,
+            },
+            sort: Sort::Type,
+        };
+        let bound = Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        };
+        let hole = Term::Hole {
+            index: 7,
+            sort: Sort::ComptimeValue,
+        };
+        let fn_with_bound = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: Sort::Type,
+                ty: bool_ty.clone(),
+            }],
+            result: Box::new(bound),
+        };
+        let snap_with_hole = Term::ClosureSnapshot {
+            factory: DeclarationId {
+                package: 1,
+                local: 2,
+            },
+            arguments: vec![Term::Pointer(Box::new(hole))],
+        };
+        let iface = DeclarationId {
+            package: 1,
+            local: 3,
+        };
+
+        assert!(!Formula::True.has_bound_or_hole());
+        assert!(!Formula::equal(rigid.clone(), bool_ty.clone()).has_bound_or_hole());
+        assert!(!Formula::kind(rigid.clone(), TypeKind::Tuple).has_bound_or_hole());
+        assert!(
+            !Formula::Trait(TraitQuery {
+                interface: iface,
+                subject: rigid.clone(),
+                arguments: vec![bool_ty.clone()],
+            })
+            .has_bound_or_hole()
+        );
+
+        assert!(Formula::equal(fn_with_bound.clone(), bool_ty.clone()).has_bound_or_hole());
+        assert!(
+            Formula::And(vec![
+                Formula::equal(rigid.clone(), bool_ty),
+                Formula::Or(vec![Formula::kind(fn_with_bound, TypeKind::Tuple).negate()]),
+            ])
+            .has_bound_or_hole()
+        );
+        assert!(
+            Formula::Trait(TraitQuery {
+                interface: iface,
+                subject: rigid,
+                arguments: vec![snap_with_hole],
+            })
+            .has_bound_or_hole()
+        );
     }
 }

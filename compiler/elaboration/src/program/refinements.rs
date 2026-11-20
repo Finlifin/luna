@@ -55,6 +55,7 @@ impl Checker<'_, '_> {
             }
         }
     }
+
     /// Concrete annotations supply their own checking direction. Gradual
     /// inputs evaluate the actual supplier once, then check its requirements
     /// in the receiving context before publishing a specialized signature.
@@ -270,6 +271,7 @@ pub(super) struct Pending {
     assumptions: Vec<n::TraitRequirement>,
     span: Span,
 }
+
 fn has_trait(predicate: &n::TypePredicate) -> bool {
     let mut work = vec![predicate];
     while let Some(predicate) = work.pop() {
@@ -282,6 +284,7 @@ fn has_trait(predicate: &n::TypePredicate) -> bool {
     }
     false
 }
+
 // None means executable/program syntax; Some records whether the pure
 // proposition actually observes a type. Classification must not change domains
 // merely because a type atom is buried under a long Boolean prefix.
@@ -339,6 +342,7 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
+
     fn continuation_type_fact(
         expr: &n::Expr,
         fuel: &mut usize,
@@ -619,6 +623,7 @@ impl Checker<'_, '_> {
         };
         self.enter_observed_pattern_type_facts(pattern, observed, span)
     }
+
     pub(super) fn under_observed_pattern_type_facts<R>(
         &mut self,
         pattern: &n::Pattern,
@@ -921,6 +926,7 @@ impl Checker<'_, '_> {
             _ => self.is_type_head(expr),
         }
     }
+
     // Classify before checking: a failed type proof is never a request to run
     // arbitrary code under another meaning. Calls/control flow are executable
     // predicates and remain outside PTC's type-proposition language.
@@ -932,6 +938,7 @@ impl Checker<'_, '_> {
         )
         .is_some()
     }
+
     pub(super) fn is_type_assumption(&self, expr: &Expr<'_>) -> bool {
         classify_refinement(
             expr,
@@ -960,6 +967,7 @@ impl Checker<'_, '_> {
             )),
         }
     }
+
     pub(super) fn refinement_trait_value(&mut self, expr: &Expr<'_>) -> Result<bool, Error> {
         let predicate = self.type_predicate(expr)?;
         let formula = crate::ptc::Formula::from_predicate(&predicate);
@@ -1013,6 +1021,7 @@ impl Checker<'_, '_> {
             ),
         ))
     }
+
     pub(super) fn check_source_refinement(
         &mut self,
         predicate: n::TypePredicate,
@@ -1049,6 +1058,7 @@ impl Checker<'_, '_> {
         }
         self.prove_source_refinement(&predicate, &self.context, &assumptions, span)
     }
+
     fn prove_source_refinement(
         &self,
         predicate: &n::TypePredicate,
@@ -1073,6 +1083,7 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
+
     pub(super) fn finish_signature_refinements(&mut self) -> Result<(), Error> {
         for pending in std::mem::take(&mut self.pending_refinements) {
             self.prove_source_refinement(
@@ -1101,6 +1112,143 @@ impl Checker<'_, '_> {
         self.verify_type_guarantees_expr(expr, binder, &guarantees, &context, &bindings, span, 0)
     }
 
+    fn remove_pattern_bindings(
+        pattern: &n::Pattern,
+        bindings: &mut BTreeMap<n::LocalId, &n::Expr>,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        let mut pending = vec![pattern];
+        while let Some(pattern) = pending.pop() {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("result guarantee invalidation budget exhausted")?;
+            match pattern {
+                n::Pattern::Binding { binding, inner } => {
+                    bindings.remove(binding);
+                    pending.push(inner);
+                }
+                n::Pattern::Remap {
+                    pattern,
+                    bindings: remap,
+                } => {
+                    *fuel = fuel
+                        .checked_sub(remap.len())
+                        .ok_or("result guarantee invalidation budget exhausted")?;
+                    for (_, to) in remap {
+                        bindings.remove(to);
+                    }
+                    pending.push(pattern);
+                }
+                n::Pattern::OptionalPresent(inner)
+                | n::Pattern::ErrorResult { inner, .. }
+                | n::Pattern::Observe { inner, .. }
+                | n::Pattern::Guard { pattern: inner, .. } => pending.push(inner),
+                n::Pattern::Then { first, next, .. } => {
+                    pending.push(first);
+                    pending.push(next);
+                }
+                n::Pattern::Tuple(fields)
+                | n::Pattern::TypeTuple(fields)
+                | n::Pattern::Or(fields)
+                | n::Pattern::NominalType { fields, .. }
+                | n::Pattern::Record { fields, .. }
+                | n::Pattern::AnonymousRecord { fields, .. }
+                | n::Pattern::Variant { fields, .. }
+                | n::Pattern::NormalForm {
+                    arguments: fields, ..
+                } => {
+                    *fuel = fuel
+                        .checked_sub(fields.len())
+                        .ok_or("result guarantee invalidation budget exhausted")?;
+                    pending.extend(fields);
+                }
+                n::Pattern::OptionalAbsent
+                | n::Pattern::Wild
+                | n::Pattern::Unit
+                | n::Pattern::Literal(_)
+                | n::Pattern::CodeEvidence { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn invalidate_mutated_type_bindings(
+        expr: &n::Expr,
+        bindings: &mut BTreeMap<n::LocalId, &n::Expr>,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        if bindings.is_empty() {
+            return Ok(());
+        }
+        nir::visit::expression(expr, fuel, |node, fuel| {
+            if bindings.is_empty() {
+                return Ok(());
+            }
+            match &node.kind {
+                K::Assign { place, .. }
+                | K::BitUpdate { place, .. }
+                | K::BitAssign { place, .. } => {
+                    bindings.remove(&place.root);
+                }
+                K::AddressOf(place_expr) => {
+                    let mut root = place_expr.as_ref();
+                    while let K::Field { value, .. } | K::AnonymousField { value, .. } = &root.kind
+                    {
+                        *fuel = fuel
+                            .checked_sub(1)
+                            .ok_or("result guarantee invalidation budget exhausted")?;
+                        root = value;
+                    }
+                    if let K::Local(id) = root.kind {
+                        bindings.remove(&id);
+                    } else {
+                        bindings.clear();
+                    }
+                }
+                K::WritePointer { .. } | K::BitWritePointer { .. } => {
+                    bindings.clear();
+                }
+                K::Call { arguments, .. } => {
+                    for arg in arguments {
+                        if arg.passing == n::ArgumentPassing::Value {
+                            continue;
+                        }
+                        let mut root = &arg.value;
+                        while let K::Field { value, .. } | K::AnonymousField { value, .. } =
+                            &root.kind
+                        {
+                            *fuel = fuel
+                                .checked_sub(1)
+                                .ok_or("result guarantee invalidation budget exhausted")?;
+                            root = value;
+                        }
+                        if let K::Local(id) = root.kind {
+                            bindings.remove(&id);
+                        } else {
+                            bindings.clear();
+                            break;
+                        }
+                    }
+                }
+                K::Let { binding, .. } => {
+                    bindings.remove(binding);
+                }
+                K::LetPattern { pattern, .. } => {
+                    Self::remove_pattern_bindings(pattern, bindings, fuel)?;
+                }
+                K::Closure { captures, .. } => {
+                    for capture in captures {
+                        if capture.value.is_none() {
+                            bindings.remove(&capture.binding);
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+    }
+
     fn verify_type_guarantees_expr<'e>(
         &mut self,
         expr: &'e n::Expr,
@@ -1123,11 +1271,31 @@ impl Checker<'_, '_> {
                 let mut local_bindings = bindings.clone();
                 let frames = self.call_input_frames();
                 for stmt in statements {
-                    if let K::Let { binding, value } = &stmt.kind
-                        && !is_never(&value.ty)
-                    {
-                        local_bindings.insert(*binding, value);
-                    }
+                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                    let before = fuel;
+                    let mutated = match &stmt.kind {
+                        K::Let { binding, value } => {
+                            let res = Self::invalidate_mutated_type_bindings(
+                                value,
+                                &mut local_bindings,
+                                &mut fuel,
+                            );
+                            if res.is_ok() {
+                                local_bindings.remove(binding);
+                                if !is_never(&value.ty) {
+                                    local_bindings.insert(*binding, value);
+                                }
+                            }
+                            res
+                        }
+                        _ => Self::invalidate_mutated_type_bindings(
+                            stmt,
+                            &mut local_bindings,
+                            &mut fuel,
+                        ),
+                    };
+                    self.required_steps -= (before - fuel) as u64;
+                    mutated.map_err(|message| error(span, message))?;
                     let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                     let before = fuel;
                     let fact = Self::continuation_type_fact(stmt, &mut fuel, 0)
@@ -1176,13 +1344,20 @@ impl Checker<'_, '_> {
                 then_branch,
                 else_branch,
             } => {
+                let mut branch_bindings = bindings.clone();
                 let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                 let before = fuel;
-                let then_fact = Self::condition_type_fact(condition, true, &mut fuel, 0)
-                    .map_err(|message| error(span, message))?;
-                let else_fact = Self::condition_type_fact(condition, false, &mut fuel, 0)
-                    .map_err(|message| error(span, message))?;
+                let invalidated = Self::invalidate_mutated_type_bindings(
+                    condition,
+                    &mut branch_bindings,
+                    &mut fuel,
+                );
+                let then_fact = Self::condition_type_fact(condition, true, &mut fuel, 0);
+                let else_fact = Self::condition_type_fact(condition, false, &mut fuel, 0);
                 self.required_steps -= (before - fuel) as u64;
+                invalidated.map_err(|message| error(span, message))?;
+                let then_fact = then_fact.map_err(|message| error(span, message))?;
+                let else_fact = else_fact.map_err(|message| error(span, message))?;
                 let mut then_context = context.fork();
                 if let Some(fact) = then_fact {
                     then_context
@@ -1195,7 +1370,7 @@ impl Checker<'_, '_> {
                     binder,
                     guarantees,
                     &then_context,
-                    bindings,
+                    &branch_bindings,
                     span,
                     depth + 1,
                 )?;
@@ -1212,21 +1387,44 @@ impl Checker<'_, '_> {
                         binder,
                         guarantees,
                         &else_context,
-                        bindings,
+                        &branch_bindings,
                         span,
                         depth + 1,
                     )?;
                 }
                 Ok(())
             }
-            K::Match { arms, .. } => {
+            K::Match { value, arms } => {
+                let mut match_bindings = bindings.clone();
+                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let before = fuel;
+                let invalidated =
+                    Self::invalidate_mutated_type_bindings(value, &mut match_bindings, &mut fuel);
+                self.required_steps -= (before - fuel) as u64;
+                invalidated.map_err(|message| error(span, message))?;
                 for arm in arms {
+                    let mut arm_bindings = match_bindings.clone();
+                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                    let before = fuel;
+                    let arm_res = (|| {
+                        Self::remove_pattern_bindings(&arm.pattern, &mut arm_bindings, &mut fuel)?;
+                        if let Some(guard) = &arm.guard {
+                            Self::invalidate_mutated_type_bindings(
+                                guard,
+                                &mut arm_bindings,
+                                &mut fuel,
+                            )?;
+                        }
+                        Ok::<_, String>(())
+                    })();
+                    self.required_steps -= (before - fuel) as u64;
+                    arm_res.map_err(|message| error(span, message))?;
                     self.verify_type_guarantees_expr(
                         &arm.body,
                         binder,
                         guarantees,
                         context,
-                        bindings,
+                        &arm_bindings,
                         span,
                         depth + 1,
                     )?;
@@ -1438,7 +1636,7 @@ impl Checker<'_, '_> {
     }
 
     fn prove_guarantees_for_term(
-        &self,
+        &mut self,
         context: &crate::ptc::Context,
         target: &Term,
         binder: DeclarationId,
@@ -1447,49 +1645,54 @@ impl Checker<'_, '_> {
     ) -> Result<(), Error> {
         let frames = self.call_input_frames();
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        for guarantee in guarantees {
-            let instantiated = if *target
-                == (Term::Rigid {
-                    declaration: binder,
-                    sort: Sort::Type,
-                }) {
-                guarantee.clone()
-            } else {
-                let sub = nir::DeclarationSubstitution::bounded(
-                    &[binder],
-                    &[p(P::Type)],
-                    std::slice::from_ref(target),
-                    &frames,
-                    &mut fuel,
-                )
-                .map_err(|e| error(span, e.to_string()))?;
-                sub.instantiate_predicate_bounded(guarantee, &mut fuel)
-                    .map_err(|e| error(span, e.to_string()))?
-            };
-            if matches!(
-                context.prove(
-                    crate::ptc::Formula::from_predicate(&instantiated),
-                    crate::ptc::Budget::default(),
-                ),
-                crate::ptc::Outcome::Entailed(_)
-            ) {
-                continue;
-            }
-            if has_trait(&instantiated) || matches!(instantiated, n::TypePredicate::Equal(..)) {
-                let assumptions = self.capability_assumptions();
-                if self
-                    .prove_source_refinement(&instantiated, context, &assumptions, span)
-                    .is_ok()
-                {
+        let before = fuel;
+        let result = (|| -> Result<(), Error> {
+            for guarantee in guarantees {
+                let instantiated = if *target
+                    == (Term::Rigid {
+                        declaration: binder,
+                        sort: Sort::Type,
+                    }) {
+                    guarantee.clone()
+                } else {
+                    let sub = nir::DeclarationSubstitution::bounded(
+                        &[binder],
+                        &[p(P::Type)],
+                        std::slice::from_ref(target),
+                        &frames,
+                        &mut fuel,
+                    )
+                    .map_err(|e| error(span, e.to_string()))?;
+                    sub.instantiate_predicate_bounded(guarantee, &mut fuel)
+                        .map_err(|e| error(span, e.to_string()))?
+                };
+                if matches!(
+                    context.prove(
+                        crate::ptc::Formula::from_predicate(&instantiated),
+                        crate::ptc::Budget::default(),
+                    ),
+                    crate::ptc::Outcome::Entailed(_)
+                ) {
                     continue;
                 }
+                if has_trait(&instantiated) || matches!(instantiated, n::TypePredicate::Equal(..)) {
+                    let assumptions = self.capability_assumptions();
+                    if self
+                        .prove_source_refinement(&instantiated, context, &assumptions, span)
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                }
+                return Err(error(
+                    span,
+                    format!("result guarantee contract is not established: {instantiated}"),
+                ));
             }
-            return Err(error(
-                span,
-                format!("result guarantee contract is not established: {instantiated}"),
-            ));
-        }
-        Ok(())
+            Ok(())
+        })();
+        self.required_steps -= (before - fuel) as u64;
+        result
     }
 }
 

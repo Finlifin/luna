@@ -1,5 +1,6 @@
 //! Named bindings for compiler operations retain their checked call lowering.
 use super::*;
+
 mod signatures;
 mod values;
 
@@ -138,6 +139,9 @@ impl Checker<'_, '_> {
             );
             self.signatures
                 .insert(owner, ty.callable_signature().clone());
+            for &(id, _, _) in &descriptors {
+                self.parameter_domain_owners.entry(id).or_insert(owner);
+            }
             self.normal_parameters.insert(owner, descriptors);
         }
         self.ensure_contract(owner, span)?;

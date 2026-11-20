@@ -225,5 +225,196 @@ pub(super) fn builtin_subject(subject: &Term) -> bool {
             | Term::ComptimeFunction(_)
             | Term::NormalFormFunction(..)
             | Term::UnsafeFunction(_)
+            | Term::Tuple(_)
+            | Term::Record(_)
+            | Term::Closure { .. }
+            | Term::ContextualClosure { .. }
+            | Term::Computation { .. }
+            | Term::ClosureContextType
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::implementation::{Index, InherentHead, InherentIndex};
+    use nir::normal_forms::{Head as NormalFormHead, Role};
+    use nir::{Primitive, Sort};
+    use std::collections::BTreeSet;
+
+    fn decl(package: u64, local: u32) -> DeclarationId {
+        DeclarationId { package, local }
+    }
+
+    fn builtin_subjects(tuple_head: DeclarationId, list_head: DeclarationId) -> Vec<Term> {
+        let bool_ty = Term::Primitive(Primitive::Bool);
+        let sig = Term::Function {
+            parameters: vec![],
+            result: Box::new(bool_ty.clone()),
+        };
+        vec![
+            bool_ty.clone(),
+            Term::Tuple(vec![bool_ty.clone()]),
+            Term::Record(vec![("x".into(), bool_ty.clone())]),
+            Term::Closure {
+                environment: vec![bool_ty.clone()],
+                signature: Box::new(sig.clone()),
+            },
+            Term::ContextualClosure {
+                context: Box::new(Term::Rigid {
+                    declaration: decl(0, 99),
+                    sort: Sort::ComptimeValue,
+                }),
+                signature: Box::new(sig),
+            },
+            Term::Computation {
+                effects: vec![],
+                result: Box::new(bool_ty.clone()),
+            },
+            Term::ClosureContextType,
+            Term::NormalForm {
+                head: tuple_head,
+                sort: Sort::Type,
+                arguments: vec![Term::TupleValue(vec![bool_ty.clone()])],
+            },
+            Term::NormalForm {
+                head: list_head,
+                sort: Sort::Type,
+                arguments: vec![bool_ty],
+            },
+        ]
+    }
+
+    #[test]
+    fn builtin_packages_exempt_all_builtin_constructors_without_granting_user_packages() {
+        let builtin_pkg = 0;
+        let user_pkg = 7;
+        let foreign_trait = decl(9, 1);
+        let tuple_head = decl(builtin_pkg, 10);
+        let list_head = decl(1, 11);
+        let opaque_head = decl(user_pkg, 12);
+        let nf_metadata = vec![
+            NormalFormHead {
+                collector: None,
+                role: Role::Tuple,
+                declaration: tuple_head,
+                parameters: vec![],
+                requirements: vec![],
+            },
+            NormalFormHead {
+                collector: None,
+                role: Role::TypeList,
+                declaration: list_head,
+                parameters: vec![],
+                requirements: vec![],
+            },
+            NormalFormHead {
+                collector: None,
+                role: Role::Opaque,
+                declaration: opaque_head,
+                parameters: vec![],
+                requirements: vec![],
+            },
+        ];
+
+        let mut trait_index = Index::for_builtin_packages(None, [builtin_pkg]);
+        trait_index.set_normal_form_metadata(nf_metadata.clone());
+        let mut inherent_index = InherentIndex::for_builtin_packages(None, [builtin_pkg]);
+        inherent_index.set_normal_form_metadata(nf_metadata);
+
+        for (i, subject) in builtin_subjects(tuple_head, list_head)
+            .into_iter()
+            .enumerate()
+        {
+            let impl_id = decl(builtin_pkg, 100 + i as u32);
+            trait_index
+                .insert(
+                    ImplementationHead {
+                        parameter_types: vec![],
+                        declaration: impl_id,
+                        interface: Some(foreign_trait),
+                        interface_arguments: vec![],
+                        subject: subject.clone(),
+                        type_parameters: vec![],
+                        requirements: vec![],
+                    },
+                    Budget::default(),
+                )
+                .expect("builtin package should implement foreign trait for builtin subject");
+            inherent_index
+                .insert(
+                    InherentHead {
+                        parameter_types: vec![],
+                        declaration: impl_id,
+                        subject: subject.clone(),
+                        type_parameters: vec![],
+                        requirements: vec![],
+                        members: BTreeSet::from(["m".into()]),
+                    },
+                    Budget::default(),
+                )
+                .expect("builtin package should add inherent impl for builtin subject");
+
+            let user_impl_id = decl(user_pkg, 200 + i as u32);
+            assert!(
+                trait_index
+                    .insert(
+                        ImplementationHead {
+                            parameter_types: vec![],
+                            declaration: user_impl_id,
+                            interface: Some(foreign_trait),
+                            interface_arguments: vec![],
+                            subject: subject.clone(),
+                            type_parameters: vec![],
+                            requirements: vec![],
+                        },
+                        Budget::default(),
+                    )
+                    .is_err()
+            );
+            assert!(
+                inherent_index
+                    .insert(
+                        InherentHead {
+                            parameter_types: vec![],
+                            declaration: user_impl_id,
+                            subject,
+                            type_parameters: vec![],
+                            requirements: vec![],
+                            members: BTreeSet::from(["m".into()]),
+                        },
+                        Budget::default(),
+                    )
+                    .is_err()
+            );
+        }
+
+        // Opaque user normal-form heads are not exempted even for builtin packages.
+        let opaque_nf = Term::NormalForm {
+            head: opaque_head,
+            sort: Sort::Type,
+            arguments: vec![],
+        };
+        assert!(
+            trait_index
+                .insert(
+                    ImplementationHead {
+                        parameter_types: vec![],
+                        declaration: decl(builtin_pkg, 500),
+                        interface: Some(foreign_trait),
+                        interface_arguments: vec![],
+                        subject: opaque_nf.clone(),
+                        type_parameters: vec![],
+                        requirements: vec![],
+                    },
+                    Budget::default(),
+                )
+                .is_err()
+        );
+        assert!(
+            inherent_index
+                .check_ownership(&opaque_nf, builtin_pkg)
+                .is_err()
+        );
+    }
 }

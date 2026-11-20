@@ -3,17 +3,25 @@
 //! Phase, coherence, associated members and runtime environment delivery remain
 //! separate obligations: type selection alone is not trait satisfaction.
 use crate::ptc::Budget;
+
 mod applicability;
+
 pub(crate) use applicability::equivalent_domains;
+
 mod coherence;
 mod evidence;
+
 pub use evidence::EvidenceError;
+
 mod inherent;
+
 pub use coherence::{CoherenceReport, PairAssessment};
 pub use inherent::{InherentHead, InherentIndex};
+
 mod ownership;
 mod phases;
 mod source;
+
 pub use applicability::{HeadMatch, TypeAssessment, TypeEvidence, TypeResolution};
 use nir::{DeclarationId, Sort, Term};
 pub use ownership::{
@@ -37,12 +45,14 @@ pub enum Head {
     UnsafeFunction,
     Function(Vec<Sort>),
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     Wildcard,
     Leaf(Term),
     Node(Head, Vec<Key>),
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     BudgetExhausted,
@@ -52,10 +62,12 @@ pub enum Error {
     AmbiguousPhaseRelationship,
     UndeterminedPhaseRelationship(String),
 }
+
 fn spend(fuel: &mut usize) -> Result<(), Error> {
     *fuel = fuel.checked_sub(1).ok_or(Error::BudgetExhausted)?;
     Ok(())
 }
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum KeyDiscriminant {
     Primitive(nir::Primitive),
@@ -94,10 +106,12 @@ impl Key {
         let mut fuel = budget.steps;
         Self::with_fuel(ty, &mut fuel, budget.max_depth)
     }
+
     /// Build an index key using and returning the caller's remaining work.
     pub fn from_type_metered(ty: &Term, budget: &mut Budget) -> Result<Self, Error> {
         Self::with_fuel(ty, &mut budget.steps, budget.max_depth)
     }
+
     fn with_fuel(ty: &Term, fuel: &mut usize, max_depth: usize) -> Result<Self, Error> {
         fn build(ty: &Term, fuel: &mut usize, depth: usize, limit: usize) -> Result<Key, Error> {
             spend(fuel)?;
@@ -290,6 +304,7 @@ impl Key {
             .map_err(|_| Error::BudgetExhausted)?;
         build(ty, fuel, 0, max_depth.min(128))
     }
+
     pub fn precision(&self) -> usize {
         let mut pending = vec![(self, 0)];
         let mut minimum = None;
@@ -306,6 +321,7 @@ impl Key {
         }
         minimum.unwrap_or(maximum)
     }
+
     pub fn cut(&self, depth: usize) -> Self {
         if depth == 0 {
             return Self::Wildcard;
@@ -318,6 +334,7 @@ impl Key {
             other => other.clone(),
         }
     }
+
     /// May overlap, deliberately over-approximating logical equality for opaque
     /// leaves. Unknown queries visit compatible descendants, not just ancestors.
     fn compatible(&self, other: &Self, fuel: &mut usize) -> Result<bool, Error> {
@@ -391,6 +408,7 @@ impl Key {
         }
         Ok(true)
     }
+
     pub(crate) fn is_open(&self) -> bool {
         let mut pending = vec![self];
         while let Some(key) = pending.pop() {
@@ -416,11 +434,13 @@ pub struct ImplementationHead {
     pub interface_arguments: Vec<Term>,
     pub subject: Term,
 }
+
 impl ImplementationHead {
     pub fn parameter_binders(&self) -> Result<Vec<nir::DeclarationParameter>, nir::TypeError> {
         nir::declaration_parameters(&self.type_parameters, &self.parameter_types)
     }
 }
+
 #[derive(Clone, Debug)]
 struct Entry {
     head: ImplementationHead,
@@ -429,6 +449,7 @@ struct Entry {
     precision: usize,
     phases: [Option<DeclarationId>; 2],
 }
+
 #[derive(Clone, Copy)]
 enum ArgFilter<'a> {
     Any,
@@ -560,6 +581,7 @@ pub struct Index {
     buckets: BTreeMap<Option<DeclarationId>, InterfaceBucket>,
     revision: u64,
 }
+
 impl Default for Index {
     fn default() -> Self {
         Self {
@@ -575,6 +597,7 @@ impl Default for Index {
         }
     }
 }
+
 impl Index {
     /// Construct a declaration world with explicitly authorized builtin package
     /// identities. The grant is immutable for the lifetime of this index.
@@ -587,6 +610,24 @@ impl Index {
         index
     }
 
+    pub(super) fn is_builtin_subject(&self, subject: &Term) -> bool {
+        ownership::builtin_subject(subject)
+            || matches!(
+                subject,
+                Term::NormalForm {
+                    head,
+                    sort: Sort::Type,
+                    ..
+                } if self.nominal_layouts.normal_forms.iter().any(|meta| {
+                    meta.declaration == *head
+                        && matches!(
+                            meta.role,
+                            nir::normal_forms::Role::Tuple | nir::normal_forms::Role::TypeList
+                        )
+                })
+            )
+    }
+
     fn check_ownership(
         &self,
         head: &ImplementationHead,
@@ -594,7 +635,7 @@ impl Index {
         depth: usize,
     ) -> Result<Ownership, Error> {
         if self.builtin_packages.contains(&head.declaration.package)
-            && ownership::builtin_subject(&head.subject)
+            && self.is_builtin_subject(&head.subject)
         {
             spend(fuel)?;
             Ok(Ownership::BuiltinPackage(head.declaration.package))
@@ -610,6 +651,7 @@ impl Index {
         }
         f.write_str(")")
     }
+
     pub fn parameter_domains(&self) -> &BTreeMap<DeclarationId, Term> {
         &self.parameter_domains
     }
@@ -796,6 +838,7 @@ impl Index {
     pub fn revision(&self) -> u64 {
         self.revision
     }
+
     pub fn insert(&mut self, head: ImplementationHead, budget: Budget) -> Result<(), Error> {
         self.insert_metered(head, &mut { budget })
     }
@@ -843,6 +886,7 @@ impl Index {
         self.revision += 1;
         Ok(())
     }
+
     pub fn candidates(
         &self,
         interface: Option<DeclarationId>,
@@ -852,6 +896,7 @@ impl Index {
     ) -> Result<Candidates, Error> {
         self.candidates_metered(interface, arguments, subject, &mut { budget })
     }
+
     /// Return candidate search work even when key construction or scanning fails.
     pub fn candidates_metered(
         &self,
@@ -924,6 +969,7 @@ impl Index {
             fixed_interface,
         })
     }
+
     /// Assessments are private to each candidate. No candidate may publish a
     /// substitution while a same/higher precision competitor remains pending.
     pub fn select(
@@ -970,6 +1016,7 @@ impl Index {
         Selection::NoApplicableCandidate
     }
 }
+
 #[derive(Clone, Debug)]
 pub struct Candidates {
     identity: u64,
@@ -977,17 +1024,20 @@ pub struct Candidates {
     revision: u64,
     fixed_interface: bool,
 }
+
 impl Candidates {
     pub fn declarations(&self) -> &[DeclarationId] {
         &self.declarations
     }
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Applicability {
     Applicable,
     Excluded,
     Pending,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Selection {
     StaleIndex,
@@ -1001,6 +1051,7 @@ pub enum Selection {
     NoApplicableCandidate,
     InvalidCandidate(DeclarationId),
 }
+
 impl fmt::Display for Key {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1047,6 +1098,7 @@ impl fmt::Display for Key {
         }
     }
 }
+
 impl fmt::Display for Index {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(implementation-index (revision {})", self.revision)?;
@@ -1109,6 +1161,7 @@ impl fmt::Display for Candidates {
         f.write_str("))")
     }
 }
+
 impl fmt::Display for Selection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

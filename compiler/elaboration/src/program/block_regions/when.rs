@@ -19,6 +19,7 @@ struct Ordinary {
     selection: Option<usize>,
     suppressed: bool,
     comptime: bool,
+    in_code_body: bool,
     callee: Option<hir::HirId>,
     preserve_effect: Option<bool>,
 }
@@ -125,6 +126,7 @@ impl<'h> Frame<'h> {
                 .map(|(_, index)| index),
             suppressed: checker.in_unselected_inline,
             comptime: checker.in_required_comptime,
+            in_code_body: checker.in_code_body,
             callee: checker.comptime_callee_result,
             preserve_effect: (own_effect_delivery && input_delivery.is_none())
                 .then(|| std::mem::take(&mut checker.preserve_effect_value)),
@@ -194,8 +196,11 @@ impl<'h> Frame<'h> {
                             .is_some_and(|selected| selected != self.branches.len());
                 }
                 if let Some(condition) = arm.cond {
-                    if let Some(ordinary) = &self.ordinary {
-                        checker.in_required_comptime |= ordinary.selection.is_some();
+                    if let Some(ordinary) = &self.ordinary
+                        && ordinary.selection.is_some()
+                    {
+                        checker.in_required_comptime = true;
+                        checker.in_code_body = false;
                     }
                     let destination = Destination::ordinary(
                         checker,
@@ -215,6 +220,7 @@ impl<'h> Frame<'h> {
             (State::Condition, Some(value)) => {
                 if let Some(ordinary) = &self.ordinary {
                     checker.in_required_comptime = ordinary.comptime;
+                    checker.in_code_body = ordinary.in_code_body;
                 }
                 let condition = value.ordinary(self.source.span)?;
                 self.body(checker, Some(condition))
@@ -483,6 +489,7 @@ impl<'h> Frame<'h> {
             checker.comptime_callee_result = ordinary.callee;
             checker.in_unselected_inline = ordinary.suppressed;
             checker.in_required_comptime = ordinary.comptime;
+            checker.in_code_body = ordinary.in_code_body;
         }
         if let Some(scope) = self.branch.take() {
             scope.leave(checker);
@@ -603,6 +610,7 @@ mod tests {
             selection: Some(2),
             suppressed: false,
             comptime: false,
+            in_code_body: false,
             callee: None,
             preserve_effect: Some(true),
         };

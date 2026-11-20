@@ -96,6 +96,10 @@ impl Checker<'_, '_> {
                 unreachable!("formed declaration has a function signature")
             };
             this.in_code_body = sig.modifiers.is_quote;
+            if sig.modifiers.is_quote {
+                this.in_required_comptime = false;
+                this.in_staged_input = false;
+            }
             let body = this.function_body(owner, body.value, result)?;
             this.verify_returned_type_guarantees(&body, span)?;
             let runtime_deliveries = this

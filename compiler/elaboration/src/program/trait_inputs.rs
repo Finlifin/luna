@@ -52,6 +52,9 @@ impl Checker<'_, '_> {
                 .register_parameter_domain(*id, domain.clone())
                 .map_err(|message| error(self.package.item(owner).unwrap().span, message))?;
         }
+        for &id in &self.type_parameters[&owner] {
+            self.parameter_domain_owners.entry(id).or_insert(owner);
+        }
         self.trait_parameter_types.insert(owner, retained);
         // Self skeletons may be registered before explicit value domains are
         // known. Refresh all nominal members when their telescope is complete.
@@ -112,28 +115,31 @@ impl Checker<'_, '_> {
         if let Some(domain) = self.nominal_input_prefixes.get(&id) {
             return Ok(Some(domain));
         }
-        for (owner, domains) in &self.trait_parameter_types {
+        if let Some(&owner) = self.parameter_domain_owners.get(&id) {
             charge()?;
-            for (index, input) in self.type_parameters[owner].iter().enumerate() {
-                charge()?;
-                if *input == id {
-                    if let Some(domain) = domains.get(index) {
-                        return Ok(Some(domain));
+            if let Some(domains) = self.trait_parameter_types.get(&owner) {
+                for (index, input) in self.type_parameters[&owner].iter().enumerate() {
+                    charge()?;
+                    if *input == id {
+                        if let Some(domain) = domains.get(index) {
+                            return Ok(Some(domain));
+                        }
+                        break;
                     }
-                    break;
                 }
             }
-        }
-        for prefix in self
-            .normal_input_prefixes
-            .values()
-            .chain(self.normal_parameters.values())
-        {
-            charge()?;
-            for (parameter, _, domain) in prefix {
+            for prefix in self
+                .normal_input_prefixes
+                .get(&owner)
+                .into_iter()
+                .chain(self.normal_parameters.get(&owner))
+            {
                 charge()?;
-                if *parameter == id {
-                    return Ok(Some(domain));
+                for (parameter, _, domain) in prefix {
+                    charge()?;
+                    if *parameter == id {
+                        return Ok(Some(domain));
+                    }
                 }
             }
         }
@@ -737,15 +743,45 @@ impl Checker<'_, '_> {
                 self.normal_value_argument(value, &domain)?
             });
         }
-        let saved_owner = self.signature_owner.replace(owner);
-        let saved_context = self.context.clone();
-        let saved_aliases = self.alias_substitution.clone();
+        struct CallerScope {
+            owner: Option<OwnerId>,
+            context: crate::ptc::Context,
+            aliases: DeclarationBindings<Term>,
+            forbidden: BTreeSet<DeclarationId>,
+            bindings: DeclarationBindings<(n::LocalId, Term)>,
+            value_bindings: DeclarationBindings<n::LocalId>,
+        }
+        impl CallerScope {
+            fn swap(&mut self, checker: &mut Checker<'_, '_>) {
+                std::mem::swap(&mut self.owner, &mut checker.signature_owner);
+                std::mem::swap(&mut self.context, &mut checker.context);
+                std::mem::swap(&mut self.aliases, &mut checker.alias_substitution);
+                std::mem::swap(&mut self.forbidden, &mut checker.forbidden_default_inputs);
+                std::mem::swap(&mut self.bindings, &mut checker.normal_default_bindings);
+                std::mem::swap(&mut self.value_bindings, &mut checker.alias_value_bindings);
+            }
+            fn with_caller<R>(
+                &mut self,
+                checker: &mut Checker<'_, '_>,
+                run: impl FnOnce(&mut Checker<'_, '_>) -> R,
+            ) -> R {
+                self.swap(checker);
+                let result = run(checker);
+                self.swap(checker);
+                result
+            }
+        }
+        let mut caller_scope = CallerScope {
+            owner: self.signature_owner.replace(owner),
+            context: self.context.clone(),
+            aliases: self.alias_substitution.clone(),
+            forbidden: self.forbidden_default_inputs.clone(),
+            bindings: self.normal_default_bindings.clone(),
+            value_bindings: self.alias_value_bindings.clone(),
+        };
         if let Some(environment) = defaults {
             self.alias_substitution.extend(environment.clone());
         }
-        let saved_forbidden = self.forbidden_default_inputs.clone();
-        let saved_bindings = self.normal_default_bindings.clone();
-        let saved_value_bindings = self.alias_value_bindings.clone();
         if let Some(environment) = defaults {
             for parameter in environment.keys() {
                 self.normal_default_bindings.remove(parameter);
@@ -777,29 +813,21 @@ impl Checker<'_, '_> {
                     if let Some((actual, value_span)) = &pending_domains[slot] {
                         let domain = self.substituted_trait_domain(&domains[slot], *value_span)?;
                         // Explicit expressions belong to the caller, including
-                        // the type equalities available when they were checked.
-                        let definition_context =
-                            std::mem::replace(&mut self.context, saved_context.clone());
-                        let checked = self.require(actual, &domain, *value_span);
-                        self.context = definition_context;
-                        checked?;
+                        // its type equalities, aliases, and signature owner.
+                        caller_scope
+                            .with_caller(self, |this| this.require(actual, &domain, *value_span))?;
                     }
                     value
                 } else if let Some(literal) = pending_literals[slot] {
                     let domain = self.substituted_trait_domain(&domains[slot], literal.span)?;
-                    let definition_context =
-                        std::mem::replace(&mut self.context, saved_context.clone());
-                    let checked = self.normal_value_argument(literal, &domain);
-                    self.context = definition_context;
-                    checked?
+                    caller_scope
+                        .with_caller(self, |this| this.normal_value_argument(literal, &domain))?
                 } else if let Some(runtime_expr) = pending_runtime[slot] {
                     let domain =
                         self.substituted_trait_domain(&domains[slot], runtime_expr.span)?;
-                    let definition_context =
-                        std::mem::replace(&mut self.context, saved_context.clone());
-                    let checked = self.normal_value_argument(runtime_expr, &domain);
-                    self.context = definition_context;
-                    checked?
+                    caller_scope.with_caller(self, |this| {
+                        this.normal_value_argument(runtime_expr, &domain)
+                    })?
                 } else {
                     let hir::clause::ClauseParamKind::Optional(_, _, value) =
                         *clauses[slot].kind.unquoted()
@@ -833,7 +861,7 @@ impl Checker<'_, '_> {
                             self.normal_value_argument(value, &domain)
                         }
                     })();
-                    self.forbidden_default_inputs = saved_forbidden.clone();
+                    self.forbidden_default_inputs = caller_scope.forbidden.clone();
                     self.active_type_defaults.remove(&(owner, slot));
                     result?
                 };
@@ -843,12 +871,7 @@ impl Checker<'_, '_> {
             }
             Ok(arguments)
         })();
-        self.signature_owner = saved_owner;
-        self.context = saved_context;
-        self.alias_substitution = saved_aliases;
-        self.forbidden_default_inputs = saved_forbidden;
-        self.normal_default_bindings = saved_bindings;
-        self.alias_value_bindings = saved_value_bindings;
+        caller_scope.swap(self);
         result
     }
 }

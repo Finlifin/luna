@@ -16,6 +16,16 @@ pub(super) struct Checkpoint {
     bodies: usize,
 }
 
+impl std::fmt::Display for Checkpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "(generated-functions-checkpoint (reservations {}) (bodies {}))",
+            self.reservations, self.bodies
+        )
+    }
+}
+
 #[derive(Default)]
 pub(super) struct GeneratedFunctions {
     next: u32,

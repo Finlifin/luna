@@ -2,6 +2,7 @@
 //! evidence without inventing a runnable program; invocation supplies actual
 //! code witnesses before anything can enter the runtime package.
 use super::*;
+
 mod classification;
 pub(in crate::program::cmtt) mod clauses;
 mod consumers;
@@ -17,9 +18,11 @@ pub(in crate::program::cmtt) mod statements;
 mod storage;
 mod storage_observation;
 mod type_inputs;
+
 use statements::Control;
 
 use nir::code_interfaces::{CodeFunctionSignature, CodeInput as Input};
+
 #[derive(Clone)]
 pub(in crate::program) struct Generator<O = Interface> {
     pub(super) captures: Vec<(DeclarationId, Term)>,
@@ -32,6 +35,7 @@ pub(in crate::program) struct Generator<O = Interface> {
     pub(super) body: Option<hir::BodyId>,
     pub(super) checked: bool,
 }
+
 impl<O> Generator<O> {
     pub(super) fn input_value(&self, slot: usize) -> Option<Term> {
         self.input_values.get(&slot).cloned().or_else(|| {
@@ -45,10 +49,12 @@ impl<O> Generator<O> {
 
 impl<O> std::ops::Deref for Generator<O> {
     type Target = CodeFunctionSignature<O>;
+
     fn deref(&self) -> &Self::Target {
         &self.signature
     }
 }
+
 impl<O> std::ops::DerefMut for Generator<O> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.signature
@@ -60,8 +66,10 @@ pub(in crate::program::cmtt) enum Argument {
     LiveData(comptime_interpretor::Value),
     Code(CodeValue),
 }
+
 // Entry snapshots copy parameter values, not the objects reached through pointers.
 type GeneratorEntryData = BTreeMap<n::LocalId, (n::Expr, Option<GeneratorCell>)>;
+
 pub(in crate::program::cmtt) type GeneratorTypePlan = (
     Vec<DeclarationId>,
     Vec<Term>,
@@ -196,6 +204,9 @@ impl Checker<'_, '_> {
             }) = self.self_types.get(&owner)
             {
                 visible_parameters.push(*self_parameter);
+            }
+            for &id in &self.type_parameters[&owner] {
+                self.parameter_domain_owners.entry(id).or_insert(owner);
             }
             let mut domains = Vec::new();
             for parameter in sig.clause_params {

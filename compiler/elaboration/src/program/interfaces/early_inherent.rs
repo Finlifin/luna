@@ -18,6 +18,7 @@ impl Checker<'_, '_> {
             })
         })
     }
+
     pub(super) fn early_inherent_method(
         &mut self,
         subject: Term,
@@ -109,6 +110,9 @@ impl Checker<'_, '_> {
                 ItemKind::Impl(def) => self.type_expr(def.self_ty)?,
                 _ => self.nominal_self_type(owner),
             };
+            if matches!(receiver, Term::NormalForm { .. }) {
+                index.set_normal_form_metadata(self.normal_form_metadata());
+            }
             let identity = declaration(self.package, &self.package_identities, owner);
             index
                 .check_ownership(&receiver, identity.package)

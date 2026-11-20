@@ -34,6 +34,7 @@ pub(in crate::program) enum Annotation {
         slot: usize,
     },
 }
+
 impl From<CompletedType> for Annotation {
     fn from(value: CompletedType) -> Self {
         match value {
@@ -42,6 +43,7 @@ impl From<CompletedType> for Annotation {
         }
     }
 }
+
 impl Annotation {
     pub(super) fn awaits_inputs(&self) -> bool {
         matches!(
@@ -49,9 +51,11 @@ impl Annotation {
             Self::Pending(_) | Self::InputType { .. } | Self::Suspended { .. }
         )
     }
+
     pub(in crate::program) fn needs_instance(&self) -> bool {
         !matches!(self, Self::Known(_))
     }
+
     pub(super) fn description(&self) -> D {
         match self {
             Self::Known(ty) => D::Known(ty.clone()),
@@ -62,6 +66,7 @@ impl Annotation {
         }
     }
 }
+
 impl std::fmt::Display for Annotation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -358,9 +363,7 @@ impl Checker<'_, '_> {
         };
         let assumptions = self.context.assumptions().to_vec();
         let ty = self.in_open_function_scope(owner, None, |this| {
-            for assumption in assumptions {
-                this.context.assume(assumption);
-            }
+            this.import_closed_caller_assumptions(assumptions);
             this.default_input_scope = Some(parameters.into());
             this.default_input_owner = Some(owner);
             let mut graph = Vec::new();
@@ -432,9 +435,7 @@ impl Checker<'_, '_> {
                 // the definition-side check of the open function body.
                 let caller_assumptions = self.context.assumptions().to_vec();
                 self.in_open_function_scope(*owner, None, |this| {
-                    for assumption in caller_assumptions {
-                        this.context.assume(assumption);
-                    }
+                    this.import_closed_caller_assumptions(caller_assumptions);
                     this.default_input_scope = Some(parameters.into());
                     this.default_input_owner = Some(*owner);
                     for ((parameter, (sort, domain)), symbol) in
@@ -489,5 +490,18 @@ impl Checker<'_, '_> {
             }
         };
         self.specialize_completed_annotation(ty, symbols, span)
+    }
+}
+
+impl Checker<'_, '_> {
+    pub(super) fn import_closed_caller_assumptions(
+        &mut self,
+        assumptions: Vec<crate::ptc::Formula>,
+    ) {
+        for assumption in assumptions {
+            if !assumption.has_bound_or_hole() {
+                self.context.assume(assumption);
+            }
+        }
     }
 }

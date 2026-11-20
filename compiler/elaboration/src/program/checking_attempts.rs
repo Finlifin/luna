@@ -27,6 +27,7 @@ struct StorageCheckpoint {
     cells: BTreeMap<n::LocalId, (n::Expr, GeneratorCell)>,
     graph: Option<comptime_interpretor::OwnedGraphCheckpoint>,
 }
+
 impl StorageCheckpoint {
     fn capture(checker: &mut Checker<'_, '_>, span: Span) -> Result<Self, Error> {
         let work = checker
@@ -84,6 +85,7 @@ impl StorageCheckpoint {
         })
     }
 }
+
 impl std::fmt::Display for StorageCheckpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(checking-storage (data")?;
@@ -119,6 +121,9 @@ struct LexicalCheckpoint {
     context: crate::ptc::Context,
     field_defaults: SourceBindings<n::Expr>,
     inputs: input_facts::State,
+    open_staged_locals: BTreeSet<n::LocalId>,
+    open_member_locals: BTreeSet<n::LocalId>,
+    local_write_versions: BTreeMap<n::LocalId, u64>,
     pending_len: Option<usize>,
 }
 
@@ -135,6 +140,9 @@ impl LexicalCheckpoint {
             context: checker.context.clone(),
             field_defaults: checker.field_defaults.clone(),
             inputs: checker.input_facts.clone(),
+            open_staged_locals: checker.open_staged_locals.clone(),
+            open_member_locals: checker.open_member_locals.clone(),
+            local_write_versions: checker.local_write_versions.clone(),
             pending_len: checker.pending_type_uses.as_ref().map(Vec::len),
         }
     }
@@ -153,6 +161,60 @@ impl LexicalCheckpoint {
         checker.context = self.context;
         checker.field_defaults = self.field_defaults;
         checker.input_facts = self.inputs;
+        checker.open_staged_locals = self.open_staged_locals;
+        checker.open_member_locals = self.open_member_locals;
+        checker.local_write_versions = self.local_write_versions;
+    }
+}
+
+/// Compiler state tied to retained elaborated NIR code (`Disposition::RetainCode`)
+/// rather than lexical scope: rolled back only on `Probe` or error so quoted
+/// blocks keep their synthetic dependency table, runtime origins/deliveries,
+/// and type-use stability obligations.
+struct RetainedCheckpoint {
+    abstract_code_dependencies: BTreeMap<n::LocalId, BTreeSet<n::LocalId>>,
+    local_runtime_origin_ids: BTreeMap<LocalRuntimeOrigin, nir::RuntimeId>,
+    local_runtime_deliveries: BTreeMap<nir::RuntimeId, LocalRuntimeDelivery>,
+    pending_refinements_len: usize,
+    pending_contract_projections_len: usize,
+    signature_type_uses_len: usize,
+    pending_default_stability_len: usize,
+    pending_predicate_stability_len: usize,
+}
+
+impl RetainedCheckpoint {
+    fn capture(checker: &Checker<'_, '_>) -> Self {
+        Self {
+            abstract_code_dependencies: checker.abstract_code_dependencies.clone(),
+            local_runtime_origin_ids: checker.local_runtime_origin_ids.clone(),
+            local_runtime_deliveries: checker.local_runtime_deliveries.clone(),
+            pending_refinements_len: checker.pending_refinements.len(),
+            pending_contract_projections_len: checker.pending_contract_projections.len(),
+            signature_type_uses_len: checker.signature_type_uses.len(),
+            pending_default_stability_len: checker.pending_default_stability.len(),
+            pending_predicate_stability_len: checker.pending_predicate_stability.len(),
+        }
+    }
+
+    fn restore(self, checker: &mut Checker<'_, '_>) {
+        checker
+            .pending_refinements
+            .truncate(self.pending_refinements_len);
+        checker
+            .pending_contract_projections
+            .truncate(self.pending_contract_projections_len);
+        checker
+            .signature_type_uses
+            .truncate(self.signature_type_uses_len);
+        checker
+            .pending_default_stability
+            .truncate(self.pending_default_stability_len);
+        checker
+            .pending_predicate_stability
+            .truncate(self.pending_predicate_stability_len);
+        checker.abstract_code_dependencies = self.abstract_code_dependencies;
+        checker.local_runtime_origin_ids = self.local_runtime_origin_ids;
+        checker.local_runtime_deliveries = self.local_runtime_deliveries;
     }
 }
 
@@ -164,7 +226,9 @@ pub(super) struct Attempt {
     span: Span,
     disposition: Disposition,
     lexical: LexicalCheckpoint,
+    retained: RetainedCheckpoint,
     storage: StorageCheckpoint,
+    generated_functions: generated_functions::Checkpoint,
     quote_holes: BTreeSet<(u32, u32)>,
     defaults: bool,
     pattern_pending: Option<bool>,
@@ -181,11 +245,15 @@ impl Attempt {
         // mode. Fuel already spent on a failed acquisition is not restored.
         let storage = StorageCheckpoint::capture(checker, span)?;
         let lexical = LexicalCheckpoint::capture(checker);
+        let retained = RetainedCheckpoint::capture(checker);
+        let generated_functions = checker.generated_functions.checkpoint();
         Ok(Self {
             span,
             disposition,
             lexical,
+            retained,
             storage,
+            generated_functions,
             quote_holes: checker.quote_holes.clone(),
             defaults: std::mem::replace(&mut checker.numeric_defaults, allow_defaults),
             pattern_pending: checker.pattern_quote_pending,
@@ -202,8 +270,12 @@ impl Attempt {
             self.lexical.restore(checker);
         }
         if self.disposition == Disposition::Probe || result.is_err() {
+            self.retained.restore(checker);
             checker.pattern_quote_pending = self.pattern_pending;
             checker.quote_holes = self.quote_holes;
+            checker
+                .generated_functions
+                .rollback(self.generated_functions);
             self.storage.restore(checker, self.span)?;
         }
         // Missing context is the only recoverable absence. Domain, budget and
@@ -254,11 +326,47 @@ impl std::fmt::Display for LexicalCheckpoint {
         for (field, value) in &self.field_defaults {
             write!(f, " (field {field} {value})")?;
         }
+        f.write_str(") (open-staged-locals")?;
+        for binding in &self.open_staged_locals {
+            write!(f, " {binding}")?;
+        }
+        f.write_str(") (open-member-locals")?;
+        for binding in &self.open_member_locals {
+            write!(f, " {binding}")?;
+        }
+        f.write_str(") (local-write-versions")?;
+        for (binding, version) in &self.local_write_versions {
+            write!(f, " (binding {binding} {version})")?;
+        }
         f.write_str(") (pending-type-uses")?;
         if let Some(len) = self.pending_len {
             write!(f, " {len}")?;
         }
         write!(f, ") {} {} {})", self.control, self.context, self.inputs)
+    }
+}
+
+impl std::fmt::Display for RetainedCheckpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("(checking-retained (abstract-code-dependencies")?;
+        for (binding, deps) in &self.abstract_code_dependencies {
+            write!(f, " (binding {binding}")?;
+            for dep in deps {
+                write!(f, " {dep}")?;
+            }
+            f.write_str(")")?;
+        }
+        write!(
+            f,
+            ") (local-runtime-origins {}) (local-runtime-deliveries {}) (pending-refinements {}) (pending-contract-projections {}) (signature-type-uses {}) (pending-default-stability {}) (pending-predicate-stability {}))",
+            self.local_runtime_origin_ids.len(),
+            self.local_runtime_deliveries.len(),
+            self.pending_refinements_len,
+            self.pending_contract_projections_len,
+            self.signature_type_uses_len,
+            self.pending_default_stability_len,
+            self.pending_predicate_stability_len,
+        )
     }
 }
 
@@ -278,7 +386,11 @@ impl std::fmt::Display for Attempt {
         for (start, end) in &self.quote_holes {
             write!(f, " (source {start} {end})")?;
         }
-        write!(f, ") {} {})", self.lexical, self.storage)
+        write!(
+            f,
+            ") {} {} {} {})",
+            self.generated_functions, self.lexical, self.retained, self.storage
+        )
     }
 }
 
@@ -329,17 +441,32 @@ mod tests {
             context: crate::ptc::Context::default(),
             field_defaults: SourceBindings::default(),
             inputs: input_facts::State::default(),
+            open_staged_locals: BTreeSet::new(),
+            open_member_locals: BTreeSet::new(),
+            local_write_versions: BTreeMap::new(),
             pending_len: Some(7),
+        };
+        let retained = RetainedCheckpoint {
+            abstract_code_dependencies: BTreeMap::new(),
+            local_runtime_origin_ids: BTreeMap::new(),
+            local_runtime_deliveries: BTreeMap::new(),
+            pending_refinements_len: 0,
+            pending_contract_projections_len: 0,
+            signature_type_uses_len: 0,
+            pending_default_stability_len: 0,
+            pending_predicate_stability_len: 0,
         };
         let attempt = Attempt {
             span: Span::default(),
             disposition: Disposition::RetainCode,
             lexical,
+            retained,
             storage: StorageCheckpoint {
                 data: BTreeMap::new(),
                 cells: BTreeMap::new(),
                 graph: None,
             },
+            generated_functions: generated_functions::GeneratedFunctions::default().checkpoint(),
             quote_holes: BTreeSet::from([(11, 13)]),
             defaults: false,
             pattern_pending: Some(true),
@@ -353,6 +480,7 @@ mod tests {
             "(quote-holes (source 11 13))",
             "(pending-type-uses 7)",
             "(checking-lexical ",
+            "(checking-retained ",
             "(checking-storage ",
             "parent\\\"\\n",
         ] {

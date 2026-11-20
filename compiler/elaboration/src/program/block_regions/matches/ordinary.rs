@@ -106,6 +106,7 @@ impl Ordinary {
             if self.selected.is_none() {
                 if let Some(bindings) = checker.select_inline_pattern(pattern, subject, arm.body)? {
                     self.selected = Some(index);
+                    checker.immutable.extend(bindings.keys().copied());
                     self.bindings = checker.materialize_inline_bindings(&bindings, arm.body)?;
                 }
             }

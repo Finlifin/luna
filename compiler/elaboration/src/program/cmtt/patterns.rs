@@ -1,7 +1,9 @@
 //! Checked pattern code stays at comptime; each splice creates a fresh
 //! ordinary NIR pattern and publishes only its success outputs.
 use super::*;
+
 mod generators;
+
 pub(in crate::program) use generators::{PatternGenerator, PatternInterface};
 
 pub(in crate::program) use nir::code_values::PatternCode;
@@ -161,6 +163,8 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(decl.span, "pattern code requires an initializer"))?;
         let saved = self.locals.clone();
         let context = self.context.clone();
+        let saved_required = std::mem::replace(&mut self.in_required_comptime, false);
+        let saved_staged = std::mem::replace(&mut self.in_staged_input, false);
         let in_code = std::mem::replace(&mut self.in_code_body, true);
         let holes = std::mem::take(&mut self.quote_holes);
         let result = (|| {
@@ -213,6 +217,8 @@ impl Checker<'_, '_> {
         })();
         self.locals = saved;
         self.context = context;
+        self.in_required_comptime = saved_required;
+        self.in_staged_input = saved_staged;
         self.in_code_body = in_code;
         self.quote_holes = holes;
         let code = result?;

@@ -1,5 +1,6 @@
 //! Bounded source-range unrolling; runtime bodies retain their own scopes.
 use super::*;
+
 mod comptime_ranges;
 
 impl Checker<'_, '_> {
@@ -237,8 +238,8 @@ impl Checker<'_, '_> {
                     span: body.span,
                     kind: H::Block(body),
                 };
-                let matched = if count == 0 {
-                    false
+                let (matched, statements) = if count == 0 {
+                    (false, Vec::new())
                 } else if let Some(bindings) = self.select_inline_pattern(
                     &pattern,
                     &Term::Integer(current.clone()),
@@ -246,12 +247,11 @@ impl Checker<'_, '_> {
                 )? {
                     // Only successful matches export staged bindings. Failed
                     // iterations still receive ordinary body/phase checking.
-                    self.materialize_inline_bindings(&bindings, &source_body)?;
-                    true
+                    let statements = self.materialize_inline_bindings(&bindings, &source_body)?;
+                    (true, statements)
                 } else {
-                    false
+                    (false, Vec::new())
                 };
-                let statements = Vec::new();
                 if !matched {
                     self.inline_selection = Some((expr.hir_id, usize::MAX));
                     self.in_unselected_inline = true;
@@ -360,6 +360,7 @@ impl Checker<'_, '_> {
         self.local_runtime_origin_ids = saved_runtime_origins;
         result
     }
+
     fn expand_inline_tuple(
         &mut self,
         expr: &Expr<'_>,
@@ -772,6 +773,7 @@ impl Checker<'_, '_> {
         }
         Ok(expanded)
     }
+
     /// Both the outer exit and each iteration use the caller's compilation
     /// budget. No generated loop receives a fresh, unaccounted traversal cap.
     pub(super) fn expanded_loop(

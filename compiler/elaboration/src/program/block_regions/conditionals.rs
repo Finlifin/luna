@@ -6,23 +6,29 @@ use refinements::TypeConditionScope;
 
 struct Ambient {
     comptime: bool,
+    in_code_body: bool,
     suppressed: bool,
     callee: Option<hir::HirId>,
 }
+
 impl Ambient {
     fn capture(checker: &Checker<'_, '_>) -> Self {
         Self {
             comptime: checker.in_required_comptime,
+            in_code_body: checker.in_code_body,
             suppressed: checker.in_unselected_inline,
             callee: checker.comptime_callee_result,
         }
     }
+
     fn restore(&self, checker: &mut Checker<'_, '_>) {
         checker.in_required_comptime = self.comptime;
+        checker.in_code_body = self.in_code_body;
         checker.in_unselected_inline = self.suppressed;
         checker.comptime_callee_result = self.callee;
     }
 }
+
 impl std::fmt::Display for Ambient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -180,8 +186,9 @@ impl<'h> Frame<'h> {
                     },
                     condition.span,
                 )?;
-                if self.ambient.is_some() {
-                    checker.in_required_comptime |= self.selection.is_some();
+                if self.ambient.is_some() && self.selection.is_some() {
+                    checker.in_required_comptime = true;
+                    checker.in_code_body = false;
                 }
                 self.state = State::Condition;
                 Ok(Step::Child(Request::expression(condition, destination)))

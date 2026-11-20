@@ -4,9 +4,12 @@
 use super::*;
 use comptime_interpretor::{Budget, Interpreter, Value};
 use std::collections::VecDeque;
+
 mod capture;
 mod data;
+
 pub(super) use data::{MemberSources, independent_member_data};
+
 mod dependencies;
 pub(super) mod inputs;
 pub(super) mod prepared;
@@ -15,6 +18,7 @@ mod restore;
 mod scope;
 mod source_closure;
 mod trait_world;
+
 pub(super) use dependencies::{Dependency, Discovery, Member};
 use prepared::PreparedRequired;
 
@@ -1049,6 +1053,7 @@ impl Checker<'_, '_> {
         }
         let saved_control = std::mem::take(&mut self.control);
         let saved_captures = std::mem::take(&mut self.captures);
+        let saved_code = std::mem::replace(&mut self.in_code_body, false);
         let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
         let saved_numeric = std::mem::replace(&mut self.numeric_defaults, true);
         let saved_pending = self.pending_type_uses.replace(Vec::new());
@@ -1520,17 +1525,6 @@ impl Checker<'_, '_> {
                 &self.expansion_sources,
                 &self.member_sources.owner,
             )?;
-            let invocation_assumptions =
-                if let Some(implementation) = self.initializer_implementation() {
-                    crate::capabilities::capability_sources(
-                        &world.package().traits,
-                        &implementation.capabilities,
-                        crate::ptc::Budget::default(),
-                    )
-                    .map_err(|message| error(expr.span, message))?
-                } else {
-                    vec![]
-                };
             // The snapshot contains demanded layouts only. Nominal identities
             // are admitted from source declarations even when no value/layout
             // of that type is needed by this comptime invocation.
@@ -1615,6 +1609,51 @@ impl Checker<'_, '_> {
             observed.types.extend(lexical_types);
             let existing: BTreeSet<_> = abstract_parameters.iter().copied().collect();
             abstract_parameters.extend(observed.types.difference(&existing).copied());
+            let mut raw_assumptions = Vec::new();
+            if let Some(implementation) = self.initializer_implementation() {
+                raw_assumptions.extend(implementation.capabilities.iter().cloned());
+            }
+            if !abstract_parameters.is_empty() {
+                let abstract_type_set: BTreeSet<DeclarationId> =
+                    abstract_parameters.iter().copied().collect();
+                let abstract_value_set: BTreeSet<DeclarationId> = abstract_value_parameters
+                    .iter()
+                    .map(|(id, _)| *id)
+                    .collect();
+                for cap in self.capability_assumptions() {
+                    if !world.package().traits.iter().any(|t| {
+                        t.declaration == cap.interface
+                            && t.type_parameters.len() == cap.interface_arguments.len()
+                    }) {
+                        continue;
+                    }
+                    let in_scope = std::iter::once(&cap.subject)
+                        .chain(&cap.interface_arguments)
+                        .all(|term| {
+                            term.check_scope(&[]).is_ok()
+                                && term.rigid_parameters().is_ok_and(|rigids| {
+                                    rigids.into_iter().all(|(id, sort)| match sort {
+                                        Sort::Type => abstract_type_set.contains(&id),
+                                        Sort::ComptimeValue => abstract_value_set.contains(&id),
+                                        Sort::Runtime => false,
+                                    })
+                                })
+                        });
+                    if in_scope && !raw_assumptions.contains(&cap) {
+                        raw_assumptions.push(cap);
+                    }
+                }
+            }
+            let invocation_assumptions = if raw_assumptions.is_empty() {
+                vec![]
+            } else {
+                crate::capabilities::capability_sources(
+                    &world.package().traits,
+                    &raw_assumptions,
+                    crate::ptc::Budget::default(),
+                )
+                .map_err(|message| error(expr.span, message))?
+            };
             // This is checked source for an invocation, not a concrete dispatch
             // closure. The private VM resolves demanded members in RequiredWorld;
             // unrelated concrete implementations must not be selected here.
@@ -1656,6 +1695,7 @@ impl Checker<'_, '_> {
         self.immutable = saved_input_immutable;
         self.control = saved_control;
         self.captures = saved_captures;
+        self.in_code_body = saved_code;
         self.in_required_comptime = saved_mode;
         self.numeric_defaults = saved_numeric;
         self.active_required.remove(&query);

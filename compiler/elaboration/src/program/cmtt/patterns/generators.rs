@@ -40,6 +40,7 @@ pub(in crate::program) use nir::code_interfaces::PatternCodeInterface as Pattern
 
 impl std::ops::Deref for PatternGenerator {
     type Target = PatternInterface;
+
     fn deref(&self) -> &Self::Target {
         &self.interface
     }
@@ -325,6 +326,9 @@ impl Checker<'_, '_> {
                 if let Some(parent) = this.source_declarations.owner(*self_parameter) {
                     visible_parameters.extend(this.type_parameters[&parent].iter().copied());
                 }
+            }
+            for &id in &this.type_parameters[&owner] {
+                this.parameter_domain_owners.entry(id).or_insert(owner);
             }
             let mut domains = Vec::new();
             for parameter in sig.clause_params {

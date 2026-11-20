@@ -28,8 +28,10 @@ mod lexical_domains;
 mod nominal_fields;
 mod spreads;
 mod tactics;
+
 use arguments::route_arguments;
 use control::ReturnObservations;
+
 mod bit_indices;
 mod block_regions;
 mod branch_probes;
@@ -38,7 +40,9 @@ mod builtin_bindings;
 mod call_selection;
 mod checking_attempts;
 mod clause_inputs;
+
 use checking_attempts::Disposition as CheckingDisposition;
+
 mod cmtt;
 mod constants;
 mod declaration_inputs;
@@ -54,7 +58,9 @@ mod interfaces;
 mod iteration;
 mod lexical_inputs;
 mod local_bindings;
+
 use local_bindings::{DeclarationBindings, LocalBindings, SourceBindings};
+
 mod list_operations;
 mod list_patterns;
 mod literal_conversion;
@@ -64,7 +70,9 @@ mod normal;
 mod open_functions;
 mod operators;
 mod pattern_checking;
+
 use pattern_checking::*;
+
 mod places;
 mod projections;
 mod purity;
@@ -76,6 +84,7 @@ mod text_queries;
 mod trait_inputs;
 mod type_data;
 mod type_defaults;
+
 use crate::verification::purity::{copy_scalar, stable_default};
 pub(crate) use cmtt::{expand_bound_quote, expand_materialized_quotes};
 use hir::common::{Arg, BinOp, TyParamKind, UnOp};
@@ -104,6 +113,7 @@ pub struct Error {
     retry_after_capability_progress: bool,
     incompatible_context: bool,
 }
+
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -121,13 +131,16 @@ impl std::fmt::Display for Error {
         Ok(())
     }
 }
+
 impl std::error::Error for Error {}
+
 fn source(span: Span) -> n::SourceRange {
     n::SourceRange {
         start: span.lo().0,
         end: span.hi().0,
     }
 }
+
 fn error(span: Span, message: impl Into<String>) -> Error {
     Error {
         source: source(span),
@@ -139,12 +152,14 @@ fn error(span: Span, message: impl Into<String>) -> Error {
         incompatible_context: false,
     }
 }
+
 fn capability_query_error(span: Span, cause: nir::NominalAdmissionError) -> Error {
     Error {
         retry_after_capability_progress: matches!(cause, nir::NominalAdmissionError::Unresolved(_)),
         ..error(span, cause.to_string())
     }
 }
+
 // Only missing inference inputs are resumable. Semantic errors and solver
 // exhaustion remain errors, never alternative evidence for another candidate.
 fn context_error(span: Span, message: impl Into<String>) -> Error {
@@ -153,6 +168,7 @@ fn context_error(span: Span, message: impl Into<String>) -> Error {
         ..error(span, message)
     }
 }
+
 // A known expression shape cannot inhabit the supplied context. This is
 // distinct from missing inference inputs and from semantic/budget failures.
 fn incompatible_context(span: Span, message: impl Into<String>) -> Error {
@@ -161,6 +177,7 @@ fn incompatible_context(span: Span, message: impl Into<String>) -> Error {
         ..error(span, message)
     }
 }
+
 fn call_inference_error(span: Span, cause: crate::calls::Error) -> Error {
     let pending = matches!(
         cause,
@@ -174,21 +191,25 @@ fn call_inference_error(span: Span, cause: crate::calls::Error) -> Error {
         ..error(span, format!("generic call inference failed: {cause}"))
     }
 }
+
 fn p(value: P) -> Term {
     Term::Primitive(value)
 }
+
 fn local(id: hir::HirId) -> n::LocalId {
     n::LocalId {
         owner: id.owner.def_id.raw(),
         index: id.local_id.raw(),
     }
 }
+
 fn semantic_package(identities: &BTreeMap<u32, u64>, source: u32) -> u64 {
     identities
         .get(&source)
         .copied()
         .unwrap_or(u64::from(source))
 }
+
 fn declaration(
     package: &hir::Package<'_>,
     identities: &BTreeMap<u32, u64>,
@@ -202,6 +223,7 @@ fn declaration(
         local: definition.map_or(owner.def_id.raw(), |id| id.index),
     }
 }
+
 fn is_never(ty: &Term) -> bool {
     *ty == p(P::Never)
 }
@@ -263,6 +285,7 @@ pub struct Protocols {
     pub meta_list: Option<DeclarationId>,
     pub tuple: Option<DeclarationId>,
 }
+
 impl Protocols {
     pub fn host_bindings(
         &self,
@@ -561,6 +584,7 @@ fn elaborate_in_mode(
             protocols.builtin_implementation_packages.iter().copied(),
         ),
         trait_parameter_types: BTreeMap::new(),
+        parameter_domain_owners: std::collections::HashMap::new(),
         nominal_input_prefixes: BTreeMap::new(),
         inherent_index: crate::implementation::InherentIndex::for_builtin_packages(
             target,
@@ -909,6 +933,9 @@ fn elaborate_candidate<'a, 'h>(
             }
             checker.type_parameters.insert(owner, parameters);
             if !trait_domains.is_empty() {
+                for &id in &checker.type_parameters[&owner] {
+                    checker.parameter_domain_owners.entry(id).or_insert(owner);
+                }
                 checker.trait_parameter_types.insert(owner, trait_domains);
             }
             if matches!(
@@ -2165,12 +2192,14 @@ fn match_default_strategy_term(
         _ => Ok(false),
     }
 }
+
 #[derive(Clone)]
 struct CaptureFrame {
     comptime: bool,
     outer: BTreeSet<n::LocalId>,
     values: Vec<n::Capture>,
 }
+
 #[derive(Clone, Debug)]
 struct FormationInputs {
     terms: Vec<Term>,
@@ -2178,6 +2207,7 @@ struct FormationInputs {
     deferred: BTreeSet<DeclarationId>,
     environment: DeclarationBindings<Term>,
 }
+
 impl FormationInputs {
     fn ready(terms: &[Term]) -> Self {
         Self {
@@ -2199,16 +2229,19 @@ enum GeneratorCell {
     Owned(comptime_interpretor::Storage),
     Reference(comptime_interpretor::ValueReference),
 }
+
 impl GeneratorCell {
     fn owned(value: comptime_interpretor::Value) -> Self {
         Self::Owned(comptime_interpretor::Storage::new(value))
     }
+
     fn live(value: comptime_interpretor::Value) -> Self {
         match value {
             comptime_interpretor::Value::ComptimeReference(reference) => Self::Reference(reference),
             value => Self::owned(value),
         }
     }
+
     fn value(&self) -> comptime_interpretor::Value {
         match self {
             Self::Owned(cell) => comptime_interpretor::Value::Storage(cell.clone()),
@@ -2322,6 +2355,7 @@ struct Checker<'a, 'h> {
     associated_signature_values: BTreeMap<OwnerId, n::Expr>,
     implementation_index: crate::implementation::Index,
     trait_parameter_types: BTreeMap<OwnerId, Vec<Term>>,
+    parameter_domain_owners: std::collections::HashMap<DeclarationId, OwnerId>,
     nominal_input_prefixes: BTreeMap<DeclarationId, Term>,
     inherent_index: crate::implementation::InherentIndex,
     type_parameters: BTreeMap<OwnerId, Vec<DeclarationId>>,
@@ -2439,6 +2473,7 @@ struct Checker<'a, 'h> {
     local_write_versions: BTreeMap<n::LocalId, u64>,
     active_env_parameters: BTreeMap<DeclarationId, (n::LocalId, Term)>,
 }
+
 impl Checker<'_, '_> {
     fn intern_runtime_id(&mut self, domain: Term, span: Span) -> Result<nir::RuntimeId, Error> {
         let local_id = self.next_runtime_id;
@@ -3036,6 +3071,7 @@ impl Checker<'_, '_> {
                     local(parameter.hir_id),
                     domain,
                 ));
+                self.parameter_domain_owners.entry(id).or_insert(owner);
                 if !sig.modifiers.is_normal_form_head || sort == Sort::Type {
                     if sig.modifiers.is_normal_form_head {
                         // Publish each Type binder for the next domain check.
@@ -3075,6 +3111,9 @@ impl Checker<'_, '_> {
                     self.inherent_index
                         .register_parameter_domain(*id, domain.clone())
                         .map_err(|message| error(span, message))?;
+                }
+                for &id in &type_parameters {
+                    self.parameter_domain_owners.entry(id).or_insert(owner);
                 }
                 self.trait_parameter_types.insert(owner, domains);
             }
@@ -3313,6 +3352,7 @@ impl Checker<'_, '_> {
             _ => Err(error(span, "optional operation requires an optional type")),
         }
     }
+
     fn variant_target(
         &mut self,
         callee: &Expr<'_>,
@@ -3343,6 +3383,7 @@ impl Checker<'_, '_> {
             None => Err(error(callee.span, "unknown enum variant")),
         }
     }
+
     fn construct_named_variant(
         &mut self,
         expr: &Expr<'_>,
@@ -3427,6 +3468,7 @@ impl Checker<'_, '_> {
             },
         })
     }
+
     /// Infer a contextual enum payload without publishing candidate-local holes.
     fn infer_contextual_variant(
         &mut self,
@@ -3749,6 +3791,7 @@ impl Checker<'_, '_> {
             },
         })
     }
+
     fn construct_variant(
         &mut self,
         expr: &Expr<'_>,
@@ -3809,6 +3852,7 @@ impl Checker<'_, '_> {
             },
         })
     }
+
     fn enum_variant(&mut self, ty: &Term, name: &str, span: Span) -> Result<n::Expr, Error> {
         let shape = self.structural_type(ty, span)?;
         let ty = &shape;
@@ -3841,12 +3885,14 @@ impl Checker<'_, '_> {
             },
         })
     }
+
     fn bound_tuple_metadata(&self) -> Option<nir::normal_forms::Head> {
         let identity = self.protocols.tuple?;
         let owner = self.source_declarations.owner(identity)?;
         self.normal_parameters.get(&owner)?;
         self.normal_form_head_metadata(owner)
     }
+
     fn bound_tuple_list_domain(&self) -> Option<Term> {
         let head = self.bound_tuple_metadata()?;
         let [parameter] = head.parameters.as_slice() else {
@@ -3855,6 +3901,7 @@ impl Checker<'_, '_> {
         self.is_type_list_type(&parameter.ty)
             .then(|| parameter.ty.clone())
     }
+
     fn bound_tuple_elements<'a>(&self, ty: &'a Term) -> Option<&'a [Term]> {
         if !matches!(ty, Term::NormalForm { head, sort: Sort::Type, .. } if Some(*head) == self.protocols.tuple)
         {
@@ -3862,6 +3909,7 @@ impl Checker<'_, '_> {
         }
         self.bound_tuple_metadata()?.tuple_elements(ty)
     }
+
     fn structural_type(&self, ty: &Term, span: Span) -> Result<Term, Error> {
         let ty = self.type_identity_view(ty, span)?;
         if let Some(elements) = self.bound_tuple_elements(&ty) {
@@ -3869,6 +3917,7 @@ impl Checker<'_, '_> {
         }
         Ok(ty)
     }
+
     fn type_identity_view(&self, ty: &Term, span: Span) -> Result<Term, Error> {
         if self.bound_tuple_elements(ty).is_some() || self.context.is_list_type(ty) {
             return Ok(ty.clone());
@@ -3899,6 +3948,7 @@ impl Checker<'_, '_> {
                 )
             })
     }
+
     fn negated_pattern_domain(
         &self,
         ty: &Term,
@@ -4056,9 +4106,11 @@ impl Checker<'_, '_> {
         )
         .0
     }
+
     fn pattern_exhaustive(&self, pattern: &n::Pattern, ty: &Term) -> bool {
         self.patterns_exhaustive(&[pattern], ty) == crate::coverage::Coverage::Exhaustive
     }
+
     fn construct(
         &mut self,
         expr: &Expr<'_>,
@@ -4069,6 +4121,7 @@ impl Checker<'_, '_> {
         let ty = self.type_expr(callee)?;
         self.construct_typed(expr, ty, args, expected)
     }
+
     fn construct_typed(
         &mut self,
         expr: &Expr<'_>,
@@ -4156,6 +4209,7 @@ impl Checker<'_, '_> {
             },
         })
     }
+
     fn check_struct_cycles(&self) -> Result<(), Error> {
         let tuple = self.bound_tuple_metadata();
         let mut representations = crate::representations::Checker::new(
@@ -4199,6 +4253,7 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
+
     fn is_type_head(&self, expr: &Expr<'_>) -> bool {
         if self.associated_reference_is_type(expr) {
             return true;
@@ -4322,6 +4377,7 @@ impl Checker<'_, '_> {
             _ => false,
         }
     }
+
     fn form_type_identity(&mut self, expr: &Expr<'_>) -> Result<Term, Error> {
         match &expr.kind {
             H::ResolvedLocal(_, id) if self.callable_type_inputs.contains_key(&local(*id)) => {
@@ -4724,6 +4780,7 @@ impl Checker<'_, '_> {
             )),
         }
     }
+
     fn type_predicate(&mut self, expr: &Expr<'_>) -> Result<n::TypePredicate, Error> {
         enum Work<'a, 'hir> {
             Expr(&'a Expr<'hir>, usize),
@@ -4829,6 +4886,7 @@ impl Checker<'_, '_> {
             )),
         }
     }
+
     fn nominal_context(&self) -> crate::ptc::Context {
         let mut context = crate::ptc::Context::default();
         for declaration in &self.code_packet_nominals {
@@ -4882,6 +4940,7 @@ impl Checker<'_, '_> {
         }
         context
     }
+
     fn definition_context(&self, owner: OwnerId) -> crate::ptc::Context {
         let scope = self
             .signatures
@@ -4944,6 +5003,7 @@ impl Checker<'_, '_> {
         }
         context
     }
+
     fn binder_assumptions(&self, owner: OwnerId) -> Vec<n::TraitRequirement> {
         let mut assumptions = self.capabilities.get(&owner).cloned().unwrap_or_default();
         if let Some(parent) = self.self_containers.get(&owner) {
@@ -4983,6 +5043,7 @@ impl Checker<'_, '_> {
         }
         assumptions
     }
+
     // Carry the same type premises used to check the body into owned NIR.
     // Program verification must recover scalar domains without guessing from
     // the body's chosen operations or relying on the transient checker state.
@@ -5001,6 +5062,7 @@ impl Checker<'_, '_> {
         }
         requirements
     }
+
     fn binder_context(&self, owner: OwnerId) -> crate::ptc::Context {
         let mut context = self.nominal_context();
         for requirement in crate::capabilities::subject_requirements_with_layouts(
@@ -5014,6 +5076,7 @@ impl Checker<'_, '_> {
         }
         context
     }
+
     fn check_type_application(
         &mut self,
         owner: OwnerId,
@@ -5022,6 +5085,7 @@ impl Checker<'_, '_> {
     ) -> Result<(), Error> {
         self.check_formation_application(owner, FormationInputs::ready(arguments), span)
     }
+
     fn check_formation_application(
         &mut self,
         owner: OwnerId,
@@ -5047,6 +5111,7 @@ impl Checker<'_, '_> {
             self.check_formation_requirements(owner, &arguments, span)
         }
     }
+
     fn capability_argument_view(&self, term: &Term, span: Span) -> Result<Term, Error> {
         if term.sort() == Sort::Type {
             self.callable_input_view(term, span)
@@ -5107,6 +5172,7 @@ impl Checker<'_, '_> {
             }
         })
     }
+
     fn check_requirements(
         &self,
         owner: OwnerId,
@@ -5115,6 +5181,7 @@ impl Checker<'_, '_> {
     ) -> Result<(), Error> {
         self.check_formation_requirements(owner, &FormationInputs::ready(arguments), span)
     }
+
     fn check_formation_requirements(
         &self,
         owner: OwnerId,
@@ -5243,6 +5310,7 @@ impl Checker<'_, '_> {
             )
         }
     }
+
     // Shared discharge path for completed type prerequisites. Program
     // predicates never enter this PTC/implementation-world boundary.
     fn establish_type_requirement(
@@ -5306,6 +5374,7 @@ impl Checker<'_, '_> {
         }
         Ok(())
     }
+
     /// Equality observations keep caller telescope slots in their original scope.
     fn scoped_equality_operands(
         &self,
@@ -5383,9 +5452,11 @@ impl Checker<'_, '_> {
             }
         }
     }
+
     fn block(&mut self, block: &hir::Block<'_>, expected: Option<&Term>) -> Result<n::Expr, Error> {
         self.block_context(block, expected, None)
     }
+
     fn block_context(
         &mut self,
         block: &hir::Block<'_>,
@@ -5394,6 +5465,7 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         self.block_context_with_input(block, expected, partial, None)
     }
+
     fn block_context_with_input(
         &mut self,
         block: &hir::Block<'_>,
@@ -5454,6 +5526,7 @@ impl Checker<'_, '_> {
             .with_comptime_phase(comptime)
             .with_unsafe_call_requirement(is_unsafe)
     }
+
     fn function_instance(
         &mut self,
         expr: &Expr<'_>,
@@ -5528,6 +5601,7 @@ impl Checker<'_, '_> {
             },
         })
     }
+
     fn contextual_function_instance(
         &mut self,
         expr: &Expr<'_>,
@@ -5538,6 +5612,7 @@ impl Checker<'_, '_> {
         let fixed = self.lexical_function_arguments(owner, expr.span)?;
         self.contextual_function_instance_with_fixed(expr, owner, fixed, expected, partial)
     }
+
     fn contextual_function_instance_with_fixed(
         &mut self,
         expr: &Expr<'_>,
@@ -5550,6 +5625,7 @@ impl Checker<'_, '_> {
             expr, owner, fixed, expected, partial, None,
         )
     }
+
     fn contextual_function_instance_with_fixed_view(
         &mut self,
         expr: &Expr<'_>,
@@ -5715,6 +5791,7 @@ impl Checker<'_, '_> {
             self.callable_value_view(value, expected, expr.span)
         }
     }
+
     // Staged availability is checked separately from required execution.
     // Carry only the phase context here; do not eagerly invoke deferred inputs.
     fn with_staged_input<R>(&mut self, staged: bool, check: impl FnOnce(&mut Self) -> R) -> R {
@@ -5736,6 +5813,7 @@ impl Checker<'_, '_> {
     ) -> Result<Option<n::Expr>, Error> {
         self.argument_attempt_with_defaults(input, expected, partial, false)
     }
+
     fn argument_attempt_with_defaults(
         &mut self,
         input: &Expr<'_>,
@@ -5745,6 +5823,7 @@ impl Checker<'_, '_> {
     ) -> Result<Option<n::Expr>, Error> {
         self.argument_attempt_with_input(input, expected, partial, allow_defaults, None)
     }
+
     fn wrap_inferred_optional(&self, value: n::Expr, span: Span) -> n::Expr {
         n::Expr {
             source: source(span),
@@ -5962,6 +6041,7 @@ impl Checker<'_, '_> {
         let known = self.lexical_function_arguments(owner, expr.span)?;
         self.generic_call_with_receiver(expr, owner, args, expected, partial, Vec::new(), known)
     }
+
     fn generic_call_with_receiver(
         &mut self,
         expr: &Expr<'_>,
@@ -6561,6 +6641,7 @@ impl Checker<'_, '_> {
         let call = self.freeze_staged_call_inputs(call, expr)?;
         self.stage_collected_call(call, &routes, offset, expr)
     }
+
     fn closure(
         &mut self,
         expr: &Expr<'_>,
@@ -6597,9 +6678,19 @@ impl Checker<'_, '_> {
             Some(Term::Closure { signature, .. }) => Some(signature.as_ref()),
             other => other,
         };
-        let comptime = self.in_required_comptime || self.in_staged_input || (!self.in_code_body && self.signature_owner
-            .and_then(|owner| self.package.item(owner))
-            .is_some_and(|item| matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if sig.modifiers.is_comptime)));
+        let comptime = !self.in_code_body
+            && (self.in_required_comptime
+                || self.in_staged_input
+                || self
+                    .signature_owner
+                    .and_then(|owner| self.package.item(owner))
+                    .is_some_and(|item| {
+                        matches!(
+                            &item.kind,
+                            ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                                if sig.modifiers.is_comptime
+                        )
+                    }));
         let contextual = match expected_signature.map(Term::callable_signature) {
             Some(Term::Function { parameters, result }) => Some((parameters, result)),
             Some(_) => {
@@ -7208,6 +7299,7 @@ impl Checker<'_, '_> {
             kind: K::Literal(literal),
         })
     }
+
     fn integer_proxy(
         &self,
         spelling: &str,
@@ -7358,9 +7450,11 @@ impl Checker<'_, '_> {
             kind: K::Literal(literal),
         })
     }
+
     fn expr(&mut self, expr: &Expr<'_>, expected: Option<&Term>) -> Result<n::Expr, Error> {
         self.expr_context(expr, expected, None)
     }
+
     fn finish_arithmetic_expression(
         &mut self,
         expr: &Expr<'_>,

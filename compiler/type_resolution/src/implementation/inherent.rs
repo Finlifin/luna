@@ -15,6 +15,7 @@ pub struct InherentHead {
     pub requirements: Vec<TypePredicate>,
     pub members: BTreeSet<String>,
 }
+
 impl InherentHead {
     fn matching_head(&self) -> ImplementationHead {
         ImplementationHead {
@@ -28,11 +29,13 @@ impl InherentHead {
         }
     }
 }
+
 #[derive(Default)]
 pub struct InherentIndex {
     index: Index,
     heads: BTreeMap<DeclarationId, InherentHead>,
 }
+
 impl InherentIndex {
     pub fn for_builtin_packages(
         target: Option<nir::target::TargetData>,
@@ -45,7 +48,8 @@ impl InherentIndex {
     }
 
     pub fn check_ownership(&self, subject: &Term, package: u64) -> Result<Ownership, Error> {
-        if self.index.builtin_packages.contains(&package) && ownership::builtin_subject(subject) {
+        if self.index.builtin_packages.contains(&package) && self.index.is_builtin_subject(subject)
+        {
             Ok(Ownership::BuiltinPackage(package))
         } else {
             inherent_ownership(subject, package)
@@ -115,9 +119,11 @@ impl InherentIndex {
         self.heads.insert(head.declaration, head);
         Ok(())
     }
+
     pub fn resolution_is_current(&self, resolution: &TypeResolution) -> bool {
         self.index.type_resolution_is_current(resolution)
     }
+
     pub fn resolve_types(
         &self,
         name: &str,
@@ -129,6 +135,7 @@ impl InherentIndex {
             Applicability::Applicable
         })
     }
+
     pub(crate) fn resolve_types_with(
         &self,
         name: &str,
@@ -149,6 +156,7 @@ impl InherentIndex {
             (assessment, state)
         })
     }
+
     pub(crate) fn resolve_matched_with(
         &self,
         name: &str,
@@ -188,6 +196,7 @@ impl InherentIndex {
             },
         )
     }
+
     pub fn verify_evidence(
         &self,
         name: &str,
@@ -200,6 +209,7 @@ impl InherentIndex {
             context.verify_proof(proof, budget)
         })
     }
+
     pub(crate) fn verify_evidence_with(
         &self,
         name: &str,
@@ -230,6 +240,7 @@ impl InherentIndex {
                 verify_requirement,
             )
     }
+
     /// Declaration-world check, independent of local caller assumptions. Only
     /// heads with a shared member name, equal precision, and non-distinct outer
     /// type heads require solver overlap queries. Unknown never means disjoint.
@@ -318,6 +329,7 @@ impl InherentIndex {
         Ok(())
     }
 }
+
 impl fmt::Display for InherentHead {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -343,6 +355,7 @@ impl fmt::Display for InherentHead {
         write!(f, "))")
     }
 }
+
 impl fmt::Display for InherentIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

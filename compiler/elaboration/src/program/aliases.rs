@@ -49,6 +49,7 @@ impl Checker<'_, '_> {
         let saved_owner = self.signature_owner.replace(owner);
         let saved_context = self.context.clone();
         let saved_locals = std::mem::take(&mut self.locals);
+        let saved_code = std::mem::replace(&mut self.in_code_body, false);
         let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
         let saved_substitution = std::mem::take(&mut self.alias_substitution);
         let saved_value_bindings = std::mem::take(&mut self.alias_value_bindings);
@@ -78,6 +79,7 @@ impl Checker<'_, '_> {
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.locals = saved_locals;
+        self.in_code_body = saved_code;
         self.in_required_comptime = saved_mode;
         self.alias_substitution = saved_substitution;
         self.alias_value_bindings = saved_value_bindings;
@@ -629,9 +631,11 @@ impl Checker<'_, '_> {
     }
 
     fn check_alias_value_body(&mut self, value: &Expr<'_>) -> Result<n::Expr, Error> {
+        let saved_code = std::mem::replace(&mut self.in_code_body, false);
         let mode = std::mem::replace(&mut self.in_required_comptime, true);
         let body = self.expr(value, Some(&p(P::Type)));
         self.in_required_comptime = mode;
+        self.in_code_body = saved_code;
         body
     }
 

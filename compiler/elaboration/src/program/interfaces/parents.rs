@@ -65,6 +65,7 @@ impl Checker<'_, '_> {
             arguments,
         })
     }
+
     pub(crate) fn parent_interfaces(
         &mut self,
         expr: &Expr<'_>,
@@ -75,6 +76,7 @@ impl Checker<'_, '_> {
         let subject = self.self_type(owner, expr.span)?;
         self.parent_interfaces_for(expr, &subject)
     }
+
     pub(crate) fn parent_interfaces_for(
         &mut self,
         expr: &Expr<'_>,
@@ -107,6 +109,7 @@ impl Checker<'_, '_> {
         }
         Ok(parents)
     }
+
     pub(super) fn validate_parent_graph(
         &self,
         traits: &BTreeMap<DeclarationId, n::Trait>,
@@ -217,6 +220,7 @@ impl Checker<'_, '_> {
         }
         Ok(unique)
     }
+
     pub(crate) fn interface_substitution(
         &self,
         interface: &n::InterfaceInstance,
@@ -230,6 +234,7 @@ impl Checker<'_, '_> {
                 .collect(),
         )
     }
+
     pub(in crate::program) fn inherited_member_source(
         &self,
         subject: &Term,
@@ -311,6 +316,7 @@ impl Checker<'_, '_> {
         }
         Ok(sources)
     }
+
     pub(super) fn default_interface(&self) -> Option<n::InterfaceInstance> {
         self.signature_owner
             .and_then(|owner| {
@@ -338,6 +344,7 @@ impl Checker<'_, '_> {
                     .collect(),
             })
     }
+
     pub(in crate::program) fn symbolic_interface_evidence(
         &self,
         subject: &Term,
@@ -380,11 +387,12 @@ impl Checker<'_, '_> {
                 .map(|given| given.is_some())
         }
     }
+
     pub(super) fn comptime_member_context(&self) -> bool {
-        self.in_required_comptime
-            || self.in_staged_input
-            || (!self.in_code_body
-                && self
+        !self.in_code_body
+            && (self.in_required_comptime
+                || self.in_staged_input
+                || self
                     .captures
                     .last()
                     .map(|frame| frame.comptime)
@@ -392,9 +400,12 @@ impl Checker<'_, '_> {
                         self.signature_owner
                             .and_then(|owner| self.package.item(owner))
                             .is_some_and(|item| {
-                                matches!(&item.kind,
-                        ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
-                        if sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head)
+                                matches!(
+                                    &item.kind,
+                                    ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                                        if sig.modifiers.is_comptime
+                                            || sig.modifiers.is_normal_form_head
+                                )
                             })
                     }))
     }

@@ -354,9 +354,7 @@ impl Checker<'_, '_> {
     ) -> Result<Option<(comptime_interpretor::Value, Term)>, Error> {
         let assumptions = self.context.assumptions().to_vec();
         self.in_open_function_scope(owner, None, |this| {
-            for assumption in assumptions {
-                this.context.assume(assumption);
-            }
+            this.import_closed_caller_assumptions(assumptions);
             let ItemKind::Fn(sig, _) = &this.package.item(owner).unwrap().kind else {
                 unreachable!()
             };
