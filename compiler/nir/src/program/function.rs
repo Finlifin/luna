@@ -4,33 +4,51 @@ use super::*;
 /// Canonical package/owner namespaces reserved for compiler-synthesized
 /// implicit runtime environment parameters backing local `Term::Runtime` dependencies.
 pub const IMPLICIT_RUNTIME_ENV_PACKAGE: u64 = u64::MAX - 9;
+
 pub const IMPLICIT_RUNTIME_ENV_OWNER: u32 = u32::MAX - 1;
 
-/// Collect implicit runtime environment parameters required by `RuntimeId`s
-/// embedded inside `arguments`, excluding globals and already-bound entries.
+/// Local identities that require additional ABI slots, in canonical order.
+pub fn implicit_runtime_env_ids(
+    runtime_domains: &std::collections::BTreeMap<crate::RuntimeId, Term>,
+    globals: &std::collections::BTreeMap<crate::RuntimeId, Expr>,
+    arguments: &[Term],
+    bound: impl IntoIterator<Item = crate::RuntimeId>,
+) -> Result<std::collections::BTreeSet<crate::RuntimeId>, &'static str> {
+    let mut ids = std::collections::BTreeSet::new();
+    for argument in arguments {
+        ids.extend(argument.runtime_dependencies());
+    }
+    for id in bound {
+        ids.remove(&id);
+    }
+    ids.retain(|id| {
+        !globals.contains_key(id) && matches!(runtime_domains.get(id), Some(Term::Lift(_)))
+    });
+    if ids.iter().any(|id| id.instance != 0) {
+        return Err("implicit runtime environment parameter requires instance 0 identity");
+    }
+    Ok(ids)
+}
+
+/// Collect implicit runtime environment parameters required by local identities
+/// inside the instance arguments, after the declaration's explicit slots.
 pub fn implicit_runtime_env_parameters(
     runtime_domains: &std::collections::BTreeMap<crate::RuntimeId, Term>,
     global_runtime_deliveries: &std::collections::BTreeMap<crate::RuntimeId, Expr>,
     arguments: &[Term],
     existing: &[RuntimeEnvParameter],
 ) -> Result<Vec<RuntimeEnvParameter>, &'static str> {
-    let mut ids = std::collections::BTreeSet::new();
-    for argument in arguments {
-        ids.extend(argument.runtime_dependencies());
-    }
-    let mut extra = Vec::new();
+    let ids = implicit_runtime_env_ids(
+        runtime_domains,
+        global_runtime_deliveries,
+        arguments,
+        existing.iter().filter_map(|env| env.runtime_id),
+    )?;
+    let mut extra = Vec::with_capacity(ids.len());
     for id in ids {
-        if global_runtime_deliveries.contains_key(&id)
-            || existing.iter().any(|ep| ep.runtime_id == Some(id))
-        {
-            continue;
-        }
-        let Some(Term::Lift(inner)) = runtime_domains.get(&id) else {
-            continue;
+        let Term::Lift(inner) = &runtime_domains[&id] else {
+            unreachable!("checked lift domain")
         };
-        if id.instance != 0 {
-            return Err("implicit runtime environment parameter requires instance 0 identity");
-        }
         extra.push(RuntimeEnvParameter {
             declaration: DeclarationId {
                 package: IMPLICIT_RUNTIME_ENV_PACKAGE,
@@ -98,6 +116,7 @@ pub struct FunctionDeclaration {
     pub env_parameters: Vec<RuntimeEnvParameter>,
     pub defaults: Vec<(usize, Expr)>,
 }
+
 impl FunctionDeclaration {
     /// Value interface of this declaration; the stored signature remains its
     /// parameter/result telescope for instantiation and ABI consumers.
@@ -114,6 +133,7 @@ impl FunctionDeclaration {
             std::borrow::Cow::Borrowed(&self.signature)
         }
     }
+
     /// Substitute checked declaration fields without acquiring or copying a
     /// body. Binder identities and local input slots are preserved.
     pub fn instantiate_parameters(
@@ -257,10 +277,12 @@ pub struct Function {
 // signature/contract-only services can accept FunctionDeclaration directly.
 impl std::ops::Deref for Function {
     type Target = FunctionDeclaration;
+
     fn deref(&self) -> &Self::Target {
         &self.interface
     }
 }
+
 impl std::ops::DerefMut for Function {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.interface
@@ -505,6 +527,7 @@ impl FunctionDeclaration {
         f.write_str(")")
     }
 }
+
 impl fmt::Display for FunctionDeclaration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(function-declaration ")?;
@@ -512,6 +535,7 @@ impl fmt::Display for FunctionDeclaration {
         f.write_str(")")
     }
 }
+
 impl fmt::Display for Function {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(function ")?;

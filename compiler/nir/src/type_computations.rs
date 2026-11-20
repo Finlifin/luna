@@ -599,6 +599,22 @@ pub fn contains_associated_projection(
     Ok(found)
 }
 
+/// Can specialization still change the set of local runtime identities in this
+/// argument? An unresolved binder or projection can introduce or merge slots.
+pub fn runtime_dependencies_may_change(root: &Term, fuel: &mut usize) -> Result<bool, Error> {
+    let mut open = false;
+    visit_expanded_term(root, fuel, 128, &BTreeMap::new(), &mut |term| {
+        open |= matches!(
+            term,
+            Term::Rigid { .. }
+                | Term::Bound { .. }
+                | Term::Hole { .. }
+                | Term::AssociatedType { .. }
+        );
+    })?;
+    Ok(open)
+}
+
 /// Inspect open declaration inputs without cloning the type or unfolding heads.
 pub fn has_rigid_parameters_bounded(root: &Term, fuel: &mut usize) -> Result<bool, Error> {
     mentions_rigid_bounded(root, fuel, |_| true)

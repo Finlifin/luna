@@ -55,6 +55,38 @@ impl Checker<'_, '_> {
                 instantiated_inner,
             ));
         }
+        if self.runtime_domains.len() != self.global_runtime_deliveries.len() {
+            let bound = env_args.iter().filter_map(|(term, _)| match term {
+                Term::Runtime(id) => Some(*id),
+                _ => None,
+            });
+            let implicit = n::implicit_runtime_env_ids(
+                &self.runtime_domains,
+                &self.global_runtime_deliveries,
+                args,
+                bound,
+            )
+            .map_err(|reason| error(span, reason))?;
+            if implicit.is_empty() {
+                return Ok(env_args);
+            }
+            // Materialization owns the implicit suffix until all slot identities
+            // and their order are stable under specialization.
+            for arg in args {
+                let open = nominal_fields::metered(&mut self.required_steps, |fuel| {
+                    nir::type_computations::runtime_dependencies_may_change(arg, fuel)
+                })
+                .map_err(|reason| error(span, reason.to_string()))?;
+                if open {
+                    return Ok(env_args);
+                }
+            }
+            for id in implicit {
+                let term = Term::Runtime(id);
+                let domain = self.runtime_root_payload(&term, span)?;
+                env_args.push((term, domain));
+            }
+        }
         Ok(env_args)
     }
 

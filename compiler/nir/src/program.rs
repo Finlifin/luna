@@ -15,7 +15,8 @@ mod function;
 
 pub use function::{
     DefinitionRegion, Function, FunctionDeclaration, IMPLICIT_RUNTIME_ENV_OWNER,
-    IMPLICIT_RUNTIME_ENV_PACKAGE, RuntimeEnvParameter, implicit_runtime_env_parameters,
+    IMPLICIT_RUNTIME_ENV_PACKAGE, RuntimeEnvParameter, implicit_runtime_env_ids,
+    implicit_runtime_env_parameters,
 };
 
 mod predicate_shape;

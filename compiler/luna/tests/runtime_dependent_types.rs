@@ -1210,6 +1210,34 @@ fn closures_keep_prior_storage_addresses_and_own_their_by_value_captures() {
 }
 
 #[test]
+fn generic_calls_inside_closures_deliver_the_environment_of_the_inferred_type() {
+    let case = NativeCase::new(
+        r#"
+        struct Cell { value: i32 }
+        fn read(p: *Cell) -> i32 { p.value.* }
+        enum View where quote src: lift *Cell, quote .snapshot: lift i32 = read(src) { empty, }
+        fn relay(v: T) -> T where T { v }
+        fn check(v: View<p, .snapshot = n>) -> bool
+        where quote p: lift *Cell, quote n: lift i32
+        {
+            p.value.* == 42 and n == 7
+        }
+        fn run() -> bool {
+            var cell = Cell { value: 7 };
+            let v = View<cell.ref>.empty;
+            let call = || { let nested = || relay(v); nested() };
+            cell.value = 42;
+            check(call())
+        }
+    "#,
+    );
+    assert_success(&case.build());
+    let output = case.run();
+    assert_success(&output);
+    assert_eq!(output.stdout, b"(bool true)\n");
+}
+
+#[test]
 fn computed_default_identities_are_per_acquisition_and_cannot_export_dead_storage() {
     let definitions = r#"
         struct Pair { first: i32 }
