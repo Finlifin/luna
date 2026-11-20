@@ -714,3 +714,66 @@ fn constructed_type_results_keep_their_heads_and_mixed_input_identities() {
         );
     }
 }
+
+#[test]
+fn constructed_result_proofs_observe_computed_packets_in_source_order() {
+    let source = r#"
+        pure comptime fn Opaque<A, B, C, D> -> Type { D }
+        struct Quad where A, B, C, D { tag: bool }
+        pure comptime fn Hidden(comptime T: Type) -> Type { T }
+
+        pure comptime fn Packed(comptime T: Type) -> R: Type
+        where A, ensures R == Opaque<A, T, ?T, A>
+        {
+            Opaque<...do { (A, T) }, ...do { (?T, A) }>
+        }
+
+        pure comptime fn Nominal(comptime T: Type) -> R: Type
+        where A, ensures R == Quad<A, T, ?T, A>
+        {
+            Quad<...do { (A, T) }, ...do { (?T, A) }>
+        }
+
+        fn run() -> bool {
+            const exact = Packed<bool>(u8) == Opaque<bool, u8, ?u8, bool>
+                and Nominal<bool>(u8) == Quad<bool, u8, ?u8, bool>;
+            exact
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    for last in ["(A, ?T)", "(?T, Hidden(A))"] {
+        let altered = source.replacen("do { (?T, A) }", &format!("do {{ {last} }}"), 1);
+        let error = support::compile(&altered).unwrap_err();
+        assert!(
+            error.contains("result guarantee contract is not established"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn collected_result_proofs_use_the_callers_dependent_element_domain() {
+    let source = r#"
+        pure comptime fn Packet<.Element: Type = Type, ...xs: meta.List<Element>> -> Type {
+            Element
+        }
+        pure comptime fn Packed(comptime T: Type, comptime x: T) -> R: Type
+        where ensures R == Packet<.Element = T, x, x>
+        {
+            Packet<x, x, .Element = T>
+        }
+        fn run() -> bool {
+            const exact = Packed(bool, true) == Packet<.Element = bool, true, true>
+                and Packed(u8, 7) == Packet<.Element = u8, 7, 7>;
+            exact
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    let error =
+        support::compile(&source.replace("Packet<x, x, .Element = T>", "Packet<x, .Element = T>"))
+            .unwrap_err();
+    assert!(
+        error.contains("result guarantee contract is not established"),
+        "{error}"
+    );
+}

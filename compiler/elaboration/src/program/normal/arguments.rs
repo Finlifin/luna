@@ -4,15 +4,50 @@ use super::*;
 
 use nir::program::InputSchedule as Plan;
 
-fn observable(
-    plan: Plan<'_>,
+type LocalValues = BTreeMap<n::LocalId, std::sync::Arc<Term>>;
+
+fn observable_schedule<'p>(
+    plan: Plan<'p>,
     count: usize,
-    outer: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+    outer: &LocalValues,
     budget: &mut comptime_runtime::Budget,
-) -> Result<bool, Failure> {
+) -> Result<Option<n::CheckedInputSchedule<'p>>, Failure> {
     Ok(plan
         .check(count, |n| budget.consume(n))?
-        .is_some_and(|schedule| schedule.locals.iter().all(|id| !outer.contains_key(id))))
+        .filter(|schedule| schedule.locals.iter().all(|id| !outer.contains_key(id))))
+}
+
+/// A contextual operand may need a later argument. Follow declaration
+/// templates only: rigids inside supplied values belong to the caller.
+fn missing_domain_input(
+    domain: &Term,
+    parameters: &BTreeMap<DeclarationId, (usize, &Term)>,
+    values: &[Option<Term>],
+    budget: &mut comptime_runtime::Budget,
+) -> Result<Option<usize>, Failure> {
+    let mut dependencies = BTreeSet::new();
+    nir::type_computations::rigid_declarations_bounded(
+        domain,
+        &mut budget.steps,
+        &mut dependencies,
+    )?;
+    let mut seen = BTreeSet::new();
+    while let Some(id) = dependencies.pop_first() {
+        let Some(&(slot, template)) = parameters.get(&id) else {
+            continue;
+        };
+        if values[slot].is_none() {
+            return Ok(Some(slot));
+        }
+        if seen.insert(id) {
+            nir::type_computations::rigid_declarations_bounded(
+                template,
+                &mut budget.steps,
+                &mut dependencies,
+            )?;
+        }
+    }
+    Ok(None)
 }
 
 impl Checker<'_, '_> {
@@ -73,102 +108,105 @@ impl Checker<'_, '_> {
         plan: Plan<'_>,
         depth: usize,
         budget: &mut comptime_runtime::Budget,
-        bindings: &BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        bindings: &LocalValues,
     ) -> Result<Vec<Term>, Failure> {
         budget.consume(arguments.len().saturating_add(bindings.len()))?;
-        if !plan.preparations.is_empty() || !observable(plan, arguments.len(), bindings, budget)? {
-            return Err(Failure::Unavailable);
-        }
-        // Contextual operands obtain their domain from the declaration. This
-        // observation neither runs its formation checks nor replaces the plan.
-        let parameters = if arguments
+        let schedule = observable_schedule(plan, arguments.len(), bindings, budget)?
+            .ok_or(Failure::Unavailable)?;
+        let (signature, frames) = if arguments
             .iter()
-            .any(|argument| argument.expression().is_none())
+            .any(|operand| operand.expression().is_none())
         {
-            self.observed_declaration_domains(head, budget)?
-        } else {
-            None
-        };
-        if parameters
-            .as_ref()
-            .is_some_and(|inputs| inputs.len() != arguments.len())
-        {
-            return Err(Failure::Unavailable);
-        }
-        let order: Vec<_> = plan
-            .order
-            .map_or_else(|| (0..arguments.len()).collect(), |order| order.to_vec());
-        let mut scoped = bindings.clone();
-        let mut values = vec![None; arguments.len()];
-        let mut ids = Vec::new();
-        let mut domains = Vec::new();
-        let mut completed = Vec::new();
-        let mut pending = order;
-        while !pending.is_empty() {
-            let before = pending.len();
-            let mut deferred = Vec::new();
-            for slot in pending {
-                if arguments[slot].expression().is_none()
-                    && let Some(parameters) = parameters.as_ref()
-                {
-                    // A caller rigid introduced by substitution cannot add a
-                    // dependency on this declaration's still-pending slots.
-                    let mut required = BTreeSet::new();
-                    nir::type_computations::rigid_declarations_bounded(
-                        parameters[slot].1,
-                        &mut budget.steps,
-                        &mut required,
-                    )?;
-                    budget.consume(parameters.len())?;
-                    if parameters
-                        .iter()
-                        .zip(&values)
-                        .any(|((id, _), value)| value.is_none() && required.contains(id))
-                    {
-                        deferred.push(slot);
-                        continue;
-                    }
-                }
-                let domain = if let Some(parameters) = parameters.as_ref() {
-                    Some(
-                        nir::DeclarationSubstitution::bounded(
-                            &ids,
-                            &domains,
-                            &completed,
-                            &[],
-                            &mut budget.steps,
-                        )
-                        .and_then(|substitution| {
-                            substitution.instantiate_bounded(parameters[slot].1, &mut budget.steps)
-                        })?,
-                    )
-                } else {
-                    None
-                };
-                let value = collect_known_normal_argument(
-                    &arguments[slot],
-                    domain.as_ref(),
-                    self.protocols.meta_list,
-                    budget,
-                    |value, budget| self.observe_normal_input_in(value, depth + 1, budget, &scoped),
-                )?;
-                if let Some(bindings) = plan.bindings {
-                    scoped.insert(
-                        bindings[slot],
-                        std::sync::Arc::new(copy_observed_term(&value, budget)?),
-                    );
-                }
-                if let (Some(parameters), Some(domain)) = (parameters.as_ref(), domain) {
-                    ids.push(parameters[slot].0);
-                    domains.push(domain);
-                    completed.push(copy_observed_term(&value, budget)?);
-                }
-                values[slot] = Some(value);
-            }
-            if deferred.len() == before {
+            let signature = self
+                .observed_declaration_domains(head, budget)?
+                .ok_or(Failure::Unavailable)?;
+            if signature.len() != arguments.len() {
                 return Err(Failure::Unavailable);
             }
-            pending = deferred;
+            (signature, self.call_input_frames())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let parameters = signature
+            .iter()
+            .enumerate()
+            .map(|(slot, &(id, domain))| (id, (slot, domain)))
+            .collect();
+
+        let mut scoped = bindings.clone();
+        let mut values = vec![None; arguments.len()];
+        let mut steps = schedule.steps();
+        let mut waiting: BTreeMap<usize, Vec<(usize, LocalValues)>> = BTreeMap::new();
+        let mut ready = BTreeMap::new();
+        loop {
+            // Wake before advancing to the next preparation or default. A
+            // delayed observation sees exactly the bindings at its source.
+            let (slot, snapshot) = if let Some((slot, saved)) = ready.pop_first() {
+                (slot, Some(saved))
+            } else {
+                match steps.next() {
+                    Some(n::InputStep::Prepare(expr)) => {
+                        self.observe_normal_binding(expr, depth + 1, budget, &mut scoped)?;
+                        continue;
+                    }
+                    Some(n::InputStep::Supply(slot)) => (slot, None),
+                    None => break,
+                }
+            };
+            budget.consume(1)?;
+            let operand = &arguments[slot];
+            let domain = if operand.expression().is_none() {
+                let template = signature[slot].1;
+                if let Some(dependency) =
+                    missing_domain_input(template, &parameters, &values, budget)?
+                {
+                    let saved = match snapshot {
+                        Some(saved) => saved,
+                        None => {
+                            budget.consume(scoped.len())?;
+                            scoped.clone()
+                        }
+                    };
+                    waiting.entry(dependency).or_default().push((slot, saved));
+                    continue;
+                }
+                Some(nir::instantiate_observed_domain(
+                    template,
+                    |id| {
+                        let &(index, domain) = parameters.get(&id)?;
+                        Some((domain, values[index].as_ref()?))
+                    },
+                    &frames,
+                    &mut budget.steps,
+                )?)
+            } else {
+                None
+            };
+            let value = collect_known_normal_argument(
+                operand,
+                domain.as_ref(),
+                self.protocols.meta_list,
+                budget,
+                |expr, budget| {
+                    self.observe_normal_input_in(
+                        expr,
+                        depth + 1,
+                        budget,
+                        snapshot.as_ref().unwrap_or(&scoped),
+                    )
+                },
+            )?;
+            if let Some(binding) = schedule.binding(slot) {
+                scoped.insert(
+                    binding,
+                    std::sync::Arc::new(copy_observed_term(&value, budget)?),
+                );
+            }
+            values[slot] = Some(value);
+            if let Some(dependents) = waiting.remove(&slot) {
+                budget.consume(dependents.len())?;
+                ready.extend(dependents);
+            }
         }
         values
             .into_iter()
@@ -182,6 +220,48 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_dependent_domain_waits_for_its_template_inputs_only() {
+        let id = |local| DeclarationId { package: 7, local };
+        let rigid = |local| Term::Rigid {
+            declaration: id(local),
+            sort: Sort::Type,
+        };
+        let domain = rigid(1);
+        let element_domain = rigid(0);
+        let ty = p(P::Type);
+        let parameters = BTreeMap::from([
+            (id(0), (0, &ty)),
+            (id(1), (1, &element_domain)),
+            (id(2), (2, &ty)),
+        ]);
+        let mut budget = comptime_runtime::Budget::default();
+        let mut values = [None, None, None];
+        assert_eq!(
+            missing_domain_input(&domain, &parameters, &values, &mut budget).unwrap(),
+            Some(1)
+        );
+
+        // The caller's value happens to mention the declaration of slot 2.
+        // Its identity is a replacement; only slot 1's template depends on 0.
+        values[1] = Some(rigid(2));
+        assert_eq!(
+            missing_domain_input(&domain, &parameters, &values, &mut budget).unwrap(),
+            Some(0)
+        );
+        values[0] = Some(ty.clone());
+        assert_eq!(
+            missing_domain_input(&domain, &parameters, &values, &mut budget).unwrap(),
+            None
+        );
+
+        budget.steps = 0;
+        assert!(matches!(
+            missing_domain_input(&domain, &parameters, &values, &mut budget),
+            Err(Failure::Structure)
+        ));
+    }
+
+    #[test]
     fn input_plans_require_a_permutation_and_fresh_unique_bindings() {
         let a = n::LocalId { owner: 1, index: 0 };
         let b = n::LocalId { owner: 1, index: 1 };
@@ -193,10 +273,14 @@ mod tests {
             order: Some(&[1, 0]),
             ..Plan::default()
         };
-        assert!(observable(plan, 2, &outer, &mut budget).unwrap());
+        assert!(
+            observable_schedule(plan, 2, &outer, &mut budget)
+                .unwrap()
+                .is_some()
+        );
         for order in [&[0, 0][..], &[0, 2], &[0]] {
             assert!(
-                !observable(
+                observable_schedule(
                     Plan {
                         order: Some(order),
                         ..plan
@@ -206,11 +290,12 @@ mod tests {
                     &mut budget
                 )
                 .unwrap()
+                .is_none()
             );
         }
         for bindings in [&[a, a][..], &[a]] {
             assert!(
-                !observable(
+                observable_schedule(
                     Plan {
                         bindings: Some(bindings),
                         ..plan
@@ -220,19 +305,28 @@ mod tests {
                     &mut budget
                 )
                 .unwrap()
+                .is_none()
             );
         }
         let outer = BTreeMap::from([(a, std::sync::Arc::new(Term::Primitive(P::Bool)))]);
-        assert!(!observable(plan, 2, &outer, &mut budget).unwrap());
+        assert!(
+            observable_schedule(plan, 2, &outer, &mut budget)
+                .unwrap()
+                .is_none()
+        );
         let mut short = comptime_runtime::Budget {
             steps: 3,
             ..Default::default()
         };
-        assert_eq!(
-            observable(plan, 2, &BTreeMap::new(), &mut short),
+        assert!(matches!(
+            observable_schedule(plan, 2, &BTreeMap::new(), &mut short),
             Err(Failure::Steps)
+        ));
+        assert!(
+            observable_schedule(plan, 2, &BTreeMap::new(), &mut budget)
+                .unwrap()
+                .is_some()
         );
-        assert!(observable(plan, 2, &BTreeMap::new(), &mut budget).unwrap());
         let dump = format!("{plan}");
         assert!(
             dump.starts_with("(input-plan (order 1 0) (bindings "),
