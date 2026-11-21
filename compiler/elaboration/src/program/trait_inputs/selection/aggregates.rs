@@ -1,6 +1,27 @@
 //! Rebuild result expressions against the settled domain. Ordinary expression
-//! checking owns tuple/list field contexts and optional/error conversions.
+//! checking owns field contexts, constructor routing and result conversions.
 use super::*;
+
+// A bare Symbol is a contextual constructor head here. A projection on a
+// Symbol may also call an ordinary method; it cannot be delayed on syntax alone.
+pub(super) fn fields<'h>(site: &Expr<'h>) -> Option<impl Iterator<Item = &'h Expr<'h>>> {
+    let (items, arguments): (&[Expr<'h>], &[Arg<'h>]) = match site.kind {
+        H::Tuple(items) | H::List(items) => (items, &[]),
+        H::Application(_, args) | H::ExtendedApplication(_, args)
+            if enum_groups::has_bare_symbol_head(site) =>
+        {
+            (&[], args)
+        }
+        _ => return None,
+    };
+    Some(items.iter().chain(arguments.iter().map(|arg| match arg {
+        Arg::Positional(e)
+        | Arg::Named(_, e)
+        | Arg::Expand(e)
+        | Arg::Implicit(e)
+        | Arg::PostLambda(e) => *e,
+    })))
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum View {
@@ -104,10 +125,34 @@ fn aggregate<'a, 'h: 'a>(
         };
         items.push(item);
     }
-    let items = arena.alloc_expr_slice(items);
     let kind = match site.kind {
-        H::Tuple(_) => H::Tuple(items),
-        H::List(_) => H::List(items),
+        H::Tuple(_) => H::Tuple(arena.alloc_expr_slice(items)),
+        H::List(_) => H::List(arena.alloc_expr_slice(items)),
+        H::Application(head, args) | H::ExtendedApplication(head, args) => {
+            if args.len() != items.len() {
+                return Err(error(site.span, "staged constructor field count mismatch"));
+            }
+            let args = arena.alloc_arg_slice(
+                args.iter()
+                    .zip(items)
+                    .map(|(arg, item)| {
+                        let item = arena.alloc_expr(item);
+                        match arg {
+                            Arg::Positional(_) => Arg::Positional(item),
+                            Arg::Named(name, _) => Arg::Named(*name, item),
+                            Arg::Expand(_) => Arg::Expand(item),
+                            Arg::Implicit(_) => Arg::Implicit(item),
+                            Arg::PostLambda(_) => Arg::PostLambda(item),
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            if matches!(site.kind, H::ExtendedApplication(..)) {
+                H::ExtendedApplication(head, args)
+            } else {
+                H::Application(head, args)
+            }
+        }
         _ => return Err(error(site.span, "invalid aggregate clause result")),
     };
     Ok(Expr {

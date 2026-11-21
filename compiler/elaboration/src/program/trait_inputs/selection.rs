@@ -44,13 +44,9 @@ impl<'hir> Selection<'hir> {
     ) -> Result<Option<ExplicitClause<'hir>>, Error> {
         if !matches!(
             source.kind,
-            H::Tuple(_)
-                | H::List(_)
-                | H::Block(_)
-                | H::If(_, _, Some(_))
-                | H::When(_)
-                | H::Match(..)
-        ) {
+            H::Block(_) | H::If(_, _, Some(_)) | H::When(_) | H::Match(..)
+        ) && aggregates::fields(source).is_none()
+        {
             return Ok(None);
         }
         let arena = hir::HirArena::new();
@@ -384,8 +380,8 @@ fn project<'tree, 'src: 'tree>(
             let mut fields = vec![hir::expr::ObjectEntry::Value(index)];
             if checker.is_closed_clause_literal(source)? {
                 alternatives.push(Alternative::Literal(source));
-            } else if let H::Tuple(items) | H::List(items) = source.kind {
-                let mut positions = Vec::with_capacity(items.len());
+            } else if let Some(items) = aggregates::fields(source) {
+                let mut positions = Vec::new();
                 for item in items {
                     let mut field = Position::default();
                     let Some(packet) = project(checker, arena, item, &mut field.sites, depth + 1)?

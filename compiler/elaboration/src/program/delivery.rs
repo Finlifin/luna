@@ -5,6 +5,40 @@ use super::*;
 use std::borrow::Cow;
 mod computed;
 
+/// The same source rule applies to a partial call context and a settled type.
+#[derive(Clone, Copy, PartialEq)]
+pub(super) enum OptionalInput {
+    Whole,
+    Payload,
+    Probe,
+}
+
+fn constructs_payload(expr: &Expr<'_>) -> bool {
+    matches!(expr.kind, H::Tuple(_) | H::List(_)) || enum_groups::has_bare_symbol_head(expr)
+}
+
+pub(super) fn optional_input(expr: &Expr<'_>) -> OptionalInput {
+    match &expr.kind {
+        _ if constructs_payload(expr) => OptionalInput::Payload,
+        H::Null
+        | H::Block(_)
+        | H::If(..)
+        | H::Match(..)
+        | H::When(_)
+        | H::Return(_)
+        | H::EffectRequest(_)
+        | H::ErrorHandle { .. }
+        | H::EffectHandle(..) => OptionalInput::Whole,
+        H::Application(head, _) | H::ExtendedApplication(head, _)
+            if enum_groups::symbol_path(head).is_some() =>
+        {
+            OptionalInput::Whole
+        }
+        H::Projection(..) if enum_groups::symbol_path(expr).is_some() => OptionalInput::Whole,
+        _ => OptionalInput::Probe,
+    }
+}
+
 enum Delivery<'t> {
     Optional { target: Cow<'t, Term>, span: Span },
     Error { target: Cow<'t, Term>, span: Span },
@@ -202,10 +236,6 @@ impl Checker<'_, '_> {
         if matches!(target.as_ref(), Term::Primitive(_)) {
             return Ok(Step::Unadapted(target));
         }
-        // An aggregate literal constructs its fields here. Its outer value
-        // cannot already carry the destination's optional or error tag. Pass
-        // the payload context down before a field defaults to its own type.
-        let constructs_fields = matches!(expr.kind, H::Tuple(_) | H::List(_));
         if let Term::ErrorResult { result, .. } = target.as_ref() {
             // Branching rules pass the whole destination to yielded paths.
             let directed = matches!(
@@ -220,7 +250,7 @@ impl Checker<'_, '_> {
                     | H::EffectHandle(..)
             );
             if !directed {
-                if !constructs_fields
+                if !constructs_payload(expr)
                     && let Some(value) = self.argument_attempt(expr, None, partial)?
                 {
                     return Delivery::Error {
@@ -253,36 +283,21 @@ impl Checker<'_, '_> {
         }
         if self.optional_target_probe != Some(expr.hir_id) {
             if let Ok(payload) = self.optional_payload(&target, expr.span) {
-                // Null, branches and contextual enum constructors take the
-                // complete destination, not an inferred payload destination.
-                let directed = matches!(
-                    &expr.kind,
-                    H::Null
-                        | H::Block(_)
-                        | H::If(..)
-                        | H::Match(..)
-                        | H::When(_)
-                        | H::Return(_)
-                        | H::EffectRequest(_)
-                        | H::ErrorHandle { .. }
-                        | H::EffectHandle(..)
-                ) || enum_groups::symbol_path(expr).is_some()
-                    || matches!(&expr.kind, H::Application(head,_) | H::ExtendedApplication(head,_)
-                        if enum_groups::symbol_path(head).is_some());
-                if !directed {
-                    if !constructs_fields
+                let input = optional_input(expr);
+                if input != OptionalInput::Whole {
+                    if input == OptionalInput::Probe
                         && let Some(value) = self.argument_attempt(expr, None, partial)?
                     {
                         return self
                             .inject_optional_value(value, &target, expr.span)
                             .map(Step::Checked);
                     }
-                    // A producer can itself deliver the whole optional. Keep
-                    // this attempt separate from the subsequent payload rule.
-                    if matches!(
-                        expr.kind,
-                        H::Application(..) | H::ExtendedApplication(..) | H::OptionPropagate(_)
-                    ) {
+                    if input == OptionalInput::Probe
+                        && matches!(
+                            expr.kind,
+                            H::Application(..) | H::ExtendedApplication(..) | H::OptionPropagate(_)
+                        )
+                    {
                         let saved = self.optional_target_probe.replace(expr.hir_id);
                         let attempt = self.argument_attempt_with_defaults(
                             expr,

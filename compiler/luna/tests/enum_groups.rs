@@ -23,7 +23,7 @@ fn local_type_names_preserve_enum_namespaces_and_payload_order() {
                 self.calls == 2
             }
         }
-        comptime fn check() -> bool {
+        comptime fn enum_namespace_order() -> bool {
             const Selected = Event;
             const Alias = Selected;
             let counter = Counter { calls: 0 };
@@ -42,7 +42,7 @@ fn local_type_names_preserve_enum_namespaces_and_payload_order() {
     )
     .unwrap();
     assert_eq!(
-        luna::invocation::invoke(&package, "check", 1_000_000).unwrap(),
+        luna::invocation::invoke(&package, "enum_namespace_order", 1_000_000).unwrap(),
         Value::Bool(true)
     );
 }
@@ -73,7 +73,7 @@ fn declared_enum_names_keep_precedence_over_type_receiver_methods() {
             impl Counter {{
                 comptime fn next(self) -> bool {{ self.calls = self.calls + 1; true }}
             }}
-            comptime fn check() -> bool {{
+            comptime fn enum_constructor_precedence() -> bool {{
                 let counter = Counter {{ calls: 0 }};
                 let value = Choice<{argument}>.struct_fields(counter.next());
                 (value match {{ .struct_fields(flag) => flag }}) and counter.calls == 1
@@ -81,7 +81,7 @@ fn declared_enum_names_keep_precedence_over_type_receiver_methods() {
         );
         let package = sysroot::compile(&source).unwrap();
         assert_eq!(
-            luna::invocation::invoke(&package, "check", 1_000_000).unwrap(),
+            luna::invocation::invoke(&package, "enum_constructor_precedence", 1_000_000).unwrap(),
             Value::Bool(true)
         );
         if argument == "selected()" {
@@ -244,6 +244,57 @@ fn type_alias_group_prefix_is_not_evaluated_as_a_method_receiver() {
     let source = "enum Source {net.{ready,nested.{data(bool)}},other} typealias Event=Source;
         fn read(value:Event)->bool {value match {.net=>true,.other=>false}}
         fn run()->bool {read(Event.net.ready) and read(Event.net.nested.data(true)) and not read(Event.other)}";
+    let package = compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn named_payload_effects_follow_source_order_with_known_and_partial_targets() {
+    let source = r#"
+        enum Packet where T {
+            group.{record { first: T, second: T, defaulted: bool = true }},
+        }
+        fn mark(state: *bool) -> bool {
+            let previous = state.*;
+            state.* = not previous;
+            previous
+        }
+        fn read(value: Packet<T>) -> bool where T, requires T == bool {
+            value matches .group.record { first: true, second: false, defaulted: true }
+        }
+        fn run() -> bool {
+            var state = false;
+            let known: Packet<bool> = .group.record {
+                second: mark(state.ref), first: mark(state.ref)
+            };
+            read(known) and read(.group.record { second: mark(state.ref), first: mark(state.ref) })
+                and not state
+        }
+    "#;
+    let package = compile_with_protocols(source, &Default::default()).unwrap();
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn contextual_variant_and_symbol_literals_deliver_through_result_tags() {
+    let source = r#"
+        typealias Symbol = .Symbol'builtin;
+        enum State { waiting, ready(bool) }
+        enum ReadErr { Missing }
+        fn run() -> bool {
+            let state: !ReadErr ??State = .ready(true);
+            let empty: ?State = .waiting;
+            let key: !ReadErr ??Symbol = .waiting;
+            (state matches State.ready(true)??!) and (empty matches State.waiting?)
+                and (key matches .waiting??!)
+        }
+    "#;
     let package = compile_with_protocols(source, &Default::default()).unwrap();
     assert_eq!(
         luna::execution::interpret(&package, "run", 100_000).unwrap(),

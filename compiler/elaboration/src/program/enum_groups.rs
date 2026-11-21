@@ -1,6 +1,23 @@
 //! Enum groups organize leaf names without adding types, values or payloads.
 use super::*;
 
+// A literal Symbol has no independent call signature. Its constructor and
+// the literal itself need the destination before selecting a nominal member.
+// Projections can also name ordinary methods on the Symbol receiver.
+pub(super) fn has_bare_symbol_head(expr: &Expr<'_>) -> bool {
+    let head = match expr.kind {
+        H::Application(head, _) | H::ExtendedApplication(head, _) => head,
+        _ => expr,
+    };
+    matches!(
+        head.kind,
+        H::Lit(hir::Lit {
+            kind: hir::LitKind::Symbol(_),
+            ..
+        })
+    )
+}
+
 pub(super) fn symbol_path(mut expr: &Expr<'_>) -> Option<String> {
     let mut names = Vec::new();
     for _ in 0..128 {

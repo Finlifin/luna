@@ -519,3 +519,98 @@ fn computed_fields_receive_payload_context_through_error_and_optional_tags() {
     "#;
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn enum_clause_payloads_wait_for_their_namespace_and_preserve_source_effects() {
+    let source = r#"
+        enum Packet {
+            waiting,
+            ready(u8),
+            pair(u8, u8),
+            record { first: u8, second: u8, defaulted: u8 = 7 },
+        }
+        comptime fn event(name: Symbol, value: u8) -> u8 {
+            let generated = meta.StructBuilder.new(.name = name).Build();
+            value
+        }
+        comptime fn pair() -> Tuple<u8, u8> { (event(.Spread, 1), 2) }
+        fn keep(witness: T) -> ?T where T, .tag: ?T = null, .stamp: u8 = 0 {
+            if stamp == 9 { tag } else { null }
+        }
+        fn run() -> bool {
+            let witness = Packet.waiting;
+            let record = keep<.tag = .record {
+                second: event(.Second, 2), first: event(.First, 1)
+            }, .stamp = event(.AfterRecord, 9)>(witness);
+            let another = Packet.waiting;
+            let value = keep<.tag = if event(.Guard, 1) == 1 {
+                .pair(...pair())
+            } else { .ready(event(.Skipped, 0)) }, .stamp = event(.AfterPair, 9)>(another);
+            (record matches Packet.record { first: 1, second: 2, defaulted: 7 }?) and
+                (value matches Packet.pair(1, 2)?)
+        }
+    "#;
+    for program in [
+        source.to_string(),
+        source.replace("keep<.tag", "keep<Packet, .tag"),
+    ] {
+        let package = sysroot::compile(&program).unwrap();
+        let mut events: Vec<_> = package
+            .structs
+            .iter()
+            .filter_map(|item| {
+                let name = item.name.as_str();
+                matches!(
+                    name,
+                    "Second"
+                        | "First"
+                        | "AfterRecord"
+                        | "Guard"
+                        | "Spread"
+                        | "Skipped"
+                        | "AfterPair"
+                )
+                .then_some((item.declaration, name))
+            })
+            .collect();
+        events.sort_unstable();
+        assert_eq!(
+            events.into_iter().map(|(_, name)| name).collect::<Vec<_>>(),
+            [
+                "Second",
+                "First",
+                "AfterRecord",
+                "Guard",
+                "Spread",
+                "AfterPair"
+            ]
+        );
+        let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+        let mut vm =
+            comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+        assert_eq!(
+            vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+    let wrong = source.replace(".ready(event(.Skipped, 0))", ".ready(false)");
+    let error = sysroot::compile(&wrong).unwrap_err();
+    assert!(error.contains("u8") && error.contains("bool"), "{error}");
+}
+
+#[test]
+fn list_elements_resolve_enum_constructors_from_the_inferred_domain() {
+    let source = r#"
+        enum State { ready(u8), waiting }
+        comptime fn byte() -> u8 { 42 }
+        fn check(witness: T) -> T where T, .values: meta.List<T> = [] {
+            const first = values[0];
+            first
+        }
+        fn run() -> bool {
+            let witness = State.waiting;
+            check<.values = [.ready(byte())]>(witness) matches State.ready(42)
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}

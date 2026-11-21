@@ -61,6 +61,7 @@ mod interfaces;
 mod iteration;
 mod lexical_inputs;
 mod local_bindings;
+mod variant_fields;
 
 use local_bindings::{DeclarationBindings, LocalBindings, SourceBindings};
 
@@ -3231,27 +3232,18 @@ impl Checker<'_, '_> {
         let n::VariantShape::Named(names) = &variant.shape else {
             return Err(error(expr.span, "enum variant does not have named fields"));
         };
-        let mut supplied = BTreeMap::new();
-        for arg in args {
-            let Arg::Named(name, value) = arg else {
-                return Err(error(expr.span, "enum payload fields must be fully named"));
-            };
-            let slot = names
-                .iter()
-                .position(|n| n == name.name.as_str())
-                .ok_or_else(|| error(name.span, "unknown enum payload field"))?;
-            if supplied.insert(slot, *value).is_some() {
-                return Err(error(
-                    name.span,
-                    "enum payload field supplied more than once",
-                ));
-            }
+        let routed = variant_fields::named_inputs(names, args, expr.span)?;
+        let mut supplied = vec![None; names.len()];
+        let mut order = Vec::with_capacity(routed.len());
+        for (slot, value) in routed {
+            supplied[slot] = Some(self.expr(value, Some(&variant.fields[slot]))?);
+            order.push(slot);
         }
         let owner = self.source_declarations.owner(id);
-        let mut fields = Vec::new();
-        for (slot, ty) in variant.fields.iter().enumerate() {
-            fields.push(if let Some(value) = supplied.get(&slot) {
-                self.expr(value, Some(ty))?
+        let mut fields = Vec::with_capacity(names.len());
+        for (slot, value) in supplied.into_iter().enumerate() {
+            fields.push(if let Some(value) = value {
+                value
             } else {
                 let owner = owner.ok_or_else(|| {
                     error(
@@ -3273,23 +3265,11 @@ impl Checker<'_, '_> {
                 .map_err(|e| error(expr.span, e.to_string()))?
             });
         }
-        let ty = if fields.iter().any(|f| is_never(&f.ty)) {
-            p(P::Never)
-        } else {
-            ty
-        };
+        let value = self.finish_variant_fields(expr.span, ty, id, index, fields, &order)?;
         if let Some(expected) = expected {
-            self.require(&ty, expected, expr.span)?;
+            self.require(&value.ty, expected, expr.span)?;
         }
-        Ok(n::Expr {
-            ty,
-            source: source(expr.span),
-            kind: K::Variant {
-                declaration: id,
-                index,
-                fields,
-            },
-        })
+        Ok(value)
     }
 
     /// Infer a contextual enum payload without publishing candidate-local holes.
@@ -3397,6 +3377,7 @@ impl Checker<'_, '_> {
         };
         let mut inputs = vec![None; variant.fields.len()];
         let mut defaults = vec![None; variant.fields.len()];
+        let mut explicit_order = Vec::with_capacity(args.len());
         match (&variant.shape, &expr.kind) {
             (n::VariantShape::Tuple, H::Application(..)) => {
                 if args.iter().any(|arg| matches!(arg, Arg::Expand(_))) {
@@ -3460,23 +3441,13 @@ impl Checker<'_, '_> {
                         ));
                     };
                     inputs[slot] = Some(*value);
+                    explicit_order.push(slot);
                 }
             }
             (n::VariantShape::Named(names), H::ExtendedApplication(..)) => {
-                for arg in args {
-                    let Arg::Named(name, value) = arg else {
-                        return Err(error(expr.span, "enum payload fields must be fully named"));
-                    };
-                    let slot = names
-                        .iter()
-                        .position(|field| field == name.name.as_str())
-                        .ok_or_else(|| error(name.span, "unknown enum payload field"))?;
-                    if inputs[slot].replace(*value).is_some() {
-                        return Err(error(
-                            name.span,
-                            "enum payload field supplied more than once",
-                        ));
-                    }
+                for (slot, value) in variant_fields::named_inputs(names, args, expr.span)? {
+                    inputs[slot] = Some(value);
+                    explicit_order.push(slot);
                 }
                 for (slot, input) in inputs.iter().enumerate() {
                     if input.is_none() {
@@ -3530,10 +3501,8 @@ impl Checker<'_, '_> {
                 if defaults && (!self.numeric_defaults || progress) {
                     break;
                 }
-                for (slot, input) in inputs.iter().enumerate() {
-                    let Some(input) = input else {
-                        continue;
-                    };
+                for &slot in &explicit_order {
+                    let input = inputs[slot].expect("routed explicit variant payload");
                     if checked[slot].is_some() {
                         continue;
                     }
@@ -3600,19 +3569,14 @@ impl Checker<'_, '_> {
             self.require(&value.ty, &variants[index].fields[slot], expr.span)?;
             fields.push(value);
         }
-        Ok(n::Expr {
-            source: source(expr.span),
-            ty: if fields.iter().any(|value| is_never(&value.ty)) {
-                p(P::Never)
-            } else {
-                instance.result
-            },
-            kind: K::Variant {
-                declaration: id,
-                index,
-                fields,
-            },
-        })
+        self.finish_variant_fields(
+            expr.span,
+            instance.result,
+            id,
+            index,
+            fields,
+            &explicit_order,
+        )
     }
 
     fn construct_variant(
@@ -5634,22 +5598,11 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         use crate::calls::InputContext as C;
         if let C::Optional(payload_context) = context {
-            let directed = matches!(
-                &input.kind,
-                H::Null
-                    | H::Block(_)
-                    | H::If(..)
-                    | H::Match(..)
-                    | H::When(_)
-                    | H::Return(_)
-                    | H::EffectRequest(_)
-                    | H::ErrorHandle { .. }
-                    | H::EffectHandle(..)
-            ) || enum_groups::symbol_path(input).is_some()
-                || matches!(&input.kind, H::Application(head,_) | H::ExtendedApplication(head,_)
-                    if enum_groups::symbol_path(head).is_some());
-            if !directed {
-                if let Some(mut value) = self.argument_attempt(input, None, None)? {
+            let source = delivery::optional_input(input);
+            if source != delivery::OptionalInput::Whole {
+                if source == delivery::OptionalInput::Probe
+                    && let Some(mut value) = self.argument_attempt(input, None, None)?
+                {
                     if is_never(&value.ty) {
                         return Ok(value);
                     }
