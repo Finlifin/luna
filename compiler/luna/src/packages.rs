@@ -26,6 +26,7 @@ pub struct CompilationInputs {
     pub directories: Vec<(u32, PathBuf)>,
     pub discovery: Vec<SourceDiscovery>,
 }
+
 #[derive(Debug)]
 pub struct SourceDiscovery {
     pub resolution_id: u32,
@@ -36,6 +37,7 @@ pub struct SourceDiscovery {
     pub files: Vec<PathBuf>,
     pub directories: Vec<PathBuf>,
 }
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct DiscoveryChange {
     pub resolution_id: u32,
@@ -67,8 +69,30 @@ pub fn compile_with_inputs(
     protocols: &elaboration::program::Protocols,
     selectors: crate::protocols::type_constructors::Selectors<'_>,
 ) -> Result<(Artifact, CompilationInputs), String> {
+    compile_with_target_and_inputs(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        protocols,
+        selectors,
+        None,
+    )
+}
+
+/// Compile an explicit package set with explicit target data and retain
+/// observed source-map inputs.
+pub fn compile_with_target_and_inputs(
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    target: Option<nir::target::TargetData>,
+) -> Result<(Artifact, CompilationInputs), String> {
     let mut inputs = CompilationInputs::default();
-    let (artifact, _) = compile_observed(
+    let (artifact, _) = compile_observed_for_target(
         packages,
         dependencies,
         primary,
@@ -78,6 +102,7 @@ pub fn compile_with_inputs(
         protocols,
         selectors,
         Some(&mut inputs),
+        target,
     )?;
     Ok((artifact, inputs))
 }
@@ -87,10 +112,12 @@ struct ObservedLoader {
     root: PathBuf,
     text: Arc<std::sync::Mutex<BTreeMap<PathBuf, Arc<str>>>>,
 }
+
 impl rustc_span::source_map::FileLoader for ObservedLoader {
     fn file_exists(&self, path: &std::path::Path) -> bool {
         path.exists()
     }
+
     fn read_file(&self, path: &std::path::Path) -> std::io::Result<String> {
         let key = self.root.join(path);
         let mut text = self
@@ -107,6 +134,7 @@ impl rustc_span::source_map::FileLoader for ObservedLoader {
         Ok(value)
     }
 }
+
 impl ObservedLoader {
     fn get(&self, path: &std::path::Path) -> Result<Arc<str>, String> {
         self.text
@@ -233,7 +261,28 @@ pub fn compile_with_source_protocols(
     protocols: &elaboration::program::Protocols,
     selectors: crate::protocols::type_constructors::Selectors<'_>,
 ) -> Result<Artifact, String> {
-    compile_stage_with_selectors(
+    compile_with_source_protocols_for_target(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        protocols,
+        selectors,
+        None,
+    )
+}
+
+/// Bind driver-selected source protocols after resolution with explicit target data.
+pub fn compile_with_source_protocols_for_target(
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    target: Option<nir::target::TargetData>,
+) -> Result<Artifact, String> {
+    compile_observed_for_target(
         packages,
         dependencies,
         primary,
@@ -242,7 +291,10 @@ pub fn compile_with_source_protocols(
         None,
         protocols,
         selectors,
+        None,
+        target,
     )
+    .map(|(artifact, _)| artifact)
 }
 
 pub(crate) fn compile_stage_with_selectors(
@@ -579,7 +631,102 @@ pub type DefinitionExpander<'host> = dyn for<'hir> FnMut(
     ) -> Result<(), String>
     + 'host;
 
+pub(crate) struct ProviderCompileOutput {
+    pub(crate) nir: nir::program::Package,
+    pub(crate) module_tree: Arc<resolve::ModuleTree>,
+    pub(crate) package_scopes: std::collections::HashMap<u32, resolve::ScopeId>,
+    pub(crate) package_identities: BTreeMap<u32, u64>,
+}
+
+enum CoreArtifact {
+    Driver(Artifact),
+    Provider(ProviderCompileOutput),
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_for_macro_provider(
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    observed: Option<&mut CompilationInputs>,
+    target: Option<nir::target::TargetData>,
+    preludes: &[u32],
+    macro_host: &mut crate::macro_host::MacroHost,
+    virtual_sources: &BTreeMap<PathBuf, Arc<str>>,
+    force_directory_discovery_for_primary: bool,
+) -> Result<ProviderCompileOutput, String> {
+    let (artifact, _) = compile_packages_core(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        Emit::Nir,
+        None,
+        protocols,
+        selectors,
+        observed,
+        target,
+        preludes,
+        None,
+        None,
+        Some(macro_host),
+        virtual_sources,
+        force_directory_discovery_for_primary,
+        true,
+    )?;
+    match artifact {
+        CoreArtifact::Provider(out) => Ok(out),
+        CoreArtifact::Driver(_) => unreachable!(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn compile_with_expansion(
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    emit: Emit,
+    output: Option<&std::path::Path>,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    observed: Option<&mut CompilationInputs>,
+    target: Option<nir::target::TargetData>,
+    preludes: &[u32],
+    expansion: Option<(&mut usize, &mut DefinitionExpander<'_>)>,
+    builder_invocation: Option<&mut BuilderInvocation<'_>>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    let empty_virtual = BTreeMap::new();
+    let (artifact, protocols) = compile_packages_core(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        emit,
+        output,
+        protocols,
+        selectors,
+        observed,
+        target,
+        preludes,
+        expansion,
+        builder_invocation,
+        None,
+        &empty_virtual,
+        false,
+        false,
+    )?;
+    match artifact {
+        CoreArtifact::Driver(out) => Ok((out, protocols)),
+        CoreArtifact::Provider(_) => unreachable!(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_packages_core(
     packages: &[SourcePackage],
     dependencies: &[resolve::DependencyEdge],
     primary: u32,
@@ -593,7 +740,11 @@ fn compile_with_expansion(
     preludes: &[u32],
     expansion: Option<(&mut usize, &mut DefinitionExpander<'_>)>,
     builder_invocation: Option<&mut BuilderInvocation<'_>>,
-) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    macro_host: Option<&mut crate::macro_host::MacroHost>,
+    virtual_sources: &BTreeMap<PathBuf, Arc<str>>,
+    force_directory_discovery_for_primary: bool,
+    return_provider_output: bool,
+) -> Result<(CoreArtifact, elaboration::program::Protocols), String> {
     if emit == Emit::Ast {
         return Err("package sets support HIR or NIR, not AST output".into());
     }
@@ -604,7 +755,9 @@ fn compile_with_expansion(
     let mut resolution_ids = HashSet::new();
     let mut identities = HashSet::new();
     for package in packages {
-        protect_source_output(&package.entry, output)?;
+        if !virtual_sources.contains_key(&package.entry) {
+            protect_source_output(&package.entry, output)?;
+        }
         if package.name.is_empty() {
             return Err(format!(
                 "source package {} has an empty name",
@@ -638,8 +791,19 @@ fn compile_with_expansion(
     let boundaries = packages
         .iter()
         .map(|package| {
-            let entry = std::fs::canonicalize(&package.entry)
-                .map_err(|e| format!("cannot read package {}: {e}", package.name))?;
+            let entry = if virtual_sources.contains_key(&package.entry) {
+                let parent = package
+                    .entry
+                    .parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .unwrap_or(std::path::Path::new("."));
+                let canon_dir = std::fs::canonicalize(parent)
+                    .map_err(|e| format!("cannot read package {}: {e}", package.name))?;
+                return Ok((package.resolution_id, canon_dir));
+            } else {
+                std::fs::canonicalize(&package.entry)
+                    .map_err(|e| format!("cannot read package {}: {e}", package.name))?
+            };
             let path = if matches!(
                 package.entry.file_name().and_then(|n| n.to_str()),
                 Some("lib.fl" | "main.fl")
@@ -680,36 +844,57 @@ fn compile_with_expansion(
             .file_name()
             .ok_or("package entry has no filename")?;
         let mut vfs = vfs::Vfs::new(&package.name, directory.to_path_buf());
-        let source = session
-            .source_map
-            .load_file(&package.entry)
-            .map_err(|e| format!("cannot read package {}: {e}", package.name))?;
+        let is_virtual = virtual_sources.get(&package.entry);
+        let source = if let Some(text) = is_virtual {
+            session.source_map.new_source_file(
+                rustc_span::FileName::Real(rustc_span::RealFileName::LocalPath(
+                    package.entry.clone(),
+                )),
+                text.to_string(),
+            )
+        } else {
+            session
+                .source_map
+                .load_file(&package.entry)
+                .map_err(|e| format!("cannot read package {}: {e}", package.name))?
+        };
         if let Some(inputs) = observed.as_deref_mut() {
-            inputs.sources.push(SourceInput {
-                resolution_id: package.resolution_id,
-                identity: package.identity,
-                path: cwd.join(&package.entry),
-                raw_text: loader
-                    .as_ref()
-                    .expect("observation loader is installed")
-                    .get(&package.entry)?,
-                text: Arc::from(
-                    source
-                        .src
+            if is_virtual.is_none() {
+                inputs.sources.push(SourceInput {
+                    resolution_id: package.resolution_id,
+                    identity: package.identity,
+                    path: cwd.join(&package.entry),
+                    raw_text: loader
                         .as_ref()
-                        .ok_or("source text is unavailable")?
-                        .as_str(),
-                ),
-            });
+                        .expect("observation loader is installed")
+                        .get(&package.entry)?,
+                    text: Arc::from(
+                        source
+                            .src
+                            .as_ref()
+                            .ok_or("source text is unavailable")?
+                            .as_str(),
+                    ),
+                });
+            }
         }
         let root = vfs.add_file(filename.into(), source);
         vfs.selected_root = Some(root);
-        if matches!(filename.to_str(), Some("lib.fl" | "main.fl")) {
-            let exclusions: Vec<_> = boundaries
+        let scan_dir = matches!(filename.to_str(), Some("lib.fl" | "main.fl"))
+            || (force_directory_discovery_for_primary && package.resolution_id == primary);
+        if scan_dir {
+            let mut exclusions: Vec<_> = boundaries
                 .iter()
                 .filter(|(id, _)| *id != package.resolution_id)
                 .map(|(_, path)| path.clone())
                 .collect();
+            if is_virtual.is_none()
+                && !(force_directory_discovery_for_primary && package.resolution_id == primary)
+            {
+                if let Some(scripts_dir) = crate::macro_host::scripts_exclusion(&package.entry) {
+                    exclusions.push(scripts_dir);
+                }
+            }
             let (files, directories) = discover_sources_excluding(directory, &exclusions)?;
             if let Some(inputs) = observed.as_deref_mut() {
                 inputs.discovery.push(SourceDiscovery {
@@ -763,6 +948,32 @@ fn compile_with_expansion(
         }
         inputs.push((package.resolution_id, vfs));
     }
+
+    let mut owned_host;
+    let active_host = match macro_host {
+        Some(existing) => existing,
+        None => {
+            owned_host = crate::macro_host::MacroHost::new(
+                packages,
+                dependencies,
+                builtin,
+                protocols,
+                selectors,
+                target.clone(),
+                preludes,
+            );
+            &mut owned_host
+        }
+    };
+    active_host.expand_and_parse_packages(
+        &session.source_map,
+        &instance.diag_ctx,
+        packages,
+        dependencies,
+        &mut inputs,
+        observed,
+    )?;
+
     let mut references: Vec<_> = inputs.iter_mut().map(|(id, vfs)| (*id, vfs)).collect();
     let resolved = resolve::build_package_set_with_preludes(
         &session.source_map,
@@ -815,6 +1026,7 @@ fn compile_with_expansion(
         }
     }
     ast_lowering::set_providers(&mut instance.db.providers);
+    let module_tree_arc = Arc::clone(&input.module_tree);
     instance.set_hir_input(Arc::new(input));
     let hir = instance.enter(|compiler| compiler.hir_package());
     if instance.diag_ctx.has_errors() {
@@ -872,7 +1084,10 @@ fn compile_with_expansion(
         hir.package()
     };
     if emit == Emit::Hir {
-        return Ok((Artifact::Hir(package.dump_to_lisp()), protocols.clone()));
+        return Ok((
+            CoreArtifact::Driver(Artifact::Hir(package.dump_to_lisp())),
+            protocols.clone(),
+        ));
     }
     let identities: BTreeMap<_, _> = packages
         .iter()
@@ -902,7 +1117,9 @@ fn compile_with_expansion(
             elaboration::program::attributes::inspect(package, &identities, &protocols, target)
                 .map_err(|error| format!("multi-package attribute inspection failed: {error}"))?;
         return Ok((
-            crate::frontend::attribute_artifact(package, attributes, emit)?,
+            CoreArtifact::Driver(crate::frontend::attribute_artifact(
+                package, attributes, emit,
+            )?),
             protocols,
         ));
     }
@@ -924,7 +1141,18 @@ fn compile_with_expansion(
     } else {
         nir
     };
-    Ok((Artifact::Nir(nir), protocols))
+    if return_provider_output {
+        return Ok((
+            CoreArtifact::Provider(ProviderCompileOutput {
+                nir,
+                module_tree: module_tree_arc,
+                package_scopes: resolved.package_scopes,
+                package_identities: identities,
+            }),
+            protocols,
+        ));
+    }
+    Ok((CoreArtifact::Driver(Artifact::Nir(nir)), protocols))
 }
 
 pub(crate) fn protect_source_output(
@@ -1016,6 +1244,7 @@ impl CompilationInputs {
         }
         Ok(changes)
     }
+
     /// Compare current file bytes with the exact inputs originally loaded.
     /// Missing files are changes; other I/O failures remain errors. This does
     /// not validate directory membership, request options or atomicity.

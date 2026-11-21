@@ -117,4 +117,46 @@ impl InvocationScope<'_> {
             message
         })
     }
+
+    pub(super) fn execute_declaration(
+        self,
+        declaration: nir::DeclarationId,
+        args: Vec<Value>,
+        mut session: Option<&mut comptime_interpretor::CodeSession>,
+        stats: &mut InvocationStats,
+    ) -> Result<Value, String> {
+        let mut budget = self.budget;
+        let package = self.package;
+        let interpreter = match session.as_deref_mut() {
+            Some(session) => Interpreter::for_comptime_resolving_in_session(
+                package,
+                session,
+                self.resolvers,
+                &mut budget,
+            ),
+            None => Interpreter::for_comptime_resolving_in_budget(
+                package,
+                &[],
+                &[],
+                &[],
+                self.resolvers,
+                &mut budget,
+            ),
+        };
+        let mut interpreter =
+            interpreter.map_err(|error| format!("cannot prepare comptime invocation: {error}"))?;
+        let operation = |vm: &mut Interpreter<'_>| {
+            vm.start_invocation(Value::Function(declaration), args)?
+                .run_to_completion()
+        };
+        let result = match session {
+            Some(session) => interpreter.with_code_session(session, operation),
+            None => operation(&mut interpreter),
+        };
+        *stats = InvocationStats {
+            bytecode_compilations: interpreter.bytecode_compilations(),
+            bytecode_invocations: interpreter.bytecode_invocations(),
+        };
+        result.map_err(|error| format!("comptime invocation failed: {error}"))
+    }
 }

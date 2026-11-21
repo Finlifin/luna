@@ -41,11 +41,21 @@ pub fn expand_template_macros(
     provenance: &mut ExpansionMap,
     budget: &mut MacroBudget,
 ) -> Result<(Vec<MacroToken>, bool), MacroError> {
+    expand_tokens_with_host(&input, None, provenance, budget)
+}
+
+pub(crate) fn expand_tokens_with_host(
+    input: &[MacroToken],
+    construction: Option<&mut crate::construction::ConstructionHost<'_, '_>>,
+    provenance: &mut ExpansionMap,
+    budget: &mut MacroBudget,
+) -> Result<(Vec<MacroToken>, bool), MacroError> {
     let mut env = HashMap::new();
     let mut expanded_any = false;
-    let output = expand_slice(
-        &input,
+    let output = expand_slice_with_construction(
+        input,
         &mut env,
+        construction,
         provenance,
         budget,
         0,
@@ -55,9 +65,58 @@ pub fn expand_template_macros(
     Ok((output, expanded_any))
 }
 
-fn expand_slice(
+#[allow(clippy::too_many_arguments)]
+fn finish_expanded_replacement(
+    mut substituted: Vec<MacroToken>,
+    exp_id: ExpansionId,
+    trailing_spacing: TokenSpacing,
+    env: &mut HashMap<String, TemplateMacroDef>,
+    construction: Option<&mut crate::construction::ConstructionHost<'_, '_>>,
+    provenance: &mut ExpansionMap,
+    budget: &mut MacroBudget,
+    depth: usize,
+    expanded_any: &mut bool,
+    out: &mut Vec<MacroToken>,
+) -> Result<(), MacroError> {
+    for tok in &mut substituted {
+        if tok.expansion_id.is_none() {
+            tok.expansion_id = Some(exp_id);
+        }
+    }
+
+    let mut recursively_expanded = expand_slice_with_construction(
+        &substituted,
+        env,
+        construction,
+        provenance,
+        budget,
+        depth + 1,
+        Some(exp_id),
+        expanded_any,
+    )?;
+    let propagated_spacing = if trailing_spacing == TokenSpacing::Separated {
+        TokenSpacing::Alone
+    } else {
+        trailing_spacing
+    };
+    if let Some(last) = recursively_expanded.last_mut() {
+        if last.spacing != TokenSpacing::Separated {
+            last.spacing = propagated_spacing;
+        }
+    } else if let Some(prev_out) = out.last_mut() {
+        if prev_out.spacing == TokenSpacing::Joint && propagated_spacing != TokenSpacing::Joint {
+            prev_out.spacing = propagated_spacing;
+        }
+    }
+    out.extend(recursively_expanded);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_slice_with_construction(
     tokens: &[MacroToken],
     env: &mut HashMap<String, TemplateMacroDef>,
+    mut construction: Option<&mut crate::construction::ConstructionHost<'_, '_>>,
     provenance: &mut ExpansionMap,
     budget: &mut MacroBudget,
     depth: usize,
@@ -66,6 +125,9 @@ fn expand_slice(
 ) -> Result<Vec<MacroToken>, MacroError> {
     let mut out = Vec::with_capacity(tokens.len());
     let mut cursor = 0usize;
+    let mut in_use_stmt = false;
+    let mut use_brace_depth = 0usize;
+    let mut use_can_end = false;
 
     while cursor < tokens.len() {
         budget
@@ -74,7 +136,7 @@ fn expand_slice(
 
         let tok = &tokens[cursor];
 
-        // Preserve `{{ ... }}` token buffers verbatim without interpreting `$` as template calls.
+        // Preserve `{{ ... }}` token buffers verbatim without interpreting `$` or `@` inside them.
         if is_token_buffer_open(tokens, cursor, out.last()) {
             if let Some(end) = find_token_buffer_end(tokens, cursor) {
                 budget
@@ -92,6 +154,30 @@ fn expand_slice(
             *expanded_any = true;
             cursor = next_cursor;
             continue;
+        }
+
+        if tok.kind == TokenKind::At && !in_use_stmt {
+            if let Some(host) = construction.as_deref_mut() {
+                *expanded_any = true;
+                let (produced, exp_id, trailing_spacing, next_cursor) =
+                    crate::construction::expand_at_call(
+                        tokens, cursor, host, provenance, budget, depth, parent_exp,
+                    )?;
+                finish_expanded_replacement(
+                    produced,
+                    exp_id,
+                    trailing_spacing,
+                    env,
+                    Some(host),
+                    provenance,
+                    budget,
+                    depth,
+                    expanded_any,
+                    &mut out,
+                )?;
+                cursor = next_cursor;
+                continue;
+            }
         }
 
         if tok.kind == TokenKind::Dollar {
@@ -143,50 +229,70 @@ fn expand_slice(
             let (substituted, exp_id, trailing_spacing, next_cursor) =
                 instantiate_call(&def, tokens, cursor, provenance, parent_exp, budget)?;
 
-            let tagged: Vec<MacroToken> = substituted
-                .into_iter()
-                .map(|mut t| {
-                    if t.expansion_id.is_none() {
-                        t.expansion_id = Some(exp_id);
-                    }
-                    t
-                })
-                .collect();
-
-            let mut recursively_expanded = expand_slice(
-                &tagged,
+            finish_expanded_replacement(
+                substituted,
+                exp_id,
+                trailing_spacing,
                 env,
+                construction.as_deref_mut(),
                 provenance,
                 budget,
-                depth + 1,
-                Some(exp_id),
+                depth,
                 expanded_any,
+                &mut out,
             )?;
-            let propagated_spacing = if trailing_spacing == TokenSpacing::Separated {
-                TokenSpacing::Alone
-            } else {
-                trailing_spacing
-            };
-            if let Some(last) = recursively_expanded.last_mut() {
-                if last.spacing != TokenSpacing::Separated {
-                    last.spacing = propagated_spacing;
-                }
-            } else if let Some(prev_out) = out.last_mut() {
-                if prev_out.spacing == TokenSpacing::Joint
-                    && propagated_spacing != TokenSpacing::Joint
-                {
-                    prev_out.spacing = propagated_spacing;
-                }
-            }
-            out.extend(recursively_expanded);
             cursor = next_cursor;
             continue;
+        }
+
+        if !in_use_stmt && tok.kind == TokenKind::Use {
+            let after_dot = out.last().is_some_and(|t| t.kind == TokenKind::Dot);
+            if !after_dot {
+                in_use_stmt = true;
+                use_brace_depth = 0;
+                use_can_end = false;
+            }
+        } else if in_use_stmt {
+            match tok.kind {
+                TokenKind::LBrace => {
+                    use_brace_depth += 1;
+                    use_can_end = false;
+                }
+                TokenKind::RBrace => {
+                    if use_brace_depth > 0 {
+                        use_brace_depth -= 1;
+                        if use_brace_depth == 0 {
+                            in_use_stmt = false;
+                            use_can_end = false;
+                        }
+                    }
+                }
+                TokenKind::Semi if use_brace_depth == 0 => {
+                    in_use_stmt = false;
+                    use_can_end = false;
+                }
+                TokenKind::Dot | TokenKind::Comma | TokenKind::At | TokenKind::As => {
+                    use_can_end = false;
+                }
+                TokenKind::Id | TokenKind::Star | TokenKind::SeparatedStar => {
+                    use_can_end = true;
+                }
+                _ => {}
+            }
         }
 
         budget
             .consume_tokens(1)
             .map_err(|err| err.with_chain_if_empty(provenance, parent_exp, tok.span))?;
         out.push(tok.clone());
+        if in_use_stmt
+            && use_brace_depth == 0
+            && use_can_end
+            && tok.spacing == TokenSpacing::Newline
+        {
+            in_use_stmt = false;
+            use_can_end = false;
+        }
         cursor += 1;
     }
 

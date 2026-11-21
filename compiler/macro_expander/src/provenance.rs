@@ -271,7 +271,7 @@ pub fn escape_sexp_str(value: &str) -> String {
     out
 }
 
-pub(crate) fn is_separated_kind(kind: TokenKind) -> bool {
+pub fn is_separated_kind(kind: TokenKind) -> bool {
     matches!(
         kind,
         TokenKind::SeparatedPlus

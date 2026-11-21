@@ -396,7 +396,10 @@ fn compile_bound_for_target_with_invocation(
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(std::path::Path::new("."));
-        let (files, directories) = discover_sources(directory)?;
+        let exclusions: Vec<_> = crate::macro_host::scripts_exclusion(&options.input)
+            .into_iter()
+            .collect();
+        let (files, directories) = discover_sources_excluding(directory, &exclusions)?;
         instance.vfs_mut().source_directories = directories;
         for relative in files {
             if relative == std::path::Path::new(options.input.file_name().unwrap()) {
@@ -664,12 +667,6 @@ fn compile_sysroot(
         &preludes,
         invocation,
     )
-}
-
-pub(crate) fn discover_sources(
-    root: &std::path::Path,
-) -> Result<(Vec<std::path::PathBuf>, Vec<std::path::PathBuf>), String> {
-    discover_sources_excluding(root, &[])
 }
 
 /// Exclusions are canonical paths explicitly owned by other supplied packages.

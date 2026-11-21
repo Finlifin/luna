@@ -1,4 +1,5 @@
 //! Flurry macro expansion engine (template macros, construction macros, provenance, and budgets).
+pub mod construction;
 pub mod imports;
 pub mod materialize;
 pub mod provenance;
@@ -11,8 +12,9 @@ use lex::{LexError, Symbol, Token, TokenKind};
 pub use materialize::{ExpandedFile, materialize_expanded, tokens_to_macro_tokens};
 pub use provenance::{
     ExpansionId, ExpansionKind, ExpansionMap, ExpansionRecord, MacroToken, TokenSpacing,
-    escape_sexp_str,
+    escape_sexp_str, is_separated_kind,
 };
+pub use raw_source::{ReferencedMacros, scan_referenced_macro_roots};
 pub use registry::{
     AstNodeKind, ExpansionContext, MacroDescriptor, MacroExecutor, MacroId, MacroInputMode,
     MacroRegistry, MacroVisibility,
@@ -338,7 +340,7 @@ pub fn expand_source_file(
 /// Pre-lexing full macro expansion entrypoint for one source file.
 ///
 /// Runs the Mode 4 / `@use` raw-source scanner before normal Flurry lexing so raw macro
-/// bodies never fail ordinary lexing, then runs file-local template macro expansion.
+/// bodies never fail ordinary lexing, then runs unified template + Mode 3 (`^macro3`) expansion.
 pub fn expand_source_file_with_context(
     source_map: &SourceMap,
     source_file: &SourceFile,
@@ -348,7 +350,7 @@ pub fn expand_source_file_with_context(
     let src = source_file.src.as_deref().map(String::as_str).unwrap_or("");
     let mut provenance = ExpansionMap::new();
 
-    if src.contains('@') {
+    let (raw_tokens, macro_scope, raw_modified) = if src.contains('@') {
         let raw_pass = raw_source::process_raw_source_and_imports(
             src,
             source_file.start_pos,
@@ -356,7 +358,6 @@ pub fn expand_source_file_with_context(
             &mut provenance,
             budget,
         )?;
-
         if raw_pass.modified {
             if !raw_pass.lex_errors.is_empty() {
                 return Ok((
@@ -371,22 +372,38 @@ pub fn expand_source_file_with_context(
                     raw_pass.lex_errors,
                 ));
             }
-            let has_template_syntax = raw_pass
-                .tokens
-                .iter()
-                .any(|tok| matches!(tok.kind, TokenKind::Define | TokenKind::Dollar));
-            let final_tokens = if has_template_syntax {
-                let (after_tmpl, _) =
-                    template::expand_template_macros(raw_pass.tokens, &mut provenance, budget)?;
-                after_tmpl
-            } else {
-                raw_pass.tokens
-            };
-            return Ok((
-                materialize_expanded(source_map, source_file, &final_tokens, provenance),
-                Vec::new(),
-            ));
+            (Some(raw_pass.tokens), raw_pass.scope, true)
+        } else {
+            (None, raw_pass.scope, false)
         }
+    } else {
+        (None, imports::MacroScope::new(), false)
+    };
+
+    if let Some(macro_tokens) = raw_tokens {
+        let needs_token_pass = src.contains('@')
+            || macro_tokens.iter().any(|tok| {
+                matches!(
+                    tok.kind,
+                    TokenKind::Define | TokenKind::Dollar | TokenKind::At
+                )
+            });
+        let final_tokens = if needs_token_pass {
+            let (after_tokens, _) = construction::expand_all_tokens(
+                macro_tokens,
+                &macro_scope,
+                ctx,
+                &mut provenance,
+                budget,
+            )?;
+            after_tokens
+        } else {
+            macro_tokens
+        };
+        return Ok((
+            materialize_expanded(source_map, source_file, &final_tokens, provenance),
+            Vec::new(),
+        ));
     }
 
     let (tokens, symbols, lex_errors) = lex::lex(src, source_file.start_pos);
@@ -404,6 +421,46 @@ pub fn expand_source_file_with_context(
         ));
     }
 
-    let expanded = expand_source(source_map, source_file, tokens, symbols, budget)?;
-    Ok((expanded, Vec::new()))
+    let needs_token_pass = src.contains('@')
+        || tokens.iter().any(|tok| {
+            matches!(
+                tok.kind,
+                TokenKind::Define | TokenKind::Dollar | TokenKind::At
+            )
+        });
+    if !needs_token_pass {
+        return Ok((
+            ExpandedFile {
+                tokens,
+                symbols,
+                start_pos: source_file.start_pos,
+                expanded: false,
+                provenance,
+                source_text: None,
+            },
+            Vec::new(),
+        ));
+    }
+
+    let macro_tokens = tokens_to_macro_tokens(&tokens, src, source_file.start_pos);
+    let (final_tokens, token_expanded) =
+        construction::expand_all_tokens(macro_tokens, &macro_scope, ctx, &mut provenance, budget)?;
+    if !raw_modified && !token_expanded {
+        return Ok((
+            ExpandedFile {
+                tokens,
+                symbols,
+                start_pos: source_file.start_pos,
+                expanded: false,
+                provenance,
+                source_text: None,
+            },
+            Vec::new(),
+        ));
+    }
+
+    Ok((
+        materialize_expanded(source_map, source_file, &final_tokens, provenance),
+        Vec::new(),
+    ))
 }

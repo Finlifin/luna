@@ -1,6 +1,7 @@
 pub mod cli;
 pub mod frontend;
 pub mod invocation;
+pub mod macro_host;
 
 pub mod execution;
 pub mod instantiation;

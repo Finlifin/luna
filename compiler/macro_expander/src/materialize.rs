@@ -201,7 +201,31 @@ fn needs_safety_space(prev: &MacroToken, curr: &MacroToken) -> bool {
     {
         return true;
     }
-    false
+    // Avoid fusing two joint punctuation tokens into a different compound token.
+    matches!(
+        (prev.kind, curr.kind),
+        (
+            TokenKind::Eq,
+            TokenKind::Eq | TokenKind::EqEq | TokenKind::Gt
+        ) | (TokenKind::EqEq, TokenKind::Eq)
+            | (TokenKind::Plus, TokenKind::Plus | TokenKind::Eq)
+            | (TokenKind::Minus, TokenKind::Eq | TokenKind::Gt)
+            | (
+                TokenKind::Star
+                    | TokenKind::Slash
+                    | TokenKind::Percent
+                    | TokenKind::Bang
+                    | TokenKind::Lt
+                    | TokenKind::Gt,
+                TokenKind::Eq
+            )
+            | (
+                TokenKind::Colon,
+                TokenKind::Colon | TokenKind::Tilde | TokenKind::Minus
+            )
+            | (TokenKind::Tilde | TokenKind::Pipe, TokenKind::Gt)
+            | (TokenKind::Dollar, TokenKind::Dollar)
+    )
 }
 
 /// Materialize `macro_tokens` into a synthetic `SourceFile` registered in `source_map`.
@@ -224,12 +248,17 @@ pub fn materialize_expanded(
                 TokenSpacing::Newline => expanded_src.push('\n'),
                 TokenSpacing::Alone | TokenSpacing::Separated => expanded_src.push(' '),
                 TokenSpacing::Joint => {
-                    if mt.spacing == TokenSpacing::Separated || needs_safety_space(prev, mt) {
+                    if mt.spacing == TokenSpacing::Separated
+                        || crate::provenance::is_separated_kind(mt.kind)
+                        || needs_safety_space(prev, mt)
+                    {
                         expanded_src.push(' ');
                     }
                 }
             }
-        } else if mt.spacing == TokenSpacing::Separated {
+        } else if mt.spacing == TokenSpacing::Separated
+            || crate::provenance::is_separated_kind(mt.kind)
+        {
             expanded_src.push(' ');
         }
 

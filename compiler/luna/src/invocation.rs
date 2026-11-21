@@ -1,6 +1,7 @@
 //! Explicit, bounded invocation of completed comptime declarations.
 mod entry;
 mod scope;
+
 pub use crate::memoization::Invocation as MemoizedInvocation;
 use comptime_interpretor::{Budget, Value};
 use elaboration::materialization::{DeclarationSnapshot, DeclarationSource};
@@ -17,11 +18,13 @@ pub struct PreparedInvocation {
     code: comptime_interpretor::CodeSession,
     last_stats: InvocationStats,
 }
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct InvocationStats {
     pub bytecode_compilations: usize,
     pub bytecode_invocations: usize,
 }
+
 impl PreparedInvocation {
     pub fn new(
         package: std::sync::Arc<Package>,
@@ -53,6 +56,7 @@ impl PreparedInvocation {
             last_stats: InvocationStats::default(),
         })
     }
+
     pub fn invoke(&mut self, fuel: u64) -> Result<Value, String> {
         self.last_stats = InvocationStats::default();
         if fuel == 0 {
@@ -68,9 +72,105 @@ impl PreparedInvocation {
             )
         })
     }
+
     pub fn last_stats(&self) -> InvocationStats {
         self.last_stats
     }
+}
+
+/// Reusable invocation session for a compiled macro provider package.
+pub struct MacroPackageSession {
+    source: DeclarationSnapshot,
+    code: comptime_interpretor::CodeSession,
+}
+
+impl MacroPackageSession {
+    pub fn new(package: std::sync::Arc<Package>) -> Self {
+        let code = comptime_interpretor::CodeSession::new(package.clone());
+        Self {
+            source: DeclarationSnapshot::new(package),
+            code,
+        }
+    }
+
+    pub fn package(&self) -> &Package {
+        DeclarationSource::Snapshot(&self.source).package()
+    }
+
+    pub fn invoke_declaration(
+        &mut self,
+        declaration: DeclarationId,
+        args: Vec<Value>,
+        fuel: u64,
+    ) -> Result<Value, String> {
+        if fuel == 0 {
+            return Err("invocation fuel must be positive".into());
+        }
+        validate_declaration_callable(self.package(), declaration, args.len())?;
+        InvocationScope::with(DeclarationSource::Snapshot(&self.source), fuel, |scope| {
+            scope.execute_declaration(
+                declaration,
+                args,
+                Some(&mut self.code),
+                &mut InvocationStats::default(),
+            )
+        })
+    }
+}
+
+pub fn invoke_declaration_with_args(
+    package: &Package,
+    declaration: DeclarationId,
+    args: Vec<Value>,
+    fuel: u64,
+) -> Result<Value, String> {
+    if fuel == 0 {
+        return Err("invocation fuel must be positive".into());
+    }
+    validate_declaration_callable(package, declaration, args.len())?;
+    InvocationScope::with(DeclarationSource::Borrowed(package), fuel, |scope| {
+        scope.execute_declaration(declaration, args, None, &mut InvocationStats::default())
+    })
+}
+
+fn validate_declaration_callable(
+    package: &Package,
+    declaration: DeclarationId,
+    arg_count: usize,
+) -> Result<(), String> {
+    let function = package
+        .functions
+        .iter()
+        .find(|f| f.interface.declaration == declaration)
+        .ok_or_else(|| format!("missing comptime declaration {declaration}"))?;
+    let iface = &function.interface;
+    if iface.phase != FunctionPhase::Comptime {
+        return Err(format!(
+            "declaration '{}' ({declaration}) is not a comptime function",
+            iface.name
+        ));
+    }
+    if !iface.type_parameters.is_empty() {
+        return Err(format!(
+            "macro handler '{}' cannot have generic type parameters",
+            iface.name
+        ));
+    }
+    if !iface.env_parameters.is_empty() {
+        return Err(format!(
+            "macro handler '{}' cannot have runtime environment parameters",
+            iface.name
+        ));
+    }
+    if iface.parameters.len() != arg_count {
+        return Err(format!(
+            "macro handler '{}' expects {} argument(s), got {}",
+            iface.name,
+            iface.parameters.len(),
+            arg_count
+        ));
+    }
+    Ok(())
 }
 
 pub fn invoke(package: &Package, entry: &str, fuel: u64) -> Result<Value, String> {
