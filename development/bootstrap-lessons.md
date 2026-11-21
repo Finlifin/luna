@@ -169,3 +169,9 @@ VM 在同一发布器中检查三种定义的形成条件及有限存储。对�
 `empty(comptime ty: Type) -> ?ty` 的签名可以预先检查；在一次调用的参数准入后，VM 才持有该次调用完整的结果域。即使两个调用都返回 null，使用 bool 和 char 作实参的调用也应分别交付 `?bool` 和 `?char`。解释器的可选值本身带类型，但宿主若从值的表示反查声明的结果域，就会把每种值的存储方式变成跨阶段协议的一部分。
 
 当前 VM 在正文返回、结果检查、后置条件和清理全部成功后，移动该帧的值和结果域。嵌套调用先把值交还其父帧；宿主最后接收根调用的结果。Elaboration 把交付的类型从当前调用的作用域换回调用者的作用域，预先保存的类型仍供执行前的检查使用。开放正文中途请求 Type 并恢复源码检查的位置仍需保存独立的检查续体。只保存结果无法重建已经发生的写入、提前返回或仍在等待的实参。[VM 调用会话](../compiler/comptime_interpretor/src/invocation/host.rs) · [elaboration 的调用结果](../compiler/elaboration/src/program/required/prepared.rs)
+
+### 在原调用的实参槽交付数据
+
+当 `accept(Selected(flag), .next = mark())` 的后续检查取决于第一个实参，VM 可以在它存入形参槽后交还控制。此时 `Selected` 已返回，`mark` 尚未执行。若后面的实参提前返回，先前的交付仍然有效，未填的槽也不会补发。递归可以让位于同一源码位置的两次调用同时等待不同实参；关联多个槽的检查器需要持有某一次动态调用的身份。当前只在接收者索取身份时为该调用分配令牌。
+
+宿主可以借用当前槽，并按 VM 的剩余预算将可导出的数据冻结在该次调用的作用域里。Any 保留描述字段，comptime 值引用继续由 VM 持有。当前接口适用于已有字节码的普通调用。开放正文若必须知道某个实参才能生成后续代码，仍需把源码检查续体和可执行前缀一起交给驱动；仅凭这条交付通道还无法启动那个前缀。[调用会话](../compiler/comptime_interpretor/src/invocation/host.rs) · [真实 sysroot 用例](../compiler/luna/tests/ordinary_input_identity.rs)

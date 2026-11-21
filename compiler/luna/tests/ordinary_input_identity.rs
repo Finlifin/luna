@@ -1331,3 +1331,153 @@ fn an_opaque_selector_cannot_preserve_a_type_from_before_its_write() {
         "{failure}"
     );
 }
+
+#[test]
+fn source_operand_delivery_stops_before_later_arguments_and_keeps_original_control() {
+    use comptime_interpretor::{InvocationProgress, OperandProgress};
+    use nir::{Primitive, Term};
+
+    let package = sysroot::compile(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn mark() -> bool { true }
+        comptime fn accept(comptime ty: Type, .flag: bool = mark()) -> bool { flag }
+        comptime fn execute(flag: bool) -> bool { accept(Selected(flag)) }
+        comptime fn escape() -> bool {
+            accept(Selected(true), .flag = do { return false; mark() })
+        }
+        comptime fn described() -> bool { accept(Any) }
+    ",
+    )
+    .unwrap();
+    let id = |name| sysroot::source_function(&package, name);
+    sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, false, |vm| {
+        let entries = |vm: &comptime_interpretor::Interpreter<'_>, name| {
+            vm.events()
+                .iter()
+                .filter(
+                    |event| matches!(event, Event::EnterFunction(target) if *target == id(name)),
+                )
+                .count()
+        };
+        // Drop the VM continuation just after the first operand. Neither the
+        // omitted default nor the target has run, and the VM can be reused.
+        {
+            let mut active = vm
+                .start_invocation(Value::Function(id("execute")), vec![Value::Bool(true)])
+                .unwrap();
+            loop {
+                match active.poll_with_operands().unwrap() {
+                    OperandProgress::Invocation(InvocationProgress::Running) => {}
+                    OperandProgress::Supplied(input) => {
+                        if input.named_callee() == Some((id("accept"), &[])) {
+                            assert_eq!(input.parameter, 0);
+                            assert_eq!(
+                                input.freeze_data().unwrap().into_concrete(),
+                                Some(Term::Primitive(Primitive::Bool))
+                            );
+                            break;
+                        }
+                    }
+                    _ => panic!("expected the first accept operand"),
+                }
+            }
+        }
+        assert_eq!(entries(vm, "Selected"), 1);
+        assert_eq!(entries(vm, "mark"), 0);
+        assert_eq!(entries(vm, "accept"), 0);
+        for (entry, args, slots, result) in [
+            (
+                "execute",
+                vec![Value::Bool(false)],
+                vec![
+                    Some(Term::Primitive(Primitive::Char)),
+                    Some(Term::Bool(true)),
+                ],
+                true,
+            ),
+            (
+                "escape",
+                vec![],
+                vec![Some(Term::Primitive(Primitive::Bool))],
+                false,
+            ),
+            (
+                "described",
+                vec![],
+                vec![None, Some(Term::Bool(true))],
+                true,
+            ),
+        ] {
+            let mut active = vm
+                .start_invocation(Value::Function(id(entry)), args)
+                .unwrap();
+            let mut seen = Vec::new();
+            loop {
+                match active.poll_with_operands().unwrap() {
+                    OperandProgress::Invocation(InvocationProgress::Running) => {}
+                    OperandProgress::Supplied(input) => {
+                        if input.named_callee() == Some((id("accept"), &[])) {
+                            assert_eq!(input.parameter, seen.len());
+                            seen.push(input.freeze_data().unwrap().into_concrete());
+                        }
+                    }
+                    OperandProgress::Invocation(InvocationProgress::Complete(output)) => {
+                        assert_eq!(output.value, Value::Bool(result));
+                        assert_eq!(seen, slots, "{entry}");
+                        break;
+                    }
+                    _ => panic!("unexpected host work in {entry}"),
+                }
+            }
+        }
+        assert_eq!(entries(vm, "Selected"), 3);
+        assert_eq!(entries(vm, "mark"), 2);
+        assert_eq!(entries(vm, "accept"), 2);
+    });
+}
+
+#[test]
+fn source_operand_delivery_distinguishes_recursive_calls_at_the_same_site() {
+    use comptime_interpretor::{InvocationProgress, OperandProgress};
+    let package = sysroot::compile(
+        "
+        comptime fn accept(first: bool, second: bool) -> bool { first and second }
+        comptime fn recurse(flag: bool) -> bool {
+            accept(true, if flag { recurse(false) } else { true })
+        }
+    ",
+    )
+    .unwrap();
+    let id = |name| sysroot::source_function(&package, name);
+    sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, false, |vm| {
+        let mut active = vm
+            .start_invocation(Value::Function(id("recurse")), vec![Value::Bool(true)])
+            .unwrap();
+        let mut slots = Vec::new();
+        loop {
+            match active.poll_with_operands().unwrap() {
+                OperandProgress::Invocation(InvocationProgress::Running) => {}
+                OperandProgress::Supplied(mut input) => {
+                    if input.named_callee() == Some((id("accept"), &[])) {
+                        slots.push((input.source, input.parameter, input.call()));
+                    }
+                }
+                OperandProgress::Invocation(InvocationProgress::Complete(output)) => {
+                    assert_eq!(output.value, Value::Bool(true));
+                    break;
+                }
+                _ => panic!("unexpected host request"),
+            }
+        }
+        assert_eq!(slots.len(), 4);
+        assert!(slots.iter().all(|slot| slot.0 == slots[0].0));
+        assert_eq!(
+            slots.iter().map(|slot| slot.1).collect::<Vec<_>>(),
+            [0, 0, 1, 1]
+        );
+        assert_ne!(slots[0].2, slots[1].2);
+        assert_eq!(slots[0].2, slots[3].2);
+        assert_eq!(slots[1].2, slots[2].2);
+    });
+}

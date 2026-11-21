@@ -11,6 +11,19 @@ mod interface;
 mod preparation;
 pub(super) use preparation::{MethodContinuation, MethodWait, Preparation};
 
+/// Stack-local output of one driver poll. The instruction supplies this
+/// location only after successfully storing the value in the active call.
+pub(super) enum OperandPoll {
+    Skip,
+    Next,
+    Supplied(OperandSite),
+}
+
+pub(super) struct OperandSite {
+    pub(super) source: SourceRange,
+    pub(super) parameter: usize,
+}
+
 pub(super) struct Frame {
     code: Arc<Program>,
     environment: Environment,
@@ -110,6 +123,18 @@ impl Frame {
         Ok(scope.instance)
     }
 
+    pub(super) fn delivered_operand(
+        &mut self,
+        slot: usize,
+    ) -> (&Value, &Value, &mut Option<OperandCall>) {
+        let (_, call) = self.calls.last_mut().expect("suspended call owner");
+        (
+            &call.callee,
+            call.operands.supplied(slot).expect("supplied call slot"),
+            &mut call.operand_identity,
+        )
+    }
+
     fn current_call(&mut self, register: usize) -> Option<&mut PendingCall> {
         self.calls
             .last_mut()
@@ -168,6 +193,7 @@ enum Waiting {
 
 struct PendingCall {
     callee: Value,
+    operand_identity: Option<OperandCall>,
     trait_defaults: Option<method_catalog::Inputs<Term>>,
     interface: Option<(nir::contracts::ProgramContract, Vec<LocalId>)>,
     operands: call_operands::CallOperands,
@@ -1064,15 +1090,25 @@ impl<'a> Interpreter<'a> {
         Ok(frame)
     }
 
+    #[cfg(test)]
     pub(super) fn resume_frame(
         &mut self,
         frame: &mut Frame,
         quantum: usize,
     ) -> Result<Progress, Error> {
+        self.resume_frame_until_operand(frame, quantum, &mut OperandPoll::Skip)
+    }
+
+    pub(super) fn resume_frame_until_operand(
+        &mut self,
+        frame: &mut Frame,
+        quantum: usize,
+        operand: &mut OperandPoll,
+    ) -> Result<Progress, Error> {
         if frame.terminal || frame.waiting.is_some() {
             return Err(self.failure(ErrorKind::InvalidControlFlow, None));
         }
-        let result = self.run_frame(frame, quantum);
+        let result = self.run_frame(frame, quantum, operand);
         // A failed instruction may have consumed operands or changed storage.
         // Such a frame is terminal; resumption must never replay that work.
         if matches!(result, Ok(Progress::Complete(_)) | Err(_)) {
@@ -1081,7 +1117,12 @@ impl<'a> Interpreter<'a> {
         result
     }
 
-    fn run_frame(&mut self, frame: &mut Frame, quantum: usize) -> Result<Progress, Error> {
+    fn run_frame(
+        &mut self,
+        frame: &mut Frame,
+        quantum: usize,
+        operand: &mut OperandPoll,
+    ) -> Result<Progress, Error> {
         if let Some(mut interface) = frame.interface.take() {
             match interface.advance(self)? {
                 interface::Step::Suspend(progress) => {
@@ -2378,6 +2419,13 @@ impl<'a> Interpreter<'a> {
                     let value = frame.slots[*value].take().ok_or_else(missing)?;
                     let pending = frame.current_call(*call).ok_or_else(missing)?;
                     pending.operands.supply(self, *parameter, value, source)?;
+                    if matches!(operand, OperandPoll::Next) {
+                        *operand = OperandPoll::Supplied(OperandSite {
+                            source,
+                            parameter: *parameter,
+                        });
+                        return Ok(Progress::Suspended);
+                    }
                 }
                 Op::Invoke { call, destination } => {
                     let (_, pending) = frame

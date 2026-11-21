@@ -65,6 +65,60 @@ impl fmt::Display for InvocationResult {
     }
 }
 
+/// Identifies one dynamic call under preparation, including across nested
+/// calls at the same source location. Its lifetime is independent of the
+/// frame; retaining the token does not retain the callee or its values.
+#[derive(Clone, Debug)]
+pub struct OperandCall(Arc<()>);
+
+impl PartialEq for OperandCall {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for OperandCall {}
+
+/// A bytecode call has accepted one ordinary input. The session lends the slot
+/// until its next transition. Freezing is optional and uses this VM's scope and
+/// remaining work allowance. The value itself remains in its original slot.
+pub struct DeliveredOperand<'session, 'world> {
+    pub source: SourceRange,
+    pub parameter: usize,
+    pub(crate) callee: &'session Value,
+    pub(crate) value: &'session Value,
+    pub(crate) identity: &'session mut Option<OperandCall>,
+    pub(crate) vm: &'session mut Interpreter<'world>,
+}
+
+impl DeliveredOperand<'_, '_> {
+    /// Only consumers correlating several deliveries need to allocate a token.
+    pub fn call(&mut self) -> OperandCall {
+        self.identity
+            .get_or_insert_with(|| OperandCall(Arc::new(())))
+            .clone()
+    }
+
+    /// The named target when the evaluated callee carries a declaration.
+    pub fn named_callee(&self) -> Option<(DeclarationId, &[Term])> {
+        match self.callee {
+            Value::Function(id) => Some((*id, &[])),
+            other => other.declaration_instance(),
+        }
+    }
+
+    /// Export ordinary data for source checking. Description fields retain
+    /// their private telescope. Invocation-local references cannot escape.
+    pub fn freeze_data(self) -> Result<nir::described_applications::DataArgument, Error> {
+        self.vm.freeze_normal_argument(self.value, self.source)
+    }
+}
+
+pub enum OperandProgress<'session, 'world> {
+    Supplied(DeliveredOperand<'session, 'world>),
+    Invocation(InvocationProgress<'world, InvocationResult>),
+}
+
 /// Running made internal progress; Waiting has an outstanding owned request.
 pub enum InvocationProgress<'world, T = Value> {
     Running,
@@ -261,14 +315,34 @@ impl<'world> InvocationSession<'_, 'world> {
     /// host. Running may include synchronous services or tree execution; this
     /// boundary does not promise a wall-clock slice or preemption.
     pub fn poll(&mut self) -> Result<InvocationProgress<'world>, Error> {
-        self.session.poll_external(|result| result.value)
+        self.session
+            .poll_external(&mut bytecode::OperandPoll::Skip, |result| result.value)
     }
 
     /// Like `poll`, preserving the result type on the successful terminal transition.
     pub fn poll_with_result_type(
         &mut self,
     ) -> Result<InvocationProgress<'world, InvocationResult>, Error> {
-        self.session.poll_external(std::convert::identity)
+        self.session
+            .poll_external(&mut bytecode::OperandPoll::Skip, std::convert::identity)
+    }
+
+    /// Advance one transition, stopping after the next ordinary bytecode call
+    /// slot is filled, before evaluating later operands or admitting the callee.
+    /// An escaping producer never delivers its unfinished slot. Subsequent
+    /// polls continue after the store, including when switching to plain poll.
+    pub fn poll_with_operands(&mut self) -> Result<OperandProgress<'_, 'world>, Error> {
+        let mut delivered = bytecode::OperandPoll::Next;
+        let progress = self
+            .session
+            .poll_external(&mut delivered, std::convert::identity)?;
+        if let bytecode::OperandPoll::Supplied(site) = delivered {
+            Ok(OperandProgress::Supplied(
+                self.session.delivered_operand(site),
+            ))
+        } else {
+            Ok(OperandProgress::Invocation(progress))
+        }
     }
 
     /// Deliver an answer for later admission. A rejected answer is returned

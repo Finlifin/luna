@@ -166,17 +166,23 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             self.pending = Some(request.resolve(self.vm));
             return Ok(Poll::Pending);
         }
-        Ok(self.advance(false)?.map(|exit| match exit {
-            SessionExit::Returned(result) => Some(Flow::Value(result.value)),
-            SessionExit::Flow(flow) => flow,
-        }))
+        Ok(self
+            .advance(false, &mut bytecode::OperandPoll::Skip)?
+            .map(|exit| match exit {
+                SessionExit::Returned(result) => Some(Flow::Value(result.value)),
+                SessionExit::Flow(flow) => flow,
+            }))
     }
 
-    fn advance(&mut self, external: bool) -> Result<Poll<SessionExit>, Error> {
+    fn advance(
+        &mut self,
+        external: bool,
+        operand: &mut bytecode::OperandPoll,
+    ) -> Result<Poll<SessionExit>, Error> {
         if self.terminal {
             return Err(self.vm.failure(ErrorKind::InvalidControlFlow, None));
         }
-        let result = self.step(external);
+        let result = self.step(external, operand);
         if !matches!(result, Ok(Poll::Pending)) {
             debug_assert!(
                 self.stack.is_empty()
@@ -200,7 +206,32 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         self.vm.remaining_steps()
     }
 
-    fn step(&mut self, external: bool) -> Result<Poll<SessionExit>, Error> {
+    pub(super) fn delivered_operand(
+        &mut self,
+        site: bytecode::OperandSite,
+    ) -> DeliveredOperand<'_, 'a> {
+        let frame = self
+            .stack
+            .last_mut()
+            .and_then(StackEntry::code)
+            .or_else(|| self.root.code())
+            .expect("operand owner");
+        let (callee, value, identity) = frame.delivered_operand(site.parameter);
+        DeliveredOperand {
+            source: site.source,
+            parameter: site.parameter,
+            identity,
+            callee,
+            value,
+            vm: self.vm,
+        }
+    }
+
+    fn step(
+        &mut self,
+        external: bool,
+        operand: &mut bytecode::OperandPoll,
+    ) -> Result<Poll<SessionExit>, Error> {
         let Self {
             vm,
             root,
@@ -472,7 +503,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             .and_then(StackEntry::code)
             .or_else(|| root.code())
             .expect("active execution");
-        match vm.resume_frame(code, 1024) {
+        match vm.resume_frame_until_operand(code, 1024, operand) {
             Ok(bytecode::Progress::Prepare(preparation)) => {
                 *pending = Some(Pending::Bytecode(preparation));
             }
@@ -612,7 +643,10 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         // Deliver failure through the same restoration boundaries. No source
         // code, default or contract is executed while unwinding this error.
         if self.result.is_some() {
-            while matches!(self.step(false), Ok(Poll::Pending)) {}
+            while matches!(
+                self.step(false, &mut bytecode::OperandPoll::Skip),
+                Ok(Poll::Pending)
+            ) {}
         }
         debug_assert!(self.stack.is_empty() && self.execution.is_none() && self.result.is_none());
         self.root.cancel();

@@ -125,13 +125,14 @@ impl<'a> Session<'_, 'a, '_> {
 
     pub(in crate::invocation) fn poll_external<T>(
         &mut self,
+        operand: &mut bytecode::OperandPoll,
         deliver: impl FnOnce(InvocationResult) -> T,
     ) -> Result<InvocationProgress<'a, T>, Error> {
         if matches!(self.pending, Some(Pending::Waiting { .. })) {
             return Ok(InvocationProgress::Waiting);
         }
         if !matches!(self.pending, Some(Pending::Request(_))) {
-            match self.advance(true)? {
+            match self.advance(true, operand)? {
                 Poll::Ready(SessionExit::Returned(result)) => {
                     return Ok(InvocationProgress::Complete(deliver(result)));
                 }

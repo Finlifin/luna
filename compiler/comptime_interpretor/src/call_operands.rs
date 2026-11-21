@@ -12,6 +12,10 @@ pub(super) struct CallOperands {
 }
 
 impl CallOperands {
+    pub(super) fn supplied(&self, slot: usize) -> Option<&Value> {
+        self.slots.get(slot)?.as_ref()
+    }
+
     pub(super) fn open(
         vm: &mut Interpreter<'_>,
         callee: &Value,

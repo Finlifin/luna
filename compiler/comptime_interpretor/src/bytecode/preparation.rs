@@ -464,6 +464,7 @@ impl<'a> Interpreter<'a> {
             *call,
             PendingCall {
                 callee,
+                operand_identity: None,
                 trait_defaults,
                 interface: interface_parameters.map(|parameters| (interface_program, parameters)),
                 operands,
