@@ -17,6 +17,7 @@ mod inline_evidence;
 mod inputs;
 mod live_defaults;
 mod observations;
+mod pending_inputs;
 mod scalar_descriptions;
 
 /// Transfers observed during ordinary definition checking, keyed by the
@@ -6848,6 +6849,7 @@ impl Checker<'_, '_> {
                         &mut checked.values,
                         &mut checked.symbols,
                         &mut checked.live,
+                        &mut checked.pending,
                     )?;
                     for (slot, ty) in early_domains {
                         definition.parameters[slot].1 = Annotation::Known(ty.clone());
@@ -7175,6 +7177,25 @@ impl Checker<'_, '_> {
                     .map_err(|e| call_inference_error(expr.span, e))?;
                 if let Some(ty) = &hint {
                     route.require_collection_type(self, ty, expr.span)?;
+                }
+                if checked.pending.contains(route.parameter) {
+                    let evidence = match hint {
+                        Some(known) => Some(known),
+                        None => checked.pending.actual_domain(
+                            self,
+                            route,
+                            expr.span,
+                            allow_numeric_defaults,
+                        )?,
+                    };
+                    let Some(evidence) = evidence else { continue };
+                    if !is_never(&evidence) {
+                        actual[index] = Some(evidence);
+                    }
+                    visited.insert(route.parameter);
+                    progress = true;
+                    allow_numeric_defaults = false;
+                    break;
                 }
                 let input = route.expression(expr);
                 let staged = definition.parameters[route.parameter].0 != Sort::Runtime;
@@ -7697,6 +7718,7 @@ impl Checker<'_, '_> {
         let mut symbols = checked.symbols;
         let mut values = checked.values;
         let mut live = checked.live;
+        let mut pending_inputs = checked.pending;
         let mut default_writes = checked.default_writes;
         let mut live_writes = checked.live_writes;
         let mut parameters = Vec::new();
@@ -7718,13 +7740,26 @@ impl Checker<'_, '_> {
                 expr.span,
             )?;
             let ty = if let Some(route) = routes.iter().find(|route| route.parameter == slot) {
-                self.admit_supplied_annotation(
-                    ty,
-                    route,
-                    expr,
-                    &mut values[slot],
-                    *sort != Sort::Runtime || sig.modifiers.is_comptime,
-                )?
+                if pending_inputs.contains(slot) {
+                    self.admit_type_data(ty, expr.span, |this| {
+                        pending_inputs
+                            .actual_domain(this, route, expr.span, this.numeric_defaults)?
+                            .ok_or_else(|| {
+                                context_error(
+                                    expr.span,
+                                    "gradual operand requires a concrete input domain",
+                                )
+                            })
+                    })?
+                } else {
+                    self.admit_supplied_annotation(
+                        ty,
+                        route,
+                        expr,
+                        &mut values[slot],
+                        *sort != Sort::Runtime || sig.modifiers.is_comptime,
+                    )?
+                }
             } else {
                 self.admit_type_data(ty, expr.span, |this| {
                     let default = definition.default_types.get(&slot).ok_or_else(|| {
@@ -7746,6 +7781,13 @@ impl Checker<'_, '_> {
                 },
                 ty: ty.clone(),
             });
+            if pending_inputs.contains(slot) {
+                let route = routes.iter().find(|route| route.parameter == slot).unwrap();
+                let (value, symbol, completed) = pending_inputs.deliver(self, route, &ty, expr)?;
+                values[slot] = Some(value);
+                symbols[slot] = symbol;
+                live[slot] = Some(completed);
+            }
             if *sort != Sort::Runtime || ordinary_dependencies.contains(&slot) {
                 if sig.modifiers.is_comptime {
                     let early_domains = self.prepare_open_comptime_prefix(
@@ -7759,6 +7801,7 @@ impl Checker<'_, '_> {
                         &mut values,
                         &mut symbols,
                         &mut live,
+                        &mut pending_inputs,
                     )?;
                     for (slot, ty) in early_domains {
                         definition.parameters[slot].1 = Annotation::Known(ty);

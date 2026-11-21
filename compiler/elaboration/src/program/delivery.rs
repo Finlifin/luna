@@ -24,6 +24,31 @@ pub(super) enum PayloadTarget<'a> {
 }
 
 impl Checker<'_, '_> {
+    // Only built-in literals and their closed structural composition have no
+    // producer to run or binding to capture before the destination is known.
+    pub(super) fn is_closed_input_literal(&mut self, source: &Expr<'_>) -> Result<bool, Error> {
+        let mut pending = vec![source];
+        while let Some(expr) = pending.pop() {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(expr.span, "input literal inspection budget exhausted"))?;
+            match &expr.kind {
+                H::Lit(_) | H::Unit | H::Null => {}
+                H::Unary(UnOp::Neg, _) if is_numeric_literal(expr) => {}
+                H::Tuple(items) | H::List(items) => pending.extend(items.iter()),
+                H::Block(block) if block.stmts.is_empty() => pending.extend(block.expr),
+                H::If(condition, yes, no) if yes.stmts.is_empty() => {
+                    pending.push(condition);
+                    pending.extend(yes.expr);
+                    pending.extend(*no);
+                }
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
     fn enum_payload_member(
         &mut self,
         mut target: PayloadTarget<'_>,

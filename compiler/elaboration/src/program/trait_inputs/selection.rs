@@ -378,7 +378,7 @@ fn project<'tree, 'src: 'tree>(
                 }),
             });
             let mut fields = vec![hir::expr::ObjectEntry::Value(index)];
-            if checker.is_closed_clause_literal(source)? {
+            if checker.is_closed_input_literal(source)? {
                 alternatives.push(Alternative::Literal(source));
             } else if let Some(items) = aggregates::fields(source) {
                 let mut positions = Vec::new();

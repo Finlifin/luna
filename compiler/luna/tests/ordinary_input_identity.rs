@@ -834,13 +834,79 @@ fn open_comptime_defaults_keep_mutable_slots_through_the_residual_suffix() {
         }
         const written = gather();
         const skipped = gather(.seed = true, .flip = false);
-        fn run() -> bool { written and not skipped }";
+        const overridden = gather(.flip = true, .value = true);
+        fn run() -> bool { written and not skipped and not overridden }";
     assert_eq!(sysroot::run(source), Value::Bool(true));
     let error = sysroot::compile(&source.replace("= 'z'", "= true")).unwrap_err();
     assert!(
         error.contains("expected (primitive char), found (primitive bool)"),
         "{error}"
     );
+}
+
+#[test]
+fn explicit_operands_wait_for_default_dependent_comptime_domains() {
+    let source = r#"
+        comptime fn flag() -> bool { true }
+        comptime fn select(.wide: bool = true,
+            .enabled: bool = wide,
+            .value: defer if enabled { ?bool } else { ?char } = false)
+            -> defer if enabled { ?bool } else { ?char } {
+            value
+        }
+        comptime fn widths(.wide: bool = true,
+            ...fields: defer if wide { Tuple<u16, bool> } else { Tuple<u8, bool> }) -> bool {
+            true
+        }
+        comptime fn describe(.pair: bool = true,
+            ...fields: defer if pair { Tuple<Any, Any> } else { Tuple<char> }) -> bool { true }
+        const described = describe(flag(), 255);
+        const present = do { let item = select(.value = flag()); item matches true? };
+        const pack = widths(256, flag());
+        fn run() -> bool { present and pack and described }"#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let wrong_width = source.replace(
+        "fn widths(.wide: bool = true",
+        "fn widths(.wide: bool = false",
+    );
+    let error = sysroot::compile(&wrong_width).unwrap_err();
+    assert!(error.contains("integer does not fit"), "{error}");
+    let wrong_field = source.replace("select(.value = flag())", "select(.value = 'x')");
+    let error = sysroot::compile(&wrong_field).unwrap_err();
+    assert!(
+        error.contains("expected (primitive bool), found (primitive char)"),
+        "{error}"
+    );
+}
+
+#[test]
+fn pending_variadic_operands_preserve_shared_closure_captures() {
+    let source = "
+        typealias Switch = %{flag: bool} comptime fn() -> bool;
+        comptime fn toggle() -> Switch { var flag = false; || { flag = not flag; flag } }
+        comptime fn pair() -> Tuple<Switch, Switch> { let flip = toggle(); (flip, flip) }
+        comptime fn preserve(.two: bool = true,
+            ...fields: defer if two { Tuple<Switch, Switch> } else { Tuple<Switch> })
+            -> defer if two { Tuple<Switch, Switch> } else { Tuple<Switch> } { fields }
+        const ok = do { let (first, second) = preserve(...pair()); first() and not second() };
+        fn run() -> bool { ok }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
+fn pending_operands_execute_before_an_omitted_comptime_default() {
+    let source = "
+        comptime fn bad_input() -> bool { assumes false; true }
+        comptime fn bad_default() -> bool {
+            let items: meta.List<bool> = [];
+            items[0]
+        }
+        comptime fn accept(.selector: bool = bad_default(),
+            ...fields: defer if selector { Tuple<bool> } else { Tuple<char> }) -> bool { true }
+        const rejected = accept(bad_input());
+        fn run() -> bool { rejected }";
+    let error = sysroot::compile(source).unwrap_err();
+    assert!(error.contains("ProgramContractRejected"), "{error}");
 }
 
 #[test]

@@ -1,4 +1,5 @@
 //! Source-ordered staged suppliers and declaration-scoped defaults for open calls.
+use super::pending_inputs::PendingInputs;
 use super::*;
 
 // (written parameter, writing default) in declaration order. A residual
@@ -13,6 +14,7 @@ pub(super) struct StagedInputs {
     pub(super) values: Vec<Option<n::Expr>>,
     pub(super) symbols: Vec<Option<Term>>,
     pub(super) live: Vec<Option<comptime_interpretor::Value>>,
+    pub(super) pending: PendingInputs,
     /// Post-default slot contents, separate from the arguments delivered to the body.
     pub(super) default_writes: DefaultWrites,
     pub(super) live_writes: LiveWrites,
@@ -24,6 +26,7 @@ impl StagedInputs {
             values: vec![None; count],
             symbols: vec![None; count],
             live: vec![None; count],
+            pending: PendingInputs::default(),
             default_writes: BTreeMap::new(),
             live_writes: BTreeMap::new(),
         }
@@ -81,11 +84,21 @@ impl Checker<'_, '_> {
         values: &mut [Option<n::Expr>],
         symbols: &mut [Option<Term>],
         live: &mut [Option<comptime_interpretor::Value>],
+        pending: &mut PendingInputs,
     ) -> Result<BTreeMap<usize, Term>, Error> {
         let mut early_domains = BTreeMap::new();
         let end = Self::open_comptime_prefix_end(routes, target);
         let mut inputs = Vec::new();
         for (route_index, route) in routes.iter().enumerate() {
+            let slot = route.parameter;
+            if pending.contains(slot)
+                && let Some(parameter) = parameters.get(slot)
+            {
+                let (expr, symbol, value) = pending.deliver(self, route, &parameter.ty, call)?;
+                values[slot] = Some(expr);
+                symbols[slot] = symbol;
+                live[slot] = Some(value);
+            }
             if values[route.parameter].is_some()
                 && (symbols[route.parameter].is_some() || live[route.parameter].is_some())
             {
@@ -102,6 +115,43 @@ impl Checker<'_, '_> {
         for (_, route_index, field) in inputs {
             let route = &routes[route_index];
             let slot = route.parameter;
+            let aggregate = route.expression(call);
+            let input = if route.is_collected() {
+                route.source_inputs().nth(field).unwrap().1
+            } else {
+                &aggregate
+            };
+            if pending.contains(slot) {
+                pending.acquire(self, slot, field, input)?;
+                continue;
+            }
+            if parameters.get(slot).is_none() && !collections.contains_key(&slot) {
+                let available = |index: usize| symbols[index].is_some() || live[index].is_some();
+                let waits = match &definition.parameters[slot].1 {
+                    Annotation::Known(ty) => self
+                        .term_substitution_inputs(ty, call.span)?
+                        .keys()
+                        .any(|i| symbols[*i].is_none()),
+                    Annotation::Description(_) => false,
+                    Annotation::InputType { slot } => symbols[*slot].is_none(),
+                    Annotation::Pending(prepared) => prepared
+                        .pending_parameters()
+                        .flatten()
+                        .any(|i| !available(i)),
+                    Annotation::Suspended { .. } => {
+                        let source = annotation_source(sig, slot).ok_or_else(|| {
+                            error(call.span, "missing suspended parameter annotation")
+                        })?;
+                        self.expression_parameter_dependencies(owner, source)?
+                            .into_iter()
+                            .any(|i| i >= parameters.len() || !available(i))
+                    }
+                };
+                if waits {
+                    pending.acquire(self, slot, field, input)?;
+                    continue;
+                }
+            }
             let ty = if let Some(packet) = collections.get(&slot) {
                 packet.domain.clone()
             } else if let Some(parameter) = parameters.get(slot) {
@@ -125,12 +175,6 @@ impl Checker<'_, '_> {
                 ty
             };
             route.require_collection_type(self, &ty, call.span)?;
-            let aggregate = route.expression(call);
-            let input = if route.is_collected() {
-                route.source_inputs().nth(field).unwrap().1
-            } else {
-                &aggregate
-            };
             let expected = if route.is_collected() {
                 let Term::Tuple(fields) = self.structural_type(&ty, call.span)? else {
                     unreachable!("collection type checked above")
