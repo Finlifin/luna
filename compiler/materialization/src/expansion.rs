@@ -4,7 +4,23 @@
 use nir::program as n;
 use std::collections::BTreeSet;
 
+/// A publisher owns private checked receipts for one source invocation.
+pub trait DefinitionPublisher: comptime_interpretor::DefinitionBuildService {
+    fn finish(self: Box<Self>) -> (n::PublishedDefinitions, u32);
+}
+
 pub trait Expansion {
+    /// The host owns the implementation of formation and representation checks.
+    /// Providers with no declaration service can still expand ordinary code.
+    fn definition_publisher<'a>(
+        &self,
+        _baseline: &'a n::Package,
+        _owner: u64,
+        _solver: &'a comptime_interpretor::BudgetedTypeSolver<'a>,
+    ) -> Option<Box<dyn DefinitionPublisher + 'a>> {
+        None
+    }
+
     fn quotes(
         &self,
         package: &n::Package,

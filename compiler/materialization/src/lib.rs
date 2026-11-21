@@ -31,7 +31,7 @@ use type_resolution::{associated, capabilities, ptc};
 mod dispatch_function;
 mod expansion;
 
-pub use expansion::Expansion;
+pub use expansion::{DefinitionPublisher, Expansion};
 use nir::program::{self as n, ExprKind as K, Pattern as P};
 use nir::{DeclarationId as Id, Term};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -112,7 +112,6 @@ struct Builder<'a, 'e> {
     quote_sources: Vec<n::ExpansionSource>,
     retain_templates: bool,
     package: &'a n::Package,
-    source: DeclarationSource<'a>,
     world: DeclarationWorld<'a>,
     value_scope: input_admission::ValueScope,
     queue: VecDeque<Task>,
@@ -546,6 +545,7 @@ impl<'a> InstantiationSession<'a> {
             .checked_sub(runtime_bindings.len())
             .ok_or("IIR runtime binding copy budget exhausted")?;
         let BuildResult {
+            published_source,
             mut dispatch,
             functions,
             nominals,
@@ -569,7 +569,10 @@ impl<'a> InstantiationSession<'a> {
         let templates = captured_templates::storage(
             &functions,
             &frozen_methods,
-            package,
+            published_source
+                .as_ref()
+                .map(|s| s.package().as_ref())
+                .unwrap_or(package),
             &dispatch,
             &mut type_cores,
             &mut publication_fuel,
@@ -655,7 +658,6 @@ impl<'a> InstantiationSession<'a> {
                     quote_sources: prev.quote_sources,
                     retain_templates: false,
                     package,
-                    source,
                     world: prev.world,
                     value_scope: prev.value_scope,
                     queue: VecDeque::new(),
@@ -712,7 +714,6 @@ impl<'a> InstantiationSession<'a> {
                     quote_sources: package.expansion_sources.clone(),
                     retain_templates: false,
                     package,
-                    source,
                     world,
                     value_scope,
                     queue: VecDeque::new(),
@@ -773,14 +774,14 @@ impl<'a> InstantiationSession<'a> {
                 builder.global_runtime_deliveries.insert(id, expr);
             }
         }
-        drain_queue(&mut builder, package)?;
+        drain_queue(&mut builder)?;
 
         let mut publication_fuel = builder.fuel;
         let functions = builder.instances.take().unwrap_or_default();
         let templates = captured_templates::storage(
             &functions,
             &builder.frozen_methods,
-            package,
+            builder.world.scope().declaration_source().package(),
             &builder.output,
             &mut builder.type_cores,
             &mut publication_fuel,
@@ -881,6 +882,7 @@ enum Roots<'a> {
 // the storage pass that runs after dependency discovery. Analysis-only callers
 // discard this private result; no active inference state is retained here.
 struct BuildResult {
+    published_source: Option<DeclarationSnapshot>,
     dispatch: Vec<n::DispatchInstance>,
     functions: Vec<iir::FunctionInstance>,
     nominals: Vec<iir::NominalInstance>,
@@ -972,7 +974,6 @@ fn build(
             Roots::All | Roots::AllWithMethods(_) | Roots::Invocation(_)
         ),
         package,
-        source,
         world,
         value_scope,
         queue: VecDeque::new(),
@@ -1134,8 +1135,9 @@ fn build(
             builder.global_runtime_deliveries.insert(id, expr);
         }
     }
-    drain_queue(&mut builder, package)?;
+    drain_queue(&mut builder)?;
     Ok(BuildResult {
+        published_source: builder.world.scope().published_snapshot().cloned(),
         dispatch: builder.output,
         functions: builder.instances.unwrap_or_default(),
         nominals: builder.nominals,
@@ -1150,7 +1152,7 @@ fn build(
     })
 }
 
-fn drain_queue(builder: &mut Builder<'_, '_>, package: &n::Package) -> Result<(), String> {
+fn drain_queue(builder: &mut Builder<'_, '_>) -> Result<(), String> {
     while let Some(task) = builder.queue.pop_front() {
         builder.tick(0)?;
         match task {
@@ -1165,13 +1167,7 @@ fn drain_queue(builder: &mut Builder<'_, '_>, package: &n::Package) -> Result<()
                 })?;
                 // A given obligation has no executable dispatch identity.
                 // Method/value demands still call interface() directly.
-                let world = crate::capabilities::World {
-                    index: builder.world.index(),
-                    implementations: &package.implementations,
-                    traits: &package.traits,
-                    assumptions: builder.world.assumptions(),
-                    context: builder.world.context(),
-                };
+                let world = builder.world.capabilities();
                 let given = query_budget::run(&mut builder.fuel, builder.budget, |budget| {
                     world.given_metered(&capability, budget)
                 })?
@@ -1319,7 +1315,7 @@ impl Builder<'_, '_> {
             ));
         }
         iir::staging::forward_closed_locals_with_layouts(
-            self.package,
+            self.world.scope().declaration_source().package(),
             &mut function,
             &mut self.fuel,
         )?;
@@ -1774,13 +1770,7 @@ impl Builder<'_, '_> {
         &mut self,
         requirement: &n::TypePredicate,
     ) -> Result<crate::ptc::Outcome, nir::NominalAdmissionError> {
-        let world = crate::capabilities::World {
-            index: self.world.index(),
-            implementations: &self.package.implementations,
-            traits: &self.package.traits,
-            assumptions: self.world.assumptions(),
-            context: self.world.context(),
-        };
+        let world = self.world.capabilities();
         query_budget::run(&mut self.fuel, self.budget, |budget| {
             world.check_predicate_metered(requirement, budget)
         })
@@ -2023,7 +2013,7 @@ impl Builder<'_, '_> {
             self.expansion
                 .ok_or("IIR materialization lacks an expansion service")?
                 .quotes(
-                    self.package,
+                    self.world.scope().declaration_source().package(),
                     expression,
                     caller_envs,
                     caller_deliveries,
@@ -2083,7 +2073,7 @@ impl Builder<'_, '_> {
             self.expansion
                 .ok_or("IIR materialization lacks an expansion service")?
                 .effects(
-                    self.package,
+                    self.world.scope().declaration_source().package(),
                     &self.inline_effects,
                     expression,
                     &mut self.quote_cursor,
@@ -2253,7 +2243,11 @@ impl Builder<'_, '_> {
                     && matches!(callee.ty.callable_signature(), Term::Function { parameters, .. }
                         if parameters.iter().all(|p| p.sort == nir::Sort::Runtime))
                 {
-                    let selected = resolve_method_instance(self.package, callee, &mut self.fuel)?;
+                    let selected = resolve_method_instance_in_source(
+                        self.world.scope().declaration_source(),
+                        callee,
+                        &mut self.fuel,
+                    )?;
                     let template = self
                         .package
                         .functions
@@ -2569,8 +2563,9 @@ impl Builder<'_, '_> {
             self.deliver_staged_call_envs(expression, &template.interface.env_parameters)?;
         }
         let mut fuel = self.fuel;
+        let scope = self.world.scope().clone();
         let result = iir::staging::bind_call_with_layouts_and_type_views(
-            self.package,
+            scope.declaration_source().package(),
             &template,
             &arguments,
             expression,
@@ -2642,7 +2637,7 @@ impl Builder<'_, '_> {
             self.expansion
                 .ok_or("IIR materialization lacks an expansion service")?
                 .quote(
-                    self.package,
+                    self.world.scope().declaration_source().package(),
                     &instance.function,
                     expression,
                     caller_envs,
@@ -2719,7 +2714,7 @@ impl Builder<'_, '_> {
             .expansion
             .ok_or("IIR materialization lacks an expansion service")?
             .inline(
-                self.package,
+                self.world.scope().declaration_source().package(),
                 function,
                 expression,
                 caller_envs,
@@ -3250,10 +3245,21 @@ impl Builder<'_, '_> {
             std::slice::from_ref(input),
             &mut self.fuel,
             |ty, variant, fuel| {
-                nir::normal_forms::query_value_fields(self.package, ty, variant, fuel)
+                nir::normal_forms::query_value_fields(
+                    self.world.scope().declaration_source().package(),
+                    ty,
+                    variant,
+                    fuel,
+                )
             },
             |_, _, _| false,
-            |domain, fuel| nir::normal_forms::list_element_budgeted(self.package, domain, fuel),
+            |domain, fuel| {
+                nir::normal_forms::list_element_budgeted(
+                    self.world.scope().declaration_source().package(),
+                    domain,
+                    fuel,
+                )
+            },
             self.package.target,
         )
         .map_err(|e| e.to_string())?;
@@ -3339,7 +3345,7 @@ impl Builder<'_, '_> {
                 .normalized_type(ty, self.budget, &mut self.fuel)
                 .map_err(Into::into);
         }
-        let mut host = staged::type_initializer_host(self.source, &mut self.invocation_snapshot);
+        let mut host = staged::type_initializer_host(self.expansion, &mut self.invocation_snapshot);
         self.world
             .normalized_type_with_host(ty, self.budget, &mut self.fuel, Some(&mut host))
             .map_err(Into::into)
@@ -3366,7 +3372,7 @@ impl Builder<'_, '_> {
         let world = self.world.capabilities();
         let view = if self.instances.is_some() {
             let mut host =
-                staged::type_initializer_host(self.source, &mut self.invocation_snapshot);
+                staged::type_initializer_host(self.expansion, &mut self.invocation_snapshot);
             self.world
                 .scoped_type_with_host(term, &mut budget, &mut self.staging_views, &mut host)
         } else {
@@ -3585,8 +3591,9 @@ impl Builder<'_, '_> {
                 arguments,
             } => {
                 children.extend(arguments.iter().cloned());
-                if let Some(s) = self
-                    .package
+                let scope = self.world.scope().clone();
+                let package = scope.declaration_source().package();
+                if let Some(s) = package
                     .structs
                     .iter()
                     .find(|s| s.declaration == *declaration)
@@ -3653,11 +3660,7 @@ impl Builder<'_, '_> {
                             .push_back(Task::Interface(cap.interface_instance(), cap.subject));
                     }
                     children.extend(fields);
-                } else if let Some(e) = self
-                    .package
-                    .enums
-                    .iter()
-                    .find(|e| e.declaration == *declaration)
+                } else if let Some(e) = package.enums.iter().find(|e| e.declaration == *declaration)
                 {
                     if self.instances.is_some() {
                         self.world.with_admission_queries(|queries| {
@@ -3724,8 +3727,7 @@ impl Builder<'_, '_> {
                             .push_back(Task::Interface(cap.interface_instance(), cap.subject));
                     }
                     children.extend(fields);
-                } else if let Some(n) = self
-                    .package
+                } else if let Some(n) = package
                     .newtypes
                     .iter()
                     .find(|n| n.declaration == *declaration)

@@ -68,6 +68,8 @@ impl ClosedDeclarations {
             normalized_types: HashMap::new(),
             scope: DeclarationScope {
                 source: DeclarationSource::Snapshot(&self.source),
+                published: None,
+                closed: true,
                 metadata: self.metadata.clone(),
                 context: self.context.clone(),
                 assumptions: Arc::from([]),
@@ -401,6 +403,48 @@ impl<'a> DeclarationSource<'a> {
         }
     }
 
+    /// Fork the declaration data and preserve detached member programs. The old
+    /// directory, proof context and selected dispatch belong to the old owner.
+    pub(super) fn with_published_nominals(
+        self,
+        definitions: n::PublishedDefinitions,
+        owner: u64,
+        next: u32,
+        budget: &mut Budget,
+    ) -> Result<DeclarationSnapshot, AdmissionError> {
+        let first = self.package().definition_identity_cursor;
+        definitions
+            .charge_copy(&mut budget.steps)
+            .map_err(|_| AdmissionError::Budget)?;
+        let mut identities = std::collections::HashSet::new();
+        if next < first
+            || definitions.declarations().any(|id| {
+                id.package != owner || !(first..next).contains(&id.local) || !identities.insert(id)
+            })
+        {
+            return Err(
+                "published nominal identities do not belong to the reserved declaration interval"
+                    .into(),
+            );
+        }
+        let mut package =
+            nir::copy_budget::clone_declaration_source(self.package(), &mut budget.steps)
+                .map_err(|_| AdmissionError::Budget)?;
+        // The copied source shares its formation set until the first addition.
+        construction::spend(&mut budget.steps, package.formed_nullary_nominals.len())?;
+        definitions.append_to(&mut package);
+        package.definition_identity_cursor = next;
+        let package = Arc::new(package);
+        Ok(match self {
+            Self::Snapshot(parent) => DeclarationSnapshot::from_parts(
+                package,
+                parent.0.programs.clone(),
+                parent.0.data.clone(),
+            ),
+            Self::Borrowed(_) | Self::Prepared(_) => DeclarationSnapshot::new(package),
+        })
+    }
+
     pub fn world(
         self,
         budget: &mut Budget,
@@ -535,6 +579,74 @@ impl DeclarationSnapshot {
 mod tests {
     use super::*;
     use nir::copy_budget::CopyBudgetExhausted;
+
+    #[test]
+    fn publishing_nominals_checks_the_reserved_interval_and_owns_its_new_theory() {
+        let base = DeclarationSnapshot::new(Arc::new(n::Package {
+            definition_identity_cursor: 7,
+            ..Default::default()
+        }));
+        let input = DeclarationSource::Snapshot(&base);
+        let published = |ids: &[(u64, u32)]| n::PublishedDefinitions {
+            structs: vec![
+                ids.iter()
+                    .map(|&(package, local)| n::Struct {
+                        declaration: Id { package, local },
+                        name: format!("Record{local}"),
+                        type_parameters: vec![],
+                        parameter_types: vec![],
+                        requirements: vec![],
+                        capabilities: vec![],
+                        fields: vec![],
+                        packed: false,
+                    })
+                    .collect::<Vec<_>>()
+                    .into(),
+            ],
+            ..Default::default()
+        };
+        let mut budget = Budget::default();
+        let mut world = input.world(&mut budget, None).unwrap();
+        let old = world.scope.clone();
+        for invalid in [&[(1, 6)][..], &[(2, 7)], &[(1, 9)], &[(1, 7), (1, 7)]] {
+            let error = world
+                .scope
+                .install_published_nominals(published(invalid), 1, 9, &mut budget)
+                .unwrap_err();
+            assert!(error.to_string().contains("reserved declaration interval"));
+            assert!(world.scope.published_snapshot().is_none());
+        }
+        let mut exhausted = Budget { steps: 1, ..budget };
+        assert!(matches!(
+            world
+                .scope
+                .install_published_nominals(published(&[(1, 8)]), 1, 9, &mut exhausted),
+            Err(AdmissionError::Budget)
+        ));
+        assert!(world.scope.published_snapshot().is_none());
+        let mut lexical = input
+            .world(&mut budget, Some((world.context(), &[])))
+            .unwrap();
+        assert!(
+            lexical
+                .scope
+                .install_published_nominals(published(&[(1, 8)]), 1, 9, &mut budget)
+                .is_err()
+        );
+        assert!(lexical.scope.published_snapshot().is_none());
+        world
+            .scope
+            .install_published_nominals(published(&[(1, 8)]), 1, 9, &mut budget)
+            .unwrap();
+        let successor = world.scope.declaration_source().package();
+        assert_eq!(successor.definition_identity_cursor, 9);
+        assert!(successor.formed_nullary_nominals.contains_declaration(Id {
+            package: 1,
+            local: 8
+        }));
+        assert!(old.declaration_source().package().structs.is_empty());
+        assert_eq!(base.package().definition_identity_cursor, 7);
+    }
 
     #[test]
     fn retention_shares_the_exact_owner_and_completed_directory() {

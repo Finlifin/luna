@@ -731,12 +731,43 @@ fn a_failed_type_traversal_keeps_spent_fuel_and_discards_new_observations() {
             &both,
             budget,
             &mut fuel,
-            Some(&mut |_, key, _, _| {
+            Some(&mut |scope, key, owner, _, _| {
                 seen.push(key.clone());
                 if key == &no {
+                    let source = scope
+                        .published_snapshot()
+                        .expect("sibling sees pending descriptors");
+                    assert!(source.package().structs.iter().any(|r| r.name == "Pending"));
                     return Err("test initializer failed".into());
                 }
-                Ok(Term::Primitive(Primitive::Bool))
+                let local = package.definition_identity_cursor;
+                let id = nir::DeclarationId {
+                    package: owner.package,
+                    local,
+                };
+                let record = nir::program::Struct {
+                    declaration: id,
+                    name: "Pending".into(),
+                    type_parameters: vec![],
+                    parameter_types: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    packed: false,
+                    fields: vec![("value".into(), Term::Primitive(Primitive::Bool))],
+                };
+                Ok(type_resolution::associated::TypeInitializerResult {
+                    value: Term::Nominal {
+                        declaration: id,
+                        arguments: vec![],
+                    },
+                    publication: Some((
+                        nir::program::PublishedDefinitions {
+                            structs: vec![vec![record].into()],
+                            ..Default::default()
+                        },
+                        local + 1,
+                    )),
+                })
             }),
         )
         .unwrap_err();
@@ -746,6 +777,7 @@ fn a_failed_type_traversal_keeps_spent_fuel_and_discards_new_observations() {
     );
     assert_eq!(seen, [yes.clone(), no.clone()]);
     assert!(fuel > 0 && fuel < budget.steps);
+    assert!(world.scope().published_snapshot().is_none());
     assert!(world.normalized_type(&yes, budget, &mut fuel).is_err());
     seen.clear();
     let expected = Term::Tuple(vec![
@@ -757,13 +789,14 @@ fn a_failed_type_traversal_keeps_spent_fuel_and_discards_new_observations() {
             &both,
             budget,
             &mut fuel,
-            Some(&mut |_, key, _, _| {
+            Some(&mut |_, key, _, _, _| {
                 seen.push(key.clone());
                 Ok(Term::Primitive(if key == &yes {
                     Primitive::Bool
                 } else {
                     Primitive::Char
-                }))
+                })
+                .into())
             }),
         )
         .unwrap();

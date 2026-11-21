@@ -27,11 +27,52 @@ pub struct DeclarationWorld<'a> {
 #[derive(Clone)]
 pub struct DeclarationScope<'a> {
     source: DeclarationSource<'a>,
+    published: Option<DeclarationSnapshot>,
+    closed: bool,
     metadata: Arc<catalog::DeclarationMetadata>,
     context: Context,
     assumptions: Arc<[n::TraitRequirement]>,
 }
 impl<'a> DeclarationScope<'a> {
+    /// Source, including any committed nominal additions. Callable declaration
+    /// references continue to borrow the original, immutable function table.
+    pub fn published_snapshot(&self) -> Option<&DeclarationSnapshot> {
+        self.published.as_ref()
+    }
+
+    pub fn declaration_source(&self) -> DeclarationSource<'_> {
+        self.published
+            .as_ref()
+            .map(DeclarationSource::Snapshot)
+            .unwrap_or(self.source)
+    }
+
+    /// The concrete publisher has already checked formation and representation
+    /// against this scope. Rebuild immutable theory and metadata before exposing
+    /// the successor to any query, including siblings in the same traversal.
+    pub(crate) fn install_published_nominals(
+        &mut self,
+        definitions: n::PublishedDefinitions,
+        owner: u64,
+        next: u32,
+        budget: &mut Budget,
+    ) -> Result<(), AdmissionError> {
+        if !self.closed {
+            return Err(
+                "publishing generated declarations requires a closed declaration world".into(),
+            );
+        }
+        let successor =
+            self.declaration_source()
+                .with_published_nominals(definitions, owner, next, budget)?;
+        let source = DeclarationSource::Snapshot(&successor);
+        let context = source.closed_context(&mut budget.steps)?;
+        let metadata = source.metadata(budget)?;
+        self.published = Some(successor);
+        self.context = context;
+        self.metadata = metadata;
+        Ok(())
+    }
     pub(crate) fn observed_associated_types(&self) -> &n::ObservedAssociatedTypes {
         &self.source.package().observed_associated_types
     }
@@ -55,8 +96,11 @@ impl<'a> DeclarationScope<'a> {
     /// A query view of this exact source, declaration index and premise scope.
     /// It carries no executable contracts or persistent proof authority.
     pub fn capabilities(&self) -> crate::capabilities::World<'_> {
-        self.metadata
-            .capabilities(self.source.package(), &self.context, &self.assumptions)
+        self.metadata.capabilities(
+            self.declaration_source().package(),
+            &self.context,
+            &self.assumptions,
+        )
     }
 }
 impl<'a> DeclarationWorld<'a> {
@@ -91,6 +135,7 @@ impl<'a> DeclarationWorld<'a> {
             &mut budget.steps,
         )?;
         let assumptions = Arc::from(context.map_or(&[][..], |(_, assumptions)| assumptions));
+        let closed = context.is_none();
         let context = match context {
             Some((context, _)) => context.clone(),
             None => source.closed_context(&mut budget.steps)?,
@@ -101,6 +146,8 @@ impl<'a> DeclarationWorld<'a> {
             normalized_types: HashMap::new(),
             scope: DeclarationScope {
                 source,
+                published: None,
+                closed,
                 metadata,
                 context,
                 assumptions,
@@ -362,7 +409,7 @@ impl<'a> DeclarationWorld<'a> {
                     }
                 }
                 nir::normal_forms::query_nominal_value_fields(
-                    self.scope.source.package(),
+                    self.scope.declaration_source().package(),
                     ty,
                     variant,
                     fuel,
@@ -375,7 +422,7 @@ impl<'a> DeclarationWorld<'a> {
                         argument,
                         self.index().parameter_domains(),
                         self.index().runtime_domains(),
-                        Some(self.scope.source.package()),
+                        Some(self.scope.declaration_source().package()),
                         &[],
                         fuel,
                     )?
@@ -455,6 +502,9 @@ impl<'a> DeclarationWorld<'a> {
         )?;
         self.local_type_observations
             .publish(result.observations, &mut budget.steps)?;
+        if let Some(scope) = result.scope {
+            self.scope = scope;
+        }
         cache.extend(result.completed);
         Ok(result.view)
     }
@@ -500,6 +550,9 @@ impl<'a> DeclarationWorld<'a> {
         crate::associated::charge_projection_copy(&normalized.value, fuel)?;
         self.local_type_observations
             .publish(result.observations, fuel)?;
+        if let Some(scope) = result.scope {
+            self.scope = scope;
+        }
         self.normalized_types.extend(result.completed);
         self.normalized_types
             .insert(ty.clone(), normalized.value.clone());

@@ -281,3 +281,153 @@ fn a_frozen_runtime_signature_keeps_the_nominal_identity_generated_by_its_type_p
         Value::Bool(true)
     );
 }
+
+#[test]
+fn first_use_in_runtime_specializations_delivers_distinct_generated_layouts() {
+    use iir::NominalDefinition as D;
+    use nir::{Primitive, Term};
+    let source = r#"
+        comptime fn Built(flag: bool) -> Type {
+            let payload = if flag { bool } else { char };
+            let scalar = meta.NewtypeBuilder.new(payload, .name = .LateScalar).Build();
+            let row = meta.StructBuilder.new(.name = .LateRow);
+            row.add_field(.value, scalar);
+            let choice = meta.EnumBuilder.new(.name = .LateChoice);
+            choice.add_tuple(.some, [row.Build()]);
+            choice.Build()
+        }
+        trait Source where flag: bool { assoc Item: Type = Built(flag); }
+        struct Holder where flag: bool {}
+        impl Source<flag> for Holder<flag> where flag: bool {}
+        fn leaf() -> ?Holder<flag>.as(Source<flag>).Item
+        where flag: bool
+        { null }
+        fn relay() -> bool
+        where flag: bool
+        {
+            let callback = leaf<flag>;
+            callback() match { null => true, _ => false }
+        }
+        fn first() -> bool { relay<true>() }
+        fn second() -> bool { relay<false>() }
+        fn run() -> bool { first() and second() }
+    "#;
+    let package = sysroot::compile(source).unwrap();
+    assert!(package.observed_associated_types.is_empty());
+    assert!(package.enums.iter().all(|e| e.name != "LateChoice"));
+    let graph = luna::instantiation::instantiate(&package, "run", 10_000_000).unwrap();
+    let nominal = |ty: &Term| {
+        &graph
+            .nominals
+            .iter()
+            .find(|n| &n.ty == ty)
+            .unwrap()
+            .definition
+    };
+    let mut ids = std::collections::BTreeSet::new();
+    for (flag, primitive) in [(true, Primitive::Bool), (false, Primitive::Char)] {
+        let leaf = graph
+            .functions
+            .iter()
+            .find(|f| f.function.name == "leaf" && f.key.arguments.as_ref() == [Term::Bool(flag)])
+            .unwrap();
+        let Term::Function { result, .. } = &leaf.function.signature else {
+            panic!("expected callable");
+        };
+        let Term::Optional(choice) = result.as_ref() else {
+            panic!("expected optional");
+        };
+        let D::Enum(e) = nominal(choice) else {
+            panic!("expected choice");
+        };
+        let D::Struct(row) = nominal(&e.variants[0].fields[0]) else {
+            panic!("expected record");
+        };
+        let D::Newtype(scalar) = nominal(&row.fields[0].1) else {
+            panic!("expected newtype");
+        };
+        assert_eq!(
+            (&*e.name, &*row.name, &*scalar.name),
+            ("LateChoice", "LateRow", "LateScalar")
+        );
+        assert_eq!(row.fields[0].0, "value");
+        assert_eq!(scalar.representation, Term::Primitive(primitive));
+        for id in [e.declaration, row.declaration, scalar.declaration] {
+            assert!(id.local >= package.definition_identity_cursor && ids.insert(id));
+        }
+    }
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(package.observed_associated_types.is_empty());
+    assert!(package.enums.iter().all(|e| e.name != "LateChoice"));
+
+    // An incremental client extends one declaration world across root requests.
+    // Keep the original result alive while a detached source publishes the next.
+    use elaboration::materialization::{
+        DeclarationSnapshot, DeclarationSource, InstantiationSession, extend_with_types_in_session,
+    };
+    let entry = |name| iir::InstanceKey {
+        declaration: package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration,
+        arguments: vec![].into(),
+    };
+    let roots = [entry("first"), entry("second")];
+    let source = DeclarationSnapshot::capture_member_programs(package, &mut 10_000_000).unwrap();
+    let mut session = InstantiationSession::new(DeclarationSource::Snapshot(&source));
+    let budget = || elaboration::ptc::Budget {
+        steps: 10_000_000,
+        ..Default::default()
+    };
+    let first = extend_with_types_in_session(
+        &mut session,
+        &roots[..1],
+        &[],
+        Default::default(),
+        &mut budget(),
+    )
+    .unwrap();
+    let extended =
+        extend_with_types_in_session(&mut session, &roots, &[], Default::default(), &mut budget())
+            .unwrap();
+    let generated = |graph: &iir::Package| {
+        graph
+            .nominals
+            .iter()
+            .filter_map(|n| match &n.definition {
+                D::Enum(def) if def.name == "LateChoice" => Some(def.declaration),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let old = generated(&first);
+    let new = generated(&extended);
+    assert_eq!(old.len(), 1);
+    assert_eq!(new.len(), 2);
+    assert!(old.is_subset(&new));
+    for item in &first.nominals {
+        assert!(
+            extended.nominals.contains(item),
+            "changed an existing layout: {item}"
+        );
+    }
+    let mut vm =
+        comptime_interpretor::Interpreter::from_iir(&extended, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&roots[1], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert!(
+        source
+            .package()
+            .enums
+            .iter()
+            .all(|e| e.name != "LateChoice")
+    );
+}

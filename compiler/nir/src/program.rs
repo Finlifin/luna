@@ -12,8 +12,10 @@ pub use definition_attributes::DefinitionAttributes;
 
 mod formed_nominals;
 mod observed_types;
+mod published_definitions;
 pub use formed_nominals::FormedNullaryNominals;
 pub use observed_types::{ObservedAssociatedType, ObservedAssociatedTypes};
+pub use published_definitions::PublishedDefinitions;
 
 mod input_schedule;
 

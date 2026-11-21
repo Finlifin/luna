@@ -54,6 +54,7 @@ impl Builder<'_, '_> {
         subject: &Term,
         arguments: &[Term],
     ) -> Result<Vec<Term>, String> {
+        let scope = self.world.scope().clone();
         query_budget::run(&mut self.fuel, self.budget, |budget| {
             self.world.normalized_interface_arguments(
                 declaration,
@@ -66,7 +67,7 @@ impl Builder<'_, '_> {
                             value,
                             &self.value_scope.0,
                             &self.package.runtime_domains,
-                            Some(self.package),
+                            Some(scope.declaration_source().package()),
                             &[],
                             fuel,
                         )?

@@ -16,7 +16,32 @@ pub(crate) use ::materialization::{
 
 struct SourceExpansion;
 
+impl ::materialization::DefinitionPublisher
+    for crate::definitions::AllocatedDefinitionPublisher<'_>
+{
+    fn finish(self: Box<Self>) -> (n::PublishedDefinitions, u32) {
+        (*self).finish()
+    }
+}
+
 impl ::materialization::Expansion for SourceExpansion {
+    fn definition_publisher<'a>(
+        &self,
+        baseline: &'a n::Package,
+        owner: u64,
+        solver: &'a comptime_interpretor::BudgetedTypeSolver<'a>,
+    ) -> Option<Box<dyn ::materialization::DefinitionPublisher + 'a>> {
+        Some(Box::new(
+            crate::definitions::AllocatedDefinitionPublisher::new_with_type_solver(
+                baseline,
+                owner,
+                baseline.definition_identity_cursor,
+                usize::MAX,
+                solver,
+            ),
+        ))
+    }
+
     fn quotes(
         &self,
         package: &n::Package,

@@ -7,6 +7,7 @@ use comptime_interpretor::{ClosureIdentity, CodeSession, Interpreter, Value};
 pub(super) struct Snapshot {
     source: DeclarationSnapshot,
     code: CodeSession,
+    from_published_scope: bool,
 }
 
 impl Snapshot {
@@ -16,15 +17,40 @@ impl Snapshot {
     ) -> Result<Self, nir::copy_budget::CopyBudgetExhausted> {
         let source = source.retain_for_invocation(fuel)?;
         let code = CodeSession::new(source.package().clone());
-        Ok(Self { source, code })
+        Ok(Self {
+            source,
+            code,
+            from_published_scope: false,
+        })
+    }
+    fn for_scope<'s>(
+        slot: &'s mut Option<Self>,
+        scope: &type_resolution::dispatch::DeclarationScope<'_>,
+        fuel: &mut usize,
+    ) -> Result<&'s mut Self, nir::copy_budget::CopyBudgetExhausted> {
+        let current = scope.published_snapshot();
+        let replace = slot.as_ref().is_none_or(|existing| match current {
+            Some(source) => !std::sync::Arc::ptr_eq(existing.source.package(), source.package()),
+            None => existing.from_published_scope,
+        });
+        if replace {
+            let mut captured = Self::capture(scope.declaration_source(), fuel)?;
+            captured.from_published_scope = current.is_some();
+            *slot = Some(captured);
+        }
+        Ok(slot.as_mut().expect("source snapshot was captured"))
     }
 }
 
-struct InvocationFailure(&'static str, comptime_interpretor::Error);
+struct InvocationFailure(&'static str, comptime_interpretor::Error, Option<String>);
 
 impl std::fmt::Display for InvocationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "staged comptime {}: {}", self.0, self.1)
+        write!(f, "staged comptime {}: {}", self.0, self.1)?;
+        if let Some(reason) = &self.2 {
+            write!(f, "; definition publication: {reason}")?;
+        }
+        Ok(())
     }
 }
 
@@ -35,7 +61,8 @@ impl Snapshot {
         world: crate::capabilities::World<'_>,
         limits: Budget,
         fuel: &mut usize,
-    ) -> Result<Value, InvocationFailure> {
+        publication: Option<(&dyn Expansion, u64)>,
+    ) -> Result<(Value, Option<(n::PublishedDefinitions, u32)>), InvocationFailure> {
         let snapshot = self.source.package();
         // The checked expression is source code, not a concrete IIR closure.
         // Resolve each demanded member in the same immutable declaration world;
@@ -63,6 +90,8 @@ impl Snapshot {
             steps: std::mem::take(fuel) as u64,
             depth: 128,
         };
+        let publisher = publication
+            .and_then(|(provider, owner)| provider.definition_publisher(snapshot, owner, &solver));
         let prepared = Interpreter::for_comptime_resolving_in_scope_in_session(
             snapshot,
             &mut self.code,
@@ -77,26 +106,39 @@ impl Snapshot {
             &mut invocation_budget,
         );
         *fuel = usize::try_from(invocation_budget.steps).unwrap_or(usize::MAX);
-        let mut interpreter = prepared.map_err(|error| InvocationFailure("preparation", error))?;
+        let mut interpreter =
+            prepared.map_err(|error| InvocationFailure("preparation", error, None))?;
+        if let Some(service) = publisher.as_deref() {
+            interpreter = interpreter.with_definition_service(service);
+        }
         let value = interpreter.with_code_session(&mut self.code, |vm| {
             vm.invoke_comptime_expression(expression)
         });
         *fuel = usize::try_from(interpreter.remaining_steps()).unwrap_or(usize::MAX);
-        value.map_err(|error| InvocationFailure("invocation", error))
+        drop(interpreter);
+        let value = value.map_err(|error| {
+            InvocationFailure(
+                "invocation",
+                error,
+                publisher.as_ref().and_then(|p| p.last_diagnostic()),
+            )
+        })?;
+        Ok((value, publisher.map(|p| p.finish())))
     }
 }
 
 pub(super) fn type_initializer_host<'a>(
-    source: DeclarationSource<'a>,
+    expansion: Option<&'a dyn Expansion>,
     retained: &'a mut Option<Snapshot>,
 ) -> impl FnMut(
     &type_resolution::dispatch::DeclarationScope<'_>,
     &Term,
+    Id,
     n::SourceRange,
     &mut Budget,
-) -> Result<Term, nir::NominalAdmissionError>
+) -> Result<crate::associated::TypeInitializerResult, nir::NominalAdmissionError>
 + 'a {
-    move |scope, key, site, budget| {
+    move |scope, key, implementation, site, budget| {
         let Term::AssociatedType {
             origin,
             arguments,
@@ -118,15 +160,18 @@ pub(super) fn type_initializer_host<'a>(
                 member: origin.member,
             },
         };
-        if retained.is_none() {
-            *retained = Some(
-                Snapshot::capture(source, &mut budget.steps)
-                    .map_err(|_| nir::NominalAdmissionError::Budget)?,
-            );
-        }
-        let snapshot = retained.as_mut().expect("captured source snapshot");
-        match snapshot.execute(&read, scope.capabilities(), *budget, &mut budget.steps) {
-            Ok(Value::Type(ty)) => Ok(ty),
+        let snapshot = Snapshot::for_scope(retained, scope, &mut budget.steps)
+            .map_err(|_| nir::NominalAdmissionError::Budget)?;
+        match snapshot.execute(
+            &read,
+            scope.capabilities(),
+            *budget,
+            &mut budget.steps,
+            expansion.map(|p| (p, implementation.package)),
+        ) {
+            Ok((Value::Type(value), publication)) => {
+                Ok(crate::associated::TypeInitializerResult { value, publication })
+            }
             Ok(_) => Err("associated Type initializer did not return a type identity".into()),
             Err(InvocationFailure(
                 _,
@@ -134,6 +179,7 @@ pub(super) fn type_initializer_host<'a>(
                     kind: comptime_interpretor::ErrorKind::StepsExhausted,
                     ..
                 },
+                _,
             )) => Err(nir::NominalAdmissionError::Budget),
             Err(failure) => Err(failure.to_string().into()),
         }
@@ -186,7 +232,7 @@ impl Builder<'_, '_> {
             return self.invoke_staged_input(expression);
         }
         iir::staging::canonical_input_with_layouts(
-            self.package.into(),
+            self.world.scope().declaration_source().package().into(),
             expression,
             &mut self.fuel,
         )?;
@@ -199,11 +245,16 @@ impl Builder<'_, '_> {
 
     pub(super) fn invoke_staged_input(&mut self, expression: &n::Expr) -> Result<n::Expr, String> {
         self.tick(0)?;
-        let mut snapshot = match self.invocation_snapshot.take() {
-            Some(snapshot) => snapshot,
-            None => Snapshot::capture(self.source, &mut self.fuel)
-                .map_err(|error| format!("staged source retention budget exhausted: {error:?}"))?,
-        };
+        Snapshot::for_scope(
+            &mut self.invocation_snapshot,
+            self.world.scope(),
+            &mut self.fuel,
+        )
+        .map_err(|error| format!("staged source retention budget exhausted: {error:?}"))?;
+        let mut snapshot = self
+            .invocation_snapshot
+            .take()
+            .expect("source snapshot was captured");
         let result = self.invoke_with_snapshot(expression, &mut snapshot);
         self.invocation_snapshot = Some(snapshot);
         result
@@ -217,12 +268,13 @@ impl Builder<'_, '_> {
         iir::visit::expression(expression, &mut self.fuel, |_, _| Ok(()))?;
         crate::associated::charge_projection_copy(&expression.ty, &mut self.fuel)
             .map_err(|_| "staged result type budget exhausted")?;
-        let value = retained
+        let (value, _) = retained
             .execute(
                 expression,
                 self.world.capabilities(),
                 self.budget,
                 &mut self.fuel,
+                None,
             )
             .map_err(|failure| failure.to_string())?;
         self.freeze_staged_value(value, &expression.ty, expression.source, 0)
@@ -468,15 +520,16 @@ impl Builder<'_, '_> {
                 else {
                     return Err("staged newtype requires a nominal type".into());
                 };
-                let definition = self
-                    .package
+                let scope = self.world.scope().clone();
+                let package = scope.declaration_source().package();
+                let definition = package
                     .newtypes
                     .iter()
                     .find(|definition| definition.declaration == *declaration)
                     .ok_or("staged newtype declaration is missing")?;
                 self.fuel = self
                     .fuel
-                    .checked_sub(self.package.newtypes.len())
+                    .checked_sub(package.newtypes.len())
                     .ok_or("staged newtype layout budget exhausted")?;
                 let representation = definition
                     .representation_budgeted(arguments, &[], &mut self.fuel)
@@ -702,7 +755,7 @@ impl Builder<'_, '_> {
             return Err("staged nominal result identity mismatch".into());
         }
         let types = nir::normal_forms::query_nominal_value_fields(
-            self.package,
+            self.world.scope().declaration_source().package(),
             ty,
             variant,
             &mut self.fuel,

@@ -545,18 +545,34 @@ impl TypeProjectionEnvironment for PassiveProjectionWorld<'_, '_> {
     }
 }
 
+/// A VM result can introduce nominal identities whose descriptions must enter
+/// the same declaration revision before the traversal can inspect its value.
+pub struct TypeInitializerResult {
+    pub value: Term,
+    pub publication: Option<(nir::program::PublishedDefinitions, u32)>,
+}
+impl From<Term> for TypeInitializerResult {
+    fn from(value: Term) -> Self {
+        Self {
+            value,
+            publication: None,
+        }
+    }
+}
+
 /// Complete an admitted, closed associated Type initializer in its declaration
 /// scope. The caller supplies execution authority and the remaining query fuel.
 pub type TypeInitializerHost<'a> = dyn FnMut(
         &crate::dispatch::DeclarationScope<'_>,
         &Term,
+        nir::DeclarationId,
         nir::program::SourceRange,
         &mut Budget,
-    ) -> Result<Term, QueryError>
+    ) -> Result<TypeInitializerResult, QueryError>
     + 'a;
 
 struct DeliveredTypeWorld<'a, 's, 'h> {
-    scope: &'a crate::dispatch::DeclarationScope<'s>,
+    scope: std::borrow::Cow<'a, crate::dispatch::DeclarationScope<'s>>,
     previous: &'a nir::program::ObservedAssociatedTypes,
     host: Option<&'h mut TypeInitializerHost<'h>>,
     observations: Vec<(Term, nir::program::ObservedAssociatedType)>,
@@ -605,7 +621,19 @@ impl TypeProjectionEnvironment for DeliveredTypeWorld<'_, '_, '_> {
             return Ok(TypeProjection::Initializer(pending));
         };
         let source = pending.source;
-        let value = evaluate(self.scope, key, source, budget)?;
+        let owner = pending.evidence.implementation;
+        let result = evaluate(&self.scope, key, owner, source, budget)?;
+        if let Some((definitions, next)) = result.publication {
+            if !definitions.is_empty() {
+                self.scope.to_mut().install_published_nominals(
+                    definitions,
+                    owner.package,
+                    next,
+                    budget,
+                )?;
+            }
+        }
+        let value = result.value;
         let (result, observation) = pending.observed(value, source, &mut budget.steps)?;
         charge_projection_copy(key, &mut budget.steps)?;
         self.observations.push((key.clone(), observation));
@@ -613,13 +641,14 @@ impl TypeProjectionEnvironment for DeliveredTypeWorld<'_, '_, '_> {
     }
 }
 
-pub(crate) struct DeliveredTypeView {
+pub(crate) struct DeliveredTypeView<'s> {
+    pub scope: Option<crate::dispatch::DeclarationScope<'s>>,
     pub view: AssociatedTypeNormalization,
     pub completed: std::collections::HashMap<Term, Term>,
     pub observations: Vec<(Term, nir::program::ObservedAssociatedType)>,
 }
 
-impl crate::dispatch::DeclarationScope<'_> {
+impl<'s> crate::dispatch::DeclarationScope<'s> {
     pub(crate) fn delivered_type_view<'h>(
         &self,
         ty: &Term,
@@ -628,9 +657,9 @@ impl crate::dispatch::DeclarationScope<'_> {
         scoped: bool,
         previous: &nir::program::ObservedAssociatedTypes,
         host: Option<&'h mut TypeInitializerHost<'h>>,
-    ) -> Result<DeliveredTypeView, QueryError> {
+    ) -> Result<DeliveredTypeView<'s>, QueryError> {
         let mut world = DeliveredTypeWorld {
-            scope: self,
+            scope: std::borrow::Cow::Borrowed(self),
             previous,
             host,
             observations: Vec::new(),
@@ -647,6 +676,10 @@ impl crate::dispatch::DeclarationScope<'_> {
             Some(cache),
         )?;
         Ok(DeliveredTypeView {
+            scope: match world.scope {
+                std::borrow::Cow::Borrowed(_) => None,
+                std::borrow::Cow::Owned(scope) => Some(scope),
+            },
             view,
             completed,
             observations: world.observations,
