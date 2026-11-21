@@ -3,35 +3,6 @@ use super::*;
 use comptime_interpretor::{Error, ErrorKind, PreparedStructBuild, StructBuildRequest};
 use std::cell::{Cell, OnceCell, RefCell};
 
-/// Host publication boundary shared by eager and first-use package ownership.
-pub trait StructBuildService {
-    fn prepare<'s>(
-        &'s self,
-        request: &StructBuildRequest,
-        steps: &mut u64,
-    ) -> Result<PreparedStructBuild<'s>, Error>;
-    fn prepare_newtype<'s>(
-        &'s self,
-        request: &comptime_interpretor::NewtypeBuildRequest,
-        _steps: &mut u64,
-    ) -> Result<comptime_interpretor::PreparedNewtypeBuild<'s>, Error> {
-        Err(Error {
-            kind: ErrorKind::Type,
-            source: Some(request.source),
-        })
-    }
-    fn prepare_enum<'s>(
-        &'s self,
-        request: &comptime_interpretor::EnumBuildRequest,
-        _steps: &mut u64,
-    ) -> Result<comptime_interpretor::PreparedEnumBuild<'s>, Error> {
-        Err(Error {
-            kind: ErrorKind::Type,
-            source: Some(request.source),
-        })
-    }
-    fn last_diagnostic(&self) -> Option<String>;
-}
 impl StructBuildService for StructPublisher<'_> {
     fn prepare<'s>(
         &'s self,

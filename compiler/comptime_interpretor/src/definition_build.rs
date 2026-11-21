@@ -2,7 +2,45 @@
 use super::*;
 use comptime_compiler::definitions::{Build, Kind};
 
+/// Host publication boundary shared by eager and first-use package ownership.
+pub trait DefinitionBuildService {
+    fn prepare<'s>(
+        &'s self,
+        request: &StructBuildRequest,
+        steps: &mut u64,
+    ) -> Result<PreparedStructBuild<'s>, Error>;
+    fn prepare_newtype<'s>(
+        &'s self,
+        request: &NewtypeBuildRequest,
+        _steps: &mut u64,
+    ) -> Result<PreparedNewtypeBuild<'s>, Error> {
+        Err(Error {
+            kind: ErrorKind::Type,
+            source: Some(request.source),
+        })
+    }
+    fn prepare_enum<'s>(
+        &'s self,
+        request: &EnumBuildRequest,
+        _steps: &mut u64,
+    ) -> Result<PreparedEnumBuild<'s>, Error> {
+        Err(Error {
+            kind: ErrorKind::Type,
+            source: Some(request.source),
+        })
+    }
+    fn last_diagnostic(&self) -> Option<String>;
+}
 impl<'a> Interpreter<'a> {
+    /// A service handles all supported definition kinds in one publication world.
+    pub fn with_definition_service(mut self, service: &'a dyn DefinitionBuildService) -> Self {
+        self.definition_service = Some(service);
+        self.struct_builder = None;
+        self.enum_builder = None;
+        self.newtype_builder = None;
+        self
+    }
+
     pub(super) fn check_definition_build(
         &self,
         output: &Term,
@@ -55,10 +93,11 @@ impl<'a> Interpreter<'a> {
 
     pub(super) fn definition_resolver(&self, request: &DefinitionBuildRequest) -> Resolver<'a> {
         match request {
-            DefinitionBuildRequest::Struct(_) => Resolver::Struct(self.struct_builder),
-            DefinitionBuildRequest::Enum(_) => Resolver::Enum(self.enum_builder),
-            DefinitionBuildRequest::Newtype(_) => Resolver::Newtype(self.newtype_builder),
+            DefinitionBuildRequest::Struct(_) => self.struct_builder.map(Resolver::Struct),
+            DefinitionBuildRequest::Enum(_) => self.enum_builder.map(Resolver::Enum),
+            DefinitionBuildRequest::Newtype(_) => self.newtype_builder.map(Resolver::Newtype),
         }
+        .unwrap_or(Resolver::Service(self.definition_service))
     }
 
     pub(super) fn admit_definition_build(
@@ -143,15 +182,10 @@ pub enum PreparedDefinitionBuild<'a> {
 }
 
 pub(super) enum Resolver<'a> {
-    Struct(
-        Option<&'a dyn Fn(&StructBuildRequest, &mut u64) -> Result<PreparedStructBuild<'a>, Error>>,
-    ),
-    Enum(Option<&'a dyn Fn(&EnumBuildRequest, &mut u64) -> Result<PreparedEnumBuild<'a>, Error>>),
-    Newtype(
-        Option<
-            &'a dyn Fn(&NewtypeBuildRequest, &mut u64) -> Result<PreparedNewtypeBuild<'a>, Error>,
-        >,
-    ),
+    Service(Option<&'a dyn DefinitionBuildService>),
+    Struct(&'a dyn Fn(&StructBuildRequest, &mut u64) -> Result<PreparedStructBuild<'a>, Error>),
+    Enum(&'a dyn Fn(&EnumBuildRequest, &mut u64) -> Result<PreparedEnumBuild<'a>, Error>),
+    Newtype(&'a dyn Fn(&NewtypeBuildRequest, &mut u64) -> Result<PreparedNewtypeBuild<'a>, Error>),
 }
 impl<'a> Resolver<'a> {
     pub(super) fn prepare(
@@ -160,13 +194,22 @@ impl<'a> Resolver<'a> {
         fuel: &mut u64,
     ) -> Result<PreparedDefinitionBuild<'a>, Error> {
         match (self, request) {
-            (Self::Struct(Some(prepare)), DefinitionBuildRequest::Struct(r)) => {
+            (Self::Service(Some(service)), DefinitionBuildRequest::Struct(r)) => service
+                .prepare(r, fuel)
+                .map(PreparedDefinitionBuild::Struct),
+            (Self::Service(Some(service)), DefinitionBuildRequest::Enum(r)) => service
+                .prepare_enum(r, fuel)
+                .map(PreparedDefinitionBuild::Enum),
+            (Self::Service(Some(service)), DefinitionBuildRequest::Newtype(r)) => service
+                .prepare_newtype(r, fuel)
+                .map(PreparedDefinitionBuild::Newtype),
+            (Self::Struct(prepare), DefinitionBuildRequest::Struct(r)) => {
                 prepare(r, fuel).map(PreparedDefinitionBuild::Struct)
             }
-            (Self::Enum(Some(prepare)), DefinitionBuildRequest::Enum(r)) => {
+            (Self::Enum(prepare), DefinitionBuildRequest::Enum(r)) => {
                 prepare(r, fuel).map(PreparedDefinitionBuild::Enum)
             }
-            (Self::Newtype(Some(prepare)), DefinitionBuildRequest::Newtype(r)) => {
+            (Self::Newtype(prepare), DefinitionBuildRequest::Newtype(r)) => {
                 prepare(r, fuel).map(PreparedDefinitionBuild::Newtype)
             }
             _ => Err(Error {

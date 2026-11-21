@@ -72,28 +72,8 @@ impl InvocationScope<'_> {
         };
         let mut interpreter =
             interpreter.map_err(|error| format!("cannot prepare comptime invocation: {error}"))?;
-        let builder = |request: &comptime_interpretor::StructBuildRequest, remaining: &mut u64| {
-            publisher
-                .expect("builder installed only with publisher")
-                .prepare(request, remaining)
-        };
-        let newtype_builder = |request: &comptime_interpretor::NewtypeBuildRequest,
-                               remaining: &mut u64| {
-            publisher
-                .expect("builder installed only with publisher")
-                .prepare_newtype(request, remaining)
-        };
-        let enum_builder = |request: &comptime_interpretor::EnumBuildRequest,
-                            remaining: &mut u64| {
-            publisher
-                .expect("builder installed only with publisher")
-                .prepare_enum(request, remaining)
-        };
-        if publisher.is_some() {
-            interpreter = interpreter
-                .with_struct_builder(&builder)
-                .with_enum_builder(&enum_builder)
-                .with_newtype_builder(&newtype_builder);
+        if let Some(service) = publisher {
+            interpreter = interpreter.with_definition_service(service);
         }
         let operation = |vm: &mut Interpreter<'_>| match call {
             Some(call) => vm.invoke_comptime_expression_owned(call),

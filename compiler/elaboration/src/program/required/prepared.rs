@@ -451,22 +451,6 @@ impl PreparedRequired {
         let world = Arc::clone(&self.world);
         let package = world.package();
         let mut code = world.code();
-        let build = |request: &comptime_interpretor::StructBuildRequest, fuel: &mut u64| {
-            builder
-                .expect("configured builder service")
-                .prepare(request, fuel)
-        };
-        let build_newtype = |request: &comptime_interpretor::NewtypeBuildRequest,
-                             fuel: &mut u64| {
-            builder
-                .expect("configured builder service")
-                .prepare_newtype(request, fuel)
-        };
-        let build_enum = |request: &comptime_interpretor::EnumBuildRequest, fuel: &mut u64| {
-            builder
-                .expect("configured builder service")
-                .prepare_enum(request, fuel)
-        };
         let PreparedRequired {
             entry,
             inputs,
@@ -569,11 +553,8 @@ impl PreparedRequired {
         if let Some(form) = reader.and_then(|reader| reader.attributes) {
             interpreter = interpreter.with_attribute_source(form);
         }
-        if builder.is_some() {
-            interpreter = interpreter
-                .with_struct_builder(&build)
-                .with_enum_builder(&build_enum)
-                .with_newtype_builder(&build_newtype);
+        if let Some(service) = builder {
+            interpreter = interpreter.with_definition_service(service);
         }
         let value = interpreter.with_code_session(code.session(), |vm| {
             vm.start_prepared_invocation(entry, inputs)?

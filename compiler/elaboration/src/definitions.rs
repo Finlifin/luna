@@ -19,7 +19,8 @@ pub use checked_definition_publisher::{
     CheckedDefinitionPublisher, PreparedDefinitions, PublishedDefinitions,
 };
 pub use checked_struct_publisher::CheckedStructPublisher;
-pub use deferred_struct_publisher::{DeferredStructPublisher, StructBuildService};
+pub use comptime_interpretor::DefinitionBuildService as StructBuildService;
+pub use deferred_struct_publisher::DeferredStructPublisher;
 pub use struct_publisher::StructPublisher;
 
 /// Publish only after the complete candidate passes ordinary elaboration with

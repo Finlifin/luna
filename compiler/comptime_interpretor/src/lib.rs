@@ -134,7 +134,9 @@ pub use enum_build::{EnumBuildRequest, PreparedEnumBuild};
 
 mod definition_build;
 
-pub use definition_build::{DefinitionBuildRequest, PreparedDefinitionBuild};
+pub use definition_build::{
+    DefinitionBuildRequest, DefinitionBuildService, PreparedDefinitionBuild,
+};
 
 mod newtype_build;
 
@@ -846,6 +848,7 @@ pub struct Interpreter<'a> {
     default_code_cache: default_code::Cache,
     contextual_code_cache: contextual_code::Cache,
     prepared_instance_cache: function_instances::Cache,
+    definition_service: Option<&'a dyn DefinitionBuildService>,
     newtype_builder: Option<
         &'a dyn Fn(&NewtypeBuildRequest, &mut u64) -> Result<PreparedNewtypeBuild<'a>, Error>,
     >,

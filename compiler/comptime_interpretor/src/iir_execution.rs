@@ -184,6 +184,7 @@ impl<'a> Interpreter<'a> {
             bytecode_enabled: true,
             abstract_type_parameters: BTreeSet::new(),
             abstract_value_parameters: BTreeMap::new(),
+            definition_service: None,
             struct_builder: None,
             enum_builder: None,
             newtype_builder: None,
