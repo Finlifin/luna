@@ -820,3 +820,43 @@ fn inference_delivers_the_selected_comptime_default_once() {
         fn run() -> bool { chosen and not skipped }";
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn open_comptime_defaults_keep_mutable_slots_through_the_residual_suffix() {
+    let source = "
+        comptime fn gather(.seed: bool = false,
+            .flip: bool = do { seed = not seed; seed },
+            .later: bool = seed,
+            .value: defer if later { char } else { bool } = 'z',
+            .before: bool = seed, .clear: bool = do { seed = false; seed },
+            .after: bool = seed) -> bool {
+            not seed and flip and later and before and not clear and not after
+        }
+        const written = gather();
+        const skipped = gather(.seed = true, .flip = false);
+        fn run() -> bool { written and not skipped }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let error = sysroot::compile(&source.replace("= 'z'", "= true")).unwrap_err();
+    assert!(
+        error.contains("expected (primitive char), found (primitive bool)"),
+        "{error}"
+    );
+}
+
+#[test]
+fn rebound_comptime_callbacks_share_their_capture_graph_with_residual_defaults() {
+    let source = "
+        typealias Switch = %{flag: bool} comptime fn() -> bool;
+        comptime fn make() -> Switch {
+            var flag = false;
+            || { flag = not flag; flag }
+        }
+        comptime fn sample(.first: Switch = make(), .second: Switch = make(),
+            .enable: bool = do { first = second; true },
+            .field: defer if enable { bool } else { char } = true,
+            .via_first: bool = first(), .via_second: bool = second()) -> bool {
+            via_first and not via_second and first() and second()
+        }
+        comptime fn check() -> bool { sample() }";
+    check_events(source, &[("check", 1)]);
+}

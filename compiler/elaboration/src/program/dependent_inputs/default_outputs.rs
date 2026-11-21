@@ -6,6 +6,11 @@ pub(in crate::program) struct DefaultOutputs {
     slots: Vec<(n::LocalId, Term)>,
 }
 
+pub(in crate::program) struct CompletedDefault {
+    pub result: (comptime_interpretor::Value, Term),
+    pub writes: Vec<(n::LocalId, Term, comptime_interpretor::Value)>,
+}
+
 impl DefaultOutputs {
     pub(in crate::program) fn prepare<'a>(
         checker: &mut Checker<'_, '_>,
@@ -94,6 +99,21 @@ impl DefaultOutputs {
         span: Span,
         mut write: impl FnMut(n::LocalId, n::Expr, Term),
     ) -> Result<(n::Expr, Term), Error> {
+        let completed = self.unpack(value, span)?;
+        let (value, domain) = completed.result;
+        let result = checker.freeze_completed_dependency(value, domain, span)?;
+        for (id, domain, field) in completed.writes {
+            let (value, symbol) = checker.freeze_completed_dependency(field, domain, span)?;
+            write(id, value, symbol);
+        }
+        Ok(result)
+    }
+
+    pub(in crate::program) fn unpack(
+        self,
+        value: comptime_interpretor::Value,
+        span: Span,
+    ) -> Result<CompletedDefault, Error> {
         let comptime_interpretor::Value::Tuple(fields) = value else {
             return Err(error(span, "default frame did not return its slot values"));
         };
@@ -101,13 +121,14 @@ impl DefaultOutputs {
             return Err(error(span, "invalid default frame output count"));
         }
         let mut fields = fields.into_iter();
-        let result =
-            checker.freeze_completed_dependency(fields.next().unwrap(), self.result, span)?;
-        for ((id, domain), field) in self.slots.into_iter().zip(fields) {
-            let (value, symbol) = checker.freeze_completed_dependency(field, domain, span)?;
-            write(id, value, symbol);
-        }
-        Ok(result)
+        let result = (fields.next().unwrap(), self.result);
+        let writes = self
+            .slots
+            .into_iter()
+            .zip(fields)
+            .map(|((id, domain), field)| (id, domain, field))
+            .collect();
+        Ok(CompletedDefault { result, writes })
     }
 }
 

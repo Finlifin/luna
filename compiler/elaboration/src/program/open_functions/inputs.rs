@@ -5,6 +5,8 @@ use super::*;
 // runtime default can be prepared after a later staged default has run.
 type DefaultWrites = BTreeMap<(usize, usize), (n::Expr, Term)>;
 
+use super::live_defaults::LiveWrites;
+
 /// Open signature formation can receive an executed value in addition to a
 /// producer and its static identity. Ordinary source checking owns no VM values.
 pub(super) struct StagedInputs {
@@ -13,6 +15,7 @@ pub(super) struct StagedInputs {
     pub(super) live: Vec<Option<comptime_interpretor::Value>>,
     /// Post-default slot contents, separate from the arguments delivered to the body.
     pub(super) default_writes: DefaultWrites,
+    pub(super) live_writes: LiveWrites,
 }
 
 impl StagedInputs {
@@ -22,6 +25,7 @@ impl StagedInputs {
             symbols: vec![None; count],
             live: vec![None; count],
             default_writes: BTreeMap::new(),
+            live_writes: BTreeMap::new(),
         }
     }
 }
@@ -347,88 +351,6 @@ impl Checker<'_, '_> {
             symbols[slot] = Some(Term::TupleValue(Vec::new()));
         }
         Ok(early_domains)
-    }
-
-    pub(super) fn prepare_open_live_default(
-        &mut self,
-        owner: OwnerId,
-        slot: usize,
-        parameters: &[Parameter],
-        symbols: &[Option<Term>],
-        live: &[Option<comptime_interpretor::Value>],
-        span: Span,
-        unresolved: &[DeclarationId],
-    ) -> Result<Option<(comptime_interpretor::Value, Term)>, Error> {
-        let assumptions = self.context.assumptions().to_vec();
-        self.in_open_function_scope(owner, None, |this| {
-            this.import_closed_caller_assumptions(assumptions);
-            let ItemKind::Fn(sig, _) = &this.package.item(owner).unwrap().kind else {
-                unreachable!()
-            };
-            let TyParamKind::Optional(_, _, default) = sig.params[slot].ty.kind else {
-                return Err(error(
-                    span,
-                    "missing default for an unsupplied open parameter",
-                ));
-            };
-            this.default_input_scope = Some(
-                parameters
-                    .iter()
-                    .map(|p| (p.sort, Some(p.ty.clone())))
-                    .collect(),
-            );
-            this.default_input_owner = Some(owner);
-            this.in_staged_input = true;
-            let mut graph = Vec::new();
-            for (index, parameter) in sig.params.iter().enumerate().take(slot) {
-                let binding = local(parameter.hir_id);
-                let domain = &parameters[index];
-                this.locals.insert(binding, domain.ty.clone());
-                if let Some(value) = &live[index] {
-                    graph.push((binding, domain.ty.clone(), value.clone()));
-                } else if let Some(value) = &symbols[index] {
-                    this.input_facts
-                        .specialized
-                        .push((binding, domain.ty.clone(), value.clone()));
-                    if domain.ty == p(P::Type) {
-                        this.input_facts.types.insert(binding, value.clone());
-                    } else {
-                        this.input_facts
-                            .values
-                            .insert(binding, (value.clone(), domain.ty.clone()));
-                    }
-                }
-            }
-            let prepared = this.prepare_required_expression_with_live_inputs(
-                default,
-                Some(&parameters[slot].ty),
-                None,
-                Vec::new(),
-                false,
-                &graph,
-            )?;
-            if !unresolved.is_empty()
-                && this.open_computation_uses_clauses(&prepared, unresolved, default.span)?
-            {
-                return Ok(None);
-            }
-            let selected: BTreeSet<_> = prepared
-                .inputs
-                .iter()
-                .map(|(binding, _, _)| *binding)
-                .collect();
-            this.invoke_required_publishing(
-                prepared,
-                graph
-                    .into_iter()
-                    .filter(|(binding, _, _)| selected.contains(binding))
-                    .map(|(binding, _, value)| (binding, value))
-                    .collect(),
-                default.hir_id.owner,
-                default.span,
-            )
-            .map(Some)
-        })
     }
 
     pub(super) fn prepare_open_default(

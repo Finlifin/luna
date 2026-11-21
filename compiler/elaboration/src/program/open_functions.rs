@@ -15,6 +15,7 @@ mod behavior_values;
 mod fragments;
 mod inline_evidence;
 mod inputs;
+mod live_defaults;
 mod observations;
 mod scalar_descriptions;
 
@@ -6910,6 +6911,7 @@ impl Checker<'_, '_> {
                                 &parameters,
                                 &checked.symbols,
                                 &checked.live,
+                                &mut checked.live_writes,
                                 expr.span,
                                 &all,
                             )?
@@ -7696,6 +7698,7 @@ impl Checker<'_, '_> {
         let mut values = checked.values;
         let mut live = checked.live;
         let mut default_writes = checked.default_writes;
+        let mut live_writes = checked.live_writes;
         let mut parameters = Vec::new();
         // Type formation is declaration ordered. Runtime evaluation remains in
         // source order in the emitted call argument plan below.
@@ -7779,6 +7782,7 @@ impl Checker<'_, '_> {
                             &parameters,
                             &symbols,
                             &live,
+                            &mut live_writes,
                             expr.span,
                             &[],
                         )?
@@ -7859,6 +7863,17 @@ impl Checker<'_, '_> {
             parameters: parameters.clone(),
             result: Box::new(result.clone()),
         };
+        let mut residuals = self.prepare_open_live_suffix(
+            owner,
+            sig,
+            &parameters,
+            &symbols,
+            &mut live_writes,
+            assigned.iter().enumerate().filter_map(|(slot, &assigned)| {
+                (!assigned && values[slot].is_none()).then_some(slot)
+            }),
+            expr.span,
+        )?;
         let mut live_packets = BTreeSet::new();
         for (slot, value) in live.iter_mut().enumerate() {
             if value.is_none() {
@@ -7902,6 +7917,11 @@ impl Checker<'_, '_> {
                         .iter()
                         .map(|key| self.completed_packet_graph(*key)),
                 )
+                .chain(
+                    live_writes
+                        .values()
+                        .map(|(ty, value)| (value.clone(), ty.clone())),
+                )
                 .collect(),
             expr.span,
         )?;
@@ -7912,6 +7932,7 @@ impl Checker<'_, '_> {
         for key in live_packets {
             self.set_completed_packet_expression(key, completed.next().unwrap());
         }
+        let frame_writes: BTreeMap<_, _> = live_writes.into_keys().zip(completed).collect();
         let mut arguments = Vec::new();
         for route in &routes {
             let slot = route.parameter;
@@ -7945,15 +7966,21 @@ impl Checker<'_, '_> {
                     is_default: false,
                 });
             } else {
-                let (value, _) = self.prepare_open_default(
-                    owner,
-                    slot,
-                    &parameters,
-                    &symbols,
-                    &mut default_writes,
-                    false,
-                    expr.span,
-                )?;
+                let value = match residuals.remove(&slot) {
+                    Some(value) => value,
+                    None => {
+                        self.prepare_open_default(
+                            owner,
+                            slot,
+                            &parameters,
+                            &symbols,
+                            &mut default_writes,
+                            false,
+                            expr.span,
+                        )?
+                        .0
+                    }
+                };
                 pending_defaults.push(n::CallArgument {
                     passing: Default::default(),
                     parameter: slot,
@@ -8012,7 +8039,10 @@ impl Checker<'_, '_> {
         };
         let environment =
             self.prepare_call_environment(&mut call, inputs, written_types, 0, &routes, expr)?;
-        let call = environment.finish(self, call, &routes, 0, expr)?;
+        let mut call = environment.finish(self, call, &routes, 0, expr)?;
+        if !frame_writes.is_empty() {
+            self.resume_open_default_frame(&mut call, frame_writes, expr.span)?;
+        }
         if live_bindings.is_empty() {
             return Ok(call);
         }
