@@ -138,3 +138,22 @@ query(key):
 覆盖无编辑复用、仅改主体、接口变化、实现新增、构建配置变化、失败后修复、产物缺失和取消后重试。记录重新计算的查询及原因，确认缓存命中确实恢复了所需内容。
 
 对固定依赖图，失效传播可以按访问的节点和边计费；重新计算的求解与执行成本另计。源码变更、候选数及实例数会改变图规模，不以固定图复杂度承诺整个增量构建耗时。
+
+### 包级增量构建与并行编译（Package Snapshot / Sysroot Cache & Parallel Waves）
+
+在不把 `elaboration::Checker` 一次性改写为函数级持久化查询前，编译器按**闭上游包快照 + DAG/SCC 并行波次**推进包级增量与并行构建：
+
+1. **闭上游分区与 Tarjan SCC 波次调度**：
+   - **闭上游分区**（`partition_closed_upstream`）：从入口包 `primary` 出发沿反向依赖边标记下游集合 `D`（包含 `primary` 及直接/间接依赖它的包）；其余包构成向上闭合集合 `B`（如 6 个 sysroot 内置包 `{builtin, std, meta, build, attrs, verification}` 或未改动的第三方/工作区依赖），`B` 中没有任何包依赖 `D`。
+   - **SCC 缩点与波次并行**（`schedule_package_waves`）：使用 Tarjan 强连通分量把存在相互可见环的包集合并（例如 6 个 sysroot 包组成一个闭环单元 `PackageUnit`），再按无环 DAG 拓扑分层为 `Wave 0, Wave 1, ...`。同一波次内彼此独立的 `PackageUnit` 可并发执行；前一轮波次任一单元失败即中止，不启动后续波次，保证并发调度下错误报告与输出顺序完全确定。
+2. **内容寻址快照键（Merkle `PackageSnapshotKey`）**：
+   - 使用确定性 SHA-256 对格式化版本、编译器二进制指纹、上游 SCC/包拓扑、各上游包的规范目录树与 `.fl` 原文（支持按包并行哈希并按规范顺序折叠，线程数变化不改变键字节）、外部绑定配置文件（如 `language-items.conf`）、目标平台 `TargetData`、仅过滤到上游包语义身份的 `build.mode` / `build.target` / `build.package_metadata`、协议选择器以及直接依赖单元的 Merkle 键共同摘要。
+   - 修改下游用户源码或仅更改用户包的 `build.mode` 不会使闭上游快照键失效；修改任一上游源码字节、新增/删除上游文件、更改目标平台、上游 `build.mode` 或编译器二进制本身会立即使对应上游快照键失效。
+3. **两级缓存与并行验证**：
+   - 进程内线程安全有界 LRU 缓存 `MemoryPackageCache` 与原子落盘 `.flpkg` 文件缓存 `DiskPackageCache`（含魔数 `FLPK`、版本、`ArtifactKind`、完整 256 位键校验、负载长度与 SHA-256 校验和，写入采用同目录临时文件 + 原子 rename；损坏/截断/版本不匹配时安全退回缓存未命中并重建）。
+   - `program_verification` 在 `flow` 与 `contracts` 阶段分别提供 `VerifiedUpstream` 增量跳过门禁（跳过已冻结上游函数体、impl 关联初始化程序与契约继承证明，同时保持完整上游签名、前提/后置条件对下游可见），并在 `flow::validate_machine_owners` 中支持多核确定性并行验证（`LUNA_JOBS` 控制并行度，始终按声明顺序返回首个诊断）。
+
+#### 当前实现分层状态
+
+- **已落地（Layer 1 & Layer 2）**：`program_verification` 增量上游跳过门禁与多核确定性并行 `flow` 验证；`luna::package_cache` 的 SHA-256 指纹引擎、并行目录/文件哈希、闭上游分区与 Tarjan SCC 并行波次调度器、两级 `.flpkg` / 内存快照缓存引擎。
+- **待协同接入（Layer 3）**：将 `resolve::extend_package_set`、`elaboration::program::ElaboratedBase`、`.flpkg` `NirBase` 序列化与 `luna` 前端的真实 sysroot 快照加载/保存端到端接通（需待涉及 `resolve/module_builder.rs`、`elaboration/program.rs`、`luna/{frontend,packages}.rs` 的在途改动合入后统一接入）。

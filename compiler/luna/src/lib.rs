@@ -22,6 +22,8 @@ pub mod testing;
 
 pub mod compilation_cache;
 
+pub mod package_cache;
+
 pub mod package_stream;
 
 pub mod host;
