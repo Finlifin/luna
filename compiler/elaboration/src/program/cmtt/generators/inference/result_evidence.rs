@@ -3,6 +3,10 @@
 //! the original call site. Normal-form heads have a separate identity rule.
 use super::*;
 
+mod control;
+
+const FORMALS: Option<(&[DeclarationId], &[Term])> = Some((&[], &[]));
+
 // An unknown direct read has no lexical control transfer. An unobserved call
 // operand or guard can itself return from the function whose result we seek.
 fn direct_read(expr: &Expr<'_>) -> bool {
@@ -134,7 +138,6 @@ impl Checker<'_, '_> {
             this.in_required_comptime = true;
             // Defaults bind only their declaration prefix. Even an unknown
             // explicit operand suppresses its default at this call site.
-            let formals: Option<(&[DeclarationId], &[Term])> = Some((&[], &[]));
             for ((parameter, assigned), explicit) in
                 decl.params.iter().zip(plan.assigned).zip(inputs)
             {
@@ -142,11 +145,11 @@ impl Checker<'_, '_> {
                     explicit
                 } else if let TyParamKind::Optional(_, annotation, default) = parameter.ty.kind {
                     let Some(ty) =
-                        this.generator_static_type_hint(annotation, depth + 1, formals)?
+                        this.generator_static_type_hint(annotation, depth + 1, FORMALS)?
                     else {
                         continue;
                     };
-                    this.generator_static_value_hint(default, &ty, depth + 1, formals)?
+                    this.generator_static_value_hint(default, &ty, depth + 1, FORMALS)?
                         .map(|value| (ty, value))
                 } else {
                     None
@@ -162,7 +165,7 @@ impl Checker<'_, '_> {
                     .partial
                     .insert(id, constants::PartialStagedValue::known(value));
             }
-            this.generator_static_value_hint(body, domain, depth + 1, formals)
+            control::result(this, body, domain, depth + 1)
         });
         self.observing_call_results.remove(&owner);
         result

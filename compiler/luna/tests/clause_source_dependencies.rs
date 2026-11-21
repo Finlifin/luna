@@ -895,3 +895,50 @@ fn type_producer_defaults_observe_only_the_selected_declaration_prefix() {
     let error = sysroot::compile(&invalid).unwrap_err();
     assert!(error.contains("ProgramContractRejected"), "{error}");
 }
+
+#[test]
+fn lexical_returns_and_fallthrough_supply_the_same_type_evidence() {
+    let source = r#"
+        enum Packet { group.{byte(u8)} }
+        comptime fn note(name: Symbol, value: bool) -> bool {
+            let generated = meta.StructBuilder.new(.name = name).Build();
+            value
+        }
+        pure comptime fn Choose(flag: bool, yes: Type, no: Type) -> Type {
+            if flag { return yes; };
+            return no;
+        }
+        pure comptime fn Agrees(flag: bool) -> Type {
+            when {
+                flag => { return Packet; },
+                else => {},
+            };
+            Packet
+        }
+        pure comptime fn InGuard(flag: bool) -> Type {
+            if do { if flag { return ?u8; }; true } { return Packet; };
+            ?u8
+        }
+        pure comptime fn Short(flag: bool) -> Type {
+            if not flag or do { return Packet; false } { return ?u8; };
+            Packet
+        }
+        fn read() -> T where .T: Type = bool, .items: meta.List<T> = [] {
+            const item = items[0];
+            item
+        }
+        fn run() -> bool {
+            let a = read<.items = [.group.byte(7)], .T = Choose(true, Packet, ?u8)>();
+            let b = read<.items = [.group.byte(0)], .T = Choose(false, Packet, ?u8)>();
+            let c = read<.items = [.group.byte(3)], .T = Agrees(note(.TypeExitMerge, false))>();
+            let d = read<.items = [.group.byte(5)], .T = InGuard(false)>();
+            let e = read<.items = [.group.byte(0)], .T = InGuard(true)>();
+            let f = read<.items = [.group.byte(0)], .T = Choose(note(.TypeExitSplit, false), Packet, ?u8)>();
+            let g = read<.items = [.group.byte(9)], .T = Short(true)>();
+            let h = read<.items = [.group.byte(0)], .T = Short(false)>();
+            (g matches .group.byte(9)) and (h matches 103?) and (a matches .group.byte(7)) and (b matches 103?) and (c matches .group.byte(3))
+                and (d matches .group.byte(5)) and (e matches 103?) and (f matches 103?)
+        }
+    "#;
+    check_struct_events(source, "TypeExit", &["TypeExitMerge", "TypeExitSplit"]);
+}
