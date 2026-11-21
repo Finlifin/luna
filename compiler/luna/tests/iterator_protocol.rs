@@ -54,7 +54,20 @@ fn cli_accepts_one_explicit_iterator_binding() {
 
 #[test]
 fn repository_iterator_is_a_valid_push_protocol() {
-    check(&include!("support/iterator_source.rs"), "input.Iterator").unwrap();
+    support::compile_with_source_bindings_for_target(
+        &include!("support/iterator_source.rs"),
+        &Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            iterator: Some("input.Iterator"),
+            copy: Some("input.protocols.resources.Copy"),
+            drop: Some("input.protocols.resources.Drop"),
+            meta_list: Some("input.meta.List"),
+            tuple: Some("input.types.tuple.Tuple"),
+            ..Default::default()
+        },
+        Some(luna::frontend::native_test_target().unwrap()),
+    )
+    .unwrap();
 }
 
 #[test]

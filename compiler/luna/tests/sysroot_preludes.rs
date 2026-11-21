@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
 
 struct Inputs(PathBuf);
+
 impl Inputs {
     fn new() -> Self {
         let nonce = std::time::SystemTime::now()
@@ -19,11 +20,13 @@ impl Inputs {
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
+
     fn write(&self, path: &str, source: &str) {
         let path = self.0.join(path);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, source).unwrap();
     }
+
     fn run(&self, source: &str) -> std::process::Output {
         self.write("input.fl", source);
         std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
@@ -35,11 +38,13 @@ impl Inputs {
             .unwrap()
     }
 }
+
 impl Drop for Inputs {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+
 fn assert_true(output: std::process::Output) {
     assert!(
         output.status.success(),
@@ -54,22 +59,53 @@ fn source_configured_iterator_runs_ordinary_for_from_prelude() {
     let input = Inputs::new();
     input.write(
         "library/builtin/lib.fl",
-        "pub use primitives.*; pub use iterator.*; pub use resources.*; pub mod prelude {pub use primitives.*; pub use iterator.Iterator;}",
+        "pub use primitives.*; pub use protocols.iterator.*; pub use protocols.resources.*; pub mod prelude {pub use primitives.*; pub use protocols.iterator.Iterator;}",
     );
     input.write(
         "library/builtin/primitives.fl",
         include_str!("../../../library/builtin/primitives.fl"),
     );
     input.write(
-        "library/builtin/iterator.fl",
+        "library/builtin/bindings.fl",
+        include_str!("../../../library/builtin/bindings.fl"),
+    );
+    input.write(
+        "library/builtin/protocols/iterator.fl",
         include_str!("../../../library/builtin/protocols/iterator.fl"),
     );
     input.write(
-        "library/builtin/resources.fl",
-        include!("support/resources_source.rs"),
+        "library/builtin/protocols/resources.fl",
+        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
-    input.write("library/language-items.conf", "version = 1\niterator-protocol = builtin.iterator.Iterator\ncopy-protocol = builtin.resources.Copy\ndrop-protocol = builtin.resources.Drop\n");
-    for package in ["meta", "build", "attrs", "verification", "std"] {
+    input.write(
+        "library/builtin/numeric/comparison.fl",
+        include_str!("../../../library/builtin/numeric/comparison.fl"),
+    );
+    input.write(
+        "library/builtin/types/tuple.fl",
+        include_str!("../../../library/builtin/types/tuple.fl"),
+    );
+    input.write(
+        "library/builtin/mem_impl/raw.fl",
+        "use bindings.{try_u128_to_usize, usize_representation}
+        use primitives.{u128, usize}
+        pub fn checked_add_usize(a: usize, b: usize) -> ?usize {
+            let raw_a = usize_representation(a);
+            let raw_b = usize_representation(b);
+            let u128_max: u128 = 340282366920938463463374607431768211455;
+            if raw_a > u128_max - raw_b { return null; }
+            try_u128_to_usize(raw_a + raw_b)
+        }",
+    );
+    input.write(
+        "library/language-items.conf",
+        "version = 1\niterator-protocol = builtin.protocols.iterator.Iterator\ncopy-protocol = builtin.protocols.resources.Copy\ndrop-protocol = builtin.protocols.resources.Drop\nmeta-list-type = meta.List\ntuple-type = builtin.types.tuple.Tuple\n",
+    );
+    input.write(
+        "library/meta/lib.fl",
+        "use builtin.Type;\npub const List: pure comptime fn<T: Type> -> Type = .List'builtin;\npub mod prelude {pub use .List;}",
+    );
+    for package in ["build", "attrs", "verification", "std"] {
         input.write(&format!("library/{package}/lib.fl"), "pub mod prelude {}");
     }
     input.write(
@@ -84,9 +120,9 @@ fn source_configured_iterator_runs_ordinary_for_from_prelude() {
             "--test-native",
             "--inline-functions",
             "--copy-protocol",
-            "builtin.resources.Copy",
+            "builtin.protocols.resources.Copy",
             "--drop-protocol",
-            "builtin.resources.Drop",
+            "builtin.protocols.resources.Drop",
         ])
         .output()
         .unwrap();

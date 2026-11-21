@@ -2,12 +2,13 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use comptime_interpretor::Value;
 
 #[test]
 fn ordinary_for_retires_rejected_current_and_unproduced_items_once() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Watch {{seen:*bool,keep:bool}}
         impl Drop for Watch {{fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -29,7 +30,6 @@ fn ordinary_for_retires_rejected_current_and_unproduced_items_once() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration_with_budget(
         &source,
@@ -41,7 +41,7 @@ fn ordinary_for_retires_rejected_current_and_unproduced_items_once() {
 #[test]
 fn ordinary_for_evaluates_input_once_before_installing_delivery_handler() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn run()->bool {{
             var inputs:.u32'builtin=0;
             var outputs:.u32'builtin=0;
@@ -62,7 +62,6 @@ fn ordinary_for_evaluates_input_once_before_installing_delivery_handler() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -70,7 +69,7 @@ fn ordinary_for_evaluates_input_once_before_installing_delivery_handler() {
 #[test]
 fn ordinary_for_uses_symbolic_iterator_evidence_in_generic_bodies() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         inline fn visits(items:I)->.u32'builtin where I:-Iterator {{
             var count:.u32'builtin=0;
             for item in items {{assumes count < 3; count = count + 1;}}
@@ -82,7 +81,6 @@ fn ordinary_for_uses_symbolic_iterator_evidence_in_generic_bodies() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -90,7 +88,7 @@ fn ordinary_for_uses_symbolic_iterator_evidence_in_generic_bodies() {
 #[test]
 fn ordinary_for_consumes_optional_chain_and_skips_failed_patterns() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn run()->bool {{
             var count:.u32'builtin=0;
             let first:?bool=false;
@@ -102,7 +100,6 @@ fn ordinary_for_consumes_optional_chain_and_skips_failed_patterns() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -110,7 +107,7 @@ fn ordinary_for_consumes_optional_chain_and_skips_failed_patterns() {
 #[test]
 fn ordinary_for_guards_continue_break_and_return_keep_lexical_targets() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn stop()->bool {{
             let value:?bool=true;
             for item in value {{return item;}}
@@ -131,7 +128,6 @@ fn ordinary_for_guards_continue_break_and_return_keep_lexical_targets() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -139,7 +135,7 @@ fn ordinary_for_guards_continue_break_and_return_keep_lexical_targets() {
 #[test]
 fn ordinary_for_nested_labelled_transfers_leave_only_the_target_iteration() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn run()->bool {{
             var count:.u32'builtin=0;
             let a:?bool=false;
@@ -159,7 +155,6 @@ fn ordinary_for_nested_labelled_transfers_leave_only_the_target_iteration() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -195,7 +190,7 @@ fn associated_item_inherits_implementation_parameter_constraints() {
 #[test]
 fn repository_inline_iterator_maps_filters_and_consumes_in_order() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         typealias Unit=.void'builtin;
         struct Flags {{}}
         impl Iterator for Flags {{
@@ -222,7 +217,6 @@ fn repository_inline_iterator_maps_filters_and_consumes_in_order() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -230,7 +224,7 @@ fn repository_inline_iterator_maps_filters_and_consumes_in_order() {
 #[test]
 fn repository_inline_iterator_drops_filtered_and_unproduced_items() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         typealias Unit=.void'builtin;
         struct Watch {{seen:*bool,keep:bool}}
         impl Drop for Watch {{fn drop(*self) {{
@@ -278,7 +272,6 @@ fn repository_inline_iterator_drops_filtered_and_unproduced_items() {
         fn run()->bool {{filtered() and short_circuit(true) and short_circuit(false)}}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -295,7 +288,7 @@ fn repository_iterator_rejects_repeated_consumption_of_callback_capture() {
         "skip_while(|flag| {let consumed=ticket;true}).as(Iterator).foreach(|item| {})",
     ] {
         let source = format!(
-            "{}\n{}\n
+            "{}\n
         typealias Unit=.void'builtin;
         struct Ticket {{}}
         struct Flags {{}}
@@ -310,7 +303,6 @@ fn repository_iterator_rejects_repeated_consumption_of_callback_capture() {
             Flags {{}}.as(Iterator).{adapter};
         }}",
             &include!("support/iterator_source.rs"),
-            include_str!("../../../library/builtin/protocols/resources.fl"),
         );
         let package = compile_iteration(&source);
         let mut expanded = package.clone();
@@ -333,7 +325,7 @@ fn repository_iterator_rejects_repeated_consumption_of_callback_capture() {
 #[test]
 fn optional_iteration_preserves_layers_and_chain_order() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn run()->bool {{
             var count:.u32'builtin=0;
             let observed=count.ref;
@@ -361,7 +353,6 @@ fn optional_iteration_preserves_layers_and_chain_order() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -369,7 +360,7 @@ fn optional_iteration_preserves_layers_and_chain_order() {
 #[test]
 fn optional_chain_cleans_owned_items_on_short_circuit() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Watch {{seen:*bool}}
         impl Drop for Watch {{fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -389,7 +380,6 @@ fn optional_chain_cleans_owned_items_on_short_circuit() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -397,7 +387,7 @@ fn optional_chain_cleans_owned_items_on_short_circuit() {
 #[test]
 fn collect_selects_the_requested_from_iterator_implementation() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Count {{value:.u32'builtin}}
         impl FromIterator<bool> for Count {{
             inline fn from_iter(iter:I)->Self
@@ -422,7 +412,6 @@ fn collect_selects_the_requested_from_iterator_implementation() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -444,8 +433,10 @@ fn compile_iteration(source: &str) -> nir::program::Package {
         luna::protocols::type_constructors::Selectors {
             iterator: Some("input.Iterator"),
             into_iterator: Some("input.IntoIterator"),
-            copy: Some("input.Copy"),
-            drop: Some("input.Drop"),
+            copy: Some("input.protocols.resources.Copy"),
+            drop: Some("input.protocols.resources.Drop"),
+            meta_list: Some("input.meta.List"),
+            tuple: Some("input.types.tuple.Tuple"),
             ..Default::default()
         },
         Some(luna::frontend::native_test_target().expect("host target available")),
@@ -457,7 +448,13 @@ fn compile_iteration_unbound(source: &str) -> Result<nir::program::Package, Stri
     support::compile_with_source_bindings_for_target(
         source,
         &Default::default(),
-        Default::default(),
+        luna::protocols::type_constructors::Selectors {
+            copy: Some("input.protocols.resources.Copy"),
+            drop: Some("input.protocols.resources.Drop"),
+            meta_list: Some("input.meta.List"),
+            tuple: Some("input.types.tuple.Tuple"),
+            ..Default::default()
+        },
         Some(luna::frontend::native_test_target().expect("host target available")),
     )
 }
@@ -465,7 +462,7 @@ fn compile_iteration_unbound(source: &str) -> Result<nir::program::Package, Stri
 #[test]
 fn inspection_observes_items_before_filtering_without_changing_them() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn run()->bool {{
             var count:.u32'builtin=0;
             var delivered=false;
@@ -489,7 +486,6 @@ fn inspection_observes_items_before_filtering_without_changing_them() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -497,7 +493,7 @@ fn inspection_observes_items_before_filtering_without_changing_them() {
 #[test]
 fn inspection_borrows_affine_items_and_stops_with_the_consumer() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Watch {{seen:*bool}}
         impl Drop for Watch {{fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -520,7 +516,6 @@ fn inspection_borrows_affine_items_and_stops_with_the_consumer() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -528,7 +523,7 @@ fn inspection_borrows_affine_items_and_stops_with_the_consumer() {
 #[test]
 fn fold_moves_and_reinitializes_affine_accumulator_in_source_order() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct State {{count:.u32'builtin,seen:*bool}}
         impl Drop for State {{fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -560,7 +555,6 @@ fn fold_moves_and_reinitializes_affine_accumulator_in_source_order() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_contract_limit(
         &source,
@@ -571,7 +565,7 @@ fn fold_moves_and_reinitializes_affine_accumulator_in_source_order() {
 #[test]
 fn handler_borrows_pointer_bearing_affine_capture_without_copy() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Observer {{seen:*bool,count:.u32'builtin}}
         impl Drop for Observer {{fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -597,7 +591,6 @@ fn handler_borrows_pointer_bearing_affine_capture_without_copy() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -610,7 +603,7 @@ fn borrowed_pointer_capture_retains_owner_and_storage_restrictions() {
         "let alias=observer.ref;",
     ] {
         let source = format!(
-            "{}\n{}\n
+            "{}\n
             struct Observer {{seen:*bool}}
             fn run() {{
                 var first=false;var second=false;
@@ -620,7 +613,6 @@ fn borrowed_pointer_capture_retains_owner_and_storage_restrictions() {
                 item.as(Iterator).iterate()# {{emit_item<bool>(value)=>{{{body}}},}};
             }}",
             &include!("support/iterator_source.rs"),
-            include_str!("../../../library/builtin/protocols/resources.fl"),
         );
         let package = compile_iteration(&source);
         let error =
@@ -639,7 +631,7 @@ fn borrowed_pointer_capture_retains_owner_and_storage_restrictions() {
 #[test]
 fn borrowed_affine_capture_cleanup_follows_lexical_return_and_loop_exit() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Observer {{seen:*bool,count:.u32'builtin}}
         impl Drop for Observer {{fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -681,7 +673,6 @@ fn borrowed_affine_capture_cleanup_follows_lexical_return_and_loop_exit() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -689,7 +680,7 @@ fn borrowed_affine_capture_cleanup_follows_lexical_return_and_loop_exit() {
 #[test]
 fn find_transfers_the_match_and_cleans_rejected_and_unproduced_items() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Watch {{seen:*bool,keep:bool}}
         impl Drop for Watch {{fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -719,7 +710,6 @@ fn find_transfers_the_match_and_cleans_rejected_and_unproduced_items() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     // Three owned optional sources and their cleanup guards share this budget.
     // Unexpanded lexical delivery of pointer-bearing results still lacks a
@@ -734,7 +724,7 @@ fn find_transfers_the_match_and_cleans_rejected_and_unproduced_items() {
 #[test]
 fn find_map_preserves_present_null_and_stops_mapping() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn run()->bool {{
             var calls:.u32'builtin=0;
             let counter=calls.ref;
@@ -757,7 +747,6 @@ fn find_map_preserves_present_null_and_stops_mapping() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -765,7 +754,7 @@ fn find_map_preserves_present_null_and_stops_mapping() {
 #[test]
 fn find_scalar_handles_match_and_exhaustion_without_expansion() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn run()->bool {{
             let first:?bool=false;let second:?bool=true;
             let found=first.as(Iterator).chain(second).as(Iterator).find(|value| value.*);
@@ -777,7 +766,6 @@ fn find_scalar_handles_match_and_exhaustion_without_expansion() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -785,7 +773,7 @@ fn find_scalar_handles_match_and_exhaustion_without_expansion() {
 #[test]
 fn filter_map_preserves_nested_optionals_and_maps_in_order() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn run()->bool {{
             var calls:.u32'builtin=0;var outputs:.u32'builtin=0;
             let counter=calls.ref;let output=outputs.ref;
@@ -808,7 +796,6 @@ fn filter_map_preserves_nested_optionals_and_maps_in_order() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration(&source);
 }
@@ -816,7 +803,7 @@ fn filter_map_preserves_nested_optionals_and_maps_in_order() {
 #[test]
 fn filter_map_cleans_rejected_items_and_unused_callback_environment() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Watch {{seen:*bool,keep:bool}}
         impl Drop for Watch {{fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -847,7 +834,6 @@ fn filter_map_cleans_rejected_items_and_unused_callback_environment() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -855,7 +841,7 @@ fn filter_map_cleans_rejected_items_and_unused_callback_environment() {
 #[test]
 fn filter_map_short_circuit_cleans_remaining_inputs_without_mapping_them() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Watch {{seen:*bool,keep:bool}}
         impl Drop for Watch {{fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -879,7 +865,6 @@ fn filter_map_short_circuit_cleans_remaining_inputs_without_mapping_them() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -887,7 +872,7 @@ fn filter_map_short_circuit_cleans_remaining_inputs_without_mapping_them() {
 #[test]
 fn flat_map_finishes_inner_sources_before_advancing_outer_source() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         typealias PairUnit=.void'builtin;
         struct Pair {{first:bool,second:bool}}
         impl Iterator for Pair {{
@@ -915,7 +900,6 @@ fn flat_map_finishes_inner_sources_before_advancing_outer_source() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -923,7 +907,7 @@ fn flat_map_finishes_inner_sources_before_advancing_outer_source() {
 #[test]
 fn flat_map_short_circuit_cleans_inner_and_outer_remainders() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         typealias GroupUnit=.void'builtin;
         struct Watch {{seen:*bool}}
         impl Drop for Watch {{fn drop(*self) {{
@@ -955,7 +939,6 @@ fn flat_map_short_circuit_cleans_inner_and_outer_remainders() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -972,7 +955,7 @@ fn flat_map_rejects_mapper_results_without_iterator_protocol() {
 #[test]
 fn take_while_stops_its_source_but_not_the_enclosing_chain() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn run()->bool {{
             var calls:.u32'builtin=0;var outputs:.u32'builtin=0;
             let counter=calls.ref;let output=outputs.ref;
@@ -991,7 +974,6 @@ fn take_while_stops_its_source_but_not_the_enclosing_chain() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -999,7 +981,7 @@ fn take_while_stops_its_source_but_not_the_enclosing_chain() {
 #[test]
 fn take_while_rejection_cleans_current_remaining_and_predicate_resources() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Watch {{seen:*bool,keep:bool}}
         impl Drop for Watch {{fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -1026,7 +1008,6 @@ fn take_while_rejection_cleans_current_remaining_and_predicate_resources() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1034,7 +1015,7 @@ fn take_while_rejection_cleans_current_remaining_and_predicate_resources() {
 #[test]
 fn take_while_handles_empty_sources_and_downstream_early_exit() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Watch {{seen:*bool,keep:bool}}
         impl Drop for Watch {{fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -1058,7 +1039,6 @@ fn take_while_handles_empty_sources_and_downstream_early_exit() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1066,7 +1046,7 @@ fn take_while_handles_empty_sources_and_downstream_early_exit() {
 #[test]
 fn skip_while_stops_testing_after_the_first_forwarded_item() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn run() -> bool {{
             var calls: .u32'builtin = 0;
             var outputs: .u32'builtin = 0;
@@ -1088,7 +1068,6 @@ fn skip_while_stops_testing_after_the_first_forwarded_item() {
         }}
         fn verify() {{ let passed = run(); assumes passed; }}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1096,7 +1075,7 @@ fn skip_while_stops_testing_after_the_first_forwarded_item() {
 #[test]
 fn skip_while_cleans_prefix_tail_and_environment_on_consumer_exit() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Watch {{ seen: *bool, skip: bool }}
         impl Drop for Watch {{ fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -1124,7 +1103,6 @@ fn skip_while_cleans_prefix_tail_and_environment_on_consumer_exit() {
         }}
         fn verify() {{ let passed = run(); assumes passed; }}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1132,7 +1110,7 @@ fn skip_while_cleans_prefix_tail_and_environment_on_consumer_exit() {
 #[test]
 fn skip_while_handles_empty_and_fully_skipped_sources() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Guard {{ seen: *bool }}
         impl Drop for Guard {{ fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -1159,7 +1137,6 @@ fn skip_while_handles_empty_and_fully_skipped_sources() {
         }}
         fn verify() {{ let passed = run(); assumes passed; }}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1167,7 +1144,7 @@ fn skip_while_handles_empty_and_fully_skipped_sources() {
 #[test]
 fn counted_adapters_preserve_order_and_do_not_overproduce() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn run() -> bool {{
             var calls: .u32'builtin = 0;
             let counter = calls.ref;
@@ -1184,7 +1161,6 @@ fn counted_adapters_preserve_order_and_do_not_overproduce() {
         }}
         fn verify() {{ let passed = run(); assumes passed; }}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1192,7 +1168,7 @@ fn counted_adapters_preserve_order_and_do_not_overproduce() {
 #[test]
 fn counted_adapters_handle_zero_and_exhausted_limits() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         typealias Unit = .void'builtin;
         struct NeverStart {{ retired: *bool }}
         impl Drop for NeverStart {{ fn drop(*self) {{
@@ -1220,7 +1196,6 @@ fn counted_adapters_handle_zero_and_exhausted_limits() {
         }}
         fn verify() {{ let passed = run(); assumes passed; }}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1228,7 +1203,7 @@ fn counted_adapters_handle_zero_and_exhausted_limits() {
 #[test]
 fn counted_adapters_retire_skipped_delivered_and_remaining_items_once() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Watch {{ seen: *bool }}
         impl Drop for Watch {{ fn drop(*self) {{
             assumes not self.seen.*.*;
@@ -1249,7 +1224,6 @@ fn counted_adapters_retire_skipped_delivered_and_remaining_items_once() {
         }}
         fn verify() {{ let passed = run(); assumes passed; }}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1338,7 +1312,7 @@ fn check_iteration_with_budget(source: &str, original_limit: Option<&str>, budge
 #[test]
 fn ordinary_for_converts_containers_once_and_keeps_conversion_outside_handler() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Receipt {{done:*bool}}
         impl Drop for Receipt {{fn drop(*self) {{assumes not self.done.*.*;self.done.*.* = true;}}}}
         struct Container {{value:?bool,converted:*bool,receipt:Receipt}}
@@ -1360,7 +1334,6 @@ fn ordinary_for_converts_containers_once_and_keeps_conversion_outside_handler() 
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -1368,7 +1341,7 @@ fn ordinary_for_converts_containers_once_and_keeps_conversion_outside_handler() 
 #[test]
 fn ordinary_for_prefers_direct_iteration_and_converts_generic_inputs() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         struct Both {{}}
         impl Iterator for Both {{
             assoc Item:(.Type'builtin)=bool;
@@ -1395,7 +1368,6 @@ fn ordinary_for_prefers_direct_iteration_and_converts_generic_inputs() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration(&source);
 }
@@ -1404,7 +1376,6 @@ fn ordinary_for_prefers_direct_iteration_and_converts_generic_inputs() {
 fn reduce_seeds_from_first_item_and_calls_combiner_in_order() {
     let source = format!(
         r#"{}
-{}
         fn run()->bool {{
             var calls:.u32'builtin=0;
             let counter=calls.ref;
@@ -1428,7 +1399,6 @@ fn reduce_seeds_from_first_item_and_calls_combiner_in_order() {
         fn verify() {{let passed=run();assumes passed;}}
     "#,
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration_with_contract_limit(
         &source,
@@ -1440,7 +1410,6 @@ fn reduce_seeds_from_first_item_and_calls_combiner_in_order() {
 fn reduce_preserves_a_present_null_item() {
     let source = format!(
         r#"{}
-{}
         fn run()->bool {{
             let payload:?bool=null;
             let source:??bool=payload;
@@ -1450,7 +1419,6 @@ fn reduce_preserves_a_present_null_item() {
         fn verify() {{let passed=run();assumes passed;}}
     "#,
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration_with_contract_limit(
         &source,
@@ -1462,7 +1430,6 @@ fn reduce_preserves_a_present_null_item() {
 fn selection_stops_nth_and_preserves_last_and_optional_layers() {
     let source = format!(
         r#"{}
-{}
         fn run()->bool {{
             var calls:.u32'builtin=0;
             let counter=calls.ref;
@@ -1488,7 +1455,6 @@ fn selection_stops_nth_and_preserves_last_and_optional_layers() {
         fn verify() {{let passed=run();assumes passed;}}
         "#,
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1501,7 +1467,6 @@ fn selection_retires_affine_prefix_and_remainder_without_copying_result() {
     ] {
         let source = format!(
             r#"{}
-{}
             struct Watch {{seen:*bool}}
             impl Drop for Watch {{fn drop(*self) {{assumes not self.seen.*.*;self.seen.*.* = true;}}}}
             fn run()->bool {{
@@ -1518,7 +1483,6 @@ fn selection_retires_affine_prefix_and_remainder_without_copying_result() {
             fn verify() {{let passed=run();assumes passed;}}
             "#,
             &include!("support/iterator_source.rs"),
-            include_str!("../../../library/builtin/protocols/resources.fl")
         );
         check_iteration_with_contract_limit(
             &source,
@@ -1535,7 +1499,6 @@ fn selection_retires_affine_prefix_and_remainder_without_copying_result() {
 fn reduce_moves_affine_items_and_retires_only_replaced_accumulators() {
     let source = format!(
         r#"{}
-{}
         struct Watch {{seen:*bool}}
         impl Drop for Watch {{fn drop(*self) {{assumes not self.seen.*.*;self.seen.*.* = true;}}}}
         fn run()->bool {{
@@ -1553,7 +1516,6 @@ fn reduce_moves_affine_items_and_retires_only_replaced_accumulators() {
         fn verify() {{let passed=run();assumes passed;}}
     "#,
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl")
     );
     check_iteration_with_contract_limit(
         &source,
@@ -1564,7 +1526,7 @@ fn reduce_moves_affine_items_and_retires_only_replaced_accumulators() {
 #[test]
 fn flatten_short_circuit_cleans_inner_and_outer_remainders() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         typealias GroupUnit=.void'builtin;
         struct Watch {{seen:*bool}}
         impl Drop for Watch {{fn drop(*self) {{
@@ -1590,7 +1552,6 @@ fn flatten_short_circuit_cleans_inner_and_outer_remainders() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1608,7 +1569,6 @@ fn flatten_rejects_noniterable_items() {
 fn flatten_preserves_order_empty_sources_and_one_optional_layer() {
     let source = format!(
         r#"{}
-{}
         fn run()->bool {{
             var count:.u32'builtin=0;
             let counter=count.ref;
@@ -1630,7 +1590,6 @@ fn flatten_preserves_order_empty_sources_and_one_optional_layer() {
         fn verify() {{let passed=run();assumes passed;}}
         "#,
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1638,7 +1597,7 @@ fn flatten_preserves_order_empty_sources_and_one_optional_layer() {
 #[test]
 fn intersperse_with_preserves_order_and_skips_empty_and_singleton_factories() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn run() -> bool {{
             var calls: primitives.usize = 0;
             var outputs: primitives.usize = 0;
@@ -1663,7 +1622,6 @@ fn intersperse_with_preserves_order_and_skips_empty_and_singleton_factories() {
         }}
         fn verify() {{let passed = run(); assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1671,7 +1629,7 @@ fn intersperse_with_preserves_order_and_skips_empty_and_singleton_factories() {
 #[test]
 fn named_optional_mapper_matches_completed_associated_signature() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn present_null(value: bool) -> ??bool {{
             let inner: ?bool = null;
             if value {{inner}} else {{null}}
@@ -1683,7 +1641,6 @@ fn named_optional_mapper_matches_completed_associated_signature() {
         }}
         fn verify() {{let passed = run(); assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1703,7 +1660,7 @@ fn intersperse_with_rejects_factory_domain_and_arity_mismatches() {
 #[test]
 fn map_while_stops_mapping_without_stopping_a_following_chain() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn selected(value: bool) -> ?bool {{if value {{true}} else {{null}}}}
         fn run() -> bool {{
             var calls: primitives.usize = 0;
@@ -1727,7 +1684,6 @@ fn map_while_stops_mapping_without_stopping_a_following_chain() {
         }}
         fn verify() {{let passed = run(); assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }
@@ -1735,7 +1691,7 @@ fn map_while_stops_mapping_without_stopping_a_following_chain() {
 #[test]
 fn scan_preserves_state_across_items_and_stops_before_chain_tail() {
     let source = format!(
-        "{}\n{}\n
+        "{}\n
         fn step(state:*bool,value:bool)->?bool {{
             if not value {{return null;}};state.* = not state.*;state.*
         }}
@@ -1752,7 +1708,6 @@ fn scan_preserves_state_across_items_and_stops_before_chain_tail() {
         }}
         fn verify() {{let passed=run();assumes passed;}}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/protocols/resources.fl"),
     );
     check_iteration_with_budget(&source, None, 4_000_000);
 }

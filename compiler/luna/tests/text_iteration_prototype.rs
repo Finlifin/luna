@@ -2,15 +2,13 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use comptime_interpretor::Value;
 
 fn compile(body: &str) -> nir::program::Package {
     let source = format!(
-        "{}\n{}\nmod iterator {{ {} }}\nmod bindings {{ {} }}\nmod text_bytes {{ {} }}\nuse text_bytes.TextBytes;\nmod text_iteration {{ {} }}\n{}",
-        include_str!("../../../library/builtin/primitives.fl"),
-        include!("support/resources_source.rs"),
+        "mod iterator {{ {} }}\nuse iterator.primitives;\nuse iterator.primitives.*;\nuse iterator.protocols.resources.*;\nuse iterator.bindings;\nmod text_bytes {{ {} }}\nuse text_bytes.TextBytes;\nmod text_iteration {{ {} }}\n{}",
         &include!("support/iterator_source.rs"),
-        include_str!("../../../library/builtin/bindings.fl"),
         include_str!("../../../library/builtin/text_impl/bytes.fl"),
         include_str!("../../../development/library-prototypes/builtin/text_iteration.fl"),
         body
@@ -20,8 +18,10 @@ fn compile(body: &str) -> nir::program::Package {
         &Default::default(),
         luna::protocols::type_constructors::Selectors {
             iterator: Some("input.iterator.Iterator"),
-            copy: Some("input.Copy"),
-            drop: Some("input.Drop"),
+            copy: Some("input.iterator.protocols.resources.Copy"),
+            drop: Some("input.iterator.protocols.resources.Drop"),
+            meta_list: Some("input.iterator.meta.List"),
+            tuple: Some("input.iterator.types.tuple.Tuple"),
             ..Default::default()
         },
         Some(luna::frontend::native_test_target().unwrap()),
