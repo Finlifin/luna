@@ -11,10 +11,12 @@ pub(super) struct DifferenceBounds {
     bounds: Vec<Vec<Option<Integer>>>,
     inconsistent: bool,
 }
+
 impl DifferenceBounds {
     pub fn build(facts: &Facts, limits: &mut Limits) -> Result<Option<Self>, Unknown> {
         Self::build_with_nodes(facts, &BTreeSet::new(), limits)
     }
+
     fn build_with_nodes(
         facts: &Facts,
         extra: &BTreeSet<ValueId>,
@@ -88,6 +90,7 @@ impl DifferenceBounds {
         graph.close_sparse(limits)?;
         Ok(Some(graph))
     }
+
     fn tighten(
         &mut self,
         a: usize,
@@ -105,9 +108,11 @@ impl DifferenceBounds {
         }
         Ok(())
     }
+
     pub(super) fn contradiction(&self) -> bool {
         self.inconsistent
     }
+
     pub fn refine(&self, facts: &mut Facts, limits: &mut Limits) -> Result<bool, Unknown> {
         let mut changed = false;
         for (i, node) in self.nodes.iter().enumerate().skip(1) {
@@ -126,6 +131,33 @@ impl DifferenceBounds {
         }
         Ok(changed)
     }
+
+    /// True only when `p` contains at least one positive and one negative
+    /// single-variable term present in this difference graph. Without such a
+    /// pair, no difference edge `a - b <= c` can tighten `p`'s interval box.
+    pub(super) fn can_enclose(&self, p: &Polynomial, limits: &mut Limits) -> Result<bool, Unknown> {
+        let mut has_positive = false;
+        let mut has_negative = false;
+        for (factors, coefficient) in &p.terms {
+            limits.step(1)?;
+            if factors.len() != 1 || coefficient.is_zero() {
+                continue;
+            }
+            if self.nodes.binary_search(&Some(factors[0])).is_err() {
+                continue;
+            }
+            if coefficient.is_negative() {
+                has_negative = true;
+            } else {
+                has_positive = true;
+            }
+            if has_positive && has_negative {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) fn enclose(
         &self,
         p: &Polynomial,
@@ -133,6 +165,9 @@ impl DifferenceBounds {
         result: &mut Interval,
         limits: &mut Limits,
     ) -> Result<(), Unknown> {
+        if !self.can_enclose(p, limits)? {
+            return Ok(());
+        }
         for (a, positive) in &p.terms {
             if a.len() != 1 || positive.is_negative() {
                 continue;
@@ -278,6 +313,7 @@ impl DifferenceBounds {
             .map_err(Into::into)
     }
 }
+
 // Recognize k*x-k*y+c <= 0 with integer k>0, including one absent endpoint.
 fn difference(
     row: &Polynomial,
@@ -327,6 +363,7 @@ fn difference(
         bound,
     )))
 }
+
 impl fmt::Display for DifferenceBounds {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -355,6 +392,7 @@ impl fmt::Display for DifferenceBounds {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn difference_graph_dump_and_storage_cap_are_explicit() {
         let mut limits = Limits::default();

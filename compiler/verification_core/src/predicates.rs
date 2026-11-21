@@ -294,23 +294,13 @@ impl Condition {
         {
             return Ok(Some(relation == Comparison::NotEqual));
         }
-        let (mut range, mut premises) = match difference.enclosure(facts, limits) {
+        let (mut range, premises) = match difference.enclosure(facts, limits) {
             Ok(enclosed) => enclosed,
             Err(Unknown::MissingBound(_)) => {
                 return difference.global_quadratic_comparison(relation, limits);
             }
             Err(failure) => return Err(failure),
         };
-        if let Some(truth) = enclosed_comparison(&range, relation, limits)? {
-            return Ok(Some(truth));
-        }
-        difference.refine_row_difference_enclosure_until(
-            &mut range,
-            &mut premises,
-            facts,
-            limits,
-            |enclosure, limits| Ok(enclosed_comparison(enclosure, relation, limits)?.is_some()),
-        )?;
         if let Some(truth) = enclosed_comparison(&range, relation, limits)? {
             return Ok(Some(truth));
         }

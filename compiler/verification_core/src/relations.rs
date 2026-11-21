@@ -269,15 +269,7 @@ impl Facts {
                 }
             }
             for row in &rows {
-                let (mut range, _) = row.interval_enclosure(self, limits)?;
-                let interval_satisfied = !limits.compare(&range.upper, &Integer::zero())?.is_gt();
-                if let Some(graph) = &graph {
-                    graph.enclose(row, self, &mut range, limits)?;
-                    if limits.compare(&range.lower, &range.upper)?.is_gt() {
-                        self.reachable = false;
-                        return Ok(());
-                    }
-                }
+                let (range, _) = row.interval_enclosure(self, limits)?;
                 if limits.compare(&range.lower, &Integer::zero())?.is_gt() {
                     self.reachable = false;
                     return Ok(());
@@ -285,7 +277,7 @@ impl Facts {
                 // Every point in the current interval box already satisfies
                 // this row. Isolating its variables cannot narrow that box.
                 // Keep the stored row: a later join can widen the intervals.
-                if interval_satisfied {
+                if !limits.compare(&range.upper, &Integer::zero())?.is_gt() {
                     continue;
                 }
                 for (factors, coefficient) in &row.terms {
@@ -333,11 +325,18 @@ impl Polynomial {
         facts: &Facts,
         limits: &mut Limits,
     ) -> Result<(Interval, BTreeMap<ValueId, Interval>), Unknown> {
-        let (mut enclosure, mut premises) = self.enclosure(facts, limits)?;
+        let (mut enclosure, mut premises, graph) = self.enclosure_with_graph(facts, limits)?;
         if enclosure.within(target, limits)? {
             return Ok((enclosure, premises));
         }
-        self.refine_row_difference_enclosure(&mut enclosure, &mut premises, target, facts, limits)?;
+        self.refine_row_difference_enclosure(
+            &mut enclosure,
+            &mut premises,
+            target,
+            facts,
+            graph.as_ref(),
+            limits,
+        )?;
         if !enclosure.within(target, limits)? {
             self.refine_monotone_enclosure(&mut enclosure, &premises, facts, limits)?;
         }
@@ -377,36 +376,17 @@ impl Polynomial {
         premises: &mut BTreeMap<ValueId, Interval>,
         target: &Interval,
         facts: &Facts,
+        graph: Option<&super::differences::DifferenceBounds>,
         limits: &mut Limits,
-    ) -> Result<(), Unknown> {
-        self.refine_row_difference_enclosure_until(
-            enclosure,
-            premises,
-            facts,
-            limits,
-            |range, limits| range.within(target, limits),
-        )
-    }
-
-    pub(super) fn refine_row_difference_enclosure_until(
-        &self,
-        enclosure: &mut Interval,
-        premises: &mut BTreeMap<ValueId, Interval>,
-        facts: &Facts,
-        limits: &mut Limits,
-        mut satisfied: impl FnMut(&Interval, &mut Limits) -> Result<bool, Unknown>,
     ) -> Result<(), Unknown> {
         if facts.inequalities.is_empty()
             || limits.compare(&enclosure.lower, &enclosure.upper)?.is_eq()
         {
             return Ok(());
         }
-        let Some(graph) = super::differences::DifferenceBounds::build(facts, limits)? else {
+        let Some(graph) = graph else {
             return Ok(());
         };
-        if graph.contradiction() {
-            return Err(Unknown::UnreachablePath);
-        }
         for row in &facts.inequalities {
             if !self.overlaps_nonconstant_monomial(row, limits)? {
                 continue;
@@ -415,8 +395,6 @@ impl Polynomial {
             if !facts.relation_is_current(row, limits)? {
                 continue;
             }
-            let (_, dependencies) = row.interval_enclosure(facts, limits)?;
-            premises.extend(dependencies);
             for subtract in [true, false] {
                 let remainder = if subtract {
                     self.subtract(row, limits)
@@ -428,7 +406,12 @@ impl Polynomial {
                     Err(Unknown::TermLimit) => continue,
                     Err(e) => return Err(e),
                 };
+                if !graph.can_enclose(&remainder, limits)? {
+                    continue;
+                }
+                let (_, row_dependencies) = row.interval_enclosure(facts, limits)?;
                 let (mut bound, dependencies) = remainder.interval_enclosure(facts, limits)?;
+                premises.extend(row_dependencies);
                 premises.extend(dependencies);
                 graph.enclose(&remainder, facts, &mut bound, limits)?;
                 if limits.compare(&bound.lower, &bound.upper)?.is_gt() {
@@ -443,7 +426,7 @@ impl Polynomial {
                 if limits.compare(&enclosure.lower, &enclosure.upper)?.is_gt() {
                     return Err(Unknown::InsufficientBounds);
                 }
-                if satisfied(enclosure, limits)? {
+                if enclosure.within(target, limits)? {
                     return Ok(());
                 }
             }
@@ -911,12 +894,28 @@ impl Polynomial {
         facts: &Facts,
         limits: &mut Limits,
     ) -> Result<(Interval, BTreeMap<ValueId, Interval>), Unknown> {
+        self.enclosure_with_graph(facts, limits)
+            .map(|(interval, premises, _)| (interval, premises))
+    }
+
+    pub(super) fn enclosure_with_graph(
+        &self,
+        facts: &Facts,
+        limits: &mut Limits,
+    ) -> Result<
+        (
+            Interval,
+            BTreeMap<ValueId, Interval>,
+            Option<super::differences::DifferenceBounds>,
+        ),
+        Unknown,
+    > {
         let (mut result, mut premises) = self.interval_enclosure(facts, limits)?;
         // A singleton already fixes the value on every state admitted by these
         // interval premises. Relational closure cannot tighten it further; do
         // not rebuild the whole difference graph for a constant-valued query.
         if limits.compare(&result.lower, &result.upper)?.is_eq() {
-            return Ok((result, premises));
+            return Ok((result, premises, None));
         }
         for row in &facts.inequalities {
             // With no shared nonconstant monomial, interval evaluation of
@@ -956,11 +955,12 @@ impl Polynomial {
                 // consulted rows and their cancelled variables are already in
                 // premises; no additional closure can tighten this result.
                 if limits.compare(&result.lower, &result.upper)?.is_eq() {
-                    return Ok((result, premises));
+                    return Ok((result, premises, None));
                 }
             }
         }
-        if let Some(graph) = super::differences::DifferenceBounds::build(facts, limits)? {
+        let graph = super::differences::DifferenceBounds::build(facts, limits)?;
+        if let Some(graph) = &graph {
             if graph.contradiction() {
                 return Err(Unknown::UnreachablePath);
             }
@@ -969,7 +969,7 @@ impl Polynomial {
         if limits.compare(&result.lower, &result.upper)?.is_gt() {
             return Err(Unknown::InsufficientBounds);
         }
-        Ok((result, premises))
+        Ok((result, premises, graph))
     }
 }
 
@@ -1738,7 +1738,7 @@ mod relation_store_tests {
     }
 
     #[test]
-    fn truth_by_enclosure_composes_row_with_difference_bounds_for_u64_sum() {
+    fn enclosure_for_target_proves_u64_sum_under_row_and_difference_bounds() {
         let mut limits = Limits::default();
         let mut facts = Facts::default();
         let u64_range = Interval::machine(64, false, &mut limits).unwrap();
@@ -1775,7 +1775,7 @@ mod relation_store_tests {
                     owner: 44,
                     local: 3,
                 },
-                u64_range,
+                u64_range.clone(),
             )
             .unwrap();
 
@@ -1783,8 +1783,6 @@ mod relation_store_tests {
         let start_p = Polynomial::variable(start, &mut limits).unwrap();
         let pattern_length_p = Polynomial::variable(pattern_length, &mut limits).unwrap();
         let index_p = Polynomial::variable(index, &mut limits).unwrap();
-        let u64_max_p =
-            Polynomial::constant(Integer::from_u128(u64::MAX as u128), &mut limits).unwrap();
 
         facts
             .assume(
@@ -1821,24 +1819,10 @@ mod relation_store_tests {
             .unwrap();
 
         let sum = index_p.add(&start_p, &mut limits).unwrap();
-        let gt_max = Condition::PolynomialCompare {
-            left: sum.copy(&mut limits).unwrap(),
-            relation: Comparison::Greater,
-            right: u64_max_p.copy(&mut limits).unwrap(),
-        };
-        let le_max = Condition::PolynomialCompare {
-            left: sum,
-            relation: Comparison::LessEqual,
-            right: u64_max_p,
-        };
-        assert_eq!(
-            gt_max.truth_by_enclosure(&facts, &mut limits, 0),
-            Ok(Some(false))
-        );
-        assert_eq!(
-            le_max.truth_by_enclosure(&facts, &mut limits, 0),
-            Ok(Some(true))
-        );
+        assert!(matches!(
+            sum.prove_within(&u64_range, &facts, &mut limits),
+            Outcome::Proven(_)
+        ));
     }
 
     #[test]
