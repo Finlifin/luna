@@ -85,9 +85,33 @@ class CargoCacheTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))
             self.assertEqual(runner.env["CARGO_BUILD_JOBS"], str(cargo.default_build_jobs()))
-        with patch.dict(os.environ, {"CARGO_BUILD_JOBS": "3"}, clear=True):
+            self.assertEqual(runner.env["RUST_TEST_THREADS"], str(cargo.default_build_jobs()))
+            self.assertEqual(
+                runner.env["CARGO_PROFILE_DEV_CODEGEN_UNITS"],
+                str(cargo.default_codegen_units()),
+            )
+            self.assertEqual(
+                runner.env["CARGO_PROFILE_TEST_CODEGEN_UNITS"],
+                str(cargo.default_codegen_units()),
+            )
+        with patch.dict(
+            os.environ,
+            {
+                "CARGO_BUILD_JOBS": "3",
+                "RUST_TEST_THREADS": "2",
+                "CARGO_PROFILE_DEV_CODEGEN_UNITS": "8",
+                "CARGO_PROFILE_TEST_CODEGEN_UNITS": "4",
+            },
+            clear=True,
+        ):
             runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))
             self.assertEqual(runner.env["CARGO_BUILD_JOBS"], "3")
+            self.assertEqual(runner.env["RUST_TEST_THREADS"], "2")
+            self.assertEqual(runner.env["CARGO_PROFILE_DEV_CODEGEN_UNITS"], "8")
+            self.assertEqual(runner.env["CARGO_PROFILE_TEST_CODEGEN_UNITS"], "4")
+        with patch.object(cargo.os, "cpu_count", return_value=32):
+            self.assertEqual(cargo.default_build_jobs(), 32)
+            self.assertEqual(cargo.default_codegen_units(), 32)
 
     def test_cleanup_is_scoped_to_managed_target(self):
         runner = cargo.Runner(Path("/repo"), Path("/tmp/test-target"))

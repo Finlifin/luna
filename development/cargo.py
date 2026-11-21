@@ -112,7 +112,11 @@ def cargo_arguments(arguments: list[str], target: Path) -> list[str]:
 
 
 def default_build_jobs() -> int:
-    return max(1, min(os.cpu_count() or 1, 12))
+    return max(1, os.cpu_count() or 1)
+
+
+def default_codegen_units() -> int:
+    return min(256, max(16, default_build_jobs()))
 
 
 def manifest_root(default_root: Path, arguments: list[str]) -> Path:
@@ -207,7 +211,12 @@ class Runner:
             raise ValueError("managed target must not redirect through a symlink")
         self.root, self.target = root, target
         self.env = dict(os.environ)
-        self.env.setdefault("CARGO_BUILD_JOBS", str(default_build_jobs()))
+        jobs = str(default_build_jobs())
+        codegen_units = str(default_codegen_units())
+        self.env.setdefault("CARGO_BUILD_JOBS", jobs)
+        self.env.setdefault("RUST_TEST_THREADS", jobs)
+        self.env.setdefault("CARGO_PROFILE_DEV_CODEGEN_UNITS", codegen_units)
+        self.env.setdefault("CARGO_PROFILE_TEST_CODEGEN_UNITS", codegen_units)
         self.env.update(CARGO_INCREMENTAL="0", CARGO_PROFILE_DEV_DEBUG="0", CARGO_PROFILE_TEST_DEBUG="0")
         wrappers = ('RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER',
                     'CARGO_BUILD_RUSTC_WRAPPER', 'CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER')
