@@ -70,9 +70,24 @@ fn sum_union_llvm(tag_bits: u32, payload_size: u64, payload_align: u64) -> Strin
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct NicheEncoding {
+    llvm_path: Vec<usize>,
+    scalar: nir::layout::NicheScalar,
+    start: u64,
+    widened_bool: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OptionalLayout {
+    payload: Ty,
+    niche: Option<NicheEncoding>,
+    carrier: Ty,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
     Unit,
-    Optional(std::sync::Arc<Ty>),
+    Optional(std::sync::Arc<OptionalLayout>),
     ErrorResult(std::sync::Arc<ErrorResultLayout>),
     Bool,
     String,
@@ -99,22 +114,48 @@ enum Ty {
 impl Ty {
     fn llvm(&self) -> String {
         match self {
-            Self::Optional(payload) => format!(
-                "{{ i1, {} }}",
-                if **payload == Ty::Unit {
-                    "{}".into()
+            Self::Optional(opt) => {
+                if opt.niche.is_some() {
+                    opt.carrier.llvm()
                 } else {
-                    payload.llvm()
+                    format!(
+                        "{{ i1, {} }}",
+                        if opt.payload == Ty::Unit {
+                            "{}".into()
+                        } else {
+                            opt.payload.llvm()
+                        }
+                    )
                 }
-            ),
+            }
             Self::ErrorResult(layout) => {
                 sum_union_llvm(layout.tag_bits, layout.payload_size, layout.payload_align)
             }
-            Self::Enum(layout) if layout.symbols.is_some() => Self::String.llvm(),
-            Self::Enum(layout) if layout.aggregate => {
-                sum_union_llvm(layout.tag_bits, layout.payload_size, layout.payload_align)
-            }
-            Self::Enum(layout) => format!("i{}", layout.width),
+            Self::Enum(layout) => match &layout.repr {
+                enums::EnumRepr::Symbol(_) => Self::String.llvm(),
+                enums::EnumRepr::FixedBits { width, .. } => format!("i{width}"),
+                enums::EnumRepr::Unit { width } => {
+                    if *width == 0 {
+                        "{}".into()
+                    } else {
+                        format!("i{width}")
+                    }
+                }
+                enums::EnumRepr::SingleVariant { carrier, .. } => {
+                    if *carrier == Ty::Unit {
+                        "{}".into()
+                    } else {
+                        carrier.llvm()
+                    }
+                }
+                enums::EnumRepr::Niche { carrier, .. } => carrier.llvm(),
+                enums::EnumRepr::TaggedUnion {
+                    tag_bits,
+                    payload_size,
+                    payload_align,
+                    ..
+                } => sum_union_llvm(*tag_bits, *payload_size, *payload_align),
+            },
             Self::Closure(fields) => format!(
                 "{{ ptr, {}, [{} x i1] }}",
                 Self::Record(fields.clone()).llvm(),
@@ -188,10 +229,19 @@ impl Ty {
                 nir::layout::struct_layout(&[ptr, nir::TypeLayout { size: 8, align: 8 }])
                     .map_err(|e| e.to_string())
             }
-            Self::Optional(payload) => {
-                let payload_layout = payload.storage_layout_at(pointer_bits, depth + 1, fuel)?;
-                nir::layout::struct_layout(&[nir::TypeLayout { size: 1, align: 1 }, payload_layout])
+            Self::Optional(opt) => {
+                if opt.niche.is_some() {
+                    opt.carrier.storage_layout_at(pointer_bits, depth + 1, fuel)
+                } else {
+                    let payload_layout =
+                        opt.payload
+                            .storage_layout_at(pointer_bits, depth + 1, fuel)?;
+                    nir::layout::struct_layout(&[
+                        nir::TypeLayout { size: 1, align: 1 },
+                        payload_layout,
+                    ])
                     .map_err(|e| e.to_string())
+                }
             }
             Self::ErrorResult(layout) => {
                 let tag =
@@ -216,23 +266,34 @@ impl Ty {
                 }
                 nir::layout::packed_struct_layout(&layouts).map_err(|e| e.to_string())
             }
-            Self::Enum(layout) if layout.symbols.is_some() => {
-                let ptr = nir::layout::integer_layout(pointer_bits).map_err(|e| e.to_string())?;
-                nir::layout::struct_layout(&[ptr, nir::TypeLayout { size: 8, align: 8 }])
-                    .map_err(|e| e.to_string())
-            }
-            Self::Enum(layout) if layout.aggregate => {
-                let tag =
-                    nir::layout::integer_layout(layout.tag_bits).map_err(|e| e.to_string())?;
-                let payload = nir::TypeLayout {
-                    size: layout.payload_size,
-                    align: layout.payload_align,
-                };
-                nir::layout::struct_layout(&[tag, payload]).map_err(|e| e.to_string())
-            }
-            Self::Enum(layout) => {
-                nir::layout::integer_layout(layout.width).map_err(|e| e.to_string())
-            }
+            Self::Enum(layout) => match &layout.repr {
+                enums::EnumRepr::Symbol(_) => {
+                    let ptr =
+                        nir::layout::integer_layout(pointer_bits).map_err(|e| e.to_string())?;
+                    nir::layout::struct_layout(&[ptr, nir::TypeLayout { size: 8, align: 8 }])
+                        .map_err(|e| e.to_string())
+                }
+                enums::EnumRepr::FixedBits { width, .. } | enums::EnumRepr::Unit { width } => {
+                    nir::layout::integer_layout(*width).map_err(|e| e.to_string())
+                }
+                enums::EnumRepr::SingleVariant { carrier, .. }
+                | enums::EnumRepr::Niche { carrier, .. } => {
+                    carrier.storage_layout_at(pointer_bits, depth + 1, fuel)
+                }
+                enums::EnumRepr::TaggedUnion {
+                    tag_bits,
+                    payload_size,
+                    payload_align,
+                    ..
+                } => {
+                    let tag = nir::layout::integer_layout(*tag_bits).map_err(|e| e.to_string())?;
+                    let payload = nir::TypeLayout {
+                        size: *payload_size,
+                        align: *payload_align,
+                    };
+                    nir::layout::struct_layout(&[tag, payload]).map_err(|e| e.to_string())
+                }
+            },
             Self::Closure(fields) => {
                 let ptr = nir::layout::integer_layout(pointer_bits).map_err(|e| e.to_string())?;
                 let mut env_layouts = Vec::with_capacity(fields.len());
@@ -256,29 +317,32 @@ impl Ty {
     }
 }
 
-struct HostLayoutWorld<'a>(&'a iir::Package);
+struct HostLayoutWorld<'a> {
+    graph: &'a iir::Package,
+    pointer_fallback: Option<nir::target::TargetData>,
+}
 
 impl nir::LayoutWorld for HostLayoutWorld<'_> {
     fn target(&self) -> Option<nir::target::TargetData> {
-        self.0.target
+        self.graph.target.or(self.pointer_fallback)
     }
 
     fn is_tuple_head(&self, head: nir::DeclarationId) -> bool {
-        self.0
+        self.graph
             .normal_forms
             .iter()
             .any(|nf| nf.declaration == head && nf.role == nir::normal_forms::Role::Tuple)
     }
 
     fn is_list_head(&self, head: nir::DeclarationId) -> bool {
-        self.0
+        self.graph
             .normal_forms
             .iter()
             .any(|nf| nf.declaration == head && nf.role == nir::normal_forms::Role::TypeList)
     }
 
     fn nominal_kind(&self, ty: &Term) -> Option<nir::NominalKind> {
-        let instance = self.0.nominals.iter().find(|entry| entry.ty == *ty)?;
+        let instance = self.graph.nominals.iter().find(|entry| entry.ty == *ty)?;
         Some(match &instance.definition {
             iir::NominalDefinition::Struct(_) => nir::NominalKind::Struct,
             iir::NominalDefinition::Enum(_) => nir::NominalKind::Enum,
@@ -287,7 +351,7 @@ impl nir::LayoutWorld for HostLayoutWorld<'_> {
     }
 
     fn is_template_identity(&self, ty: &Term) -> bool {
-        self.0
+        self.graph
             .templates
             .iter()
             .any(|table| table.logical_type() == ty)
@@ -298,7 +362,12 @@ impl nir::LayoutWorld for HostLayoutWorld<'_> {
         ty: &Term,
         _fuel: &mut usize,
     ) -> Result<Option<nir::NominalLayout>, nir::LayoutError> {
-        let Some(instance) = self.0.nominals.iter().find(|instance| instance.ty == *ty) else {
+        let Some(instance) = self
+            .graph
+            .nominals
+            .iter()
+            .find(|instance| instance.ty == *ty)
+        else {
             return Ok(None);
         };
         Ok(Some(match &instance.definition {
@@ -319,9 +388,12 @@ impl nir::LayoutWorld for HostLayoutWorld<'_> {
                 } else if let Some(encoding) = &def.encoding {
                     let bits = u32::try_from(encoding.width())
                         .map_err(|_| nir::LayoutError::Unsupported(ty.clone()))?;
-                    nir::NominalLayout::EnumFixedBits(bits)
+                    nir::NominalLayout::EnumFixedBits {
+                        width: bits,
+                        niche: encoding.layout.contiguous_niche(),
+                    }
                 } else if def.variants.iter().all(|v| v.fields.is_empty()) {
-                    nir::NominalLayout::EnumUnit
+                    nir::NominalLayout::EnumUnit(def.variants.len())
                 } else {
                     nir::NominalLayout::EnumAggregate(
                         def.variants.iter().map(|v| v.fields.clone()).collect(),
@@ -330,6 +402,98 @@ impl nir::LayoutWorld for HostLayoutWorld<'_> {
             }
         }))
     }
+}
+
+fn query_niche_layout(
+    graph: &iir::Package,
+    ty: &Term,
+    remaining: &mut usize,
+) -> Result<nir::layout::LayoutWithNiche, String> {
+    let world = HostLayoutWorld {
+        graph,
+        pointer_fallback: Some(nir::target::TargetData::new(64).map_err(|e| e.to_string())?),
+    };
+    let mut fuel = (*remaining).min(MAX_LAYOUT_NODES).max(64);
+    let before = fuel;
+    let res =
+        nir::layout::compute_layout_and_niche(&world, ty, &mut fuel).map_err(|e| e.to_string())?;
+    let spent = before - fuel;
+    if spent > *remaining {
+        *remaining = 0;
+    } else {
+        *remaining -= spent;
+    }
+    Ok(res)
+}
+
+fn widen_bool_ty(ty: &Ty, path: &[usize]) -> Result<Ty, String> {
+    match (ty, path) {
+        (Ty::Bool, []) => Ok(Ty::Int(8, false)),
+        (Ty::Record(fields), [idx, rest @ ..]) => {
+            let mut cloned = (**fields).clone();
+            let target = cloned
+                .get_mut(*idx)
+                .ok_or("host niche bool-widen record field out of range")?;
+            *target = widen_bool_ty(target, rest)?;
+            Ok(Ty::Record(std::sync::Arc::new(cloned)))
+        }
+        (Ty::Optional(opt), [0]) if opt.niche.is_none() => {
+            Ok(Ty::Record(std::sync::Arc::new(vec![
+                Ty::Int(8, false),
+                opt.payload.clone(),
+            ])))
+        }
+        (Ty::Enum(layout), _) => match &layout.repr {
+            enums::EnumRepr::SingleVariant {
+                unwrapped, carrier, ..
+            } => {
+                if *unwrapped || !path.is_empty() {
+                    widen_bool_ty(carrier, path)
+                } else {
+                    Err("host niche bool-widen requires path into single-variant record".into())
+                }
+            }
+            _ => Err("host niche bool-widen encountered unsupported enum layout".into()),
+        },
+        _ => Err("host niche bool-widen path mismatch".into()),
+    }
+}
+
+fn step_aggregate_field(ty: &Ty, idx: usize) -> Result<Ty, String> {
+    match ty {
+        Ty::Record(fields) => fields
+            .get(idx)
+            .cloned()
+            .ok_or_else(|| "host niche record field out of range".into()),
+        Ty::Optional(opt) => {
+            if opt.niche.is_some() {
+                step_aggregate_field(&opt.carrier, idx)
+            } else if idx == 0 {
+                Ok(Ty::Bool)
+            } else if idx == 1 {
+                Ok(opt.payload.clone())
+            } else {
+                Err("host niche optional field out of range".into())
+            }
+        }
+        Ty::Enum(layout) => match &layout.repr {
+            enums::EnumRepr::SingleVariant { carrier, .. }
+            | enums::EnumRepr::Niche { carrier, .. } => step_aggregate_field(carrier, idx),
+            enums::EnumRepr::TaggedUnion { tag_bits, .. } if idx == 0 => {
+                Ok(Ty::Int(*tag_bits, false))
+            }
+            _ => Err("host niche step unsupported enum layout".into()),
+        },
+        _ => Err("host niche step requires aggregate type".into()),
+    }
+}
+
+fn niche_leaf_ty(carrier: &Ty, path: &[usize]) -> Result<Ty, String> {
+    let mut current = carrier.clone();
+    for &idx in path {
+        current = step_aggregate_field(&current, idx)?;
+    }
+    Ok(current)
 }
 
 // Never has no value representation. Only the machine return channel uses
@@ -373,13 +537,41 @@ fn repr_at(
         return Ok(Ty::TemplateIdentity(std::sync::Arc::new(ty.clone())));
     }
     match ty {
-        Term::Optional(payload) => {
-            let payload = if **payload == Term::Primitive(P::Never) {
-                Ty::Unit
+        Term::Optional(payload_term) => {
+            if **payload_term == Term::Primitive(P::Never) {
+                return Ok(Ty::Optional(std::sync::Arc::new(OptionalLayout {
+                    payload: Ty::Unit,
+                    niche: None,
+                    carrier: Ty::Unit,
+                })));
+            }
+            let payload = repr_at(graph, payload_term, depth + 1, checked, remaining)?;
+            let computed = query_niche_layout(graph, payload_term, remaining)?;
+            if let Some(niche) = computed.niche
+                && niche.count >= 1
+            {
+                let carrier = if niche.needs_bool_widen {
+                    widen_bool_ty(&payload, &niche.path)?
+                } else {
+                    payload.clone()
+                };
+                Ok(Ty::Optional(std::sync::Arc::new(OptionalLayout {
+                    payload,
+                    niche: Some(NicheEncoding {
+                        llvm_path: niche.path,
+                        scalar: niche.scalar,
+                        start: niche.start,
+                        widened_bool: niche.needs_bool_widen,
+                    }),
+                    carrier,
+                })))
             } else {
-                repr_at(graph, payload, depth + 1, checked, remaining)?
-            };
-            Ok(Ty::Optional(std::sync::Arc::new(payload)))
+                Ok(Ty::Optional(std::sync::Arc::new(OptionalLayout {
+                    payload: payload.clone(),
+                    niche: None,
+                    carrier: payload,
+                })))
+            }
         }
         Term::ErrorResult { errors, result } => {
             let success = if **result == Term::Primitive(P::Never) {
@@ -2334,8 +2526,12 @@ impl Emitter<'_> {
                 let K::TypeValue(ty) = &operand.kind else {
                     return Err("host layout query requires a resolved Type value".into());
                 };
-                let layout = nir::compute_layout(&HostLayoutWorld(self.graph), ty, self.fuel)
-                    .map_err(|err| err.to_string())?;
+                let world = HostLayoutWorld {
+                    graph: self.graph,
+                    pointer_fallback: None,
+                };
+                let layout =
+                    nir::compute_layout(&world, ty, self.fuel).map_err(|err| err.to_string())?;
                 let target = self
                     .graph
                     .target
@@ -2357,7 +2553,11 @@ impl Emitter<'_> {
                 let K::TypeValue(ty) = &operand.kind else {
                     return Err("host type predicate requires a resolved Type value".into());
                 };
-                let result = nir::layout::evaluate_kind(&HostLayoutWorld(self.graph), *kind, ty)
+                let world = HostLayoutWorld {
+                    graph: self.graph,
+                    pointer_fallback: None,
+                };
+                let result = nir::layout::evaluate_kind(&world, *kind, ty)
                     .ok_or("host type predicate evaluation is unresolved")?;
                 Ok(Value {
                     ty: Ty::Bool,
@@ -2489,10 +2689,10 @@ impl Emitter<'_> {
             return Err("host try integer convert requires an integer input".into());
         };
         let opt_ty = repr(self.graph, result_ty, self.checked)?;
-        let Ty::Optional(dst_ty_arc) = &opt_ty else {
+        let Ty::Optional(opt_layout) = &opt_ty else {
             return Err("host try integer convert requires an optional result".into());
         };
-        let dst_ty = (**dst_ty_arc).clone();
+        let dst_ty = opt_layout.payload.clone();
         let Ty::Int(dst_bits, dst_signed) = dst_ty else {
             return Err("host try integer convert requires an integer destination".into());
         };
@@ -2630,24 +2830,15 @@ impl Emitter<'_> {
                 format!("zext {src_llvm} {} to {dst_llvm}", value.text),
             )
         };
-        let opt_llvm = opt_ty.llvm();
-        let present_tag = self.instruction(
-            opt_ty.clone(),
-            format!("insertvalue {opt_llvm} zeroinitializer, i1 true, 0"),
-        );
-        let present = self.instruction(
-            opt_ty.clone(),
-            format!(
-                "insertvalue {opt_llvm} {}, {dst_llvm} {}, 1",
-                present_tag.text, converted.text
-            ),
-        );
+        let present = self.optional_present_value(&opt_ty, converted)?;
         Ok(if let Some(cond) = in_range {
+            let absent = self.optional_absent_value(&opt_ty)?;
+            let opt_llvm = opt_ty.llvm();
             self.instruction(
                 opt_ty,
                 format!(
-                    "select i1 {}, {opt_llvm} {}, {opt_llvm} zeroinitializer",
-                    cond.text, present.text
+                    "select i1 {}, {opt_llvm} {}, {opt_llvm} {}",
+                    cond.text, present.text, absent.text
                 ),
             )
         } else {

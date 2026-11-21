@@ -96,10 +96,34 @@ pub enum NominalLayout {
     Struct(Vec<Term>),
     PackedStruct(Vec<Term>),
     Newtype(Term),
-    EnumUnit,
+    EnumUnit(usize),
     EnumSymbol,
-    EnumFixedBits(u32),
+    EnumFixedBits {
+        width: u32,
+        niche: Option<(u64, u64)>,
+    },
     EnumAggregate(Vec<Vec<Term>>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NicheScalar {
+    Pointer,
+    Int { bits: u32 },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Niche {
+    pub path: Vec<usize>,
+    pub scalar: NicheScalar,
+    pub start: u64,
+    pub count: u64,
+    pub needs_bool_widen: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LayoutWithNiche {
+    pub layout: TypeLayout,
+    pub niche: Option<Niche>,
 }
 
 pub trait LayoutWorld {
@@ -127,8 +151,30 @@ pub fn compute_layout(
     ty: &Term,
     fuel: &mut usize,
 ) -> Result<TypeLayout, LayoutError> {
+    compute_layout_and_niche(world, ty, fuel).map(|res| res.layout)
+}
+
+pub fn compute_layout_and_niche(
+    world: &impl LayoutWorld,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<LayoutWithNiche, LayoutError> {
     let mut visiting = Vec::new();
-    layout_at(world, ty, 0, &mut visiting, fuel)
+    layout_with_niche_at(world, ty, 0, &mut visiting, fuel)
+}
+
+pub fn unit_enum_tag_bits(variant_count: usize) -> Result<u32, LayoutError> {
+    if variant_count <= 1 {
+        Ok(0)
+    } else if variant_count <= 256 {
+        Ok(8)
+    } else if variant_count <= 65_536 {
+        Ok(16)
+    } else if u32::try_from(variant_count - 1).is_ok() {
+        Ok(32)
+    } else {
+        Err(LayoutError::Overflow)
+    }
 }
 
 pub fn evaluate_kind(world: &impl LayoutWorld, kind: TypeKind, ty: &Term) -> Option<bool> {
@@ -227,43 +273,142 @@ pub fn sum_tag_bits(branch_count: usize) -> Result<u32, LayoutError> {
     }
 }
 
-fn layout_at(
+fn no_niche(layout: TypeLayout) -> LayoutWithNiche {
+    LayoutWithNiche {
+        layout,
+        niche: None,
+    }
+}
+
+fn tag_niche(branch_count: usize, tag_bits: u32) -> Option<Niche> {
+    if tag_bits == 0 || tag_bits >= 64 {
+        return None;
+    }
+    let space = 1u64 << tag_bits;
+    let used = branch_count as u64;
+    (used < space).then(|| Niche {
+        path: vec![0],
+        scalar: NicheScalar::Int { bits: tag_bits },
+        start: used,
+        count: space - used,
+        needs_bool_widen: false,
+    })
+}
+
+fn fields_layout_with_niche(
+    world: &impl LayoutWorld,
+    fields: &[Term],
+    depth: usize,
+    visiting: &mut Vec<Term>,
+    fuel: &mut usize,
+) -> Result<LayoutWithNiche, LayoutError> {
+    charge(fuel, fields.len())?;
+    let mut field_layouts = Vec::with_capacity(fields.len());
+    let mut best: Option<(usize, Niche)> = None;
+    for (index, field_ty) in fields.iter().enumerate() {
+        let fw = layout_with_niche_at(world, field_ty, depth, visiting, fuel)?;
+        field_layouts.push(fw.layout);
+        if let Some(niche) = fw.niche
+            && best
+                .as_ref()
+                .is_none_or(|(_, prev)| niche.count > prev.count)
+        {
+            best = Some((index, niche));
+        }
+    }
+    let layout = struct_layout(&field_layouts)?;
+    let niche = best.map(|(index, mut niche)| {
+        niche.path.insert(0, index);
+        niche
+    });
+    Ok(LayoutWithNiche { layout, niche })
+}
+
+fn variant_payload_layout_with_niche(
+    world: &impl LayoutWorld,
+    fields: &[Term],
+    depth: usize,
+    visiting: &mut Vec<Term>,
+    fuel: &mut usize,
+) -> Result<LayoutWithNiche, LayoutError> {
+    if fields.len() == 1 {
+        charge(fuel, 1)?;
+        layout_with_niche_at(world, &fields[0], depth, visiting, fuel)
+    } else {
+        fields_layout_with_niche(world, fields, depth, visiting, fuel)
+    }
+}
+
+fn layout_with_niche_at(
     world: &impl LayoutWorld,
     ty: &Term,
     depth: usize,
     visiting: &mut Vec<Term>,
     fuel: &mut usize,
-) -> Result<TypeLayout, LayoutError> {
+) -> Result<LayoutWithNiche, LayoutError> {
     charge(fuel, 1)?;
     if depth >= MAX_LAYOUT_DEPTH {
         return Err(LayoutError::BudgetExhausted);
     }
     if world.is_template_identity(ty) {
-        return Ok(TypeLayout { size: 8, align: 8 });
+        return Ok(no_niche(TypeLayout { size: 8, align: 8 }));
     }
     match ty {
-        Term::Primitive(Primitive::Void) => Ok(TypeLayout { size: 0, align: 1 }),
-        Term::Primitive(Primitive::Bool) => Ok(TypeLayout { size: 1, align: 1 }),
-        Term::Primitive(Primitive::Char) => Ok(TypeLayout { size: 4, align: 4 }),
-        Term::Primitive(Primitive::F16 | Primitive::Bf16) => Ok(TypeLayout { size: 2, align: 2 }),
-        Term::Primitive(Primitive::F32) => Ok(TypeLayout { size: 4, align: 4 }),
-        Term::Primitive(Primitive::F64) => Ok(TypeLayout { size: 8, align: 8 }),
-        Term::Primitive(Primitive::I8 | Primitive::U8) => Ok(TypeLayout { size: 1, align: 1 }),
-        Term::Primitive(Primitive::I16 | Primitive::U16) => Ok(TypeLayout { size: 2, align: 2 }),
-        Term::Primitive(Primitive::I32 | Primitive::U32) => Ok(TypeLayout { size: 4, align: 4 }),
-        Term::Primitive(Primitive::I64 | Primitive::U64) => Ok(TypeLayout { size: 8, align: 8 }),
-        Term::Primitive(Primitive::I128 | Primitive::U128) => Ok(TypeLayout {
+        Term::Primitive(Primitive::Void) => Ok(no_niche(TypeLayout { size: 0, align: 1 })),
+        Term::Primitive(Primitive::Bool) => Ok(LayoutWithNiche {
+            layout: TypeLayout { size: 1, align: 1 },
+            niche: Some(Niche {
+                path: Vec::new(),
+                scalar: NicheScalar::Int { bits: 8 },
+                start: 2,
+                count: 254,
+                needs_bool_widen: true,
+            }),
+        }),
+        Term::Primitive(Primitive::Char) => Ok(LayoutWithNiche {
+            layout: TypeLayout { size: 4, align: 4 },
+            niche: Some(Niche {
+                path: Vec::new(),
+                scalar: NicheScalar::Int { bits: 32 },
+                start: 0x11_0000,
+                count: u64::from(u32::MAX) - 0x11_0000 + 1,
+                needs_bool_widen: false,
+            }),
+        }),
+        Term::Primitive(Primitive::F16 | Primitive::Bf16) => {
+            Ok(no_niche(TypeLayout { size: 2, align: 2 }))
+        }
+        Term::Primitive(Primitive::F32) => Ok(no_niche(TypeLayout { size: 4, align: 4 })),
+        Term::Primitive(Primitive::F64) => Ok(no_niche(TypeLayout { size: 8, align: 8 })),
+        Term::Primitive(Primitive::I8 | Primitive::U8) => {
+            Ok(no_niche(TypeLayout { size: 1, align: 1 }))
+        }
+        Term::Primitive(Primitive::I16 | Primitive::U16) => {
+            Ok(no_niche(TypeLayout { size: 2, align: 2 }))
+        }
+        Term::Primitive(Primitive::I32 | Primitive::U32) => {
+            Ok(no_niche(TypeLayout { size: 4, align: 4 }))
+        }
+        Term::Primitive(Primitive::I64 | Primitive::U64) => {
+            Ok(no_niche(TypeLayout { size: 8, align: 8 }))
+        }
+        Term::Primitive(Primitive::I128 | Primitive::U128) => Ok(no_niche(TypeLayout {
             size: 16,
             align: 16,
-        }),
-        Term::Primitive(Primitive::Isize | Primitive::Usize) => pointer_layout(world, ty),
+        })),
+        Term::Primitive(Primitive::Isize | Primitive::Usize) => {
+            Ok(no_niche(pointer_layout(world, ty)?))
+        }
         Term::Primitive(Primitive::BitVec(width)) => {
             let bits = u32::try_from(*width).map_err(|_| LayoutError::Unsupported(ty.clone()))?;
-            int_layout(bits, ty)
+            Ok(no_niche(int_layout(bits, ty)?))
         }
         Term::Primitive(Primitive::Str | Primitive::Symbol) => {
             let ptr = pointer_layout(world, ty)?;
-            struct_layout(&[ptr, TypeLayout { size: 8, align: 8 }])
+            Ok(no_niche(struct_layout(&[
+                ptr,
+                TypeLayout { size: 8, align: 8 },
+            ])?))
         }
         Term::Primitive(
             Primitive::Type
@@ -273,49 +418,100 @@ fn layout_at(
             | Primitive::Unit,
         ) => Err(LayoutError::ComptimeOnly(ty.clone())),
         Term::Primitive(Primitive::Never) => Err(LayoutError::Unsupported(ty.clone())),
-        Term::Pointer(_) => pointer_layout(world, ty),
-        Term::UnsafeFunction(signature) => layout_at(world, signature, depth + 1, visiting, fuel),
+        Term::Pointer(_) => Ok(LayoutWithNiche {
+            layout: pointer_layout(world, ty)?,
+            niche: Some(Niche {
+                path: Vec::new(),
+                scalar: NicheScalar::Pointer,
+                start: 0,
+                count: 1,
+                needs_bool_widen: false,
+            }),
+        }),
+        Term::UnsafeFunction(signature) => {
+            layout_with_niche_at(world, signature, depth + 1, visiting, fuel)
+        }
         Term::Function { parameters, .. } => {
             if parameters.iter().any(|p| p.sort != Sort::Runtime) {
                 return Err(LayoutError::ComptimeOnly(ty.clone()));
             }
-            pointer_layout(world, ty)
+            Ok(LayoutWithNiche {
+                layout: pointer_layout(world, ty)?,
+                niche: Some(Niche {
+                    path: Vec::new(),
+                    scalar: NicheScalar::Pointer,
+                    start: 0,
+                    count: 1,
+                    needs_bool_widen: false,
+                }),
+            })
         }
         Term::ComptimeFunction(_) | Term::NormalFormFunction(..) | Term::Lift(_) => {
             Err(LayoutError::ComptimeOnly(ty.clone()))
         }
         Term::Optional(payload) => {
-            let payload_layout = if **payload == Term::Primitive(Primitive::Never) {
-                TypeLayout { size: 0, align: 1 }
+            if **payload == Term::Primitive(Primitive::Never) {
+                return Ok(LayoutWithNiche {
+                    layout: TypeLayout { size: 1, align: 1 },
+                    niche: Some(Niche {
+                        path: vec![0],
+                        scalar: NicheScalar::Int { bits: 8 },
+                        start: 2,
+                        count: 254,
+                        needs_bool_widen: true,
+                    }),
+                });
+            }
+            let inner = layout_with_niche_at(world, payload, depth + 1, visiting, fuel)?;
+            if let Some(mut niche) = inner.niche
+                && niche.count >= 1
+            {
+                let remaining = if niche.count > 1 {
+                    niche.start = niche.start.checked_add(1).ok_or(LayoutError::Overflow)?;
+                    niche.count -= 1;
+                    niche.needs_bool_widen = false;
+                    Some(niche)
+                } else {
+                    None
+                };
+                Ok(LayoutWithNiche {
+                    layout: inner.layout,
+                    niche: remaining,
+                })
             } else {
-                layout_at(world, payload, depth + 1, visiting, fuel)?
-            };
-            struct_layout(&[TypeLayout { size: 1, align: 1 }, payload_layout])
+                let layout = struct_layout(&[TypeLayout { size: 1, align: 1 }, inner.layout])?;
+                Ok(LayoutWithNiche {
+                    layout,
+                    niche: Some(Niche {
+                        path: vec![0],
+                        scalar: NicheScalar::Int { bits: 8 },
+                        start: 2,
+                        count: 254,
+                        needs_bool_widen: true,
+                    }),
+                })
+            }
         }
         Term::ErrorResult { errors, result } => {
             charge(fuel, errors.len())?;
             let success_layout = if **result == Term::Primitive(Primitive::Never) {
                 TypeLayout { size: 0, align: 1 }
             } else {
-                layout_at(world, result, depth + 1, visiting, fuel)?
+                layout_with_niche_at(world, result, depth + 1, visiting, fuel)?.layout
             };
             let mut branches = Vec::with_capacity(errors.len() + 1);
             branches.push(success_layout);
             for err in errors {
-                branches.push(layout_at(world, err, depth + 1, visiting, fuel)?);
+                branches.push(layout_with_niche_at(world, err, depth + 1, visiting, fuel)?.layout);
             }
             let tag = integer_layout(sum_tag_bits(branches.len())?)?;
             let payload = union_layout(&branches)?;
-            struct_layout(&[tag, payload])
+            Ok(no_niche(struct_layout(&[tag, payload])?))
         }
-        Term::Tuple(fields) => tuple_fields_layout(world, fields, depth, visiting, fuel),
+        Term::Tuple(fields) => tuple_fields_layout_with_niche(world, fields, depth, visiting, fuel),
         Term::Record(fields) => {
-            charge(fuel, fields.len())?;
-            let layouts = fields
-                .iter()
-                .map(|(_, field_ty)| layout_at(world, field_ty, depth + 1, visiting, fuel))
-                .collect::<Result<Vec<_>, _>>()?;
-            struct_layout(&layouts)
+            let field_types: Vec<Term> = fields.iter().map(|(_, t)| t.clone()).collect();
+            fields_layout_with_niche(world, &field_types, depth + 1, visiting, fuel)
         }
         Term::NormalForm {
             head,
@@ -328,7 +524,7 @@ fn layout_at(
                         world.is_list_head(id)
                     })
                 {
-                    return tuple_fields_layout(world, elements, depth, visiting, fuel);
+                    return tuple_fields_layout_with_niche(world, elements, depth, visiting, fuel);
                 }
                 return Err(LayoutError::Unresolved(ty.clone()));
             }
@@ -347,44 +543,137 @@ fn layout_at(
             visiting.push(ty.clone());
             let result = match definition {
                 NominalLayout::Struct(fields) => {
-                    charge(fuel, fields.len())?;
-                    let layouts = fields
-                        .iter()
-                        .map(|field_ty| layout_at(world, field_ty, depth + 1, visiting, fuel))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    struct_layout(&layouts)
+                    fields_layout_with_niche(world, &fields, depth + 1, visiting, fuel)
                 }
                 NominalLayout::PackedStruct(fields) => {
                     charge(fuel, fields.len())?;
                     let layouts = fields
                         .iter()
-                        .map(|field_ty| layout_at(world, field_ty, depth + 1, visiting, fuel))
+                        .map(|field_ty| {
+                            layout_with_niche_at(world, field_ty, depth + 1, visiting, fuel)
+                                .map(|r| r.layout)
+                        })
                         .collect::<Result<Vec<_>, _>>()?;
-                    packed_struct_layout(&layouts)
+                    Ok(no_niche(packed_struct_layout(&layouts)?))
                 }
                 NominalLayout::Newtype(representation) => {
-                    layout_at(world, &representation, depth + 1, visiting, fuel)
+                    layout_with_niche_at(world, &representation, depth + 1, visiting, fuel)
                 }
-                NominalLayout::EnumUnit => Ok(TypeLayout { size: 4, align: 4 }),
+                NominalLayout::EnumUnit(variant_count) => {
+                    let bits = unit_enum_tag_bits(variant_count)?;
+                    let layout = integer_layout(bits)?;
+                    let niche = if bits > 0 && (variant_count as u64) < (1u64 << bits) {
+                        Some(Niche {
+                            path: Vec::new(),
+                            scalar: NicheScalar::Int { bits },
+                            start: variant_count as u64,
+                            count: (1u64 << bits) - (variant_count as u64),
+                            needs_bool_widen: false,
+                        })
+                    } else {
+                        None
+                    };
+                    Ok(LayoutWithNiche { layout, niche })
+                }
                 NominalLayout::EnumSymbol => {
                     let ptr = pointer_layout(world, ty)?;
-                    struct_layout(&[ptr, TypeLayout { size: 8, align: 8 }])
+                    Ok(no_niche(struct_layout(&[
+                        ptr,
+                        TypeLayout { size: 8, align: 8 },
+                    ])?))
                 }
-                NominalLayout::EnumFixedBits(width) => int_layout(width, ty),
+                NominalLayout::EnumFixedBits { width, niche } => {
+                    let layout = int_layout(width, ty)?;
+                    let niche = niche.filter(|_| matches!(width, 8 | 16 | 32 | 64)).map(
+                        |(start, count)| Niche {
+                            path: Vec::new(),
+                            scalar: NicheScalar::Int { bits: width },
+                            start,
+                            count,
+                            needs_bool_widen: false,
+                        },
+                    );
+                    Ok(LayoutWithNiche { layout, niche })
+                }
                 NominalLayout::EnumAggregate(variants) => {
-                    charge(fuel, variants.len())?;
-                    let mut variant_layouts = Vec::with_capacity(variants.len());
-                    for variant_fields in variants {
-                        charge(fuel, variant_fields.len())?;
-                        let v_layouts = variant_fields
+                    if variants.is_empty() {
+                        Ok(no_niche(TypeLayout { size: 0, align: 1 }))
+                    } else if variants.len() == 1 {
+                        variant_payload_layout_with_niche(
+                            world,
+                            &variants[0],
+                            depth + 1,
+                            visiting,
+                            fuel,
+                        )
+                    } else {
+                        charge(fuel, variants.len())?;
+                        let mut non_empty = variants
                             .iter()
-                            .map(|f_ty| layout_at(world, f_ty, depth + 1, visiting, fuel))
-                            .collect::<Result<Vec<_>, _>>()?;
-                        variant_layouts.push(struct_layout(&v_layouts)?);
+                            .enumerate()
+                            .filter(|(_, fields)| !fields.is_empty());
+                        let single_data = match (non_empty.next(), non_empty.next()) {
+                            (Some((idx, _)), None) => Some(idx),
+                            _ => None,
+                        };
+                        if let Some(data_idx) = single_data {
+                            let empty_count = (variants.len() - 1) as u64;
+                            let data = variant_payload_layout_with_niche(
+                                world,
+                                &variants[data_idx],
+                                depth + 1,
+                                visiting,
+                                fuel,
+                            )?;
+                            if let Some(mut niche) = data.niche
+                                && niche.count >= empty_count
+                            {
+                                let remaining = if niche.count > empty_count {
+                                    niche.start = niche
+                                        .start
+                                        .checked_add(empty_count)
+                                        .ok_or(LayoutError::Overflow)?;
+                                    niche.count -= empty_count;
+                                    niche.needs_bool_widen = false;
+                                    Some(niche)
+                                } else {
+                                    None
+                                };
+                                return {
+                                    visiting.pop();
+                                    Ok(LayoutWithNiche {
+                                        layout: data.layout,
+                                        niche: remaining,
+                                    })
+                                };
+                            }
+                            let tag_bits = sum_tag_bits(variants.len())?;
+                            let tag = integer_layout(tag_bits)?;
+                            let payload = union_layout(&[data.layout])?;
+                            let layout = struct_layout(&[tag, payload])?;
+                            let niche = tag_niche(variants.len(), tag_bits);
+                            Ok(LayoutWithNiche { layout, niche })
+                        } else {
+                            let mut variant_layouts = Vec::with_capacity(variants.len());
+                            for variant_fields in variants {
+                                charge(fuel, variant_fields.len())?;
+                                let v_layouts = variant_fields
+                                    .iter()
+                                    .map(|f_ty| {
+                                        layout_with_niche_at(world, f_ty, depth + 1, visiting, fuel)
+                                            .map(|r| r.layout)
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?;
+                                variant_layouts.push(struct_layout(&v_layouts)?);
+                            }
+                            let tag_bits = sum_tag_bits(variant_layouts.len())?;
+                            let tag = integer_layout(tag_bits)?;
+                            let payload = union_layout(&variant_layouts)?;
+                            let layout = struct_layout(&[tag, payload])?;
+                            let niche = tag_niche(variant_layouts.len(), tag_bits);
+                            Ok(LayoutWithNiche { layout, niche })
+                        }
                     }
-                    let tag = integer_layout(sum_tag_bits(variant_layouts.len())?)?;
-                    let payload = union_layout(&variant_layouts)?;
-                    struct_layout(&[tag, payload])
                 }
             };
             visiting.pop();
@@ -404,18 +693,21 @@ fn layout_at(
             charge(fuel, environment.len())?;
             let env_layouts = environment
                 .iter()
-                .map(|field_ty| layout_at(world, field_ty, depth + 1, visiting, fuel))
+                .map(|field_ty| {
+                    layout_with_niche_at(world, field_ty, depth + 1, visiting, fuel)
+                        .map(|r| r.layout)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let env = struct_layout(&env_layouts)?;
             let state_count = closure_env_state_count(world, environment, depth + 1, fuel)?;
-            struct_layout(&[
+            Ok(no_niche(struct_layout(&[
                 ptr,
                 env,
                 TypeLayout {
                     size: u64::try_from(state_count).map_err(|_| LayoutError::Overflow)?,
                     align: 1,
                 },
-            ])
+            ])?))
         }
         Term::Rigid { .. }
         | Term::Bound { .. }
@@ -428,22 +720,17 @@ fn layout_at(
     }
 }
 
-fn tuple_fields_layout(
+fn tuple_fields_layout_with_niche(
     world: &impl LayoutWorld,
     fields: &[Term],
     depth: usize,
     visiting: &mut Vec<Term>,
     fuel: &mut usize,
-) -> Result<TypeLayout, LayoutError> {
+) -> Result<LayoutWithNiche, LayoutError> {
     if fields.is_empty() {
-        return Ok(TypeLayout { size: 0, align: 1 });
+        return Ok(no_niche(TypeLayout { size: 0, align: 1 }));
     }
-    charge(fuel, fields.len())?;
-    let layouts = fields
-        .iter()
-        .map(|field_ty| layout_at(world, field_ty, depth + 1, visiting, fuel))
-        .collect::<Result<Vec<_>, _>>()?;
-    struct_layout(&layouts)
+    fields_layout_with_niche(world, fields, depth + 1, visiting, fuel)
 }
 
 pub fn packed_struct_layout(fields: &[TypeLayout]) -> Result<TypeLayout, LayoutError> {
@@ -521,9 +808,9 @@ fn closure_field_state_count(
                 closure_field_state_count(world, &repr, depth + 1, fuel)
             }
             Some(
-                NominalLayout::EnumUnit
+                NominalLayout::EnumUnit(_)
                 | NominalLayout::EnumSymbol
-                | NominalLayout::EnumFixedBits(_)
+                | NominalLayout::EnumFixedBits { .. }
                 | NominalLayout::EnumAggregate(_),
             ) => Ok(1),
             None => Err(LayoutError::Unresolved(ty.clone())),
@@ -719,7 +1006,7 @@ mod tests {
         );
         assert_eq!(
             compute_layout(&world, &link, &mut fuel),
-            Ok(TypeLayout { size: 24, align: 8 })
+            Ok(TypeLayout { size: 16, align: 8 })
         );
         assert!(matches!(
             compute_layout(
@@ -1015,6 +1302,190 @@ mod tests {
         assert_eq!(
             compute_layout(&world, &many_257, &mut fuel),
             Ok(TypeLayout { size: 4, align: 2 })
+        );
+    }
+
+    #[test]
+    fn unit_enum_widths_and_compositional_niches_minimize_layouts() {
+        let mut world = TestWorldVec::new(Some(TargetData::new(64).unwrap()));
+        let mut fuel = 10_000;
+
+        for (local, count, expected, exp_niche) in [
+            (30, 0usize, TypeLayout { size: 0, align: 1 }, None),
+            (31, 1, TypeLayout { size: 0, align: 1 }, None),
+            (32, 3, TypeLayout { size: 1, align: 1 }, Some((3, 253))),
+            (33, 256, TypeLayout { size: 1, align: 1 }, None),
+            (
+                34,
+                257,
+                TypeLayout { size: 2, align: 2 },
+                Some((257, 65_279)),
+            ),
+        ] {
+            let ty = Term::Nominal {
+                declaration: id(local),
+                arguments: vec![],
+            };
+            world
+                .nominals
+                .push((ty.clone(), NominalLayout::EnumUnit(count)));
+            let res = compute_layout_and_niche(&world, &ty, &mut fuel).unwrap();
+            assert_eq!(res.layout, expected, "unit enum count {count}");
+            assert_eq!(
+                res.niche.as_ref().map(|n| (n.start, n.count)),
+                exp_niche,
+                "unit enum niche count {count}"
+            );
+        }
+
+        // Bool and nested optionals pack into 1 byte (up to 255 layers!).
+        let opt_bool = Term::Optional(Box::new(Term::Primitive(Primitive::Bool)));
+        let opt2_bool = Term::Optional(Box::new(opt_bool.clone()));
+        let opt3_bool = Term::Optional(Box::new(opt2_bool.clone()));
+        assert_eq!(
+            compute_layout(&world, &opt_bool, &mut fuel),
+            Ok(TypeLayout { size: 1, align: 1 })
+        );
+        assert_eq!(
+            compute_layout(&world, &opt2_bool, &mut fuel),
+            Ok(TypeLayout { size: 1, align: 1 })
+        );
+        assert_eq!(
+            compute_layout(&world, &opt3_bool, &mut fuel),
+            Ok(TypeLayout { size: 1, align: 1 })
+        );
+
+        // Pointer null niche eliminates tag in ?*u64, then falls back in ??*u64.
+        let opt_ptr = Term::Optional(Box::new(Term::Pointer(Box::new(Term::Primitive(
+            Primitive::U64,
+        )))));
+        let opt2_ptr = Term::Optional(Box::new(opt_ptr.clone()));
+        assert_eq!(
+            compute_layout(&world, &opt_ptr, &mut fuel),
+            Ok(TypeLayout { size: 8, align: 8 })
+        );
+        assert_eq!(
+            compute_layout(&world, &opt2_ptr, &mut fuel),
+            Ok(TypeLayout { size: 16, align: 8 })
+        );
+
+        // Char has non-Unicode codepoint niches (> 0x10_FFFF).
+        let opt_char = Term::Optional(Box::new(Term::Primitive(Primitive::Char)));
+        assert_eq!(
+            compute_layout(&world, &opt_char, &mut fuel),
+            Ok(TypeLayout { size: 4, align: 4 })
+        );
+
+        // ?u64 has no inner niche (size 16), then ??u64 reuses ?u64's i1 tag niche (still size 16).
+        let opt_u64 = Term::Optional(Box::new(Term::Primitive(Primitive::U64)));
+        let opt2_u64 = Term::Optional(Box::new(opt_u64.clone()));
+        assert_eq!(
+            compute_layout(&world, &opt_u64, &mut fuel),
+            Ok(TypeLayout { size: 16, align: 8 })
+        );
+        assert_eq!(
+            compute_layout(&world, &opt2_u64, &mut fuel),
+            Ok(TypeLayout { size: 16, align: 8 })
+        );
+
+        // Struct with pointer niche packs into ?S and { a: u8, b: Color } picks largest niche.
+        let s_with_ptr = Term::Nominal {
+            declaration: id(35),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            s_with_ptr.clone(),
+            NominalLayout::Struct(vec![
+                Term::Primitive(Primitive::U64),
+                Term::Pointer(Box::new(Term::Primitive(Primitive::U32))),
+            ]),
+        ));
+        assert_eq!(
+            compute_layout(&world, &Term::Optional(Box::new(s_with_ptr)), &mut fuel),
+            Ok(TypeLayout { size: 16, align: 8 })
+        );
+
+        // Single-variant payload enum unwraps transparently and niche-encoded payload enums omit tag.
+        let single_payload = Term::Nominal {
+            declaration: id(36),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            single_payload.clone(),
+            NominalLayout::EnumAggregate(vec![vec![Term::Primitive(Primitive::U64)]]),
+        ));
+        assert_eq!(
+            compute_layout(&world, &single_payload, &mut fuel),
+            Ok(TypeLayout { size: 8, align: 8 })
+        );
+
+        let maybe_ptr = Term::Nominal {
+            declaration: id(37),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            maybe_ptr.clone(),
+            NominalLayout::EnumAggregate(vec![
+                vec![],
+                vec![Term::Pointer(Box::new(Term::Primitive(Primitive::U32)))],
+            ]),
+        ));
+        assert_eq!(
+            compute_layout(&world, &maybe_ptr, &mut fuel),
+            Ok(TypeLayout { size: 8, align: 8 })
+        );
+
+        let three_with_bool = Term::Nominal {
+            declaration: id(38),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            three_with_bool.clone(),
+            NominalLayout::EnumAggregate(vec![
+                vec![],
+                vec![],
+                vec![Term::Primitive(Primitive::Bool)],
+            ]),
+        ));
+        assert_eq!(
+            compute_layout(&world, &three_with_bool, &mut fuel),
+            Ok(TypeLayout { size: 1, align: 1 })
+        );
+
+        let pair_opt = Term::Nominal {
+            declaration: id(39),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            pair_opt.clone(),
+            NominalLayout::EnumAggregate(vec![
+                vec![],
+                vec![
+                    Term::Primitive(Primitive::Bool),
+                    Term::Primitive(Primitive::U64),
+                ],
+            ]),
+        ));
+        assert_eq!(
+            compute_layout(&world, &pair_opt, &mut fuel),
+            Ok(TypeLayout { size: 16, align: 8 })
+        );
+
+        // Fixed-bit enum niche eliminates tag in ?Packet.
+        let packet_ty = Term::Nominal {
+            declaration: id(40),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            packet_ty.clone(),
+            NominalLayout::EnumFixedBits {
+                width: 8,
+                niche: Some((1, 159)),
+            },
+        ));
+        assert_eq!(
+            compute_layout(&world, &Term::Optional(Box::new(packet_ty)), &mut fuel),
+            Ok(TypeLayout { size: 1, align: 1 })
         );
     }
 }

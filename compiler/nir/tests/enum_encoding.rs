@@ -99,6 +99,7 @@ fn symbol_encodings_share_checked_construction_and_discrimination() {
 fn bits(width: usize, value: u32) -> BitVec {
     BitVec::from_words(width, &[value], &mut Budget::default()).unwrap()
 }
+
 fn instruction(name: &str, value: u32) -> Variant {
     Variant::new(
         name.into(),
@@ -480,4 +481,94 @@ fn empty_payloads_preserve_identity_without_occupying_encoding_bits() {
             .is_err()
         );
     }
+}
+
+#[test]
+fn contiguous_niche_finds_largest_gap_for_scalar_widths() {
+    let mut budget = Budget::default();
+
+    // Packet { empty = 0, data: 0xA (payload: Nibble) }
+    let empty = Variant::new(
+        "empty".into(),
+        bits(8, 0xff),
+        bits(8, 0),
+        vec![],
+        &mut budget,
+    )
+    .unwrap();
+    let data = Variant::new(
+        "data".into(),
+        bits(8, 0xf0),
+        bits(8, 0xa0),
+        vec![Field {
+            name: "payload".into(),
+            start: 0,
+            width: 4,
+        }],
+        &mut budget,
+    )
+    .unwrap();
+    let sparse_u8 = Layout::new(8, vec![empty, data], &mut budget).unwrap();
+    assert_eq!(sparse_u8.contiguous_niche(), Some((1, 159)));
+
+    // Exhaustive u8 coverage leaves no niche.
+    let low = Variant::new(
+        "low".into(),
+        bits(8, 0x80),
+        bits(8, 0x00),
+        vec![Field {
+            name: "lo".into(),
+            start: 0,
+            width: 7,
+        }],
+        &mut budget,
+    )
+    .unwrap();
+    let high = Variant::new(
+        "high".into(),
+        bits(8, 0x80),
+        bits(8, 0x80),
+        vec![Field {
+            name: "hi".into(),
+            start: 0,
+            width: 7,
+        }],
+        &mut budget,
+    )
+    .unwrap();
+    let full_u8 = Layout::new(8, vec![low, high], &mut budget).unwrap();
+    assert_eq!(full_u8.contiguous_niche(), None);
+
+    // 32-bit RISC-V instructions leave large contiguous gaps disjoint from every valid encoding.
+    let riscv = Layout::new(
+        32,
+        vec![instruction("add", 0x33), instruction("sub", 0x40000033)],
+        &mut budget,
+    )
+    .unwrap();
+    let (start, count) = riscv.contiguous_niche().unwrap();
+    assert!(count > 0);
+    let witness = bits(32, start as u32);
+    assert!(matches!(
+        riscv.discriminate(&witness, &mut budget),
+        Err(Error::InvalidValue)
+    ));
+
+    // Non-machine widths (e.g., 12 bits) do not publish scalar niches.
+    let narrow = Layout::new(
+        12,
+        vec![
+            Variant::new(
+                "zero".into(),
+                bits(12, 0xfff),
+                bits(12, 0),
+                vec![],
+                &mut budget,
+            )
+            .unwrap(),
+        ],
+        &mut budget,
+    )
+    .unwrap();
+    assert_eq!(narrow.contiguous_niche(), None);
 }

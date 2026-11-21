@@ -282,129 +282,281 @@ impl Emitter<'_> {
                 })
             }
             K::OptionalAbsent => {
-                if !matches!(ty, Ty::Optional(_)) {
+                let Ty::Optional(opt) = ty.clone() else {
                     return Err("host optional constant lacks optional layout".into());
+                };
+                if let Some(niche) = &opt.niche {
+                    let inner = const_niche_value(
+                        &opt.carrier,
+                        &niche.llvm_path,
+                        niche.scalar,
+                        niche.start,
+                    )?;
+                    Ok(ConstValue::NicheCarrier {
+                        ty,
+                        inner: Box::new(inner),
+                    })
+                } else {
+                    Ok(ConstValue::Optional {
+                        llvm_ty: ty.llvm(),
+                        ty,
+                        payload: None,
+                    })
                 }
-                Ok(ConstValue::Optional {
-                    llvm_ty: ty.llvm(),
-                    ty,
-                    payload: None,
-                })
             }
             K::OptionalPresent(payload) => {
-                let Ty::Optional(expected) = &ty else {
+                let Ty::Optional(opt) = ty.clone() else {
                     return Err("host optional constant lacks optional layout".into());
                 };
                 if payload.ty == Term::Primitive(P::Never)
-                    || repr(self.graph, &payload.ty, self.checked)? != **expected
+                    || repr(self.graph, &payload.ty, self.checked)? != opt.payload
                 {
                     return Err("host optional constant payload representation mismatch".into());
                 }
-                let inner = self.const_eval(payload, env, depth + 1)?;
-                Ok(ConstValue::Optional {
-                    llvm_ty: ty.llvm(),
-                    ty,
-                    payload: Some(Box::new(inner)),
-                })
+                let mut inner = self.const_eval(payload, env, depth + 1)?;
+                if let Some(niche) = &opt.niche {
+                    if niche.widened_bool {
+                        inner = const_widen_bool(inner, &opt.payload, &niche.llvm_path)?;
+                    }
+                    Ok(ConstValue::NicheCarrier {
+                        ty,
+                        inner: Box::new(inner),
+                    })
+                } else {
+                    Ok(ConstValue::Optional {
+                        llvm_ty: ty.llvm(),
+                        ty,
+                        payload: Some(Box::new(inner)),
+                    })
+                }
             }
             K::Variant { index, fields, .. } => {
-                let Ty::Enum(layout) = &ty else {
+                let Ty::Enum(layout) = ty.clone() else {
                     return Err("host variant constant lacks enum layout".into());
                 };
-                if let Some(symbols) = &layout.symbols {
-                    if !fields.is_empty() {
-                        return Err("host Symbol enum cannot carry payloads".into());
-                    }
-                    let symbol = symbols
-                        .get(*index)
-                        .ok_or("host Symbol variant index out of range")?;
-                    let value = self.text_literal(symbol, Ty::String)?;
-                    return Ok(ConstValue::Enum {
-                        llvm_ty: ty.llvm(),
-                        ty,
-                        llvm_init: value.text,
-                    });
+                if *index >= layout.names.len() {
+                    return Err("host variant index out of range".into());
                 }
-                let code = layout
-                    .codes
-                    .get(*index)
-                    .ok_or("host variant index out of range")?;
-                let expected_fields = layout
-                    .fields
-                    .get(*index)
-                    .ok_or("host enum payload layout missing")?;
-                if fields.len() != expected_fields.len() {
-                    return Err("host enum payload count mismatch".into());
-                }
-                if layout.aggregate {
-                    let mut evaluated = Vec::with_capacity(fields.len());
-                    for (field, (_, expected)) in fields.iter().zip(expected_fields.iter()) {
-                        if repr(self.graph, &field.ty, self.checked)? != *expected {
-                            return Err("host enum payload representation mismatch".into());
+                match &layout.repr {
+                    enums::EnumRepr::Symbol(symbols) => {
+                        if !fields.is_empty() {
+                            return Err("host Symbol enum cannot carry payloads".into());
                         }
-                        evaluated.push(self.const_eval(field, env, depth + 1)?);
+                        let symbol = symbols
+                            .get(*index)
+                            .ok_or("host Symbol variant index out of range")?;
+                        let value = self.text_literal(symbol, Ty::String)?;
+                        Ok(ConstValue::Enum {
+                            llvm_ty: ty.llvm(),
+                            ty,
+                            llvm_init: value.text,
+                        })
                     }
-                    return Ok(ConstValue::AggregateEnum {
-                        ty,
-                        variant: *index,
-                        fields: evaluated,
-                    });
-                }
-                if fields.is_empty() {
-                    let llvm_init = code.clone();
-                    return Ok(ConstValue::Enum {
-                        llvm_ty: ty.llvm(),
-                        ty,
-                        llvm_init,
-                    });
-                }
-                if layout.width > 128 {
-                    return Err(
-                        "host constant bit-packed enum exceeds 128-bit initializer budget".into(),
-                    );
-                }
-                let mut combined = u128::from_str_radix(code, 10)
-                    .map_err(|_| "host bit-packed enum discriminant is not an integer")?;
-                for (field, (start, expected)) in fields.iter().zip(expected_fields.iter()) {
-                    if repr(self.graph, &field.ty, self.checked)? != *expected {
-                        return Err("host enum payload representation mismatch".into());
+                    enums::EnumRepr::Unit { width } => {
+                        if !fields.is_empty() {
+                            return Err("host enum payload count mismatch".into());
+                        }
+                        let llvm_init = if *width == 0 {
+                            "zeroinitializer".into()
+                        } else {
+                            index.to_string()
+                        };
+                        Ok(ConstValue::Enum {
+                            llvm_ty: ty.llvm(),
+                            ty,
+                            llvm_init,
+                        })
                     }
-                    let (_, fi) = self.const_eval(field, env, depth + 1)?.to_llvm(false);
-                    let Some(field_width) = bits::bit_width(expected) else {
-                        return Err("host constant bit-packed enum payload lacks bit width".into());
-                    };
-                    if field_width == 0 {
-                        continue;
+                    enums::EnumRepr::SingleVariant {
+                        unwrapped,
+                        carrier,
+                        fields: expected_fields,
+                    } => {
+                        if *index != 0 {
+                            return Err("host variant index out of range".into());
+                        }
+                        if fields.len() != expected_fields.len() {
+                            return Err("host enum payload count mismatch".into());
+                        }
+                        let mut evaluated = Vec::with_capacity(fields.len());
+                        for (field, expected) in fields.iter().zip(expected_fields.iter()) {
+                            if repr(self.graph, &field.ty, self.checked)? != *expected {
+                                return Err("host enum payload representation mismatch".into());
+                            }
+                            evaluated.push(self.const_eval(field, env, depth + 1)?);
+                        }
+                        let inner = if *unwrapped {
+                            evaluated.into_iter().next().unwrap()
+                        } else {
+                            ConstValue::Record {
+                                ty: carrier.clone(),
+                                packed: false,
+                                llvm_ty: carrier.llvm(),
+                                fields: evaluated,
+                            }
+                        };
+                        Ok(ConstValue::NicheCarrier {
+                            ty,
+                            inner: Box::new(inner),
+                        })
                     }
-                    if field_width > 128 || *start + (field_width as usize) > 128 {
-                        return Err("host constant bit-packed enum field exceeds 128 bits".into());
+                    enums::EnumRepr::Niche {
+                        data_variant,
+                        unwrapped,
+                        data_fields,
+                        carrier,
+                        niche,
+                    } => {
+                        if *index != *data_variant {
+                            if !fields.is_empty() {
+                                return Err("host enum payload count mismatch".into());
+                            }
+                            let ord = if *index < *data_variant {
+                                *index
+                            } else {
+                                *index - 1
+                            };
+                            let inner = const_niche_value(
+                                carrier,
+                                &niche.llvm_path,
+                                niche.scalar,
+                                niche.start + ord as u64,
+                            )?;
+                            return Ok(ConstValue::NicheCarrier {
+                                ty,
+                                inner: Box::new(inner),
+                            });
+                        }
+                        if fields.len() != data_fields.len() {
+                            return Err("host enum payload count mismatch".into());
+                        }
+                        let mut evaluated = Vec::with_capacity(fields.len());
+                        for (field, expected) in fields.iter().zip(data_fields.iter()) {
+                            if repr(self.graph, &field.ty, self.checked)? != *expected {
+                                return Err("host enum payload representation mismatch".into());
+                            }
+                            evaluated.push(self.const_eval(field, env, depth + 1)?);
+                        }
+                        let raw_ty = if *unwrapped {
+                            data_fields[0].clone()
+                        } else {
+                            Ty::Record(std::sync::Arc::new(data_fields.clone()))
+                        };
+                        let mut inner = if *unwrapped {
+                            evaluated.into_iter().next().unwrap()
+                        } else {
+                            ConstValue::Record {
+                                ty: raw_ty.clone(),
+                                packed: false,
+                                llvm_ty: raw_ty.llvm(),
+                                fields: evaluated,
+                            }
+                        };
+                        if niche.widened_bool {
+                            inner = const_widen_bool(inner, &raw_ty, &niche.llvm_path)?;
+                        }
+                        Ok(ConstValue::NicheCarrier {
+                            ty,
+                            inner: Box::new(inner),
+                        })
                     }
-                    let raw = if fi == "true" {
-                        1u128
-                    } else if fi == "false" {
-                        0u128
-                    } else if let Ok(v) = fi.parse::<u128>() {
-                        v
-                    } else if let Ok(v) = fi.parse::<i128>() {
-                        v as u128
-                    } else {
-                        return Err(
-                            "host constant bit-packed enum payload requires integer initializer"
-                                .into(),
-                        );
-                    };
-                    let mask = if field_width == 128 {
-                        u128::MAX
-                    } else {
-                        (1u128 << field_width) - 1
-                    };
-                    combined |= (raw & mask) << *start;
+                    enums::EnumRepr::FixedBits {
+                        width,
+                        codes,
+                        fields: expected_fields,
+                        ..
+                    } => {
+                        let code = codes.get(*index).ok_or("host variant index out of range")?;
+                        let expected_fields = expected_fields
+                            .get(*index)
+                            .ok_or("host enum payload layout missing")?;
+                        if fields.len() != expected_fields.len() {
+                            return Err("host enum payload count mismatch".into());
+                        }
+                        if fields.is_empty() {
+                            return Ok(ConstValue::Enum {
+                                llvm_ty: ty.llvm(),
+                                ty,
+                                llvm_init: code.clone(),
+                            });
+                        }
+                        if *width > 128 {
+                            return Err(
+                                "host constant bit-packed enum exceeds 128-bit initializer budget"
+                                    .into(),
+                            );
+                        }
+                        let mut combined = u128::from_str_radix(code, 10)
+                            .map_err(|_| "host bit-packed enum discriminant is not an integer")?;
+                        for (field, (start, expected)) in fields.iter().zip(expected_fields.iter())
+                        {
+                            if repr(self.graph, &field.ty, self.checked)? != *expected {
+                                return Err("host enum payload representation mismatch".into());
+                            }
+                            let (_, fi) = self.const_eval(field, env, depth + 1)?.to_llvm(false);
+                            let Some(field_width) = bits::bit_width(expected) else {
+                                return Err(
+                                    "host constant bit-packed enum payload lacks bit width".into(),
+                                );
+                            };
+                            if field_width == 0 {
+                                continue;
+                            }
+                            if field_width > 128 || *start + (field_width as usize) > 128 {
+                                return Err(
+                                    "host constant bit-packed enum field exceeds 128 bits".into()
+                                );
+                            }
+                            let raw = if fi == "true" {
+                                1u128
+                            } else if fi == "false" {
+                                0u128
+                            } else if let Ok(v) = fi.parse::<u128>() {
+                                v
+                            } else if let Ok(v) = fi.parse::<i128>() {
+                                v as u128
+                            } else {
+                                return Err(
+                                    "host constant bit-packed enum payload requires integer initializer"
+                                        .into(),
+                                );
+                            };
+                            let mask = if field_width == 128 {
+                                u128::MAX
+                            } else {
+                                (1u128 << field_width) - 1
+                            };
+                            combined |= (raw & mask) << *start;
+                        }
+                        Ok(ConstValue::Enum {
+                            llvm_ty: ty.llvm(),
+                            ty,
+                            llvm_init: combined.to_string(),
+                        })
+                    }
+                    enums::EnumRepr::TaggedUnion {
+                        fields: all_fields, ..
+                    } => {
+                        let expected_fields = all_fields
+                            .get(*index)
+                            .ok_or("host enum payload layout missing")?;
+                        if fields.len() != expected_fields.len() {
+                            return Err("host enum payload count mismatch".into());
+                        }
+                        let mut evaluated = Vec::with_capacity(fields.len());
+                        for (field, expected) in fields.iter().zip(expected_fields.iter()) {
+                            if repr(self.graph, &field.ty, self.checked)? != *expected {
+                                return Err("host enum payload representation mismatch".into());
+                            }
+                            evaluated.push(self.const_eval(field, env, depth + 1)?);
+                        }
+                        Ok(ConstValue::AggregateEnum {
+                            ty,
+                            variant: *index,
+                            fields: evaluated,
+                        })
+                    }
                 }
-                Ok(ConstValue::Enum {
-                    llvm_ty: ty.llvm(),
-                    ty,
-                    llvm_init: combined.to_string(),
-                })
             }
             _ => Err("host constant address initializer contains dynamic expression".into()),
         }
@@ -444,6 +596,10 @@ enum ConstValue {
         llvm_ty: String,
         llvm_init: String,
     },
+    NicheCarrier {
+        ty: Ty,
+        inner: Box<ConstValue>,
+    },
     AggregateEnum {
         ty: Ty,
         variant: usize,
@@ -459,6 +615,7 @@ impl ConstValue {
             | Self::Record { ty, .. }
             | Self::Optional { ty, .. }
             | Self::Enum { ty, .. }
+            | Self::NicheCarrier { ty, .. }
             | Self::AggregateEnum { ty, .. } => ty,
         }
     }
@@ -467,6 +624,7 @@ impl ConstValue {
         match self {
             Self::Unit | Self::Atom { .. } | Self::Enum { .. } => false,
             Self::AggregateEnum { .. } => true,
+            Self::NicheCarrier { inner, .. } => inner.contains_aggregate_enum(),
             Self::Record { fields, .. } => fields.iter().any(Self::contains_aggregate_enum),
             Self::Optional { payload, .. } => payload
                 .as_deref()
@@ -534,8 +692,29 @@ impl ConstValue {
                 }
             },
             Self::Enum {
-                llvm_ty, llvm_init, ..
-            } => (llvm_ty.clone(), llvm_init.clone()),
+                ty,
+                llvm_ty,
+                llvm_init,
+            } => {
+                if top_level
+                    && matches!(
+                        ty,
+                        Ty::Enum(layout) if matches!(layout.repr, enums::EnumRepr::Unit { width: 0 })
+                    )
+                {
+                    ("i8".into(), "0".into())
+                } else {
+                    (llvm_ty.clone(), llvm_init.clone())
+                }
+            }
+            Self::NicheCarrier { ty, inner } => {
+                let (inner_ty, inner_init) = inner.to_llvm(top_level);
+                if top_level && inner_ty == "i8" && inner_init == "0" && ty.llvm() == "{}" {
+                    ("i8".into(), "0".into())
+                } else {
+                    (ty.llvm(), inner_init)
+                }
+            }
             Self::AggregateEnum { ty, .. } => (ty.llvm(), "zeroinitializer".into()),
         }
     }
@@ -671,6 +850,9 @@ impl ConstValue {
                     }
                 }
             }
+            Self::NicheCarrier { inner, .. } => {
+                inner.append_packed_parts(pointer_bits, depth + 1, fuel, types, inits)
+            }
             Self::AggregateEnum {
                 ty,
                 variant,
@@ -679,12 +861,20 @@ impl ConstValue {
                 let Ty::Enum(layout) = ty else {
                     return Err("host aggregate enum constant lacks enum layout".into());
                 };
+                let enums::EnumRepr::TaggedUnion {
+                    tag_bits,
+                    payload_align,
+                    ..
+                } = layout.repr
+                else {
+                    return Err("host aggregate enum constant lacks tagged-union layout".into());
+                };
                 let total = ty.storage_layout_at(pointer_bits, 0, fuel)?;
                 let tag_layout =
-                    nir::layout::integer_layout(layout.tag_bits).map_err(|e| e.to_string())?;
-                types.push(format!("i{}", layout.tag_bits));
-                inits.push(format!("i{} {variant}", layout.tag_bits));
-                let payload_offset = nir::layout::align_up(tag_layout.size, layout.payload_align)
+                    nir::layout::integer_layout(tag_bits).map_err(|e| e.to_string())?;
+                types.push(format!("i{tag_bits}"));
+                inits.push(format!("i{tag_bits} {variant}"));
+                let payload_offset = nir::layout::align_up(tag_layout.size, payload_align)
                     .map_err(|e| e.to_string())?;
                 push_zero_padding(payload_offset - tag_layout.size, types, inits);
                 let mut v_offset = 0u64;
@@ -711,6 +901,274 @@ impl ConstValue {
                 Ok(total.size)
             }
         }
+    }
+}
+
+fn const_zero_value(ty: &Ty) -> Result<ConstValue, String> {
+    match ty {
+        Ty::Unit => Ok(ConstValue::Unit),
+        Ty::Bool => Ok(ConstValue::Atom {
+            ty: ty.clone(),
+            llvm_ty: "i1".into(),
+            llvm_init: "false".into(),
+            zero_sized: false,
+        }),
+        Ty::Int(0, _) => Ok(ConstValue::Atom {
+            ty: ty.clone(),
+            llvm_ty: "{}".into(),
+            llvm_init: "zeroinitializer".into(),
+            zero_sized: true,
+        }),
+        Ty::Int(..)
+        | Ty::BFloat16
+        | Ty::Float16
+        | Ty::Float32
+        | Ty::Float64
+        | Ty::Pointer
+        | Ty::FunctionPointer
+        | Ty::TemplateIdentity(_)
+        | Ty::String
+        | Ty::Symbol
+        | Ty::ErrorResult(_)
+        | Ty::Closure(_) => Ok(ConstValue::Atom {
+            ty: ty.clone(),
+            llvm_ty: ty.llvm(),
+            llvm_init: if matches!(ty, Ty::Pointer | Ty::FunctionPointer) {
+                "null".into()
+            } else if matches!(ty, Ty::Float16 | Ty::Float32 | Ty::Float64) {
+                "0.0".into()
+            } else if matches!(
+                ty,
+                Ty::String | Ty::Symbol | Ty::ErrorResult(_) | Ty::Closure(_)
+            ) {
+                "zeroinitializer".into()
+            } else {
+                "0".into()
+            },
+            zero_sized: false,
+        }),
+        Ty::Record(fields) | Ty::PackedRecord(fields) => {
+            let zeroed = fields
+                .iter()
+                .map(const_zero_value)
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ConstValue::Record {
+                packed: matches!(ty, Ty::PackedRecord(_)),
+                llvm_ty: ty.llvm(),
+                ty: ty.clone(),
+                fields: zeroed,
+            })
+        }
+        Ty::Optional(opt) => {
+            if opt.niche.is_some() {
+                Ok(ConstValue::NicheCarrier {
+                    ty: ty.clone(),
+                    inner: Box::new(const_zero_value(&opt.carrier)?),
+                })
+            } else {
+                Ok(ConstValue::Optional {
+                    ty: ty.clone(),
+                    llvm_ty: ty.llvm(),
+                    payload: None,
+                })
+            }
+        }
+        Ty::Enum(layout) => match &layout.repr {
+            enums::EnumRepr::Unit { width: 0 } => Ok(ConstValue::Enum {
+                ty: ty.clone(),
+                llvm_ty: "{}".into(),
+                llvm_init: "zeroinitializer".into(),
+            }),
+            enums::EnumRepr::Unit { .. } | enums::EnumRepr::FixedBits { .. } => {
+                Ok(ConstValue::Enum {
+                    ty: ty.clone(),
+                    llvm_ty: ty.llvm(),
+                    llvm_init: "0".into(),
+                })
+            }
+            enums::EnumRepr::Symbol(_) => Ok(ConstValue::Enum {
+                ty: ty.clone(),
+                llvm_ty: ty.llvm(),
+                llvm_init: "zeroinitializer".into(),
+            }),
+            enums::EnumRepr::SingleVariant { carrier, .. } => Ok(ConstValue::NicheCarrier {
+                ty: ty.clone(),
+                inner: Box::new(const_zero_value(carrier)?),
+            }),
+            enums::EnumRepr::Niche { carrier, .. } => Ok(ConstValue::NicheCarrier {
+                ty: ty.clone(),
+                inner: Box::new(const_zero_value(carrier)?),
+            }),
+            enums::EnumRepr::TaggedUnion { .. } => Ok(ConstValue::AggregateEnum {
+                ty: ty.clone(),
+                variant: 0,
+                fields: Vec::new(),
+            }),
+        },
+    }
+}
+
+fn const_niche_value(
+    carrier: &Ty,
+    path: &[usize],
+    scalar: nir::layout::NicheScalar,
+    code: u64,
+) -> Result<ConstValue, String> {
+    if path.is_empty() {
+        let init = match scalar {
+            nir::layout::NicheScalar::Pointer => "null".to_string(),
+            nir::layout::NicheScalar::Int { .. } => code.to_string(),
+        };
+        return Ok(ConstValue::Atom {
+            ty: carrier.clone(),
+            llvm_ty: carrier.llvm(),
+            llvm_init: init,
+            zero_sized: false,
+        });
+    }
+    let idx = path[0];
+    let rest = &path[1..];
+    match carrier {
+        Ty::Record(fields) => {
+            if idx >= fields.len() {
+                return Err("host constant niche record index out of range".into());
+            }
+            let mut built = Vec::with_capacity(fields.len());
+            for (j, field_ty) in fields.iter().enumerate() {
+                if j == idx {
+                    built.push(const_niche_value(field_ty, rest, scalar, code)?);
+                } else {
+                    built.push(const_zero_value(field_ty)?);
+                }
+            }
+            Ok(ConstValue::Record {
+                ty: carrier.clone(),
+                packed: false,
+                llvm_ty: carrier.llvm(),
+                fields: built,
+            })
+        }
+        Ty::Optional(opt) if opt.niche.is_some() => Ok(ConstValue::NicheCarrier {
+            ty: carrier.clone(),
+            inner: Box::new(const_niche_value(&opt.carrier, path, scalar, code)?),
+        }),
+        Ty::Enum(layout) => match &layout.repr {
+            enums::EnumRepr::SingleVariant {
+                carrier: inner_carrier,
+                ..
+            }
+            | enums::EnumRepr::Niche {
+                carrier: inner_carrier,
+                ..
+            } => Ok(ConstValue::NicheCarrier {
+                ty: carrier.clone(),
+                inner: Box::new(const_niche_value(inner_carrier, path, scalar, code)?),
+            }),
+            enums::EnumRepr::TaggedUnion { .. } if idx == 0 && rest.is_empty() => {
+                Ok(ConstValue::AggregateEnum {
+                    ty: carrier.clone(),
+                    variant: usize::try_from(code)
+                        .map_err(|_| "host constant niche tag overflows usize")?,
+                    fields: Vec::new(),
+                })
+            }
+            _ => Err("host constant niche unsupported enum carrier".into()),
+        },
+        _ => Err("host constant niche carrier path mismatch".into()),
+    }
+}
+
+fn const_widen_bool(val: ConstValue, orig_ty: &Ty, path: &[usize]) -> Result<ConstValue, String> {
+    if path.is_empty() {
+        if let ConstValue::NicheCarrier { inner, .. } = val {
+            return const_widen_bool(*inner, orig_ty, &[]);
+        }
+        let ConstValue::Atom { llvm_init, .. } = val else {
+            return Err("host constant bool-widen leaf must be atom".into());
+        };
+        let widened = match llvm_init.as_str() {
+            "true" | "1" => "1",
+            "false" | "0" => "0",
+            _ => return Err("host constant bool-widen encountered non-boolean init".into()),
+        };
+        return Ok(ConstValue::Atom {
+            ty: Ty::Int(8, false),
+            llvm_ty: "i8".into(),
+            llvm_init: widened.into(),
+            zero_sized: false,
+        });
+    }
+    let idx = path[0];
+    let rest = &path[1..];
+    match (val, orig_ty) {
+        (ConstValue::Record { mut fields, .. }, _) => {
+            if idx >= fields.len() {
+                return Err("host constant bool-widen field out of range".into());
+            }
+            let child_orig = match orig_ty {
+                Ty::Record(orig_fields) => orig_fields
+                    .get(idx)
+                    .ok_or("host constant bool-widen orig field out of range")?
+                    .clone(),
+                Ty::Enum(layout) => match &layout.repr {
+                    enums::EnumRepr::SingleVariant { carrier, .. } => {
+                        let Ty::Record(orig_fields) = carrier else {
+                            return Err("host constant bool-widen expected record carrier".into());
+                        };
+                        orig_fields
+                            .get(idx)
+                            .ok_or("host constant bool-widen orig field out of range")?
+                            .clone()
+                    }
+                    _ => return Err("host constant bool-widen unsupported enum carrier".into()),
+                },
+                _ => return Err("host constant bool-widen type mismatch".into()),
+            };
+            let target = fields.remove(idx);
+            let widened = const_widen_bool(target, &child_orig, rest)?;
+            fields.insert(idx, widened);
+            let new_ty = Ty::Record(std::sync::Arc::new(
+                fields.iter().map(|f| f.ty().clone()).collect(),
+            ));
+            Ok(ConstValue::Record {
+                llvm_ty: new_ty.llvm(),
+                ty: new_ty,
+                packed: false,
+                fields,
+            })
+        }
+        (ConstValue::Optional { payload, .. }, Ty::Optional(opt))
+            if opt.niche.is_none() && idx == 0 && rest.is_empty() =>
+        {
+            let tag_init = if payload.is_some() { "1" } else { "0" };
+            let tag_const = ConstValue::Atom {
+                ty: Ty::Int(8, false),
+                llvm_ty: "i8".into(),
+                llvm_init: tag_init.into(),
+                zero_sized: false,
+            };
+            let pay_const = match payload {
+                Some(p) => *p,
+                None => const_zero_value(&opt.payload)?,
+            };
+            let new_ty = Ty::Record(std::sync::Arc::new(vec![
+                Ty::Int(8, false),
+                opt.payload.clone(),
+            ]));
+            Ok(ConstValue::Record {
+                llvm_ty: new_ty.llvm(),
+                ty: new_ty,
+                packed: false,
+                fields: vec![tag_const, pay_const],
+            })
+        }
+        (ConstValue::NicheCarrier { inner, .. }, Ty::Enum(layout)) => match &layout.repr {
+            enums::EnumRepr::SingleVariant { carrier, .. } => {
+                const_widen_bool(*inner, carrier, path)
+            }
+            _ => Err("host constant bool-widen unsupported enum".into()),
+        },
+        _ => Err("host constant bool-widen path mismatch".into()),
     }
 }
 
@@ -957,10 +1415,7 @@ mod tests {
             ),
             "{decls}"
         );
-        assert!(
-            decls.contains("<{ i1, [7 x i8], i8, [7 x i8], [24 x i8] }>"),
-            "{decls}"
-        );
+        assert!(decls.contains("<{ i8, [7 x i8], [24 x i8] }>"), "{decls}");
 
         let enum_llvm = repr(&graph, &const_text_enum.ty, true).unwrap();
         let loaded_enum = emitter.load(&Slot::new(enum_llvm.clone(), p_enum.text, None));
@@ -998,6 +1453,378 @@ mod tests {
         let opt_val = emitter.optional_payload(&loaded_opt).unwrap();
         let cond_opt_enum = emitter.variant_condition(&opt_val, 0).unwrap();
         emitter.guard(&cond_opt_enum).unwrap();
+
+        emitter.line("ret i32 0");
+        let decls = emitter
+            .declarations
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let ir = format!(
+            "declare void @llvm.trap()\n{decls}\ndefine i32 @main() {{\nentry:\n{}{}}}\n",
+            emitter.prologue, emitter.body
+        );
+        for optimization in [
+            crate::host::OptimizationLevel::O0,
+            crate::host::OptimizationLevel::O3,
+        ] {
+            let toolchain = crate::host::Toolchain {
+                optimization,
+                ..Default::default()
+            };
+            let output = toolchain.execute_test_ir(&ir).unwrap();
+            assert!(output.status.success(), "{optimization:?}: {ir}");
+        }
+    }
+
+    #[test]
+    fn const_address_emits_niche_optionals_and_enums_correctly() {
+        let mut graph = iir::Package::default();
+        let rich_decl = nir::DeclarationId {
+            package: 0,
+            local: 1,
+        };
+        let rich_ty = Term::Nominal {
+            declaration: rich_decl,
+            arguments: vec![],
+        };
+        let rich_inst = iir::NominalInstance {
+            ty: rich_ty.clone(),
+            definition: iir::NominalDefinition::Enum(nir::program::Enum {
+                is_intrinsic: false,
+                parameter_types: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration: rich_decl,
+                name: "Rich".into(),
+                groups: vec![],
+                encoding: None,
+                symbol_encoding: None,
+                variants: vec![
+                    nir::program::Variant {
+                        name: "none".into(),
+                        shape: nir::program::VariantShape::Unit,
+                        fields: vec![],
+                    },
+                    nir::program::Variant {
+                        name: "text".into(),
+                        shape: nir::program::VariantShape::Tuple,
+                        fields: vec![Term::Primitive(P::Str), Term::Primitive(P::U64)],
+                    },
+                    nir::program::Variant {
+                        name: "triple".into(),
+                        shape: nir::program::VariantShape::Tuple,
+                        fields: vec![
+                            Term::Primitive(P::U8),
+                            Term::Primitive(P::U64),
+                            Term::Primitive(P::U8),
+                        ],
+                    },
+                ],
+            }),
+        };
+        let choice_decl = nir::DeclarationId {
+            package: 0,
+            local: 2,
+        };
+        let choice_ty = Term::Nominal {
+            declaration: choice_decl,
+            arguments: vec![],
+        };
+        let choice_inst = iir::NominalInstance {
+            ty: choice_ty.clone(),
+            definition: iir::NominalDefinition::Enum(nir::program::Enum {
+                is_intrinsic: false,
+                parameter_types: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration: choice_decl,
+                name: "FlagChoice".into(),
+                groups: vec![],
+                encoding: None,
+                symbol_encoding: None,
+                variants: vec![
+                    nir::program::Variant {
+                        name: "empty".into(),
+                        shape: nir::program::VariantShape::Unit,
+                        fields: vec![],
+                    },
+                    nir::program::Variant {
+                        name: "alt".into(),
+                        shape: nir::program::VariantShape::Unit,
+                        fields: vec![],
+                    },
+                    nir::program::Variant {
+                        name: "flag".into(),
+                        shape: nir::program::VariantShape::Tuple,
+                        fields: vec![Term::Primitive(P::Bool)],
+                    },
+                ],
+            }),
+        };
+        graph.nominals = vec![rich_inst, choice_inst];
+
+        let lambdas = BTreeMap::new();
+        let template_identities = callables::TemplateIdentities::default();
+        let mut declarations = BTreeSet::new();
+        let mut fuel = 10_000;
+        let mut emitter = Emitter {
+            graph: &graph,
+            cleanup: None,
+            schedules: None,
+            resource_unwinds: vec![],
+            checked: true,
+            function: None,
+            closure_body: None,
+            failure_result: None,
+            effects: vec![],
+            effect_resume: None,
+            native_return: None,
+            loop_destinations: Default::default(),
+            outlined_return: None,
+            outlined_loops: BTreeMap::new(),
+            lambdas: &lambdas,
+            template_identities: &template_identities,
+            locals: BTreeMap::new(),
+            live: BTreeMap::new(),
+            temporaries: BTreeMap::new(),
+            temporary_live: BTreeMap::new(),
+            prepared: BTreeMap::new(),
+            receipt_paths: vec![],
+            pattern_orders: BTreeMap::new(),
+            temporary_fields: BTreeMap::new(),
+            loops: BTreeMap::new(),
+            prologue: String::new(),
+            body: String::new(),
+            declarations: &mut declarations,
+            text_constants: &mut strings::TextConstants::default(),
+            attr_table: None,
+            serial: 0,
+            terminated: false,
+            fuel: &mut fuel,
+        };
+
+        let src = nir::program::SourceRange::generated(0);
+        let opt_rich_ty = Term::Optional(Box::new(rich_ty));
+        let null_rich = Expr {
+            ty: opt_rich_ty.clone(),
+            source: src,
+            kind: K::OptionalAbsent,
+        };
+        let p_null_rich = emitter
+            .const_address(
+                nir::DeclarationId {
+                    package: 0,
+                    local: 20,
+                },
+                &null_rich,
+            )
+            .unwrap();
+
+        let opt_bool_ty = Term::Optional(Box::new(Term::Primitive(P::Bool)));
+        let opt2_bool_ty = Term::Optional(Box::new(opt_bool_ty.clone()));
+        let make_opt_bool = |e: Expr| Expr {
+            ty: opt2_bool_ty.clone(),
+            source: src,
+            kind: K::OptionalPresent(Box::new(e)),
+        };
+        let p_b_outer_null = emitter
+            .const_address(
+                nir::DeclarationId {
+                    package: 0,
+                    local: 21,
+                },
+                &Expr {
+                    ty: opt2_bool_ty.clone(),
+                    source: src,
+                    kind: K::OptionalAbsent,
+                },
+            )
+            .unwrap();
+        let p_b_inner_null = emitter
+            .const_address(
+                nir::DeclarationId {
+                    package: 0,
+                    local: 22,
+                },
+                &make_opt_bool(Expr {
+                    ty: opt_bool_ty.clone(),
+                    source: src,
+                    kind: K::OptionalAbsent,
+                }),
+            )
+            .unwrap();
+        let p_b_true = emitter
+            .const_address(
+                nir::DeclarationId {
+                    package: 0,
+                    local: 23,
+                },
+                &make_opt_bool(Expr {
+                    ty: opt_bool_ty,
+                    source: src,
+                    kind: K::OptionalPresent(Box::new(Expr {
+                        ty: Term::Primitive(P::Bool),
+                        source: src,
+                        kind: K::Literal(Literal::Bool(true)),
+                    })),
+                }),
+            )
+            .unwrap();
+
+        let opt_u64_ty = Term::Optional(Box::new(Term::Primitive(P::U64)));
+        let opt2_u64_ty = Term::Optional(Box::new(opt_u64_ty.clone()));
+        let p_u_outer_null = emitter
+            .const_address(
+                nir::DeclarationId {
+                    package: 0,
+                    local: 24,
+                },
+                &Expr {
+                    ty: opt2_u64_ty.clone(),
+                    source: src,
+                    kind: K::OptionalAbsent,
+                },
+            )
+            .unwrap();
+        let p_u_42 = emitter
+            .const_address(
+                nir::DeclarationId {
+                    package: 0,
+                    local: 25,
+                },
+                &Expr {
+                    ty: opt2_u64_ty.clone(),
+                    source: src,
+                    kind: K::OptionalPresent(Box::new(Expr {
+                        ty: opt_u64_ty,
+                        source: src,
+                        kind: K::OptionalPresent(Box::new(Expr {
+                            ty: Term::Primitive(P::U64),
+                            source: src,
+                            kind: K::Literal(Literal::UnsignedInteger(42)),
+                        })),
+                    })),
+                },
+            )
+            .unwrap();
+
+        let p_choice_alt = emitter
+            .const_address(
+                nir::DeclarationId {
+                    package: 0,
+                    local: 26,
+                },
+                &Expr {
+                    ty: choice_ty.clone(),
+                    source: src,
+                    kind: K::Variant {
+                        declaration: choice_decl,
+                        index: 1,
+                        fields: vec![],
+                    },
+                },
+            )
+            .unwrap();
+        let p_choice_flag = emitter
+            .const_address(
+                nir::DeclarationId {
+                    package: 0,
+                    local: 27,
+                },
+                &Expr {
+                    ty: choice_ty.clone(),
+                    source: src,
+                    kind: K::Variant {
+                        declaration: choice_decl,
+                        index: 2,
+                        fields: vec![Expr {
+                            ty: Term::Primitive(P::Bool),
+                            source: src,
+                            kind: K::Literal(Literal::Bool(true)),
+                        }],
+                    },
+                },
+            )
+            .unwrap();
+
+        let decls = emitter
+            .declarations
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(decls.contains("<{ i8, [7 x i8], [24 x i8] }>"), "{decls}");
+        assert!(decls.contains("i8 3"), "{decls}");
+
+        let opt_rich_llvm = repr(&graph, &opt_rich_ty, true).unwrap();
+        let loaded_null_rich = emitter.load(&Slot::new(opt_rich_llvm, p_null_rich.text, None));
+        let null_tag = emitter.optional_tag(&loaded_null_rich).unwrap();
+        let not_present = emitter.instruction(Ty::Bool, format!("xor i1 {}, true", null_tag.text));
+        emitter.guard(&not_present).unwrap();
+
+        let opt2_bool_llvm = repr(&graph, &opt2_bool_ty, true).unwrap();
+        assert_eq!(opt2_bool_llvm.llvm(), "i8");
+        let l_out_null = emitter.load(&Slot::new(
+            opt2_bool_llvm.clone(),
+            p_b_outer_null.text,
+            None,
+        ));
+        let t_out_null = emitter.optional_tag(&l_out_null).unwrap();
+        let not_out = emitter.instruction(Ty::Bool, format!("xor i1 {}, true", t_out_null.text));
+        emitter.guard(&not_out).unwrap();
+
+        let l_in_null = emitter.load(&Slot::new(
+            opt2_bool_llvm.clone(),
+            p_b_inner_null.text,
+            None,
+        ));
+        let t_in_null = emitter.optional_tag(&l_in_null).unwrap();
+        emitter.guard(&t_in_null).unwrap();
+        let pay_in_null = emitter.optional_payload(&l_in_null).unwrap();
+        let t_inner = emitter.optional_tag(&pay_in_null).unwrap();
+        let not_inner = emitter.instruction(Ty::Bool, format!("xor i1 {}, true", t_inner.text));
+        emitter.guard(&not_inner).unwrap();
+
+        let l_b_true = emitter.load(&Slot::new(opt2_bool_llvm, p_b_true.text, None));
+        let t_b_true = emitter.optional_tag(&l_b_true).unwrap();
+        emitter.guard(&t_b_true).unwrap();
+        let p1 = emitter.optional_payload(&l_b_true).unwrap();
+        let t_p1 = emitter.optional_tag(&p1).unwrap();
+        emitter.guard(&t_p1).unwrap();
+        let b_val = emitter.optional_payload(&p1).unwrap();
+        emitter.guard(&b_val).unwrap();
+
+        let opt2_u64_llvm = repr(&graph, &opt2_u64_ty, true).unwrap();
+        assert_eq!(opt2_u64_llvm.llvm(), "{ i8, i64 }");
+        let l_u_null = emitter.load(&Slot::new(opt2_u64_llvm.clone(), p_u_outer_null.text, None));
+        let t_u_null = emitter.optional_tag(&l_u_null).unwrap();
+        let not_u = emitter.instruction(Ty::Bool, format!("xor i1 {}, true", t_u_null.text));
+        emitter.guard(&not_u).unwrap();
+
+        let l_u_42 = emitter.load(&Slot::new(opt2_u64_llvm, p_u_42.text, None));
+        let t_u_42 = emitter.optional_tag(&l_u_42).unwrap();
+        emitter.guard(&t_u_42).unwrap();
+        let inner_u42 = emitter.optional_payload(&l_u_42).unwrap();
+        let t_in42 = emitter.optional_tag(&inner_u42).unwrap();
+        emitter.guard(&t_in42).unwrap();
+        let u42 = emitter.optional_payload(&inner_u42).unwrap();
+        let eq42 = emitter.instruction(Ty::Bool, format!("icmp eq i64 {}, 42", u42.text));
+        emitter.guard(&eq42).unwrap();
+
+        let choice_llvm = repr(&graph, &choice_ty, true).unwrap();
+        assert_eq!(choice_llvm.llvm(), "i8");
+        let l_alt = emitter.load(&Slot::new(choice_llvm.clone(), p_choice_alt.text, None));
+        let is_alt = emitter.variant_condition(&l_alt, 1).unwrap();
+        emitter.guard(&is_alt).unwrap();
+        let l_flag = emitter.load(&Slot::new(choice_llvm, p_choice_flag.text, None));
+        let is_flag = emitter.variant_condition(&l_flag, 2).unwrap();
+        emitter.guard(&is_flag).unwrap();
+        let extracted_flag = emitter.variant_field(&l_flag, 2, 0).unwrap();
+        emitter.guard(&extracted_flag).unwrap();
 
         emitter.line("ret i32 0");
         let decls = emitter

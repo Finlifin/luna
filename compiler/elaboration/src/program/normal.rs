@@ -1,6 +1,7 @@
 //! Opaque head inputs: a stable value or a declaration-side symbolic input.
 use super::*;
 use observation::Failure;
+
 mod arguments;
 mod control_observations;
 mod dynamic_inputs;
@@ -108,6 +109,7 @@ impl Checker<'_, '_> {
         self.ensure_contract(owner, span)?;
         Ok(Some(head))
     }
+
     pub(super) fn tuple_value_type(
         &mut self,
         elements: Vec<Term>,
@@ -208,6 +210,7 @@ impl Checker<'_, '_> {
             _ => None,
         }
     }
+
     /// Lexically visible declaration parameters used by both invocation and
     /// reification. A member's outer value parameters remain invocation-scoped.
     pub(super) fn visible_comptime_parameters(
@@ -1857,6 +1860,7 @@ impl Checker<'_, '_> {
         self.numeric_defaults = saved_defaults;
         result.map(n::NormalFormArgument::Value)
     }
+
     fn dependent_normal_block(
         &mut self,
         block: &hir::Block<'_>,
@@ -2173,10 +2177,13 @@ impl nir::LayoutWorld for Checker<'_, '_> {
             if let Some(encoding) = &def.encoding {
                 let bits = u32::try_from(encoding.width())
                     .map_err(|_| nir::LayoutError::Unsupported(ty.clone()))?;
-                return Ok(Some(nir::NominalLayout::EnumFixedBits(bits)));
+                return Ok(Some(nir::NominalLayout::EnumFixedBits {
+                    width: bits,
+                    niche: encoding.layout.contiguous_niche(),
+                }));
             }
             if def.variants.iter().all(|v| v.fields.is_empty()) {
-                return Ok(Some(nir::NominalLayout::EnumUnit));
+                return Ok(Some(nir::NominalLayout::EnumUnit(def.variants.len())));
             }
             let mut variants = Vec::with_capacity(def.variants.len());
             for variant in &def.variants {

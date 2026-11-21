@@ -40,14 +40,9 @@ impl Emitter<'_> {
             format!("icmp ult i64 {}, {}", index.text, length.text),
         );
         let result_type = repr(self.graph, &expr.ty, self.checked)?;
+        let absent = self.optional_absent_value(&result_type)?;
         let slot = self.slot(result_type.clone());
-        self.store(
-            &slot,
-            &Value {
-                ty: result_type.clone(),
-                text: "zeroinitializer".into(),
-            },
-        )?;
+        self.store(&slot, &absent)?;
         let found = self.fresh();
         let done = self.fresh();
         self.line(format!(
@@ -71,22 +66,7 @@ impl Emitter<'_> {
             Ty::Int(8, false),
             format!("load i8, ptr %{offset}, align 1"),
         );
-        let present = self.instruction(
-            result_type.clone(),
-            format!(
-                "insertvalue {} zeroinitializer, i1 true, 0",
-                result_type.llvm()
-            ),
-        );
-        let present = self.instruction(
-            result_type.clone(),
-            format!(
-                "insertvalue {} {}, i8 {}, 1",
-                result_type.llvm(),
-                present.text,
-                byte.text
-            ),
-        );
+        let present = self.optional_present_value(&result_type, byte)?;
         self.store(&slot, &present)?;
         self.branch(&done);
         self.label(&done);

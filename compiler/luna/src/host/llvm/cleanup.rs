@@ -1504,7 +1504,7 @@ pub(super) fn has_invoke(steps: &[Step]) -> bool {
 fn variant_count(ty: &Ty) -> Option<usize> {
     match ty {
         Ty::Optional(_) => Some(2),
-        Ty::Enum(layout) => Some(layout.fields.len()),
+        Ty::Enum(layout) => Some(layout.names.len()),
         Ty::ErrorResult(layout) => Some(layout.branches.len()),
         _ => None,
     }
@@ -1519,17 +1519,56 @@ fn field_layout(ty: &Ty, field: usize, tag: Option<usize>) -> Option<(Ty, Vec<(T
             fields.get(field)?.clone(),
             vec![(ty.clone(), vec![1, field])],
         )),
-        Ty::Enum(layout) if layout.aggregate => {
-            let tag = tag?;
-            let field_ty = layout.fields.get(tag)?.get(field)?.1.clone();
-            let variant_ty = layout.variant_record_ty(tag)?;
-            Some((
-                field_ty,
-                vec![(ty.clone(), vec![1]), (variant_ty, vec![field])],
-            ))
-        }
-        Ty::Optional(payload) if field == 0 && tag == Some(1) => {
-            Some(((**payload).clone(), vec![(ty.clone(), vec![1])]))
+        Ty::Enum(layout) => match &layout.repr {
+            super::enums::EnumRepr::TaggedUnion { fields, .. } => {
+                let tag = tag?;
+                let field_ty = fields.get(tag)?.get(field)?.clone();
+                let variant_ty = layout.variant_record_ty(tag)?;
+                Some((
+                    field_ty,
+                    vec![(ty.clone(), vec![1]), (variant_ty, vec![field])],
+                ))
+            }
+            super::enums::EnumRepr::SingleVariant {
+                unwrapped,
+                carrier,
+                fields,
+            } => {
+                if tag? != 0 {
+                    return None;
+                }
+                let field_ty = fields.get(field)?.clone();
+                if *unwrapped && field == 0 {
+                    Some((field_ty, vec![]))
+                } else {
+                    Some((field_ty, vec![(carrier.clone(), vec![field])]))
+                }
+            }
+            super::enums::EnumRepr::Niche {
+                data_variant,
+                unwrapped,
+                data_fields,
+                carrier,
+                ..
+            } => {
+                if tag? != *data_variant {
+                    return None;
+                }
+                let field_ty = data_fields.get(field)?.clone();
+                if *unwrapped && field == 0 {
+                    Some((field_ty, vec![]))
+                } else {
+                    Some((field_ty, vec![(carrier.clone(), vec![field])]))
+                }
+            }
+            _ => None,
+        },
+        Ty::Optional(opt) if field == 0 && tag == Some(1) => {
+            if opt.niche.is_some() {
+                Some((opt.payload.clone(), vec![]))
+            } else {
+                Some((opt.payload.clone(), vec![(ty.clone(), vec![1])]))
+            }
         }
         Ty::ErrorResult(layout) if field == 0 => {
             let tag = tag?;

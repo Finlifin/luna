@@ -71,6 +71,7 @@ impl Interpreter<'_> {
         self.read_build_metadata(*owner, &expr.ty, entries, selector, expr.source)
             .map(Flow::Value)
     }
+
     pub(super) fn eval_observation(
         &mut self,
         expr: &Expr,
@@ -100,6 +101,7 @@ impl Interpreter<'_> {
         self.observe_value(&observation, value, expr.source)
             .map(Flow::Value)
     }
+
     pub(super) fn check_observation(
         &self,
         observation: &comptime_compiler::observations::Observation<impl std::borrow::Borrow<Term>>,
@@ -245,6 +247,7 @@ impl Interpreter<'_> {
         }
         Ok(())
     }
+
     fn observe_definition_attributes(
         &mut self,
         value: Value,
@@ -544,6 +547,7 @@ impl Interpreter<'_> {
         }
         Ok(Value::UnsignedInteger(val))
     }
+
     #[inline(never)]
     pub(super) fn prepare_snapshot(
         &self,
@@ -670,9 +674,12 @@ impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
                     } else if let Some(encoding) = &def.encoding {
                         let bits = u32::try_from(encoding.width())
                             .map_err(|_| nir::LayoutError::Unsupported(ty.clone()))?;
-                        nir::NominalLayout::EnumFixedBits(bits)
+                        nir::NominalLayout::EnumFixedBits {
+                            width: bits,
+                            niche: encoding.layout.contiguous_niche(),
+                        }
                     } else if def.variants.iter().all(|v| v.fields.is_empty()) {
-                        nir::NominalLayout::EnumUnit
+                        nir::NominalLayout::EnumUnit(def.variants.len())
                     } else {
                         nir::NominalLayout::EnumAggregate(
                             def.variants.iter().map(|v| v.fields.clone()).collect(),
@@ -712,10 +719,13 @@ impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
             if let Some(encoding) = &def.encoding {
                 let bits = u32::try_from(encoding.width())
                     .map_err(|_| nir::LayoutError::Unsupported(ty.clone()))?;
-                return Ok(Some(nir::NominalLayout::EnumFixedBits(bits)));
+                return Ok(Some(nir::NominalLayout::EnumFixedBits {
+                    width: bits,
+                    niche: encoding.layout.contiguous_niche(),
+                }));
             }
             if def.variants.iter().all(|v| v.fields.is_empty()) {
-                return Ok(Some(nir::NominalLayout::EnumUnit));
+                return Ok(Some(nir::NominalLayout::EnumUnit(def.variants.len())));
             }
             let mut variants = Vec::with_capacity(def.variants.len());
             for variant in &def.variants {

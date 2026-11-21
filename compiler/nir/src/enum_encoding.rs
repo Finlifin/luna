@@ -22,6 +22,7 @@ pub struct SymbolVariant {
 pub struct SymbolRepresentation {
     variants: Vec<SymbolVariant>,
 }
+
 impl SymbolRepresentation {
     pub fn new(variants: Vec<SymbolVariant>, budget: &mut Budget) -> Result<Self, Error> {
         let mut names = BTreeSet::new();
@@ -52,14 +53,17 @@ impl SymbolRepresentation {
         }
         Ok(Self { variants })
     }
+
     pub fn variants(&self) -> &[SymbolVariant] {
         &self.variants
     }
+
     pub fn encode(&self, index: usize) -> Option<&str> {
         self.variants
             .get(index)
             .map(|variant| variant.value.as_str())
     }
+
     pub fn discriminate(&self, symbol: &str, budget: &mut Budget) -> Result<usize, Error> {
         for (index, variant) in self.variants.iter().enumerate() {
             budget.consume(symbol.len().min(variant.value.len()).saturating_add(1))?;
@@ -70,6 +74,7 @@ impl SymbolRepresentation {
         Err(Error::InvalidValue)
     }
 }
+
 impl fmt::Display for SymbolRepresentation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(symbol-encoding")?;
@@ -108,16 +113,19 @@ pub enum Error {
     },
     InvalidValue,
 }
+
 impl From<BitError> for Error {
     fn from(error: BitError) -> Self {
         Self::Bits(error)
     }
 }
+
 impl From<comptime_runtime::Error> for Error {
     fn from(error: comptime_runtime::Error) -> Self {
         Self::Bits(BitError::Resource(error))
     }
 }
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -143,6 +151,7 @@ impl fmt::Display for Error {
         }
     }
 }
+
 impl std::error::Error for Error {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,6 +161,7 @@ pub struct Variant {
     value: BitVec,
     fields: Vec<Field>,
 }
+
 impl Variant {
     /// Validate an exact partition into fixed bits and named payload slots.
     /// There is no implicit value for an unbound wildcard construction slot.
@@ -211,26 +221,33 @@ impl Variant {
             fields,
         })
     }
+
     /// Fixed bits in this validated representation; payload slots are zero.
     pub fn fixed_value(&self) -> &BitVec {
         &self.value
     }
+
     /// Discrimination mask, excluding the payload slots.
     pub fn fixed_mask(&self) -> &BitVec {
         &self.mask
     }
+
     pub fn name(&self) -> &str {
         &self.name
     }
+
     pub fn fields(&self) -> &[Field] {
         &self.fields
     }
+
     pub fn width(&self) -> usize {
         self.mask.width()
     }
+
     pub fn accepts(&self, bits: &BitVec, budget: &mut Budget) -> Result<bool, Error> {
         Ok(bits.and(&self.mask, budget)? == self.value)
     }
+
     pub fn construct(&self, payloads: &[BitVec], budget: &mut Budget) -> Result<BitVec, Error> {
         if payloads.len() != self.fields.len() {
             return Err(Error::Invalid(
@@ -248,6 +265,7 @@ impl Variant {
         }
         Ok(bits)
     }
+
     pub fn extract(&self, bits: &BitVec, budget: &mut Budget) -> Result<Vec<BitVec>, Error> {
         if !self.accepts(bits, budget)? {
             return Err(Error::InvalidValue);
@@ -264,6 +282,7 @@ pub struct Layout {
     width: usize,
     variants: Vec<Variant>,
 }
+
 /// The source representation domain, retained separately from its bit plan.
 /// A width-only declaration has no implied scalar alignment or base identity.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -271,13 +290,16 @@ pub struct Representation {
     pub base_type: Option<crate::Primitive>,
     pub layout: Layout,
 }
+
 impl Representation {
     pub fn width(&self) -> usize {
         self.layout.width()
     }
+
     pub fn variants(&self) -> &[Variant] {
         self.layout.variants()
     }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         self.validate_in(None)
     }
@@ -300,6 +322,7 @@ impl Representation {
         Ok(())
     }
 }
+
 impl fmt::Display for Representation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(enum-representation (base-type ")?;
@@ -311,6 +334,7 @@ impl fmt::Display for Representation {
         write!(f, ") (layout {}))", self.layout)
     }
 }
+
 impl Layout {
     pub fn new(width: usize, variants: Vec<Variant>, budget: &mut Budget) -> Result<Self, Error> {
         if width == 0 {
@@ -339,12 +363,82 @@ impl Layout {
         }
         Ok(Self { width, variants })
     }
+
     pub fn width(&self) -> usize {
         self.width
     }
+
     pub fn variants(&self) -> &[Variant] {
         &self.variants
     }
+
+    /// Largest contiguous unused `(start, count)` interval in `0..2^width`
+    /// strictly outside every variant's value range, for scalar machine widths.
+    pub fn contiguous_niche(&self) -> Option<(u64, u64)> {
+        if !matches!(self.width, 8 | 16 | 32 | 64) {
+            return None;
+        }
+        let full_mask = if self.width == 64 {
+            u64::MAX
+        } else {
+            (1u64 << self.width) - 1
+        };
+        let words_u64 = |words: &[u32]| -> u64 {
+            let lo = u64::from(*words.first().unwrap_or(&0));
+            let hi = u64::from(*words.get(1).unwrap_or(&0));
+            (lo | (hi << 32)) & full_mask
+        };
+        let mut intervals: Vec<(u64, u64)> = self
+            .variants
+            .iter()
+            .map(|variant| {
+                let mask = words_u64(variant.fixed_mask().words());
+                let val = words_u64(variant.fixed_value().words()) & mask;
+                let hi = val | (!mask & full_mask);
+                (val, hi)
+            })
+            .collect();
+        if intervals.is_empty() {
+            return Some((0, full_mask));
+        }
+        intervals.sort_unstable();
+        let mut merged: Vec<(u64, u64)> = Vec::with_capacity(intervals.len());
+        for (lo, hi) in intervals {
+            if let Some((_, prev_hi)) = merged.last_mut()
+                && lo <= prev_hi.saturating_add(1)
+            {
+                *prev_hi = (*prev_hi).max(hi);
+            } else {
+                merged.push((lo, hi));
+            }
+        }
+        let mut best: Option<(u64, u64)> = None;
+        let consider = |best: &mut Option<(u64, u64)>, start: u64, end_incl: u64| {
+            let count = (end_incl - start) + 1;
+            if best.is_none_or(|(b_start, b_count)| {
+                count > b_count || (count == b_count && start < b_start)
+            }) {
+                *best = Some((start, count));
+            }
+        };
+        let first_lo = merged[0].0;
+        if first_lo > 0 {
+            consider(&mut best, 0, first_lo - 1);
+        }
+        for pair in merged.windows(2) {
+            let gap_start = pair[0].1 + 1;
+            let gap_end = pair[1].0 - 1;
+            if gap_start <= gap_end {
+                consider(&mut best, gap_start, gap_end);
+            }
+        }
+        let last_hi = merged.last().unwrap().1;
+        if last_hi < full_mask {
+            consider(&mut best, last_hi + 1, full_mask);
+        }
+        best
+    }
+
     pub fn discriminate(&self, bits: &BitVec, budget: &mut Budget) -> Result<usize, Error> {
         if bits.width() != self.width {
             return Err(BitError::WidthMismatch.into());
@@ -356,6 +450,7 @@ impl Layout {
         }
         Err(Error::InvalidValue)
     }
+
     /// A deterministic witness outside every variant, or exact full coverage.
     /// Subtract fixed-mask cubes, with every split charged to the shared budget.
     /// Exhaustion is an error, never evidence of coverage or disjointness.
@@ -404,6 +499,7 @@ fn zero(width: usize, budget: &mut Budget) -> Result<BitVec, Error> {
     budget.consume(count.saturating_add(1))?;
     Ok(BitVec::from_words(width, &vec![0; count], budget)?)
 }
+
 impl fmt::Display for Variant {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -417,6 +513,7 @@ impl fmt::Display for Variant {
         write!(f, "))")
     }
 }
+
 impl fmt::Display for Field {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -426,6 +523,7 @@ impl fmt::Display for Field {
         )
     }
 }
+
 impl fmt::Display for Layout {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(enum-encoding (width {}) (variants", self.width)?;

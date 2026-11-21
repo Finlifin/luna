@@ -30,7 +30,12 @@ pub(super) fn bit_width(ty: &Ty) -> Option<u32> {
         Ty::Float16 | Ty::BFloat16 => Some(16),
         Ty::Float32 => Some(32),
         Ty::Float64 => Some(64),
-        Ty::Enum(layout) if !layout.aggregate && layout.symbols.is_none() => Some(layout.width),
+        Ty::Enum(layout) => match &layout.repr {
+            enums::EnumRepr::FixedBits { width, .. } | enums::EnumRepr::Unit { width } => {
+                Some(*width)
+            }
+            _ => None,
+        },
         _ => None,
     }
 }

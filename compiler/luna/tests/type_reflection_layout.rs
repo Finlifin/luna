@@ -363,10 +363,10 @@ fn layout_reflection_matches_llvm_and_docs_across_native_and_target_widths() {
                 and Type.size_of(?void) == 1 and Type.align_of(?void) == 1
                 and Type.size_of(!u8 u64) == 16 and Type.align_of(!u8 u64) == 8
                 and Type.size_of(Padded) == 12 and Type.align_of(Padded) == 4
-                and Type.size_of(Link) == 24 and Type.align_of(Link) == 8
+                and Type.size_of(Link) == 16 and Type.align_of(Link) == 8
                 and Type.size_of(Pair<u8, u64>) == 16 and Type.align_of(Pair<u8, u64>) == 8
                 and Type.size_of(Wrapper) == 8 and Type.align_of(Wrapper) == 8
-                and Type.size_of(Color) == 4 and Type.align_of(Color) == 4
+                and Type.size_of(Color) == 1 and Type.align_of(Color) == 1
                 and Type.size_of(Tag) == 16 and Type.align_of(Tag) == 8
                 and Type.size_of(Packet) == 2 and Type.align_of(Packet) == 2
                 and Type.size_of(Payload) == 24 and Type.align_of(Payload) == 8
@@ -985,5 +985,296 @@ fn aggregate_enum_sum_type_abi_layout_const_vec_and_drop_work_natively() {
                 && stdout.ends_with("(bool true)\n"),
             "opt={opt}: {stdout}"
         );
+    }
+}
+
+#[test]
+fn unit_enum_widths_and_compositional_niches_execute_and_drop_cleanly() {
+    let mut big_variants = String::new();
+    for i in 0..257 {
+        big_variants.push_str(&format!("            v{i},\n"));
+    }
+    let source = format!(
+        r#"
+        use std.prelude.*;
+
+        enum ZeroUnit {{}}
+        enum SoloUnit {{ only }}
+        enum TriColor {{ red, green, blue }}
+        enum Big257 {{
+{big_variants}        }}
+
+        enum Packet {{
+            .base_type u8,
+            .width 8,
+            .discrete_tag true,
+            empty: 0b00000000,
+            low: 0b00000001,
+        }}
+
+        struct Flagged {{
+            lead: u8,
+            flag: bool,
+            tail: u64,
+        }}
+
+        struct PtrBox {{
+            ptr: *u32,
+            tag: u64,
+        }}
+
+        enum Tagged {{
+            empty,
+            alt,
+            num(u64),
+        }}
+
+        enum SingleWrap {{
+            wrap(bool),
+        }}
+
+        enum SinglePair {{
+            pair(u8, u64),
+        }}
+
+        enum MaybePtr {{
+            empty,
+            some(*u32),
+        }}
+
+        enum MaybeBool {{
+            empty,
+            alt,
+            some(bool),
+        }}
+
+        enum PairOpt {{
+            empty,
+            pair(bool, u64),
+        }}
+
+        struct OwnedWithBool {{
+            flag: bool,
+            id: u64,
+        }}
+
+        impl Drop for OwnedWithBool {{
+            fn drop(*self) {{
+                let mark = if self.flag.* {{ "T" }} else {{ "F" }};
+                let _ = std.fmt.println("drop-bool:{{}}-{{}}", self.id.*, mark);
+            }}
+        }}
+
+        struct OwnedNoNiche {{
+            id: u64,
+        }}
+
+        impl Drop for OwnedNoNiche {{
+            fn drop(*self) {{
+                let _ = std.fmt.println("drop-no:{{}}", self.id.*);
+            }}
+        }}
+
+        enum OwnedChoice {{
+            empty,
+            alt,
+            active(OwnedWithBool),
+        }}
+
+        fn check_sizes() -> bool {{
+            Type.size_of(ZeroUnit) == 0 and Type.align_of(ZeroUnit) == 1
+                and Type.size_of(SoloUnit) == 0 and Type.align_of(SoloUnit) == 1
+                and Type.size_of(TriColor) == 1 and Type.align_of(TriColor) == 1
+                and Type.size_of(Big257) == 2 and Type.align_of(Big257) == 2
+                and Type.size_of(?bool) == 1 and Type.align_of(?bool) == 1
+                and Type.size_of(??bool) == 1 and Type.align_of(??bool) == 1
+                and Type.size_of(?*u32) == 8 and Type.align_of(?*u32) == 8
+                and Type.size_of(??*u32) == 16 and Type.align_of(??*u32) == 8
+                and Type.size_of(?char) == 4 and Type.align_of(?char) == 4
+                and Type.size_of(?TriColor) == 1 and Type.align_of(?TriColor) == 1
+                and Type.size_of(?Packet) == 1 and Type.align_of(?Packet) == 1
+                and Type.size_of(??u64) == 16 and Type.align_of(??u64) == 8
+                and Type.size_of(?Flagged) == 16 and Type.align_of(?Flagged) == 8
+                and Type.size_of(?PtrBox) == 16 and Type.align_of(?PtrBox) == 8
+                and Type.size_of(?Tagged) == 16 and Type.align_of(?Tagged) == 8
+                and Type.size_of(??Tagged) == 16 and Type.align_of(??Tagged) == 8
+                and Type.size_of(SingleWrap) == 1 and Type.align_of(SingleWrap) == 1
+                and Type.size_of(SinglePair) == 16 and Type.align_of(SinglePair) == 8
+                and Type.size_of(MaybePtr) == 8 and Type.align_of(MaybePtr) == 8
+                and Type.size_of(MaybeBool) == 1 and Type.align_of(MaybeBool) == 1
+                and Type.size_of(PairOpt) == 16 and Type.align_of(PairOpt) == 8
+                and Type.size_of(?OwnedWithBool) == 16 and Type.align_of(?OwnedWithBool) == 8
+                and Type.size_of(??OwnedNoNiche) == 16 and Type.align_of(??OwnedNoNiche) == 8
+                and Type.size_of(OwnedChoice) == 16 and Type.align_of(OwnedChoice) == 8
+        }}
+
+        fn check_unit_enums(flag: bool) -> bool {{
+            let s = SoloUnit.only;
+            let s_ok = s'tag_name == "only" and (s match {{ SoloUnit.only => true }});
+            let c = if flag {{ TriColor.green }} else {{ TriColor.blue }};
+            let c_ok = c'tag_name == "green" and (c match {{ TriColor.green => true, _ => false }});
+            let b = Big257.v256;
+            let b_ok = b'tag_name == "v256" and (b match {{ Big257.v256 => true, _ => false }});
+            s_ok and c_ok and b_ok
+        }}
+
+        fn check_nested_optionals() -> bool {{
+            let b0: ??bool = null;
+            let b1_inner: ?bool = null;
+            let b1: ??bool = b1_inner;
+            let b2_inner: ?bool = false;
+            let b2: ??bool = b2_inner;
+            let b3_inner: ?bool = true;
+            let b3: ??bool = b3_inner;
+
+            let s0: u8 = b0 match {{ null => 0, _? => 9 }};
+            let s1: u8 = b1 match {{ null => 9, inner? => inner match {{ null => 1, _? => 8 }} }};
+            let s2: u8 = b2 match {{ null => 9, inner? => inner match {{ null => 8, v? => if v {{ 9 }} else {{ 2 }} }} }};
+            let s3: u8 = b3 match {{ null => 9, inner? => inner match {{ null => 8, v? => if v {{ 3 }} else {{ 9 }} }} }};
+
+            var target: u32 = 42;
+            let p0: ?*u32 = null;
+            let p1: ?*u32 = target.ref;
+            let pp0: ??*u32 = null;
+            let pp1_in: ?*u32 = null;
+            let pp1: ??*u32 = pp1_in;
+            let pp2: ??*u32 = p1;
+
+            let pp0_c: u8 = pp0 match {{ null => 0, _? => 9 }};
+            let pp1_c: u8 = pp1 match {{ null => 9, inner? => inner match {{ null => 1, _? => 8 }} }};
+            let pp2_c: u8 = pp2 match {{ null => 9, inner? => inner match {{ null => 8, r? => if r.* == 42 {{ 2 }} else {{ 9 }} }} }};
+            let p_ok = (p0 match {{ null => true, _? => false }})
+                and pp0_c == 0
+                and pp1_c == 1
+                and pp2_c == 2;
+
+            let c_null: ?TriColor = null;
+            let c_some: ?TriColor = TriColor.red;
+            let c_ok = (c_null match {{ null => true, _? => false }})
+                and (c_some match {{ null => false, v? => v'tag_name == "red" }});
+
+            let pk_null: ?Packet = null;
+            let pk_low: ?Packet = Packet.low;
+            let pk_ok = (pk_null match {{ null => true, _? => false }})
+                and (pk_low match {{ null => false, v? => v'tag_name == "low" }});
+
+            let ch_null: ?char = null;
+            let ch_ok_val: ?char = 'A';
+            let ch_ok = (ch_null match {{ null => true, _? => false }})
+                and (ch_ok_val match {{ null => false, c? => c == 'A' }});
+
+            let f_null: ?Flagged = null;
+            let f_val: ?Flagged = Flagged {{ lead: 7, flag: false, tail: 99 }};
+            let f_ok = (f_null match {{ null => true, _? => false }})
+                and (f_val match {{ null => false, f? => f.lead == 7 and not f.flag and f.tail == 99 }});
+
+            let pb_null: ?PtrBox = null;
+            let pb_val: ?PtrBox = PtrBox {{ ptr: target.ref, tag: 55 }};
+            let pb_ok = (pb_null match {{ null => true, _? => false }})
+                and (pb_val match {{ null => false, b? => b.ptr.* == 42 and b.tag == 55 }});
+
+            let t0: ??Tagged = null;
+            let t1_in: ?Tagged = null;
+            let t1: ??Tagged = t1_in;
+            let t2_in: ?Tagged = Tagged.num(123);
+            let t2: ??Tagged = t2_in;
+            let t_ok = (t0 match {{ null => true, _? => false }})
+                and (t1 match {{ null => false, i? => i match {{ null => true, _? => false }} }})
+                and (t2 match {{ null => false, i? => i match {{ null => false, v? => v match {{ Tagged.num(n) => n == 123, _ => false }} }} }});
+
+            let u0: ??u64 = null;
+            let u1_in: ?u64 = null;
+            let u1: ??u64 = u1_in;
+            let u2: ??u64 = 777;
+            let u0_c: u8 = u0 match {{ null => 0, _? => 9 }};
+            let u1_c: u8 = u1 match {{ null => 9, i? => i match {{ null => 1, _? => 8 }} }};
+            let u2_c: u8 = u2 match {{ null => 9, i? => i match {{ null => 8, v? => if v == 777 {{ 2 }} else {{ 9 }} }} }};
+            let u_ok = u0_c == 0 and u1_c == 1 and u2_c == 2;
+
+            s0 == 0 and s1 == 1 and s2 == 2 and s3 == 3
+                and p_ok and c_ok and pk_ok and ch_ok and f_ok and pb_ok and t_ok and u_ok
+        }}
+
+        fn check_niche_enums() -> bool {{
+            var target: u32 = 91;
+            let sw = SingleWrap.wrap(true);
+            let sp = SinglePair.pair(9, 88);
+            let sw_ok = sw match {{ SingleWrap.wrap(b) => b }};
+            let sp_ok = sp match {{ SinglePair.pair(a, b) => a == 9 and b == 88 }};
+
+            let mp_e = MaybePtr.empty;
+            let mp_s = MaybePtr.some(target.ref);
+            let mp_ok = mp_e'tag_name == "empty"
+                and mp_s'tag_name == "some"
+                and (mp_e match {{ MaybePtr.empty => true, _ => false }})
+                and (mp_s match {{ MaybePtr.some(p) => p.* == 91, _ => false }});
+
+            let mb_e = MaybeBool.empty;
+            let mb_a = MaybeBool.alt;
+            let mb_f = MaybeBool.some(false);
+            let mb_t = MaybeBool.some(true);
+            let mb_ok = mb_e'tag_name == "empty"
+                and mb_a'tag_name == "alt"
+                and mb_f'tag_name == "some"
+                and mb_t'tag_name == "some"
+                and (mb_e match {{ MaybeBool.empty => true, _ => false }})
+                and (mb_a match {{ MaybeBool.alt => true, _ => false }})
+                and (mb_f match {{ MaybeBool.some(v) => not v, _ => false }})
+                and (mb_t match {{ MaybeBool.some(v) => v, _ => false }});
+
+            let po_e = PairOpt.empty;
+            let po_p = PairOpt.pair(true, 314);
+            let po_ok = po_e'tag_name == "empty"
+                and po_p'tag_name == "pair"
+                and (po_e match {{ PairOpt.empty => true, _ => false }})
+                and (po_p match {{ PairOpt.pair(f, v) => f and v == 314, _ => false }});
+
+            sw_ok and sp_ok and mp_ok and mb_ok and po_ok
+        }}
+
+        fn exercise_niche_drops() -> bool {{
+            do {{
+                let _opt_none: ?OwnedWithBool = null;
+                let _opt_false: ?OwnedWithBool = OwnedWithBool {{ flag: false, id: 1 }};
+                let _opt_true: ?OwnedWithBool = OwnedWithBool {{ flag: true, id: 2 }};
+                let _nest_outer: ??OwnedNoNiche = null;
+                let _inner_none: ?OwnedNoNiche = null;
+                let _nest_inner: ??OwnedNoNiche = _inner_none;
+                let _nest_some: ??OwnedNoNiche = OwnedNoNiche {{ id: 3 }};
+                let _enum_empty = OwnedChoice.empty;
+                let _enum_alt = OwnedChoice.alt;
+                let _enum_active = OwnedChoice.active(OwnedWithBool {{ flag: true, id: 4 }});
+            }};
+            true
+        }}
+
+        fn run() -> bool {{
+            check_sizes()
+                and check_unit_enums(true)
+                and check_nested_optionals()
+                and check_niche_enums()
+                and exercise_niche_drops()
+        }}
+        "#
+    );
+    for opt in ["0", "3"] {
+        let case = NativeCase::new(&source);
+        let build = case.build(opt);
+        assert_success(&build);
+        let output = case.run();
+        assert_success(&output);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let drop_lines: Vec<&str> = stdout.lines().filter(|l| l.starts_with("drop-")).collect();
+        assert!(
+            drop_lines
+                == vec![
+                    "drop-bool:4-T",
+                    "drop-no:3",
+                    "drop-bool:2-T",
+                    "drop-bool:1-F"
+                ],
+            "opt={opt}: {stdout}"
+        );
+        assert!(stdout.ends_with("(bool true)\n"), "opt={opt}: {stdout}");
     }
 }
