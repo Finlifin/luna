@@ -231,23 +231,30 @@ fn term_contains_str(ty: &nir::Term, fuel: &mut usize) -> Result<bool, String> {
     Ok(false)
 }
 
-fn instance_uses_text(instance: &iir::FunctionInstance, fuel: &mut usize) -> Result<bool, String> {
-    if term_contains_str(&instance.function.signature, fuel)? {
-        return Ok(true);
+fn type_already_in_graph(graph: &iir::Package, ty: &nir::Term, depth: usize) -> bool {
+    if depth >= 32 {
+        return false;
     }
-    for argument in instance.key.arguments.iter() {
-        if term_contains_str(argument, fuel)? {
-            return Ok(true);
+    match ty {
+        nir::Term::Primitive(_) => true,
+        nir::Term::Nominal { .. } => graph.nominals.iter().any(|n| n.ty == *ty),
+        nir::Term::Optional(inner) | nir::Term::Pointer(inner) => {
+            type_already_in_graph(graph, inner, depth + 1)
         }
+        nir::Term::ErrorResult { errors, result } => {
+            type_already_in_graph(graph, result, depth + 1)
+                && errors
+                    .iter()
+                    .all(|e| type_already_in_graph(graph, e, depth + 1))
+        }
+        nir::Term::Tuple(items) => items
+            .iter()
+            .all(|item| type_already_in_graph(graph, item, depth + 1)),
+        nir::Term::Record(fields) => fields
+            .iter()
+            .all(|(_, field)| type_already_in_graph(graph, field, depth + 1)),
+        _ => false,
     }
-    let mut found = false;
-    nir::visit::expressions(&instance.function, fuel, |expr, fuel| {
-        if !found && term_contains_str(&expr.ty, fuel)? {
-            found = true;
-        }
-        Ok(())
-    })?;
-    Ok(found)
 }
 
 #[derive(Default)]
@@ -485,6 +492,7 @@ fn prepare_source_impl(
     let mut retained_summaries = elaboration::verification::memory::SummaryCache::default();
     let mut owned_layouts: Option<Package> = None;
     let mut copy_cache = std::collections::HashMap::new();
+    let mut cached_graph: Option<(Vec<iir::InstanceKey>, Vec<nir::Term>, iir::Package)> = None;
 
     loop {
         *fuel = fuel
@@ -497,170 +505,190 @@ fn prepare_source_impl(
             .filter(|ty| !generated_layouts.contains(*ty))
             .cloned()
             .collect::<Vec<_>>();
-        let graph = elaboration::materialization::instantiate_with_types_in_session(
-            &mut instantiation,
-            &roots,
-            &source_types,
-            Default::default(),
-            &mut construction_budget,
-        )?;
-        let active_enums = owned_layouts
-            .as_ref()
-            .map_or(&package.enums, |view| &view.enums);
-        let generated = graph
-            .nominals
-            .iter()
-            .filter_map(|nominal| match &nominal.definition {
-                iir::NominalDefinition::Enum(definition)
-                    if !active_enums
-                        .iter()
-                        .any(|source| source.declaration == definition.declaration) =>
-                {
-                    Some((nominal.ty.clone(), definition))
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        if !generated.is_empty() {
-            // New roots can change the traversal order of late expansions.
-            // Recompute schedules against this graph's identities and sources.
-            schedule = Schedule::default();
-            copy_cache.clear();
-            retained_summaries = Default::default();
-            verified_text_roots.clear();
-            validated_instances.clear();
-            instance_deps.clear();
-            schedule_deps.clear();
-            scheduled_roots.clear();
-            graph_has_text = false;
-            if owned_layouts.is_none() {
-                for function in package.functions.iter().chain(&package.quote_templates) {
-                    nir::visit::expressions(function, fuel, |expr, fuel| {
-                        nir::type_computations::charge_term(&expr.ty, fuel)
-                            .map_err(|e| e.to_string())
-                    })?;
-                }
-                owned_layouts = Some(package.clone());
-            }
-            let view = owned_layouts.as_mut().unwrap();
-            for (ty, definition) in generated {
-                generated_layouts.insert(ty);
-                view.enums.push(definition.clone());
-            }
+        let graph_changed = !matches!(
+            &cached_graph,
+            Some((cached_roots, cached_types, _))
+                if cached_roots == &roots && cached_types == &source_types
+        );
+        if graph_changed {
+            let graph = elaboration::materialization::instantiate_with_types_in_session(
+                &mut instantiation,
+                &roots,
+                &source_types,
+                Default::default(),
+                &mut construction_budget,
+            )?;
+            cached_graph = Some((roots.clone(), source_types, graph));
         }
-        for instance in &graph.functions {
-            if !validated_instances.insert(instance.key.clone()) {
-                continue;
-            }
-            graph.validate_cleanup_control_instance(instance, fuel)?;
-            nir::type_computations::charge_term(&instance.function.signature, fuel)
-                .map_err(|e| e.to_string())?;
-            for argument in instance.key.arguments.iter() {
-                nir::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
-            }
-            let mut deps = InstanceDeps::default();
-            nir::visit::expressions(&instance.function, fuel, |expr, fuel| {
-                nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())?;
-                match &expr.kind {
-                    K::Function(declaration) => {
-                        deps.callees.insert(iir::InstanceKey {
-                            declaration: *declaration,
-                            arguments: vec![].into(),
-                        });
+        let graph = &cached_graph.as_ref().unwrap().2;
+        if graph_changed {
+            let active_enums = owned_layouts
+                .as_ref()
+                .map_or(&package.enums, |view| &view.enums);
+            let generated = graph
+                .nominals
+                .iter()
+                .filter_map(|nominal| match &nominal.definition {
+                    iir::NominalDefinition::Enum(definition)
+                        if !active_enums
+                            .iter()
+                            .any(|source| source.declaration == definition.declaration) =>
+                    {
+                        Some((nominal.ty.clone(), definition.clone()))
                     }
-                    K::FunctionInstance {
-                        declaration,
-                        arguments,
-                    } => {
-                        deps.callees.insert(iir::InstanceKey {
-                            declaration: *declaration,
-                            arguments: arguments.clone().into(),
-                        });
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            if !generated.is_empty() {
+                // New roots can change the traversal order of late expansions.
+                // Recompute schedules against this graph's identities and sources.
+                schedule = Schedule::default();
+                copy_cache.clear();
+                retained_summaries = Default::default();
+                verified_text_roots.clear();
+                validated_instances.clear();
+                instance_deps.clear();
+                schedule_deps.clear();
+                scheduled_roots.clear();
+                graph_has_text = false;
+                let view = owned_layouts.get_or_insert_with(|| package.clone());
+                for (ty, definition) in generated {
+                    nir::type_computations::charge_term(&ty, fuel).map_err(|e| e.to_string())?;
+                    *fuel = fuel
+                        .checked_sub(definition.variants.len().saturating_add(1))
+                        .ok_or("generated enum layout budget exhausted")?;
+                    for variant in &definition.variants {
+                        for field in &variant.fields {
+                            nir::type_computations::charge_term(field, fuel)
+                                .map_err(|e| e.to_string())?;
+                        }
                     }
-                    K::TraitMethod {
-                        interface,
-                        interface_arguments,
-                        subject,
-                        member,
-                        method_arguments,
-                    } => {
-                        let mut matched = false;
-                        for dispatch in &graph.dispatch {
-                            if dispatch.interface == *interface
-                                && dispatch.interface_arguments == *interface_arguments
-                                && dispatch.subject == *subject
-                            {
-                                for method in &dispatch.methods {
-                                    if method.member == *member
-                                        && method.method_arguments == *method_arguments
-                                    {
-                                        deps.callees.insert(iir::InstanceKey {
-                                            declaration: method.body,
-                                            arguments: method.arguments.clone().into(),
-                                        });
-                                        matched = true;
+                    generated_layouts.insert(ty);
+                    view.enums.push(definition);
+                }
+            }
+            for instance in &graph.functions {
+                if !validated_instances.insert(instance.key.clone()) {
+                    continue;
+                }
+                nir::type_computations::charge_term(&instance.function.signature, fuel)
+                    .map_err(|e| e.to_string())?;
+                if !graph_has_text && term_contains_str(&instance.function.signature, fuel)? {
+                    graph_has_text = true;
+                }
+                for argument in instance.key.arguments.iter() {
+                    nir::type_computations::charge_term(argument, fuel)
+                        .map_err(|e| e.to_string())?;
+                    if !graph_has_text && term_contains_str(argument, fuel)? {
+                        graph_has_text = true;
+                    }
+                }
+                let mut deps = InstanceDeps::default();
+                nir::visit::expressions(&instance.function, fuel, |expr, fuel| {
+                    graph.validate_cleanup_control_expr(expr, fuel)?;
+                    nir::type_computations::charge_term(&expr.ty, fuel)
+                        .map_err(|e| e.to_string())?;
+                    if !graph_has_text && term_contains_str(&expr.ty, fuel)? {
+                        graph_has_text = true;
+                    }
+                    match &expr.kind {
+                        K::Function(declaration) => {
+                            deps.callees.insert(iir::InstanceKey {
+                                declaration: *declaration,
+                                arguments: vec![].into(),
+                            });
+                        }
+                        K::FunctionInstance {
+                            declaration,
+                            arguments,
+                        } => {
+                            deps.callees.insert(iir::InstanceKey {
+                                declaration: *declaration,
+                                arguments: arguments.clone().into(),
+                            });
+                        }
+                        K::TraitMethod {
+                            interface,
+                            interface_arguments,
+                            subject,
+                            member,
+                            method_arguments,
+                        } => {
+                            let mut matched = false;
+                            for dispatch in &graph.dispatch {
+                                if dispatch.interface == *interface
+                                    && dispatch.interface_arguments == *interface_arguments
+                                    && dispatch.subject == *subject
+                                {
+                                    for method in &dispatch.methods {
+                                        if method.member == *member
+                                            && method.method_arguments == *method_arguments
+                                        {
+                                            deps.callees.insert(iir::InstanceKey {
+                                                declaration: method.body,
+                                                arguments: method.arguments.clone().into(),
+                                            });
+                                            matched = true;
+                                        }
                                     }
                                 }
                             }
+                            if !matched {
+                                deps.dynamic_or_unknown = true;
+                            }
                         }
-                        if !matched {
+                        K::Call { callee, .. }
+                            if !matches!(
+                                callee.kind,
+                                K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
+                            ) =>
+                        {
                             deps.dynamic_or_unknown = true;
                         }
+                        K::EffectHandle { .. } | K::EffectRequest { .. } | K::Closure { .. } => {
+                            deps.dynamic_or_unknown = true;
+                        }
+                        _ => {}
                     }
-                    K::Call { callee, .. }
-                        if !matches!(
-                            callee.kind,
-                            K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
-                        ) =>
-                    {
-                        deps.dynamic_or_unknown = true;
-                    }
-                    K::EffectHandle { .. } | K::EffectRequest { .. } | K::Closure { .. } => {
-                        deps.dynamic_or_unknown = true;
-                    }
-                    _ => {}
-                }
-                Ok(())
-            })?;
-            instance_deps.insert(instance.key.clone(), deps);
-            if !graph_has_text && instance_uses_text(instance, fuel)? {
-                graph_has_text = true;
-            }
-        }
-        for (_, accesses) in &cleanup_accesses {
-            for access in accesses {
-                let cost = access.through.iter().fold(
-                    access
-                        .input_fields
-                        .len()
-                        .saturating_add(access.fields.len())
-                        .saturating_add(1),
-                    |cost, path| cost.saturating_add(path.len()).saturating_add(1),
-                );
-                *fuel = fuel
-                    .checked_sub(cost)
-                    .ok_or("cleanup footprint overlay budget exhausted")?;
-                nir::type_computations::charge_term(&access.ty, fuel).map_err(|e| e.to_string())?;
+                    Ok(())
+                })?;
+                instance_deps.insert(instance.key.clone(), deps);
             }
         }
         let mut cleanup_changed = false;
         let mut changed_cleanup_keys = std::collections::HashSet::new();
         let mut round_affected = std::collections::HashSet::new();
         let view = owned_layouts.get_or_insert_with(|| package.clone());
-        view.runtime_instances = graph
-            .functions
-            .iter()
-            .map(|instance| nir::program::RuntimeInstance {
-                declaration: instance.key.declaration,
-                arguments: instance.key.arguments.to_vec(),
-                function: instance.function.clone(),
-                cleanup_accesses: cleanup_accesses
-                    .iter()
-                    .find(|(key, _)| key == &instance.key)
-                    .map(|(_, accesses)| accesses.clone())
-                    .unwrap_or_default(),
-            })
-            .collect();
+        if graph_changed || view.runtime_instances.len() != graph.functions.len() {
+            view.runtime_instances = graph
+                .functions
+                .iter()
+                .map(|instance| nir::program::RuntimeInstance {
+                    declaration: instance.key.declaration,
+                    arguments: instance.key.arguments.to_vec(),
+                    function: instance.function.clone(),
+                    cleanup_accesses: cleanup_accesses
+                        .iter()
+                        .find(|(key, _)| key == &instance.key)
+                        .map(|(_, accesses)| accesses.clone())
+                        .unwrap_or_default(),
+                })
+                .collect();
+        } else {
+            let access_count: usize = cleanup_accesses.iter().map(|(_, a)| a.len()).sum();
+            *fuel = fuel
+                .checked_sub(access_count.saturating_add(1))
+                .ok_or("cleanup footprint overlay budget exhausted")?;
+            for runtime_instance in &mut view.runtime_instances {
+                if let Some((_, accesses)) = cleanup_accesses.iter().find(|(key, _)| {
+                    key.declaration == runtime_instance.declaration
+                        && key.arguments.as_ref() == runtime_instance.arguments.as_slice()
+                }) && runtime_instance.cleanup_accesses != *accesses
+                {
+                    runtime_instance.cleanup_accesses = accesses.clone();
+                }
+            }
+        }
         let package: &Package = &*view;
         let dispatch_catalog = elaboration::materialization::BorrowedCatalog::new(package);
         let dispatch_source =
@@ -941,6 +969,19 @@ fn prepare_source_impl(
                             .checked_sub(effects.len() + 1)
                             .ok_or("cleanup footprint publication budget exhausted")?;
                         if !effects.contains(&access) {
+                            let cost = access.through.iter().fold(
+                                access
+                                    .input_fields
+                                    .len()
+                                    .saturating_add(access.fields.len())
+                                    .saturating_add(1),
+                                |cost, path| cost.saturating_add(path.len()).saturating_add(1),
+                            );
+                            *fuel = fuel
+                                .checked_sub(cost)
+                                .ok_or("cleanup footprint overlay budget exhausted")?;
+                            nir::type_computations::charge_term(&access.ty, fuel)
+                                .map_err(|e| e.to_string())?;
                             effects.push(access);
                             if changed_cleanup_keys.insert(cleanup_accesses[position].0.clone()) {
                                 round_affected = affected_cleanup_instances(
@@ -1625,7 +1666,11 @@ fn prepare_source_impl(
                                     roots.push(method);
                                 }
                             }
-                            if !types.contains(&temporary.ty) {types.push(temporary.ty.clone());}
+                            if !type_already_in_graph(graph, &temporary.ty, 0)
+                                && !types.contains(&temporary.ty)
+                            {
+                                types.push(temporary.ty.clone());
+                            }
                             discards.push(DiscardCleanup {source:site.source,value_source:temporary.source,
                                 program:iir::cleanup::Program {ty:temporary.ty,guards:plan.variants.iter().map(|v|(v.fields.clone(),v.index)).collect(),steps}});
                             continue;
@@ -1693,7 +1738,7 @@ fn prepare_source_impl(
                                 roots.push(method);
                             }
                         }
-                        if !types.contains(&ty) {
+                        if !type_already_in_graph(graph, &ty, 0) && !types.contains(&ty) {
                             types.push(ty.clone());
                         }
                         actions.push(Action {
@@ -1949,6 +1994,9 @@ fn prepare_source_impl(
             schedule
                 .functions
                 .sort_by_key(|item| order.get(&item.instance).copied().unwrap_or(usize::MAX));
+            drop(cleanup_session);
+            drop(verification_session);
+            let (_, _, graph) = cached_graph.take().unwrap();
             return Ok(Executable {
                 entry,
                 graph,
@@ -2026,5 +2074,86 @@ mod tests {
         assert!(affected.contains(&dynamic_fn));
         assert!(affected.contains(&borrowed_fn));
         assert!(!affected.contains(&disjoint_fn));
+    }
+
+    #[test]
+    fn type_already_in_graph_recognizes_primitives_and_materialized_nominals_conservatively() {
+        let mut graph = iir::Package::default();
+        let present_nominal = nir::Term::Nominal {
+            declaration: DeclarationId {
+                package: 1,
+                local: 10,
+            },
+            arguments: vec![],
+        };
+        let missing_nominal = nir::Term::Nominal {
+            declaration: DeclarationId {
+                package: 1,
+                local: 11,
+            },
+            arguments: vec![],
+        };
+        graph.nominals.push(iir::NominalInstance {
+            ty: present_nominal.clone(),
+            definition: iir::NominalDefinition::Struct(nir::program::Struct {
+                parameter_types: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 10,
+                },
+                name: "Present".into(),
+                fields: vec![],
+                packed: false,
+            }),
+        });
+
+        assert!(super::type_already_in_graph(
+            &graph,
+            &nir::Term::Primitive(nir::Primitive::U32),
+            0
+        ));
+        assert!(super::type_already_in_graph(&graph, &present_nominal, 0));
+        assert!(super::type_already_in_graph(
+            &graph,
+            &nir::Term::Optional(Box::new(present_nominal.clone())),
+            0
+        ));
+        assert!(super::type_already_in_graph(
+            &graph,
+            &nir::Term::ErrorResult {
+                errors: vec![present_nominal.clone()],
+                result: Box::new(nir::Term::Primitive(nir::Primitive::U64)),
+            },
+            0
+        ));
+        assert!(super::type_already_in_graph(
+            &graph,
+            &nir::Term::Tuple(vec![
+                present_nominal.clone(),
+                nir::Term::Pointer(Box::new(nir::Term::Primitive(nir::Primitive::U8))),
+            ]),
+            0
+        ));
+        assert!(!super::type_already_in_graph(&graph, &missing_nominal, 0));
+        assert!(!super::type_already_in_graph(
+            &graph,
+            &nir::Term::Optional(Box::new(missing_nominal)),
+            0
+        ));
+        assert!(!super::type_already_in_graph(
+            &graph,
+            &nir::Term::NormalForm {
+                head: DeclarationId {
+                    package: 1,
+                    local: 12,
+                },
+                sort: nir::Sort::Type,
+                arguments: vec![],
+            },
+            0
+        ));
     }
 }

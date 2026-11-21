@@ -547,38 +547,49 @@ impl Package {
         fuel: &mut usize,
     ) -> Result<(), String> {
         visit::expressions(&instance.function, fuel, |expr, fuel| {
-            use nir::program::ExprKind as K;
-            match &expr.kind {
-                K::EffectHandle { handlers, .. } => {
-                    for handler in handlers {
-                        if handler.abi != nir::effects::Abi::Direct
-                            && !(handler.abi == nir::effects::Abi::DirectPassing
-                                && effects::data_passing_signature(self, &handler.signature, fuel)?)
-                        {
-                            return Err("IIR effect installation requires slot/capture cleanup protocol lowering".into());
-                        }
-                        // Capture ownership/initialization is discharged by
-                        // resource schedule publication, not type-only IIR
-                        // validation. Traverse here to retain bounded lexical
-                        // well-formedness checks before execution.
-                        for arm in &handler.arms {
-                            nir::free_bindings::collect_arm(arm, fuel)?;
-                        }
+            self.validate_cleanup_control_expr(expr, fuel)
+        })
+    }
+
+    pub fn validate_cleanup_control_expr(
+        &self,
+        expr: &nir::program::Expr,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        use nir::program::ExprKind as K;
+        match &expr.kind {
+            K::EffectHandle { handlers, .. } => {
+                for handler in handlers {
+                    if handler.abi != nir::effects::Abi::Direct
+                        && !(handler.abi == nir::effects::Abi::DirectPassing
+                            && effects::data_passing_signature(self, &handler.signature, fuel)?)
+                    {
+                        return Err(
+                            "IIR effect installation requires slot/capture cleanup protocol lowering"
+                                .into(),
+                        );
+                    }
+                    // Capture ownership/initialization is discharged by
+                    // resource schedule publication, not type-only IIR
+                    // validation. Traverse here to retain bounded lexical
+                    // well-formedness checks before execution.
+                    for arm in &handler.arms {
+                        nir::free_bindings::collect_arm(arm, fuel)?;
                     }
                 }
-                K::EffectRequest { abi, signature, .. }
-                    if *abi != nir::effects::Abi::Direct
-                        && !(*abi == nir::effects::Abi::DirectPassing
-                            && effects::data_passing_signature(self, signature, fuel)?) =>
-                {
-                    return Err(
-                        "IIR effect request requires slot/capture cleanup protocol lowering".into(),
-                    );
-                }
-                _ => {}
             }
-            Ok(())
-        })
+            K::EffectRequest { abi, signature, .. }
+                if *abi != nir::effects::Abi::Direct
+                    && !(*abi == nir::effects::Abi::DirectPassing
+                        && effects::data_passing_signature(self, signature, fuel)?) =>
+            {
+                return Err(
+                    "IIR effect request requires slot/capture cleanup protocol lowering".into(),
+                );
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     // Contracts and executable bodies must inspect the same embedded types.
