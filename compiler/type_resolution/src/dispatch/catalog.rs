@@ -638,6 +638,18 @@ mod tests {
             .scope
             .install_published_nominals(published(&[(1, 8)]), 1, 9, &mut budget)
             .unwrap();
+        let before = budget.steps;
+        let failure = world
+            .with_published_nominals(published(&[(1, 9)]), 1, 10, &mut budget, |candidate, _| {
+                assert!(candidate.formed_nullary_nominals.contains_declaration(Id {
+                    package: 1,
+                    local: 9
+                }));
+                Err::<(), _>("cannot freeze returned value".to_owned())
+            })
+            .unwrap_err();
+        assert_eq!(failure, "cannot freeze returned value");
+        assert!(budget.steps < before);
         let successor = world.scope.declaration_source().package();
         assert_eq!(successor.definition_identity_cursor, 9);
         assert!(successor.formed_nullary_nominals.contains_declaration(Id {

@@ -534,3 +534,84 @@ fn staged_normal_callables_specialize_by_head_and_check_obligations_at_applicati
     let error = support::compile_with_protocols(&bad, &Default::default()).unwrap_err();
     assert!(error.contains("TypeContract"), "{error}");
 }
+
+#[test]
+fn a_newtype_published_by_one_input_is_visible_to_its_default_and_instance_key() {
+    use nir::program::{CallArgument, Expr, ExprKind as K, Literal};
+    let package = compile(
+        "newtype Tag=bool; fn choose(comptime tag:Tag, comptime .copy:Tag=tag)->bool {true}",
+    );
+    let template = package
+        .functions
+        .iter()
+        .find(|f| f.name == "choose")
+        .unwrap();
+    let tag = package.newtypes.iter().find(|n| n.name == "Tag").unwrap();
+    let ty = Term::Nominal {
+        declaration: tag.declaration,
+        arguments: vec![],
+    };
+    let source = template.body.source;
+    let make = |kind, ty| Expr { kind, ty, source };
+    let wrapped = make(
+        K::NewtypeConvert(Box::new(make(
+            K::Literal(Literal::Bool(true)),
+            Term::Primitive(Primitive::Bool),
+        ))),
+        ty.clone(),
+    );
+    let call = make(
+        K::Call {
+            callee: Box::new(make(
+                K::Function(template.declaration),
+                template.callable_type(),
+            )),
+            parameter_bindings: template.parameters.clone(),
+            env_arguments: vec![],
+            arguments: vec![
+                CallArgument {
+                    parameter: 0,
+                    value: wrapped,
+                    passing: Default::default(),
+                    is_default: false,
+                },
+                CallArgument {
+                    parameter: 1,
+                    value: make(K::Local(template.parameters[0]), ty.clone()),
+                    passing: Default::default(),
+                    is_default: true,
+                },
+            ],
+        },
+        Term::Primitive(Primitive::Bool),
+    );
+    let mut layouts = Vec::new();
+    let mut evaluations = 0;
+    let (instance, _) = iir::staging::bind_call_in_world(
+        template,
+        &[],
+        &call,
+        &mut 100_000,
+        &mut layouts,
+        |layouts| iir::staging::Layouts::new(&[], layouts),
+        |layouts, input, _| {
+            evaluations += 1;
+            if evaluations == 1 {
+                layouts.push(tag.clone());
+            }
+            Ok(input.clone())
+        },
+        |_, ty, _| Ok(ty.clone()),
+    )
+    .unwrap();
+    let expected = Term::NominalValue {
+        ty: Box::new(ty),
+        variant: None,
+        fields: vec![Term::Bool(true)],
+    };
+    assert_eq!(
+        instance.key.arguments.as_ref(),
+        [expected.clone(), expected]
+    );
+    assert_eq!(evaluations, 2);
+}

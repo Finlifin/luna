@@ -299,19 +299,21 @@ pub(super) fn captured_slots(
     Ok(bindings)
 }
 
-pub(super) fn evaluate_default(
-    heads: Layouts<'_>,
+pub(super) fn evaluate_default<C>(
     mut input: Expr,
     prepared: &mut BTreeMap<LocalId, Expr>,
     fuel: &mut usize,
-    mut evaluate: impl FnMut(&Expr, &mut usize) -> Result<Expr, String>,
+    context: &mut C,
+    layouts: impl Fn(&C) -> Layouts<'_>,
+    mut evaluate: impl FnMut(&mut C, &Expr, &mut usize) -> Result<Expr, String>,
 ) -> Result<Expr, String> {
+    let heads = layouts(context);
     let access = nir::free_bindings::access(&input, |id| prepared.contains_key(&id), fuel)?;
     if access.writable.is_empty() {
         if !access.readonly.is_empty() {
             prepare_local_input_in_place(heads, &mut input, prepared, fuel, 0)?;
         }
-        let value = evaluate(&input, fuel)?;
+        let value = evaluate(context, &input, fuel)?;
         if value.ty != input.ty {
             return Err("staged evaluator result type mismatch".into());
         }
@@ -337,7 +339,7 @@ pub(super) fn evaluate_default(
         bindings.push((*id, copy_expression(&prepared[id], fuel)?));
     }
     wrap(heads, &mut packet, &bindings, fuel)?;
-    let completed = evaluate(&packet, fuel)?;
+    let completed = evaluate(context, &packet, fuel)?;
     if completed.ty != packet.ty {
         return Err("staged default frame result type mismatch".into());
     }
@@ -350,7 +352,7 @@ pub(super) fn evaluate_default(
     let mut fields = fields.into_iter();
     let result = fields.next().unwrap();
     for (id, value) in access.writable.into_iter().zip(fields) {
-        constant(heads, &value, fuel, 0)?;
+        constant(layouts(context), &value, fuel, 0)?;
         prepared.insert(id, value);
     }
     Ok(result)

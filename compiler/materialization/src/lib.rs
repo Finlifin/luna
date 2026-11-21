@@ -139,6 +139,7 @@ struct Builder<'a, 'e> {
     frozen_methods: Vec<n::Expr>,
     callable_identities: Vec<iir::CallableIdentity>,
     type_cores: nir::TypeInterner,
+    expression_owner: Option<u64>,
     active_caller_env: Option<(
         Vec<n::RuntimeEnvParameter>,
         BTreeMap<nir::RuntimeId, n::Expr>,
@@ -683,6 +684,7 @@ impl<'a> InstantiationSession<'a> {
                     frozen_methods: prev.frozen_methods,
                     callable_identities: prev.callable_identities,
                     type_cores: prev.type_cores,
+                    expression_owner: None,
                     active_caller_env: None,
                     active_closure_scopes: Vec::new(),
                 };
@@ -739,6 +741,7 @@ impl<'a> InstantiationSession<'a> {
                     frozen_methods: vec![],
                     callable_identities: vec![],
                     type_cores: nir::TypeInterner::default(),
+                    expression_owner: None,
                     active_caller_env: None,
                     active_closure_scopes: Vec::new(),
                 };
@@ -999,6 +1002,7 @@ fn build(
         frozen_methods: vec![],
         callable_identities: vec![],
         type_cores: nir::TypeInterner::default(),
+        expression_owner: None,
         active_caller_env: None,
         active_closure_scopes: Vec::new(),
     };
@@ -1323,13 +1327,13 @@ impl Builder<'_, '_> {
         let saved_closure_scopes = std::mem::take(&mut self.active_closure_scopes);
         self.active_caller_env = Some((function.interface.env_parameters.clone(), BTreeMap::new()));
         for expression in function.runtime_deliveries.values_mut() {
-            self.normalize_expression(expression)?;
+            self.normalize_owned_expression(id.package, expression)?;
         }
         self.active_caller_env = Some((
             function.interface.env_parameters.clone(),
             function.runtime_deliveries.clone(),
         ));
-        self.normalize_expression(&mut function.body)?;
+        self.normalize_owned_expression(id.package, &mut function.body)?;
         for expression in function
             .interface
             .preconditions
@@ -1343,7 +1347,7 @@ impl Builder<'_, '_> {
                     .map(|(_, expression)| expression),
             )
         {
-            self.normalize_expression(expression)?;
+            self.normalize_owned_expression(id.package, expression)?;
         }
         if function.phase == n::FunctionPhase::Runtime {
             let caller_envs = &function.interface.env_parameters;
@@ -1842,9 +1846,20 @@ impl Builder<'_, '_> {
             .iter_mut()
             .chain(&mut method.program.postconditions)
         {
-            self.normalize_expression(expression)?;
+            self.normalize_owned_expression(method.declaration.package, expression)?;
         }
         Ok(())
+    }
+
+    fn normalize_owned_expression(
+        &mut self,
+        owner: u64,
+        expression: &mut n::Expr,
+    ) -> Result<(), String> {
+        let previous = self.expression_owner.replace(owner);
+        let result = self.normalize_expression(expression);
+        self.expression_owner = previous;
+        result
     }
 
     fn normalize_expression(&mut self, expression: &mut n::Expr) -> Result<(), String> {
@@ -2026,11 +2041,18 @@ impl Builder<'_, '_> {
         }
         if self.instances.is_some() {
             self.walk_pruned_tracking_closures(expression, &mut |this, expr| {
-                if let Some(plan) =
-                    iir::staging::preparation_with_layouts(this.package, expr, &mut this.fuel)?
-                {
+                if let Some(plan) = iir::staging::preparation_with_layouts(
+                    this.world.scope().declaration_source().package(),
+                    expr,
+                    &mut this.fuel,
+                )? {
                     let completed = this.invoke_staged_input(&plan.expression)?;
-                    plan.apply_with_layouts(this.package, expr, completed, &mut this.fuel)?;
+                    plan.apply_with_layouts(
+                        this.world.scope().declaration_source().package(),
+                        expr,
+                        completed,
+                        &mut this.fuel,
+                    )?;
                 }
                 let mut remaining = this.fuel;
                 let completed = conditional_calls::complete_inputs(
@@ -2563,14 +2585,13 @@ impl Builder<'_, '_> {
             self.deliver_staged_call_envs(expression, &template.interface.env_parameters)?;
         }
         let mut fuel = self.fuel;
-        let scope = self.world.scope().clone();
-        let result = iir::staging::bind_call_with_layouts_and_type_views(
-            scope.declaration_source().package(),
+        let result = iir::staging::bind_call_in_world(
             &template,
             &arguments,
             expression,
             &mut fuel,
             self,
+            |this| this.world.scope().declaration_source().package().into(),
             |this, input, fuel| {
                 this.fuel = *fuel;
                 let result = this.complete_staged_input(input);

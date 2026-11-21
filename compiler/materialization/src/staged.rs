@@ -268,18 +268,54 @@ impl Builder<'_, '_> {
         iir::visit::expression(expression, &mut self.fuel, |_, _| Ok(()))?;
         crate::associated::charge_projection_copy(&expression.ty, &mut self.fuel)
             .map_err(|_| "staged result type budget exhausted")?;
-        let (value, _) = retained
+        let owner = self.expression_owner;
+        let (value, generated) = retained
             .execute(
                 expression,
                 self.world.capabilities(),
                 self.budget,
                 &mut self.fuel,
-                None,
+                self.expansion.zip(owner),
             )
             .map_err(|failure| failure.to_string())?;
-        self.freeze_staged_value(value, &expression.ty, expression.source, 0)
+        let mut budget = Budget {
+            steps: self.fuel,
+            ..self.budget
+        };
+        let freeze = |package: &n::Package, budget: &mut Budget| {
+            ValueFreezer { package, budget }.freeze_staged_value(
+                value,
+                &expression.ty,
+                expression.source,
+                0,
+            )
+        };
+        let result = match generated {
+            Some((definitions, next)) if !definitions.is_empty() => {
+                self.world.with_published_nominals(
+                    definitions,
+                    owner.expect("configured publisher has an owner"),
+                    next,
+                    &mut budget,
+                    freeze,
+                )
+            }
+            _ => freeze(
+                self.world.scope().declaration_source().package(),
+                &mut budget,
+            ),
+        };
+        self.fuel = budget.steps;
+        result
     }
+}
 
+struct ValueFreezer<'p, 'b> {
+    package: &'p n::Package,
+    budget: &'b mut Budget,
+}
+
+impl ValueFreezer<'_, '_> {
     fn freeze_staged_value(
         &mut self,
         value: Value,
@@ -292,7 +328,7 @@ impl Builder<'_, '_> {
         if graph.bindings.is_empty() {
             return Ok(result);
         }
-        crate::associated::charge_projection_copy(ty, &mut self.fuel)
+        crate::associated::charge_projection_copy(ty, &mut self.budget.steps)
             .map_err(|_| "staged snapshot result type copy budget exhausted")?;
         // All generated bindings are private to this block. Capture initializers
         // refer only to these bindings; closure bodies use their own environments.
@@ -314,8 +350,11 @@ impl Builder<'_, '_> {
         depth: usize,
         graph: &mut FrozenGraph,
     ) -> Result<n::Expr, String> {
-        self.tick(depth)?;
-        crate::associated::charge_projection_copy(ty, &mut self.fuel)
+        if depth >= self.budget.max_depth.min(128) || self.budget.steps == 0 {
+            return Err("dispatch materialization budget exhausted".into());
+        }
+        self.budget.steps -= 1;
+        crate::associated::charge_projection_copy(ty, &mut self.budget.steps)
             .map_err(|_| "staged value type copy budget exhausted")?;
         let kind = match value {
             Value::IirCallable(_) | Value::FunctionInstance { .. }
@@ -331,9 +370,9 @@ impl Builder<'_, '_> {
                 // identities can belong to either phase; freezing preserves
                 // the original signature rather than granting runtime entry.
                 for argument in arguments {
-                    nir::type_computations::charge_term(argument, &mut self.fuel)
+                    nir::type_computations::charge_term(argument, &mut self.budget.steps)
                         .map_err(|error| error.to_string())?;
-                    iir::completed_type(argument, &BTreeSet::new(), &mut self.fuel)?;
+                    iir::completed_type(argument, &BTreeSet::new(), &mut self.budget.steps)?;
                 }
                 K::FunctionInstance {
                     declaration,
@@ -354,9 +393,9 @@ impl Builder<'_, '_> {
                     .chain(&interface.arguments)
                     .chain(method_arguments)
                 {
-                    nir::type_computations::charge_term(argument, &mut self.fuel)
+                    nir::type_computations::charge_term(argument, &mut self.budget.steps)
                         .map_err(|error| error.to_string())?;
-                    iir::completed_type(argument, &BTreeSet::new(), &mut self.fuel)?;
+                    iir::completed_type(argument, &BTreeSet::new(), &mut self.budget.steps)?;
                 }
                 K::TraitMethod {
                     interface: interface.declaration,
@@ -397,23 +436,24 @@ impl Builder<'_, '_> {
                     return Err("staged closure environment shape mismatch".into());
                 }
                 graph.closures.insert(identity.clone(), None);
-                let mut steps = self.fuel as u64;
+                let mut steps = self.budget.steps as u64;
                 let checked = nir::copy_budget::charge_type_rewrite(closure.body(), &mut steps);
-                self.fuel = usize::try_from(steps).unwrap_or(usize::MAX);
+                self.budget.steps = usize::try_from(steps).unwrap_or(usize::MAX);
                 checked.map_err(|error| {
                     format!("staged closure body exceeds copy limits: {error:?}")
                 })?;
-                self.fuel = self
-                    .fuel
+                self.budget.steps = self
+                    .budget
+                    .steps
                     .checked_sub(capture_types.len() + closure.parameters().len())
                     .ok_or("staged closure environment budget exhausted")?;
                 let mut captures = Vec::new();
                 for ((binding, value), capture_type) in closure.captured_values().zip(capture_types)
                 {
                     let captured = if let Value::Storage(cell) = value {
-                        let mut steps = self.fuel as u64;
+                        let mut steps = self.budget.steps as u64;
                         let result = cell.inspect_owned(&mut steps, 128, |value, steps| {
-                            self.fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
+                            self.budget.steps = usize::try_from(*steps).unwrap_or(usize::MAX);
                             let result = self.freeze_staged_value_in(
                                 value,
                                 capture_type,
@@ -421,10 +461,10 @@ impl Builder<'_, '_> {
                                 depth + 1,
                                 graph,
                             );
-                            *steps = self.fuel as u64;
+                            *steps = self.budget.steps as u64;
                             result
                         });
-                        self.fuel = usize::try_from(steps).unwrap_or(usize::MAX);
+                        self.budget.steps = usize::try_from(steps).unwrap_or(usize::MAX);
                         result.map_err(|e| format!("staged capture storage: {e:?}"))??
                     } else {
                         self.freeze_staged_value_in(value, capture_type, source, depth + 1, graph)?
@@ -520,19 +560,19 @@ impl Builder<'_, '_> {
                 else {
                     return Err("staged newtype requires a nominal type".into());
                 };
-                let scope = self.world.scope().clone();
-                let package = scope.declaration_source().package();
+                let package = self.package;
                 let definition = package
                     .newtypes
                     .iter()
                     .find(|definition| definition.declaration == *declaration)
                     .ok_or("staged newtype declaration is missing")?;
-                self.fuel = self
-                    .fuel
+                self.budget.steps = self
+                    .budget
+                    .steps
                     .checked_sub(package.newtypes.len())
                     .ok_or("staged newtype layout budget exhausted")?;
                 let representation = definition
-                    .representation_budgeted(arguments, &[], &mut self.fuel)
+                    .representation_budgeted(arguments, &[], &mut self.budget.steps)
                     .map_err(|error| error.to_string())?;
                 K::NewtypeConvert(Box::new(self.freeze_staged_value_in(
                     value,
@@ -570,11 +610,11 @@ impl Builder<'_, '_> {
                     return Err("staged floating value identity mismatch".into());
                 }
                 let mut budget = comptime_runtime::Budget {
-                    steps: self.fuel,
+                    steps: self.budget.steps,
                     max_limbs: 4096,
                 };
                 let literal = scalar.freeze_literal(&mut budget);
-                self.fuel = budget.steps;
+                self.budget.steps = budget.steps;
                 K::Literal(
                     literal
                         .map_err(|e| e.to_string())?
@@ -582,7 +622,7 @@ impl Builder<'_, '_> {
                 )
             }
             Value::Type(v) => {
-                crate::associated::charge_projection_copy(v, &mut self.fuel)
+                crate::associated::charge_projection_copy(v, &mut self.budget.steps)
                     .map_err(|_| "staged Type payload copy budget exhausted")?;
                 K::TypeValue(v.clone())
             }
@@ -597,8 +637,9 @@ impl Builder<'_, '_> {
                     .find_map(|head| head.list_element(ty))
                     .cloned()
                     .ok_or("staged list requires trusted meta.List")?;
-                self.fuel = self
-                    .fuel
+                self.budget.steps = self
+                    .budget
+                    .steps
                     .checked_sub(values.len())
                     .ok_or("staged list budget exhausted")?;
                 K::TypeList(
@@ -615,15 +656,17 @@ impl Builder<'_, '_> {
                     return Err("staged Object identity mismatch".into());
                 }
                 let entries = object.entries();
-                self.fuel = self
-                    .fuel
+                self.budget.steps = self
+                    .budget
+                    .steps
                     .checked_sub(entries.len())
                     .ok_or("staged Object entry budget exhausted")?;
                 let mut names = Vec::with_capacity(entries.len());
                 let mut fields = Vec::with_capacity(entries.len());
                 for entry in entries {
-                    self.fuel = self
-                        .fuel
+                    self.budget.steps = self
+                        .budget
+                        .steps
                         .checked_sub(entry.key().map_or(0, str::len))
                         .ok_or("staged Object key budget exhausted")?;
                     names.push(entry.key().map(str::to_owned));
@@ -647,8 +690,9 @@ impl Builder<'_, '_> {
                 }
                 let mut fields = Vec::new();
                 for ((name, value), (expected_name, ty)) in values.into_iter().zip(types) {
-                    self.fuel = self
-                        .fuel
+                    self.budget.steps = self
+                        .budget
+                        .steps
                         .checked_sub(name.len())
                         .ok_or("staged record budget exhausted")?;
                     if name != expected_name {
@@ -747,7 +791,7 @@ impl Builder<'_, '_> {
         depth: usize,
         graph: &mut FrozenGraph,
     ) -> Result<Vec<n::Expr>, String> {
-        nir::type_computations::charge_term(ty, &mut self.fuel)
+        nir::type_computations::charge_term(ty, &mut self.budget.steps)
             .map_err(|error| error.to_string())?;
         if !matches!(ty, Term::Nominal { declaration: expected, arguments: expected_arguments }
             if *expected == declaration && expected_arguments == arguments)
@@ -755,10 +799,10 @@ impl Builder<'_, '_> {
             return Err("staged nominal result identity mismatch".into());
         }
         let types = nir::normal_forms::query_nominal_value_fields(
-            self.world.scope().declaration_source().package(),
+            self.package,
             ty,
             variant,
-            &mut self.fuel,
+            &mut self.budget.steps,
         )
         .map_err(|error| format!("staged nominal layout: {error}"))?;
         if fields.len() != types.len() {

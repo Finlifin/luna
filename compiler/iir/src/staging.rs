@@ -152,18 +152,25 @@ pub fn bind_inputs_with_layouts<'layout>(
     inputs: &[Option<Expr>],
     fuel: &mut usize,
 ) -> Result<Function, String> {
-    let heads = heads.into();
-    bind_inputs_with_type_view(heads, template, inputs, fuel, |ty, _| Ok(ty.clone()))
+    let mut heads = heads.into();
+    bind_inputs_with_type_view(
+        template,
+        inputs,
+        fuel,
+        &mut heads,
+        |heads| *heads,
+        |_, ty, _| Ok(ty.clone()),
+    )
 }
 
-fn bind_inputs_with_type_view<'layout>(
-    heads: impl Into<Layouts<'layout>>,
+fn bind_inputs_with_type_view<C>(
     template: &Function,
     inputs: &[Option<Expr>],
     fuel: &mut usize,
-    mut type_view: impl FnMut(&Term, &mut usize) -> Result<Term, String>,
+    context: &mut C,
+    layouts: impl Fn(&C) -> Layouts<'_>,
+    mut type_view: impl FnMut(&mut C, &Term, &mut usize) -> Result<Term, String>,
 ) -> Result<Function, String> {
-    let heads = heads.into();
     let Term::Function { parameters, .. } = template.signature.callable_signature() else {
         return Err("staged input template is not a function".into());
     };
@@ -180,19 +187,24 @@ fn bind_inputs_with_type_view<'layout>(
             if parameter.sort == Sort::Runtime {
                 return Err("runtime input cannot be erased as a staged input".into());
             }
-            Some(constant(heads, value, fuel, 0)?)
+            Some(constant(layouts(context), value, fuel, 0)?)
         } else {
             None
         };
         symbols.push(symbol);
     }
     let scope =
-        prepare_binding_with_type_view(&template.signature, &symbols, fuel, &mut type_view)?;
+        prepare_binding_with_type_view(&template.signature, &symbols, fuel, &mut |ty, fuel| {
+            type_view(context, ty, fuel)
+        })?;
     let mut bindings = Vec::new();
     for ((parameter, binding), input) in parameters.iter().zip(&template.parameters).zip(inputs) {
         if let Some(value) = input {
             let expected = scope.rebind(&parameter.ty).map_err(|e| e.to_string())?;
-            let expected = binding_type_view(&expected, scope.signature(), fuel, &mut type_view)?;
+            let expected =
+                binding_type_view(&expected, scope.signature(), fuel, &mut |ty, fuel| {
+                    type_view(context, ty, fuel)
+                })?;
             if value.ty != expected {
                 return Err("staged value type differs from parameter type".into());
             }
@@ -204,7 +216,9 @@ fn bind_inputs_with_type_view<'layout>(
     result.signature = scope.signature().clone();
     for env in &mut result.env_parameters {
         let ty = scope.rebind(&env.ty).map_err(|error| error.to_string())?;
-        env.ty = binding_type_view(&ty, scope.signature(), fuel, &mut type_view)?;
+        env.ty = binding_type_view(&ty, scope.signature(), fuel, &mut |ty, fuel| {
+            type_view(context, ty, fuel)
+        })?;
     }
     for root in std::iter::once(&mut result.body)
         .chain(&mut result.interface.preconditions)
@@ -215,7 +229,9 @@ fn bind_inputs_with_type_view<'layout>(
         root.rewrite_types(&mut |ty| {
             charge(fuel, 1)?;
             let ty = scope.rebind(ty).map_err(|error| error.to_string())?;
-            binding_type_view(&ty, scope.signature(), fuel, &mut type_view)
+            binding_type_view(&ty, scope.signature(), fuel, &mut |ty, fuel| {
+                type_view(context, ty, fuel)
+            })
         })?;
     }
     for requirement in &mut result.capabilities {
@@ -274,6 +290,7 @@ fn bind_inputs_with_type_view<'layout>(
             result.entry_snapshots.push(snapshot.clone());
         }
     }
+    let heads = layouts(context);
     substitute_forwarded_inputs(heads, &mut result, &bindings, fuel)?;
     wrap(heads, &mut result.body, &bindings, fuel)?;
     for expression in result
@@ -1503,6 +1520,30 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
     mut type_view: impl FnMut(&mut C, &Term, &mut usize) -> Result<Term, String>,
 ) -> Result<(crate::FunctionInstance, Expr), String> {
     let heads = heads.into();
+    bind_call_in_world(
+        template,
+        declaration_arguments,
+        call,
+        fuel,
+        &mut (heads, context),
+        |(heads, _)| *heads,
+        |(_, context), input, fuel| evaluate(*context, input, fuel),
+        |(_, context), ty, fuel| type_view(*context, ty, fuel),
+    )
+}
+
+/// Reacquire layouts from the current declaration revision after each operation
+/// that may execute source code, including normalization of dependent domains.
+pub fn bind_call_in_world<C>(
+    template: &Function,
+    declaration_arguments: &[Term],
+    call: &Expr,
+    fuel: &mut usize,
+    context: &mut C,
+    layouts: impl Fn(&C) -> Layouts<'_>,
+    mut evaluate: impl FnMut(&mut C, &Expr, &mut usize) -> Result<Expr, String>,
+    mut type_view: impl FnMut(&mut C, &Term, &mut usize) -> Result<Term, String>,
+) -> Result<(crate::FunctionInstance, Expr), String> {
     charge(fuel, 1)?;
     let K::Call {
         callee,
@@ -1623,9 +1664,14 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
                     type_view(context, ty, fuel)
                 })
             })?;
-            preparation::evaluate_default(heads, input, &mut prepared, fuel, |input, fuel| {
-                evaluate(context, input, fuel)
-            })?
+            preparation::evaluate_default(
+                input,
+                &mut prepared,
+                fuel,
+                context,
+                &layouts,
+                &mut evaluate,
+            )?
         } else {
             let value = evaluate(context, &input, fuel)?;
             if value.ty != input.ty {
@@ -1633,14 +1679,13 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
             }
             value
         };
-        let symbol = constant(heads, &value, fuel, 0)?;
+        let symbol = constant(layouts(context), &value, fuel, 0)?;
         prepared.insert(template.parameters[argument.parameter], value.clone());
         symbols[argument.parameter] = Some(symbol);
         inputs[argument.parameter] = Some(value);
     }
-    let function = bind_inputs_with_type_view(heads, template, &inputs, fuel, |ty, fuel| {
-        type_view(context, ty, fuel)
-    })?;
+    let function =
+        bind_inputs_with_type_view(template, &inputs, fuel, context, &layouts, &mut type_view)?;
     let mut key_arguments = declaration_arguments.to_vec();
     key_arguments.extend(symbols.iter().flatten().cloned());
     let key = crate::InstanceKey {
@@ -1692,6 +1737,7 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
             }
         }
     }
+    let heads = layouts(context);
     let mut runtime_arguments = Vec::new();
     for argument in arguments {
         if let Some(slot) = slots[argument.parameter] {

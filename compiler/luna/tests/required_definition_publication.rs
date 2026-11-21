@@ -431,3 +431,64 @@ fn first_use_in_runtime_specializations_delivers_distinct_generated_layouts() {
             .all(|e| e.name != "LateChoice")
     );
 }
+
+#[test]
+fn staged_operands_publish_generated_layouts_with_their_function_instances() {
+    let src = r#"
+        comptime fn Built(flag: bool) -> Type {
+            let row = meta.StructBuilder.new(.name = .Operand);
+            if flag {
+                row.add_field(.flag, bool);
+                row.Build()
+            } else {
+                meta.NewtypeBuilder.new(bool, .name = .Operand).Build()
+            }
+        }
+        fn inspect(comptime ty: Type, comptime is_record: bool) -> bool {
+            is_record
+        }
+        fn relay(comptime flag: bool) -> bool { inspect(Built(flag), flag) }
+        fn run() -> bool { relay(true) and not relay(false) }
+    "#;
+    let package = sysroot::compile(src).unwrap();
+    assert!(package.structs.iter().all(|s| s.name != "Operand"));
+    let graph = luna::instantiation::instantiate(&package, "run", 10_000_000).unwrap();
+    let mut shapes = std::collections::BTreeSet::new();
+    for instance in graph
+        .functions
+        .iter()
+        .filter(|f| f.function.name == "inspect")
+    {
+        let [ty, nir::Term::Bool(is_record)] = instance.key.arguments.as_ref() else {
+            panic!("unexpected staged key: {}", instance.key)
+        };
+        let nominal = graph.nominals.iter().find(|n| &n.ty == ty).unwrap();
+        let id = match &nominal.definition {
+            iir::NominalDefinition::Struct(row) => {
+                assert!(*is_record);
+                assert_eq!(
+                    row.fields,
+                    [("flag".into(), nir::Term::Primitive(nir::Primitive::Bool))]
+                );
+                row.declaration
+            }
+            iir::NominalDefinition::Newtype(wrapper) => {
+                assert!(!is_record);
+                assert_eq!(
+                    wrapper.representation,
+                    nir::Term::Primitive(nir::Primitive::Bool)
+                );
+                wrapper.declaration
+            }
+            other => panic!("unexpected nominal: {other}"),
+        };
+        assert_eq!(id.package, instance.key.declaration.package);
+        assert!(shapes.insert((id, *is_record)));
+    }
+    assert_eq!(shapes.len(), 2);
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}

@@ -190,6 +190,24 @@ impl<'a> DeclarationWorld<'a> {
             .map(|slot| &self.scope.source.package().normal_forms[*slot])
     }
 
+    /// Admit a generated declaration batch and its consuming value together.
+    /// Freezing receives the candidate layouts. Only a successful freeze makes
+    /// the new declaration identities visible to subsequent operands.
+    pub fn with_published_nominals<R>(
+        &mut self,
+        definitions: n::PublishedDefinitions,
+        owner: u64,
+        next: u32,
+        budget: &mut Budget,
+        freeze: impl FnOnce(&n::Package, &mut Budget) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let mut scope = self.scope.clone();
+        scope.install_published_nominals(definitions, owner, next, budget)?;
+        let value = freeze(scope.declaration_source().package(), budget)?;
+        self.scope = scope;
+        Ok(value)
+    }
+
     pub fn scope(&self) -> &DeclarationScope<'a> {
         &self.scope
     }
