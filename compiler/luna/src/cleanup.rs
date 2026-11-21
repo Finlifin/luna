@@ -250,6 +250,68 @@ fn instance_uses_text(instance: &iir::FunctionInstance, fuel: &mut usize) -> Res
     Ok(found)
 }
 
+#[derive(Default)]
+struct InstanceDeps {
+    callees: std::collections::HashSet<iir::InstanceKey>,
+    dynamic_or_unknown: bool,
+}
+
+fn affected_cleanup_instances(
+    changed: &std::collections::HashSet<iir::InstanceKey>,
+    instance_deps: &std::collections::HashMap<iir::InstanceKey, InstanceDeps>,
+    schedule_deps: &std::collections::HashMap<
+        iir::InstanceKey,
+        std::collections::HashSet<iir::InstanceKey>,
+    >,
+    borrowed_callables: &[iir::InstanceKey],
+) -> std::collections::HashSet<iir::InstanceKey> {
+    let mut affected = std::collections::HashSet::new();
+    if changed.is_empty() {
+        return affected;
+    }
+    let mut worklist = std::collections::VecDeque::new();
+    let mut enqueue = |key: iir::InstanceKey| {
+        if affected.insert(key.clone()) {
+            worklist.push_back(key);
+        }
+    };
+    for key in changed {
+        enqueue(key.clone());
+    }
+    for key in borrowed_callables {
+        enqueue(key.clone());
+    }
+    for (caller, deps) in instance_deps {
+        if deps.dynamic_or_unknown {
+            enqueue(caller.clone());
+        }
+    }
+
+    let mut callers_of: std::collections::HashMap<&iir::InstanceKey, Vec<&iir::InstanceKey>> =
+        std::collections::HashMap::new();
+    for (caller, deps) in instance_deps {
+        for callee in &deps.callees {
+            callers_of.entry(callee).or_default().push(caller);
+        }
+    }
+    for (caller, callees) in schedule_deps {
+        for callee in callees {
+            callers_of.entry(callee).or_default().push(caller);
+        }
+    }
+
+    while let Some(key) = worklist.pop_front() {
+        if let Some(callers) = callers_of.get(&key) {
+            for &caller in callers {
+                if affected.insert(caller.clone()) {
+                    worklist.push_back(caller.clone());
+                }
+            }
+        }
+    }
+    affected
+}
+
 /// Publish schedules for every reachable concrete function, including captured
 /// destructors. Unmapped responsibilities are rejected before execution.
 fn field_borrows(
@@ -411,6 +473,14 @@ fn prepare_source_impl(
     let mut construction_budget = budget;
     let mut verified_text_roots = std::collections::HashSet::new();
     let mut validated_instances = std::collections::HashSet::new();
+    let mut instance_deps: std::collections::HashMap<iir::InstanceKey, InstanceDeps> =
+        std::collections::HashMap::new();
+    let mut schedule_deps: std::collections::HashMap<
+        iir::InstanceKey,
+        std::collections::HashSet<iir::InstanceKey>,
+    > = std::collections::HashMap::new();
+    let mut scheduled_roots: std::collections::HashSet<iir::InstanceKey> =
+        std::collections::HashSet::new();
     let mut graph_has_text = false;
     let mut retained_summaries = elaboration::verification::memory::SummaryCache::default();
     let mut owned_layouts: Option<Package> = None;
@@ -459,6 +529,9 @@ fn prepare_source_impl(
             retained_summaries = Default::default();
             verified_text_roots.clear();
             validated_instances.clear();
+            instance_deps.clear();
+            schedule_deps.clear();
+            scheduled_roots.clear();
             graph_has_text = false;
             if owned_layouts.is_none() {
                 for function in package.functions.iter().chain(&package.quote_templates) {
@@ -485,9 +558,71 @@ fn prepare_source_impl(
             for argument in instance.key.arguments.iter() {
                 nir::type_computations::charge_term(argument, fuel).map_err(|e| e.to_string())?;
             }
+            let mut deps = InstanceDeps::default();
             nir::visit::expressions(&instance.function, fuel, |expr, fuel| {
-                nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())
+                nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())?;
+                match &expr.kind {
+                    K::Function(declaration) => {
+                        deps.callees.insert(iir::InstanceKey {
+                            declaration: *declaration,
+                            arguments: vec![].into(),
+                        });
+                    }
+                    K::FunctionInstance {
+                        declaration,
+                        arguments,
+                    } => {
+                        deps.callees.insert(iir::InstanceKey {
+                            declaration: *declaration,
+                            arguments: arguments.clone().into(),
+                        });
+                    }
+                    K::TraitMethod {
+                        interface,
+                        interface_arguments,
+                        subject,
+                        member,
+                        method_arguments,
+                    } => {
+                        let mut matched = false;
+                        for dispatch in &graph.dispatch {
+                            if dispatch.interface == *interface
+                                && dispatch.interface_arguments == *interface_arguments
+                                && dispatch.subject == *subject
+                            {
+                                for method in &dispatch.methods {
+                                    if method.member == *member
+                                        && method.method_arguments == *method_arguments
+                                    {
+                                        deps.callees.insert(iir::InstanceKey {
+                                            declaration: method.body,
+                                            arguments: method.arguments.clone().into(),
+                                        });
+                                        matched = true;
+                                    }
+                                }
+                            }
+                        }
+                        if !matched {
+                            deps.dynamic_or_unknown = true;
+                        }
+                    }
+                    K::Call { callee, .. }
+                        if !matches!(
+                            callee.kind,
+                            K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. }
+                        ) =>
+                    {
+                        deps.dynamic_or_unknown = true;
+                    }
+                    K::EffectHandle { .. } | K::EffectRequest { .. } | K::Closure { .. } => {
+                        deps.dynamic_or_unknown = true;
+                    }
+                    _ => {}
+                }
+                Ok(())
             })?;
+            instance_deps.insert(instance.key.clone(), deps);
             if !graph_has_text && instance_uses_text(instance, fuel)? {
                 graph_has_text = true;
             }
@@ -510,6 +645,7 @@ fn prepare_source_impl(
         }
         let mut cleanup_changed = false;
         let mut changed_cleanup_keys = std::collections::HashSet::new();
+        let mut round_affected = std::collections::HashSet::new();
         let view = owned_layouts.get_or_insert_with(|| package.clone());
         view.runtime_instances = graph
             .functions
@@ -562,7 +698,13 @@ fn prepare_source_impl(
         let initial_roots_len = roots.len();
         let mut deferred = false;
         let mut deferred_nested = false;
-        'instances: for instance in &graph.functions {
+        'instances: for instance in graph.functions.iter().rev() {
+            if scheduled_roots.contains(&instance.key) {
+                continue;
+            }
+            if cleanup_changed && round_affected.contains(&instance.key) {
+                continue;
+            }
             // Higher-order bodies are verified against each call's concrete
             // inputs below, never published as an unconditional root schedule.
             if !moves::callable_parameter_paths(
@@ -591,13 +733,6 @@ fn prepare_source_impl(
                 if instance.key == entry {
                     return Err("higher-order entry requires callable input context".into());
                 }
-                continue;
-            }
-            if schedule
-                .functions
-                .iter()
-                .any(|f| f.instance == instance.key && f.context.is_empty())
-            {
                 continue;
             }
             *fuel = fuel
@@ -807,7 +942,14 @@ fn prepare_source_impl(
                             .ok_or("cleanup footprint publication budget exhausted")?;
                         if !effects.contains(&access) {
                             effects.push(access);
-                            changed_cleanup_keys.insert(cleanup_accesses[position].0.clone());
+                            if changed_cleanup_keys.insert(cleanup_accesses[position].0.clone()) {
+                                round_affected = affected_cleanup_instances(
+                                    &changed_cleanup_keys,
+                                    &instance_deps,
+                                    &schedule_deps,
+                                    &schedule.borrowed_callable_functions,
+                                );
+                            }
                             cleanup_changed = true;
                         }
                     }
@@ -1106,6 +1248,10 @@ fn prepare_source_impl(
                         }
                     }
                     if let Some(target) = recursive_target {
+                        schedule_deps
+                            .entry(instance.key.clone())
+                            .or_default()
+                            .insert(key.clone());
                         let mut recursive_context = context.clone();
                         recursive_context.push(ContextKey::Function {
                             call: call.source,
@@ -1276,6 +1422,10 @@ fn prepare_source_impl(
                     {
                         return Err("named callable context lost its input premises".into());
                     }
+                    schedule_deps
+                        .entry(instance.key.clone())
+                        .or_default()
+                        .insert(key.clone());
                     let mut child_context = context.clone();
                     child_context.push(ContextKey::Function {
                         call: call.source,
@@ -1466,7 +1616,15 @@ fn prepare_source_impl(
                             }
                             let mut methods=vec![];
                             let steps=lower(&plan.steps,&plan.receiver,&mut methods,&mut receivers,fuel,0)?;
-                            for method in methods {if !roots.contains(&method) {roots.push(method);}}
+                            for method in methods {
+                                schedule_deps
+                                    .entry(instance.key.clone())
+                                    .or_default()
+                                    .insert(method.clone());
+                                if !roots.contains(&method) {
+                                    roots.push(method);
+                                }
+                            }
                             if !types.contains(&temporary.ty) {types.push(temporary.ty.clone());}
                             discards.push(DiscardCleanup {source:site.source,value_source:temporary.source,
                                 program:iir::cleanup::Program {ty:temporary.ty,guards:plan.variants.iter().map(|v|(v.fields.clone(),v.index)).collect(),steps}});
@@ -1527,6 +1685,10 @@ fn prepare_source_impl(
                             0,
                         )?;
                         for method in methods {
+                            schedule_deps
+                                .entry(instance.key.clone())
+                                .or_default()
+                                .insert(method.clone());
                             if !roots.contains(&method) {
                                 roots.push(method);
                             }
@@ -1707,14 +1869,45 @@ fn prepare_source_impl(
                     pattern_orders,
                 });
             }
+            scheduled_roots.insert(instance.key.clone());
         }
-        if cleanup_changed || deferred_nested {
+        if deferred_nested {
             // Every caller must be rechecked against the grown transitive footprint.
             // No schedule from a provisional body-only round is published.
             drop(cleanup_session);
             retained_summaries = verification_session.into_summaries();
             retained_summaries.retain_unaffected(&changed_cleanup_keys);
             schedule = Schedule::default();
+            scheduled_roots.clear();
+            schedule_deps.clear();
+            continue;
+        }
+        if cleanup_changed {
+            // Every caller must be rechecked against the grown transitive footprint.
+            // Retain unaffected schedules across fixpoint rounds.
+            drop(cleanup_session);
+            retained_summaries = verification_session.into_summaries();
+            retained_summaries.retain_unaffected(&changed_cleanup_keys);
+            let affected = affected_cleanup_instances(
+                &changed_cleanup_keys,
+                &instance_deps,
+                &schedule_deps,
+                &schedule.borrowed_callable_functions,
+            );
+            schedule
+                .functions
+                .retain(|item| !affected.contains(&item.instance));
+            schedule
+                .closure_definitions
+                .retain(|item| !affected.contains(&item.instance));
+            schedule
+                .aliases
+                .retain(|item| !affected.contains(&item.instance));
+            schedule
+                .borrowed_callable_functions
+                .retain(|key| !affected.contains(key));
+            scheduled_roots.retain(|key| !affected.contains(key));
+            schedule_deps.retain(|key, _| !affected.contains(key));
             continue;
         }
         if deferred {
@@ -1747,6 +1940,15 @@ fn prepare_source_impl(
                     })?;
                 }
             }
+            let order: std::collections::HashMap<iir::InstanceKey, usize> = graph
+                .functions
+                .iter()
+                .enumerate()
+                .map(|(index, instance)| (instance.key.clone(), index))
+                .collect();
+            schedule
+                .functions
+                .sort_by_key(|item| order.get(&item.instance).copied().unwrap_or(usize::MAX));
             return Ok(Executable {
                 entry,
                 graph,
@@ -1756,5 +1958,73 @@ fn prepare_source_impl(
         drop(cleanup_session);
         retained_summaries = verification_session.into_summaries();
         retained_summaries.retain_unaffected(&changed_cleanup_keys);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InstanceDeps, affected_cleanup_instances};
+    use nir::DeclarationId;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn affected_cleanup_instances_evicts_transitive_dynamic_drop_and_borrowed_keeps_disjoint() {
+        let key = |local| iir::InstanceKey {
+            declaration: DeclarationId { package: 1, local },
+            arguments: vec![].into(),
+        };
+        let leaf_changed = key(1);
+        let direct_caller = key(2);
+        let transitive_caller = key(3);
+        let drop_caller = key(4);
+        let dynamic_fn = key(5);
+        let borrowed_fn = key(6);
+        let disjoint_fn = key(7);
+
+        let mut instance_deps = HashMap::new();
+        instance_deps.insert(leaf_changed.clone(), InstanceDeps::default());
+        instance_deps.insert(
+            direct_caller.clone(),
+            InstanceDeps {
+                callees: HashSet::from([leaf_changed.clone()]),
+                dynamic_or_unknown: false,
+            },
+        );
+        instance_deps.insert(
+            transitive_caller.clone(),
+            InstanceDeps {
+                callees: HashSet::from([direct_caller.clone()]),
+                dynamic_or_unknown: false,
+            },
+        );
+        instance_deps.insert(drop_caller.clone(), InstanceDeps::default());
+        instance_deps.insert(
+            dynamic_fn.clone(),
+            InstanceDeps {
+                callees: HashSet::new(),
+                dynamic_or_unknown: true,
+            },
+        );
+        instance_deps.insert(disjoint_fn.clone(), InstanceDeps::default());
+
+        let schedule_deps =
+            HashMap::from([(drop_caller.clone(), HashSet::from([leaf_changed.clone()]))]);
+        let borrowed_callables = vec![borrowed_fn.clone()];
+        let changed = HashSet::from([leaf_changed.clone()]);
+
+        let affected = affected_cleanup_instances(
+            &changed,
+            &instance_deps,
+            &schedule_deps,
+            &borrowed_callables,
+        );
+
+        assert!(affected.contains(&leaf_changed));
+        assert!(affected.contains(&direct_caller));
+        assert!(affected.contains(&transitive_caller));
+        assert!(affected.contains(&drop_caller));
+        assert!(affected.contains(&dynamic_fn));
+        assert!(affected.contains(&borrowed_fn));
+        assert!(!affected.contains(&disjoint_fn));
     }
 }
