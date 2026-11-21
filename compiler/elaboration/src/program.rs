@@ -7756,7 +7756,7 @@ impl Checker<'_, '_> {
                         kind: K::IntegerRepresentation(Box::new(value)),
                     })
                 }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "str_byte_length" | "str_byte" | "str_slice" | "str_concat" | "symbol_byte_length" | "symbol_byte")) => {
+                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "str_byte_length" | "str_byte" | "str_slice" | "str_concat" | "str_from_char" | "symbol_byte_length" | "symbol_byte")) => {
                     self.text_builtin(expr, callee, args, expected)
                 }
                 H::Application(callee, args) => {

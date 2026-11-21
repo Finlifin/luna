@@ -38,6 +38,13 @@ pub(super) fn callable(
                 ],
                 result: Box::new(p(P::Str)),
             })),
+            n::TextQueryKind::FromChar => Term::ComptimeFunction(Box::new(Term::Function {
+                parameters: vec![Parameter {
+                    sort: Sort::Runtime,
+                    ty: p(P::Char),
+                }],
+                result: Box::new(p(P::Str)),
+            })),
             _ => {
                 let mut parameters = vec![Parameter {
                     sort: Sort::Runtime,
@@ -239,6 +246,7 @@ pub(super) fn text_query(name: &str) -> Option<n::TextQueryKind> {
         "str_byte" => n::TextQueryKind::Byte,
         "str_slice" => n::TextQueryKind::Slice,
         "str_concat" => n::TextQueryKind::Concat,
+        "str_from_char" => n::TextQueryKind::FromChar,
         "symbol_byte_length" => n::TextQueryKind::SymbolByteLength,
         "symbol_byte" => n::TextQueryKind::SymbolByte,
         _ => return None,

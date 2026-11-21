@@ -371,3 +371,54 @@ fn comptime_text_slice_and_concat_enforce_utf8_boundaries_and_phase() {
         );
     }
 }
+
+#[test]
+fn comptime_str_from_char_encodes_utf8_and_rejects_runtime() {
+    use nir::{Primitive as P, Term, program::TextQueryKind as Q};
+    let ty = |p| Term::Primitive(p);
+    assert!(Q::FromChar.validate(&Term::Tuple(vec![ty(P::Char)]), &ty(P::Str)));
+    assert!(!Q::FromChar.validate(&Term::Tuple(vec![ty(P::U8)]), &ty(P::Str)));
+    assert!(!Q::FromChar.validate(&Term::Tuple(vec![ty(P::Char)]), &ty(P::Char)));
+
+    let package = compile_text(&source(
+        r#"
+        comptime fn run() -> bool {
+            let ascii = str.from_char('a');
+            let cjk = str.from_char('界');
+            let emoji = str.from_char('🦀');
+            let newline = str.from_char('\n');
+            let mid = meta.str_from_char('·');
+            ascii == "a"
+                and ascii.byte_length() == 1
+                and cjk == "界"
+                and cjk.byte_length() == 3
+                and emoji == "🦀"
+                and emoji.byte_length() == 4
+                and newline == "\n"
+                and mid == "·"
+        }
+        "#,
+    ));
+    assert!(format!("{package}").contains("(text-query from-char"));
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+
+    for invalid in [
+        "fn bad(ch: char) -> str { .str_from_char'builtin(ch) }",
+        "fn bad(ch: char) -> str { str.from_char(ch) }",
+        "fn bad(ch: char) -> str { meta.str_from_char(ch) }",
+    ] {
+        let error = support::compile_with_source_bindings(
+            &source(invalid),
+            &support::meta_fixture_protocols(),
+            support::text_fixture_selectors(),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("runtime") || error.contains("phase") || error.contains("comptime"),
+            "{invalid}: {error}"
+        );
+    }
+}

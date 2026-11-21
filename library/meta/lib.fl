@@ -41,7 +41,7 @@ pub use patterns.ComptimeListPatternView;
 pub use set.Set;
 pub use structs.*;
 pub use structure.*;
-pub use text.ComptimeTextBytes;
+pub use text.{ComptimeTextBytes, str_from_char}
 
 pub mod ast {
     pub use ast_impl.*;

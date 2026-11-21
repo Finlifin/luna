@@ -1,8 +1,10 @@
 use List;
-use builtin.{Integer, Symbol, Type, usize}
+use builtin.{Integer, Symbol, Type, isize, u128, usize}
 use numeric.bindings.{
     integer_div_trunc as compiler_comptime_integer_div_trunc,
     integer_rem_trunc as compiler_comptime_integer_rem_trunc,
+    isize_representation as compiler_isize_representation,
+    usize_representation as compiler_usize_representation,
 }
 
 pub use types.bindings.Object;
@@ -113,6 +115,14 @@ pub pure comptime fn from_usize(value: usize) -> Integer {
 pub const div_trunc: comptime fn(Integer, Integer) -> Integer = compiler_comptime_integer_div_trunc;
 
 pub const rem_trunc: comptime fn(Integer, Integer) -> Integer = compiler_comptime_integer_rem_trunc;
+
+pub pure comptime fn usize_representation(value: usize) -> u128 {
+    compiler_usize_representation(value)
+}
+
+pub pure comptime fn isize_representation(value: isize) -> u128 {
+    compiler_isize_representation(value)
+}
 
 pub pure comptime fn object_length(value: Object) -> Integer {
     compiler_object_length(value)

@@ -16,6 +16,7 @@ impl Checker<'_, '_> {
             "str_byte" => n::TextQueryKind::Byte,
             "str_slice" => n::TextQueryKind::Slice,
             "str_concat" => n::TextQueryKind::Concat,
+            "str_from_char" => n::TextQueryKind::FromChar,
             "symbol_byte_length" => n::TextQueryKind::SymbolByteLength,
             "symbol_byte" => n::TextQueryKind::SymbolByte,
             _ => unreachable!(),
@@ -27,6 +28,7 @@ impl Checker<'_, '_> {
             n::TextQueryKind::SymbolByte => &[P::Symbol, P::U64],
             n::TextQueryKind::Slice => &[P::Str, P::U64, P::U64],
             n::TextQueryKind::Concat => &[P::Str, P::Str],
+            n::TextQueryKind::FromChar => &[P::Char],
         };
         if args.len() != expected_inputs.len()
             || args.iter().any(|arg| !matches!(arg, Arg::Positional(_)))
@@ -52,7 +54,7 @@ impl Checker<'_, '_> {
                     Term::Optional(Box::new(p(P::U8)))
                 }
                 n::TextQueryKind::Slice => Term::Optional(Box::new(p(P::Str))),
-                n::TextQueryKind::Concat => p(P::Str),
+                n::TextQueryKind::Concat | n::TextQueryKind::FromChar => p(P::Str),
             }
         };
         if let Some(expected) = expected {

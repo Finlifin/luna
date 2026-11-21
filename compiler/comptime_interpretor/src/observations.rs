@@ -418,6 +418,19 @@ impl Interpreter<'_> {
                 let Value::Tuple(values) = value else {
                     return Err(self.failure(ErrorKind::Type, Some(source)));
                 };
+                if query == nir::program::TextQueryKind::FromChar {
+                    let [Value::Char(ch)] = values.as_slice() else {
+                        return Err(self.failure(ErrorKind::Type, Some(source)));
+                    };
+                    let mut buf = [0u8; 4];
+                    let encoded = ch.encode_utf8(&mut buf);
+                    self.budget.steps = self
+                        .budget
+                        .steps
+                        .checked_sub(encoded.len() as u64)
+                        .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+                    return Ok(Value::String(encoded.into()));
+                }
                 let text = match values.first() {
                     Some(Value::String(text)) if !query.is_symbol() => text,
                     Some(Value::Symbol(text)) if query.is_symbol() => text,

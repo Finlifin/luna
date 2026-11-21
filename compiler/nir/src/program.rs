@@ -1180,6 +1180,7 @@ pub enum TextQueryKind {
     SymbolByte,
     Slice,
     Concat,
+    FromChar,
 }
 
 impl fmt::Display for TextQueryKind {
@@ -1191,6 +1192,7 @@ impl fmt::Display for TextQueryKind {
             Self::SymbolByte => "symbol-byte",
             Self::Slice => "slice",
             Self::Concat => "concat",
+            Self::FromChar => "from-char",
         })
     }
 }
@@ -1205,7 +1207,7 @@ impl TextQueryKind {
     }
 
     pub fn is_comptime_only(self) -> bool {
-        matches!(self, Self::Slice | Self::Concat)
+        matches!(self, Self::Slice | Self::Concat | Self::FromChar)
     }
 
     pub fn validate(self, packet: &Term, result: &Term) -> bool {
@@ -1220,6 +1222,7 @@ impl TextQueryKind {
             Self::SymbolByte => &[P::Symbol, P::U64],
             Self::Slice => &[P::Str, P::U64, P::U64],
             Self::Concat => &[P::Str, P::Str],
+            Self::FromChar => &[P::Char],
         };
         if inputs.len() != expected_inputs.len()
             || inputs.iter().zip(expected_inputs).any(|(ty, expected)| {
@@ -1235,7 +1238,7 @@ impl TextQueryKind {
                 Self::ByteLength | Self::SymbolByteLength => Term::Primitive(P::U64),
                 Self::Byte | Self::SymbolByte => Term::Optional(Box::new(Term::Primitive(P::U8))),
                 Self::Slice => Term::Optional(Box::new(Term::Primitive(P::Str))),
-                Self::Concat => Term::Primitive(P::Str),
+                Self::Concat | Self::FromChar => Term::Primitive(P::Str),
             }
         };
         *result == expected

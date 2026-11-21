@@ -8,5 +8,5 @@ concat!(
     "mod meta {mod text_impl {mod bindings {\n",
     include_str!("../../../../library/meta/text_impl/bindings.fl"),
     "\n}} mod text {\n", include_str!("../../../../library/meta/data/text.fl"),
-    "\n} pub use text.ComptimeTextBytes;}\nuse meta.ComptimeTextBytes;\n",
+    "\n} pub use text.{ComptimeTextBytes, str_from_char};}\nuse meta.ComptimeTextBytes;\n",
 )

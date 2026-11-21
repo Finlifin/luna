@@ -18,6 +18,7 @@ fn operation(name: &str) -> bool {
             | "str_byte"
             | "str_slice"
             | "str_concat"
+            | "str_from_char"
             | "symbol_byte_length"
             | "symbol_byte"
             | "object_length"

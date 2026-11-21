@@ -1,4 +1,4 @@
-use builtin.{Symbol, bool, str, u64, u8}
+use builtin.{Symbol, bool, char, str, u64, u8}
 use text_impl.bindings;
 
 {-
@@ -123,6 +123,10 @@ comptime impl ComptimeTextBytes for str {
 }
 
 impl str {
+    pub pure comptime fn from_char(ch: char) -> str {
+        bindings.from_char(ch)
+    }
+
     {-
         Callers establish start <= length and pattern_length <= length - start.
         Optional byte queries remain checked; no unchecked indexing or pointer
@@ -150,6 +154,10 @@ impl str {
         }
         true
     }
+}
+
+pub pure comptime fn str_from_char(ch: char) -> str {
+    bindings.from_char(ch)
 }
 
 impl Symbol {

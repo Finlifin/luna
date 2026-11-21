@@ -1,5 +1,5 @@
 use bindings;
-use builtin.{Integer, usize}
+use builtin.{Integer, isize, u128, usize}
 
 {-
   Exact host-pipeline size conversion during comptime invocation. to_usize
@@ -9,6 +9,10 @@ use builtin.{Integer, usize}
 pub use bindings.to_usize;
 
 pub use bindings.from_usize;
+
+pub use bindings.isize_representation;
+
+pub use bindings.usize_representation;
 
 {-
     Explicit arbitrary-precision division toward zero. The remainder has the

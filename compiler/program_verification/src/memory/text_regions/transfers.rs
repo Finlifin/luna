@@ -906,6 +906,11 @@ impl Query<'_, '_, '_, '_, '_, '_> {
                 vec![],
                 BTreeSet::from([TextRegionOrigin::Static]),
             )]))));
+        } else if *query == nir::program::TextQueryKind::FromChar {
+            return Ok(Some(Regions::from(BTreeMap::from([(
+                vec![],
+                BTreeSet::from([TextRegionOrigin::Static]),
+            )]))));
         }
         Ok(empty)
     }
