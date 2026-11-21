@@ -440,6 +440,9 @@ pub(crate) fn compile_observed_with_preludes(
     preludes: &[u32],
     invocation: Option<&mut BuilderInvocation<'_>>,
 ) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    if emit == Emit::Ast {
+        return Err("package sets support HIR or NIR, not AST output".into());
+    }
     compile_observed_with_preludes_and_macro_selectors(
         packages,
         dependencies,
