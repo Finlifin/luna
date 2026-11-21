@@ -42,13 +42,13 @@ impl SelectedMethod {
         let inherited = 1 + self.interface_arguments.len();
         let signature = checker
             .declared_signature(owner)
-            .ok_or_else(|| error(span, "missing trait method signature"))?
-            .instantiate_parameters_in_scope(
-                &checker.declaration_binders(owner),
-                arguments,
-                &checker.call_input_frames(),
-            )
-            .map_err(|e| error(span, e.to_string()))?;
+            .ok_or_else(|| error(span, "missing trait method signature"))?;
+        let signature = checker.instantiate_input_types(
+            &signature,
+            &checker.type_parameters[&owner],
+            arguments,
+            span,
+        )?;
         Ok(n::Expr {
             source: source(span),
             ty: checker.callable_type(owner, signature),
@@ -2772,9 +2772,9 @@ impl Checker<'_, '_> {
                     unreachable!()
                 };
                 let frames = self.call_input_frames();
-                let parameters = self.declaration_binders(owner);
-                let requirement = requirement
-                    .instantiate_parameters_in_scope(&parameters, arguments, &frames)
+                let requirement = self
+                    .input_substitution(&self.type_parameters[&owner], arguments, &frames)
+                    .and_then(|substitution| substitution.instantiate_requirement(&requirement))
                     .map_err(|e| error(span, e.to_string()))?;
                 let instance = requirement.interface_instance();
                 let mut incomplete_given: Option<nir::NominalAdmissionError> = None;
@@ -3080,13 +3080,13 @@ impl Checker<'_, '_> {
             .signatures
             .get(&owner)
             .or_else(|| self.interface_signatures.get(&owner))
-            .ok_or_else(|| error(expr.span, "partial callable signature is missing"))?
-            .instantiate_parameters_in_scope(
-                &self.input_binders(&parameters[..arguments.len()]),
-                &arguments,
-                &self.call_input_frames(),
-            )
-            .map_err(|e| error(expr.span, e.to_string()))?;
+            .ok_or_else(|| error(expr.span, "partial callable signature is missing"))?;
+        let signature = self.instantiate_input_types(
+            signature,
+            &parameters[..arguments.len()],
+            &arguments,
+            expr.span,
+        )?;
         Ok(n::Expr {
             ty: self.callable_type(owner, signature),
             source: source(expr.span),

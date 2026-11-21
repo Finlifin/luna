@@ -6413,20 +6413,19 @@ impl Checker<'_, '_> {
         ty: &Term,
         span: Span,
     ) -> Result<Term, Error> {
-        let mut binders = Vec::new();
+        let mut parameters = Vec::new();
         let mut arguments = Vec::new();
-        for binder in self.declaration_binders(owner) {
-            if let Some(value) = self.alias_substitution.get(&binder.declaration) {
-                binders.push(binder);
+        for id in &self.type_parameters[&owner] {
+            if let Some(value) = self.alias_substitution.get(id) {
+                parameters.push(*id);
                 arguments.push(value.clone());
             }
         }
-        if binders.is_empty() {
+        if parameters.is_empty() {
             return Ok(ty.clone());
         }
-        let frames = vec![self.open_functions[&owner].input_sorts()];
-        ty.instantiate_parameters_in_scope(&binders, &arguments, &frames)
-            .map_err(|failure| error(span, failure.to_string()))
+        let frames = [self.open_functions[&owner].input_sorts()];
+        self.instantiate_input_types_in_scope(ty, &parameters, &arguments, &frames, span)
     }
 
     fn open_annotation_requirements_ready(

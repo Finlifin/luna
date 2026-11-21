@@ -647,10 +647,10 @@ impl Checker<'_, '_> {
         if environment.is_empty() {
             return Ok(predicate.clone());
         }
-        let parameters = self.input_binders(&environment.keys().copied().collect::<Vec<_>>());
+        let parameters: Vec<_> = environment.keys().copied().collect();
         let arguments: Vec<_> = environment.values().cloned().collect();
-        predicate
-            .instantiate_parameters_in_scope(&parameters, &arguments, self.context.scope())
+        self.input_substitution(&parameters, &arguments, self.context.scope())
+            .and_then(|substitution| substitution.instantiate_predicate(predicate))
             .map_err(|e| error(span, e.to_string()))
     }
 

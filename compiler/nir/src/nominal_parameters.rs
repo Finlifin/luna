@@ -566,7 +566,7 @@ impl<'a> DeclarationSubstitution<'a> {
         crate::copy_budget::check_retained_body(function, self, fuel)
     }
 
-    pub(crate) fn instantiate_requirement(
+    pub fn instantiate_requirement(
         &self,
         requirement: &crate::program::TraitRequirement,
     ) -> Result<crate::program::TraitRequirement, TypeError> {

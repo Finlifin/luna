@@ -6956,3 +6956,72 @@ fn source_contracts_publish_only_unconditional_nullary_nominal_models() {
         TypeInputOutcome::Ambiguous { .. }
     ));
 }
+
+#[test]
+fn dependent_type_indices_specialize_inferred_calls_and_ordinary_defaults() {
+    let source = r#"
+        typealias Type = .Type'builtin;
+        struct Key where T, index:T {}
+        fn pick(value:U)->U where T, index:T, U {value}
+        fn read(key:Key<T,index>, .flag:bool=true)->bool where T, index:T {flag}
+        fn run()->bool {
+            pick<Type,bool>(true) and not pick<bool,true>(false)
+                and read(Key<Type,bool>{}) and not read(Key<bool,true>{}, .flag=false)
+        }
+    "#;
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("pick<Type,bool>(true)", "pick<bool,bool>(true)");
+    let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("type mismatch: expected (primitive bool)"),
+        "{error}"
+    );
+}
+
+#[test]
+fn dependent_type_indices_preserve_trait_evidence_and_method_selection() {
+    let source = r#"
+        typealias Type = .Type'builtin;
+        typealias char = .char'builtin;
+        trait Allowed where T, index:T {}
+        impl Allowed<Type,bool> for bool {}
+        fn guarded(value:bool)->bool where T, index:T, requires bool :- Allowed<T,index> {value}
+
+        struct Reader {}
+        trait Read where T, index:T {fn read(self, value:U)->U where U;}
+        impl Read<Type,bool> for Reader {fn read(self, value:U)->U where U {value}}
+        fn run()->bool {Reader{}.as(Read<Type,bool>).read(guarded<Type,bool>(true))}
+    "#;
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    for (invalid, diagnostic) in [
+        (
+            source.replace("guarded<Type,bool>(true)", "guarded<Type,char>(true)"),
+            "trait bound is not established",
+        ),
+        (
+            source.replace(".as(Read<Type,bool>)", ".as(Read<Type,char>)"),
+            "method implementation is not uniquely established",
+        ),
+    ] {
+        let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}
+
+#[test]
+fn dependent_type_indices_specialize_alias_formation_in_the_enclosing_scope() {
+    let source = r#"
+        typealias Type = .Type'builtin;
+        struct EqualPair where X, Y, requires X == Y {flag:bool}
+        typealias Pair<T, index:T> = EqualPair<T,T>;
+        fn read(value:Pair<Type,bool>)->bool {value.flag}
+        fn run()->bool {read(EqualPair<Type,Type>{flag:true})}
+    "#;
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("EqualPair<T,T>;", "EqualPair<T,bool>;");
+    let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("type requirement is not satisfied"),
+        "{error}"
+    );
+}

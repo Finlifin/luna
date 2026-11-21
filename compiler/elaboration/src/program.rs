@@ -5949,25 +5949,17 @@ impl Checker<'_, '_> {
         } else {
             vec![caller_scope.iter().map(|p| p.0).collect()]
         };
-        let prepared_signature = self.instantiate_input_types_in_scope(
-            &signature,
-            &known_inputs,
-            &known_values,
-            &caller_frames,
-            expr.span,
-        )?;
+        let known = self
+            .input_substitution(&known_inputs, &known_values, &caller_frames)
+            .map_err(|e| error(expr.span, e.to_string()))?;
+        let prepared_signature = known
+            .instantiate(&signature)
+            .map_err(|e| error(expr.span, e.to_string()))?;
         let preview_arguments = template
             .iter()
-            .map(|ty| {
-                self.instantiate_input_types_in_scope(
-                    ty,
-                    &known_inputs,
-                    &known_values,
-                    &caller_frames,
-                    expr.span,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|ty| known.instantiate(ty))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| error(expr.span, e.to_string()))?;
         let preview = n::Expr {
             source: source(expr.span),
             ty: self.callable_type(owner, prepared_signature.clone()),
@@ -6355,18 +6347,14 @@ impl Checker<'_, '_> {
                 ));
             }
         };
+        let inferred = self
+            .input_substitution(&parameters, &instance.type_arguments, &caller_frames)
+            .map_err(|e| error(expr.span, e.to_string()))?;
         let full_arguments = template
             .iter()
-            .map(|ty| {
-                self.instantiate_input_types_in_scope(
-                    ty,
-                    &parameters,
-                    &instance.type_arguments,
-                    &caller_frames,
-                    expr.span,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|ty| inferred.instantiate(ty))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| error(expr.span, e.to_string()))?;
         self.check_type_application(owner, &full_arguments, expr.span)?;
         self.check_ordinary_capabilities(
             owner,
@@ -6404,13 +6392,7 @@ impl Checker<'_, '_> {
             if !assigned {
                 let mut value = checked[parameter].take().unwrap();
                 value
-                    .rewrite_types(&mut |ty| {
-                        ty.instantiate_parameters_in_scope(
-                            &self.input_binders(&parameters),
-                            &instance.type_arguments,
-                            &caller_frames,
-                        )
-                    })
+                    .rewrite_types(&mut |ty| inferred.instantiate(ty))
                     .map_err(|e| error(expr.span, e.to_string()))?;
                 value.rewrite_types(&mut |ty| self.callable_argument_term_view(ty, expr.span))?;
                 arguments.push(n::CallArgument {
