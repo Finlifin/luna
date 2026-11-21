@@ -51,13 +51,27 @@ pub struct SessionCaches {
     layouts: memory::TypeLayoutCache,
     move_layouts: moves::MoveLayoutCache,
     ownership_shapes: moves::OwnershipShapeCache,
+    text_regions: memory::TextRegionCache,
+    return_results: moves::ReturnResultCache,
+    rejection: rejection::Memo,
 }
 
 impl SessionCaches {
     /// Retain entries unaffected by updates to `changed` runtime instances.
-    /// Layout and ownership-shape caches depend only on type declarations.
+    /// Layout, text-region, rejection, and ownership-shape caches depend only
+    /// on immutable declarations and bodies unless new instances arrive.
     pub fn retain_unaffected(&mut self, changed: &std::collections::HashSet<iir::InstanceKey>) {
         self.summaries.retain_unaffected(changed);
+        if !changed.is_empty() {
+            self.return_results.clear();
+        }
+    }
+
+    /// Reset caches that inspect materialized `runtime_instances` after the
+    /// graph grows monotonically without adding new nominal types.
+    pub fn on_graph_extended(&mut self) {
+        self.rejection.clear();
+        self.return_results.clear();
     }
 }
 
@@ -77,6 +91,7 @@ pub struct PackageSession<'a> {
     pub(crate) layout_cache: memory::TypeLayoutCache,
     pub(crate) move_layouts: moves::MoveLayoutCache,
     pub(crate) ownership_shapes: moves::OwnershipShapeCache,
+    pub(crate) text_regions: memory::TextRegionCache,
 }
 
 impl<'a> PackageSession<'a> {
@@ -93,6 +108,7 @@ impl<'a> PackageSession<'a> {
             layout_cache: memory::TypeLayoutCache::default(),
             move_layouts: moves::MoveLayoutCache::default(),
             ownership_shapes: moves::OwnershipShapeCache::default(),
+            text_regions: memory::TextRegionCache::default(),
         }
     }
 
@@ -139,6 +155,9 @@ impl<'a> PackageSession<'a> {
         self.layout_cache = caches.layouts;
         self.move_layouts = caches.move_layouts;
         self.ownership_shapes = caches.ownership_shapes;
+        self.text_regions = caches.text_regions;
+        self.return_results = caches.return_results;
+        self.rejection = caches.rejection;
         self
     }
 
@@ -148,6 +167,9 @@ impl<'a> PackageSession<'a> {
             layouts: self.layout_cache,
             move_layouts: self.move_layouts,
             ownership_shapes: self.ownership_shapes,
+            text_regions: self.text_regions,
+            return_results: self.return_results,
+            rejection: self.rejection,
         }
     }
 
@@ -208,6 +230,7 @@ impl<'a> PackageSession<'a> {
             self.declarations.as_ref(),
             &mut self.methods,
             Some(&mut self.layout_cache),
+            Some(&mut self.text_regions),
             declaration,
             arguments,
             fuel,

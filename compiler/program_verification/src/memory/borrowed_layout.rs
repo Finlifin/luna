@@ -325,6 +325,9 @@ pub struct TypeLayoutCache {
     copy_readable_unchecked: HashMap<Term, bool>,
     copy_readable_verified: HashMap<Term, bool>,
     owned_variants: HashMap<Term, Vec<Vec<Term>>>,
+    callable_paths_named: HashMap<Term, Vec<Vec<usize>>>,
+    callable_paths_all: HashMap<Term, Vec<Vec<usize>>>,
+    may_hold_text_or_callable: HashMap<Term, bool>,
 }
 
 impl TypeLayoutCache {
@@ -485,6 +488,98 @@ impl TypeLayoutCache {
         }
         let result = owned_variant_fields(package, ty, fuel)?;
         self.owned_variants.insert(ty.clone(), result.clone());
+        Ok(result)
+    }
+
+    pub(crate) fn owned_callable_paths(
+        &mut self,
+        package: Option<&Package>,
+        ty: &Term,
+        include_closures: bool,
+        fuel: &mut usize,
+    ) -> Result<Vec<Vec<usize>>, String> {
+        let cache = if include_closures {
+            &self.callable_paths_all
+        } else {
+            &self.callable_paths_named
+        };
+        if let Some(cached) = cache.get(ty) {
+            *fuel = fuel
+                .checked_sub(cached.len().saturating_add(1))
+                .ok_or("memory callable result layout budget exhausted")?;
+            return Ok(cached.clone());
+        }
+        let paths: Vec<Vec<usize>> =
+            super::owned_callable_bottom(package, ty, fuel, include_closures)?
+                .into_keys()
+                .collect();
+        let cache = if include_closures {
+            &mut self.callable_paths_all
+        } else {
+            &mut self.callable_paths_named
+        };
+        cache.insert(ty.clone(), paths.clone());
+        Ok(paths)
+    }
+
+    pub(crate) fn owned_callable_bottom(
+        &mut self,
+        package: Option<&Package>,
+        ty: &Term,
+        include_closures: bool,
+        fuel: &mut usize,
+    ) -> Result<BTreeMap<Vec<usize>, super::CallableResult>, String> {
+        Ok(self
+            .owned_callable_paths(package, ty, include_closures, fuel)?
+            .into_iter()
+            .map(|path| (path, super::CallableResult::NoReturn))
+            .collect())
+    }
+
+    pub(crate) fn result_callable_bottom(
+        &mut self,
+        package: Option<&Package>,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<BTreeMap<Vec<usize>, super::CallableResult>, String> {
+        let ty = match ty {
+            Term::Computation { result, .. } => result,
+            ty => ty,
+        };
+        self.owned_callable_bottom(package, ty, false, fuel)
+    }
+
+    pub(crate) fn code_result_bottom(
+        &mut self,
+        package: Option<&Package>,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<super::CodeFields, String> {
+        let ty = match ty {
+            Term::Computation { result, .. } => result,
+            ty => ty,
+        };
+        Ok(self
+            .owned_callable_paths(package, ty, true, fuel)?
+            .into_iter()
+            .map(|path| (path, super::CodeResult::NoReturn))
+            .collect())
+    }
+
+    pub(crate) fn type_may_hold_text_or_callable(
+        &mut self,
+        package: &Package,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<bool, String> {
+        if let Some(&cached) = self.may_hold_text_or_callable.get(ty) {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("text region inference budget exhausted")?;
+            return Ok(cached);
+        }
+        let result = super::text_regions::type_may_hold_text_or_callable(package, ty, fuel)?;
+        self.may_hold_text_or_callable.insert(ty.clone(), result);
         Ok(result)
     }
 }
@@ -992,6 +1087,172 @@ mod tests {
         assert!(
             cache
                 .owned_variant_fields(Some(&package), &err_ty, &mut 0)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn type_layout_cache_callable_paths_and_text_or_callable_reuse_and_fail_closed() {
+        let str_ty = Term::Primitive(Primitive::Str);
+        let u8_ty = Term::Primitive(Primitive::U8);
+        let fn_ty = Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Void)),
+        };
+        let deep_clean_id = DeclarationId {
+            package: 98,
+            local: 1,
+        };
+        let wide_cb_id = DeclarationId {
+            package: 98,
+            local: 2,
+        };
+        let mut deep_clean = u8_ty;
+        for _ in 0..8 {
+            deep_clean = Term::Tuple(vec![deep_clean.clone(), deep_clean]);
+        }
+        let wide_cb = Term::Tuple(vec![
+            fn_ty.clone(),
+            Term::Closure {
+                environment: vec![str_ty.clone(), fn_ty],
+                signature: Box::new(Term::Function {
+                    parameters: vec![],
+                    result: Box::new(Term::Primitive(Primitive::Void)),
+                }),
+            },
+            Term::Optional(Box::new(str_ty)),
+        ]);
+        let mut package = Package::default();
+        package.structs.push(nir::program::Struct {
+            declaration: deep_clean_id,
+            name: "DeepClean".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            fields: vec![("inner".into(), deep_clean)],
+            packed: false,
+        });
+        package.structs.push(nir::program::Struct {
+            declaration: wide_cb_id,
+            name: "WideCallbacks".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            fields: vec![("items".into(), wide_cb)],
+            packed: false,
+        });
+        let bad_arity_id = DeclarationId {
+            package: 98,
+            local: 99,
+        };
+        package.structs.push(nir::program::Struct {
+            declaration: bad_arity_id,
+            name: "BadArity".into(),
+            type_parameters: vec![DeclarationId {
+                package: 98,
+                local: 999,
+            }],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            fields: vec![],
+            packed: false,
+        });
+        let deep_nominal = Term::Nominal {
+            declaration: deep_clean_id,
+            arguments: vec![],
+        };
+        let wide_nominal = Term::Nominal {
+            declaration: wide_cb_id,
+            arguments: vec![],
+        };
+        let bad_arity_nominal = Term::Nominal {
+            declaration: bad_arity_id,
+            arguments: vec![],
+        };
+
+        let mut cache = TypeLayoutCache::default();
+        // Errors (structural mismatch / budget exhaustion) are never cached;
+        // type_may_hold_text_or_callable fails closed on non-budget errors.
+        assert!(
+            cache
+                .owned_callable_paths(Some(&package), &bad_arity_nominal, true, &mut 1_000)
+                .is_err()
+        );
+        assert!(
+            cache
+                .owned_callable_paths(Some(&package), &bad_arity_nominal, true, &mut 1_000)
+                .is_err()
+        );
+        assert!(
+            cache
+                .type_may_hold_text_or_callable(&package, &bad_arity_nominal, &mut 1_000)
+                .unwrap()
+        );
+        assert!(
+            cache
+                .owned_callable_paths(Some(&package), &wide_nominal, true, &mut 3)
+                .is_err()
+        );
+        assert!(
+            cache
+                .type_may_hold_text_or_callable(&package, &deep_nominal, &mut 5)
+                .is_err()
+        );
+
+        let mut cold_fuel = 50_000;
+        let cold_before = cold_fuel;
+        let paths = cache
+            .owned_callable_paths(Some(&package), &wide_nominal, true, &mut cold_fuel)
+            .unwrap();
+        let cold_cost = cold_before - cold_fuel;
+        assert_eq!(paths.len(), 2);
+        assert!(cold_cost > paths.len() + 1);
+
+        let mut tight = 10;
+        assert_eq!(
+            cache
+                .owned_callable_paths(Some(&package), &wide_nominal, true, &mut tight)
+                .unwrap(),
+            paths
+        );
+        assert_eq!(tight, 10 - (paths.len() + 1));
+        assert!(
+            cache
+                .owned_callable_paths(Some(&package), &wide_nominal, true, &mut 0)
+                .is_err()
+        );
+
+        let mut text_cold = 50_000;
+        assert!(
+            !cache
+                .type_may_hold_text_or_callable(&package, &deep_nominal, &mut text_cold)
+                .unwrap()
+        );
+        assert!(50_000 - text_cold > 20);
+        assert!(
+            cache
+                .type_may_hold_text_or_callable(&package, &wide_nominal, &mut 50_000)
+                .unwrap()
+        );
+
+        let mut text_tight = 2;
+        assert!(
+            !cache
+                .type_may_hold_text_or_callable(&package, &deep_nominal, &mut text_tight)
+                .unwrap()
+        );
+        assert!(
+            cache
+                .type_may_hold_text_or_callable(&package, &wide_nominal, &mut text_tight)
+                .unwrap()
+        );
+        assert_eq!(text_tight, 0);
+        assert!(
+            cache
+                .type_may_hold_text_or_callable(&package, &deep_nominal, &mut 0)
                 .is_err()
         );
     }

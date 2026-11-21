@@ -310,9 +310,9 @@ impl Infer<'_, '_> {
                 };
                 self.target_work(actual)?;
                 let mut fields = BTreeMap::new();
-                for path in owned_callable_bottom(self.package, &pointee, self.fuel, true)?.keys() {
+                for path in self.owned_callable_paths(&pointee, true)? {
                     let projection =
-                        project_owned_storage(self.package, &pointee, path, self.fuel)?;
+                        project_owned_storage(self.package, &pointee, &path, self.fuel)?;
                     let mut value = CallableResult::NoReturn;
                     let mut complete = true;
                     for target in actual {
@@ -326,7 +326,7 @@ impl Infer<'_, '_> {
                         }
                     }
                     if complete {
-                        fields.insert(path.clone(), BorrowedCallableValue::Named(value));
+                        fields.insert(path, BorrowedCallableValue::Named(value));
                     }
                 }
                 if !fields.is_empty() {

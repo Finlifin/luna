@@ -30,7 +30,7 @@ use std::{
     fmt,
 };
 pub(crate) use text_regions::infer_text_regions_with_context;
-pub use text_regions::{TextRegionOrigin, TextRegionSummary, infer_text_regions};
+pub use text_regions::{TextRegionCache, TextRegionOrigin, TextRegionSummary, infer_text_regions};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParameterPlace {
@@ -1350,18 +1350,6 @@ fn extend_storage_projection(
     Ok(())
 }
 
-fn result_callable_bottom(
-    package: Option<&Package>,
-    ty: &Term,
-    fuel: &mut usize,
-) -> Result<BTreeMap<Vec<usize>, CallableResult>, String> {
-    let ty = match ty {
-        Term::Computation { result, .. } => result,
-        ty => ty,
-    };
-    owned_callable_bottom(package, ty, fuel, false)
-}
-
 // Mutation tracking must also visit environment-bearing callable leaves. They
 // cannot disappear just because the published named-result lattice omits them.
 fn owned_callable_bottom(
@@ -2667,6 +2655,36 @@ impl<'a> Infer<'a, '_> {
             .collect())
     }
 
+    pub(super) fn owned_callable_paths(
+        &mut self,
+        ty: &Term,
+        include_closures: bool,
+    ) -> Result<Vec<Vec<usize>>, String> {
+        self.round.layout_cache.as_mut().owned_callable_paths(
+            self.package,
+            ty,
+            include_closures,
+            self.fuel,
+        )
+    }
+
+    pub(super) fn result_callable_bottom(
+        &mut self,
+        ty: &Term,
+    ) -> Result<BTreeMap<Vec<usize>, CallableResult>, String> {
+        self.round
+            .layout_cache
+            .as_mut()
+            .result_callable_bottom(self.package, ty, self.fuel)
+    }
+
+    pub(super) fn code_result_bottom(&mut self, ty: &Term) -> Result<CodeFields, String> {
+        self.round
+            .layout_cache
+            .as_mut()
+            .code_result_bottom(self.package, ty, self.fuel)
+    }
+
     // Pointer provenance follows a single representation leaf while source
     // operations and nominal signatures keep their declared types.
     fn local_pointer_value(&mut self, ty: &Term) -> Result<bool, String> {
@@ -2732,16 +2750,19 @@ impl<'a> Infer<'a, '_> {
         if steps == 0 {
             return Err("memory type view budget exhausted".into());
         }
-        *self.fuel -= steps;
-        let view = self
-            .type_context
-            .structural_view(
-                ty,
-                crate::ptc::Budget {
-                    steps,
-                    ..Default::default()
-                },
-            )
+        let (result, used) = self.type_context.structural_view_metered(
+            ty,
+            crate::ptc::Budget {
+                steps,
+                ..Default::default()
+            },
+        );
+        let charge = used.max(1);
+        *self.fuel = self
+            .fuel
+            .checked_sub(charge)
+            .ok_or("memory type view budget exhausted")?;
+        let view = result
             .ok()
             .flatten()
             .map(|(ty, _)| ty)
@@ -3497,7 +3518,7 @@ impl<'a> Infer<'a, '_> {
         if !self.stable_capture_roots.contains(&root) {
             return Ok(());
         }
-        for (path, _) in owned_callable_bottom(self.package, expected, self.fuel, true)? {
+        for path in self.owned_callable_paths(expected, true)? {
             if !self.stable_code_source(value, &path, 0)? {
                 return Err("captured code derived from invocation values requires an environment transition contract".into());
             }
@@ -4042,12 +4063,11 @@ impl<'a> Infer<'a, '_> {
                 let mut pointers = BTreeMap::new();
                 for (index, capture) in captures.iter().enumerate() {
                     let mut paths = BTreeMap::new();
-                    for (path, _) in symbolic_pointer_fields_for(
-                        self.package,
-                        &capture.ty,
-                        self.round.text_provenance,
-                        self.fuel,
-                    )? {
+                    for path in self
+                        .pointer_input_layout(&capture.ty)?
+                        .into_iter()
+                        .map(|leaf| leaf.input_fields)
+                    {
                         self.step(prefix.len() + path.len() + 1)?;
                         let mut full = prefix.clone();
                         full.push(index);
@@ -4449,10 +4469,10 @@ impl<'a> Infer<'a, '_> {
         self.callable_results
             .insert(expr as *const Expr as usize, CallableResult::NoReturn);
         let ty = self.ty(&expr.ty)?;
-        let fields = result_callable_bottom(self.package, &ty, self.fuel)?;
+        let fields = self.result_callable_bottom(&ty)?;
         self.aggregate_callees
             .insert(expr as *const Expr as usize, fields);
-        let code_fields = code_result_bottom(self.package, &ty, self.fuel)?;
+        let code_fields = self.code_result_bottom(&ty)?;
         self.install_code_results(expr, &code_fields)
     }
 
@@ -4475,13 +4495,7 @@ impl<'a> Infer<'a, '_> {
         let mut has_pointer = false;
         for capture in captures {
             let capture_ty = self.ty(&capture.ty)?;
-            has_pointer |= !symbolic_pointer_fields_for(
-                self.package,
-                &capture_ty,
-                self.round.text_provenance,
-                self.fuel,
-            )?
-            .is_empty();
+            has_pointer |= !self.pointer_input_layout(&capture_ty)?.is_empty();
         }
         if !has_pointer {
             return Ok(false);
@@ -4498,12 +4512,7 @@ impl<'a> Infer<'a, '_> {
             return Err("immediate closure cannot have default arguments".into());
         }
         if !self.local_pointer_value(result)? {
-            symbolic_pointer_fields_for(
-                self.package,
-                result,
-                self.round.text_provenance,
-                self.fuel,
-            )?;
+            self.pointer_input_layout(result)?;
         }
         let mut targets = BTreeMap::new();
         let mut captured_code = BTreeMap::new();
@@ -4548,12 +4557,7 @@ impl<'a> Infer<'a, '_> {
         for argument in arguments {
             let ty = self.ty(&argument.value.ty)?;
             let view = self.type_view(&ty)?;
-            symbolic_pointer_fields_for(
-                self.package,
-                &view,
-                self.round.text_provenance,
-                self.fuel,
-            )?;
+            self.pointer_input_layout(&view)?;
             self.walk(&argument.value, depth + 1)?;
             let mut fields = self.pointer_fields_for(&argument.value)?;
             if self.local_pointer_value(&ty)? {
@@ -4696,15 +4700,7 @@ impl<'a> Infer<'a, '_> {
                 // Known pointer-bearing local layouts are now valid storage
                 // roots: loads resolve their current environment origins.
                 // This does not authorize pointer stores or local escape.
-                if !self.local_pointer_value(&ty)?
-                    && symbolic_pointer_fields_for(
-                        self.package,
-                        &ty,
-                        self.round.text_provenance,
-                        self.fuel,
-                    )?
-                    .is_empty()
-                {
+                if !self.local_pointer_value(&ty)? && self.pointer_input_layout(&ty)?.is_empty() {
                     self.pointer_free_owned(&ty, depth + 1)?;
                 }
                 let mut storage = None;
@@ -5166,8 +5162,7 @@ impl<'a> Infer<'a, '_> {
         if intrinsic_pointer_value(&ty) || self.local_pointer_value(&ty)? {
             return Ok(());
         }
-        let layout =
-            symbolic_pointer_fields_for(self.package, &ty, self.round.text_provenance, self.fuel)?;
+        let layout = self.symbolic_pointer_fields(&ty)?;
         if layout.is_empty() {
             return Ok(());
         }
@@ -5217,12 +5212,15 @@ impl<'a> Infer<'a, '_> {
                             else {
                                 return Err("borrowed code exit lacks a closure definition".into());
                             };
-                            for (path, _) in symbolic_pointer_fields_for(
-                                self.package,
-                                &definition.ty,
-                                self.round.text_provenance,
-                                self.fuel,
-                            )? {
+                            let definition_ty = definition.ty.clone();
+                            let pointer_layout =
+                                self.round.layout_cache.as_mut().pointer_input_layout_for(
+                                    self.package,
+                                    &definition_ty,
+                                    self.round.text_provenance,
+                                    self.fuel,
+                                )?;
+                            for path in pointer_layout.into_iter().map(|leaf| leaf.input_fields) {
                                 *self.fuel = self
                                     .fuel
                                     .checked_sub(place.fields.len() + path.len() + 1)
@@ -6103,7 +6101,7 @@ impl<'a> Infer<'a, '_> {
             self.aggregate_pointers
                 .insert(expr as *const Expr as usize, loaded);
         }
-        if !owned_callable_bottom(self.package, &ty, self.fuel, true)?.is_empty() {
+        if !self.owned_callable_paths(&ty, true)?.is_empty() {
             let mut code = None;
             let mut named = None;
             for target in &targets {
@@ -6148,12 +6146,13 @@ impl<'a> Infer<'a, '_> {
                     }
                 }
                 if matches!(target.root, PointerRoot::Parameter(_)) {
-                    for path in owned_callable_bottom(self.package, &ty, self.fuel, true)?.keys() {
-                        let projection = project_owned_storage(self.package, &ty, path, self.fuel)?;
+                    for path in self.owned_callable_paths(&ty, true)? {
+                        let projection =
+                            project_owned_storage(self.package, &ty, &path, self.fuel)?;
                         let slot = borrowed_code::project_slot(target, &projection);
                         if let Some(value) = self.borrowed_callable_slots.get(&slot) {
                             value.charge(self.fuel)?;
-                            named_fields.insert(path.clone(), value.clone());
+                            named_fields.insert(path, value.clone());
                         }
                     }
                 }
@@ -6203,36 +6202,34 @@ impl<'a> Infer<'a, '_> {
             Ok(output)
         }
         let ty = self.ty(&expr.ty)?;
-        let mut pointers =
-            symbolic_pointer_fields_for(self.package, &ty, self.round.text_provenance, self.fuel)?
-                .into_keys()
-                .map(|path| (path, Some(BTreeSet::new())))
-                .collect::<BTreeMap<_, _>>();
+        let mut pointers = self
+            .pointer_input_layout(&ty)?
+            .into_iter()
+            .map(|leaf| (leaf.input_fields, Some(BTreeSet::new())))
+            .collect::<BTreeMap<_, _>>();
         let source_ty = self.ty(&value.ty)?;
-        for mut path in symbolic_pointer_fields_for(
-            self.package,
-            &source_ty,
-            self.round.text_provenance,
-            self.fuel,
-        )?
-        .into_keys()
+        for mut path in self
+            .pointer_input_layout(&source_ty)?
+            .into_iter()
+            .map(|leaf| leaf.input_fields)
         {
             remap_error_path(&mut path, &mapping, self.fuel)?;
             pointers.insert(path, None);
         }
         pointers.extend(remap(self.pointer_fields_for(value)?, &mapping, self.fuel)?);
-        let mut callees = result_callable_bottom(self.package, &ty, self.fuel)?;
-        for (mut path, _) in result_callable_bottom(self.package, &source_ty, self.fuel)? {
+        let mut callees = self.result_callable_bottom(&ty)?;
+        for mut path in self.result_callable_bottom(&source_ty)?.into_keys() {
             remap_error_path(&mut path, &mapping, self.fuel)?;
             callees.insert(path, CallableResult::Unknown);
         }
         callees.extend(remap(self.value_callees(value)?, &mapping, self.fuel)?);
-        let mut local: LocalCodeFields = owned_callable_bottom(self.package, &ty, self.fuel, true)?
-            .into_keys()
+        let mut local: LocalCodeFields = self
+            .owned_callable_paths(&ty, true)?
+            .into_iter()
             .map(|path| (path, BTreeSet::new()))
             .collect();
         // Unknown active source leaves must stay absent, not bottom.
-        for (mut path, _) in owned_callable_bottom(self.package, &source_ty, self.fuel, true)? {
+        for mut path in self.owned_callable_paths(&source_ty, true)? {
             remap_error_path(&mut path, &mapping, self.fuel)?;
             local.remove(&path);
         }
@@ -6561,12 +6558,7 @@ impl<'a> Infer<'a, '_> {
                 let pointer = self.local_pointer_value(&target)?;
                 if !pointer {
                     let view = self.type_view(&target)?;
-                    symbolic_pointer_fields_for(
-                        self.package,
-                        &view,
-                        self.round.text_provenance,
-                        self.fuel,
-                    )?;
+                    self.pointer_input_layout(&view)?;
                 }
                 self.walk(inner, depth + 1)?;
                 if pointer {
@@ -6634,30 +6626,26 @@ impl<'a> Infer<'a, '_> {
                 let (fields, variant) = owned_constructor(expr, self.fuel)?;
                 let ty = self.ty(&expr.ty)?;
                 let view = self.type_view(&ty)?;
-                let mut pointers = symbolic_pointer_fields_for(
-                    self.package,
-                    &view,
-                    self.round.text_provenance,
-                    self.fuel,
-                )?
-                .into_keys()
-                .map(|path| {
-                    (
-                        path,
-                        if variant.is_some() {
-                            Some(BTreeSet::new())
-                        } else {
-                            None
-                        },
-                    )
-                })
-                .collect::<BTreeMap<_, _>>();
-                let mut values = result_callable_bottom(self.package, &ty, self.fuel)?;
-                let mut local_fields: LocalCodeFields =
-                    owned_callable_bottom(self.package, &ty, self.fuel, true)?
-                        .into_keys()
-                        .map(|path| (path, BTreeSet::new()))
-                        .collect();
+                let mut pointers = self
+                    .pointer_input_layout(&view)?
+                    .into_iter()
+                    .map(|leaf| {
+                        (
+                            leaf.input_fields,
+                            if variant.is_some() {
+                                Some(BTreeSet::new())
+                            } else {
+                                None
+                            },
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+                let mut values = self.result_callable_bottom(&ty)?;
+                let mut local_fields: LocalCodeFields = self
+                    .owned_callable_paths(&ty, true)?
+                    .into_iter()
+                    .map(|path| (path, BTreeSet::new()))
+                    .collect();
                 for (index, field) in fields.iter().enumerate() {
                     let prefix = if let Some(variant) = variant {
                         vec![VARIANT_FIELD, variant, index]
@@ -6682,7 +6670,7 @@ impl<'a> Infer<'a, '_> {
                     self.charge_local_fields(&local_fields)?;
                     local_fields.retain(|path, _| !path.starts_with(&prefix));
                     let field_ty = self.ty(&field.ty)?;
-                    for (path, _) in result_callable_bottom(self.package, &field_ty, self.fuel)? {
+                    for path in self.result_callable_bottom(&field_ty)?.into_keys() {
                         let mut path_prefix = prefix.clone();
                         path_prefix.extend(path);
                         values.insert(path_prefix, CallableResult::Unknown);
@@ -6815,8 +6803,7 @@ impl<'a> Infer<'a, '_> {
             }
             K::WritePointer { pointer, value } => {
                 let ty = self.ty(&value.ty)?;
-                let code_storage =
-                    !owned_callable_bottom(self.package, &ty, self.fuel, true)?.is_empty();
+                let code_storage = !self.owned_callable_paths(&ty, true)?.is_empty();
                 let pointer_layout = self.pointer_input_layout(&ty)?;
                 let aggregate_pointers =
                     !pointer_layout.is_empty() && !self.local_pointer_value(&ty)?;
@@ -7210,6 +7197,7 @@ impl<'a> Infer<'a, '_> {
                     };
                     let transition_slots = closure_transition_slots_for(
                         package,
+                        self.round.layout_cache.as_mut(),
                         definitions,
                         parameters.len(),
                         true,
@@ -7510,15 +7498,7 @@ impl<'a> Infer<'a, '_> {
                 self.walk(value, depth + 1)?;
                 let ty = self.ty(&value.ty)?;
                 let pointer_subject = self.local_pointer_value(&value.ty)?;
-                if !pointer_subject
-                    && symbolic_pointer_fields_for(
-                        self.package,
-                        &ty,
-                        self.round.text_provenance,
-                        self.fuel,
-                    )?
-                    .is_empty()
-                {
+                if !pointer_subject && self.pointer_input_layout(&ty)?.is_empty() {
                     self.pointer_free_owned(&ty, depth + 1)?;
                 }
                 let pointers = self.pointer_fields_for(value)?;
@@ -7665,12 +7645,7 @@ impl<'a> Infer<'a, '_> {
                     pointers,
                 )?;
                 if !path.is_empty() {
-                    symbolic_pointer_fields_for(
-                        self.package,
-                        &expected,
-                        self.round.text_provenance,
-                        self.fuel,
-                    )?;
+                    self.pointer_input_layout(&expected)?;
                 }
                 let values = self.value_callees(value)?;
                 let local_fields = self.local_fields_for(value)?;
@@ -7934,10 +7909,9 @@ impl SummaryCache {
 }
 
 fn charge_cached_summary(summary: &Summary, fuel: &mut usize) -> Result<(), String> {
-    bound_type(&summary.signature, fuel)?;
-    for argument in &summary.arguments {
-        bound_type(argument, fuel)?;
-    }
+    *fuel = fuel
+        .checked_sub(summary.arguments.len().saturating_add(1))
+        .ok_or("memory summary type budget exhausted")?;
     *fuel = fuel
         .checked_sub(summary.accesses.len().saturating_add(1))
         .ok_or("memory summary budget exhausted")?;
@@ -7945,7 +7919,6 @@ fn charge_cached_summary(summary: &Summary, fuel: &mut usize) -> Result<(), Stri
         *fuel = fuel
             .checked_sub(access.target.path_cost())
             .ok_or("memory summary budget exhausted")?;
-        bound_type(&access.ty, fuel)?;
     }
     effects::charge_inputs(&summary.effect_inputs, fuel)?;
     for (path, targets) in &summary.pointer_fields {
@@ -8888,9 +8861,6 @@ pub(crate) fn infer_borrowed_context_with_full_context<'a>(
         && let Some(cache) = summary_cache.as_deref()
         && let Some(cached) = cache.get(text_provenance, &root_key)
     {
-        for argument in arguments {
-            bound_type(argument, fuel)?;
-        }
         let cached = std::sync::Arc::clone(cached);
         charge_cached_summary(&cached, fuel)?;
         return Ok((*cached).clone());
@@ -9175,9 +9145,6 @@ fn derive_with_borrowed(
         return Err("memory summary budget exhausted".into());
     }
     *fuel -= 1;
-    for argument in arguments {
-        bound_type(argument, fuel)?;
-    }
     if round.cleanup.is_none()
         && inputs.is_empty()
         && prepared.is_empty()
@@ -9198,6 +9165,9 @@ fn derive_with_borrowed(
             charge_cached_summary(&cached, fuel)?;
             return Ok((*cached).clone());
         }
+    }
+    for argument in arguments {
+        bound_type(argument, fuel)?;
     }
     for (input, value) in inputs {
         *fuel = fuel
@@ -9314,8 +9284,16 @@ fn derive_with_borrowed(
     let Term::Function { result, .. } = signature.callable_signature() else {
         return Err("memory summary requires a function signature".into());
     };
-    let callable_fields = result_callable_bottom(Some(package), result, fuel)?;
-    let code_fields = code_result_bottom(Some(package), result, fuel)?;
+    let callable_fields =
+        round
+            .layout_cache
+            .as_mut()
+            .result_callable_bottom(Some(package), result, fuel)?;
+    let code_fields =
+        round
+            .layout_cache
+            .as_mut()
+            .code_result_bottom(Some(package), result, fuel)?;
     let result_value = if let Term::Computation { result, .. } = result.as_ref() {
         result
     } else {
@@ -9568,18 +9546,12 @@ fn infer_body(
         && result_view != Term::Primitive(Primitive::Void)
         && !infer.local_pointer_value(&result_view)?
     {
-        symbolic_pointer_fields_for(
-            package,
-            &result_view,
-            infer.round.text_provenance,
-            infer.fuel,
-        )
-        .map_err(|reason| {
+        infer.pointer_input_layout(&result_view).map_err(|reason| {
             format!("memory result requires an escape or ownership contract: {reason}")
         })?;
     }
-    infer.callable_field_returns = result_callable_bottom(package, result, infer.fuel)?;
-    infer.code_field_returns = code_result_bottom(package, result, infer.fuel)?;
+    infer.callable_field_returns = infer.result_callable_bottom(result)?;
+    infer.code_field_returns = infer.code_result_bottom(result)?;
     for (index, (binding, parameter)) in function.parameters.iter().zip(parameters).enumerate() {
         infer.step(0)?;
         infer.note_owned_cleanup(&parameter.ty)?;
@@ -9597,7 +9569,7 @@ fn infer_body(
         // Parameter premises also carry closure-code bottom during the
         // worklist. The published named-result lattice omits closure leaves,
         // so it cannot be used to install these input facts.
-        for (fields, _) in owned_callable_bottom(package, &parameter.ty, infer.fuel, true)? {
+        for fields in infer.owned_callable_paths(&parameter.ty, true)? {
             infer.environment.callees.insert(
                 CallablePlace {
                     binding: *binding,
@@ -10305,6 +10277,7 @@ fn infer_closure_with_borrowed_effect_context_full<'a>(
 
 fn closure_transition_slots_for(
     package: &Package,
+    layout_cache: &mut TypeLayoutCache,
     captures: &[nir::program::Capture],
     parameter_count: usize,
     include_code: bool,
@@ -10313,17 +10286,21 @@ fn closure_transition_slots_for(
 ) -> Result<BTreeMap<LocalId, usize>, String> {
     let mut slots = BTreeMap::new();
     for capture in captures {
-        if !symbolic_pointer_fields_for(Some(package), &capture.ty, provenance, fuel)?.is_empty() {
+        if !layout_cache
+            .pointer_input_layout_for(Some(package), &capture.ty, provenance, fuel)?
+            .is_empty()
+        {
             slots.insert(capture.binding, parameter_count + slots.len());
         }
     }
     if include_code {
         for capture in captures {
-            if !slots.contains_key(&capture.binding) {
-                let fields = owned_callable_bottom(Some(package), &capture.ty, fuel, true)?;
-                if !fields.is_empty() {
-                    slots.insert(capture.binding, parameter_count + slots.len());
-                }
+            if !slots.contains_key(&capture.binding)
+                && !layout_cache
+                    .owned_callable_paths(Some(package), &capture.ty, true, fuel)?
+                    .is_empty()
+            {
+                slots.insert(capture.binding, parameter_count + slots.len());
             }
         }
     }
@@ -10350,7 +10327,10 @@ fn infer_closure_with_borrowed_in_round(
         .ok_or("borrowed capture budget exhausted")?;
     let mut pointer_bindings = BTreeSet::new();
     for capture in captures {
-        if !symbolic_pointer_fields_for(Some(package), &capture.ty, round.text_provenance, fuel)?
+        if !round
+            .layout_cache
+            .as_mut()
+            .pointer_input_layout_for(Some(package), &capture.ty, round.text_provenance, fuel)?
             .is_empty()
         {
             pointer_bindings.insert(capture.binding);
@@ -10365,6 +10345,7 @@ fn infer_closure_with_borrowed_in_round(
     };
     let capture_slots = closure_transition_slots_for(
         package,
+        round.layout_cache.as_mut(),
         captures,
         signature_parameters.len(),
         transition_code_captures,
@@ -11063,12 +11044,7 @@ fn infer_closure_pass(
         && completion != Term::Primitive(Primitive::Void)
         && !infer.local_pointer_value(&completion)?
     {
-        symbolic_pointer_fields_for(
-            Some(package),
-            &completion,
-            infer.round.text_provenance,
-            infer.fuel,
-        )?;
+        infer.pointer_input_layout(&completion)?;
     }
     for capture in captures {
         infer.step(0)?;
@@ -11185,9 +11161,7 @@ fn infer_closure_pass(
     )?;
     for (index, (binding, parameter)) in bindings.iter().zip(parameters).enumerate() {
         infer.step(0)?;
-        for fields in
-            owned_callable_bottom(Some(package), &parameter.ty, infer.fuel, true)?.into_keys()
-        {
+        for fields in infer.owned_callable_paths(&parameter.ty, true)? {
             infer.step(fields.len())?;
             infer.input_code_slots.insert(
                 CallablePlace {
@@ -11200,13 +11174,10 @@ fn infer_closure_pass(
                 },
             );
         }
-        for fields in symbolic_pointer_fields_for(
-            Some(package),
-            &parameter.ty,
-            infer.round.text_provenance,
-            infer.fuel,
-        )?
-        .into_keys()
+        for fields in infer
+            .pointer_input_layout(&parameter.ty)?
+            .into_iter()
+            .map(|leaf| leaf.input_fields)
         {
             infer.step(fields.len())?;
             infer.input_pointer_slots.insert(
@@ -11261,7 +11232,7 @@ fn infer_closure_pass(
     }
     infer.install_code_inputs(bindings, parameters, inputs, code_inputs)?;
     infer.record_parameter_cleanup_reads(bindings, parameters, body.source)?;
-    infer.code_field_returns = code_result_bottom(Some(package), result, infer.fuel)?;
+    infer.code_field_returns = infer.code_result_bottom(result)?;
     infer.prepare_private_storage_roots(body)?;
     infer.walk(body, 0)?;
     let completes = !super::pattern_facts::cannot_complete(body, infer.fuel, 0)?;
@@ -12302,5 +12273,106 @@ mod effect_cache_tests {
                 .is_none()
         );
         assert!(cache.get(TextProvenance::Unchecked, &independent).is_some());
+    }
+
+    #[test]
+    fn summary_cache_hit_charges_bounded_cost_without_rewalking_large_terms() {
+        let fn_id = DeclarationId {
+            package: 1,
+            local: 77,
+        };
+        let mut large_ty = Term::Primitive(Primitive::U32);
+        for _ in 0..8 {
+            large_ty = Term::Tuple(vec![large_ty.clone(), large_ty]);
+        }
+        // Check that `bound_type` on `large_ty` indeed exceeds our tight hit budget.
+        assert!(bound_type(&large_ty, &mut 50).is_err());
+
+        let summary = Summary {
+            declaration: fn_id,
+            arguments: vec![large_ty.clone()],
+            signature: Term::Function {
+                parameters: vec![nir::Parameter {
+                    sort: nir::Sort::Runtime,
+                    ty: large_ty.clone(),
+                }],
+                result: Box::new(large_ty.clone()),
+            },
+            callable_inputs: BTreeMap::new(),
+            prepared_inputs: BTreeMap::new(),
+            borrowed_inputs: BTreeMap::new(),
+            effect_inputs: vec![],
+            accesses: vec![Access {
+                target: ParameterPlace {
+                    parameter: 0,
+                    input_fields: vec![],
+                    through: vec![],
+                    conditions: BTreeMap::new(),
+                    fields: vec![],
+                },
+                ty: large_ty.clone(),
+                write: false,
+                read_value: true,
+            }],
+            may_reject: false,
+            may_run_cleanup: false,
+            result_targets: None,
+            pointer_fields: BTreeMap::new(),
+            callable_result: CallableResult::NoReturn,
+            callable_fields: BTreeMap::new(),
+            code_fields: BTreeMap::new(),
+        };
+        let mut cache = SummaryCache::default();
+        cache.insert(
+            TextProvenance::Unchecked,
+            iir::InstanceKey {
+                declaration: fn_id,
+                arguments: vec![large_ty.clone()].into(),
+            },
+            std::sync::Arc::new(summary),
+        );
+
+        let package = Package::default();
+        let mut tight = 20;
+        let hit = infer_borrowed_context_with_full_context(
+            &package,
+            fn_id,
+            std::slice::from_ref(&large_ty),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            None,
+            TextProvenance::Unchecked,
+            Some(&mut cache),
+            None,
+            &mut tight,
+        )
+        .expect("SummaryCache hit should not re-traverse cached Term trees");
+        assert_eq!(hit.accesses.len(), 1);
+        assert!(tight < 20);
+
+        let err = infer_borrowed_context_with_full_context(
+            &package,
+            fn_id,
+            std::slice::from_ref(&large_ty),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &[],
+            &BTreeMap::new(),
+            None,
+            None,
+            None,
+            None,
+            TextProvenance::Unchecked,
+            Some(&mut cache),
+            None,
+            &mut 0,
+        )
+        .unwrap_err();
+        assert!(err.contains("exhausted"), "{err}");
     }
 }

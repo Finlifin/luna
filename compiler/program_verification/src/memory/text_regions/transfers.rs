@@ -2,7 +2,7 @@
 //! Depth and fuel are charged by `Query::expr`, before dispatch.
 use super::*;
 
-impl Query<'_, '_, '_, '_, '_> {
+impl Query<'_, '_, '_, '_, '_, '_> {
     #[inline(never)]
     pub(super) fn transfer_function(
         &mut self,
@@ -110,7 +110,7 @@ impl Query<'_, '_, '_, '_, '_> {
         let K::AddressOf(place) = &expr.kind else {
             unreachable!("checked text transfer variant")
         };
-        let may_hold = type_may_hold_text_or_callable(self.package, &place.ty, self.fuel)?;
+        let may_hold = self.type_may_hold_text_or_callable(&place.ty)?;
         let mut empty = Some(Regions::new());
         let mut place = place.as_ref();
         let mut path = Vec::new();
@@ -162,7 +162,7 @@ impl Query<'_, '_, '_, '_, '_> {
             return Ok(None);
         };
         let Some(target) = value.places.get_mut(&vec![]).and_then(Option::as_mut) else {
-            if !type_may_hold_text_or_callable(self.package, &expr.ty, self.fuel)? {
+            if !self.type_may_hold_text_or_callable(&expr.ty)? {
                 return Ok(Some(Regions::new()));
             }
             return Err("text descriptor pointer target is unknown".into());
@@ -195,7 +195,7 @@ impl Query<'_, '_, '_, '_, '_> {
             .and_then(Option::as_ref)
             .filter(|targets| !targets.is_empty())
         else {
-            if !type_may_hold_text_or_callable(self.package, &expr.ty, self.fuel)? {
+            if !self.type_may_hold_text_or_callable(&expr.ty)? {
                 return Ok(Some(Regions::new()));
             }
             return Err("text descriptor pointer target is unknown".into());
@@ -242,7 +242,7 @@ impl Query<'_, '_, '_, '_, '_> {
             .and_then(Option::as_ref)
             .filter(|targets| !targets.is_empty())
         else {
-            if !type_may_hold_text_or_callable(self.package, &value.ty, self.fuel)?
+            if !self.type_may_hold_text_or_callable(&value.ty)?
                 && value_regions.text.is_empty()
                 && value_regions.code.is_empty()
                 && value_regions.places.is_empty()
@@ -1262,7 +1262,7 @@ impl Query<'_, '_, '_, '_, '_> {
         returned: &mut Option<Regions>,
         next: usize,
     ) -> Result<Option<Regions>, String> {
-        if type_may_hold_text_or_callable(self.package, &value.ty, self.fuel)? {
+        if self.type_may_hold_text_or_callable(&value.ty)? {
             return Err("text effect resume cannot transmit text or callables".into());
         }
         self.expr(value, locals, returned, next)?;
@@ -1278,11 +1278,11 @@ impl Query<'_, '_, '_, '_, '_> {
         returned: &mut Option<Regions>,
         next: usize,
     ) -> Result<Option<Regions>, String> {
-        if type_may_hold_text_or_callable(self.package, &expr.ty, self.fuel)? {
+        if self.type_may_hold_text_or_callable(&expr.ty)? {
             return Err("text effect request cannot return text or callables".into());
         }
         for argument in arguments {
-            if type_may_hold_text_or_callable(self.package, &argument.ty, self.fuel)? {
+            if self.type_may_hold_text_or_callable(&argument.ty)? {
                 return Err("text effect request cannot transmit text or callables".into());
             }
             if self.expr(argument, locals, returned, next)?.is_none() {
@@ -1308,11 +1308,11 @@ impl Query<'_, '_, '_, '_, '_> {
                 return Err("text effect handler requires a callable signature".into());
             };
             for parameter in parameters {
-                if type_may_hold_text_or_callable(self.package, &parameter.ty, self.fuel)? {
+                if self.type_may_hold_text_or_callable(&parameter.ty)? {
                     return Err("text effect handler cannot transmit text or callables".into());
                 }
             }
-            if type_may_hold_text_or_callable(self.package, result, self.fuel)? {
+            if self.type_may_hold_text_or_callable(result)? {
                 return Err("text effect handler cannot return text or callables".into());
             }
             handler_subjects.push(Term::Tuple(

@@ -556,6 +556,8 @@ fn prepare_source_impl(
                     generated_layouts.insert(ty);
                     view.enums.push(definition);
                 }
+            } else {
+                retained_caches.on_graph_extended();
             }
             for instance in &graph.functions {
                 if !validated_instances.insert(instance.key.clone()) {

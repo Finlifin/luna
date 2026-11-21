@@ -883,19 +883,26 @@ fn validate_enum_domains(
     package: Option<&Package>,
     subject: &Term,
     domains: &EnumDomains,
+    layout_cache: Option<&mut super::memory::TypeLayoutCache>,
     fuel: &mut usize,
     source: SourceRange,
 ) -> Result<(), Error> {
     if domains.is_empty() {
         return Err(error(source, "empty enum domain premise"));
     }
+    let mut layout_cache = layout_cache.map_or_else(
+        Default::default,
+        super::memory::TypeLayoutCacheStorage::Borrowed,
+    );
     for (path, tags) in domains {
         if tags.is_empty() {
             return Err(error(source, "empty enum tag domain"));
         }
         super::memory::bound_type(subject, fuel).map_err(|e| error(source, e))?;
         let ty = owned_field_type(package, subject, path, fuel, source)?;
-        let variants = super::memory::owned_variant_fields(package, &ty, fuel)
+        let variants = layout_cache
+            .as_mut()
+            .owned_variant_fields(package, &ty, fuel)
             .map_err(|reason| error(source, reason))?;
         if tags.iter().any(|tag| *tag >= variants.len()) {
             return Err(error(source, "enum premise tag out of bounds"));
@@ -2232,6 +2239,10 @@ pub(crate) struct ReturnResultCache {
 }
 
 impl ReturnResultCache {
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
+
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -14987,6 +14998,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
             analyzer.package,
             param_ty,
             &input.domains,
+            Some(analyzer.layout_cache.as_mut()),
             &mut analyzer.fuel,
             source,
         )?;
@@ -16027,7 +16039,14 @@ fn memory_code_definitions_at<'a>(
                     let mut prepared_captures = BTreeMap::new();
                     for capture in captures {
                         if let Some(domains) = candidate.enum_captures.get(&root(capture.binding)) {
-                            validate_enum_domains(package, &capture.ty, domains, fuel, source)?;
+                            validate_enum_domains(
+                                package,
+                                &capture.ty,
+                                domains,
+                                None,
+                                fuel,
+                                source,
+                            )?;
                             for path in
                                 callable_value_paths(package, &capture.ty, fuel, source, depth + 1)?
                             {
@@ -16412,11 +16431,35 @@ fn infer_callable_memory_with_borrowed_full_context<'b>(
     declarations: Option<&'b super::declarations::Metadata<'b>>,
     text_provenance: super::memory::TextProvenance,
     summary_cache: Option<&'b mut super::memory::SummaryCache>,
-    layout_cache: Option<&'b mut super::memory::TypeLayoutCache>,
+    mut layout_cache: Option<&'b mut super::memory::TypeLayoutCache>,
     move_layouts: Option<&'b mut MoveLayoutCache>,
     fuel: &mut usize,
     source: SourceRange,
 ) -> Result<super::memory::Summary, String> {
+    if inputs.is_empty()
+        && enums.is_empty()
+        && effects.is_empty()
+        && borrowed.is_empty()
+        && (!include_cleanup || cleanup.is_none())
+    {
+        return super::memory::infer_borrowed_context_with_full_context(
+            package,
+            declaration,
+            arguments,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            effects,
+            &BTreeMap::new(),
+            None,
+            declaration_source,
+            method_callees,
+            declarations,
+            text_provenance,
+            summary_cache,
+            layout_cache,
+            fuel,
+        );
+    }
     let mut move_layouts =
         move_layouts.map_or_else(Default::default, MoveLayoutCacheStorage::Borrowed);
     let (function, body_arguments) = package
@@ -16493,8 +16536,15 @@ fn infer_callable_memory_with_borrowed_full_context<'b>(
         let parameter = parameters
             .get(premise.parameter)
             .ok_or("memory enum input parameter is missing")?;
-        validate_enum_domains(Some(package), &parameter.ty, &premise.domains, fuel, source)
-            .map_err(|e| e.to_string())?;
+        validate_enum_domains(
+            Some(package),
+            &parameter.ty,
+            &premise.domains,
+            layout_cache.as_deref_mut(),
+            fuel,
+            source,
+        )
+        .map_err(|e| e.to_string())?;
         for fields in move_layouts
             .as_mut()
             .callable_value_paths(Some(package), &parameter.ty, fuel, source)
@@ -16877,7 +16927,7 @@ fn import_callable_evidence(
             .iter()
             .find(|field| root(field.binding) == *binding)
             .ok_or_else(|| error(source, "enum evidence refers to an unknown capture"))?;
-        validate_enum_domains(package, &field.ty, domains, fuel, source)?;
+        validate_enum_domains(package, &field.ty, domains, None, fuel, source)?;
         result
             .enum_captures
             .insert(*binding, copy_enum_domains(domains, fuel, source)?);

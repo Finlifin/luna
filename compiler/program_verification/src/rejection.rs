@@ -16,8 +16,10 @@ struct Instance {
     declaration: DeclarationId,
     arguments: Arc<[Term]>,
 }
+
 #[derive(Clone)]
 struct Substitution(Arc<nir::DeclarationSubstitution<'static>>);
+
 impl Substitution {
     fn new(
         parameters: &[DeclarationId],
@@ -33,12 +35,14 @@ impl Substitution {
             .map_err(|_| "rejection substitution ownership budget exhausted")?;
         Ok(Self(Arc::new(owned)))
     }
+
     fn ty(&self, ty: &Term, fuel: &mut usize) -> Result<Term, &'static str> {
         self.0
             .instantiate_bounded(ty, fuel)
             .map_err(|_| "invalid rejection type substitution or exhausted budget")
     }
 }
+
 fn instance(
     callee: &Expr,
     context: Option<&Substitution>,
@@ -67,6 +71,7 @@ fn instance(
         arguments: actual.into(),
     }))
 }
+
 enum Work<'a> {
     Expr(&'a Expr, Substitution),
     Pattern(&'a Pattern, Substitution),
@@ -81,6 +86,12 @@ enum Work<'a> {
 #[derive(Default)]
 pub(crate) struct Memo {
     completed: HashMap<Instance, bool>,
+}
+
+impl Memo {
+    pub(crate) fn clear(&mut self) {
+        self.completed.clear();
+    }
 }
 
 enum MemoStorage<'a> {
@@ -109,17 +120,20 @@ pub(super) struct Cache<'a> {
     declarations: std::rc::Rc<super::declarations::Metadata<'a>>,
     memo: MemoStorage<'a>,
 }
+
 impl<'a> Cache<'a> {
     pub(super) fn new(package: Option<&'a Package>) -> Self {
         Self::with_declarations(std::rc::Rc::new(super::declarations::Metadata::new(
             package,
         )))
     }
+
     pub(super) fn with_declarations(
         declarations: std::rc::Rc<super::declarations::Metadata<'a>>,
     ) -> Self {
         Self::with_declarations_and_memo(declarations, None)
     }
+
     pub(super) fn with_declarations_and_memo(
         declarations: std::rc::Rc<super::declarations::Metadata<'a>>,
         memo: Option<&'a mut Memo>,
@@ -133,9 +147,11 @@ impl<'a> Cache<'a> {
             ),
         }
     }
+
     pub(super) fn memo_mut(&mut self) -> &mut Memo {
         self.memo.as_mut()
     }
+
     #[cfg(test)]
     pub(super) fn may_reject(
         &mut self,
@@ -144,6 +160,7 @@ impl<'a> Cache<'a> {
     ) -> Result<bool, &'static str> {
         self.may_reject_with_cleanup(callee, fuel, &mut |_, _| Ok(true))
     }
+
     pub(super) fn may_reject_with_cleanup(
         &mut self,
         callee: &Expr,
@@ -158,6 +175,7 @@ impl<'a> Cache<'a> {
         };
         self.query(root, fuel, cleanup)
     }
+
     pub(super) fn function_may_reject_with_cleanup(
         &mut self,
         declaration: DeclarationId,
@@ -181,6 +199,7 @@ impl<'a> Cache<'a> {
             cleanup,
         )
     }
+
     fn query(
         &mut self,
         root: Instance,
@@ -611,9 +630,11 @@ fn scan<'a>(
 mod tests {
     use super::*;
     use nir::program::{Function, Literal, SourceRange};
+
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 0, local }
     }
+
     fn expr(kind: K) -> Expr {
         Expr {
             source: SourceRange { start: 0, end: 1 },
@@ -621,9 +642,11 @@ mod tests {
             kind,
         }
     }
+
     fn callee(local: u32) -> Expr {
         expr(K::Function(id(local)))
     }
+
     fn call(local: u32) -> Expr {
         expr(K::Call {
             callee: Box::new(callee(local)),
@@ -632,18 +655,21 @@ mod tests {
             parameter_bindings: vec![],
         })
     }
+
     fn block(statements: Vec<Expr>) -> Expr {
         expr(K::Block {
             statements,
             result: None,
         })
     }
+
     fn rejected() -> Expr {
         expr(K::CheckPredicate(Box::new(Expr {
             ty: Term::Primitive(Primitive::Bool),
             ..expr(K::Literal(Literal::Bool(false)))
         })))
     }
+
     fn function(local: u32, body: Expr) -> Function {
         Function {
             interface: nir::program::FunctionDeclaration {
@@ -675,6 +701,7 @@ mod tests {
             runtime_deliveries: Default::default(),
         }
     }
+
     #[test]
     fn error_tags_preserve_operand_and_cleanup_rejection_without_becoming_rejection() {
         for conversion in [
@@ -886,17 +913,20 @@ mod tests {
             arguments,
         })
     }
+
     fn variable(local: u32) -> Term {
         Term::Rigid {
             declaration: id(local),
             sort: nir::Sort::Type,
         }
     }
+
     fn generic_function(local: u32, parameter: u32, body: Expr) -> Function {
         let mut f = function(local, body);
         f.type_parameters = vec![id(parameter)];
         f
     }
+
     fn generic_call(local: u32, argument: Term) -> Expr {
         expr(K::Call {
             callee: Box::new(generic_callee(local, vec![argument])),
@@ -1224,6 +1254,7 @@ mod tests {
             assert_eq!(budget, 0);
         }
     }
+
     #[test]
     fn exhausted_search_does_not_publish_partial_negative_results() {
         let package = Package {
@@ -1238,6 +1269,7 @@ mod tests {
         assert!(cache.may_reject(&callee(0), &mut 1000).unwrap());
         assert!(cache.may_reject(&callee(0), &mut 1).unwrap());
     }
+
     #[test]
     fn positive_root_does_not_poison_an_unrelated_visited_callee() {
         let package = Package {
@@ -1253,6 +1285,7 @@ mod tests {
         assert!(!cache.may_reject(&callee(2), &mut 100).unwrap());
         assert!(cache.may_reject(&callee(1), &mut 100).unwrap());
     }
+
     #[test]
     fn new_package_analysis_does_not_reuse_old_definition_results() {
         let mut package = Package {

@@ -5,7 +5,7 @@ mod transfers;
 use super::*;
 use std::collections::{HashSet, VecDeque};
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TextRegionOrigin {
     Static,
     Parameter {
@@ -37,11 +37,27 @@ enum DescriptorRoot {
     Frame(usize),
 }
 
+impl std::hash::Hash for DescriptorRoot {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Local(id) => {
+                0u8.hash(state);
+                id.owner.hash(state);
+                id.index.hash(state);
+            }
+            Self::Frame(id) => {
+                1u8.hash(state);
+                id.hash(state);
+            }
+        }
+    }
+}
+
 type DescriptorTargets = BTreeSet<(DescriptorRoot, Vec<usize>)>;
 
 type DescriptorPlaces = BTreeMap<Vec<usize>, Option<DescriptorTargets>>;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 struct Regions {
     text: TextFields,
     // None is unknown code or incompatible closure environments, not absence.
@@ -243,7 +259,7 @@ pub(super) fn type_may_hold_text_or_callable(
     Ok(walk(package, ty, fuel, 0, &mut visiting, &mut clean_false)?.0)
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 struct StorageKey {
     declaration: DeclarationId,
     arguments: Vec<Term>,
@@ -692,6 +708,55 @@ pub fn infer_text_regions(
     infer_text_regions_with_metadata(package, &declarations, declaration, arguments, fuel)
 }
 
+/// Package-scoped memoization for closed `infer_text_regions` summaries.
+/// Failed or unconverged analyses are never cached; cache hits continue deducting
+/// bounded work from `fuel` so exhausted budgets fail closed.
+#[derive(Default)]
+pub struct TextRegionCache {
+    summaries: HashMap<iir::InstanceKey, Summary>,
+}
+
+impl TextRegionCache {
+    pub fn clear(&mut self) {
+        self.summaries.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.summaries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.summaries.is_empty()
+    }
+}
+
+enum TextRegionCacheStorage<'a> {
+    Owned(TextRegionCache),
+    Borrowed(&'a mut TextRegionCache),
+}
+
+impl Default for TextRegionCacheStorage<'_> {
+    fn default() -> Self {
+        Self::Owned(TextRegionCache::default())
+    }
+}
+
+impl TextRegionCacheStorage<'_> {
+    fn as_ref(&self) -> &TextRegionCache {
+        match self {
+            Self::Owned(cache) => cache,
+            Self::Borrowed(cache) => cache,
+        }
+    }
+
+    fn as_borrowed_mut(&mut self) -> Option<&mut TextRegionCache> {
+        match self {
+            Self::Owned(_) => None,
+            Self::Borrowed(cache) => Some(cache),
+        }
+    }
+}
+
 pub(crate) fn infer_text_regions_with_metadata(
     package: &Package,
     declarations: &crate::declarations::Metadata<'_>,
@@ -706,18 +771,21 @@ pub(crate) fn infer_text_regions_with_metadata(
         declarations,
         &mut methods,
         None,
+        None,
         declaration,
         arguments,
         fuel,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn infer_text_regions_with_context<'a>(
     package: &'a Package,
     source: Option<::materialization::DeclarationSource<'a>>,
     declarations: &crate::declarations::Metadata<'a>,
     methods: &mut MethodCallees,
     layout_cache: Option<&mut TypeLayoutCache>,
+    text_cache: Option<&mut TextRegionCache>,
     declaration: DeclarationId,
     arguments: &[Term],
     fuel: &mut usize,
@@ -732,11 +800,13 @@ pub(crate) fn infer_text_regions_with_context<'a>(
         local_callables: BTreeMap::new(),
         closed_closures: vec![],
         storage_entries: vec![],
+        storage_index: HashMap::new(),
         storage_pending: VecDeque::new(),
         storage_scheduled: HashSet::new(),
         storage_dependents: HashMap::new(),
         storage_cache_dependents: HashMap::new(),
         storage_outer_dependents: HashMap::new(),
+        storage_outer_dependents_set: HashMap::new(),
         storage_current: None,
         solving_storage: false,
         next_storage_frame: 0,
@@ -745,12 +815,14 @@ pub(crate) fn infer_text_regions_with_context<'a>(
         pending: VecDeque::new(),
         scheduled: HashSet::new(),
         dependents: HashMap::new(),
+        dependents_set: HashMap::new(),
         reads: vec![],
         loops: vec![],
         exits: vec![],
         cache: HashMap::new(),
         methods,
         layout_cache: layout_cache.map_or_else(Default::default, TypeLayoutCacheStorage::Borrowed),
+        external_cache: text_cache.map_or_else(Default::default, TextRegionCacheStorage::Borrowed),
     }
     .solve(declaration, arguments)
     .map(|summary| TextRegionSummary {
@@ -761,7 +833,7 @@ pub(crate) fn infer_text_regions_with_context<'a>(
     })
 }
 
-struct Query<'a, 'd, 'm, 'f, 'l> {
+struct Query<'a, 'd, 'm, 'f, 'l, 'c> {
     package: &'a Package,
     source: Option<::materialization::DeclarationSource<'a>>,
     declarations: &'d crate::declarations::Metadata<'a>,
@@ -771,11 +843,13 @@ struct Query<'a, 'd, 'm, 'f, 'l> {
     local_callables: BTreeMap<LocalId, CodeValue>,
     closed_closures: Vec<ClosedClosure>,
     storage_entries: Vec<StorageEntry>,
+    storage_index: HashMap<StorageKey, usize>,
     storage_pending: VecDeque<usize>,
     storage_scheduled: HashSet<usize>,
     storage_dependents: HashMap<usize, BTreeSet<usize>>,
     storage_cache_dependents: HashMap<SummaryKey, BTreeSet<usize>>,
     storage_outer_dependents: HashMap<usize, Vec<SummaryKey>>,
+    storage_outer_dependents_set: HashMap<usize, HashSet<SummaryKey>>,
     storage_current: Option<usize>,
     solving_storage: bool,
     next_storage_frame: usize,
@@ -784,15 +858,17 @@ struct Query<'a, 'd, 'm, 'f, 'l> {
     pending: VecDeque<SummaryKey>,
     scheduled: HashSet<SummaryKey>,
     dependents: HashMap<SummaryKey, Vec<SummaryKey>>,
+    dependents_set: HashMap<SummaryKey, HashSet<SummaryKey>>,
     reads: Vec<BTreeSet<TextRegionOrigin>>,
     loops: Vec<LoopRegions>,
     exits: Vec<Option<ExitRegions>>,
     cache: HashMap<SummaryKey, Summary>,
     methods: &'m mut MethodCallees,
     layout_cache: TypeLayoutCacheStorage<'l>,
+    external_cache: TextRegionCacheStorage<'c>,
 }
 
-impl Query<'_, '_, '_, '_, '_> {
+impl Query<'_, '_, '_, '_, '_, '_> {
     pub(super) fn borrowed_input_layout(
         &mut self,
         ty: &Term,
@@ -800,6 +876,18 @@ impl Query<'_, '_, '_, '_, '_> {
         self.layout_cache
             .as_mut()
             .borrowed_input_layout(Some(self.package), ty, self.fuel)
+    }
+
+    pub(super) fn type_may_hold_text_or_callable(&mut self, ty: &Term) -> Result<bool, String> {
+        self.layout_cache
+            .as_mut()
+            .type_may_hold_text_or_callable(self.package, ty, self.fuel)
+    }
+
+    pub(super) fn owned_callable_paths(&mut self, ty: &Term) -> Result<Vec<Vec<usize>>, String> {
+        self.layout_cache
+            .as_mut()
+            .owned_callable_paths(Some(self.package), ty, true, self.fuel)
     }
 
     fn record_exit(&mut self, locals: &Locals) -> Result<(), String> {
@@ -1334,6 +1422,22 @@ impl Query<'_, '_, '_, '_, '_> {
     }
 
     fn solve(&mut self, declaration: DeclarationId, arguments: &[Term]) -> Result<Summary, String> {
+        if let Some(summary) = self
+            .external_cache
+            .as_ref()
+            .summaries
+            .get(&iir::InstanceKey {
+                declaration,
+                arguments: arguments.to_vec().into(),
+            })
+        {
+            charge(self.fuel, arguments.len().saturating_add(1))?;
+            if let Some(returned) = &summary.returned {
+                charge_regions(returned, self.fuel)?;
+            }
+            charge(self.fuel, summary.reads.len())?;
+            return Ok(summary.clone());
+        }
         self.function(declaration, arguments)?;
         let mut deferred = Vec::<(SummaryKey, String)>::new();
         while let Some(key) = self.pending.pop_front() {
@@ -1381,7 +1485,18 @@ impl Query<'_, '_, '_, '_, '_> {
         if let Some((_, error)) = deferred.into_iter().next() {
             return Err(error);
         }
-        self.function(declaration, arguments)
+        let result = self.function(declaration, arguments)?;
+        if let Some(cache) = self.external_cache.as_borrowed_mut() {
+            for (key, summary) in &self.cache {
+                if key.callbacks.is_empty() {
+                    cache
+                        .summaries
+                        .entry(key.instance.clone())
+                        .or_insert_with(|| summary.clone());
+                }
+            }
+        }
+        Ok(result)
     }
 
     fn function(
@@ -1403,6 +1518,23 @@ impl Query<'_, '_, '_, '_, '_> {
             charge(self.fuel, path.len())?;
             charge_callback(callback, self.fuel)?;
         }
+        if callbacks.is_empty()
+            && let Some(summary) = self
+                .external_cache
+                .as_ref()
+                .summaries
+                .get(&iir::InstanceKey {
+                    declaration,
+                    arguments: arguments.to_vec().into(),
+                })
+        {
+            charge(self.fuel, arguments.len().saturating_add(1))?;
+            if let Some(returned) = &summary.returned {
+                charge_regions(returned, self.fuel)?;
+            }
+            charge(self.fuel, summary.reads.len())?;
+            return Ok(summary.clone());
+        }
         for argument in arguments {
             bound_type(argument, self.fuel)?;
         }
@@ -1414,19 +1546,21 @@ impl Query<'_, '_, '_, '_, '_> {
             callbacks: callbacks.to_vec(),
         };
         if let Some(caller) = &self.current {
-            let callers = self.dependents.entry(key.clone()).or_default();
-            charge(self.fuel, callers.len().saturating_add(1))?;
-            if !callers.contains(caller) {
-                callers.push(caller.clone());
+            charge(self.fuel, 1)?;
+            let seen = self.dependents_set.entry(key.clone()).or_default();
+            if seen.insert(caller.clone()) {
+                self.dependents
+                    .entry(key.clone())
+                    .or_default()
+                    .push(caller.clone());
             }
         }
         if let Some(storage_caller) = self.storage_current {
-            let callers = self
-                .storage_cache_dependents
+            charge(self.fuel, 1)?;
+            self.storage_cache_dependents
                 .entry(key.clone())
-                .or_default();
-            charge(self.fuel, callers.len().saturating_add(1))?;
-            callers.insert(storage_caller);
+                .or_default()
+                .insert(storage_caller);
         }
         if !self.cache.contains_key(&key) {
             // Bottom means no observed normal return yet, not static storage.
@@ -1524,8 +1658,9 @@ impl Query<'_, '_, '_, '_, '_> {
                 continue;
             }
             let mut regions = Regions::new();
-            regions.code = owned_callable_bottom(Some(self.package), &ty.ty, self.fuel, true)?
-                .into_keys()
+            regions.code = self
+                .owned_callable_paths(&ty.ty)?
+                .into_iter()
                 .map(|path| (path, None))
                 .collect();
             for (_, path, code) in key
@@ -1554,8 +1689,9 @@ impl Query<'_, '_, '_, '_, '_> {
         for (offset, env) in body.env_parameters.iter().enumerate() {
             let parameter = parameters.len() + offset;
             let mut regions = Regions::new();
-            regions.code = owned_callable_bottom(Some(self.package), &env.ty, self.fuel, true)?
-                .into_keys()
+            regions.code = self
+                .owned_callable_paths(&env.ty)?
+                .into_iter()
                 .map(|path| (path, None))
                 .collect();
             for (_, path, code) in key
@@ -1723,18 +1859,12 @@ impl Query<'_, '_, '_, '_, '_> {
             readonly: self.readonly_storage,
         };
         let cost = before.saturating_sub(*self.fuel).saturating_add(1);
-        let mut found = None;
-        for (id, entry) in self.storage_entries.iter().enumerate() {
-            charge(self.fuel, entry.cost.saturating_add(cost))?;
-            if entry.key == key {
-                found = Some(id);
-                break;
-            }
-        }
-        let id = if let Some(id) = found {
+        charge(self.fuel, cost)?;
+        let id = if let Some(&id) = self.storage_index.get(&key) {
             id
         } else {
             let id = self.storage_entries.len();
+            self.storage_index.insert(key.clone(), id);
             self.storage_entries.push(StorageEntry {
                 key,
                 summary: StorageSummary::default(),
@@ -1744,15 +1874,20 @@ impl Query<'_, '_, '_, '_, '_> {
             id
         };
         if let Some(caller) = self.storage_current {
-            let callers = self.storage_dependents.entry(id).or_default();
-            charge(self.fuel, callers.len().saturating_add(1))?;
-            callers.insert(caller);
+            charge(self.fuel, 1)?;
+            self.storage_dependents
+                .entry(id)
+                .or_default()
+                .insert(caller);
         }
         if let Some(outer) = &self.current {
-            let outers = self.storage_outer_dependents.entry(id).or_default();
-            charge(self.fuel, outers.len().saturating_add(1))?;
-            if !outers.contains(outer) {
-                outers.push(outer.clone());
+            charge(self.fuel, 1)?;
+            let seen = self.storage_outer_dependents_set.entry(id).or_default();
+            if seen.insert(outer.clone()) {
+                self.storage_outer_dependents
+                    .entry(id)
+                    .or_default()
+                    .push(outer.clone());
             }
         }
         if !self.solving_storage && !self.storage_pending.is_empty() {
@@ -2411,8 +2546,7 @@ impl Query<'_, '_, '_, '_, '_> {
                 BTreeMap::from([(vec![], BTreeSet::from([TextRegionOrigin::Static]))]),
             ))),
             K::ComptimeValue(_) | K::AssociatedValue { .. } => {
-                if !owned_callable_bottom(Some(self.package), &expr.ty, self.fuel, true)?.is_empty()
-                {
+                if !self.owned_callable_paths(&expr.ty)?.is_empty() {
                     return Err("text region comptime value cannot embed a callable".into());
                 }
                 if matches!(expr.ty, Term::Primitive(Primitive::Type | Primitive::Unit)) {
@@ -3241,5 +3375,274 @@ mod tests {
         let err = infer_text_regions_with_metadata(&package, &metadata, bad_fn, &[], &mut fuel)
             .expect_err("effectful str computation without backing origin must still fail closed");
         assert!(err.contains("backing-region origin"), "{err}");
+    }
+
+    #[test]
+    fn text_region_cache_reuses_converged_roots_and_never_caches_errors() {
+        let str_ty = Term::Primitive(Primitive::Str);
+        let helper_fn = decl(1);
+        let root_a_fn = decl(2);
+        let root_b_fn = decl(3);
+        let bad_fn = decl(4);
+
+        let static_str = expr(
+            str_ty.clone(),
+            K::Literal(nir::program::Literal::String("hello".into())),
+        );
+        let mut stmts = Vec::new();
+        let b0 = lid(1);
+        for i in 0..120 {
+            let local = lid(i + 1);
+            stmts.push(expr(
+                str_ty.clone(),
+                K::Let {
+                    binding: local,
+                    value: Box::new(static_str.clone()),
+                },
+            ));
+        }
+        let call_helper = expr(
+            str_ty.clone(),
+            K::Call {
+                callee: Box::new(expr(
+                    Term::Function {
+                        parameters: vec![],
+                        result: Box::new(str_ty.clone()),
+                    },
+                    K::Function(helper_fn),
+                )),
+                arguments: vec![],
+                env_arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        );
+        let package = Package {
+            functions: vec![
+                Function {
+                    interface: fn_decl(helper_fn, "helper", vec![], vec![], str_ty.clone()),
+                    body: expr(
+                        str_ty.clone(),
+                        K::Block {
+                            statements: stmts,
+                            result: Some(Box::new(expr(str_ty.clone(), K::Local(b0)))),
+                        },
+                    ),
+                    runtime_deliveries: Default::default(),
+                },
+                Function {
+                    interface: fn_decl(root_a_fn, "root_a", vec![], vec![], str_ty.clone()),
+                    body: call_helper.clone(),
+                    runtime_deliveries: Default::default(),
+                },
+                Function {
+                    interface: fn_decl(root_b_fn, "root_b", vec![], vec![], str_ty.clone()),
+                    body: call_helper,
+                    runtime_deliveries: Default::default(),
+                },
+                Function {
+                    interface: fn_decl(bad_fn, "bad", vec![], vec![], str_ty.clone()),
+                    body: expr(str_ty, K::Tuple(vec![])),
+                    runtime_deliveries: Default::default(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let metadata = crate::declarations::Metadata::new(Some(&package));
+        let mut methods = MethodCallees::default();
+        let mut layouts = TypeLayoutCache::default();
+        let mut text_cache = TextRegionCache::default();
+
+        // Failing analysis must not populate TextRegionCache.
+        let err = infer_text_regions_with_context(
+            &package,
+            None,
+            &metadata,
+            &mut methods,
+            Some(&mut layouts),
+            Some(&mut text_cache),
+            bad_fn,
+            &[],
+            &mut 20_000,
+        )
+        .unwrap_err();
+        assert!(err.contains("backing-region origin"), "{err}");
+        assert!(text_cache.is_empty());
+
+        // Insufficient fuel must fail and also leave TextRegionCache untouched.
+        assert!(
+            infer_text_regions_with_context(
+                &package,
+                None,
+                &metadata,
+                &mut methods,
+                Some(&mut layouts),
+                Some(&mut text_cache),
+                root_a_fn,
+                &[],
+                &mut 50,
+            )
+            .is_err()
+        );
+        assert!(text_cache.is_empty());
+
+        let mut cold_fuel = 50_000;
+        let expected = infer_text_regions_with_context(
+            &package,
+            None,
+            &metadata,
+            &mut methods,
+            Some(&mut layouts),
+            Some(&mut text_cache),
+            root_a_fn,
+            &[],
+            &mut cold_fuel,
+        )
+        .expect("cold root_a succeeds");
+        let cold_cost = 50_000 - cold_fuel;
+        assert!(cold_cost > 200);
+        assert_eq!(text_cache.len(), 2);
+
+        // Warm call to root_b reuses converged helper summary under tiny budget (< cold_cost).
+        let mut tight_callee = 30;
+        let warm_b = infer_text_regions_with_context(
+            &package,
+            None,
+            &metadata,
+            &mut methods,
+            Some(&mut layouts),
+            Some(&mut text_cache),
+            root_b_fn,
+            &[],
+            &mut tight_callee,
+        )
+        .expect("warm root_b reuses cached helper under tight budget");
+        assert_eq!(warm_b.reads, expected.reads);
+
+        // Warm root lookup also reuses cache directly and fails closed at 0 fuel.
+        let mut tight_root = 5;
+        let warm_a = infer_text_regions_with_context(
+            &package,
+            None,
+            &metadata,
+            &mut methods,
+            Some(&mut layouts),
+            Some(&mut text_cache),
+            root_a_fn,
+            &[],
+            &mut tight_root,
+        )
+        .expect("warm root_a hits TextRegionCache directly");
+        assert_eq!(warm_a, expected);
+        assert!(
+            infer_text_regions_with_context(
+                &package,
+                None,
+                &metadata,
+                &mut methods,
+                Some(&mut layouts),
+                Some(&mut text_cache),
+                root_a_fn,
+                &[],
+                &mut 0,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn text_region_storage_index_avoids_quadratic_budget_across_distinct_storage_calls() {
+        let box_decl = decl(10);
+        let box_ty = Term::Nominal {
+            declaration: box_decl,
+            arguments: vec![],
+        };
+        let ptr_box_ty = Term::Pointer(Box::new(box_ty.clone()));
+        let str_ty = Term::Primitive(Primitive::Str);
+        let void_ty = Term::Primitive(Primitive::Void);
+        let fn_sig = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: ptr_box_ty.clone(),
+            }],
+            result: Box::new(void_ty.clone()),
+        };
+
+        let caller_fn = decl(1);
+        let param_p = lid(0);
+        let mut functions = Vec::new();
+        let mut statements = Vec::new();
+        for i in 0..60u32 {
+            let callee_id = decl(100 + i);
+            let p_arg = lid(10);
+            functions.push(Function {
+                interface: fn_decl(
+                    callee_id,
+                    &format!("touch_{i}"),
+                    vec![ptr_box_ty.clone()],
+                    vec![p_arg],
+                    void_ty.clone(),
+                ),
+                body: expr(void_ty.clone(), K::Unit),
+                runtime_deliveries: Default::default(),
+            });
+            statements.push(expr(
+                void_ty.clone(),
+                K::Call {
+                    callee: Box::new(expr(fn_sig.clone(), K::Function(callee_id))),
+                    arguments: vec![nir::program::CallArgument {
+                        passing: nir::program::ArgumentPassing::Value,
+                        parameter: 0,
+                        value: expr(
+                            ptr_box_ty.clone(),
+                            K::AddressOf(Box::new(expr(box_ty.clone(), K::Local(param_p)))),
+                        ),
+                        is_default: false,
+                    }],
+                    env_arguments: vec![],
+                    parameter_bindings: vec![p_arg],
+                },
+            ));
+        }
+        functions.push(Function {
+            interface: fn_decl(
+                caller_fn,
+                "caller",
+                vec![box_ty.clone()],
+                vec![param_p],
+                void_ty.clone(),
+            ),
+            body: expr(
+                void_ty.clone(),
+                K::Block {
+                    statements,
+                    result: Some(Box::new(expr(void_ty, K::Unit))),
+                },
+            ),
+            runtime_deliveries: Default::default(),
+        });
+
+        let package = Package {
+            structs: vec![nir::program::Struct {
+                declaration: box_decl,
+                name: "TextBox".into(),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                fields: vec![("s".into(), str_ty)],
+                packed: false,
+            }],
+            functions,
+            ..Default::default()
+        };
+
+        let metadata = crate::declarations::Metadata::new(Some(&package));
+        // Quadratic storage scanning over 60 calls (each cost >= 15) exceeds 25_000;
+        // hashed lookup uses O(N) fuel.
+        let mut fuel = 12_000;
+        infer_text_regions_with_metadata(&package, &metadata, caller_fn, &[], &mut fuel)
+            .expect("60 distinct storage calls must succeed in linear budget");
+        assert!(12_000 - fuel < 10_000, "used {}", 12_000 - fuel);
     }
 }
