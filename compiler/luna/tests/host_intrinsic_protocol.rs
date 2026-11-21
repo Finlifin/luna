@@ -1,6 +1,7 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use luna::host::intrinsic::{Error, Operation, Registry, Tag};
 use nir::program::{Expr, ExprKind as K, SourceRange};
 use nir::{Primitive as P, Term};
@@ -674,10 +675,10 @@ fn unknown_target_behavior_cannot_be_published_or_proved_from_its_output() {
     };
     let graph = iir::Package {
         roots: vec![key.clone()],
-        functions: vec![iir::FunctionInstance {
+        functions: vec![iir::FunctionInstance::new(
             key,
-            function: package.functions[0].clone(),
-        }],
+            package.functions[0].clone(),
+        )],
         ..Default::default()
     };
     let reason = graph.validate(&mut 10000).unwrap_err();

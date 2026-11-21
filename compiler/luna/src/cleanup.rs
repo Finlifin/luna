@@ -1969,7 +1969,13 @@ fn prepare_source_impl(
                 .sort_by_key(|item| order.get(&item.instance).copied().unwrap_or(usize::MAX));
             drop(cleanup_session);
             drop(verification_session);
-            let (_, _, graph) = cached_graph.take().unwrap();
+            let (_, _, mut graph) = cached_graph.take().unwrap();
+            let mut cert_fuel = (*fuel).max(250_000).min(2_000_000);
+            elaboration::verification::behavior::certify_iir_package(
+                &mut graph,
+                Some(&schedule),
+                &mut cert_fuel,
+            );
             return Ok(Executable {
                 entry,
                 graph,

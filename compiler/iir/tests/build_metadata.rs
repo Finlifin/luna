@@ -3,9 +3,11 @@ use nir::{
     DeclarationId, Primitive, Sort, Term,
     program::{Expr, ExprKind as K, Function, FunctionPhase, Literal, SourceRange},
 };
+
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 94, local }
 }
+
 fn expr(ty: Term, kind: K) -> Expr {
     Expr {
         source: SourceRange { start: 1, end: 2 },
@@ -13,6 +15,7 @@ fn expr(ty: Term, kind: K) -> Expr {
         kind,
     }
 }
+
 fn graph() -> Package {
     let boolean = Term::Primitive(Primitive::Bool);
     let key = InstanceKey {
@@ -65,10 +68,13 @@ fn graph() -> Package {
                 ),
                 runtime_deliveries: Default::default(),
             },
+            behavior: None,
+            callsite_behaviors: Vec::new(),
         }],
         ..Default::default()
     }
 }
+
 #[test]
 fn metadata_snapshots_are_comptime_operations_with_linked_values() {
     let graph = graph();
@@ -106,6 +112,7 @@ fn metadata_snapshots_are_comptime_operations_with_linked_values() {
     ));
     deferred.validate(&mut 100_000).unwrap();
 }
+
 #[test]
 fn metadata_aliases_selector_and_validation_budget_are_checked() {
     let graph = graph();

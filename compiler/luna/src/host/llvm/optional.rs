@@ -80,6 +80,7 @@ impl Emitter<'_> {
 mod tests {
     use super::*;
     use nir::program::{MatchArm, Pattern, SourceRange};
+
     fn expr(ty: Term, kind: K) -> Expr {
         Expr {
             ty,
@@ -87,6 +88,7 @@ mod tests {
             source: SourceRange { start: 1, end: 2 },
         }
     }
+
     #[test]
     fn optional_layout_keeps_layers_and_bounds_recursion() {
         let graph = iir::Package::default();
@@ -117,6 +119,7 @@ mod tests {
             .is_err()
         );
     }
+
     #[test]
     fn native_optional_construction_and_patterns_preserve_all_states() {
         let graph = iir::Package::default();
@@ -168,6 +171,7 @@ mod tests {
                 body: String::new(),
                 declarations: &mut declarations,
                 text_constants: &mut strings::TextConstants::default(),
+                attr_table: None,
                 serial: 0,
                 terminated: false,
                 fuel: &mut fuel,

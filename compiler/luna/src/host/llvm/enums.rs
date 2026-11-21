@@ -756,6 +756,7 @@ mod tests {
             body: String::new(),
             declarations: &mut declarations,
             text_constants: &mut strings::TextConstants::default(),
+            attr_table: None,
             serial: 0,
             terminated: false,
             fuel: &mut fuel,

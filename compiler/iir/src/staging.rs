@@ -10,13 +10,17 @@
 use nir::program::{Expr, ExprKind as K, Function, Literal, LocalId};
 use nir::{Primitive, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet};
+
 mod error_values;
 mod frozen;
 mod general;
+
 use general::fold_general_input;
+
 mod lists;
 mod patterns;
 mod preparation;
+
 pub use preparation::{preparation, preparation_with_layouts};
 
 /// Borrowed, checked layout metadata. Type identity remains nominal; this view
@@ -29,6 +33,7 @@ pub struct Layouts<'a> {
     newtype_index:
         Option<&'a std::collections::BTreeMap<nir::DeclarationId, nir::newtypes::Newtype>>,
 }
+
 impl<'a> Layouts<'a> {
     fn list_element(self, ty: &Term, fuel: &mut usize) -> Result<Option<Term>, String> {
         for head in self.heads {
@@ -40,6 +45,7 @@ impl<'a> Layouts<'a> {
         }
         Ok(None)
     }
+
     pub fn new(
         heads: &'a [nir::normal_forms::Head],
         newtypes: &'a [nir::newtypes::Newtype],
@@ -51,6 +57,7 @@ impl<'a> Layouts<'a> {
             newtype_index: None,
         }
     }
+
     pub fn from_index(
         heads: &'a [nir::normal_forms::Head],
         newtypes: &'a std::collections::BTreeMap<nir::DeclarationId, nir::newtypes::Newtype>,
@@ -62,6 +69,7 @@ impl<'a> Layouts<'a> {
             newtype_index: Some(newtypes),
         }
     }
+
     pub fn with_target(mut self, target: Option<nir::target::TargetData>) -> Self {
         self.target = target;
         self
@@ -105,35 +113,44 @@ impl<'a> Layouts<'a> {
         Ok(None)
     }
 }
+
 impl<'a> From<&'a [nir::normal_forms::Head]> for Layouts<'a> {
     fn from(heads: &'a [nir::normal_forms::Head]) -> Self {
         Self::new(heads, &[])
     }
 }
+
 impl<'a, const N: usize> From<&'a [nir::normal_forms::Head; N]> for Layouts<'a> {
     fn from(heads: &'a [nir::normal_forms::Head; N]) -> Self {
         Self::new(heads, &[])
     }
 }
+
 impl<'a> From<&'a Vec<nir::normal_forms::Head>> for Layouts<'a> {
     fn from(heads: &'a Vec<nir::normal_forms::Head>) -> Self {
         Self::new(heads, &[])
     }
 }
+
 impl<'a> From<&'a nir::program::Package> for Layouts<'a> {
     fn from(package: &'a nir::program::Package) -> Self {
         Self::new(&package.normal_forms, &package.newtypes).with_target(package.target)
     }
 }
+
 impl<'a> IntoIterator for Layouts<'a> {
     type Item = &'a nir::normal_forms::Head;
+
     type IntoIter = std::slice::Iter<'a, nir::normal_forms::Head>;
+
     fn into_iter(self) -> Self::IntoIter {
         self.heads.iter()
     }
 }
+
 impl std::ops::Deref for Layouts<'_> {
     type Target = [nir::normal_forms::Head];
+
     fn deref(&self) -> &Self::Target {
         self.heads
     }
@@ -362,6 +379,7 @@ fn view_in_input_scope(
 }
 
 struct InputViewError(String);
+
 impl From<nir::TypeError> for InputViewError {
     fn from(error: nir::TypeError) -> Self {
         Self(error.to_string())
@@ -1791,7 +1809,7 @@ pub fn bind_call_in_world<C>(
             env_arguments: env_arguments.clone(),
         },
     };
-    Ok((crate::FunctionInstance { key, function }, result))
+    Ok((crate::FunctionInstance::new(key, function), result))
 }
 
 fn charge(fuel: &mut usize, work: usize) -> Result<(), String> {
@@ -3268,6 +3286,7 @@ pub fn bind_call_with(
 pub fn fold_value(expr: &Expr, fuel: &mut usize) -> Result<Expr, String> {
     fold_value_with_layouts(&[], expr, fuel)
 }
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -3329,6 +3348,7 @@ mod tests {
             }
         }
     }
+
     use super::*;
 
     #[test]
@@ -3358,6 +3378,7 @@ mod tests {
             K::Literal(Literal::String("ready".into()))
         );
     }
+
     use nir::program::SourceRange;
 
     #[test]
@@ -5588,6 +5609,7 @@ mod tests {
 #[cfg(test)]
 mod newtype_staging_tests {
     use super::*;
+
     #[test]
     fn deeply_nested_newtype_values_fail_at_the_logical_depth_limit() {
         let source = nir::program::SourceRange { start: 0, end: 1 };

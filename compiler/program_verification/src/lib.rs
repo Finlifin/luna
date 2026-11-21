@@ -1,5 +1,6 @@
 //! NIR program verification: control flow, memory views, ownership and effects.
 //! Type propositions remain in PTC; program facts use verification_core.
+pub mod behavior;
 pub mod contracts;
 pub mod control;
 pub mod copy;

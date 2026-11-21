@@ -1441,13 +1441,13 @@ impl Builder<'_, '_> {
         self.instances
             .as_mut()
             .expect("IIR function collection")
-            .push(iir::FunctionInstance {
-                key: iir::InstanceKey {
+            .push(iir::FunctionInstance::new(
+                iir::InstanceKey {
                     declaration: id,
                     arguments: arguments.into(),
                 },
                 function,
-            });
+            ));
         Ok(())
     }
 

@@ -98,10 +98,7 @@ mod tests {
             runtime_deliveries: Default::default(),
         };
         let graph = iir::Package {
-            functions: vec![iir::FunctionInstance {
-                key: key.clone(),
-                function: destructor,
-            }],
+            functions: vec![iir::FunctionInstance::new(key.clone(), destructor)],
             ..Default::default()
         };
         let program = Program {
@@ -204,6 +201,7 @@ mod tests {
                 body: String::new(),
                 declarations: &mut declarations,
                 text_constants: &mut strings::TextConstants::default(),
+                attr_table: None,
                 serial: 0,
                 terminated: false,
                 fuel: &mut fuel,

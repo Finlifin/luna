@@ -1,10 +1,13 @@
 //! Concrete high-level instances. Structured NIR operations are retained; this
 //! stage neither invents SSA names nor erases program contracts or opaque heads.
+pub mod behavior;
 pub mod effect_values;
 pub mod effects;
 mod index;
 mod lists;
 mod type_links;
+
+pub use behavior::{BehaviorAttributes, CallsiteBehavior, MemoryEffect, PointerParamAttrs};
 
 use type_links::TypeLinks;
 
@@ -116,11 +119,39 @@ pub struct FunctionInstance {
     /// All declaration parameters have been substituted, including contracts,
     /// capture types and default expressions. Local IDs retain source identity.
     pub function: Function,
+    /// Conservatively certified purity and memory behavior for LLVM optimization.
+    /// `None` denotes uncertified / conservative P0 semantics.
+    pub behavior: Option<BehaviorAttributes>,
+    /// Certified callsite behavior for indirect calls and direct effect handlers.
+    pub callsite_behaviors: Vec<CallsiteBehavior>,
+}
+
+impl FunctionInstance {
+    /// Construct an uncertified `FunctionInstance` with conservative behavior defaults.
+    pub fn new(key: InstanceKey, function: Function) -> Self {
+        Self {
+            key,
+            function,
+            behavior: None,
+            callsite_behaviors: Vec::new(),
+        }
+    }
 }
 
 impl fmt::Display for FunctionInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(function-instance {} {})", self.key, self.function)
+        write!(f, "(function-instance {} {}", self.key, self.function)?;
+        if let Some(behavior) = &self.behavior {
+            write!(f, " {behavior}")?;
+        }
+        if !self.callsite_behaviors.is_empty() {
+            f.write_str(" (callsite-behaviors")?;
+            for entry in &self.callsite_behaviors {
+                write!(f, " {entry}")?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(")")
     }
 }
 
@@ -1117,6 +1148,8 @@ mod validate_memo_tests {
                 body,
                 runtime_deliveries: Default::default(),
             },
+            behavior: None,
+            callsite_behaviors: Vec::new(),
         }
     }
 

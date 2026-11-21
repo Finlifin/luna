@@ -1,7 +1,9 @@
 //! Execution from retained concrete instances; no source templates are consulted.
 use super::*;
+
 mod indexes;
 mod nominals;
+
 pub(super) use indexes::GraphIndexes;
 pub(super) use nominals::ConcreteNominal;
 
@@ -78,6 +80,7 @@ impl<'a> Interpreter<'a> {
         };
         Ok(Flow::Value(Value::Bool(equal)))
     }
+
     /// Execute concrete staged instances without granting runtime functions
     /// permission to run during comptime invocation.
     pub fn from_iir_for_comptime(
@@ -517,6 +520,8 @@ mod callable_budget_tests {
                     },
                     runtime_deliveries: Default::default(),
                 },
+                behavior: None,
+                callsite_behaviors: Vec::new(),
             }],
             ..Default::default()
         }

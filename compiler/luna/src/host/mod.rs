@@ -3,8 +3,11 @@
 mod discard;
 pub mod intrinsic;
 mod llvm;
+
 pub use discard::llvm_ir_discarding_result;
+
 mod tools;
+
 use nir::program::Package;
 pub use tools::{OptimizationLevel, TargetLayout, Toolchain};
 
@@ -76,14 +79,17 @@ pub fn llvm_ir_in_package(
 pub struct Prepared {
     executable: crate::cleanup::Executable,
 }
+
 impl Prepared {
     pub fn graph(&self) -> &iir::Package {
         &self.executable.graph
     }
+
     pub fn schedule(&self) -> &iir::cleanup::Schedule {
         &self.executable.schedule
     }
 }
+
 impl std::fmt::Display for Prepared {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.executable.fmt(f)
@@ -197,7 +203,7 @@ pub(crate) fn llvm_ir_declaration(
         return llvm_ir_prepared(&prepared, fuel);
     }
     let steps = host_budget(fuel)?;
-    let graph = elaboration::materialization::instantiate(
+    let mut graph = elaboration::materialization::instantiate(
         &package,
         &[iir::InstanceKey {
             declaration,
@@ -211,6 +217,8 @@ pub(crate) fn llvm_ir_declaration(
     )?;
     let mut validation_steps = steps;
     graph.validate(&mut validation_steps)?;
+    let mut cert_fuel = steps.max(250_000).min(2_000_000);
+    elaboration::verification::behavior::certify_iir_package(&mut graph, None, &mut cert_fuel);
     llvm::emit(&graph, steps, false, None, None)
 }
 

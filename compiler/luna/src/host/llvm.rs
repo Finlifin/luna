@@ -1,3 +1,4 @@
+mod attributes;
 mod bfloat;
 mod bits;
 mod callables;
@@ -582,9 +583,37 @@ struct Emitter<'a> {
     body: String,
     declarations: &'a mut BTreeSet<String>,
     text_constants: &'a mut strings::TextConstants,
+    attr_table: Option<&'a mut attributes::AttributeTable>,
     serial: usize,
     terminated: bool,
     fuel: &'a mut usize,
+}
+
+impl<'a> Emitter<'a> {
+    pub(super) fn current_instance(&self) -> Option<&'a iir::FunctionInstance> {
+        let function = self.function?;
+        self.graph
+            .functions
+            .iter()
+            .find(|instance| std::ptr::eq(&instance.function, function))
+    }
+
+    pub(super) fn callsite_behavior(
+        &self,
+        source: nir::program::SourceRange,
+    ) -> Option<&'a iir::CallsiteBehavior> {
+        self.current_instance().and_then(|inst| {
+            inst.callsite_behaviors
+                .iter()
+                .find(|cs| cs.source == source)
+        })
+    }
+
+    fn direct_instance_index(symbol: &str) -> Option<usize> {
+        let rest = symbol.strip_prefix("@flurry_")?;
+        let head = rest.split("_scope_").next()?;
+        head.parse::<usize>().ok()
+    }
 }
 
 impl Emitter<'_> {
@@ -1525,7 +1554,31 @@ impl Emitter<'_> {
         let (row, logical_result) = effects::row_result(result);
         args.extend(self.effect_arguments(row, selected)?);
         let ty = return_repr(self.graph, result, self.checked)?;
-        let call = format!("call {} {}({})", ty.llvm(), function.text, args.join(", "));
+        let mut call_attr_suffix = String::new();
+        let mut callee_no_trap = false;
+        if let Some(target_idx) = Self::direct_instance_index(&function.text) {
+            callee_no_trap = self
+                .graph
+                .functions
+                .get(target_idx)
+                .and_then(|f| f.behavior.as_ref())
+                .is_some_and(|b| b.no_trap_or_unwind);
+        } else if !function.text.starts_with('@')
+            && let Some(cs) = self.callsite_behavior(expr.source)
+        {
+            callee_no_trap = cs.behavior.no_trap_or_unwind;
+            if let Some(table) = self.attr_table.as_deref_mut()
+                && let Some(group) = table.intern_callsite(&cs.behavior)
+            {
+                call_attr_suffix = format!(" #{group}");
+            }
+        }
+        let call = format!(
+            "call {} {}({}){call_attr_suffix}",
+            ty.llvm(),
+            function.text,
+            args.join(", ")
+        );
         self.finish_prepared_construction(expr.source)?;
         let value = if ty == Ty::Unit {
             self.line(call);
@@ -1533,7 +1586,7 @@ impl Emitter<'_> {
         } else {
             self.instruction(ty, call)
         };
-        if self.failure_result.is_some() {
+        if self.failure_result.is_some() && !(callee_no_trap && row.is_empty()) {
             let failed = self.instruction(Ty::Bool, "load i1, ptr @flurry_failed".into());
             let succeeded = self.instruction(Ty::Bool, format!("xor i1 {}, true", failed.text));
             self.guard_at(&succeeded, Some(expr.source))?;
@@ -2574,6 +2627,7 @@ pub(super) fn emit_with_result_output(
     let contracts = iir::effects::Contracts::acquire(graph, &mut fuel)?;
     let mut declarations = BTreeSet::new();
     let mut text_constants = strings::TextConstants::default();
+    let mut attr_table = attributes::AttributeTable::default();
     let mut functions = String::new();
     let mut lambdas = BTreeMap::new();
     let mut closure_nodes = Vec::new();
@@ -2654,6 +2708,15 @@ pub(super) fn emit_with_result_output(
             }
         }
     }
+    struct EmittedBody {
+        symbol: String,
+        result_llvm: String,
+        inputs: Vec<(String, Option<usize>)>,
+        prologue: String,
+        body: String,
+        behavior: Option<iir::BehaviorAttributes>,
+    }
+    let mut emitted_bodies = Vec::with_capacity(bodies.len());
     for (symbol, signature, bindings, body, metadata, closure, closure_scope) in bodies {
         let Term::Function { parameters, result } = signature else {
             return Err("host function signature is not concrete".into());
@@ -2716,6 +2779,7 @@ pub(super) fn emit_with_result_output(
             body: String::new(),
             declarations: &mut declarations,
             text_constants: &mut text_constants,
+            attr_table: Some(&mut attr_table),
             serial: 0,
             terminated: false,
             fuel: &mut fuel,
@@ -2738,9 +2802,13 @@ pub(super) fn emit_with_result_output(
                 e.native_return = Some(effects::ReturnStorage { token, value });
             }
         }
-        let mut inputs = Vec::new();
+        let mut raw_inputs: Vec<(String, Option<usize>)> = Vec::new();
+        let mut extra_inputs = Vec::new();
         if let Some(node) = closure {
-            e.bind_environment(node, &mut inputs)?;
+            e.bind_environment(node, &mut extra_inputs)?;
+            for item in extra_inputs.drain(..) {
+                raw_inputs.push((item, None));
+            }
         }
         for (i, (id, p)) in bindings.iter().zip(parameters).enumerate() {
             if p.sort != Sort::Runtime {
@@ -2748,7 +2816,10 @@ pub(super) fn emit_with_result_output(
             }
             let ty = repr(graph, &p.ty, checked)?;
             if ty != Ty::Unit {
-                inputs.push(format!("{} %arg{i}", ty.llvm()));
+                raw_inputs.push((
+                    format!("{} %arg{i}", ty.llvm()),
+                    (metadata.is_some() && ty == Ty::Pointer).then_some(i),
+                ));
             }
             e.bind(
                 *id,
@@ -2762,7 +2833,10 @@ pub(super) fn emit_with_result_output(
             for (i, env) in f.env_parameters.iter().enumerate() {
                 let ty = repr(graph, &env.ty, checked)?;
                 if ty != Ty::Unit {
-                    inputs.push(format!("{} %env{i}", ty.llvm()));
+                    raw_inputs.push((
+                        format!("{} %env{i}", ty.llvm()),
+                        (ty == Ty::Pointer).then_some(parameters.len() + i),
+                    ));
                 }
                 e.bind(
                     env.binding,
@@ -2779,7 +2853,7 @@ pub(super) fn emit_with_result_output(
             for (i, (binding, term)) in ext_envs.into_iter().enumerate() {
                 let ty = repr(graph, &term, checked)?;
                 let align = matches!(ty, Ty::PackedRecord(_)).then_some(1);
-                inputs.push(format!("ptr %ext_env{i}"));
+                raw_inputs.push((format!("ptr %ext_env{i}"), None));
                 e.locals.insert(
                     binding,
                     Slot {
@@ -2790,7 +2864,10 @@ pub(super) fn emit_with_result_output(
                 );
             }
         }
-        e.bind_effect_parameters(&contracts, effect_row, &mut inputs)?;
+        e.bind_effect_parameters(&contracts, effect_row, &mut extra_inputs)?;
+        for item in extra_inputs {
+            raw_inputs.push((item, None));
+        }
         if let Some(f) = metadata {
             for snapshot in &f.entry_snapshots {
                 let slot = e
@@ -2835,14 +2912,123 @@ pub(super) fn emit_with_result_output(
                 e.ret(&value, None)?;
             }
         }
+        let base_behavior = e.current_instance().and_then(|inst| inst.behavior.clone());
+        emitted_bodies.push(EmittedBody {
+            symbol,
+            result_llvm: result.llvm(),
+            inputs: raw_inputs,
+            prologue: e.prologue,
+            body: e.body,
+            behavior: base_behavior,
+        });
+    }
+    // Layer 2 machine-IR soundness pass: strip unsafe attrs on any body or transitive
+    // callee that emitted `@llvm.trap`, `@flurry_failed`, `@flurry_effect_control`, or `volatile`.
+    let extract_direct_callees = |text: &str| -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = text;
+        while let Some(pos) = rest.find("@flurry_") {
+            rest = &rest[pos + 1..];
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            if rest[end..].starts_with('(') {
+                out.push(rest[..end].to_string());
+            }
+        }
+        out
+    };
+    let sym_index: BTreeMap<String, usize> = emitted_bodies
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.symbol.clone(), i))
+        .collect();
+    let direct_callees: Vec<Vec<usize>> = emitted_bodies
+        .iter()
+        .enumerate()
+        .map(|(self_idx, b)| {
+            extract_direct_callees(&b.body)
+                .into_iter()
+                .filter_map(|name| sym_index.get(&name).copied().filter(|&j| j != self_idx))
+                .collect()
+        })
+        .collect();
+    for b in &mut emitted_bodies {
+        if let Some(attrs) = &mut b.behavior {
+            attributes::sanitize_for_emitted_body(attrs, &b.prologue, &b.body);
+        }
+    }
+    loop {
+        let mut changed = false;
+        for i in 0..emitted_bodies.len() {
+            let Some(mut caller_attrs) = emitted_bodies[i].behavior.clone() else {
+                continue;
+            };
+            let before = caller_attrs.clone();
+            for &j in &direct_callees[i] {
+                if let Some(callee_attrs) = &emitted_bodies[j].behavior {
+                    caller_attrs.no_trap_or_unwind &= callee_attrs.no_trap_or_unwind;
+                    caller_attrs.terminates &= callee_attrs.terminates;
+                    caller_attrs.no_free &= callee_attrs.no_free;
+                    caller_attrs.no_sync &= callee_attrs.no_sync;
+                    if !caller_attrs.no_trap_or_unwind {
+                        caller_attrs.degrade_for_runtime_failure_access();
+                    } else if callee_attrs.memory == iir::MemoryEffect::Unknown {
+                        caller_attrs.memory = iir::MemoryEffect::Unknown;
+                    }
+                } else {
+                    caller_attrs.degrade_for_runtime_failure_access();
+                    caller_attrs.terminates = false;
+                    caller_attrs.no_free = false;
+                    caller_attrs.no_sync = false;
+                }
+            }
+            if caller_attrs != before {
+                emitted_bodies[i].behavior = Some(caller_attrs);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for b in emitted_bodies {
+        let rendered_inputs: Vec<String> = b
+            .inputs
+            .iter()
+            .map(|(decl, slot_opt)| {
+                if let (Some(slot), Some(attrs)) = (slot_opt, b.behavior.as_ref())
+                    && let Some(param_attrs) = attrs.pointer_params.get(*slot)
+                    && let Some(rest) = decl.strip_prefix("ptr ")
+                {
+                    format!(
+                        "{} {rest}",
+                        attributes::format_pointer_param(Some(param_attrs))
+                    )
+                } else {
+                    decl.clone()
+                }
+            })
+            .collect();
+        let attr_suffix = b
+            .behavior
+            .as_ref()
+            .and_then(|attrs| attr_table.intern(attrs))
+            .map_or(String::new(), |id| format!(" #{id}"));
         functions.push_str(&format!(
-            "define internal {} @{symbol}({}) {{\nentry:\n{}{}}}\n\n",
-            result.llvm(),
-            inputs.join(", "),
-            e.prologue,
-            e.body
+            "define internal {} @{}({}){attr_suffix} {{\nentry:\n{}{}}}\n\n",
+            b.result_llvm,
+            b.symbol,
+            rendered_inputs.join(", "),
+            b.prologue,
+            b.body
         ));
     }
+    let attr_defs = attr_table.render_declarations();
+    let with_attrs = |mut module: String| -> String {
+        module.push_str(&attr_defs);
+        module
+    };
     let Term::Function { parameters, result } = &graph.functions[root].function.signature else {
         unreachable!()
     };
@@ -2900,7 +3086,7 @@ pub(super) fn emit_with_result_output(
         module.push_str(&format!(
             "define i32 @main() {{\nentry:\n  call void @{target}()\n  unreachable\n}}\n"
         ));
-        return Ok(module);
+        return Ok(with_attrs(module));
     }
     if !display_result {
         if !checked || result != Ty::Unit {
@@ -2910,7 +3096,7 @@ pub(super) fn emit_with_result_output(
         module.push_str(
             "define i32 @main() {\nentry:\n  call void @flurry_entry()\n  ret i32 0\n}\n",
         );
-        return Ok(module);
+        return Ok(with_attrs(module));
     }
     if matches!(
         result,
@@ -2935,7 +3121,7 @@ pub(super) fn emit_with_result_output(
             checked,
             &mut fuel,
         )?);
-        return Ok(module);
+        return Ok(with_attrs(module));
     }
     if matches!(result, Ty::String | Ty::Symbol) {
         let printer = if result == Ty::Symbol {
@@ -2951,7 +3137,7 @@ pub(super) fn emit_with_result_output(
             format!("flurry_{root}")
         };
         module.push_str(&format!("define i32 @main() {{\nentry:\n  %value = call {{ ptr, i64 }} @{target}()\n  call void @{printer}({{ ptr, i64 }} %value)\n  call i32 @flurry_output_char(i32 10)\n  %status = call i32 @flurry_output_finish()\n  ret i32 %status\n}}\n"));
-        return Ok(module);
+        return Ok(with_attrs(module));
     }
     let (format, body) = match result {
         Ty::Unit => (
@@ -3091,7 +3277,7 @@ pub(super) fn emit_with_result_output(
     module.push_str(&format!(
         "define i32 @main() {{\nentry:\n{body}  call void @flurry_output_record(i32 %output_write)\n  %status = call i32 @flurry_output_finish()\n  ret i32 %status\n}}\n"
     ));
-    Ok(module)
+    Ok(with_attrs(module))
 }
 
 fn literal_value(literal: &Literal, ty: Ty) -> Result<Value, String> {

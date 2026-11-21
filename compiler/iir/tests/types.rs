@@ -142,6 +142,7 @@ fn unresolved_associated_types_cannot_enter_iir_even_with_closed_inputs() {
         );
     }
 }
+
 #[test]
 fn completed_types_keep_heads_and_runtime_identity_but_reject_missing_scope() {
     let id = RuntimeId {
@@ -343,6 +344,8 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
                 },
                 runtime_deliveries: Default::default(),
             },
+            behavior: None,
+            callsite_behaviors: Vec::new(),
         }],
         ..Default::default()
     };
@@ -493,13 +496,13 @@ fn type_list_constants_validate_embedded_types_and_domain_authority() {
         ty: primitive(Primitive::Bool),
         kind: K::Literal(nir::program::Literal::Bool(true)),
     };
-    contract_package.functions.push(iir::FunctionInstance {
-        key: iir::InstanceKey {
+    contract_package.functions.push(iir::FunctionInstance::new(
+        iir::InstanceKey {
             declaration: id(6),
             arguments: vec![].into(),
         },
-        function: method,
-    });
+        method,
+    ));
     contract_package
         .dispatch
         .push(nir::program::DispatchInstance {
@@ -764,6 +767,8 @@ fn captured_comptime_values_must_materialize_before_iir_validation() {
                 },
                 runtime_deliveries: Default::default(),
             },
+            behavior: None,
+            callsite_behaviors: Vec::new(),
         }],
         ..Default::default()
     };

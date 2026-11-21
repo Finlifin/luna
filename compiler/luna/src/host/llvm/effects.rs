@@ -315,14 +315,29 @@ impl Emitter<'_> {
                 }
             }
             let ty = return_repr(self.graph, result, self.checked)?;
-            let call = format!("call {} {callee}({})", ty.llvm(), arguments.join(", "));
+            let callsite = self.callsite_behavior(request);
+            let mut call_attr_suffix = String::new();
+            let mut callee_no_trap = false;
+            if let Some(cs) = callsite {
+                callee_no_trap = cs.behavior.no_trap_or_unwind;
+                if let Some(table) = self.attr_table.as_deref_mut()
+                    && let Some(group) = table.intern_callsite(&cs.behavior)
+                {
+                    call_attr_suffix = format!(" #{group}");
+                }
+            }
+            let call = format!(
+                "call {} {callee}({}){call_attr_suffix}",
+                ty.llvm(),
+                arguments.join(", ")
+            );
             let value = if ty == Ty::Unit {
                 self.line(call);
                 Value::unit()
             } else {
                 self.instruction(ty, call)
             };
-            if self.failure_result.is_some() {
+            if self.failure_result.is_some() && !callee_no_trap {
                 let failed = self.instruction(Ty::Bool, "load i1, ptr @flurry_failed".into());
                 let succeeded = self.instruction(Ty::Bool, format!("xor i1 {}, true", failed.text));
                 self.guard_at(&succeeded, Some(request))?;
@@ -800,6 +815,7 @@ impl Emitter<'_> {
             body: String::new(),
             declarations: self.declarations,
             text_constants: self.text_constants,
+            attr_table: self.attr_table.as_deref_mut(),
             serial: 0,
             terminated: false,
             fuel: self.fuel,

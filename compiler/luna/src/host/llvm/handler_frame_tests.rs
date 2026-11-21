@@ -2,6 +2,7 @@
 use super::*;
 use iir::cleanup::{Action, Boundary, ContextKey, FunctionSchedule, Program, Site, Step, Target};
 use nir::program::{FunctionPhase, MatchArm, Pattern, SourceRange};
+
 #[test]
 fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
     let source = |start| SourceRange {
@@ -55,10 +56,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
         runtime_deliveries: Default::default(),
     };
     let graph = iir::Package {
-        functions: vec![iir::FunctionInstance {
-            key: key.clone(),
-            function: destructor,
-        }],
+        functions: vec![iir::FunctionInstance::new(key.clone(), destructor)],
         ..Default::default()
     };
     let program = Program {
@@ -287,6 +285,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
             body: String::new(),
             declarations: &mut declarations,
             text_constants: &mut strings::TextConstants::default(),
+            attr_table: None,
             serial: 0,
             terminated: false,
             fuel: &mut fuel,

@@ -2354,10 +2354,7 @@ mod tests {
             runtime_deliveries: Default::default(),
         };
         let mut graph = iir::Package {
-            functions: vec![iir::FunctionInstance {
-                key: key.clone(),
-                function,
-            }],
+            functions: vec![iir::FunctionInstance::new(key.clone(), function)],
             ..Default::default()
         };
         let scope = FunctionSchedule {
@@ -2573,6 +2570,7 @@ mod tests {
                 body: String::new(),
                 declarations: &mut declarations,
                 text_constants: &mut strings::TextConstants::default(),
+                attr_table: None,
                 serial: 0,
                 terminated: false,
                 fuel: &mut fuel,

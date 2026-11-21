@@ -7,6 +7,7 @@ use nir::{DeclarationId, Primitive, Sort, Term};
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 51, local }
 }
+
 fn head() -> Head {
     Head {
         collector: None,
@@ -21,6 +22,7 @@ fn head() -> Head {
         }],
     }
 }
+
 fn expr(ty: Term, kind: K) -> Expr {
     Expr {
         ty,
@@ -28,12 +30,14 @@ fn expr(ty: Term, kind: K) -> Expr {
         source: SourceRange { start: 2, end: 7 },
     }
 }
+
 fn boolean(value: bool) -> Expr {
     expr(
         Term::Primitive(Primitive::Bool),
         K::Literal(Literal::Bool(value)),
     )
 }
+
 fn list(element: Term, fields: Vec<Expr>) -> Expr {
     expr(
         Term::NormalForm {
@@ -44,6 +48,7 @@ fn list(element: Term, fields: Vec<Expr>) -> Expr {
         K::TypeList(fields),
     )
 }
+
 fn index(values: Expr, element: Term, position: &str) -> Expr {
     expr(
         element,
@@ -522,6 +527,8 @@ fn graph_for_list(body: Expr) -> iir::Package {
                 body,
                 runtime_deliveries: Default::default(),
             },
+            behavior: None,
+            callsite_behaviors: Vec::new(),
         }],
         ..Default::default()
     }

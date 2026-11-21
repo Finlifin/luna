@@ -1,8 +1,11 @@
 use super::*;
+
 const SOURCE: SourceRange = SourceRange { start: 10, end: 20 };
+
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 96, local }
 }
+
 fn wide(width: usize) -> Term {
     Term::Record(vec![("x".repeat(width), Term::Primitive(Primitive::Bool))])
 }
@@ -163,13 +166,13 @@ fn cleanup_effect_index_preserves_typed_failures_and_publishes_only_a_complete_m
         },
     };
     let graph = iir::Package {
-        functions: vec![iir::FunctionInstance {
-            key: iir::InstanceKey {
+        functions: vec![iir::FunctionInstance::new(
+            iir::InstanceKey {
                 declaration: id(3),
                 arguments: vec![].into(),
             },
             function,
-        }],
+        )],
         ..Default::default()
     };
     let package = Package::default();

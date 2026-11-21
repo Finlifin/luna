@@ -3,17 +3,22 @@
 #[path = "../../elaboration/test_support/gradual.rs"]
 #[allow(dead_code)]
 mod gradual;
+
 #[path = "../../elaboration/test_support/type_computations/mod.rs"]
 #[allow(dead_code)]
 mod type_computations;
+
 use elaboration::ptc;
 
 #[path = "support/frozen_lists.rs"]
 mod frozen_lists;
+
 use comptime_interpretor::{Budget, ErrorKind, Event, Interpreter, Value};
 use nir::program::Package;
+
 #[path = "support/execution.rs"]
 mod execution_support;
+
 use execution_support::{
     calls, compile, compile_with_bindings, compile_with_protocols, compile_with_source_bindings, id,
 };
@@ -160,6 +165,7 @@ fn key_world<R>(
         assumptions: &[],
     })
 }
+
 fn key_method(
     package: &Package,
     ty: &nir::Term,
@@ -1189,6 +1195,7 @@ fn memoized(
         Default::default(),
     )
 }
+
 const MEMO_BOOL: &str = "const eq_key_phase={comptime_phase:true}; trait Eq {^eq_key_phase comptime fn eq(self,other:Self)->bool;} const hash_key_phase={comptime_phase:true}; trait Hash {^hash_key_phase comptime fn hash(self)->.u8'builtin;} comptime impl Eq for bool {comptime fn eq(self,other:bool)->bool {self == other}} comptime impl Hash for bool {comptime fn hash(self)->.u8'builtin {0}}";
 
 #[test]
@@ -7848,6 +7855,7 @@ fn direct_passing_noncopy_results_transfer_only_once() {
             .contains("EffectValueConsumed")
     );
 }
+
 const FLAG: &str = "typealias Flag = bool; ";
 
 #[test]
@@ -7870,6 +7878,7 @@ fn parameter_bindings_and_branches_produce_real_results() {
         }
     }
 }
+
 #[test]
 fn callee_then_named_arguments_run_once_in_source_order() {
     let package = compile(&format!(
@@ -7894,6 +7903,7 @@ fn callee_then_named_arguments_run_once_in_source_order() {
         ["run", "callee", "argument", "target"]
     );
 }
+
 #[test]
 fn defaults_use_this_calls_prepared_values_not_caller_names() {
     let package = compile(&format!(
@@ -7911,6 +7921,7 @@ fn defaults_use_this_calls_prepared_values_not_caller_names() {
         Value::Bool(true)
     );
 }
+
 #[test]
 fn short_circuit_does_not_run_unselected_recursion() {
     let package = compile(&format!(
@@ -7930,6 +7941,7 @@ fn short_circuit_does_not_run_unselected_recursion() {
     );
     assert_eq!(calls(&package, &interpreter), ["run"]);
 }
+
 #[test]
 fn creating_a_closure_does_not_execute_its_body() {
     let package = compile(&format!(
@@ -7948,6 +7960,7 @@ fn creating_a_closure_does_not_execute_its_body() {
             .any(|e| matches!(e, Event::CreateClosure { captures: 0, .. }))
     );
 }
+
 #[test]
 fn nested_closures_keep_each_invocations_values() {
     let package = compile(&format!(
@@ -7963,6 +7976,7 @@ fn nested_closures_keep_each_invocations_values() {
         );
     }
 }
+
 #[test]
 fn early_return_in_an_argument_skips_remaining_call_preparation() {
     let package = compile(&format!(
@@ -7975,6 +7989,7 @@ fn early_return_in_an_argument_skips_remaining_call_preparation() {
     );
     assert_eq!(calls(&package, &interpreter), ["run"]);
 }
+
 #[test]
 fn lambda_returns_are_local_and_tuples_keep_element_order() {
     let package = execution_support::compile_with_tuple(&format!(
@@ -7986,6 +8001,7 @@ fn lambda_returns_are_local_and_tuples_keep_element_order() {
         Value::Tuple(vec![Value::Bool(true), Value::Char('x')])
     );
 }
+
 #[test]
 fn limits_are_distinct_from_type_errors_and_unwind_call_depth() {
     let package = compile(&format!(
@@ -8026,6 +8042,7 @@ fn limits_are_distinct_from_type_errors_and_unwind_call_depth() {
         Value::Bool(true)
     );
 }
+
 #[test]
 fn host_inputs_are_checked_before_entering_typed_bodies() {
     let package = compile(&format!("{FLAG} fn id(value: Flag) -> Flag {{ value }}"));
@@ -8092,6 +8109,7 @@ fn block_updates_survive_exit_but_shadowed_bindings_do_not() {
         Value::Tuple(vec![Value::Bool(true), Value::Bool(true)])
     );
 }
+
 #[test]
 fn closure_captures_keep_creation_values_after_assignment() {
     let package = execution_support::compile_with_tuple(&format!(
@@ -8107,6 +8125,7 @@ fn closure_captures_keep_creation_values_after_assignment() {
         ])
     );
 }
+
 #[test]
 fn while_rechecks_updated_condition_and_continue_skips_the_tail() {
     let package = compile(&format!(
@@ -8126,6 +8145,7 @@ fn while_rechecks_updated_condition_and_continue_skips_the_tail() {
     );
     assert_eq!(calls(&package, &interpreter), ["run"]);
 }
+
 #[test]
 fn nested_break_targets_nearest_loop_and_guarded_break_is_conditional() {
     let package = compile(&format!(
@@ -8137,6 +8157,7 @@ fn nested_break_targets_nearest_loop_and_guarded_break_is_conditional() {
         Value::Bool(true)
     );
 }
+
 #[test]
 fn return_crosses_loop_boundaries_and_infinite_loops_consume_fuel() {
     let package = compile(&format!(
@@ -12911,6 +12932,7 @@ fn bitvec_source_views_literals_generic_context_and_concatenation_execute() {
         Value::Bool(true)
     );
 }
+
 #[test]
 fn bitvec_boolean_operations_evaluate_both_sides_once_in_source_order() {
     let package = compile(
@@ -13066,6 +13088,7 @@ fn bitvec_slice_conversion_traversal_specializes_nested_generic_calls() {
         Value::UnsignedInteger(0xde)
     );
 }
+
 #[test]
 fn malformed_nir_bit_slices_fail_without_host_panics() {
     for (start, end) in [(9, 8), (0, 33), (usize::MAX, usize::MAX)] {
@@ -23385,6 +23408,7 @@ fn property_collection_builds_records_and_preserves_whole_named_supply() {
         Value::Tuple(vec![Value::Bool(true), Value::Char('x')])
     );
 }
+
 #[test]
 fn property_collection_preserves_producer_order_and_nested_projection() {
     let package = compile(
@@ -29645,13 +29669,13 @@ fn staged_direct_call_graph(package: &Package) -> (iir::Package, iir::InstanceKe
             Ok(())
         })
         .unwrap();
-        graph.functions.push(iir::FunctionInstance {
-            key: iir::InstanceKey {
+        graph.functions.push(iir::FunctionInstance::new(
+            iir::InstanceKey {
                 declaration: function.declaration,
                 arguments: vec![].into(),
             },
             function,
-        });
+        ));
     }
     (graph, root)
 }

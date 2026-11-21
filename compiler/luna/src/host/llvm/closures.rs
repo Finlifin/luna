@@ -1029,6 +1029,8 @@ mod state_count_tests {
                     body: wrapper_body,
                     runtime_deliveries: Default::default(),
                 },
+                behavior: None,
+                callsite_behaviors: Vec::new(),
             }],
             ..Default::default()
         };

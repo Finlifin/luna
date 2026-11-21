@@ -3,12 +3,15 @@ use nir::program::{
     Expr, ExprKind as K, Function, FunctionPhase, Literal, LocalId, Package, SourceRange,
 };
 use nir::{DeclarationId, Primitive, Term};
+
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 5, local }
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
+
 fn function(local: u32, parameters: Vec<LocalId>, body: Expr) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
@@ -46,6 +49,7 @@ fn function(local: u32, parameters: Vec<LocalId>, body: Expr) -> Function {
         runtime_deliveries: Default::default(),
     }
 }
+
 fn callable() -> Term {
     Term::Function {
         parameters: vec![],
@@ -53,6 +57,7 @@ fn callable() -> Term {
     }
     .with_comptime_phase(true)
 }
+
 fn world() -> Package {
     let source = SourceRange { start: 1, end: 2 };
     let binding = LocalId { owner: 2, index: 0 };
@@ -89,6 +94,7 @@ fn world() -> Package {
         ..Default::default()
     }
 }
+
 #[test]
 fn immutable_decode_never_runs_a_factory_even_when_nested() {
     let world = world();
@@ -144,6 +150,7 @@ fn immutable_decode_never_runs_a_factory_even_when_nested() {
             .any(|event| matches!(event,Event::EnterFunction(declaration) if *declaration==id(1)))
     );
 }
+
 #[test]
 fn immutable_decode_checks_scalar_domain_and_recovers_after_rejection() {
     let world = Package::default();
@@ -164,6 +171,7 @@ fn immutable_decode_checks_scalar_domain_and_recovers_after_rejection() {
     );
     assert!(vm.events().is_empty());
 }
+
 #[test]
 fn immutable_decode_requires_comptime_and_consumes_budget() {
     let world = Package::default();
@@ -367,6 +375,7 @@ fn callable_normal_form_world() -> Package {
     });
     package
 }
+
 fn callable_normal_form(declaration: DeclarationId, arguments: Vec<Term>) -> Term {
     Term::NormalForm {
         head: id(20),
@@ -646,10 +655,7 @@ fn a_nested_named_callable_freezes_by_identity_and_keeps_its_live_handle_local()
             .functions
             .iter()
             .cloned()
-            .map(|function| iir::FunctionInstance {
-                key: key(function.declaration.local),
-                function,
-            })
+            .map(|function| iir::FunctionInstance::new(key(function.declaration.local), function))
             .collect(),
         ..Default::default()
     };
