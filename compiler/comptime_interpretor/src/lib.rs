@@ -841,6 +841,7 @@ pub struct Interpreter<'a> {
     compilation_session: comptime_compiler::CompilationSession,
     bytecode_cache: bytecode::CodeCache,
     borrowed_code_cache: bytecode::BorrowedCodeCache<'a>,
+    last_named_signature_work: Option<(&'a Term, u64)>,
     input_body_cache: input_bodies::Cache,
     default_code_cache: default_code::Cache,
     contextual_code_cache: contextual_code::Cache,

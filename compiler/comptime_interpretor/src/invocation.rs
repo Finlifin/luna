@@ -558,6 +558,29 @@ impl<'a> Interpreter<'a> {
         Ok((Body::Owned(prepared), origin.filter(|_| independent)))
     }
 
+    // A named definition lends the same immutable tree for the VM's lifetime.
+    // Only its structural cost is reusable. With insufficient fuel the walker
+    // must still report how far it got, including any unspent allowance.
+    fn charge_named_signature(
+        &mut self,
+        signature: &'a Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        if let Some((previous, cost)) = self.last_named_signature_work
+            && std::ptr::eq(signature, previous)
+            && self.budget.steps >= cost
+        {
+            self.budget.steps -= cost;
+            return Ok(());
+        }
+        let before = self.budget.steps;
+        self.charge_copy_work(Some(source), |fuel| {
+            nir::copy_budget::charge_term_copy(signature, fuel, 128)
+        })?;
+        self.last_named_signature_work = Some((signature, before - self.budget.steps));
+        Ok(())
+    }
+
     fn prepare_invocation(
         &mut self,
         target: Target<'a>,
@@ -606,9 +629,13 @@ impl<'a> Interpreter<'a> {
                 )
             }
         };
-        self.charge_copy_work(Some(source), |fuel| {
-            nir::copy_budget::charge_term_copy(signature, fuel, 128)
-        })?;
+        if let Target::Named(definition) = &target {
+            self.charge_named_signature(&definition.signature, source)?;
+        } else {
+            self.charge_copy_work(Some(source), |fuel| {
+                nir::copy_budget::charge_term_copy(signature, fuel, 128)
+            })?;
+        }
         let pending = if let Some(definition) = declaration
             && (self.comptime_only || matches!(target, Target::Named(_) | Target::Instance { .. }))
             && (!definition.requirements.is_empty() || !definition.capabilities.is_empty())
@@ -820,6 +847,43 @@ mod tests {
             );
             assert!(vm.prepared_frames.is_empty());
         }
+    }
+
+    #[test]
+    fn warm_named_signature_preserves_cold_budget_failures() {
+        let package = Package::default();
+        let signature = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: nir::Sort::Runtime,
+                ty: Term::Record(vec![("field".into(), Term::Primitive(Primitive::Bool))]),
+            }],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let other = Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(Primitive::Bool)),
+        };
+        let source = SourceRange { start: 4, end: 9 };
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let before = vm.remaining_steps();
+        vm.charge_named_signature(&signature, source).unwrap();
+        let cost = before - vm.remaining_steps();
+        for allowance in 0..=cost + 1 {
+            vm.budget.steps = allowance;
+            let warm = vm.charge_named_signature(&signature, source);
+            let remaining = vm.remaining_steps();
+            let mut fuel = allowance as usize;
+            let cold = nir::copy_budget::charge_term_copy(&signature, &mut fuel, 128);
+            assert_eq!(warm.is_ok(), cold.is_ok());
+            if let Err(error) = warm {
+                assert_eq!(error.kind, ErrorKind::StepsExhausted);
+                assert_eq!(error.source, Some(source));
+            }
+            assert_eq!(remaining, fuel as u64);
+        }
+        vm.budget.steps = 2;
+        vm.charge_named_signature(&other, source).unwrap();
+        assert_eq!(vm.remaining_steps(), 0);
     }
 
     #[test]

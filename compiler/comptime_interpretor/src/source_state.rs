@@ -160,6 +160,7 @@ impl<'a> Interpreter<'a> {
             compilation_session: Default::default(),
             bytecode_cache: Default::default(),
             borrowed_code_cache: Default::default(),
+            last_named_signature_work: None,
             input_body_cache: Default::default(),
             default_code_cache: Default::default(),
             contextual_code_cache: Default::default(),

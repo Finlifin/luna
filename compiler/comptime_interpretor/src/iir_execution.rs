@@ -155,6 +155,7 @@ impl<'a> Interpreter<'a> {
             compilation_session: comptime_compiler::CompilationSession::for_concrete_graph(),
             bytecode_cache: Default::default(),
             borrowed_code_cache: Default::default(),
+            last_named_signature_work: None,
             input_body_cache: Default::default(),
             default_code_cache: Default::default(),
             contextual_code_cache: Default::default(),
