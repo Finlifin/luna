@@ -1,6 +1,8 @@
 //! Command-scoped help for the public CLI.
 pub const USAGE: &str = "Usage: luna <command> [options]\n       luna help [command]";
+
 pub const HELP: &str = "Luna — Flurry compiler\n\nUsage: luna <command> [options]\n\nCommands:\n  check       Type-check a source without emitting a dump\n  build       Build a host executable (or --emit object|bitcode)\n  test        Run tests (--engine native|reference; default native)\n  fmt         Format Flurry source files or check formatting\n  lsp         Serve editor requests over stdio (syntax and HIR)\n  dump        Emit AST, HIR, NIR, IIR, LLVM, assembly or attributes\n  comptime    Invoke a comptime function\n  interpret   Execute a runtime entry in the reference interpreter\n  analyze     Inspect resources or text regions\n  packages    Apply a command to explicit package inputs\n  serve       Serve the versioned package stream protocol\n  help        Show command-specific help\n\nUse luna <command> --help for options and examples.\nSource-first invocations and --packages-v1/--packages-stream-v1 remain\ncompatibility entries; new automation should use subcommands.\n";
+
 const FRONTEND: &str = "
 Frontend options:
   --sysroot <path>
@@ -17,12 +19,14 @@ Use luna help bindings for compiler protocol binding overrides.
 Targets describe build context, not cross-compiling backend selection.
 Paths need not be UTF-8. Use -- before a source path beginning with a dash.
 ";
+
 const HOST: &str = "
 Host options (build, native tests, LLVM/assembly dumps):
   --opt-level 0|1|2|3
   --host-intrinsic <operation=selector> (repeatable)
   --host-fma <selector>, --host-sqrt <selector>, --host-copysign <selector>
 ";
+
 const PACKAGE_INPUTS: &str = "
 Package inputs:
   --package <id> <identity> <name> <entry> (repeatable)
@@ -33,6 +37,7 @@ Package inputs:
   --with-inputs (except check)
 No positional source path is accepted.
 ";
+
 const BINDINGS: &str = "Compiler binding overrides:
   --copy-protocol <trait>, --drop-protocol <trait>
   --splice-protocol, --meta-list-type, --tuple-type, --index-protocol,
@@ -88,13 +93,16 @@ fn command_help(name: &str) -> Result<String, String> {
     }
     if name != "check" {
         text.push_str("\n  -o, --output <path>        Write output to a file\n");
-        if name == "comptime" {
+        if name == "dump" {
             text.push_str(&format!(
-                "  --fuel <steps>             Action budget (default {})\n",
-                super::DEFAULT_COMPTIME_FUEL
+                "  --fuel <steps>             Action budget (default {}; dump: iir/llvm/asm only)\n",
+                super::DEFAULT_ACTION_FUEL
             ));
         } else {
-            text.push_str("  --fuel <steps>             Action budget (dump: iir/llvm/asm only)\n");
+            text.push_str(&format!(
+                "  --fuel <steps>             Action budget (default {})\n",
+                super::DEFAULT_ACTION_FUEL
+            ));
         }
     }
     if matches!(name, "build" | "test" | "dump") {

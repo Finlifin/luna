@@ -39,8 +39,6 @@ impl TempCase {
                 "program",
                 "--opt-level",
                 "0",
-                "--fuel",
-                "20000000",
                 "--sysroot",
             ])
             .arg(Self::library_dir())

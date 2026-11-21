@@ -3,10 +3,15 @@ use std::path::PathBuf;
 
 mod help;
 mod subcommands;
+
 pub use help::{HELP, USAGE};
 
 /// Source preparation and execution share the same action allowance.
 pub const DEFAULT_COMPTIME_FUEL: u64 = comptime_interpretor::Budget::DEFAULT_STEPS;
+
+/// Host, test, interpretation, instantiation, and analysis actions share the
+/// comptime default step budget unless overridden by `--fuel`.
+pub const DEFAULT_ACTION_FUEL: u64 = DEFAULT_COMPTIME_FUEL;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Emit {
@@ -904,7 +909,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         return Ok(Command::AnalyzeTextRegions {
             options,
             entry,
-            fuel: fuel.unwrap_or(100_000),
+            fuel: fuel.unwrap_or(DEFAULT_ACTION_FUEL),
             inline_functions,
         });
     }
@@ -921,7 +926,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
             inline_functions,
             optimization,
             protocols: copy_protocol.zip(drop_protocol),
-            fuel: fuel.unwrap_or(100_000),
+            fuel: fuel.unwrap_or(DEFAULT_ACTION_FUEL),
         });
     }
     if let Some(entry) = resources {
@@ -930,7 +935,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
             entry,
             copy_protocol: copy_protocol.expect("validated protocol option"),
             drop_protocol,
-            fuel: fuel.unwrap_or(100_000),
+            fuel: fuel.unwrap_or(DEFAULT_ACTION_FUEL),
         });
     }
     if tests {
@@ -947,7 +952,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
             options,
             inline_functions,
             protocols: copy_protocol.zip(drop_protocol),
-            fuel: fuel.unwrap_or(100_000),
+            fuel: fuel.unwrap_or(DEFAULT_ACTION_FUEL),
         });
     }
     if let Some(entry) = interpret {
@@ -956,14 +961,14 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
             inline_functions,
             entry,
             protocols: copy_protocol.zip(drop_protocol),
-            fuel: fuel.unwrap_or(100_000),
+            fuel: fuel.unwrap_or(DEFAULT_ACTION_FUEL),
         });
     }
     if let Some(entry) = instantiate {
         return Ok(Command::Instantiate {
             options,
             entry,
-            fuel: fuel.unwrap_or(100_000),
+            fuel: fuel.unwrap_or(DEFAULT_ACTION_FUEL),
         });
     }
     Ok(match entry {
@@ -1148,6 +1153,7 @@ mod tests {
 #[cfg(test)]
 mod invocation_tests {
     use super::*;
+
     #[test]
     fn invocation_selects_nir_and_validates_its_own_options() {
         let Command::Invoke {
@@ -1217,6 +1223,7 @@ mod invocation_tests {
 #[cfg(test)]
 mod instantiation_tests {
     use super::*;
+
     #[test]
     fn explicit_instantiation_selects_nir_and_has_its_own_budget() {
         let Command::Instantiate {
@@ -1250,5 +1257,63 @@ mod instantiation_tests {
         ] {
             assert!(parse(arguments.into_iter().map(OsString::from)).is_err());
         }
+    }
+
+    #[test]
+    fn default_action_fuel_matches_default_comptime_fuel() {
+        let Command::Host { fuel, .. } =
+            parse(["build", "input.fl", "-o", "out"].map(OsString::from)).unwrap()
+        else {
+            panic!("expected build command");
+        };
+        assert_eq!(fuel, DEFAULT_ACTION_FUEL);
+        let Command::Host { fuel, .. } =
+            parse(["build", "input.fl", "-o", "out", "--fuel", "37"].map(OsString::from)).unwrap()
+        else {
+            panic!("expected build command");
+        };
+        assert_eq!(fuel, 37);
+
+        let Command::Test { fuel, .. } = parse(["test", "input.fl"].map(OsString::from)).unwrap()
+        else {
+            panic!("expected test command");
+        };
+        assert_eq!(fuel, DEFAULT_ACTION_FUEL);
+
+        let Command::Interpret { fuel, .. } =
+            parse(["interpret", "input.fl"].map(OsString::from)).unwrap()
+        else {
+            panic!("expected interpret command");
+        };
+        assert_eq!(fuel, DEFAULT_ACTION_FUEL);
+
+        let Command::Instantiate { fuel, .. } =
+            parse(["input.fl", "--instantiate", "main"].map(OsString::from)).unwrap()
+        else {
+            panic!("expected instantiate command");
+        };
+        assert_eq!(fuel, DEFAULT_ACTION_FUEL);
+
+        let Command::AnalyzeResources { fuel, .. } = parse(
+            [
+                "analyze",
+                "resources",
+                "input.fl",
+                "--copy-protocol",
+                "Copy",
+            ]
+            .map(OsString::from),
+        )
+        .unwrap() else {
+            panic!("expected analyze resources command");
+        };
+        assert_eq!(fuel, DEFAULT_ACTION_FUEL);
+
+        let Command::AnalyzeTextRegions { fuel, .. } =
+            parse(["analyze", "text-regions", "input.fl"].map(OsString::from)).unwrap()
+        else {
+            panic!("expected analyze text-regions command");
+        };
+        assert_eq!(fuel, DEFAULT_ACTION_FUEL);
     }
 }
