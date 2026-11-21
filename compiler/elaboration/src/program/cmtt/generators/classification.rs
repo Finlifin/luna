@@ -314,7 +314,7 @@ impl Checker<'_, '_> {
                 .transpose()
                 .map(Option::flatten);
         }
-        if let Some(domain) = self.computed_type_receiver_domain(base)?
+        if let Some(domain) = self.computed_type_receiver_domain(base, head.hir_id)?
             && let Some(category) =
                 self.contextual_method_category(&domain, name.name.as_str(), head.span)?
         {

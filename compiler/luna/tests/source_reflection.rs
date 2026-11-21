@@ -765,6 +765,7 @@ fn sysroot_reflection_uses_receiver_domains_without_unfolding_type_identity() {
         "struct Row { field: bool }
         pure comptime fn Identity<T> -> Type { T }
         struct Counter { calls: Integer }
+        struct Packet where T { item: T }
         impl Counter {
             comptime fn Selected(self) -> Type {
                 self.calls = self.calls + 1;
@@ -776,7 +777,8 @@ fn sysroot_reflection_uses_receiver_domains_without_unfolding_type_identity() {
             let a = counter.Selected().struct_fields();
             let b = (do { counter.Selected() }).struct_fields();
             let c = (if true { counter.Selected() } else { bool }).struct_fields();
-            counter.calls == 3 and a.length() == 1 and b.length() == 1
+            let d = Packet<counter.Selected()>.struct_fields();
+            counter.calls == 4 and (d.key(0) matches .item?) and a.length() == 1 and b.length() == 1
                 and c.length() == 1 and (a.key(0) matches .field?)
                 and (c.value<Type>(0) match { value? => value == bool, null => false, })
         }
@@ -819,10 +821,55 @@ fn sysroot_reflection_uses_receiver_domains_without_unfolding_type_identity() {
                     .iter()
                     .filter(|name| *name == "Selected")
                     .count(),
-                if name == "good" { 3 } else { 0 },
+                if name == "good" { 4 } else { 0 },
                 "{name}: tree={tree}"
             );
         }
+    }
+}
+
+#[test]
+fn transparent_aliases_preserve_the_type_receiver_and_the_named_member_source() {
+    let source = r#"
+        ^attrs.metadata({ version: "1.0" })
+        pure comptime fn Tagged<T> -> Type { T }
+        typealias TaggedWord<T> = Tagged<T>;
+        typealias Word = Tagged<u32>;
+        typealias AnotherWord = Word;
+        struct Catalog where T {
+            pub typealias Entry = Tagged<T>;
+        }
+        typealias ConcreteCatalog = Catalog<u32>;
+        pure comptime fn Factory() -> Type { Word }
+        typealias Produced = Factory();
+        struct Named where T {
+            pub pure comptime fn attrs() -> bool { true }
+        }
+        typealias AlsoNamed = Named<bool>;
+        struct OtherCatalog { pub typealias Entry = AlsoNamed; }
+        typealias SecondCatalog = OtherCatalog;
+        comptime fn inspect() -> bool {
+            let inherited = AnotherWord.attrs().get<meta.Object>(.metadata) match {
+                data? => data.get<str>(.version) matches "1.0"?,
+                null => false,
+            };
+            inherited and Named<bool>.attrs() and AlsoNamed.attrs()
+                and TaggedWord<u32>.attrs().has_key(.metadata)
+                and Produced.attrs().has_key(.metadata)
+                and Catalog<u32>.Entry.attrs().has_key(.metadata)
+                and ConcreteCatalog.Entry.attrs().has_key(.metadata)
+                and SecondCatalog.Entry.attrs()
+                and not meta.attrs_of(u32).has_key(.metadata)
+        }
+    "#;
+    let package = sysroot::compile(source).unwrap();
+    for reference in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, reference, |vm| {
+            assert_eq!(
+                vm.invoke(support::id(&package, "inspect"), vec![]).unwrap(),
+                Value::Bool(true)
+            );
+        });
     }
 }
 

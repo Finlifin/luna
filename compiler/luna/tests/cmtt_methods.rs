@@ -1007,6 +1007,20 @@ fn static_code_methods_preserve_nested_member_visibility() {
 }
 
 #[test]
+fn contextual_classification_preserves_generic_container_source_through_an_alias() {
+    let source = "struct Generator where T {
+            pub comptime fn attrs() -> <|-bool> { '(true) }
+        }
+        typealias BoolGenerator = Generator<bool>;
+        fn run() -> bool {
+            const direct = Generator<bool>.attrs();
+            const aliased = BoolGenerator.attrs();
+            ~<direct> and ~<aliased>
+        }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
 fn generic_container_code_methods_substitute_code_contexts() {
     let source = "struct Builder where T {
         pub comptime fn forward(code:<input:T|-T>)-><result:T|-T> {code}

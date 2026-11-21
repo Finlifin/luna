@@ -18,6 +18,7 @@ mod parents;
 mod phase_associated;
 mod phase_contributions;
 mod program_contracts;
+mod receiver_source;
 mod signatures;
 mod values;
 
@@ -1567,22 +1568,6 @@ impl Checker<'_, '_> {
         )
     }
 
-    // Ordinary calls and contextual classification must observe the same
-    // receiver domain before considering methods of the represented Type.
-    // This does not evaluate the receiver or establish a method's applicability.
-    pub(super) fn computed_type_receiver_domain(
-        &mut self,
-        value: &Expr<'_>,
-    ) -> Result<Option<Term>, Error> {
-        if Self::is_computed_method_subject(value)
-            && self.local_field_domain(value)? == Some(p(P::Type))
-        {
-            Ok(Some(p(P::Type)))
-        } else {
-            Ok(None)
-        }
-    }
-
     pub(super) fn static_method(
         &mut self,
         value: &Expr<'_>,
@@ -2355,13 +2340,14 @@ impl Checker<'_, '_> {
         // A computed Type receiver can select a method from its known domain
         // without evaluating its identity. Retain the expression for ordinary
         // call preparation, including invocation-time inputs and side effects.
-        let mut domain_method = if let Some(domain) = self.computed_type_receiver_domain(view)? {
-            let interface =
-                self.context_member_interface(&domain, name.name.as_str(), expr.span)?;
-            self.selected_method(domain, interface, name.name.as_str(), expr.span)?
-        } else {
-            None
-        };
+        let mut domain_method =
+            if let Some(domain) = self.computed_type_receiver_domain(view, callee.hir_id)? {
+                let interface =
+                    self.context_member_interface(&domain, name.name.as_str(), expr.span)?;
+                self.selected_method(domain, interface, name.name.as_str(), expr.span)?
+            } else {
+                None
+            };
         // A named Type first exposes methods of the represented subject.
         // When none matches, the Type value itself may have an inherent
         // receiver method (for example checked structural reflection).
