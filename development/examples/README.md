@@ -14,7 +14,8 @@ python3 -B development/demo_println.py
 两个调用各自在编译期由 `std.fmt.Parse(format)` 确定变参域。脚本使用仓库的 sysroot
 和 LLVM O3 构建，成功后运行 `/tmp/flurry-println`。
 
-[host-stdout.fl](host-stdout.fl) 保留单段文本与单值 Display 的宿主输出示例。
+[host-stdout.fl](host-stdout.fl) 演示如何用 `.varargs = (answer, true)` 一次传入整个参数包。
+两个字段仍由同一个格式串逐项检查，进程号则在运行时取得并传给 `println`。
 文件、内存与平台接口的可用范围见 [std 说明](../../library/std/README.md)。
 
 其他 host 示例：
