@@ -104,8 +104,8 @@ enum Task {
     Type(Term),
 }
 
-struct Builder<'a> {
-    expansion: Option<&'a dyn Expansion>,
+struct Builder<'a, 'e> {
+    expansion: Option<&'e dyn Expansion>,
     quote_cursor: u32,
     inline_effects: BTreeSet<Id>,
     active_staged_inlines: BTreeSet<Id>,
@@ -465,12 +465,43 @@ pub fn instantiate_with_types_in_source_in_budget(
     InstantiationSession::new(source).instantiate(roots, types, runtime_bindings, budget, expansion)
 }
 
+struct IncrementalIir<'a> {
+    roots: Vec<iir::InstanceKey>,
+    type_roots: Vec<nir::Term>,
+    quote_cursor: u32,
+    inline_effects: BTreeSet<Id>,
+    quote_sources: Vec<n::ExpansionSource>,
+    world: DeclarationWorld<'a>,
+    value_scope: input_admission::ValueScope,
+    functions: HashSet<(Id, Vec<Term>)>,
+    staged_functions: HashMap<(Id, Vec<Term>), n::Function>,
+    generated_functions: HashMap<Id, n::Function>,
+    recursive_factories: HashMap<iir::InstanceKey, recursive_factories::Selection>,
+    invocation_snapshot: Option<staged::Snapshot>,
+    types: HashSet<Term>,
+    staging_views: HashMap<Term, Term>,
+    interfaces: HashMap<(n::InterfaceInstance, Term), usize>,
+    associated_demands: HashSet<(usize, Id)>,
+    output: Vec<n::DispatchInstance>,
+    instances: Vec<iir::FunctionInstance>,
+    runtime_bindings: BTreeSet<nir::RuntimeId>,
+    global_runtime_deliveries: BTreeMap<nir::RuntimeId, n::Expr>,
+    nominals: Vec<iir::NominalInstance>,
+    interface_contracts: Vec<iir::InterfaceContract>,
+    effect_contracts: Vec<iir::effects::Contract>,
+    effect_instances: HashSet<nir::effects::Operation>,
+    frozen_methods: Vec<n::Expr>,
+    callable_identities: Vec<iir::CallableIdentity>,
+    type_cores: nir::TypeInterner,
+}
+
 /// Repeated graph construction in one immutable source. Only completed source
-/// phase validation survives a call; roots, contexts, resources and output
-/// graphs are rebuilt for each request. The borrow keeps the source unchanged.
+/// phase validation survives `instantiate`; `extend` transactionally retains
+/// monotonic incremental IIR state across prefix-growing requests.
 pub struct InstantiationSession<'a> {
     source: DeclarationSource<'a>,
     phase_checked: bool,
+    incremental: Option<IncrementalIir<'a>>,
 }
 
 impl<'a> InstantiationSession<'a> {
@@ -478,6 +509,7 @@ impl<'a> InstantiationSession<'a> {
         Self {
             source,
             phase_checked: false,
+            incremental: None,
         }
     }
 
@@ -489,6 +521,7 @@ impl<'a> InstantiationSession<'a> {
         budget: &mut Budget,
         expansion: &dyn Expansion,
     ) -> Result<iir::Package, String> {
+        self.incremental = None;
         let mut construction_budget = *budget;
         budget.steps = 0;
         let source = self.source;
@@ -571,6 +604,248 @@ impl<'a> InstantiationSession<'a> {
             callable_identities,
         };
         output.validate(&mut publication_fuel)?;
+        budget.steps = publication_fuel;
+        Ok(output)
+    }
+
+    pub fn extend(
+        &mut self,
+        roots: &[iir::InstanceKey],
+        types: &[nir::Term],
+        runtime_bindings: BTreeSet<nir::RuntimeId>,
+        budget: &mut Budget,
+        expansion: &dyn Expansion,
+    ) -> Result<iir::Package, String> {
+        let prior = self.incremental.take();
+        let mut construction_budget = *budget;
+        budget.steps = 0;
+        let source = self.source;
+        let package = source.package();
+        construction_budget.steps = construction_budget
+            .steps
+            .checked_sub(1)
+            .ok_or("IIR phase evidence access budget exhausted")?;
+        if !self.phase_checked {
+            source
+                .phase_inspection()
+                .check_package(&mut construction_budget.steps)
+                .map_err(|e| format!("IIR input phase: {}", e.message))?;
+            self.phase_checked = true;
+        }
+        let mut runtime_bindings = runtime_bindings;
+        runtime_bindings.extend(package.runtime_domains.keys().copied());
+        construction_budget.steps = construction_budget
+            .steps
+            .checked_sub(runtime_bindings.len())
+            .ok_or("IIR runtime binding copy budget exhausted")?;
+
+        let (mut builder, new_roots, new_types, is_cold) = match prior {
+            Some(prev)
+                if prev.runtime_bindings == runtime_bindings
+                    && roots.starts_with(&prev.roots)
+                    && types.starts_with(&prev.type_roots) =>
+            {
+                let root_prefix = prev.roots.len();
+                let type_prefix = prev.type_roots.len();
+                let builder = Builder {
+                    expansion: Some(expansion),
+                    quote_cursor: prev.quote_cursor,
+                    inline_effects: prev.inline_effects,
+                    active_staged_inlines: BTreeSet::new(),
+                    quote_sources: prev.quote_sources,
+                    retain_templates: false,
+                    package,
+                    source,
+                    world: prev.world,
+                    value_scope: prev.value_scope,
+                    queue: VecDeque::new(),
+                    functions: prev.functions,
+                    staged_functions: prev.staged_functions,
+                    generated_functions: prev.generated_functions,
+                    recursive_factories: prev.recursive_factories,
+                    invocation_snapshot: prev.invocation_snapshot,
+                    types: prev.types,
+                    staging_views: prev.staging_views,
+                    interfaces: prev.interfaces,
+                    associated_demands: prev.associated_demands,
+                    output: prev.output,
+                    fuel: construction_budget.steps,
+                    budget: construction_budget,
+                    instances: Some(prev.instances),
+                    runtime_bindings: prev.runtime_bindings,
+                    global_runtime_deliveries: prev.global_runtime_deliveries,
+                    nominals: prev.nominals,
+                    interface_contracts: prev.interface_contracts,
+                    effect_contracts: prev.effect_contracts,
+                    effect_instances: prev.effect_instances,
+                    frozen_methods: prev.frozen_methods,
+                    callable_identities: prev.callable_identities,
+                    type_cores: prev.type_cores,
+                    active_caller_env: None,
+                    active_closure_scopes: Vec::new(),
+                };
+                (builder, &roots[root_prefix..], &types[type_prefix..], false)
+            }
+            _ => {
+                let world = source.world(&mut construction_budget, None)?;
+                let mut input_fuel = construction_budget.steps;
+                let value_scope = input_admission::ValueScope::new(&[], &mut input_fuel)?;
+                input_fuel = input_fuel
+                    .checked_sub(
+                        package
+                            .effects
+                            .len()
+                            .saturating_add(package.expansion_sources.len()),
+                    )
+                    .ok_or("materialized inline effect index budget exhausted")?;
+                let inline_effects = package
+                    .effects
+                    .iter()
+                    .filter(|effect| effect.inline && effect.abi == nir::effects::Abi::Direct)
+                    .map(|effect| effect.declaration)
+                    .collect();
+                let builder = Builder {
+                    expansion: Some(expansion),
+                    quote_cursor: package.quote_identity_cursor,
+                    inline_effects,
+                    active_staged_inlines: BTreeSet::new(),
+                    quote_sources: package.expansion_sources.clone(),
+                    retain_templates: false,
+                    package,
+                    source,
+                    world,
+                    value_scope,
+                    queue: VecDeque::new(),
+                    functions: HashSet::new(),
+                    staged_functions: HashMap::new(),
+                    generated_functions: HashMap::new(),
+                    recursive_factories: HashMap::new(),
+                    invocation_snapshot: None,
+                    types: HashSet::new(),
+                    staging_views: HashMap::new(),
+                    interfaces: HashMap::new(),
+                    associated_demands: HashSet::new(),
+                    output: vec![],
+                    fuel: input_fuel,
+                    budget: construction_budget,
+                    instances: Some(Vec::new()),
+                    runtime_bindings,
+                    global_runtime_deliveries: BTreeMap::new(),
+                    nominals: vec![],
+                    interface_contracts: vec![],
+                    effect_contracts: vec![],
+                    effect_instances: HashSet::new(),
+                    frozen_methods: vec![],
+                    callable_identities: vec![],
+                    type_cores: nir::TypeInterner::default(),
+                    active_caller_env: None,
+                    active_closure_scopes: Vec::new(),
+                };
+                (builder, roots, types, true)
+            }
+        };
+
+        for ty in new_types {
+            let ty = builder.normalized_type(ty)?;
+            builder.queue.push_back(Task::Type(ty));
+        }
+        for root in new_roots {
+            builder.tick(0)?;
+            for argument in root.arguments.iter() {
+                crate::associated::charge_projection_copy(argument, &mut builder.fuel)
+                    .map_err(|_| "dispatch root argument type budget exhausted".to_owned())?;
+            }
+            builder
+                .queue
+                .push_back(Task::Function(root.declaration, root.arguments.to_vec()));
+        }
+        if is_cold {
+            for (&id, expr) in &package.global_runtime_deliveries {
+                builder.tick(0)?;
+                let mut remaining = u64::try_from(builder.fuel).unwrap_or(u64::MAX);
+                nir::copy_budget::charge_expression(expr, &mut remaining).map_err(|reason| {
+                    format!("global runtime delivery copy budget exhausted: {reason:?}")
+                })?;
+                builder.fuel = usize::try_from(remaining).unwrap_or(usize::MAX);
+                let mut expr = expr.clone();
+                builder.normalize_expression(&mut expr)?;
+                builder.expr(&expr, 0, false)?;
+                builder.global_runtime_deliveries.insert(id, expr);
+            }
+        }
+        drain_queue(&mut builder, package)?;
+
+        let mut publication_fuel = builder.fuel;
+        let functions = builder.instances.take().unwrap_or_default();
+        let templates = captured_templates::storage(
+            &functions,
+            &builder.frozen_methods,
+            package,
+            &builder.output,
+            &mut builder.type_cores,
+            &mut publication_fuel,
+        )?;
+        // Clone dispatch before pruning non-demanded methods so the retained
+        // Builder dispatch table keeps all slot indices and specialized methods
+        // available for subsequent incremental extension rounds.
+        let mut dispatch = builder.output.clone();
+        publication::retain_demanded_methods(
+            &functions,
+            &templates,
+            &builder.callable_identities,
+            &mut dispatch,
+            &mut publication_fuel,
+        )?;
+        publication_fuel = publication_fuel
+            .checked_sub(roots.len())
+            .ok_or("IIR root copy budget exhausted")?;
+        let normal_forms =
+            publication::copy_normal_forms(&package.normal_forms, &mut publication_fuel)?;
+        let output = iir::Package {
+            target: package.target,
+            expansion_sources: builder.quote_sources.clone(),
+            effect_contracts: builder.effect_contracts.clone(),
+            roots: roots.to_vec(),
+            functions: functions.clone(),
+            templates,
+            dispatch,
+            runtime_bindings: builder.runtime_bindings.clone(),
+            global_runtime_deliveries: builder.global_runtime_deliveries.clone(),
+            nominals: builder.nominals.clone(),
+            interfaces: builder.interface_contracts.clone(),
+            normal_forms,
+            callable_identities: builder.callable_identities.clone(),
+        };
+        output.validate(&mut publication_fuel)?;
+        self.incremental = Some(IncrementalIir {
+            roots: roots.to_vec(),
+            type_roots: types.to_vec(),
+            quote_cursor: builder.quote_cursor,
+            inline_effects: builder.inline_effects,
+            quote_sources: builder.quote_sources,
+            world: builder.world,
+            value_scope: builder.value_scope,
+            functions: builder.functions,
+            staged_functions: builder.staged_functions,
+            generated_functions: builder.generated_functions,
+            recursive_factories: builder.recursive_factories,
+            invocation_snapshot: builder.invocation_snapshot,
+            types: builder.types,
+            staging_views: builder.staging_views,
+            interfaces: builder.interfaces,
+            associated_demands: builder.associated_demands,
+            output: builder.output,
+            instances: functions,
+            runtime_bindings: builder.runtime_bindings,
+            global_runtime_deliveries: builder.global_runtime_deliveries,
+            nominals: builder.nominals,
+            interface_contracts: builder.interface_contracts,
+            effect_contracts: builder.effect_contracts,
+            effect_instances: builder.effect_instances,
+            frozen_methods: builder.frozen_methods,
+            callable_identities: builder.callable_identities,
+            type_cores: builder.type_cores,
+        });
         budget.steps = publication_fuel;
         Ok(output)
     }
@@ -859,6 +1134,23 @@ fn build(
             builder.global_runtime_deliveries.insert(id, expr);
         }
     }
+    drain_queue(&mut builder, package)?;
+    Ok(BuildResult {
+        dispatch: builder.output,
+        functions: builder.instances.unwrap_or_default(),
+        nominals: builder.nominals,
+        interfaces: builder.interface_contracts,
+        remaining: builder.fuel,
+        expansion_sources: builder.quote_sources,
+        effect_contracts: builder.effect_contracts,
+        frozen_methods: builder.frozen_methods,
+        callable_identities: builder.callable_identities,
+        global_runtime_deliveries: builder.global_runtime_deliveries,
+        type_cores: builder.type_cores,
+    })
+}
+
+fn drain_queue(builder: &mut Builder<'_, '_>, package: &n::Package) -> Result<(), String> {
     while let Some(task) = builder.queue.pop_front() {
         builder.tick(0)?;
         match task {
@@ -891,22 +1183,10 @@ fn build(
             Task::Type(ty) => builder.ty(ty)?,
         }
     }
-    Ok(BuildResult {
-        dispatch: builder.output,
-        functions: builder.instances.unwrap_or_default(),
-        nominals: builder.nominals,
-        interfaces: builder.interface_contracts,
-        remaining: builder.fuel,
-        expansion_sources: builder.quote_sources,
-        effect_contracts: builder.effect_contracts,
-        frozen_methods: builder.frozen_methods,
-        callable_identities: builder.callable_identities,
-        global_runtime_deliveries: builder.global_runtime_deliveries,
-        type_cores: builder.type_cores,
-    })
+    Ok(())
 }
 
-impl Builder<'_> {
+impl Builder<'_, '_> {
     fn tick(&mut self, depth: usize) -> Result<(), String> {
         if depth >= self.budget.max_depth.min(128) || self.fuel == 0 {
             return Err("dispatch materialization budget exhausted".into());

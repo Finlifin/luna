@@ -37,7 +37,7 @@ pub(super) fn invocation<T>(
 mod tests {
     use super::*;
 
-    fn builder(package: &n::Package) -> Builder<'_> {
+    fn builder(package: &n::Package) -> Builder<'_, '_> {
         let budget = Budget::default();
         let (world, fuel) = DeclarationWorld::new(package, budget, None).unwrap();
         Builder {

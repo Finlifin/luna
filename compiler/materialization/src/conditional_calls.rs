@@ -157,7 +157,7 @@ fn unwrap_target(mut expression: Box<n::Expr>) -> Box<n::Expr> {
     }
 }
 
-impl Builder<'_> {
+impl Builder<'_, '_> {
     pub(super) fn resolve_conditional_callable(
         expression: &mut n::Expr,
         include_runtime: bool,
@@ -519,6 +519,7 @@ mod tests {
         assert!(!inert_input(&tuple, &mut fuel).unwrap());
         assert!(fuel < 100);
     }
+
     #[test]
     fn computed_inputs_execute_once_in_source_order_without_running_selection_or_runtime_inputs() {
         let boolean = Term::Primitive(nir::Primitive::Bool);

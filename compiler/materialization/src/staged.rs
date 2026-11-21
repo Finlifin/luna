@@ -27,7 +27,7 @@ struct FrozenGraph {
     bindings: Vec<n::Expr>,
 }
 
-impl Builder<'_> {
+impl Builder<'_, '_> {
     /// Keep completed data cheap; all computation uses the ordinary source VM.
     /// Shape recognition does not validate a value. Validation/copy failures
     /// propagate directly and must never trigger a second execution attempt.

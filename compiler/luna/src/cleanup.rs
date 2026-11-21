@@ -511,7 +511,7 @@ fn prepare_source_impl(
                 if cached_roots == &roots && cached_types == &source_types
         );
         if graph_changed {
-            let graph = elaboration::materialization::instantiate_with_types_in_session(
+            let graph = elaboration::materialization::extend_with_types_in_session(
                 &mut instantiation,
                 &roots,
                 &source_types,

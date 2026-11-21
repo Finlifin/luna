@@ -74,7 +74,7 @@ pub(super) fn dispatch(
     })
 }
 
-impl Builder<'_> {
+impl Builder<'_, '_> {
     pub(super) fn expand_returning_template(
         &mut self,
         function: &n::Function,
@@ -272,6 +272,7 @@ fn tag_returns(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn factory_return_tags_visit_capture_initializers_but_not_closure_bodies() {
         let source = n::SourceRange { start: 0, end: 1 };

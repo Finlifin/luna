@@ -2,7 +2,7 @@
 //! Executable function ownership belongs to IIR materialization.
 use super::*;
 
-impl Builder<'_> {
+impl Builder<'_, '_> {
     pub(super) fn dispatch_function(
         &mut self,
         function: &n::Function,

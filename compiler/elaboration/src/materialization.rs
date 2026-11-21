@@ -15,6 +15,7 @@ pub(crate) use ::materialization::{
 };
 
 struct SourceExpansion;
+
 impl ::materialization::Expansion for SourceExpansion {
     fn quotes(
         &self,
@@ -38,6 +39,7 @@ impl ::materialization::Expansion for SourceExpansion {
             fuel,
         )
     }
+
     fn effects(
         &self,
         package: &n::Package,
@@ -58,6 +60,7 @@ impl ::materialization::Expansion for SourceExpansion {
             fuel,
         )
     }
+
     fn quote(
         &self,
         package: &n::Package,
@@ -84,6 +87,7 @@ impl ::materialization::Expansion for SourceExpansion {
             fuel,
         )
     }
+
     fn inline(
         &self,
         package: &n::Package,
@@ -199,4 +203,14 @@ pub fn instantiate_with_types_in_session(
     budget: &mut Budget,
 ) -> Result<iir::Package, String> {
     session.instantiate(roots, types, runtime_bindings, budget, &SourceExpansion)
+}
+
+pub fn extend_with_types_in_session(
+    session: &mut InstantiationSession<'_>,
+    roots: &[iir::InstanceKey],
+    types: &[nir::Term],
+    runtime_bindings: BTreeSet<nir::RuntimeId>,
+    budget: &mut Budget,
+) -> Result<iir::Package, String> {
+    session.extend(roots, types, runtime_bindings, budget, &SourceExpansion)
 }

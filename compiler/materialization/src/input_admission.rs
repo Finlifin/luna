@@ -47,7 +47,7 @@ impl ValueScope {
     }
 }
 
-impl Builder<'_> {
+impl Builder<'_, '_> {
     pub(super) fn normalized_interface_arguments(
         &mut self,
         declaration: Id,

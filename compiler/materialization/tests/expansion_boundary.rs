@@ -93,6 +93,7 @@ fn nominal_publication_charges_metadata_and_recovers_after_failure() {
         }
     }
 }
+
 #[test]
 fn nominal_formation_uses_instantiated_parameter_domains() {
     let universe = Term::Primitive(Primitive::Type);
@@ -240,6 +241,7 @@ struct Provider {
     fail: bool,
     remaining_after_effects: Option<usize>,
 }
+
 impl Expansion for Provider {
     fn quotes(
         &self,
@@ -268,6 +270,7 @@ impl Expansion for Provider {
             Ok(())
         }
     }
+
     fn effects(
         &self,
         _: &n::Package,
@@ -284,6 +287,7 @@ impl Expansion for Provider {
         }
         Ok((0, 0))
     }
+
     fn quote(
         &self,
         _: &n::Package,
@@ -299,6 +303,7 @@ impl Expansion for Provider {
     ) -> Result<(), String> {
         panic!("plain literal must not request bound quote expansion")
     }
+
     fn inline(
         &self,
         _: &n::Package,
@@ -635,6 +640,93 @@ fn graph_session_retains_phase_evidence_but_rebuilds_outputs_and_recovers() {
             .starts_with("IIR input phase:")
     );
     assert!(changed.to_string().contains("(phase pending)"));
+}
+
+#[test]
+fn incremental_extend_reuses_prior_graph_and_rolls_back_on_error() {
+    use materialization::{DeclarationSource, InstantiationSession};
+    let (package, root) = fixture();
+    let expected = instantiate(
+        &package,
+        std::slice::from_ref(&root),
+        BTreeSet::new(),
+        Budget::default(),
+        &Provider::default(),
+    )
+    .unwrap();
+
+    let mut session = InstantiationSession::new(DeclarationSource::Borrowed(&package));
+    let cold_provider = Provider::default();
+    let mut cold = Budget::default();
+    let initial = Budget::default().steps;
+    let first = session
+        .extend(
+            std::slice::from_ref(&root),
+            &[],
+            BTreeSet::new(),
+            &mut cold,
+            &cold_provider,
+        )
+        .unwrap();
+    assert!(cold_provider.quotes.get() > 0);
+    assert_eq!(first.to_string(), expected.to_string());
+
+    let warm_provider = Provider::default();
+    let mut warm = Budget::default();
+    let second = session
+        .extend(
+            std::slice::from_ref(&root),
+            &[],
+            BTreeSet::new(),
+            &mut warm,
+            &warm_provider,
+        )
+        .unwrap();
+    assert_eq!(warm_provider.quotes.get(), 0);
+    assert!(initial - warm.steps < initial - cold.steps);
+    assert_eq!(second.to_string(), expected.to_string());
+
+    let mut failed = Budget::default();
+    assert!(
+        session
+            .extend(
+                &[
+                    root.clone(),
+                    iir::InstanceKey {
+                        declaration: id(999),
+                        arguments: vec![].into(),
+                    },
+                ],
+                &[],
+                BTreeSet::new(),
+                &mut failed,
+                &Provider::default(),
+            )
+            .is_err()
+    );
+    assert_eq!(failed.steps, 0);
+
+    let recovered = session
+        .extend(
+            std::slice::from_ref(&root),
+            &[],
+            BTreeSet::new(),
+            &mut Budget::default(),
+            &Provider::default(),
+        )
+        .unwrap();
+    assert_eq!(recovered.to_string(), expected.to_string());
+
+    let empty = session
+        .extend(
+            &[],
+            &[],
+            BTreeSet::new(),
+            &mut Budget::default(),
+            &Provider::default(),
+        )
+        .unwrap();
+    assert!(empty.functions.is_empty() && empty.roots.is_empty());
 }
 
 fn retained_template() -> (n::Package, iir::InstanceKey) {

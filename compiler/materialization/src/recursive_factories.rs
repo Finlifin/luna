@@ -24,12 +24,14 @@ fn key(callee: &n::Expr) -> Option<iir::InstanceKey> {
         _ => None,
     }
 }
+
 fn work(fuel: &mut usize) -> Result<(), String> {
     *fuel = fuel
         .checked_sub(1)
         .ok_or("recursive factory target budget exhausted")?;
     Ok(())
 }
+
 // Inspect completing result alternatives; statements/conditions remain intact.
 fn alternatives(
     value: &n::Expr,
@@ -84,6 +86,7 @@ fn alternatives(
     }
     Ok(true)
 }
+
 struct Node {
     key: iir::InstanceKey,
     function: n::Function,
@@ -99,7 +102,7 @@ fn charge_function(function: &n::Function, fuel: &mut usize) -> Result<(), Strin
         .map_err(|error| error.to_string())
 }
 
-impl Builder<'_> {
+impl Builder<'_, '_> {
     pub(super) fn lower_recursive_factory_call(
         &mut self,
         expression: &mut n::Expr,
@@ -552,6 +555,7 @@ fn encode(
     value.ty = Term::Primitive(nir::Primitive::U64);
     Ok(())
 }
+
 fn rewrite_returns(
     body: &mut n::Expr,
     nodes: &[Node],
