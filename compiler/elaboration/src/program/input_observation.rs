@@ -119,7 +119,17 @@ impl Checker<'_, '_> {
     pub(super) fn preserved_input_identity(
         &mut self,
         producer: &n::Expr,
+        prepared: impl FnMut(n::LocalId, &mut u64) -> Result<Option<std::sync::Arc<Term>>, Error>,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        self.preserved_input_with_snapshots(producer, prepared, &BTreeSet::new(), span)
+    }
+
+    pub(super) fn preserved_input_with_snapshots(
+        &mut self,
+        producer: &n::Expr,
         mut prepared: impl FnMut(n::LocalId, &mut u64) -> Result<Option<std::sync::Arc<Term>>, Error>,
+        snapshots: &BTreeSet<n::LocalId>,
         span: Span,
     ) -> Result<Option<Term>, Error> {
         // Each new observation may use completed immutable caller bindings.
@@ -144,7 +154,7 @@ impl Checker<'_, '_> {
             steps: before,
             max_limbs: 4096,
         };
-        let observed = self.observe_preserved_input_in(producer, facts, &mut budget);
+        let observed = self.observe_preserved_input_in(producer, facts, snapshots, &mut budget);
         self.required_steps -= (before - budget.steps) as u64;
         observation::optional(observed).map_err(|failure| {
             error(
@@ -162,6 +172,7 @@ impl Checker<'_, '_> {
         &self,
         producer: &n::Expr,
         mut facts: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        snapshots: &BTreeSet<n::LocalId>,
         budget: &mut comptime_runtime::Budget,
     ) -> Result<Term, Failure> {
         if let Some(identity) =
@@ -184,7 +195,7 @@ impl Checker<'_, '_> {
                     };
                 }
             };
-            self.observe_input_prefix_in(statements, &mut facts, budget)?;
+            self.observe_input_prefix_in(statements, &mut facts, snapshots, budget)?;
             let Some(tail) = tail else {
                 return Err(Failure::Unavailable);
             };
@@ -198,14 +209,16 @@ impl Checker<'_, '_> {
         &self,
         statements: &[n::Expr],
         facts: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        snapshots: &BTreeSet<n::LocalId>,
         budget: &mut comptime_runtime::Budget,
     ) -> Result<(), Failure> {
         for statement in statements {
-            if !input_facts_cover(statement, facts, budget)? {
-                facts.clear();
-                continue;
-            }
-            let observed = if matches!(statement.kind, K::Let { .. } | K::LetPattern { .. }) {
+            let free = nir::free_bindings::collect(statement, &mut budget.steps)?;
+            budget.consume(free.len())?;
+            let covered = free.iter().all(|id| facts.contains_key(id));
+            let observed = if !covered {
+                false
+            } else if matches!(statement.kind, K::Let { .. } | K::LetPattern { .. }) {
                 observation::optional(self.observe_normal_binding(statement, 0, budget, facts))?
                     .is_some()
             } else {
@@ -213,9 +226,21 @@ impl Checker<'_, '_> {
                     .is_some()
             };
             if !observed {
-                // Unknown calls or writes can invalidate aliases as well as
-                // their apparent operands. Keep no pre-effect local facts.
-                facts.clear();
+                // A by-value scalar has no shared mutable payload. Check for a
+                // write or an escaping place, including value-reference receivers.
+                if snapshots.is_empty() {
+                    facts.clear();
+                } else {
+                    budget.consume(facts.len())?;
+                    facts.retain(|id, _| snapshots.contains(id));
+                    if free.iter().any(|id| facts.contains_key(id)) {
+                        Self::invalidate_mutated_type_bindings(
+                            statement,
+                            facts,
+                            &mut budget.steps,
+                        )?;
+                    }
+                }
             }
         }
         Ok(())

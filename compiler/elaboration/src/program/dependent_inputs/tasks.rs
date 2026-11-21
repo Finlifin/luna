@@ -119,6 +119,46 @@ fn copy_evidence(value: &Term, steps: &mut u64, span: Span) -> Result<Term, Erro
     })
 }
 
+/// Collect writes before the scheduling walk takes ownership of the defaults.
+/// Only selected defaults execute. A default cannot reference a later formal.
+fn selected_default_writes(
+    defaults: &[Option<n::Expr>],
+    steps: &mut u64,
+    span: Span,
+) -> Result<BTreeMap<n::LocalId, usize>, Error> {
+    let mut writes = BTreeMap::new();
+    spend(steps, defaults.len(), span)?;
+    let mut selected = defaults
+        .iter()
+        .enumerate()
+        .filter_map(|(i, expr)| Some((i, expr.as_ref()?)))
+        .peekable();
+    while let Some((slot, expr)) = selected.next() {
+        if selected.peek().is_none() {
+            break;
+        }
+        let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+        let mut fuel = before;
+        let result = (|| -> Result<(), String> {
+            let free = nir::free_bindings::collect(expr, &mut fuel)?;
+            fuel = fuel
+                .checked_sub(free.len())
+                .ok_or("default frame observation budget exhausted")?;
+            let mut retained = free.iter().map(|&id| (id, expr)).collect();
+            Checker::invalidate_mutated_type_bindings(expr, &mut retained, &mut fuel)?;
+            for id in free {
+                if !retained.contains_key(&id) {
+                    writes.entry(id).or_insert(slot);
+                }
+            }
+            Ok(())
+        })();
+        *steps -= (before - fuel) as u64;
+        result.map_err(|reason| error(span, reason))?;
+    }
+    Ok(writes)
+}
+
 /// The parent owns checked inputs and default continuations across child checks.
 /// Source borrows still belong to the enclosing checking region, not a VM task.
 #[must_use = "drive the input frame to completion or discard its uncommitted results"]
@@ -128,6 +168,7 @@ pub(in crate::program) struct Frame {
     call: Option<nir::FunctionCallPreparation<Term>>,
     by_slot: BTreeMap<usize, usize>,
     default_slots: Option<BTreeMap<n::LocalId, usize>>,
+    first_default_write: BTreeMap<n::LocalId, usize>,
     progress: Progress,
     phase: Phase,
 }
@@ -204,12 +245,18 @@ impl Frame {
                 .map(|(index, input)| (offset + input.parameter, index))
                 .collect()
         };
+        let first_default_write = if demanded.is_empty() {
+            BTreeMap::new()
+        } else {
+            selected_default_writes(&prepared.defaults, &mut checker.required_steps, source.span)?
+        };
         let call = nir::FunctionCallPreparation::new(signature, checker.call_input_frames())
             .map_err(|failure| error(source.span, failure.to_string()))?;
         Ok(Self {
             call: Some(call),
             by_slot,
             default_slots: None,
+            first_default_write,
             span: source.span,
             prepared,
             progress: Progress {
@@ -369,6 +416,19 @@ impl Frame {
                         .into_iter()
                         .filter_map(|binding| ids.get(&binding).map(|slot| (binding, *slot)))
                         .collect();
+                    // The default frame is shared by all selected defaults in
+                    // declaration order. A parameter's entry value no longer
+                    // describes its slot after an earlier default can write it.
+                    if references.keys().any(|id| {
+                        self.first_default_write
+                            .get(id)
+                            .is_some_and(|&writer| writer < slot)
+                    }) {
+                        return Err(context_error(
+                            source.span,
+                            "dependent default needs the parameter state left by an earlier default in the original invocation",
+                        ));
+                    }
                     // Own the checked default while its referenced inputs are
                     // prepared. Resuming does not rebuild or invoke the default.
                     let dependencies: Vec<_> = references.values().copied().collect();
@@ -530,7 +590,15 @@ impl std::fmt::Display for Frame {
             Phase::Failed => f.write_str("failed")?,
             Phase::Complete => f.write_str("complete")?,
         }
-        write!(f, ") {} {}", self.progress, self.prepared)?;
+        write!(
+            f,
+            ") {} {} (first-default-writes",
+            self.progress, self.prepared
+        )?;
+        for (id, slot) in &self.first_default_write {
+            write!(f, " (write {id} {slot})")?;
+        }
+        f.write_str(")")?;
         if let Some(call) = &self.call {
             write!(f, " {call}")?;
         }
@@ -568,9 +636,26 @@ impl Checker<'_, '_> {
         prepared: &InputProducers,
         symbols: &[Option<Term>],
     ) -> Result<Resolution, Error> {
+        // Defaults see a fresh frame populated by earlier arguments. Primitive
+        // by-value arguments can survive unrelated work in this frame. A method
+        // receiver can alias its caller, and Object may contain shared state.
+        let mut snapshots = BTreeSet::new();
+        if !references.is_empty() {
+            spend(&mut self.required_steps, references.len(), source.span)?;
+            let receiver = self.has_comptime_value_receiver(owner);
+            for (&binding, &slot) in &references {
+                if !(receiver && slot == 0)
+                    && prepared.values[slot]
+                        .as_ref()
+                        .is_some_and(|v| matches!(v.ty, Term::Primitive(p) if p != P::Object))
+                {
+                    snapshots.insert(binding);
+                }
+            }
+        }
         let identity = match &value.kind {
             K::TypeValue(ty) => Some(copy_evidence(ty, &mut self.required_steps, source.span)?),
-            _ => self.preserved_input_identity(
+            _ => self.preserved_input_with_snapshots(
                 &value,
                 |id, fuel| {
                     let Some(slot) = references.get(&id) else {
@@ -585,6 +670,7 @@ impl Checker<'_, '_> {
                         source.span,
                     )?)))
                 },
+                &snapshots,
                 source.span,
             )?,
         };
@@ -732,6 +818,7 @@ mod tests {
             span,
             by_slot: BTreeMap::new(),
             default_slots: None,
+            first_default_write: [(n::LocalId { owner: 5, index: 7 }, 1)].into(),
             prepared,
             progress: Progress::new(1),
             phase: Phase::Child {
@@ -743,6 +830,7 @@ mod tests {
         assert!(dump.starts_with("(dependent-input-frame "), "{dump}");
         for text in [
             "(phase (child 1 (caller-staged false)))",
+            "(first-default-writes (write (local 5 7) 1))",
             "(slot 0 (producer",
             "(slot 1 (producer)",
             "retained\\\"\\n",

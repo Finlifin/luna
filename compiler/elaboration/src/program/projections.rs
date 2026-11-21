@@ -877,7 +877,12 @@ impl Checker<'_, '_> {
             };
             let before = budget.steps;
             let observed = if let K::Block { statements, .. } = &instance.kind {
-                self.observe_input_prefix_in(statements, &mut known_parent, &mut budget)
+                self.observe_input_prefix_in(
+                    statements,
+                    &mut known_parent,
+                    &BTreeSet::new(),
+                    &mut budget,
+                )
             } else {
                 Ok(())
             };

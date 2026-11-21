@@ -5253,6 +5253,17 @@ impl Checker<'_, '_> {
         )
     }
 
+    fn has_comptime_value_receiver(&self, owner: Option<OwnerId>) -> bool {
+        owner
+            .and_then(|owner| self.package.item(owner))
+            .is_some_and(|item| {
+                matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head
+                    && sig.params.first().is_some_and(|param|
+                        matches!(param.ty.kind, TyParamKind::Itself { is_ref: false })))
+            })
+    }
+
     /// Receiver transport follows declaration syntax, including explicit UFCS.
     /// An ordinary first parameter remains a value even when named similarly.
     fn comptime_receiver_arguments(
@@ -5260,15 +5271,7 @@ impl Checker<'_, '_> {
         owner: Option<OwnerId>,
         arguments: &mut [n::CallArgument],
     ) {
-        let receiver = owner
-            .and_then(|owner| self.package.item(owner))
-            .is_some_and(|item| {
-                matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
-                if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head
-                    && sig.params.first().is_some_and(|param|
-                        matches!(param.ty.kind, TyParamKind::Itself { is_ref: false })))
-            });
-        if !receiver {
+        if !self.has_comptime_value_receiver(owner) {
             return;
         }
         for argument in arguments {

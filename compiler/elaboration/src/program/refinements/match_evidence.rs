@@ -14,6 +14,7 @@ impl Observation<'_> {
         match self {
             Self::Expression(expr) => {
                 Checker::invalidate_mutated_type_bindings(expr, bindings, fuel)
+                    .map_err(String::from)
             }
             Self::UnknownWrites => {
                 bindings.clear();

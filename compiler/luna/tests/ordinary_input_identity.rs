@@ -73,9 +73,10 @@ fn unobserved_dependencies_do_not_start_an_isolated_invocation() {
 }
 
 #[test]
-fn unobserved_default_dependencies_report_the_missing_continuation() {
-    let failure = sysroot::compile(&format!(
-        "{FLAG}
+fn a_default_keeps_its_scalar_prefix_across_an_independent_call() {
+    check_events(
+        &format!(
+            "{FLAG}
         comptime fn mark() -> bool {{ true }}
         comptime fn accept(comptime .T: Type = bool,
             comptime .U: Type = T,
@@ -83,11 +84,8 @@ fn unobserved_default_dependencies_report_the_missing_continuation() {
         where requires V :- Flag
         {{ true }}
         comptime fn check() -> bool {{ accept(true) }}"
-    ))
-    .unwrap_err();
-    assert!(
-        failure.contains("dependent call input needs its original comptime invocation"),
-        "{failure}"
+        ),
+        &[("accept", 1), ("mark", 1)],
     );
 }
 
@@ -131,7 +129,6 @@ fn immutable_local_identities_do_not_need_required_execution() {
 }
 
 #[test]
-#[ignore = "unknown default prefixes need source execution continuation, not eager freezing"]
 fn dependent_default_unknown_prefix_runs_in_the_original_invocation() {
     check_events(
         &format!(
@@ -153,6 +150,64 @@ fn dependent_default_unknown_prefix_runs_in_the_original_invocation() {
     "
         ),
         &[("accept", 1), ("mark", 1)],
+    );
+}
+
+#[test]
+fn only_selected_prior_defaults_can_invalidate_a_parameter_observation() {
+    let source = format!(
+        "{FLAG}
+        comptime fn mark() -> bool {{ true }}
+        comptime fn accept(comptime .T: Type = bool,
+            .change: bool = do {{ T = char; true }},
+            comptime .U: Type = do {{ mark(); T }}, value: U) -> bool
+        where requires U :- Flag {{ true }}
+        comptime fn check() -> bool {{ CALL }}"
+    );
+    let failure = sysroot::compile(&source.replace("CALL", "accept(true)")).unwrap_err();
+    assert!(
+        failure.contains("parameter state left by an earlier default"),
+        "{failure}"
+    );
+    check_events(
+        &source.replace("CALL", "accept(true, .change = false)"),
+        &[("accept", 1), ("mark", 1)],
+    );
+}
+
+#[test]
+fn a_write_inside_the_default_invalidates_its_entry_snapshot() {
+    let source = format!(
+        "{FLAG}
+        comptime fn accept(comptime .T: Type = bool,
+            comptime .U: Type = do {{ T = char; T }}, value: U) -> bool
+        where requires U :- Flag {{ true }}
+        comptime fn unused() -> bool {{ accept(true) }}"
+    );
+    let error = sysroot::compile(&source).unwrap_err();
+    assert!(
+        error.contains("needs its original comptime invocation")
+            || error.contains("not established")
+            || error.contains("type mismatch"),
+        "{error}"
+    );
+}
+
+#[test]
+fn scalar_default_snapshots_cover_value_requirements_and_literal_overrides() {
+    let source = "
+        trait Enabled where flag: bool {}
+        impl Enabled<true> for bool {}
+        comptime fn mark(input: bool) -> bool { not input }
+        comptime fn accept(comptime flag: bool,
+            comptime .next: bool = do { mark(flag); flag }) -> bool
+        where requires bool :- Enabled<next> { next }
+        comptime fn check() -> bool { accept(true) and accept(false, .next = true) }";
+    check_events(source, &[("accept", 2), ("mark", 1)]);
+    let error = sysroot::compile(&source.replace("accept(true)", "accept(false)")).unwrap_err();
+    assert!(
+        error.contains("not established") || error.contains("not satisfied"),
+        "{error}"
     );
 }
 

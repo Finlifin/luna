@@ -1115,16 +1115,16 @@ impl Checker<'_, '_> {
         self.verify_type_guarantees_expr(expr, binder, &guarantees, &context, &bindings, span, 0)
     }
 
-    fn remove_pattern_bindings(
+    fn remove_pattern_bindings<T>(
         pattern: &n::Pattern,
-        bindings: &mut BTreeMap<n::LocalId, &n::Expr>,
+        bindings: &mut BTreeMap<n::LocalId, T>,
         fuel: &mut usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), nir::visit::Error> {
         let mut pending = vec![pattern];
         while let Some(pattern) = pending.pop() {
-            *fuel = fuel
-                .checked_sub(1)
-                .ok_or("result guarantee invalidation budget exhausted")?;
+            *fuel = fuel.checked_sub(1).ok_or(nir::visit::Error::Budget(
+                "binding invalidation budget exhausted",
+            ))?;
             match pattern {
                 n::Pattern::Binding { binding, inner } => {
                     bindings.remove(binding);
@@ -1136,7 +1136,9 @@ impl Checker<'_, '_> {
                 } => {
                     *fuel = fuel
                         .checked_sub(remap.len())
-                        .ok_or("result guarantee invalidation budget exhausted")?;
+                        .ok_or(nir::visit::Error::Budget(
+                            "binding invalidation budget exhausted",
+                        ))?;
                     for (_, to) in remap {
                         bindings.remove(to);
                     }
@@ -1162,7 +1164,9 @@ impl Checker<'_, '_> {
                 } => {
                     *fuel = fuel
                         .checked_sub(fields.len())
-                        .ok_or("result guarantee invalidation budget exhausted")?;
+                        .ok_or(nir::visit::Error::Budget(
+                            "binding invalidation budget exhausted",
+                        ))?;
                     pending.extend(fields);
                 }
                 n::Pattern::OptionalAbsent
@@ -1175,15 +1179,15 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    pub(super) fn invalidate_mutated_type_bindings(
+    pub(super) fn invalidate_mutated_type_bindings<T>(
         expr: &n::Expr,
-        bindings: &mut BTreeMap<n::LocalId, &n::Expr>,
+        bindings: &mut BTreeMap<n::LocalId, T>,
         fuel: &mut usize,
-    ) -> Result<(), String> {
+    ) -> Result<(), nir::visit::Error> {
         if bindings.is_empty() {
             return Ok(());
         }
-        nir::visit::expression(expr, fuel, |node, fuel| {
+        nir::visit::expression_checked(expr, fuel, |node, fuel| {
             if bindings.is_empty() {
                 return Ok(());
             }
@@ -1197,9 +1201,9 @@ impl Checker<'_, '_> {
                     let mut root = place_expr.as_ref();
                     while let K::Field { value, .. } | K::AnonymousField { value, .. } = &root.kind
                     {
-                        *fuel = fuel
-                            .checked_sub(1)
-                            .ok_or("result guarantee invalidation budget exhausted")?;
+                        *fuel = fuel.checked_sub(1).ok_or(nir::visit::Error::Budget(
+                            "binding invalidation budget exhausted",
+                        ))?;
                         root = value;
                     }
                     if let K::Local(id) = root.kind {
@@ -1220,9 +1224,9 @@ impl Checker<'_, '_> {
                         while let K::Field { value, .. } | K::AnonymousField { value, .. } =
                             &root.kind
                         {
-                            *fuel = fuel
-                                .checked_sub(1)
-                                .ok_or("result guarantee invalidation budget exhausted")?;
+                            *fuel = fuel.checked_sub(1).ok_or(nir::visit::Error::Budget(
+                                "binding invalidation budget exhausted",
+                            ))?;
                             root = value;
                         }
                         if let K::Local(id) = root.kind {
