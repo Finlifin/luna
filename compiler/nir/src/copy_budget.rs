@@ -1266,9 +1266,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         work.push((Node::Expr(value), depth + 1));
                         0
                     }
-                    A::Integer { spelling, .. } => spelling.len(),
-                    A::Symbol { name, .. } => name.len(),
-                    A::Unit { .. } | A::Null { .. } => 0,
+                    A::Literal { value, .. } => value.text_len(),
                     A::Tuple { items, .. } | A::List { items, .. } => {
                         charge_width(steps, items.len())?;
                         work.extend(items.iter().map(|value| (Node::Argument(value), depth + 1)));

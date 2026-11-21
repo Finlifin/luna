@@ -84,14 +84,10 @@ mod tests {
         let input = A::List {
             source: SOURCE,
             items: vec![
-                A::Integer {
-                    source: SOURCE,
-                    spelling: "17".into(),
-                    negative: false,
-                },
+                A::integer(SOURCE, "17".into(), false),
                 A::Tuple {
                     source: SOURCE,
-                    items: vec![A::Unit { source: SOURCE }],
+                    items: vec![A::unit(SOURCE)],
                 },
             ],
         };

@@ -5128,11 +5128,7 @@ fn contextual_normal_integer_branches_preserve_flow_and_default_values() {
             },
             K::Literal(nir::program::Literal::Integer(spelling)) => {
                 let negative = spelling.starts_with('-');
-                A::Integer {
-                    source,
-                    spelling: spelling.trim_start_matches('-').into(),
-                    negative,
-                }
+                A::integer(source, spelling.trim_start_matches('-').into(), negative)
             }
             kind => A::Value(nir::program::Expr { kind, ..expr }),
         }
@@ -5147,9 +5143,7 @@ fn contextual_normal_integer_branches_preserve_flow_and_default_values() {
         if let nir::program::ExprKind::NormalFormType { arguments, .. } = &mut expr.kind {
             let old = std::mem::replace(
                 &mut arguments[0],
-                nir::program::NormalFormArgument::Unit {
-                    source: expr.source,
-                },
+                nir::program::NormalFormArgument::unit(expr.source),
             );
             let nir::program::NormalFormArgument::Value(value) = old else {
                 panic!("source input expression")
@@ -5375,11 +5369,11 @@ fn contextual_normal_matches_keep_pattern_bindings_and_guard_failure_effects() {
                             .map(|arm| {
                                 let body = match &arm.body.kind {
                                     K::Literal(nir::program::Literal::Integer(spelling)) => {
-                                        A::Integer {
-                                            source: arm.body.source,
-                                            spelling: spelling.trim_start_matches('-').into(),
-                                            negative: spelling.starts_with('-'),
-                                        }
+                                        A::integer(
+                                            arm.body.source,
+                                            spelling.trim_start_matches('-').into(),
+                                            spelling.starts_with('-'),
+                                        )
                                     }
                                     _ => A::Value(arm.body.clone()),
                                 };
@@ -5568,16 +5562,12 @@ fn contextual_machine_integer_inputs_preserve_bounds_and_flow() {
                     statements,
                     result: result.map(|value| Box::new(contextual(*value))),
                 },
-                K::Literal(Literal::SignedInteger(value)) => A::Integer {
-                    source,
-                    spelling: value.unsigned_abs().to_string(),
-                    negative: value < 0,
-                },
-                K::Literal(Literal::UnsignedInteger(value)) => A::Integer {
-                    source,
-                    spelling: value.to_string(),
-                    negative: false,
-                },
+                K::Literal(Literal::SignedInteger(value)) => {
+                    A::integer(source, value.unsigned_abs().to_string(), value < 0)
+                }
+                K::Literal(Literal::UnsignedInteger(value)) => {
+                    A::integer(source, value.to_string(), false)
+                }
                 kind => A::Value(nir::program::Expr { kind, ..expr }),
             }
         }
@@ -5628,7 +5618,11 @@ fn contextual_machine_integer_inputs_preserve_bounds_and_flow() {
                 else {
                     panic!("contextual block")
                 };
-                let A::Integer { spelling, .. } = result.as_mut() else {
+                let A::Literal {
+                    value: nir::program::ContextualLiteral::Integer { spelling, .. },
+                    ..
+                } = result.as_mut()
+                else {
                     panic!("contextual integer")
                 };
                 *spelling = if number < 0 { "129" } else { "256" }.into();
@@ -5701,11 +5695,7 @@ fn contextual_bitvec_integer_inputs_check_width_without_truncation() {
                 arguments[0] = A::Block {
                     source: value.source,
                     statements: statements.clone(),
-                    result: Some(Box::new(A::Integer {
-                        source: tail.source,
-                        spelling: maximum.into(),
-                        negative: false,
-                    })),
+                    result: Some(Box::new(A::integer(tail.source, maximum.into(), false))),
                 };
             }
             Ok(())
@@ -5752,11 +5742,7 @@ fn contextual_bitvec_integer_inputs_check_width_without_truncation() {
                     else {
                         panic!("input block")
                     };
-                    *result = Box::new(A::Integer {
-                        source: expr.source,
-                        spelling: spelling.into(),
-                        negative,
-                    });
+                    *result = Box::new(A::integer(expr.source, spelling.into(), negative));
                 }
                 Ok(())
             })

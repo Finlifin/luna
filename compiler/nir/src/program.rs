@@ -421,6 +421,70 @@ impl fmt::Display for NormalFormInputPlan {
     }
 }
 
+/// Source evidence whose value is formed only after the input domain is available.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContextualLiteral {
+    Null,
+    Unit,
+    Symbol(String),
+    Integer { spelling: String, negative: bool },
+    Float { spelling: String, negative: bool },
+}
+
+impl ContextualLiteral {
+    pub fn text_len(&self) -> usize {
+        match self {
+            Self::Null | Self::Unit => 0,
+            Self::Symbol(name) => name.len(),
+            Self::Integer { spelling, .. } | Self::Float { spelling, .. } => spelling.len(),
+        }
+    }
+
+    fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Null => "null",
+            Self::Unit => "unit",
+            Self::Symbol(_) => "symbol",
+            Self::Integer { .. } => "integer",
+            Self::Float { .. } => "float",
+        }
+    }
+
+    fn fmt_argument(&self, source: SourceRange, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(contextual-{}-input (source {source})",
+            self.kind_name()
+        )?;
+        match self {
+            Self::Unit | Self::Null => {}
+            Self::Symbol(name) => write!(f, " (name {})", crate::QuotedDisplay(name))?,
+            Self::Integer { spelling, negative } | Self::Float { spelling, negative } => write!(
+                f,
+                " (negative {negative}) (spelling {})",
+                crate::QuotedDisplay(spelling)
+            )?,
+        }
+        f.write_str(")")
+    }
+}
+
+impl fmt::Display for ContextualLiteral {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({}", self.kind_name())?;
+        match self {
+            Self::Unit | Self::Null => {}
+            Self::Symbol(name) => write!(f, " {}", crate::QuotedDisplay(name))?,
+            Self::Integer { spelling, negative } | Self::Float { spelling, negative } => write!(
+                f,
+                " {} (negative {negative})",
+                crate::QuotedDisplay(spelling)
+            )?,
+        }
+        f.write_str(")")
+    }
+}
+
 /// A head input may need its earlier Type inputs before literal conversion.
 #[derive(Clone, Debug, PartialEq)]
 pub enum NormalFormArgument {
@@ -432,22 +496,9 @@ pub enum NormalFormArgument {
     Value(Expr),
     /// Expand a completed list of the collector's exact contextual list type.
     ListSpread(Expr),
-    /// Absence whose optional domain is supplied by earlier or staged inputs.
-    Null {
+    Literal {
         source: SourceRange,
-    },
-    Unit {
-        source: SourceRange,
-    },
-    /// A bare symbol selects Symbol data or a unit variant in the supplied domain.
-    Symbol {
-        source: SourceRange,
-        name: String,
-    },
-    Integer {
-        source: SourceRange,
-        spelling: String,
-        negative: bool,
+        value: ContextualLiteral,
     },
     If {
         source: SourceRange,
@@ -489,6 +540,34 @@ impl fmt::Display for NormalMatchArm {
 }
 
 impl NormalFormArgument {
+    pub fn integer(source: SourceRange, spelling: String, negative: bool) -> Self {
+        Self::Literal {
+            source,
+            value: ContextualLiteral::Integer { spelling, negative },
+        }
+    }
+
+    pub fn unit(source: SourceRange) -> Self {
+        Self::Literal {
+            source,
+            value: ContextualLiteral::Unit,
+        }
+    }
+
+    pub fn null(source: SourceRange) -> Self {
+        Self::Literal {
+            source,
+            value: ContextualLiteral::Null,
+        }
+    }
+
+    pub fn symbol(source: SourceRange, name: String) -> Self {
+        Self::Literal {
+            source,
+            value: ContextualLiteral::Symbol(name),
+        }
+    }
+
     pub fn expression(&self) -> Option<&Expr> {
         match self {
             Self::ListSpread(value) | Self::Value(value) => Some(value),
@@ -509,10 +588,7 @@ impl NormalFormArgument {
         while let Some(input) = pending.pop() {
             match input {
                 Self::ListSpread(value) | Self::Value(value) => result.push(value),
-                Self::Integer { .. }
-                | Self::Symbol { .. }
-                | Self::Unit { .. }
-                | Self::Null { .. } => {}
+                Self::Literal { .. } => {}
                 Self::If {
                     condition,
                     then_input,
@@ -556,10 +632,7 @@ impl NormalFormArgument {
         while let Some(input) = pending.pop() {
             match input {
                 Self::ListSpread(value) | Self::Value(value) => result.push(value),
-                Self::Integer { .. }
-                | Self::Symbol { .. }
-                | Self::Unit { .. }
-                | Self::Null { .. } => {}
+                Self::Literal { .. } => {}
                 Self::If {
                     condition,
                     then_input,
@@ -670,12 +743,7 @@ impl NormalFormArgument {
             Self::If { condition, .. } => never(condition),
             Self::Match { value, .. } => never(value),
             Self::Block { statements, .. } => statements.iter().any(never),
-            Self::List { .. }
-            | Self::Tuple { .. }
-            | Self::Null { .. }
-            | Self::Integer { .. }
-            | Self::Symbol { .. }
-            | Self::Unit { .. } => false,
+            Self::List { .. } | Self::Tuple { .. } | Self::Literal { .. } => false,
         }
     }
 
@@ -727,10 +795,7 @@ impl NormalFormArgument {
                     }
                     Self::Value(_)
                     | Self::ListSpread(_)
-                    | Self::Unit { .. }
-                    | Self::Null { .. }
-                    | Self::Integer { .. }
-                    | Self::Symbol { .. }
+                    | Self::Literal { .. }
                     | Self::Block { result: None, .. } => false,
                 }
             };
@@ -756,10 +821,7 @@ impl NormalFormArgument {
     pub fn source(&self) -> SourceRange {
         match self {
             Self::ListSpread(value) | Self::Value(value) => value.source,
-            Self::Null { source }
-            | Self::Unit { source }
-            | Self::Integer { source, .. }
-            | Self::Symbol { source, .. }
+            Self::Literal { source, .. }
             | Self::If { source, .. }
             | Self::Block { source, .. }
             | Self::List { source, .. }
@@ -826,25 +888,7 @@ impl fmt::Display for NormalFormArgument {
                 }
                 f.write_str("))")
             }
-            Self::Null { source } => write!(f, "(contextual-null-input (source {source}))"),
-            Self::Symbol { source, name } => {
-                write!(f, "(contextual-symbol-input (source {source}) (name ")?;
-                string(f, name)?;
-                f.write_str("))")
-            }
-            Self::Unit { source } => write!(f, "(contextual-unit-input (source {source}))"),
-            Self::Integer {
-                source,
-                spelling,
-                negative,
-            } => {
-                write!(
-                    f,
-                    "(contextual-integer-input (source {source}) (negative {negative}) (spelling "
-                )?;
-                string(f, spelling)?;
-                f.write_str("))")
-            }
+            Self::Literal { source, value } => value.fmt_argument(*source, f),
         }
     }
 }

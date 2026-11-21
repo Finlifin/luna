@@ -1751,20 +1751,16 @@ impl Checker<'_, '_> {
                 .required_steps
                 .checked_sub(name.len() as u64)
                 .ok_or_else(|| error(input.span, "contextual symbol input budget exhausted"))?;
-            return Ok(n::NormalFormArgument::Symbol {
-                source: source(input.span),
-                name: name.to_owned(),
-            });
+            return Ok(n::NormalFormArgument::symbol(
+                source(input.span),
+                name.to_owned(),
+            ));
         }
         if matches!(input.kind, H::Null) {
-            return Ok(n::NormalFormArgument::Null {
-                source: source(input.span),
-            });
+            return Ok(n::NormalFormArgument::null(source(input.span)));
         }
         if matches!(input.kind, H::Unit) {
-            return Ok(n::NormalFormArgument::Unit {
-                source: source(input.span),
-            });
+            return Ok(n::NormalFormArgument::unit(source(input.span)));
         }
         if matches!(input.kind, H::List(_) | H::Tuple(_)) {
             return self.check_contextual_aggregate(input, depth);
@@ -1793,21 +1789,36 @@ impl Checker<'_, '_> {
             H::Unary(UnOp::Neg, inner) => (*inner, true),
             _ => (input, false),
         };
-        if let H::Lit(hir::Lit {
-            kind: hir::LitKind::Integer(spelling),
-            ..
-        }) = &literal.kind
-        {
-            comptime_runtime::Integer::parse_literal(
-                spelling,
-                &mut comptime_runtime::Budget::default(),
-            )
-            .map_err(|e| error(input.span, e.to_string()))?;
-            return Ok(n::NormalFormArgument::Integer {
-                source: source(input.span),
-                spelling: spelling.clone(),
-                negative,
-            });
+        if let H::Lit(hir::Lit { kind, .. }) = &literal.kind {
+            let value = match kind {
+                hir::LitKind::Integer(spelling) => {
+                    self.with_observation_budget(input.span, |_, budget| {
+                        comptime_runtime::Integer::parse_literal(spelling, budget)?;
+                        Ok(())
+                    })?;
+                    Some(n::ContextualLiteral::Integer {
+                        spelling: spelling.clone(),
+                        negative,
+                    })
+                }
+                hir::LitKind::Float(spelling) => {
+                    self.with_observation_budget(input.span, |_, budget| {
+                        nir::float_formation::FloatFormation::parse(spelling, negative, budget)?;
+                        Ok(())
+                    })?;
+                    Some(n::ContextualLiteral::Float {
+                        spelling: spelling.clone(),
+                        negative,
+                    })
+                }
+                _ => None,
+            };
+            if let Some(value) = value {
+                return Ok(n::NormalFormArgument::Literal {
+                    source: source(input.span),
+                    value,
+                });
+            }
         }
         let saved_defaults = std::mem::replace(&mut self.numeric_defaults, false);
         let result = self.expr(input, None);

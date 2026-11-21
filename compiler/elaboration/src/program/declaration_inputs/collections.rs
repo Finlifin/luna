@@ -121,9 +121,8 @@ impl<'b, 'h> Frame<'b, 'h> {
                 if pending.source_index >= self.tail_start {
                     State::ContextualTail
                 } else if matches!(pending.input.kind, H::Unit) {
-                    self.collected.push(n::NormalFormArgument::Unit {
-                        source: source(pending.input.span),
-                    });
+                    self.collected
+                        .push(n::NormalFormArgument::unit(source(pending.input.span)));
                     continue;
                 } else {
                     State::Probe
@@ -192,9 +191,7 @@ impl<'b, 'h> Frame<'b, 'h> {
         let value = match state {
             State::ContextualTail => value,
             State::ContextualLiteral => match value {
-                value @ (n::NormalFormArgument::Integer { .. }
-                | n::NormalFormArgument::Symbol { .. }
-                | n::NormalFormArgument::Null { .. }) => value,
+                value @ n::NormalFormArgument::Literal { .. } => value,
                 _ => {
                     return Err(context_error(
                         pending.input.span,

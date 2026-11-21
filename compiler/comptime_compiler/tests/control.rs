@@ -1368,7 +1368,7 @@ fn contextual_return_paths_agree_in_nir_and_compiled_input_shapes() {
         ty: Term::Primitive(Primitive::Never),
         kind: K::Return(None),
     };
-    let unit = A::Unit { source };
+    let unit = A::unit(source);
     let never = A::Value(exit.clone());
     let choice = |condition: Expr, then_input: A, else_input: A| A::If {
         source,

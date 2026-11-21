@@ -89,7 +89,7 @@ impl<'a> Worklist<'a> {
         let arg = |a| Work::Argument(a, ct);
         match input {
             A::Value(value) | A::ListSpread(value) => self.push(expr(value), fuel)?,
-            A::Null { .. } | A::Unit { .. } | A::Integer { .. } | A::Symbol { .. } => {}
+            A::Literal { .. } => {}
             A::List { items, .. } | A::Tuple { items, .. } => {
                 self.extend(items.iter().map(arg), fuel)?;
             }
@@ -145,7 +145,7 @@ mod tests {
         let source = SourceRange { start: 10, end: 20 };
         let input = A::List {
             source,
-            items: vec![A::Unit { source }; 80],
+            items: vec![A::unit(source); 80],
         };
         let mut work = Worklist::new(source, false);
         let mut limited = 20;

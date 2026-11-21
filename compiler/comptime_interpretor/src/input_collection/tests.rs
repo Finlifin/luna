@@ -155,11 +155,7 @@ fn fixture(count: usize) -> (Package, Expr, Vec<nir::DeclarationParameter>, Vec<
                             )),
                         },
                     )],
-                    result: Some(Box::new(Argument::Integer {
-                        source: SOURCE,
-                        spelling: "7".into(),
-                        negative: false,
-                    })),
+                    result: Some(Box::new(Argument::integer(SOURCE, "7".into(), false))),
                 }
             } else {
                 Argument::Value(expression(
@@ -501,11 +497,7 @@ fn one_domain_delivery_can_be_cancelled_before_a_later_field_fails() {
     let K::NormalFormType { arguments, .. } = &mut input.kind else {
         unreachable!()
     };
-    arguments[2] = Argument::Integer {
-        source: invalid_source,
-        spelling: "256".into(),
-        negative: false,
-    };
+    arguments[2] = Argument::integer(invalid_source, "256".into(), false);
 
     for tree in [false, true] {
         let mut vm = if tree {
@@ -570,11 +562,7 @@ fn shared_and_partial_dependencies_keep_each_pending_value_until_its_domain_is_r
             for slot in 2..count {
                 package.normal_forms[0].parameters[slot].kind = Kind::Value;
                 package.normal_forms[0].parameters[slot].ty = domain.clone();
-                arguments[slot] = Argument::Integer {
-                    source: SOURCE,
-                    spelling: "7".into(),
-                    negative: false,
-                };
+                arguments[slot] = Argument::integer(SOURCE, "7".into(), false);
             }
         } else {
             package.normal_forms[0].parameters[1].kind = Kind::Type;
@@ -790,11 +778,7 @@ fn recursive_application_keeps_caller_binders_in_ready_and_resumed_operands() {
                     source: SOURCE,
                     items: vec![
                         Argument::Value(expression(rigid(0), K::Local(local(42)))),
-                        Argument::Integer {
-                            source: SOURCE,
-                            spelling: "7".into(),
-                            negative: false,
-                        },
+                        Argument::integer(SOURCE, "7".into(), false),
                     ],
                 },
             ];

@@ -346,11 +346,11 @@ fn nominal_constructor_checks_value_domains_before_export_and_recovers() {
                 bindings: None,
                 order: None,
                 declaration: id(20),
-                arguments: vec![nir::program::NormalFormArgument::Integer {
-                    source: SourceRange { start: 1, end: 2 },
-                    spelling: n.to_string(),
-                    negative: false,
-                }],
+                arguments: vec![nir::program::NormalFormArgument::integer(
+                    SourceRange { start: 1, end: 2 },
+                    n.to_string(),
+                    false,
+                )],
             },
         )
     };
@@ -463,11 +463,7 @@ fn contextual_nominal_input_waits_for_capture_without_replaying_effects() {
     let argument = A::Block {
         source,
         statements: vec![call(2)],
-        result: Some(Box::new(A::Integer {
-            source,
-            spelling: "7".into(),
-            negative: false,
-        })),
+        result: Some(Box::new(A::integer(source, "7".into(), false))),
     };
     let body = expr(
         p(P::Type),
@@ -586,11 +582,7 @@ fn nominal_input_bindings_allow_repeated_construction_and_invocation() {
     };
     for argument in [
         A::Value(value(p(P::Bool))),
-        A::Integer {
-            source: SourceRange { start: 1, end: 2 },
-            spelling: "7".into(),
-            negative: false,
-        },
+        A::integer(SourceRange { start: 1, end: 2 }, "7".into(), false),
         A::Value(expr(
             p(P::Never),
             K::Return(Some(Box::new(value(p(P::Bool))))),

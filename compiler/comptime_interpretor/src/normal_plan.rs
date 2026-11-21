@@ -308,11 +308,7 @@ mod tests {
                 let value = if from_local {
                     Argument::Value(expr(Primitive::U8, K::Local(local(0))))
                 } else {
-                    Argument::Integer {
-                        source: SOURCE,
-                        spelling: spelling.into(),
-                        negative: false,
-                    }
+                    Argument::integer(SOURCE, spelling.into(), false)
                 };
                 let body = expr(
                     Primitive::Type,
@@ -378,11 +374,7 @@ mod tests {
                 head: id(0),
                 arguments: vec![
                     Argument::Value(expr(Primitive::Type, K::Local(local(7)))),
-                    Argument::Integer {
-                        source: SOURCE,
-                        spelling: "7".into(),
-                        negative: false,
-                    },
+                    Argument::integer(SOURCE, "7".into(), false),
                 ],
                 plan: Some(NormalFormInputPlan {
                     order: vec![0, 1],
@@ -506,11 +498,7 @@ mod tests {
                 Primitive::Type,
                 K::TypeValue(Term::Primitive(Primitive::U8)),
             )),
-            Argument::Integer {
-                spelling: "7".into(),
-                negative: false,
-                source: SOURCE,
-            },
+            Argument::integer(SOURCE, "7".into(), false),
         ];
         let plan = NormalFormInputPlan {
             order: vec![1, 0],

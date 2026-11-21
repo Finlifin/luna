@@ -14940,15 +14940,15 @@ fn dynamic_normal_form_constructor_rejects_corrupt_nir() {
             2 => function.body.ty = Term::Primitive(Primitive::Bool),
             3 => arguments[0].expression_mut().unwrap().kind = K::TypeValue(Term::Bool(true)),
             4 | 5 => {
-                arguments[0] = nir::program::NormalFormArgument::Integer {
+                arguments[0] = nir::program::NormalFormArgument::integer(
                     source,
-                    spelling: if corruption == 4 {
+                    if corruption == 4 {
                         "not-an-integer".into()
                     } else {
                         "1".into()
                     },
-                    negative: false,
-                }
+                    false,
+                )
             }
             _ => unreachable!(),
         }
@@ -15446,11 +15446,7 @@ fn contextual_normal_form_depth_limit_recovers_on_a_small_host_stack() {
         .find(|f| f.declaration == target)
         .unwrap();
     let source = function.body.source;
-    let mut input = A::Integer {
-        source,
-        spelling: "1".into(),
-        negative: false,
-    };
+    let mut input = A::integer(source, "1".into(), false);
     for _ in 0..384 {
         input = A::Block {
             source,

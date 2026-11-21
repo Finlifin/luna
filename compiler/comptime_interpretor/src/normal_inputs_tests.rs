@@ -181,11 +181,7 @@ fn staged_inputs_survive_cloning_with_selected_shapes_and_delayed_preflight() {
     use nir::program::{NormalMatchArm, Pattern};
     let package = Package::default();
     let trace = LocalId { owner: 7, index: 0 };
-    let literal = |spelling: &str| A::Integer {
-        source: SOURCE,
-        spelling: spelling.into(),
-        negative: false,
-    };
+    let literal = |spelling: &str| A::integer(SOURCE, spelling.into(), false);
     for invalid in [false, true] {
         let input = A::Tuple {
             source: SOURCE,
@@ -362,11 +358,7 @@ fn staged_patterns_reject_definition_evidence_before_operand_effects() {
 #[test]
 fn prepared_contextual_inputs_survive_cloning_without_source_range_keys() {
     let package = Package::default();
-    let literal = |spelling: &str| A::Integer {
-        source: SOURCE,
-        spelling: spelling.into(),
-        negative: false,
-    };
+    let literal = |spelling: &str| A::integer(SOURCE, spelling.into(), false);
     let input = A::Tuple {
         source: SOURCE,
         items: vec![
@@ -401,11 +393,7 @@ fn prepared_contextual_inputs_survive_cloning_without_source_range_keys() {
 #[test]
 fn source_and_compiled_domain_preparation_share_diagnostics_and_work() {
     let package = Package::default();
-    let literal = |spelling: &str| A::Integer {
-        source: SOURCE,
-        spelling: spelling.into(),
-        negative: false,
-    };
+    let literal = |spelling: &str| A::integer(SOURCE, spelling.into(), false);
     let cases = [
         literal("7"),
         literal("256"),
@@ -458,11 +446,7 @@ fn contextual_domain_failure_does_not_publish_partial_preparations() {
         source: SOURCE,
         items: ["7", "256"]
             .into_iter()
-            .map(|spelling| A::Integer {
-                source: SOURCE,
-                spelling: spelling.into(),
-                negative: false,
-            })
+            .map(|spelling| A::integer(SOURCE, spelling.into(), false))
             .collect(),
     };
     let (_, shape) = comptime_compiler::compile_staged_input(&input, &mut 100_000).unwrap();
@@ -513,11 +497,7 @@ fn contextual_domain_budget_failure_preserves_tables_and_allows_retry() {
         source: SOURCE,
         items: ["7", "13"]
             .into_iter()
-            .map(|spelling| A::Integer {
-                source: SOURCE,
-                spelling: spelling.into(),
-                negative: false,
-            })
+            .map(|spelling| A::integer(SOURCE, spelling.into(), false))
             .collect(),
     };
     let (_, shape) = comptime_compiler::compile_staged_input(&input, &mut 100_000).unwrap();
@@ -606,8 +586,8 @@ fn source_and_bytecode_require_a_concrete_choice_at_the_condition() {
     let input = A::If {
         source: SOURCE,
         condition,
-        then_input: Box::new(A::Unit { source: SOURCE }),
-        else_input: Box::new(A::Unit { source: SOURCE }),
+        then_input: Box::new(A::unit(SOURCE)),
+        else_input: Box::new(A::unit(SOURCE)),
     };
     for reference in [false, true] {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
@@ -660,11 +640,7 @@ fn ready_inputs_and_domain_checks_keep_nested_blocks_off_the_host_stack() {
                     start: 888,
                     end: 889,
                 };
-                let mut input = A::Integer {
-                    source: leaf,
-                    spelling: "42".into(),
-                    negative: false,
-                };
+                let mut input = A::integer(leaf, "42".into(), false);
                 for _ in 0..depth {
                     input = A::Block {
                         source: SOURCE,

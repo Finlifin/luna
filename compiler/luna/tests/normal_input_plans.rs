@@ -1340,3 +1340,20 @@ fn contextual_aggregate_fields_keep_source_order_across_a_later_type() {
         &["Exit", "byte"],
     );
 }
+
+#[test]
+fn dependent_float_collections_preserve_decimal_spelling_across_suppliers() {
+    let package = sysroot::compile("
+        pure comptime fn Samples<T, .tag:bool = true, ...xs:meta.List<T>> -> Type { bool }
+        typealias Alias<T> = Samples<T,.xs=[1.000000059604644775390625000000001,-0.0]>;
+        comptime fn Domain()->Type {f32}
+        comptime fn Direct()->Type {Samples<f32,1.000000059604644775390625000000001,-0.0>}
+        comptime fn Whole()->Type {Samples<Domain(),.xs=[1.000000059604644775390625000000001,-0.0]>}
+        comptime fn Collected()->Type {Samples<Domain(),1.000000059604644775390625000000001,.tag=true,-0.0>}
+        comptime fn Aliased()->Type {Alias<f32>}
+    ").unwrap();
+    let direct = invoke_both(&package, "Direct");
+    for name in ["Whole", "Collected", "Aliased"] {
+        assert_eq!(invoke_both(&package, name), direct, "{name}");
+    }
+}

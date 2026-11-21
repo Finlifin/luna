@@ -52,7 +52,7 @@ fn wide_expression_pattern_and_contextual_frontiers_are_bounded() {
     }));
     let input = A::List {
         source: SOURCE,
-        items: vec![A::Unit { source: SOURCE }; WIDTH],
+        items: vec![A::unit(SOURCE); WIDTH],
     };
     let result = argument_checked(&input, &mut 8, |_, _| Ok::<_, Error>(()));
     assert!(matches!(result, Err(Error::Budget(_))));

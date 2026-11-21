@@ -529,7 +529,7 @@ fn walk_mut(
                 use crate::program::NormalFormArgument as A;
                 match argument {
                     A::ListSpread(value) | A::Value(value) => push!(work, fuel, Node::Expr(value)),
-                    A::Unit { .. } | A::Null { .. } | A::Integer { .. } | A::Symbol { .. } => {}
+                    A::Literal { .. } => {}
                     A::If {
                         condition,
                         then_input,

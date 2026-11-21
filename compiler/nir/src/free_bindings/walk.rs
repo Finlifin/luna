@@ -492,7 +492,7 @@ impl<'a> Walk<'a> {
                 self.sequence(arms, Step::InputArm, fuel)?;
                 self.tasks.push(Step::Expr(value));
             }
-            A::Integer { .. } | A::Symbol { .. } | A::Unit { .. } | A::Null { .. } => {}
+            A::Literal { .. } => {}
         }
         Ok(())
     }

@@ -476,11 +476,11 @@ mod tests {
         let nested = tail.nested(&expr).unwrap().unwrap();
         assert_eq!(nested.to_string(), "(contextual-tail (depth 126))");
         assert!(nested.nested(&expr).is_err());
-        let result = CheckedBlock::Contextual(n::NormalFormArgument::Integer {
-            source: source(block.span),
-            spelling: "7".into(),
-            negative: false,
-        });
+        let result = CheckedBlock::Contextual(n::NormalFormArgument::integer(
+            source(block.span),
+            "7".into(),
+            false,
+        ));
         assert!(result.to_string().starts_with("(contextual-block-result "));
         assert!(result.ordinary(block.span).is_err());
         let checked = CheckedTail::Contextual(None);

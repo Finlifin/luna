@@ -71,64 +71,47 @@ impl Interpreter<'_> {
             _ => Err(self.failure(ErrorKind::Type, Some(source))),
         }
     }
-    pub(super) fn normal_unit_value(
+    pub(super) fn form_contextual_literal(
         &mut self,
+        literal: &nir::program::ContextualLiteral,
         expected: &Term,
         source: SourceRange,
     ) -> Result<Value, Error> {
-        // Match ordinary expression elaboration: unit syntax may construct an
-        // empty tuple value when the contextual domain supplies that layout.
-        if self
-            .tuple_input_elements(expected)
-            .is_some_and(|fields| fields.is_empty())
-        {
-            return Ok(Value::Tuple(Vec::new()));
+        use nir::program::ContextualLiteral as L;
+        // Unit and null use the entire domain; payload literals may be injected
+        // into any number of contextual optional and error-success layers.
+        match literal {
+            L::Null => {
+                let ty = self.prepare_optional(expected, None, source)?;
+                return self.complete_optional(&ty, None, source);
+            }
+            L::Unit => return self.normal_unit_value(expected, source),
+            _ => {}
         }
-        self.check_type_contract(
-            &nir::program::TypePredicate::Equal(Term::Primitive(Primitive::Void), expected.clone()),
-            source,
-        )?;
-        Ok(Value::Unit)
-    }
-
-    pub(super) fn normal_symbol_value(
-        &mut self,
-        expected: &Term,
-        name: &str,
-        source: SourceRange,
-    ) -> Result<Value, Error> {
-        let ty = self.prepare_aggregate(expected, source)?;
+        let resolved;
+        let ty = if matches!(expected, Term::Primitive(_)) {
+            expected
+        } else {
+            resolved = self.prepare_aggregate(expected, source)?;
+            &resolved
+        };
         let mut layers = Vec::new();
-        let mut leaf = &ty;
+        let mut leaf = ty;
         while let Term::Optional(inner) | Term::ErrorResult { result: inner, .. } = leaf {
             self.tick(Some(source))?;
             layers.push(leaf);
             leaf = inner;
         }
-        let mut value = match leaf {
-            Term::Primitive(Primitive::Symbol) => {
-                self.integer_operation(Some(source), |budget| {
-                    budget.consume(name.len().saturating_add(1))
-                })?;
-                Value::Symbol(name.into())
+        let mut value = match literal {
+            L::Symbol(name) => self.normal_symbol_value(leaf, name, source)?,
+            L::Integer { spelling, negative } => {
+                self.normal_integer_value(leaf, spelling, *negative, source)?
             }
-            Term::Nominal { declaration, .. } => {
-                let definition = self.selected_enum_definition(leaf, Some(source))?;
-                let index = definition
-                    .unit_variant_index(name, &mut self.budget.steps)
-                    .map_err(|reason| {
-                        let kind = match reason {
-                            nir::program::UnitVariantError::Budget => ErrorKind::StepsExhausted,
-                            _ => ErrorKind::EnumVariant(reason),
-                        };
-                        self.failure(kind, Some(source))
-                    })?;
-                self.construct_variant(leaf, *declaration, index, vec![], source)?
+            L::Float { spelling, negative } => {
+                self.form_float_literal(spelling, *negative, leaf, source)?
             }
-            _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+            L::Unit | L::Null => unreachable!("handled above"),
         };
-        // A bare symbol selects a payload. Restore every optional presence
-        // and success tag in the same order as ordinary expression delivery.
         for layer in layers.into_iter().rev() {
             value = match layer {
                 Term::Optional(_) => self.complete_optional(layer, Some(value), source)?,
@@ -151,6 +134,56 @@ impl Interpreter<'_> {
             };
         }
         Ok(value)
+    }
+
+    pub(super) fn normal_unit_value(
+        &mut self,
+        expected: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        // Match ordinary expression elaboration: unit syntax may construct an
+        // empty tuple value when the contextual domain supplies that layout.
+        if self
+            .tuple_input_elements(expected)
+            .is_some_and(|fields| fields.is_empty())
+        {
+            return Ok(Value::Tuple(Vec::new()));
+        }
+        self.check_type_contract(
+            &nir::program::TypePredicate::Equal(Term::Primitive(Primitive::Void), expected.clone()),
+            source,
+        )?;
+        Ok(Value::Unit)
+    }
+
+    fn normal_symbol_value(
+        &mut self,
+        leaf: &Term,
+        name: &str,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        match leaf {
+            Term::Primitive(Primitive::Symbol) => {
+                self.integer_operation(Some(source), |budget| {
+                    budget.consume(name.len().saturating_add(1))
+                })?;
+                Ok(Value::Symbol(name.into()))
+            }
+            Term::Nominal { declaration, .. } => {
+                let definition = self.selected_enum_definition(leaf, Some(source))?;
+                let index = definition
+                    .unit_variant_index(name, &mut self.budget.steps)
+                    .map_err(|reason| {
+                        let kind = match reason {
+                            nir::program::UnitVariantError::Budget => ErrorKind::StepsExhausted,
+                            _ => ErrorKind::EnumVariant(reason),
+                        };
+                        self.failure(kind, Some(source))
+                    })?;
+                self.construct_variant(leaf, *declaration, index, vec![], source)
+            }
+            _ => Err(self.failure(ErrorKind::Type, Some(source))),
+        }
     }
 
     pub(super) fn normal_integer_value(

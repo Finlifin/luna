@@ -6,10 +6,7 @@ use super::*;
 #[derive(Debug)]
 pub enum Input {
     Value(Term),
-    Unit,
-    Null,
-    Symbol(String),
-    Integer { spelling: String, negative: bool },
+    Literal(nir::program::ContextualLiteral),
 }
 impl Input {
     pub fn diverges(&self) -> bool {
@@ -20,12 +17,7 @@ impl fmt::Display for Input {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Value(ty) => write!(f, "(value {ty})"),
-            Self::Null => write!(f, "(null)"),
-            Self::Symbol(name) => write!(f, "(symbol {})", nir::QuotedDisplay(name)),
-            Self::Unit => write!(f, "(unit)"),
-            Self::Integer { spelling, negative } => {
-                write!(f, "(integer {spelling:?} (negative {negative}))")
-            }
+            Self::Literal(value) => value.fmt(f),
         }
     }
 }
@@ -344,22 +336,11 @@ pub(super) fn compile_input<'a>(
                         code.push(Work::Expression(value, slot));
                         Some(Input::Value(copy_term(&value.ty, fuel, value.source)?))
                     }
-                    A::Unit { .. } => Some(Input::Unit),
-                    A::Null { .. } => Some(Input::Null),
-                    A::Symbol { source, name } => {
-                        *fuel = fuel.checked_sub(name.len()).ok_or(Error::Budget(*source))?;
-                        Some(Input::Symbol(name.clone()))
-                    }
-                    A::Integer {
-                        spelling, negative, ..
-                    } => {
+                    A::Literal { source, value } => {
                         *fuel = fuel
-                            .checked_sub(spelling.len())
-                            .ok_or(Error::Budget(argument.source()))?;
-                        Some(Input::Integer {
-                            spelling: spelling.clone(),
-                            negative: *negative,
-                        })
+                            .checked_sub(value.text_len())
+                            .ok_or(Error::Budget(*source))?;
+                        Some(Input::Literal(value.clone()))
                     }
                     A::Match {
                         source,
@@ -521,19 +502,13 @@ mod tests {
     #[test]
     fn staged_symbol_owns_its_spelling_and_charges_it_before_copying() {
         let name = "tag\"\\\n雪".repeat(32);
-        let input = A::Symbol {
-            source: SOURCE,
-            name: name.clone(),
-        };
+        let input = A::symbol(SOURCE, name.clone());
         let (_, shape) = compile_staged_input(&input, &mut 10_000).unwrap();
         let quoted = nir::QuotedDisplay(&name).to_string();
         assert!(input.to_string().contains(&quoted));
         drop(input);
         assert!(shape.to_string().contains(&format!("(symbol {quoted})")));
-        let long = A::Symbol {
-            source: SOURCE,
-            name: "x".repeat(1024),
-        };
+        let long = A::symbol(SOURCE, "x".repeat(1024));
         assert!(matches!(
             compile_staged_input(&long, &mut 512),
             Err(Error::Budget(SOURCE))
@@ -547,7 +522,7 @@ mod tests {
             slots += 1;
             slots
         };
-        let mut input = A::Unit { source: SOURCE };
+        let mut input = A::unit(SOURCE);
         assert!(matches!(
             compile_input(
                 &input,
@@ -593,7 +568,7 @@ mod tests {
         ));
         let wide = A::List {
             source: SOURCE,
-            items: vec![A::Unit { source: SOURCE }; 100],
+            items: vec![A::unit(SOURCE); 100],
         };
         assert!(matches!(
             compile_input(
@@ -610,10 +585,10 @@ mod tests {
             slot: 1,
             source: SOURCE,
             diverges: false,
-            kind: ShapeKind::Scalar(Input::Integer {
+            kind: ShapeKind::Scalar(Input::Literal(nir::program::ContextualLiteral::Integer {
                 spelling: "1\"\n".into(),
                 negative: false,
-            }),
+            })),
         };
         assert!(escaped.to_string().contains("\"1\\\"\\n\""));
     }
@@ -628,11 +603,7 @@ mod contextual_fragment_tests {
     fn contextual_fragment_owns_domain_and_prechecks_before_operands() {
         let source = SourceRange { start: 1, end: 2 };
         let (program, work) = {
-            let input = A::Integer {
-                source,
-                spelling: "17".into(),
-                negative: false,
-            };
+            let input = A::integer(source, "17".into(), false);
             let expected = Term::Primitive(Primitive::U8);
             let program = compile_contextual_input(&input, &expected, &mut 10000).unwrap();
             let work = program.storage_work();

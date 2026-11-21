@@ -184,7 +184,7 @@ impl Declaration {
                         );
                     }
                 }
-                A::Unit { .. } | A::Null { .. } | A::Integer { .. } | A::Symbol { .. } => {}
+                A::Literal { .. } => {}
             }
         }
         self.check_operand_domains(checker, bindings, formation, typed, steps, span)

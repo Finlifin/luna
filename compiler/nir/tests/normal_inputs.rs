@@ -878,11 +878,7 @@ fn nominal_contextual_inputs_rewrite_nested_types_and_keep_literal_spelling() {
                         sort: Sort::Type,
                     }),
                 }],
-                result: Some(Box::new(A::Integer {
-                    source,
-                    spelling: "0xff".into(),
-                    negative: false,
-                })),
+                result: Some(Box::new(A::integer(source, "0xff".into(), false))),
             }],
         },
     };
@@ -899,7 +895,9 @@ fn nominal_contextual_inputs_rewrite_nested_types_and_keep_literal_spelling() {
         panic!("contextual block")
     };
     assert_eq!(statements[0].kind, K::TypeValue(primitive(P::U8)));
-    assert!(matches!(result.as_deref(),Some(A::Integer {spelling,..}) if spelling=="0xff"));
+    assert!(
+        matches!(result.as_deref(),Some(A::Literal { value: nir::program::ContextualLiteral::Integer { spelling, .. }, .. }) if spelling=="0xff")
+    );
     assert_ne!(body, rewritten);
     assert!(rewritten.to_string().contains("(order 0)"));
     assert!(rewritten.to_string().contains("(contextual-integer-input"));

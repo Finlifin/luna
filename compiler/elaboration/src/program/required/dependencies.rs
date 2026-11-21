@@ -595,7 +595,7 @@ mod tests {
             arguments: vec![n::NormalFormArgument::List {
                 source,
                 items: (0..100)
-                    .map(|_| n::NormalFormArgument::Null { source })
+                    .map(|_| n::NormalFormArgument::null(source))
                     .collect(),
             }],
         });

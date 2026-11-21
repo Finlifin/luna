@@ -599,6 +599,7 @@ pub enum ErrorKind {
     PhaseMismatch,
     InvalidPhase(nir::phases::Error),
     InvalidBitWidth,
+    FloatLiteralOverflow(Primitive),
     EnumVariant(nir::program::UnitVariantError),
     ProgramContractRejected,
     TypeContractRejected,
@@ -626,6 +627,18 @@ pub enum ErrorKind {
     InvalidEffectEnvironment,
     EffectControlTransfer,
     EffectValueConsumed,
+}
+
+impl From<comptime_runtime::Error> for ErrorKind {
+    fn from(cause: comptime_runtime::Error) -> Self {
+        use comptime_runtime::Error as E;
+        match cause {
+            E::BudgetExhausted => Self::StepsExhausted,
+            E::SizeLimit => Self::RepresentationSizeLimit,
+            E::DivisionByZero => Self::DivisionByZero,
+            E::InvalidLiteral | E::OutOfRange => Self::Type,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -657,6 +670,10 @@ impl fmt::Display for Error {
                 write!(f, "cyclic associated initializer for member {member}")?
             }
             ErrorKind::InvalidDefinition(reason) => write!(f, "interpretation {reason}")?,
+            ErrorKind::FloatLiteralOverflow(domain) => write!(
+                f,
+                "finite float literal exceeds the selected {domain} representation"
+            )?,
             ErrorKind::EnumVariant(reason) => write!(f, "{reason}")?,
             ErrorKind::InvalidTypeContract(reason) => write!(f, "invalid type contract: {reason}")?,
             ErrorKind::InvalidPhase(reason) => {
@@ -2606,11 +2623,10 @@ impl<'a> Interpreter<'a> {
         result
     }
 
-    fn integer_operation<T>(
+    fn with_arithmetic_budget<T>(
         &mut self,
-        source: Option<SourceRange>,
-        operation: impl FnOnce(&mut comptime_runtime::Budget) -> Result<T, comptime_runtime::Error>,
-    ) -> Result<T, Error> {
+        operation: impl FnOnce(&mut comptime_runtime::Budget) -> T,
+    ) -> T {
         let steps = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut budget = comptime_runtime::Budget {
             steps,
@@ -2618,17 +2634,16 @@ impl<'a> Interpreter<'a> {
         };
         let result = operation(&mut budget);
         self.budget.steps -= (steps - budget.steps) as u64;
-        result.map_err(|error| {
-            self.failure(
-                match error {
-                    comptime_runtime::Error::BudgetExhausted => ErrorKind::StepsExhausted,
-                    comptime_runtime::Error::SizeLimit => ErrorKind::RepresentationSizeLimit,
-                    comptime_runtime::Error::DivisionByZero => ErrorKind::DivisionByZero,
-                    _ => ErrorKind::Type,
-                },
-                source,
-            )
-        })
+        result
+    }
+
+    fn integer_operation<T>(
+        &mut self,
+        source: Option<SourceRange>,
+        operation: impl FnOnce(&mut comptime_runtime::Budget) -> Result<T, comptime_runtime::Error>,
+    ) -> Result<T, Error> {
+        self.with_arithmetic_budget(operation)
+            .map_err(|cause| self.failure(cause.into(), source))
     }
 
     fn integer_literal(
@@ -2657,13 +2672,7 @@ impl<'a> Interpreter<'a> {
             &mut comptime_runtime::Budget,
         ) -> Result<T, comptime_runtime::bitvec::Error>,
     ) -> Result<T, Error> {
-        let steps = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-        let mut budget = comptime_runtime::Budget {
-            steps,
-            max_limbs: 4096,
-        };
-        let result = operation(&mut budget);
-        self.budget.steps -= (steps - budget.steps) as u64;
+        let result = self.with_arithmetic_budget(operation);
         result.map_err(|error| {
             self.failure(
                 match error {
@@ -3304,6 +3313,38 @@ impl<'a> Interpreter<'a> {
             .map(Flow::Value)
     }
 
+    fn form_float_literal(
+        &mut self,
+        spelling: &str,
+        negative: bool,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let Term::Primitive(
+            domain @ (Primitive::Float
+            | Primitive::F16
+            | Primitive::Bf16
+            | Primitive::F32
+            | Primitive::F64),
+        ) = *ty
+        else {
+            return Err(self.failure(ErrorKind::Type, Some(source)));
+        };
+        let literal = self
+            .with_arithmetic_budget(|budget| {
+                nir::float_formation::FloatFormation::parse(spelling, negative, budget)?
+                    .form(domain, budget)
+            })
+            .map_err(|cause| {
+                let kind = match cause {
+                    comptime_runtime::Error::OutOfRange => ErrorKind::FloatLiteralOverflow(domain),
+                    other => other.into(),
+                };
+                self.failure(kind, Some(source))
+            })?;
+        self.literal_constant(&literal, ty, source)
+    }
+
     fn literal_constant(
         &mut self,
         literal: &Literal,
@@ -3321,21 +3362,7 @@ impl<'a> Interpreter<'a> {
             return self.literal_constant(&literal, ty, source);
         }
         if let Literal::PendingFloat { spelling, negative } = literal {
-            let Term::Primitive(
-                domain @ (Primitive::Float
-                | Primitive::F16
-                | Primitive::Bf16
-                | Primitive::F32
-                | Primitive::F64),
-            ) = *ty
-            else {
-                return Err(self.failure(ErrorKind::Type, Some(source)));
-            };
-            let literal = self.integer_operation(Some(source), |budget| {
-                nir::float_formation::FloatFormation::parse(spelling, *negative, budget)?
-                    .form(domain, budget)
-            })?;
-            return self.literal_constant(&literal, ty, source);
+            return self.form_float_literal(spelling, *negative, ty, source);
         }
         if !literal.has_primitive_type_in(ty, self.target) {
             return Err(self.failure(ErrorKind::Type, Some(source)));
@@ -6757,11 +6784,7 @@ mod nominal_environment_tests {
         for mode in 0..3 {
             let second = match mode {
                 0 => A::Value(type_value()),
-                1 => A::Integer {
-                    source,
-                    spelling: "7".into(),
-                    negative: false,
-                },
+                1 => A::integer(source, "7".into(), false),
                 _ => A::Value(Expr {
                     source,
                     ty: ty(Primitive::Never),

@@ -1066,3 +1066,97 @@ fn generic_float_formation_survives_quote_closure_and_default_callback_boundarie
         }
     }
 }
+
+#[test]
+fn dependent_float_inputs_round_once_in_each_invocations_domain() {
+    use nir::{Primitive as P, Term};
+    let source = "
+        typealias Type = .Type'builtin;
+        typealias f32 = .f32'builtin;
+        typealias f64 = .f64'builtin;
+        newtype Key<T, .n:T = -1.000000059604644775390625000000001> = bool;
+        comptime fn Explicit(ty:Type)->Type {Key<ty,.n=-1.000000059604644775390625000000001>}
+        comptime fn Defaulted(ty:Type)->Type {Key<ty>}
+        comptime fn Zero(ty:Type)->Type {Key<ty,.n=-0.0>}
+        comptime fn Overflow(ty:Type)->Type {Key<ty,.n=if true {1.0} else {1.0e40}>}
+        comptime fn typed()->f64 {1.0}
+        comptime fn Typed(ty:Type)->Type {Key<ty,.n=typed()>}
+        enum ReadErr { Missing }
+        comptime fn WrappedFloat()->Type {!ReadErr ??f32}
+        comptime fn DirectWrapped()->Type {Key<!ReadErr ??f32,.n=-1.000000059604644775390625000000001>}
+        typealias u8 = .u8'builtin;
+        comptime fn IntegerInput(ty:Type)->Type {Key<ty,.n=255>}
+        comptime fn DirectInteger()->Type {Key<?u8,.n=255>}
+    ";
+    let package = compile(source);
+    let decimal = |spelling| {
+        Term::Float(
+            comptime_runtime::decimal::DecimalValue::parse_literal(
+                spelling,
+                &mut comptime_runtime::Budget::default(),
+            )
+            .unwrap(),
+        )
+    };
+    for new_vm in [Interpreter::for_comptime, Interpreter::for_comptime_tree] {
+        let mut vm = new_vm(&package, Budget::default()).unwrap();
+        let arg = |domain| vec![Value::Type(Term::Primitive(domain))];
+        let err = vm
+            .invoke(id(&package, "Overflow"), arg(P::F32))
+            .unwrap_err();
+        assert_eq!(
+            err.kind,
+            comptime_interpretor::ErrorKind::FloatLiteralOverflow(P::F32)
+        );
+        let at = err.source.unwrap();
+        assert_eq!(&source[at.start as usize..at.end as usize], "1.0e40");
+        vm.invoke(id(&package, "Overflow"), arg(P::F64)).unwrap();
+        assert!(vm.invoke(id(&package, "Explicit"), arg(P::Bool)).is_err());
+        assert!(vm.invoke(id(&package, "Typed"), arg(P::F32)).is_err());
+        for (domain, rounded, zero) in [
+            (P::F16, Term::Float16(0xbc00), Term::Float16(0x8000)),
+            (P::Bf16, Term::BFloat16(0xbf80), Term::BFloat16(0x8000)),
+            (P::F32, Term::Float32(0xbf800001), Term::Float32(0x80000000)),
+            (
+                P::F64,
+                Term::Float64(0xbff0000010000000),
+                Term::Float64(1 << 63),
+            ),
+            (
+                P::Float,
+                decimal("-1.000000059604644775390625000000001"),
+                decimal("-0.0"),
+            ),
+        ] {
+            for (name, expected) in [
+                ("Explicit", &rounded),
+                ("Defaulted", &rounded),
+                ("Zero", &zero),
+            ] {
+                let result = vm.invoke(id(&package, name), arg(domain)).unwrap();
+                let Value::Type(Term::Nominal { arguments, .. }) = result else {
+                    panic!("expected Key, got {result:?}");
+                };
+                assert_eq!(
+                    arguments,
+                    [Term::Primitive(domain), expected.clone()],
+                    "{name}"
+                );
+            }
+        }
+        let wrapped = vm.invoke(id(&package, "DirectWrapped"), vec![]).unwrap();
+        let qualified = vm.invoke(id(&package, "WrappedFloat"), vec![]).unwrap();
+        assert_eq!(
+            vm.invoke(id(&package, "Explicit"), vec![qualified])
+                .unwrap(),
+            wrapped
+        );
+        let direct = vm.invoke(id(&package, "DirectInteger"), vec![]).unwrap();
+        let optional = Term::Optional(Box::new(Term::Primitive(P::U8)));
+        assert_eq!(
+            vm.invoke(id(&package, "IntegerInput"), vec![Value::Type(optional)])
+                .unwrap(),
+            direct
+        );
+    }
+}

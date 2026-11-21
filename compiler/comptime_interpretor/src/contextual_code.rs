@@ -117,11 +117,7 @@ mod tests {
     use super::*;
     const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
     fn literal(value: &str) -> NormalFormArgument {
-        NormalFormArgument::Integer {
-            source: SOURCE,
-            spelling: value.into(),
-            negative: false,
-        }
+        NormalFormArgument::integer(SOURCE, value.into(), false)
     }
     #[test]
     fn input_and_domain_identity_control_code_reuse() {

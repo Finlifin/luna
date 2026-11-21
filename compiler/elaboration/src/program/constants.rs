@@ -2787,20 +2787,12 @@ mod tests {
                 n::NormalMatchArm {
                     pattern: n::Pattern::Literal(n::Literal::String(large.clone())),
                     guard: None,
-                    body: A::Integer {
-                        source: location,
-                        spelling: "1".into(),
-                        negative: false,
-                    },
+                    body: A::integer(location, "1".into(), false),
                 },
                 n::NormalMatchArm {
                     pattern: n::Pattern::Wild,
                     guard: None,
-                    body: A::Integer {
-                        source: location,
-                        spelling: "7".repeat(1024),
-                        negative: false,
-                    },
+                    body: A::integer(location, "7".repeat(1024), false),
                 },
             ],
         };
@@ -2855,11 +2847,11 @@ mod tests {
         };
         let wide = root(A::Tuple {
             source: location,
-            items: vec![A::Unit { source: location }; 512],
+            items: vec![A::unit(location); 512],
         });
         assert!(charge_copy(&wide, &mut 64, span).is_err());
         charge_copy(&wide, &mut 4096, span).unwrap();
-        let mut deep = A::Unit { source: location };
+        let mut deep = A::unit(location);
         for _ in 0..nir::copy_budget::MAX_COPY_DEPTH + 1 {
             deep = A::Block {
                 source: location,
@@ -2868,7 +2860,7 @@ mod tests {
             };
         }
         assert!(charge_copy(&root(deep), &mut 10000, span).is_err());
-        charge_copy(&root(A::Unit { source: location }), &mut 64, span).unwrap();
+        charge_copy(&root(A::unit(location)), &mut 64, span).unwrap();
     }
 
     #[test]

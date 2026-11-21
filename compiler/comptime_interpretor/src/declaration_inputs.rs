@@ -200,11 +200,7 @@ mod tests {
                         bindings: Some(vec![local(0), local(1), local(2)]),
                         order: None,
                         arguments: vec![
-                            A::Integer {
-                                source,
-                                spelling: spelling.into(),
-                                negative: false,
-                            },
+                            A::integer(source, spelling.into(), false),
                             A::Value(Expr {
                                 source,
                                 ty: ty.clone(),
@@ -300,11 +296,7 @@ mod tests {
                 order: None,
                 bindings: Some(vec![local(0), local(1)]),
                 arguments: vec![
-                    A::Integer {
-                        spelling: "17".into(),
-                        negative: false,
-                        source,
-                    },
+                    A::integer(source, "17".into(), false),
                     A::Value(Expr {
                         source,
                         ty: Term::Primitive(Primitive::Type),

@@ -326,11 +326,7 @@ fn contextual_scalars_use_the_preceding_type_input() {
         }],
         ..Default::default()
     };
-    let integer = |spelling: &str, negative| A::Integer {
-        source: SOURCE,
-        spelling: spelling.into(),
-        negative,
-    };
+    let integer = |spelling: &str, negative| A::integer(SOURCE, spelling.into(), negative);
     for (ty, input, valid) in [
         (
             Primitive::Integer,
@@ -344,9 +340,9 @@ fn contextual_scalars_use_the_preceding_type_input() {
         (Primitive::U8, integer("1", true), false),
         (Primitive::BitVec(9), integer("511", false), true),
         (Primitive::Bool, integer("1", false), false),
-        (Primitive::Type, A::Unit { source: SOURCE }, false),
-        (Primitive::Void, A::Unit { source: SOURCE }, true),
-        (Primitive::Bool, A::Unit { source: SOURCE }, false),
+        (Primitive::Type, A::unit(SOURCE), false),
+        (Primitive::Void, A::unit(SOURCE), true),
+        (Primitive::Bool, A::unit(SOURCE), false),
     ] {
         let body = expr(
             Primitive::Type,
@@ -573,11 +569,7 @@ fn completed_head_inputs_specialize_operand_annotations_with_or_without_a_plan()
 #[test]
 fn nested_contextual_containers_preserve_domains_and_tuple_heads() {
     let package = container_package();
-    let integer = || A::Integer {
-        source: SOURCE,
-        spelling: "17".into(),
-        negative: false,
-    };
+    let integer = || A::integer(SOURCE, "17".into(), false);
     let list = |items| A::List {
         source: SOURCE,
         items,
@@ -731,14 +723,7 @@ fn contextual_container_checks_do_not_reorder_operand_effects() {
             list_ty.clone(),
             A::List {
                 source: SOURCE,
-                items: vec![
-                    effect.clone(),
-                    A::Integer {
-                        source: SOURCE,
-                        spelling: "1".into(),
-                        negative: false,
-                    },
-                ],
+                items: vec![effect.clone(), A::integer(SOURCE, "1".into(), false)],
             },
         );
         let mut env = Environment::from([(trace, Value::Bool(false))]);
@@ -797,9 +782,9 @@ fn contextual_choices_prepare_both_branches_and_clean_selected_blocks() {
             ),
             set(selected, choice),
         ],
-        result: Some(Box::new(A::Integer {
-            source: SOURCE,
-            spelling: if invalid {
+        result: Some(Box::new(A::integer(
+            SOURCE,
+            if invalid {
                 "256"
             } else if choice {
                 "17"
@@ -807,8 +792,8 @@ fn contextual_choices_prepare_both_branches_and_clean_selected_blocks() {
                 "23"
             }
             .into(),
-            negative: false,
-        })),
+            false,
+        ))),
     };
     for compiled in [false, true] {
         for invalid in [false, true] {
@@ -962,11 +947,7 @@ fn contextual_matches_preserve_guard_effects_and_binding_rollback() {
             },
         )
     };
-    let integer = |number: &str| A::Integer {
-        source: SOURCE,
-        spelling: number.into(),
-        negative: false,
-    };
+    let integer = |number: &str| A::integer(SOURCE, number.into(), false);
     for compiled in [false, true] {
         for embedded_guard in [false, true] {
             for invalid in [false, true] {
@@ -1126,11 +1107,7 @@ fn contextual_match_failure_and_guard_return_clean_bindings() {
                                 )
                             })
                         },
-                        body: A::Integer {
-                            source: SOURCE,
-                            spelling: "17".into(),
-                            negative: false,
-                        },
+                        body: A::integer(SOURCE, "17".into(), false),
                     }],
                 },
             );
@@ -1232,11 +1209,7 @@ fn planned_contextual_inputs_recover_after_deferred_literal_failure() {
     for spelling in ["256", "17", "256", "23"] {
         let mut body = container_body(
             Term::Primitive(Primitive::U8),
-            A::Integer {
-                source: SOURCE,
-                spelling: spelling.into(),
-                negative: false,
-            },
+            A::integer(SOURCE, spelling.into(), false),
         );
         let K::NormalFormType { plan, head, .. } = &mut body.kind else {
             unreachable!()
@@ -1422,11 +1395,7 @@ fn list_spreads_check_at_domain_delivery_and_report_the_field() {
                         value: Box::new(expr(Primitive::Bool, K::Literal(Literal::Bool(true)))),
                     },
                 )],
-                result: Some(Box::new(A::Integer {
-                    source: SOURCE,
-                    spelling: "29".into(),
-                    negative: false,
-                })),
+                result: Some(Box::new(A::integer(SOURCE, "29".into(), false))),
             },
         ],
     };
@@ -1526,16 +1495,12 @@ fn known_contextual_domains_precheck_all_branches_before_effects() {
             result: Some(Box::new(A::If {
                 source: SOURCE,
                 condition: expr(Primitive::Bool, K::Literal(Literal::Bool(true))),
-                then_input: Box::new(A::Integer {
-                    source: SOURCE,
-                    spelling: "17".into(),
-                    negative: false,
-                }),
-                else_input: Box::new(A::Integer {
-                    source: SOURCE,
-                    spelling: if invalid { "256" } else { "23" }.into(),
-                    negative: false,
-                }),
+                then_input: Box::new(A::integer(SOURCE, "17".into(), false)),
+                else_input: Box::new(A::integer(
+                    SOURCE,
+                    if invalid { "256" } else { "23" }.into(),
+                    false,
+                )),
             })),
         };
         for compiled in [false, true] {
@@ -1827,7 +1792,7 @@ fn contextual_unit_observes_empty_tuple_domains_without_producing_types() {
         arguments: vec![frozen_types(vec![])],
     };
     for domain in [Term::Tuple(vec![]), registered] {
-        let body = container_body(domain.clone(), A::Unit { source: SOURCE });
+        let body = container_body(domain.clone(), A::unit(SOURCE));
         let code = Arc::new(comptime_compiler::compile(&body, &mut 100_000).unwrap());
         for linear in [false, true] {
             let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();

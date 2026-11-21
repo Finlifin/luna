@@ -5588,12 +5588,11 @@ impl Walker<'_> {
                     .unwrap_or(Term::Primitive(nir::Primitive::Never)),
             ));
         }
-        use nir::program::NormalFormArgument as A;
+        use nir::program::{ContextualLiteral as L, NormalFormArgument as A};
         match input {
-            A::Integer {
+            A::Literal {
+                value: L::Integer { spelling, negative },
                 source,
-                spelling,
-                negative,
             } if domain == Some(&Term::Primitive(nir::Primitive::Integer)) => {
                 let ty = Term::Primitive(nir::Primitive::Integer);
                 let literal = Expr {
@@ -5612,10 +5611,9 @@ impl Walker<'_> {
                 };
                 Ok((self.child(&expression, state, depth + 1)?, ty))
             }
-            A::Integer {
+            A::Literal {
+                value: L::Integer { spelling, negative },
                 source,
-                spelling,
-                negative,
             } if matches!(domain, Some(Term::Primitive(primitive)) if self.integer_layout(*primitive).is_some()) =>
             {
                 let ty = domain.unwrap();
@@ -5643,8 +5641,9 @@ impl Walker<'_> {
                 };
                 Ok((self.child(&expression, state, depth + 1)?, ty.clone()))
             }
-            A::Integer {
-                spelling, negative, ..
+            A::Literal {
+                value: L::Integer { spelling, negative },
+                ..
             } if matches!(domain, Some(Term::Primitive(nir::Primitive::BitVec(_)))) => {
                 let ty = domain.unwrap();
                 let Term::Primitive(nir::Primitive::BitVec(width)) = ty else {
@@ -5724,11 +5723,13 @@ impl Walker<'_> {
                     ty.clone(),
                 ))
             }
-            A::Unit { .. } | A::Null { .. }
-                if matches!(
-                    domain,
-                    Some(Term::Primitive(nir::Primitive::Void | nir::Primitive::Type))
-                ) =>
+            A::Literal {
+                value: L::Unit | L::Null,
+                ..
+            } if matches!(
+                domain,
+                Some(Term::Primitive(nir::Primitive::Void | nir::Primitive::Type))
+            ) =>
             {
                 Ok((Value::default(), domain.unwrap().clone()))
             }

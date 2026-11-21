@@ -30,10 +30,7 @@ pub(super) enum Node<'a> {
 
 enum Kind<'a> {
     Value(&'a Term),
-    Unit,
-    Null,
-    Integer(&'a str, bool),
-    Symbol(&'a str),
+    Literal(&'a nir::program::ContextualLiteral),
     Choice(&'a Term, SourceRange),
     Block(bool),
     Match(usize),
@@ -114,12 +111,7 @@ impl<'a> Node<'a> {
         match self {
             Self::Source(input, _) => match input {
                 A::Value(value) | A::ListSpread(value) => Kind::Value(&value.ty),
-                A::Null { .. } => Kind::Null,
-                A::Symbol { name, .. } => Kind::Symbol(name),
-                A::Unit { .. } => Kind::Unit,
-                A::Integer {
-                    spelling, negative, ..
-                } => Kind::Integer(spelling, *negative),
+                A::Literal { value, .. } => Kind::Literal(value),
                 A::If { condition, .. } => Kind::Choice(&condition.ty, condition.source),
                 A::Block { result, .. } => Kind::Block(result.is_some()),
                 A::Match { arms, .. } => Kind::Match(arms.len()),
@@ -128,12 +120,7 @@ impl<'a> Node<'a> {
             },
             Self::Compiled(shape) => match &shape.kind {
                 ShapeKind::Scalar(Scalar::Value(ty)) => Kind::Value(ty),
-                ShapeKind::Scalar(Scalar::Null) => Kind::Null,
-                ShapeKind::Scalar(Scalar::Symbol(name)) => Kind::Symbol(name),
-                ShapeKind::Scalar(Scalar::Unit) => Kind::Unit,
-                ShapeKind::Scalar(Scalar::Integer { spelling, negative }) => {
-                    Kind::Integer(spelling, *negative)
-                }
+                ShapeKind::Scalar(Scalar::Literal(value)) => Kind::Literal(value),
                 ShapeKind::Choice {
                     condition,
                     condition_source,
@@ -319,26 +306,8 @@ impl Interpreter<'_> {
                 self.prepare_normal_value_type(&ty, expected, source)?;
                 return Ok(None);
             }
-            Kind::Null => {
-                let ty = self.prepare_optional(expected, None, source)?;
-                let value = self.complete_optional(&ty, None, source)?;
-                entries.push((key, Prepared::Literal(value)));
-                return Ok(None);
-            }
-            Kind::Unit => {
-                entries.push((
-                    key,
-                    Prepared::Literal(self.normal_unit_value(expected, source)?),
-                ));
-                return Ok(None);
-            }
-            Kind::Symbol(name) => {
-                let value = self.normal_symbol_value(expected, name, source)?;
-                entries.push((key, Prepared::Literal(value)));
-                return Ok(None);
-            }
-            Kind::Integer(spelling, negative) => {
-                let value = self.normal_integer_value(expected, spelling, negative, source)?;
+            Kind::Literal(literal) => {
+                let value = self.form_contextual_literal(literal, expected, source)?;
                 entries.push((key, Prepared::Literal(value)));
                 return Ok(None);
             }
@@ -409,11 +378,11 @@ mod tests {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
         let input = A::Tuple {
             source: SourceRange { start: 3, end: 8 },
-            items: vec![A::Integer {
-                source: SourceRange { start: 4, end: 5 },
-                spelling: "7".into(),
-                negative: false,
-            }],
+            items: vec![A::integer(
+                SourceRange { start: 4, end: 5 },
+                "7".into(),
+                false,
+            )],
         };
         let complete = vm
             .prepare_input_domain(

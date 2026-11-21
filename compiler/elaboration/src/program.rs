@@ -6741,16 +6741,18 @@ impl Checker<'_, '_> {
                 ..
             }
         ) {
-            self.establish_type_requirement(
-                &n::TypePredicate::Or(vec![
-                    n::TypePredicate::Equal(target.clone(), p(P::Float)),
-                    n::TypePredicate::Equal(target.clone(), p(P::F16)),
-                    n::TypePredicate::Equal(target.clone(), p(P::Bf16)),
-                    n::TypePredicate::Equal(target.clone(), p(P::F32)),
-                    n::TypePredicate::Equal(target.clone(), p(P::F64)),
-                ]),
-                span,
-            )?;
+            if self.alias_representation_input(&target).is_none() {
+                self.establish_type_requirement(
+                    &n::TypePredicate::Or(vec![
+                        n::TypePredicate::Equal(target.clone(), p(P::Float)),
+                        n::TypePredicate::Equal(target.clone(), p(P::F16)),
+                        n::TypePredicate::Equal(target.clone(), p(P::Bf16)),
+                        n::TypePredicate::Equal(target.clone(), p(P::F32)),
+                        n::TypePredicate::Equal(target.clone(), p(P::F64)),
+                    ]),
+                    span,
+                )?;
+            }
             nir::float_formation::FloatFormation::parse(
                 spelling,
                 negative,

@@ -1151,11 +1151,7 @@ mod tests {
                         ty(Primitive::Type),
                         K::TypeValue(ty(Primitive::U8)),
                     )),
-                    NormalFormArgument::Integer {
-                        spelling: "7".into(),
-                        negative: false,
-                        source: SOURCE,
-                    },
+                    NormalFormArgument::integer(SOURCE, "7".into(), false),
                 ],
                 plan: Some(NormalFormInputPlan {
                     order: vec![1, 0],

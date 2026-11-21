@@ -255,11 +255,7 @@ mod tests {
                     }),
                 },
                 guard: None,
-                body: A::Integer {
-                    source,
-                    spelling: "1".into(),
-                    negative: false,
-                },
+                body: A::integer(source, "1".into(), false),
             }],
         };
         assert_eq!(argument_references(&input, &mut 0), Err(Error::Budget));
