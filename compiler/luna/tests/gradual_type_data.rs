@@ -777,3 +777,28 @@ fn collected_result_proofs_use_the_callers_dependent_element_domain() {
         "{error}"
     );
 }
+
+#[test]
+fn a_computed_description_reaches_the_dependent_slots_identity_boundary() {
+    let definitions = r#"
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { Any } }
+        fn empty(comptime ty: Type) -> ?ty { null }
+        fn inspect() -> bool where flag: bool {
+            empty(Selected(flag)) match { null => true, _ => false }
+        }
+    "#;
+    assert_eq!(
+        support::run(&format!(
+            "{definitions} fn run() -> bool {{ inspect<true>() }}"
+        )),
+        Value::Bool(true)
+    );
+    let error = support::compile(&format!(
+        "{definitions} fn run() -> bool {{ inspect<false>() }}"
+    ))
+    .expect_err("a gradual description cannot supply the payload identity");
+    assert!(
+        error.contains("requires a type identity") && error.contains("gradual description"),
+        "{error}"
+    );
+}

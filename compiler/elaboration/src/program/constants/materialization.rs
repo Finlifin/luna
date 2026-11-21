@@ -117,11 +117,12 @@ impl Checker<'_, '_> {
         // A call-site dependency may retain the caller's Type telescope. It is
         // not an exported, closed module constant; use the same scoped boundary
         // as normal-form inputs, after required evaluation restores those slots.
-        if matches!(value, Value::Type(_)) {
-            let symbol = self.required_normal_term(value, span)?;
+        if matches!(value, Value::Type(_) | Value::Description(_)) {
             if ty != p(P::Type) {
                 return Err(error(span, "Type dependency requires a Type domain"));
             }
+            let identity = type_data::CompletedType::from_value(value, span)?.identity(span)?;
+            let symbol = self.required_normal_term(Value::Type(identity), span)?;
             let kind = K::TypeValue(symbol.clone());
             return Ok((
                 n::Expr {
