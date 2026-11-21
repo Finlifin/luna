@@ -676,15 +676,9 @@ impl Checker<'_, '_> {
                          position: usize,
                          passing: n::ArgumentPassing|
          -> Result<(), Error> {
-            let value = if passing != n::ArgumentPassing::Value {
-                reference_base(value)
-            } else {
-                value
-            };
-            if passing != n::ArgumentPassing::Value && matches!(value.kind, K::Local(_)) {
-                return Ok(());
+            if let Some(value) = operand_to_prepare(value, passing) {
+                statements[position] = Some(checker.prepare_call_operand(value, span)?);
             }
-            statements[position] = Some(checker.prepare_call_operand(value, span)?);
             Ok(())
         };
         for argument in arguments.iter_mut().take(offset) {
@@ -761,6 +755,24 @@ pub(super) fn literal_spread_arguments<'hir>(args: &[Arg<'hir>]) -> Option<Vec<A
         }
     }
     Some(flat)
+}
+
+/// Ordinary values are evaluated in full. For a comptime receiver, field
+/// selectors form a fixed path from the owning slot. Keep that path on the
+/// original call and evaluate only a computed base into private storage.
+pub(super) fn operand_to_prepare(
+    value: &mut n::Expr,
+    passing: n::ArgumentPassing,
+) -> Option<&mut n::Expr> {
+    if passing == n::ArgumentPassing::Value {
+        return Some(value);
+    }
+    let base = reference_base(value);
+    if matches!(base.kind, K::Local(_)) {
+        None
+    } else {
+        Some(base)
+    }
 }
 
 // Keep local receiver places live across argument collection. Computed bases

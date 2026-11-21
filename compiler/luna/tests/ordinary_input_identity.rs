@@ -1726,6 +1726,111 @@ fn scoped_match_prepares_a_dependent_value_before_the_next_type_operand() {
 }
 
 #[test]
+fn scoped_match_projected_receiver_observes_later_writes_to_its_owner() {
+    check_events(
+        "
+        struct Cell { value: bool }
+        struct Pair { left: Cell, right: Cell }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        impl Cell {
+            comptime fn clear(self, comptime ty: Type) -> ?ty {
+                assumes self.value;
+                self = Cell { value: false };
+                null
+            }
+        }
+        comptime fn relay(flag: bool) -> bool {
+            var pair = Pair { left: Cell { value: false }, right: Cell { value: false } };
+            let snapshot = pair.left;
+            let ok = pair.left.clear(do {
+                pair = Pair { left: Cell { value: true }, right: Cell { value: true } };
+                Selected(flag)
+            }) matches null;
+            ok and not pair.left.value and pair.right.value and not snapshot.value
+        }
+        const first = relay(true);
+        const second = relay(false);
+        comptime fn check() -> bool { first and second and relay(true) and relay(false) }
+        ",
+        &[("Selected", 2)],
+    );
+}
+
+#[test]
+fn scoped_match_computed_receiver_runs_once_before_type_inputs_or_exit() {
+    check_events(
+        "
+        struct Cell { value: bool }
+        struct Pair { left: Cell, right: Cell }
+        comptime fn made() -> bool { true }
+        comptime fn entered() -> bool { true }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        impl Cell {
+            comptime fn make(self) -> Pair {
+                made();
+                self.value = true;
+                Pair { left: Cell { value: false }, right: Cell { value: true } }
+            }
+            comptime fn clear(self, comptime ty: Type) -> ?ty {
+                entered(); assumes self.value; self.value = false; null
+            }
+        }
+        comptime fn relay(flag: bool, stop: bool) -> bool {
+            let owner = Cell { value: false };
+            let ok = owner.make().right.clear(do {
+                assumes owner.value;
+                if stop { return owner.value; };
+                Selected(flag)
+            }) matches null;
+            ok and owner.value
+        }
+        comptime fn check() -> bool {
+            relay(true, false) and relay(false, false) and relay(true, true)
+        }
+        ",
+        &[("made", 3), ("Selected", 2), ("entered", 2)],
+    );
+}
+
+#[test]
+fn scoped_match_receiver_keeps_the_original_let_rebind_permission() {
+    let package = sysroot::compile(
+        "
+        struct Cell { value: bool }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        impl Cell {
+            comptime fn change(self, whole: bool, comptime ty: Type) -> ?ty {
+                if whole { self = Cell { value: true }; } else { self.value = true; };
+                null
+            }
+        }
+        comptime fn relay(flag: bool, whole: bool) -> bool {
+            let cell = Cell { value: false };
+            let ok = Cell.change(cell, whole, Selected(flag)) matches null;
+            ok and cell.value
+        }",
+    )
+    .unwrap();
+    let relay = sysroot::source_function(&package, "relay");
+    for tree in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            let rejected = vm
+                .invoke(relay, vec![Value::Bool(true), Value::Bool(true)])
+                .unwrap_err();
+            assert_eq!(
+                rejected.kind,
+                comptime_interpretor::ErrorKind::InvalidValueReference
+            );
+            assert_eq!(
+                vm.invoke(relay, vec![Value::Bool(false), Value::Bool(false)])
+                    .unwrap(),
+                Value::Bool(true)
+            );
+        });
+    }
+}
+
+#[test]
 fn scoped_match_preserves_gradual_type_data_until_identity_is_needed() {
     let package = sysroot::compile(
         "

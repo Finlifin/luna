@@ -417,15 +417,9 @@ impl Checker<'_, '_> {
             }
             for (arg, prefix) in arguments.iter_mut().zip(receiver_prefixes) {
                 statements.extend(prefix);
-                let value = if arg.passing == n::ArgumentPassing::Value {
-                    &mut arg.value
-                } else {
-                    arguments::reference_base(&mut arg.value)
-                };
-                if arg.passing != n::ArgumentPassing::Value && matches!(value.kind, K::Local(_)) {
-                    continue;
+                if let Some(value) = arguments::operand_to_prepare(&mut arg.value, arg.passing) {
+                    statements.push(self.prepare_call_operand(value, site.span)?);
                 }
-                statements.push(self.prepare_call_operand(value, site.span)?);
             }
             // Acquire the written inputs first, then any remaining default or
             // inherited dependencies in telescope order. A reused origin can

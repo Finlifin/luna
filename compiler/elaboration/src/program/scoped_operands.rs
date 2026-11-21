@@ -149,11 +149,8 @@ impl Checker<'_, '_> {
                 break;
             }
             dependent_inputs::tasks::spend(&mut self.required_steps, 1, span)?;
-            if argument.is_default || argument.passing != n::ArgumentPassing::Value {
-                return Err(needs_frame(
-                    span,
-                    "operand follows a default or a reference receiver",
-                ));
+            if argument.is_default {
+                return Err(needs_frame(span, "operand follows an omitted default"));
             }
             let uses = self.checked_declaration_inputs(&argument.value, span)?;
             if !uses.is_disjoint(&unavailable) {
@@ -163,7 +160,11 @@ impl Checker<'_, '_> {
                 segments.push(std::mem::take(&mut segment));
                 pending.clear();
             }
-            self.retain_lexical_operand(&mut argument.value, &mut segment, span)?;
+            if let Some(value) =
+                arguments::operand_to_prepare(&mut argument.value, argument.passing)
+            {
+                self.retain_lexical_operand(value, &mut segment, span)?;
+            }
             if let Some(binder) = inputs.get(&argument.parameter) {
                 unavailable.remove(&binder.declaration);
                 pending.insert(binder.declaration);

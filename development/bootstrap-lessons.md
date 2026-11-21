@@ -204,4 +204,4 @@ VM 在同一发布器中检查三种定义的形成条件及有限存储。对�
 
 字节码复用声明实参计划的调度器，在专门化后的正文执行期间借出调用者的局部存储，随后连同控制结果一起归还。树解释器在同一环境中执行正文。这样，guard 的写入、读取模式载荷后的 `return`、指向外层循环的 `break` 和 `continue` 都保有原来的目标。显式传入 `Any` 时，要求具体身份的消费点仍报告 `TypeContractUnresolved`。
 
-自举时值得保留词法边界和求值次序。目前每层还要复制、特化正文并准备执行片段，交叉依赖多时可能重复走后缀；复制和替换使用 invocation 预算。需要引用接收者先于动态类型实参交付，以及类型由源码中更靠后的实参决定时，仍缺对应的交付方式。当前入口是普通 comptime 匹配。[源码实现](../compiler/elaboration/src/program/scoped_operands.rs) · [源码验收](../compiler/luna/tests/ordinary_input_identity.rs)
+自举时值得保留词法边界和求值次序。目前每层还要复制、特化正文并准备执行片段，交叉依赖多时可能重复走后缀；复制和替换使用 invocation 预算。对 comptime 值引用接收者，原调用保留拥有者的局部位置、字段路径和是否可整体替换的权限。计算得出的基值在后续实参之前进入私有局部存储；捕获整个字段值会割断方法写回原位置的路径。变参收集、运行时环境准备和词法 Type 绑定共用这条选择规则。类型由源码中更靠后的实参决定时，仍缺对应的交付方式。当前入口是普通 comptime 匹配。[源码实现](../compiler/elaboration/src/program/scoped_operands.rs) · [源码验收](../compiler/luna/tests/ordinary_input_identity.rs)
