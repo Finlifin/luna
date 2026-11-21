@@ -3,6 +3,7 @@
 //! Borrowed targets remain within the current checker call, not a frozen task.
 use super::*;
 use std::borrow::Cow;
+mod computed;
 
 enum Delivery<'t> {
     Optional { target: Cow<'t, Term>, span: Span },
@@ -87,65 +88,14 @@ impl Delivery<'_> {
                 kind: K::OptionalPresent(Box::new(value)),
             }),
             Self::Error { target, span } => {
-                let Term::ErrorResult { result, .. } = target.as_ref() else {
-                    return Err(error(
-                        span,
-                        "error delivery requires an error-result destination",
-                    ));
-                };
-                let (value, conversion) = if matches!(value.ty, Term::ErrorResult { .. }) {
-                    (value, nir::error_results::Conversion::Embed)
-                } else {
-                    // Optional success payloads retain their own presence layers.
-                    let value = if checker.optional_payload(result, span).is_ok() {
-                        checker.inject_optional_value(value, result, span)?
-                    } else {
-                        value
-                    };
-                    (value, nir::error_results::Conversion::Success)
-                };
-                checker.convert_error_value(value, &target, conversion, span)
+                let plan = checker.computed_error_delivery(&value.ty, &target, span)?;
+                plan.apply(checker, value, &target, span)
             }
         }
     }
 }
 
 impl Checker<'_, '_> {
-    /// Finish delivery when an operand already has a value and its destination
-    /// became known later. The source producer must not run again.
-    pub(super) fn deliver_computed_value<'v>(
-        &mut self,
-        value: &'v n::Expr,
-        target: &Term,
-        span: Span,
-    ) -> Result<Cow<'v, n::Expr>, Error> {
-        // An abstract caller value can already inhabit the whole destination.
-        // Its error tag or optional payload need not be observable here.
-        if value.ty == *target {
-            self.require(&value.ty, target, span)?;
-            return Ok(Cow::Borrowed(value));
-        }
-        if matches!(target, Term::ErrorResult { .. }) {
-            constants::charge_copy(value, &mut self.required_steps, span)?;
-            return Delivery::Error {
-                target: Cow::Borrowed(target),
-                span,
-            }
-            .finish(self, value.clone())
-            .map(Cow::Owned);
-        }
-        if !matches!(target, Term::Primitive(_))
-            && matches!(self.type_identity_view(target, span)?, Term::Optional(_))
-        {
-            constants::charge_copy(value, &mut self.required_steps, span)?;
-            return self
-                .inject_optional_value(value.clone(), target, span)
-                .map(Cow::Owned);
-        }
-        self.require(&value.ty, target, span)?;
-        Ok(Cow::Borrowed(value))
-    }
-
     fn charge_expression_delivery(&mut self, span: Span) -> Result<(), Error> {
         self.required_steps = self
             .required_steps

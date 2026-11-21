@@ -14,7 +14,11 @@ enum Alternative<'hir> {
     Literal(&'hir Expr<'hir>),
     Producer {
         site: &'hir Expr<'hir>,
-        checked: Option<Box<n::Expr>>,
+        domain: Option<Term>,
+    },
+    Frozen {
+        span: Span,
+        value: Box<n::Expr>,
     },
 }
 
@@ -69,7 +73,7 @@ impl<'hir> Selection<'hir> {
             &[],
             |this| {
                 let root = this.expr(selector, Some(&p(P::Object)))?;
-                retain_producers(this, &root, &mut alternatives, source.span)?;
+                retain_producer_domains(this, &root, &mut alternatives, source.span)?;
                 Ok((root, ()))
             },
         )?;
@@ -97,9 +101,13 @@ impl<'hir> Selection<'hir> {
         .ok_or_else(|| error(source.span, "invalid clause selection index"))?;
         match (&mut alternatives[selected], entries.next()) {
             (Alternative::Literal(_), None) => {}
-            (Alternative::Producer { site, checked }, Some(entry)) => {
-                let identity = checker.required_normal_term(entry.value, site.span)?;
-                *checked = Some(frozen_operand(identity, entry.ty, site.span));
+            (Alternative::Producer { site, .. }, Some(entry)) => {
+                let span = site.span;
+                let identity = checker.required_normal_term(entry.value, span)?;
+                alternatives[selected] = Alternative::Frozen {
+                    span,
+                    value: frozen_operand(identity, entry.ty, span),
+                };
             }
             _ => return Err(error(source.span, "invalid selected clause payload")),
         }
@@ -133,15 +141,21 @@ impl<'hir> Selection<'hir> {
                                 result = Some(literal);
                             }
                         }
-                        Alternative::Producer { site, checked } => {
-                            let operand = checked.as_deref().ok_or_else(|| {
-                                error(site.span, "missing checked clause producer")
+                        Alternative::Producer {
+                            site,
+                            domain: actual,
+                        } => {
+                            let actual = actual.as_ref().ok_or_else(|| {
+                                error(site.span, "missing checked clause producer domain")
                             })?;
-                            let delivered =
-                                this.deliver_computed_value(operand, domain, site.span)?;
-                            if index == self.selected {
-                                result = Some(delivered.into_owned());
+                            this.computed_delivery(actual, domain, site.span)?;
+                        }
+                        Alternative::Frozen { span, value } => {
+                            let delivered = this.deliver_computed_value(value, domain, *span)?;
+                            if let std::borrow::Cow::Borrowed(operand) = &delivered {
+                                constants::charge_copy(operand, &mut this.required_steps, *span)?;
                             }
+                            result = Some(delivered.into_owned());
                         }
                     }
                 }
@@ -161,7 +175,7 @@ impl<'hir> Selection<'hir> {
 // Follow only the normalized control's result edges. Inner Objects, calls and
 // guards belong to user code. A retained producer is checked after inference
 // even if this invocation selected a different arm; it is never run again.
-fn retain_producers(
+fn retain_producer_domains(
     checker: &mut Checker<'_, '_>,
     root: &n::Expr,
     alternatives: &mut [Alternative<'_>],
@@ -192,13 +206,16 @@ fn retain_producers(
                         K::Literal(n::Literal::Integer(index)) => index.parse::<usize>().ok(),
                         _ => None,
                     };
-                    let Some(Alternative::Producer { site, checked }) =
+                    let Some(Alternative::Producer { site, domain }) =
                         index.and_then(|index| alternatives.get_mut(index))
                     else {
                         return Err(error(span, "invalid staged producer site"));
                     };
-                    constants::charge_copy(value, &mut checker.required_steps, site.span)?;
-                    *checked = Some(Box::new(value.clone()));
+                    *domain = Some(declaration_inputs::copy_input_domain(
+                        &value.ty,
+                        &mut checker.required_steps,
+                        site.span,
+                    )?);
                 }
             }
             _ => return Err(error(span, "missing contextual result packet")),
@@ -298,7 +315,7 @@ fn project<'tree, 'src: 'tree>(
                 fields.push(hir::expr::ObjectEntry::Value(source));
                 alternatives.push(Alternative::Producer {
                     site: source,
-                    checked: None,
+                    domain: None,
                 });
             }
             H::Object(fields)

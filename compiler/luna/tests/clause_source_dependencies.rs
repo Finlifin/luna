@@ -398,3 +398,26 @@ fn mixed_clause_results_distinguish_absence_from_an_absent_payload() {
     "#;
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn computed_clause_delivery_preserves_error_tags_and_optional_success() {
+    let source = r#"
+        enum ReadErr { Missing }
+        comptime fn failed() -> !ReadErr ?u8 { error .Missing }
+        comptime fn byte() -> u8 { 42 }
+        fn read(value: T) -> !ReadErr ?T where T, .tag: !ReadErr ?T = null { tag }
+        fn staged(value: u8, comptime branch: u8) -> !ReadErr ?u8 {
+            read<.tag = branch match {
+                0 => null,
+                1 => failed(),
+                _ => byte(),
+            }>(value)
+        }
+        fn run() -> bool {
+            let value: u8 = 0;
+            (staged(value, 0) matches null!) and (staged(value, 1) matches error .Missing)
+                and (staged(value, 2) matches 42?!)
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
