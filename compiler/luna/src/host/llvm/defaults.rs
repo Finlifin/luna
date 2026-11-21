@@ -264,7 +264,7 @@ mod tests {
             // A low-level observer writes each owner byte without buffering.
             // This tests cleanup generation, not source P3 admission.
             let ir = format!(
-                "declare void @llvm.trap()\ndeclare i64 @write(i32, ptr, i64)\ndefine void @flurry_0(ptr %p) {{\nentry:\n  %n = call i64 @write(i32 1, ptr %p, i64 1)\n  ret void\n}}\ndefine i32 @main() {{\nentry:\n{}{}}}\n",
+                "declare void @llvm.trap()\ndeclare i64 @write(i32, ptr, i64)\ndefine {{ {{}}, ptr }} @flurry_0(ptr %p, ptr %task) {{\nentry:\n  %n = call i64 @write(i32 1, ptr %p, i64 1)\n  ret {{ {{}}, ptr }} zeroinitializer\n}}\ndefine i32 @main() {{\nentry:\n  %task = alloca {{ i8, ptr }}\n  store {{ i8, ptr }} zeroinitializer, ptr %task\n{}{}}}\n",
                 emitter.prologue, emitter.body
             );
             for optimization in [
