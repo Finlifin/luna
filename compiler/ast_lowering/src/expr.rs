@@ -428,6 +428,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                             span,
                         }
                     }
+                    "tuple_indexed" => {
+                        let value = self.lower_expr(ctx, children[0]);
+                        Expr {
+                            hir_id: self.next_hir_id(),
+                            kind: ExprKind::TakeTupleIndexed(self.arena.alloc_expr(value)),
+                            span,
+                        }
+                    }
                     "intrinsic" => {
                         let tag = self.lower_expr(ctx, children[0]);
                         Expr {

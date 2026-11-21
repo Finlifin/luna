@@ -288,6 +288,7 @@ impl<'a, 'h> Reads<'a, 'h> {
             span,
         }
     }
+
     fn drain(&mut self) -> Result<(), Error> {
         while let Some((context, scope, node)) = self.pending.pop() {
             self.scope = match &node {
@@ -302,6 +303,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
         Ok(())
     }
+
     fn charge(&mut self) -> Result<(), Error> {
         self.fuel = self
             .fuel
@@ -309,26 +311,31 @@ impl<'a, 'h> Reads<'a, 'h> {
             .ok_or_else(|| error(self.span, "lexical dependency observation budget exhausted"))?;
         Ok(())
     }
+
     fn push(&mut self, node: Node<'a, 'h>) -> Result<(), Error> {
         self.charge()?;
         self.pending.push((self.current, self.scope, node));
         Ok(())
     }
+
     fn expression(&mut self, expr: &'a Expr<'h>) -> Result<(), Error> {
         self.push(Node::Expr(expr))
     }
+
     fn optional(&mut self, expr: Option<&'a Expr<'h>>) -> Result<(), Error> {
         if let Some(expr) = expr {
             self.expression(expr)?;
         }
         Ok(())
     }
+
     fn input(&mut self, id: DeclarationId) {
         if let Some(binding) = self.staged_locals.get(&id) {
             self.read_local(*binding);
         }
         self.graph.entry(self.scope).or_default().direct.insert(id);
     }
+
     fn term(&mut self, term: &Term) -> Result<(), Error> {
         if !matches!(self.query, Query::Declaration) {
             // A delivered term may carry a scope that is not the source local
@@ -371,6 +378,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
         Ok(())
     }
+
     fn reference(&mut self, owner: OwnerId) -> Result<(), Error> {
         if matches!(self.query, Query::FreeLocals | Query::FreeInputs) {
             self.local_graph
@@ -386,6 +394,7 @@ impl<'a, 'h> Reads<'a, 'h> {
             .insert(SourceScope::Declaration(owner));
         self.push(Node::Owner(owner))
     }
+
     fn read_local(&mut self, binding: n::LocalId) {
         if matches!(self.query, Query::FreeLocals | Query::FreeInputs) {
             self.local_graph
@@ -395,6 +404,7 @@ impl<'a, 'h> Reads<'a, 'h> {
                 .insert(binding);
         }
     }
+
     fn bind_local(&mut self, binding: hir::HirId) {
         if matches!(self.query, Query::FreeLocals | Query::FreeInputs) {
             self.local_graph
@@ -404,12 +414,14 @@ impl<'a, 'h> Reads<'a, 'h> {
                 .insert(local(binding));
         }
     }
+
     fn identity(&self, id: hir::common::DefId) -> DeclarationId {
         DeclarationId {
             package: semantic_package(self.source.identities, id.pkg),
             local: id.index,
         }
     }
+
     fn definition(&mut self, id: hir::common::DefId) -> Result<(), Error> {
         self.charge()?;
         // Global declarations cannot close over this lexical scope. Their
@@ -434,6 +446,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
         Ok(())
     }
+
     fn arguments(&mut self, args: &'a [Arg<'h>]) -> Result<(), Error> {
         for arg in args {
             let (Arg::Positional(value)
@@ -445,6 +458,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
         Ok(())
     }
+
     fn clauses(
         &mut self,
         parameters: &'a [hir::ClauseParam<'h>],
@@ -455,6 +469,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
         self.constraints(parameters, constraints)
     }
+
     fn constraints(
         &mut self,
         parameters: &'a [hir::ClauseParam<'h>],
@@ -489,6 +504,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
         Ok(())
     }
+
     fn inherited(&mut self, owner: OwnerId) -> Result<(), Error> {
         let mut cursor = owner;
         let mut seen = BTreeSet::new();
@@ -518,6 +534,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
         Ok(())
     }
+
     fn fields(&mut self, fields: &'a [hir::FieldDef<'h>]) -> Result<(), Error> {
         for field in fields {
             self.expression(field.ty)?;
@@ -525,17 +542,20 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
         Ok(())
     }
+
     fn members(&mut self, members: &[OwnerId]) -> Result<(), Error> {
         for member in members {
             self.reference(*member)?;
         }
         Ok(())
     }
+
     fn arm(&mut self, arm: &'a PatternArm<'h>) -> Result<(), Error> {
         self.push(Node::Pattern(&arm.pat))?;
         self.optional(arm.guard)?;
         self.expression(arm.body)
     }
+
     fn node(&mut self, node: Node<'a, 'h>) -> Result<(), Error> {
         match node {
             Node::Owner(owner) => self.owner(owner)?,
@@ -610,6 +630,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
         Ok(())
     }
+
     fn protocols(&mut self, owner: OwnerId) -> Result<(), Error> {
         let members = self
             .source
@@ -622,6 +643,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
         Ok(())
     }
+
     fn owner(&mut self, owner: OwnerId) -> Result<(), Error> {
         if !self.owners.insert(owner) {
             return Ok(());
@@ -772,6 +794,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
         Ok(())
     }
+
     fn expr(&mut self, expr: &'a Expr<'h>) -> Result<(), Error> {
         if !self
             .expressions
@@ -903,6 +926,7 @@ impl<'a, 'h> Reads<'a, 'h> {
             | H::TakeAttribute(value)
             | H::TakeIntrinsic(value)
             | H::TakeTupleEnumerate(value)
+            | H::TakeTupleIndexed(value)
             | H::TypeOf(value)
             | H::MultiDeref(value) => self.expression(value)?,
             H::PostLambdaBody(body) => self.push(Node::Body(*body))?,
@@ -1092,6 +1116,7 @@ impl<'a, 'h> Reads<'a, 'h> {
         }
         Ok(())
     }
+
     fn pattern(&mut self, pattern: &'a hir::Pattern<'h>) -> Result<(), Error> {
         if !self
             .patterns

@@ -7357,6 +7357,13 @@ impl Checker<'_, '_> {
             return Ok(left);
         }
         let shape = self.structural_type(&left.ty, expr.span)?;
+        let shape = if !self.native_arithmetic_type(op, &shape)
+            && self.native_arithmetic_type(op, &left.ty)
+        {
+            left.ty.clone()
+        } else {
+            shape
+        };
         // A literal/block receiver may only become typed during peer inference.
         // Reuse both checked operands when selecting its protocol: do not
         // re-elaborate producers or assume the associated Output is the input

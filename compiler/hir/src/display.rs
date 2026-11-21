@@ -28,6 +28,7 @@ macro_rules! form {
 }
 
 struct Quoted<'a>(&'a str);
+
 impl Display for Quoted<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_char('"')?;
@@ -47,6 +48,7 @@ impl Display for Quoted<'_> {
 }
 
 struct List<'a, T>(&'a [T]);
+
 impl<T: Display> Display for List<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(")?;
@@ -61,6 +63,7 @@ impl<T: Display> Display for List<'_, T> {
 }
 
 struct Maybe<T>(Option<T>);
+
 impl<T: Display> Display for Maybe<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
@@ -71,6 +74,7 @@ impl<T: Display> Display for Maybe<T> {
 }
 
 struct Location(Span);
+
 impl Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         form!(f, "span", "lo" => self.0.lo().0, "hi" => self.0.hi().0)
@@ -78,6 +82,7 @@ impl Display for Location {
 }
 
 struct Name(Ident);
+
 impl Display for Name {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         form!(f, "ident", "name" => Quoted(&self.0.name), "span" => Location(self.0.span))
@@ -85,6 +90,7 @@ impl Display for Name {
 }
 
 struct Id(HirId);
+
 impl Display for Id {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         form!(f, "hir-id", "owner" => self.0.owner.def_id.raw(), "local" => self.0.local_id.raw())
@@ -92,6 +98,7 @@ impl Display for Id {
 }
 
 struct Owner(OwnerId);
+
 impl Display for Owner {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(owner-id {})", self.0.def_id.raw())
@@ -99,6 +106,7 @@ impl Display for Owner {
 }
 
 struct Definition(DefId);
+
 impl Display for Definition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         form!(f, "def-id", "package" => self.0.pkg, "index" => self.0.index)
@@ -112,6 +120,7 @@ impl Display for BodyId {
 }
 
 struct Owners<'a>(&'a [OwnerId]);
+
 impl Display for Owners<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(")?;
@@ -578,6 +587,7 @@ impl Display for UseKind<'_> {
 }
 
 struct QualifiedPath<'a, 'hir>(&'a Path<'hir>);
+
 impl Display for QualifiedPath<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         struct Anchor(PathAnchor);
@@ -921,6 +931,7 @@ impl Display for ExprKind<'_> {
             Self::TakeAttribute(value) => form!(f, "take-attribute", "value" => value),
             Self::TakeTagName(value) => form!(f, "take-tag-name", "value" => value),
             Self::TakeTupleEnumerate(value) => form!(f, "take-tuple-enumerate", "value" => value),
+            Self::TakeTupleIndexed(value) => form!(f, "take-tuple-indexed", "value" => value),
             Self::TakeBitVec(value) => form!(f, "take-bit-vec", "value" => value),
             Self::TypeOf(value) => form!(f, "type-of", "value" => value),
             Self::MultiDeref(value) => form!(f, "multi-deref", "value" => value),

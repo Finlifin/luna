@@ -276,19 +276,30 @@ impl Checker<'_, '_> {
         checked: &mut Option<n::Expr>,
     ) -> Result<Option<n::Expr>, Error> {
         let value = checked.as_ref().expect("checked protocol operand");
-        let shape = match self
-            .context
-            .structural_view_metered(&value.ty, crate::ptc::Budget::default())
-            .0
-        {
-            Ok(view) => view.map(|(ty, _)| ty).unwrap_or_else(|| value.ty.clone()),
-            Err(crate::ptc::UnknownReason::UnvalidatedModel) => value.ty.clone(),
-            Err(reason) => {
-                return Err(error(
-                    expr.span,
-                    format!("unary operand view remains unresolved: {reason:?}"),
-                ));
+        let shape = if matches!(
+            value.ty,
+            Term::Bound { .. }
+                | Term::AssociatedType { .. }
+                | Term::Rigid { .. }
+                | Term::NormalForm { .. }
+                | Term::Hole { .. }
+        ) {
+            match self
+                .context
+                .structural_view_metered(&value.ty, crate::ptc::Budget::default())
+                .0
+            {
+                Ok(view) => view.map(|(ty, _)| ty).unwrap_or_else(|| value.ty.clone()),
+                Err(crate::ptc::UnknownReason::UnvalidatedModel) => value.ty.clone(),
+                Err(reason) => {
+                    return Err(error(
+                        expr.span,
+                        format!("unary operand view remains unresolved: {reason:?}"),
+                    ));
+                }
             }
+        } else {
+            value.ty.clone()
         };
         let native = match operator {
             crate::arithmetic::Operator::Negate => {

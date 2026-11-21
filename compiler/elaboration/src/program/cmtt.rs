@@ -2,11 +2,13 @@
 //! publishes no runtime reads, moves or effects. Connection produces ordinary
 //! NIR, which goes through the existing resource/effect verification pipeline.
 use super::*;
+
 mod function_templates;
 mod functions;
 mod generators;
 pub(super) mod patterns;
 mod test_templates;
+
 use comptime_interpretor::CodeValue;
 pub(super) use functions::expand_quote_functions;
 pub(crate) use functions::{expand_bound_quote, expand_materialized_quotes, inline_template};
@@ -91,7 +93,9 @@ impl Checker<'_, '_> {
                 "local const requires an immutable binding",
             ));
         }
-        if self.checking_open_behavior {
+        if self.checking_open_behavior
+            || (self.in_unselected_inline && !self.checking_code_generator)
+        {
             return if decl.guard.is_some() || decl.otherwise.is_some() {
                 self.ordinary_conditional_constant_binding(decl, expected)
             } else {

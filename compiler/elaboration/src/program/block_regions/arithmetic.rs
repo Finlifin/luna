@@ -217,28 +217,40 @@ impl<'h> Frame<'h> {
                     self.begin_peers(checker)?;
                     return Ok(Step::Continue);
                 };
-                let shape = match checker
-                    .context
-                    .structural_view_with_heads_metered(
-                        &value.ty,
-                        crate::ptc::Budget::default(),
-                        |head| Some(head) == checker.protocols.tuple,
-                    )
-                    .0
-                {
-                    Ok(view) => view.map(|(ty, _)| ty).unwrap_or_else(|| value.ty.clone()),
-                    Err(crate::ptc::UnknownReason::UnvalidatedModel) => value.ty.clone(),
-                    Err(reason) => {
-                        return Err(error(
-                            self.inputs[0].span,
-                            format!("arithmetic operand view remains unresolved: {reason:?}"),
-                        ));
+                let shape = if matches!(
+                    value.ty,
+                    Term::Bound { .. }
+                        | Term::AssociatedType { .. }
+                        | Term::Rigid { .. }
+                        | Term::NormalForm { .. }
+                        | Term::Hole { .. }
+                ) {
+                    match checker
+                        .context
+                        .structural_view_with_heads_metered(
+                            &value.ty,
+                            crate::ptc::Budget::default(),
+                            |head| Some(head) == checker.protocols.tuple,
+                        )
+                        .0
+                    {
+                        Ok(view) => view.map(|(ty, _)| ty).unwrap_or_else(|| value.ty.clone()),
+                        Err(crate::ptc::UnknownReason::UnvalidatedModel) => value.ty.clone(),
+                        Err(reason) => {
+                            return Err(error(
+                                self.inputs[0].span,
+                                format!("arithmetic operand view remains unresolved: {reason:?}"),
+                            ));
+                        }
                     }
+                } else {
+                    value.ty.clone()
                 };
                 let H::Binary(op, _, _) = &self.source.kind else {
                     unreachable!()
                 };
-                self.native = checker.native_arithmetic_type(op, &shape);
+                self.native = checker.native_arithmetic_type(op, &shape)
+                    || checker.native_arithmetic_type(op, &value.ty);
                 self.phase = Phase::NativeRight;
                 // A native left operand does not establish a homogeneous RHS.
                 return self.request(checker, Child::Right, 1, None, true);

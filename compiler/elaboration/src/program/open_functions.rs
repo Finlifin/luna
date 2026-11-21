@@ -1423,6 +1423,7 @@ impl Checker<'_, '_> {
                 | H::TakeAttribute(value)
                 | H::TakeIntrinsic(value)
                 | H::TakeTupleEnumerate(value)
+                | H::TakeTupleIndexed(value)
                 | H::TypeOf(value)
                 | H::MultiDeref(value)
                 | H::LiteralConversion { literal: value, .. } => pending.push(value),
@@ -2869,6 +2870,18 @@ impl Checker<'_, '_> {
                     return self.describe_open_tuple_iteration(
                         value,
                         input,
+                        false,
+                        locals,
+                        returns,
+                        expected,
+                        depth + 1,
+                    );
+                }
+                if let H::TakeTupleIndexed(input) = iter.kind {
+                    return self.describe_open_tuple_iteration(
+                        value,
+                        input,
+                        true,
                         locals,
                         returns,
                         expected,
@@ -3819,7 +3832,11 @@ impl Checker<'_, '_> {
         let annotation = decl.ty.map(|ty| self.type_expr(ty)).transpose()?;
         let value = self.with_staged_input(true, |this| {
             let value = this.expr(init, annotation.as_ref())?;
-            this.check_open_fragment(&value, init.span, false)?;
+            if this.checking_open_behavior {
+                this.check_open_fragment(&value, init.span, false)?;
+            } else {
+                this.check_inline_input_availability(&value, &BTreeSet::new(), init.span)?;
+            }
             Ok(value)
         })?;
         self.immutable.extend(pattern_binding_ids(&decl.pattern));
@@ -3843,7 +3860,9 @@ impl Checker<'_, '_> {
                 .cloned()
                 .ok_or_else(|| error(decl.span, "constant pattern output has no type"))?;
             self.open_staged_locals.insert(binding);
-            self.ordinary_behavior_inputs.insert(binding, ty);
+            if self.checking_open_behavior {
+                self.ordinary_behavior_inputs.insert(binding, ty);
+            }
         }
         // Preserve candidate-local aliases introduced by equality and view
         // patterns; flattening observations loses their staged binding scope.
@@ -3851,7 +3870,11 @@ impl Checker<'_, '_> {
         if let Some(guard) = decl.guard {
             self.with_staged_input(true, |this| {
                 let guard_value = this.expr(guard, Some(&p(P::Bool)))?;
-                this.check_open_fragment(&guard_value, guard.span, false)
+                if this.checking_open_behavior {
+                    this.check_open_fragment(&guard_value, guard.span, false)
+                } else {
+                    this.check_inline_input_availability(&guard_value, &BTreeSet::new(), guard.span)
+                }
             })?;
         }
         // Only structural Type evidence survives an arbitrary guard. Values
@@ -3867,6 +3890,9 @@ impl Checker<'_, '_> {
         let Some(otherwise) = otherwise else {
             return Ok(unit);
         };
+        if !self.checking_open_behavior {
+            return Ok(unit);
+        }
         let selector = n::LocalId {
             owner: u32::MAX,
             index: self.next_temporary_binding,
@@ -3910,7 +3936,11 @@ impl Checker<'_, '_> {
         let annotation = decl.ty.map(|ty| self.type_expr(ty)).transpose()?;
         let value = self.with_staged_input(true, |this| {
             let value = this.expr(init, annotation.as_ref())?;
-            this.check_open_fragment(&value, init.span, false)?;
+            if this.checking_open_behavior {
+                this.check_open_fragment(&value, init.span, false)?;
+            } else {
+                this.check_inline_input_availability(&value, &BTreeSet::new(), init.span)?;
+            }
             Ok(value)
         })?;
         self.immutable.extend(pattern_binding_ids(&decl.pattern));
@@ -3963,9 +3993,15 @@ impl Checker<'_, '_> {
                 }
             };
             self.with_staged_input(true, |this| {
-                this.check_open_fragment(&expression, decl.span, false)
+                if this.checking_open_behavior {
+                    this.check_open_fragment(&expression, decl.span, false)
+                } else {
+                    this.check_inline_input_availability(&expression, &BTreeSet::new(), decl.span)
+                }
             })?;
-            self.retain_behavior_value(binding, &expression, decl.span)?;
+            if self.checking_open_behavior {
+                self.retain_behavior_value(binding, &expression, decl.span)?;
+            }
             self.generator_data.insert(binding, Some(expression));
             self.open_staged_locals.insert(binding);
         }
@@ -4535,6 +4571,7 @@ impl Checker<'_, '_> {
         &mut self,
         expr: &Expr<'_>,
         input: &Expr<'_>,
+        indexed: bool,
         locals: &mut BTreeMap<n::LocalId, D>,
         returns: Option<&D>,
         expected: Option<&D>,
@@ -4545,6 +4582,11 @@ impl Checker<'_, '_> {
         } = expr.kind
         else {
             unreachable!()
+        };
+        let indexed_pats = if indexed {
+            Some(inline_loops::tuple_indexed_parts(pat)?)
+        } else {
+            None
         };
         let computed = self.computed_tuple_input(input)?;
         let mut empty_tuple = false;
@@ -4602,15 +4644,46 @@ impl Checker<'_, '_> {
                 self.open_member_locals = staged_members.clone();
                 self.immutable = immutable.clone();
                 self.context = context.clone();
-                self.immutable.extend(pattern_binding_ids(pat));
-                let element = self.pattern(pat, &ty)?;
-                patterns_irrefutable &= self.pattern_exhaustive(&element, &ty);
-                let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                let before = fuel;
-                let observations = nir::visit::pattern_observations(&element, &mut fuel);
-                self.required_steps -= (before - fuel) as u64;
-                for observation in observations.map_err(|e| error(pat.span, e))? {
-                    self.check_open_fragment(observation, pat.span, false)?;
+                let elem_pat = if let Some((index_pat, elem_pat)) = indexed_pats {
+                    if let Some(index_pat) = index_pat {
+                        let before_index = self.locals.clone();
+                        self.immutable.extend(pattern_binding_ids(index_pat));
+                        let index_pattern = self.with_staged_input(true, |this| {
+                            this.pattern(index_pat, &p(P::Integer))
+                        })?;
+                        patterns_irrefutable &=
+                            self.pattern_exhaustive(&index_pattern, &p(P::Integer));
+                        for id in self.locals.keys() {
+                            if !before_index.contains_key(id) {
+                                self.open_staged_locals.insert(*id);
+                            }
+                        }
+                        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                        let before = fuel;
+                        let observations =
+                            nir::visit::pattern_observations(&index_pattern, &mut fuel);
+                        self.required_steps -= (before - fuel) as u64;
+                        for observation in observations.map_err(|e| error(index_pat.span, e))? {
+                            self.with_staged_input(true, |this| {
+                                this.check_open_fragment(observation, index_pat.span, false)
+                            })?;
+                        }
+                    }
+                    elem_pat
+                } else {
+                    Some(pat)
+                };
+                if let Some(elem_pat) = elem_pat {
+                    self.immutable.extend(pattern_binding_ids(elem_pat));
+                    let element = self.pattern(elem_pat, &ty)?;
+                    patterns_irrefutable &= self.pattern_exhaustive(&element, &ty);
+                    let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                    let before = fuel;
+                    let observations = nir::visit::pattern_observations(&element, &mut fuel);
+                    self.required_steps -= (before - fuel) as u64;
+                    for observation in observations.map_err(|e| error(elem_pat.span, e))? {
+                        self.check_open_fragment(observation, elem_pat.span, false)?;
+                    }
                 }
                 let mut branch_locals = locals.clone();
                 branch_locals.extend(

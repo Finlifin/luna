@@ -123,9 +123,11 @@ impl Sexp {
 fn owner(raw: u32) -> OwnerId {
     OwnerId::new(LocalDefId::new(raw))
 }
+
 fn id(local: u32) -> HirId {
     HirId::new(owner(7), ItemLocalId::new(local))
 }
+
 fn name(text: &str) -> Ident {
     Ident::new(Symbol::intern(text), DUMMY_SP)
 }
@@ -181,6 +183,7 @@ fn generated_definition_drafts_have_structured_escaped_dumps() {
     parsed(&batch);
     parsed(batch.published());
 }
+
 fn expr(kind: ExprKind<'_>, local: u32) -> Expr<'_> {
     Expr {
         hir_id: id(local),
@@ -188,6 +191,7 @@ fn expr(kind: ExprKind<'_>, local: u32) -> Expr<'_> {
         span: DUMMY_SP,
     }
 }
+
 fn pat(kind: PatternKind<'_>, local: u32) -> Pattern<'_> {
     Pattern {
         hir_id: id(local),
@@ -195,6 +199,7 @@ fn pat(kind: PatternKind<'_>, local: u32) -> Pattern<'_> {
         span: DUMMY_SP,
     }
 }
+
 fn parsed(value: &impl std::fmt::Display) -> Sexp {
     Sexp::parse(&value.to_string())
 }
@@ -244,6 +249,7 @@ fn contextual_code_dump_preserves_bindings_stage_and_substitution_direction() {
         assert_eq!(substitution.field("binding").tag(), "expr");
     }
 }
+
 fn assert_id(value: &Sexp, owner: u32, local: u32) {
     value.field("owner").atom(owner);
     value.field("local").atom(local);
@@ -827,8 +833,13 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             "take-tuple-enumerate",
             vec![("value", &a_tree)],
         ),
+        (
+            ExprKind::TakeTupleIndexed(&a),
+            "take-tuple-indexed",
+            vec![("value", &a_tree)],
+        ),
     ];
-    assert_eq!(cases.len(), 88);
+    assert_eq!(cases.len(), 89);
     for (kind, tag, children) in cases {
         let tree = parsed(&kind);
         assert_eq!(tree.tag(), tag);

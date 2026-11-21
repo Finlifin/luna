@@ -245,6 +245,8 @@ pub enum ExprKind<'hir> {
     TakeIntrinsic(&'hir Expr<'hir>),
     /// Structural enumeration keeps runtime elements distinct from comptime shape.
     TakeTupleEnumerate(&'hir Expr<'hir>),
+    /// Indexed structural enumeration binds `(comptime index, element)`.
+    TakeTupleIndexed(&'hir Expr<'hir>),
     TypeOf(&'hir Expr<'hir>),
     MultiDeref(&'hir Expr<'hir>),
 

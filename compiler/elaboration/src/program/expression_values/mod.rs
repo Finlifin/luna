@@ -2,6 +2,7 @@
 //! contextual/type-value handling returns, keeping unrelated recursive paths off
 //! one another's native stack. Phase and expected-type checks retain their order.
 use super::*;
+
 mod aggregates;
 mod bindings;
 mod literals;
@@ -66,6 +67,7 @@ impl Checker<'_, '_> {
             | H::Cast(..)
             | H::TakeOld(_)
             | H::TakeTupleEnumerate(_)
+            | H::TakeTupleIndexed(_)
             | H::TakeIntrinsic(_)
             | H::TakeTagName(_)
             | H::TakeAttribute(_)

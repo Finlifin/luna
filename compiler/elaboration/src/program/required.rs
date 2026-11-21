@@ -1933,6 +1933,7 @@ pub(super) fn mentions_value_parameter(
         | H::TakeAttribute(value)
         | H::TakeIntrinsic(value)
         | H::TakeTupleEnumerate(value)
+        | H::TakeTupleIndexed(value)
         | H::Defer(value)
         | H::InlineControl(value)
         | H::Unary(_, value)

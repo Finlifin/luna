@@ -175,6 +175,13 @@ impl Checker<'_, '_> {
                     "tuple_enumerate structural iteration is not yet implemented; runtime elements cannot be evaluated at comptime",
                 ));
             }
+            H::TakeTupleIndexed(input) => {
+                self.tuple_enumeration_input(input)?;
+                return Err(error(
+                    expr.span,
+                    "tuple_indexed structural iteration requires inline for",
+                ));
+            }
             H::TakeIntrinsic(_) => {
                 return Err(error(
                     expr.span,

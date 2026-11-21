@@ -47,8 +47,11 @@ const IGNORED_DIRS: &[&str] = &[
 /// LSP Diagnostic severity codes.
 pub mod lsp_severity {
     pub const ERROR: u32 = 1;
+
     pub const WARNING: u32 = 2;
+
     pub const INFORMATION: u32 = 3;
+
     pub const HINT: u32 = 4;
 }
 
@@ -1136,6 +1139,10 @@ impl WorkspaceAnalyzer {
                 (
                     "tuple_enumerate",
                     "Structural tuple enumeration ('tuple_enumerate)",
+                ),
+                (
+                    "tuple_indexed",
+                    "Indexed structural tuple enumeration ('tuple_indexed)",
                 ),
             ]
             .into_iter()

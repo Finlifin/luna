@@ -22,67 +22,119 @@ use symbol::{DefId, Symbol};
 /// LSP `SymbolKind` numeric constants (LSP 3.17).
 pub mod lsp_symbol_kind {
     pub const FILE: u32 = 1;
+
     pub const MODULE: u32 = 2;
+
     pub const NAMESPACE: u32 = 3;
+
     pub const PACKAGE: u32 = 4;
+
     pub const CLASS: u32 = 5;
+
     pub const METHOD: u32 = 6;
+
     pub const PROPERTY: u32 = 7;
+
     pub const FIELD: u32 = 8;
+
     pub const CONSTRUCTOR: u32 = 9;
+
     pub const ENUM: u32 = 10;
+
     pub const INTERFACE: u32 = 11;
+
     pub const FUNCTION: u32 = 12;
+
     pub const VARIABLE: u32 = 13;
+
     pub const CONSTANT: u32 = 14;
+
     pub const TYPE_PARAMETER: u32 = 26;
+
     pub const ENUM_MEMBER: u32 = 22;
+
     pub const STRUCT: u32 = 23;
+
     pub const EVENT: u32 = 24;
+
     pub const OPERATOR: u32 = 25;
 }
 
 /// LSP `CompletionItemKind` numeric constants (LSP 3.17).
 pub mod lsp_completion_kind {
     pub const TEXT: u32 = 1;
+
     pub const METHOD: u32 = 2;
+
     pub const FUNCTION: u32 = 3;
+
     pub const CONSTRUCTOR: u32 = 4;
+
     pub const FIELD: u32 = 5;
+
     pub const VARIABLE: u32 = 6;
+
     pub const CLASS: u32 = 7;
+
     pub const INTERFACE: u32 = 8;
+
     pub const MODULE: u32 = 9;
+
     pub const PROPERTY: u32 = 10;
+
     pub const KEYWORD: u32 = 14;
+
     pub const SNIPPET: u32 = 15;
+
     pub const ENUM: u32 = 13;
+
     pub const STRUCT: u32 = 22;
+
     pub const ENUM_MEMBER: u32 = 20;
+
     pub const CONSTANT: u32 = 21;
+
     pub const TYPE_PARAMETER: u32 = 25;
 }
 
 /// Canonical Semantic Token type indices advertised in `initialize`.
 pub mod semantic_token_type {
     pub const NAMESPACE: u32 = 0;
+
     pub const TYPE: u32 = 1;
+
     pub const STRUCT: u32 = 2;
+
     pub const ENUM: u32 = 3;
+
     pub const INTERFACE: u32 = 4;
+
     pub const TYPE_PARAMETER: u32 = 5;
+
     pub const PARAMETER: u32 = 6;
+
     pub const VARIABLE: u32 = 7;
+
     pub const PROPERTY: u32 = 8;
+
     pub const ENUM_MEMBER: u32 = 9;
+
     pub const FUNCTION: u32 = 10;
+
     pub const METHOD: u32 = 11;
+
     pub const MACRO: u32 = 12;
+
     pub const KEYWORD: u32 = 13;
+
     pub const MODIFIER: u32 = 14;
+
     pub const COMMENT: u32 = 15;
+
     pub const STRING: u32 = 16;
+
     pub const NUMBER: u32 = 17;
+
     pub const OPERATOR: u32 = 18;
 
     pub const LEGEND: &[&str] = &[
@@ -111,9 +163,13 @@ pub mod semantic_token_type {
 /// Canonical Semantic Token modifier bit indices advertised in `initialize`.
 pub mod semantic_token_modifier {
     pub const DECLARATION: u32 = 1 << 0;
+
     pub const DEFINITION: u32 = 1 << 1;
+
     pub const READONLY: u32 = 1 << 2;
+
     pub const MODIFICATION: u32 = 1 << 3;
+
     pub const DOCUMENTATION: u32 = 1 << 4;
 
     pub const LEGEND: &[&str] = &[
@@ -1849,6 +1905,7 @@ impl<'a> IndexBuilder<'a> {
             | ExprKind::TakeAttribute(inner)
             | ExprKind::TakeIntrinsic(inner)
             | ExprKind::TakeTupleEnumerate(inner)
+            | ExprKind::TakeTupleIndexed(inner)
             | ExprKind::TypeOf(inner)
             | ExprKind::MultiDeref(inner)
             | ExprKind::TacticArgument(inner) => {

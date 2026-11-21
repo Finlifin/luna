@@ -69,11 +69,13 @@ impl Control {
         }
     }
 }
+
 impl Flow {
     pub(in crate::program::cmtt) fn has_transfer(&self) -> bool {
         !self.breaks.is_empty() || !self.continues.is_empty()
     }
 }
+
 impl fmt::Display for Flow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(generator-flow (next {}) (breaks", self.next)?;
@@ -537,6 +539,12 @@ impl Checker<'_, '_> {
         };
         if let H::TakeTupleEnumerate(input) = iter.kind {
             return self.generator_inline_tuple(value, input, interface, depth, loops);
+        }
+        if let H::TakeTupleIndexed(_) = iter.kind {
+            return Err(error(
+                iter.span,
+                "generator tuple_indexed is not yet implemented",
+            ));
         }
         let H::Range {
             start: Some(start),

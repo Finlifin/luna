@@ -32,6 +32,13 @@ inline for arg in args'tuple_enumerate {
   2. PTC 已证明 `Type.predicates.is_tuple(T)`（例如参数来自带 `where ensures Type.predicates.is_tuple(R)` 的 deferred producer、签名 `requires Type.predicates.is_tuple(T)`、`refines` 或作用域内的 `assumes Type.predicates.is_tuple(...)`）。
 - 编译器不会通过窥探类型生产函数体来绕过上述契约要求。
 
+### `'tuple_indexed`
+
+用于 `inline for (index, element) in tuple'tuple_indexed` 的带编译期下标静态展开视图。
+
+- 与 `'tuple_enumerate` 遵循相同的合法元组操作数与异构字段所有权规则，仅额外在每次展开绑定从 `0` 开始的编译期 `Integer` 常量索引 `index`（支持模式 `(index_pat, element_pat)` 或通配符 `_`；两个子模式不能绑定同一标识符）。
+- `index_pat` 作为编译期常量阶段绑定参与循环展开、守卫及循环体中的 `const` / `inline if` / `comptime` 参数计算；仅允许在 `inline for` 的迭代器位置使用。
+
 ### `'tag_name`
 
 从枚举值获取当前激活变体的标签名称（`str`），用于调试、格式化及反射相关设施。

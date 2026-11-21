@@ -349,7 +349,8 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<(), Error> {
         let mut budget = crate::ptc::Budget::default();
-        let fact = Self::continuation_type_fact(statement, &mut budget.steps, 0)
+        let fact = self
+            .continuation_type_fact(statement, &mut budget.steps, 0)
             .map_err(|message| error(span, message))?;
         if let Some(fact) = fact {
             self.context
@@ -361,6 +362,7 @@ impl Checker<'_, '_> {
     }
 
     fn continuation_type_fact(
+        &self,
         expr: &n::Expr,
         fuel: &mut usize,
         depth: usize,
@@ -381,12 +383,12 @@ impl Checker<'_, '_> {
         };
         Ok(match &expr.kind {
             K::Discard(value) | K::Let { value, .. } => {
-                Self::continuation_type_fact(value, fuel, depth + 1)?
+                self.continuation_type_fact(value, fuel, depth + 1)?
             }
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
                 let mut facts = Vec::new();
                 for statement in statements.iter().chain(result.as_deref()) {
-                    if let Some(fact) = Self::continuation_type_fact(statement, fuel, depth + 1)? {
+                    if let Some(fact) = self.continuation_type_fact(statement, fuel, depth + 1)? {
                         facts.push(fact);
                     }
                 }
@@ -407,13 +409,13 @@ impl Checker<'_, '_> {
                     _ => None,
                 };
                 let facts = and(
-                    Self::continuation_type_fact(value, fuel, depth + 1)?,
-                    Self::pattern_type_fact(pattern, observed, fuel, depth + 1)?,
+                    self.continuation_type_fact(value, fuel, depth + 1)?,
+                    self.pattern_type_fact(pattern, observed, fuel, depth + 1)?,
                 );
                 and(
                     facts,
                     match guard {
-                        Some(guard) => Self::condition_type_fact(guard, true, fuel, depth + 1)?,
+                        Some(guard) => self.condition_type_fact(guard, true, fuel, depth + 1)?,
                         None => None,
                     },
                 )
@@ -427,9 +429,9 @@ impl Checker<'_, '_> {
                 let no_exits = else_branch
                     .as_ref()
                     .is_some_and(|branch| is_never(&branch.ty));
-                let yes = Self::continuation_type_fact(then_branch, fuel, depth + 1)?;
+                let yes = self.continuation_type_fact(then_branch, fuel, depth + 1)?;
                 let no = match else_branch {
-                    Some(branch) => Self::continuation_type_fact(branch, fuel, depth + 1)?,
+                    Some(branch) => self.continuation_type_fact(branch, fuel, depth + 1)?,
                     None => None,
                 };
                 let paths = if yes_exits && no_exits {
@@ -437,23 +439,23 @@ impl Checker<'_, '_> {
                 } else if yes_exits {
                     and(
                         no,
-                        Self::condition_type_fact(condition, false, fuel, depth + 1)?,
+                        self.condition_type_fact(condition, false, fuel, depth + 1)?,
                     )
                 } else if no_exits {
                     and(
                         yes,
-                        Self::condition_type_fact(condition, true, fuel, depth + 1)?,
+                        self.condition_type_fact(condition, true, fuel, depth + 1)?,
                     )
                 } else if yes.is_none() && no.is_none() {
                     None
                 } else {
                     let yes = and(
                         yes,
-                        Self::condition_type_fact(condition, true, fuel, depth + 1)?,
+                        self.condition_type_fact(condition, true, fuel, depth + 1)?,
                     );
                     let no = and(
                         no,
-                        Self::condition_type_fact(condition, false, fuel, depth + 1)?,
+                        self.condition_type_fact(condition, false, fuel, depth + 1)?,
                     );
                     match (yes, no) {
                         (Some(yes), Some(no)) => Some(F::Or(vec![yes, no])),
@@ -461,7 +463,7 @@ impl Checker<'_, '_> {
                     }
                 };
                 and(
-                    Self::continuation_type_fact(condition, fuel, depth + 1)?,
+                    self.continuation_type_fact(condition, fuel, depth + 1)?,
                     paths,
                 )
             }
@@ -480,13 +482,15 @@ impl Checker<'_, '_> {
                         continue;
                     }
                     let path = and(
-                        Self::pattern_type_fact(&arm.pattern, observed, fuel, depth + 1)?,
-                        Self::continuation_type_fact(&arm.body, fuel, depth + 1)?,
+                        self.pattern_type_fact(&arm.pattern, observed, fuel, depth + 1)?,
+                        self.continuation_type_fact(&arm.body, fuel, depth + 1)?,
                     );
                     let path = and(
                         path,
                         match &arm.guard {
-                            Some(guard) => Self::condition_type_fact(guard, true, fuel, depth + 1)?,
+                            Some(guard) => {
+                                self.condition_type_fact(guard, true, fuel, depth + 1)?
+                            }
                             None => None,
                         },
                     );
@@ -502,7 +506,7 @@ impl Checker<'_, '_> {
                 } else {
                     Some(F::Or(paths))
                 };
-                and(Self::continuation_type_fact(value, fuel, depth + 1)?, paths)
+                and(self.continuation_type_fact(value, fuel, depth + 1)?, paths)
             }
             // In particular, a Loop can exit via break: neither its body's
             // facts nor the negation of its entry condition describe all exits.
@@ -511,6 +515,7 @@ impl Checker<'_, '_> {
     }
 
     fn pattern_type_fact(
+        &self,
         pattern: &n::Pattern,
         observed: Option<&Term>,
         fuel: &mut usize,
@@ -540,12 +545,10 @@ impl Checker<'_, '_> {
                         if matches!(inner.as_ref(), P::Wild)
                             && matches!(&left.kind,K::Local(id) if id==binding) =>
                     {
-                        if let K::TypeValue(expected) = &right.kind {
+                        if let Some(expected) = self.observed_condition_type_value(right, fuel)? {
                             nir::type_computations::charge_term(subject, fuel)
                                 .map_err(|e| e.to_string())?;
-                            nir::type_computations::charge_term(expected, fuel)
-                                .map_err(|e| e.to_string())?;
-                            Some(F::equal(subject.clone(), expected.clone()))
+                            Some(F::equal(subject.clone(), expected))
                         } else {
                             None
                         }
@@ -553,19 +556,19 @@ impl Checker<'_, '_> {
                     _ => None,
                 };
                 combine(
-                    Self::pattern_type_fact(pattern, observed, fuel, depth + 1)?,
+                    self.pattern_type_fact(pattern, observed, fuel, depth + 1)?,
                     combine(
                         observed_fact,
-                        Self::condition_type_fact(condition, true, fuel, depth + 1)?,
+                        self.condition_type_fact(condition, true, fuel, depth + 1)?,
                     ),
                 )
             }
             P::Binding { inner, .. } | P::Remap { pattern: inner, .. } => {
-                Self::pattern_type_fact(inner, observed, fuel, depth + 1)?
+                self.pattern_type_fact(inner, observed, fuel, depth + 1)?
             }
             P::Then { first, value, next } => combine(
-                Self::pattern_type_fact(first, observed, fuel, depth + 1)?,
-                Self::pattern_type_fact(
+                self.pattern_type_fact(first, observed, fuel, depth + 1)?,
+                self.pattern_type_fact(
                     next,
                     match &value.kind {
                         K::TypeValue(ty) => Some(ty),
@@ -579,7 +582,7 @@ impl Checker<'_, '_> {
                 let mut facts = Vec::new();
                 let mut unknown = false;
                 for alternative in alternatives {
-                    match Self::pattern_type_fact(alternative, observed, fuel, depth + 1)? {
+                    match self.pattern_type_fact(alternative, observed, fuel, depth + 1)? {
                         Some(fact) => facts.push(fact),
                         None => unknown = true,
                     }
@@ -601,7 +604,7 @@ impl Checker<'_, '_> {
             } => {
                 let mut facts = Vec::new();
                 for field in fields {
-                    if let Some(fact) = Self::pattern_type_fact(field, None, fuel, depth + 1)? {
+                    if let Some(fact) = self.pattern_type_fact(field, None, fuel, depth + 1)? {
                         facts.push(fact);
                     }
                 }
@@ -677,7 +680,8 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<Option<crate::ptc::Formula>, Error> {
         let mut budget = crate::ptc::Budget::default();
-        let fact = Self::pattern_type_fact(pattern, observed, &mut budget.steps, 0)
+        let fact = self
+            .pattern_type_fact(pattern, observed, &mut budget.steps, 0)
             .map_err(|message| error(span, message))?;
         let Some(fact) = fact else {
             return Ok(None);
@@ -690,7 +694,35 @@ impl Checker<'_, '_> {
 
     /// Extract only audited type observations from checked immutable operands.
     /// A Boolean call or mutable Type-valued local is not type evidence.
+    fn observed_condition_type_value(
+        &self,
+        expr: &n::Expr,
+        fuel: &mut usize,
+    ) -> Result<Option<Term>, String> {
+        if let K::TypeValue(ty) = &expr.kind {
+            nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
+            return Ok(Some(ty.clone()));
+        }
+        let mut budget = comptime_runtime::Budget {
+            steps: *fuel,
+            max_limbs: 4096,
+        };
+        let before = budget.steps;
+        let observed = self
+            .normal_input_hint(expr, &mut budget)
+            .map_err(|failure| failure.to_string())?;
+        *fuel -= before - budget.steps;
+        match observed {
+            Some(ty) if ty.sort() == Sort::Type && ty.check_scope(self.context.scope()).is_ok() => {
+                nir::type_computations::charge_term(&ty, fuel).map_err(|e| e.to_string())?;
+                Ok(Some(ty))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn condition_type_fact(
+        &self,
         condition: &n::Expr,
         positive: bool,
         fuel: &mut usize,
@@ -704,22 +736,22 @@ impl Checker<'_, '_> {
             .checked_sub(1)
             .ok_or("type condition budget exhausted")?;
         let full = match &condition.kind {
-            K::TypeEqual(left, right) => match (&left.kind, &right.kind) {
-                (K::TypeValue(left), K::TypeValue(right)) => {
-                    nir::type_computations::charge_term(left, fuel).map_err(|e| e.to_string())?;
-                    nir::type_computations::charge_term(right, fuel).map_err(|e| e.to_string())?;
-                    Some(F::equal(left.clone(), right.clone()))
+            K::TypeEqual(left, right) => {
+                match (
+                    self.observed_condition_type_value(left, fuel)?,
+                    self.observed_condition_type_value(right, fuel)?,
+                ) {
+                    (Some(left), Some(right)) => Some(F::equal(left, right)),
+                    _ => None,
                 }
-                _ => None,
-            },
-            K::TypeKind { kind, operand } => match &operand.kind {
-                K::TypeValue(ty) => {
-                    nir::type_computations::charge_term(ty, fuel).map_err(|e| e.to_string())?;
-                    Some(F::kind(ty.clone(), *kind))
+            }
+            K::TypeKind { kind, operand } => {
+                match self.observed_condition_type_value(operand, fuel)? {
+                    Some(ty) => Some(F::kind(ty, *kind)),
+                    None => None,
                 }
-                _ => None,
-            },
-            K::Not(value) => return Self::condition_type_fact(value, !positive, fuel, depth + 1),
+            }
+            K::Not(value) => return self.condition_type_fact(value, !positive, fuel, depth + 1),
             // Normal completion delivers the tail's Boolean. Prefix statements
             // remain in the program; immutable TypeValue facts do not depend on
             // their mutable state or imply that their effects can be removed.
@@ -730,11 +762,11 @@ impl Checker<'_, '_> {
             | K::CallPreparation {
                 result: Some(value),
                 ..
-            } => return Self::condition_type_fact(value, positive, fuel, depth + 1),
+            } => return self.condition_type_fact(value, positive, fuel, depth + 1),
             K::And(left, right) | K::Or(left, right) if condition.ty == p(P::Bool) => {
                 let and = matches!(condition.kind, K::And(..));
-                let left = Self::condition_type_fact(left, positive, fuel, depth + 1)?;
-                let right = Self::condition_type_fact(right, positive, fuel, depth + 1)?;
+                let left = self.condition_type_fact(left, positive, fuel, depth + 1)?;
+                let right = self.condition_type_fact(right, positive, fuel, depth + 1)?;
                 // True conjunctions and false disjunctions imply every known
                 // component, even if other components are runtime Booleans.
                 return Ok(combine_condition_facts(and == positive, left, right));
@@ -913,7 +945,8 @@ impl Checker<'_, '_> {
                 _ => {}
             }
         }
-        Self::condition_type_fact(checked, positive, fuel, depth).map_err(|m| error(span, m))
+        self.condition_type_fact(checked, positive, fuel, depth)
+            .map_err(|m| error(span, m))
     }
 
     fn refinement_type_operand(&self, expr: &Expr<'_>) -> bool {
@@ -1187,7 +1220,8 @@ impl Checker<'_, '_> {
                     mutated.map_err(|message| error(span, message))?;
                     let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                     let before = fuel;
-                    let fact = Self::continuation_type_fact(stmt, &mut fuel, 0)
+                    let fact = self
+                        .continuation_type_fact(stmt, &mut fuel, 0)
                         .map_err(|message| error(span, message))?;
                     self.required_steps -= (before - fuel) as u64;
                     if let Some(fact) = fact {
@@ -1241,8 +1275,8 @@ impl Checker<'_, '_> {
                     &mut branch_bindings,
                     &mut fuel,
                 );
-                let then_fact = Self::condition_type_fact(condition, true, &mut fuel, 0);
-                let else_fact = Self::condition_type_fact(condition, false, &mut fuel, 0);
+                let then_fact = self.condition_type_fact(condition, true, &mut fuel, 0);
+                let else_fact = self.condition_type_fact(condition, false, &mut fuel, 0);
                 self.required_steps -= (before - fuel) as u64;
                 invalidated.map_err(|message| error(span, message))?;
                 let then_fact = then_fact.map_err(|message| error(span, message))?;

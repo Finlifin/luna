@@ -43,17 +43,23 @@ impl super::Checker<'_, '_> {
         self.require(inherited, &explicit, annotation.span)
     }
 }
+
 mod applications;
 mod generation_attributes;
 mod generation_inputs;
+
 pub(super) use generation_inputs::{
     GenerationBinding, execution_draft, input_draft, input_group, subject_draft, value_draft,
 };
+
 mod member_clone;
+
 pub(super) use generation_attributes::relocate as relocate_generation_attributes;
+
 mod local_definitions;
 mod patterns;
 mod resolution;
+
 pub(super) use member_clone::{ClonedMember, clone_member_with_inputs};
 
 pub(super) fn expand<'h>(source: &Package<'h>, arena: &'h HirArena) -> Result<Package<'h>, Error> {
@@ -388,6 +394,7 @@ struct Rebind<'s, 'h> {
     self_type: Option<&'h Expr<'h>>,
     locals: local_definitions::Locals<'h>,
 }
+
 impl<'h> Rebind<'_, 'h> {
     fn charge(&mut self, span: rustc_span::Span, depth: usize) -> Result<(), Error> {
         if depth >= 128 || self.budget == 0 {
@@ -399,6 +406,7 @@ impl<'h> Rebind<'_, 'h> {
         self.budget -= 1;
         Ok(())
     }
+
     fn body(
         &mut self,
         id: hir::BodyId,
@@ -429,6 +437,7 @@ impl<'h> Rebind<'_, 'h> {
         ));
         Ok(id)
     }
+
     fn block(&mut self, block: &hir::Block<'h>, depth: usize) -> Result<&'h hir::Block<'h>, Error> {
         self.charge(block.span, depth)?;
         let depth = depth + 1;
@@ -445,6 +454,7 @@ impl<'h> Rebind<'_, 'h> {
             span: block.span,
         }))
     }
+
     fn id(&mut self, id: HirId) -> HirId {
         // Nested bodies may have different owners with equal local indices.
         // Map the entire source identity, never only its local component.
@@ -454,6 +464,7 @@ impl<'h> Rebind<'_, 'h> {
         );
         *self.bindings.entry(id).or_insert(next)
     }
+
     fn parameter(
         &mut self,
         parameter: &hir::common::FnParam<'h>,
@@ -487,6 +498,7 @@ impl<'h> Rebind<'_, 'h> {
         };
         Ok(ty)
     }
+
     fn substitutions(
         &mut self,
         substitutions: &[hir::expr::CodeSubstitution<'h>],
@@ -502,6 +514,7 @@ impl<'h> Rebind<'_, 'h> {
             })
             .collect()
     }
+
     fn code_context(
         &mut self,
         context: &[hir::expr::CodeContextBinding<'h>],
@@ -522,6 +535,7 @@ impl<'h> Rebind<'_, 'h> {
             })
             .collect()
     }
+
     fn expr(&mut self, expr: &Expr<'h>, depth: usize) -> Result<&'h Expr<'h>, Error> {
         self.charge(expr.span, depth)?;
         let depth = depth + 1;
@@ -783,6 +797,7 @@ impl<'h> Rebind<'_, 'h> {
             E::TakeAttribute(a) => E::TakeAttribute(self.expr(a, depth)?),
             E::TakeTagName(a) => E::TakeTagName(self.expr(a, depth)?),
             E::TakeTupleEnumerate(a) => E::TakeTupleEnumerate(self.expr(a, depth)?),
+            E::TakeTupleIndexed(a) => E::TakeTupleIndexed(self.expr(a, depth)?),
             E::MultiDeref(a) => E::MultiDeref(self.expr(a, depth)?),
             E::Ref(a) => E::Ref(self.expr(a, depth)?),
             E::Deref(a) => E::Deref(self.expr(a, depth)?),

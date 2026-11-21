@@ -3,6 +3,36 @@ use super::*;
 
 mod comptime_ranges;
 
+/// Validate and split a `'tuple_indexed` pattern into `(index_pat, element_pat)`.
+pub(super) fn tuple_indexed_parts<'hir>(
+    pat: &'hir hir::pattern::Pattern<'hir>,
+) -> Result<
+    (
+        Option<&'hir hir::pattern::Pattern<'hir>>,
+        Option<&'hir hir::pattern::Pattern<'hir>>,
+    ),
+    Error,
+> {
+    match &pat.kind {
+        hir::pattern::PatternKind::Wild => Ok((None, None)),
+        hir::pattern::PatternKind::Tuple(fields) if fields.len() == 2 => {
+            let index_bindings: BTreeSet<_> = pattern_binding_ids(&fields[0]).into_iter().collect();
+            let elem_bindings = pattern_binding_ids(&fields[1]);
+            if elem_bindings.iter().any(|id| index_bindings.contains(id)) {
+                return Err(error(
+                    pat.span,
+                    "duplicate binding in tuple_indexed pattern",
+                ));
+            }
+            Ok((Some(&fields[0]), Some(&fields[1])))
+        }
+        _ => Err(error(
+            pat.span,
+            "tuple_indexed pattern must be a 2-tuple (index, element) or wildcard _",
+        )),
+    }
+}
+
 impl Checker<'_, '_> {
     /// Check availability without invoking an inactive staged computation.
     pub(super) fn check_inline_input_availability(
@@ -116,7 +146,10 @@ impl Checker<'_, '_> {
             unreachable!()
         };
         if let H::TakeTupleEnumerate(input) = iter.kind {
-            return self.expand_inline_tuple(expr, input, expected);
+            return self.expand_inline_tuple(expr, input, false, expected);
+        }
+        if let H::TakeTupleIndexed(input) = iter.kind {
+            return self.expand_inline_tuple(expr, input, true, expected);
         }
         let H::Range {
             start: Some(start),
@@ -365,6 +398,7 @@ impl Checker<'_, '_> {
         &mut self,
         expr: &Expr<'_>,
         input: &Expr<'_>,
+        indexed: bool,
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
         let H::For {
@@ -372,6 +406,11 @@ impl Checker<'_, '_> {
         } = expr.kind
         else {
             unreachable!()
+        };
+        let indexed_pats = if indexed {
+            Some(tuple_indexed_parts(pat)?)
+        } else {
+            None
         };
         let input_span = input.span;
         let (input, elements, abstract_tuple) = {
@@ -392,7 +431,11 @@ impl Checker<'_, '_> {
                 _ => {
                     return Err(error(
                         input_span,
-                        "tuple_enumerate requires a tuple value with established structural type evidence",
+                        if indexed {
+                            "tuple_indexed requires a tuple value with established structural type evidence"
+                        } else {
+                            "tuple_enumerate requires a tuple value with established structural type evidence"
+                        },
                     ));
                 }
             }
@@ -419,6 +462,8 @@ impl Checker<'_, '_> {
         let saved_selection = self.inline_selection;
         let saved_suppressed = self.in_unselected_inline;
         let saved_runtime_origins = self.local_runtime_origins.clone();
+        let saved_staged = self.open_staged_locals.clone();
+        let saved_members = self.open_member_locals.clone();
         let suppressed = self.in_unselected_inline;
         let identity = local(expr.hir_id);
         self.control.loops.push(identity);
@@ -465,14 +510,44 @@ impl Checker<'_, '_> {
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
                 self.local_runtime_origins = saved_runtime_origins.clone();
+                self.open_staged_locals = saved_staged.clone();
+                self.open_member_locals = saved_members.clone();
                 self.inline_selection = Some((expr.hir_id, usize::MAX));
                 self.in_unselected_inline = true;
-                self.immutable.extend(pattern_binding_ids(pat));
-                let _element_pattern = self.pattern(pat, &element_ty)?;
-                if self.checking_open_behavior {
-                    for (id, ty) in &self.locals {
-                        if !saved_locals.contains_key(id) {
-                            self.ordinary_behavior_inputs.insert(*id, ty.clone());
+                let mut index_staged = BTreeSet::new();
+                let elem_pat = if let Some((index_pat, elem_pat)) = indexed_pats {
+                    if let Some(index_pat) = index_pat {
+                        let before_index = self.locals.clone();
+                        self.immutable.extend(pattern_binding_ids(index_pat));
+                        let index_pattern = self.with_staged_input(true, |this| {
+                            this.pattern(index_pat, &p(P::Integer))
+                        })?;
+                        for (id, ty) in &self.locals {
+                            if !before_index.contains_key(id) {
+                                index_staged.insert(*id);
+                                if self.checking_open_behavior {
+                                    self.ordinary_behavior_inputs.insert(*id, ty.clone());
+                                }
+                            }
+                        }
+                        if !self.checking_open_behavior {
+                            self.check_inline_pattern_availability(&index_pattern, index_pat.span)?;
+                        }
+                        self.open_staged_locals.extend(index_staged.iter().copied());
+                    }
+                    elem_pat
+                } else {
+                    Some(pat)
+                };
+                if let Some(elem_pat) = elem_pat {
+                    let before_elem = self.locals.clone();
+                    self.immutable.extend(pattern_binding_ids(elem_pat));
+                    let _element_pattern = self.pattern(elem_pat, &element_ty)?;
+                    if self.checking_open_behavior {
+                        for (id, ty) in &self.locals {
+                            if !before_elem.contains_key(id) {
+                                self.ordinary_behavior_inputs.insert(*id, ty.clone());
+                            }
                         }
                     }
                 }
@@ -481,7 +556,7 @@ impl Checker<'_, '_> {
                 {
                     let checked =
                         self.with_staged_input(true, |this| this.expr(guard, Some(&p(P::Bool))))?;
-                    self.check_inline_input_availability(&checked, &BTreeSet::new(), guard.span)?;
+                    self.check_inline_input_availability(&checked, &index_staged, guard.span)?;
                 }
                 let checked = self.block(body, None)?;
                 let checked = self.discard_result(checked, body.span)?;
@@ -496,25 +571,101 @@ impl Checker<'_, '_> {
                 self.immutable = saved_immutable.clone();
                 self.context = saved_context.clone();
                 self.local_runtime_origins = saved_runtime_origins.clone();
+                self.open_staged_locals = saved_staged.clone();
+                self.open_member_locals = saved_members.clone();
                 let saved_delivery_ids: BTreeSet<_> =
                     self.local_runtime_deliveries.keys().copied().collect();
                 self.inline_selection = saved_selection;
                 self.in_unselected_inline = saved_suppressed;
-                self.immutable.extend(pattern_binding_ids(pat));
-                let element_pattern = self.pattern(pat, ty)?;
-                if let Some(observed) = &observed_elements {
-                    self.record_observed_pattern(&element_pattern, &observed[index], pat.span)?;
+                let source_body = Expr {
+                    hir_id: body.hir_id,
+                    span: body.span,
+                    kind: H::Block(body),
+                };
+                let mut preamble = Vec::new();
+                let mut index_staged = BTreeSet::new();
+                let (index_matched, elem_pat) = if let Some((index_pat, elem_pat)) = indexed_pats {
+                    let index_matched = if let Some(index_pat) = index_pat {
+                        let before_index = self.locals.clone();
+                        self.immutable.extend(pattern_binding_ids(index_pat));
+                        let index_pattern = self.with_staged_input(true, |this| {
+                            this.pattern(index_pat, &p(P::Integer))
+                        })?;
+                        index_staged = self
+                            .locals
+                            .keys()
+                            .filter(|id| !before_index.contains_key(id))
+                            .copied()
+                            .collect();
+                        if self.checking_open_behavior {
+                            for (id, ty) in &self.locals {
+                                if !before_index.contains_key(id) {
+                                    self.ordinary_behavior_inputs.insert(*id, ty.clone());
+                                }
+                            }
+                        } else {
+                            self.check_inline_pattern_availability(&index_pattern, index_pat.span)?;
+                        }
+                        let index_term =
+                            Term::Integer(comptime_runtime::Integer::from_u128(index as u128));
+                        if let Some(bindings) =
+                            self.select_inline_pattern(&index_pattern, &index_term, &source_body)?
+                        {
+                            let stmts =
+                                self.materialize_inline_bindings(&bindings, &source_body)?;
+                            preamble.extend(stmts);
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        true
+                    };
+                    (index_matched, elem_pat)
+                } else {
+                    (true, Some(pat))
+                };
+                self.open_staged_locals.extend(index_staged.iter().copied());
+                let (element_pattern, element_irrefutable) = if let Some(elem_pat) = elem_pat {
+                    self.immutable.extend(pattern_binding_ids(elem_pat));
+                    let element_pattern = self.pattern(elem_pat, ty)?;
+                    if let Some(observed) = &observed_elements {
+                        self.record_observed_pattern(
+                            &element_pattern,
+                            &observed[index],
+                            elem_pat.span,
+                        )?;
+                    }
+                    let irrefutable = self.pattern_exhaustive(&element_pattern, ty);
+                    (element_pattern, irrefutable)
+                } else {
+                    (n::Pattern::Wild, true)
+                };
+                if !index_matched {
+                    self.inline_selection = Some((expr.hir_id, usize::MAX));
+                    self.in_unselected_inline = true;
                 }
-                let element_irrefutable = self.pattern_exhaustive(&element_pattern, ty);
                 let selected = if let Some(guard) = guard {
-                    if suppressed {
+                    if !index_matched {
                         if !self.checking_open_behavior {
                             let checked = self.with_staged_input(true, |this| {
                                 this.expr(guard, Some(&p(P::Bool)))
                             })?;
                             self.check_inline_input_availability(
                                 &checked,
-                                &BTreeSet::new(),
+                                &index_staged,
+                                guard.span,
+                            )?;
+                        }
+                        false
+                    } else if suppressed {
+                        if !self.checking_open_behavior {
+                            let checked = self.with_staged_input(true, |this| {
+                                this.expr(guard, Some(&p(P::Bool)))
+                            })?;
+                            self.check_inline_input_availability(
+                                &checked,
+                                &index_staged,
                                 guard.span,
                             )?;
                         }
@@ -531,7 +682,7 @@ impl Checker<'_, '_> {
                         selected
                     }
                 } else {
-                    true
+                    index_matched
                 };
                 if !selected {
                     self.inline_selection = Some((expr.hir_id, usize::MAX));
@@ -610,9 +761,11 @@ impl Checker<'_, '_> {
                     })?;
                 let mut iteration_connections = connections.clone();
                 iteration_connections.insert(*temporary, *temporary);
+                preamble.push(delivery);
+                preamble.push(prefix);
                 iterations.push(self.wrap_inline_iteration(
                     checked,
-                    vec![delivery, prefix],
+                    preamble,
                     identity,
                     expr.span,
                     body.span,
@@ -684,6 +837,8 @@ impl Checker<'_, '_> {
         self.inline_selection = saved_selection;
         self.in_unselected_inline = saved_suppressed;
         self.local_runtime_origins = saved_runtime_origins;
+        self.open_staged_locals = saved_staged;
+        self.open_member_locals = saved_members;
         result
     }
 
