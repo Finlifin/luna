@@ -82,6 +82,10 @@ impl Invocation {
         let mut steps = std::mem::take(&mut checker.required_steps);
         let span = self.span;
         let owner = checker.member_sources.owner.clone();
+        let supply_attributes = checker.attribute_demands.owns(
+            &checker.definition_attributes,
+            &self.prepared.world.package().definition_attributes,
+        );
         let checker = std::cell::RefCell::new(checker);
         let source_failure = std::cell::Cell::new(None);
         let lookup = |implementation, member, remaining: &mut u64| {
@@ -98,6 +102,20 @@ impl Invocation {
                 }
             })
         };
+        let attributes = |target, remaining: &mut u64| {
+            let mut checker = checker.borrow_mut();
+            std::mem::swap(remaining, &mut checker.required_steps);
+            let result = checker.demand_definition_attributes(target);
+            std::mem::swap(remaining, &mut checker.required_steps);
+            result.map_err(|failure| {
+                let source = Some(failure.source);
+                source_failure.set(Some(failure));
+                comptime_interpretor::Error {
+                    source,
+                    kind: comptime_interpretor::ErrorKind::PendingDefinitionAttributes(target),
+                }
+            })
+        };
         let result = self.prepared.invoke_publishing(
             self.values,
             &mut steps,
@@ -106,6 +124,7 @@ impl Invocation {
             self.identities,
             Some(data::Reader {
                 owner: &owner,
+                attributes: supply_attributes.then_some(&attributes),
                 form: &lookup,
             }),
         );

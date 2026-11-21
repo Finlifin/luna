@@ -810,6 +810,11 @@ pub use nir::associated_initializers::AssociatedSelection;
 pub type AssociatedResolver<'a> =
     dyn Fn(&Expr, &mut u64) -> Result<AssociatedSelection, Error> + 'a;
 
+/// Form a pending attribute Object in the owning source checker, while the VM
+/// retains its current operand stack. An empty merged Object has no payload.
+pub type AttributeResolver<'a> =
+    dyn Fn(DeclarationId, &mut u64) -> Result<Option<Arc<Term>>, Error> + 'a;
+
 enum TypeSolver<'a> {
     Unmetered(&'a dyn Fn(&nir::program::TypePredicate) -> ContractOutcome),
     Budgeted(&'a BudgetedTypeSolver<'a>),
@@ -872,6 +877,7 @@ pub struct Interpreter<'a> {
     type_solver: Option<TypeSolver<'a>>,
     method_resolver: Option<&'a MethodResolver<'a>>,
     associated_resolver: Option<&'a AssociatedResolver<'a>>,
+    attribute_resolver: Option<&'a AttributeResolver<'a>>,
     pointer_copy: Option<PointerCopyPermission<'a>>,
     declaration_parameter_domains: Arc<BTreeMap<DeclarationId, Term>>,
     method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
@@ -1719,6 +1725,11 @@ impl<'a> Interpreter<'a> {
     /// Resolve associated programs in this source VM's frozen world.
     pub fn with_associated_resolver(mut self, resolver: &'a AssociatedResolver<'a>) -> Self {
         self.associated_resolver = Some(resolver);
+        self
+    }
+
+    pub fn with_attribute_resolver(mut self, resolver: &'a AttributeResolver<'a>) -> Self {
+        self.attribute_resolver = Some(resolver);
         self
     }
 

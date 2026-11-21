@@ -522,6 +522,8 @@ fn elaborate_in_mode(
         package_identities,
         invocation_steps,
     )?;
+    let (definition_attributes, attribute_demands) =
+        attributes::index_suppliers(package, package_identities, invocation_steps)?;
     let mut checker = Checker {
         declared_theory: source_declarations.nominal_context.clone(),
         source_declarations,
@@ -579,11 +581,8 @@ fn elaborate_in_mode(
         member_phases: BTreeMap::new(),
         packed_structs: BTreeSet::new(),
         direct_passing_effects: BTreeMap::new(),
-        definition_attributes: attributes::pending_definitions(
-            package,
-            package_identities,
-            invocation_steps,
-        )?,
+        definition_attributes,
+        attribute_demands,
         allow_packed_pointer_projection: false,
         active_early_inherent: BTreeSet::new(),
         checking_method_contract: false,
@@ -2388,6 +2387,7 @@ struct Checker<'a, 'h> {
     packed_structs: BTreeSet<OwnerId>,
     direct_passing_effects: BTreeMap<OwnerId, bool>,
     definition_attributes: n::DefinitionAttributes,
+    attribute_demands: attributes::Demands,
     allow_packed_pointer_projection: bool,
     active_early_inherent: BTreeSet<String>,
     checking_method_contract: bool,

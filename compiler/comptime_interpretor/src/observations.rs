@@ -294,9 +294,21 @@ impl Interpreter<'_> {
                 .steps
                 .checked_sub(cost)
                 .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
-            if let Some(frozen) = table.lookup(id).map_err(|target| {
-                self.failure(ErrorKind::PendingDefinitionAttributes(target), Some(source))
-            })? {
+            let supplied;
+            let payload = match table.lookup(id) {
+                Ok(frozen) => frozen,
+                Err(target) => {
+                    let resolver = self.attribute_resolver.ok_or_else(|| {
+                        self.failure(ErrorKind::PendingDefinitionAttributes(target), Some(source))
+                    })?;
+                    supplied =
+                        host_budget::checked(&mut self.budget.steps, Some(source), |fuel| {
+                            resolver(target, fuel)
+                        })?;
+                    supplied.as_deref()
+                }
+            };
+            if let Some(frozen) = payload {
                 return self
                     .decode_immutable_input(frozen, &Term::Primitive(Primitive::Object))
                     .map_err(|mut error| {

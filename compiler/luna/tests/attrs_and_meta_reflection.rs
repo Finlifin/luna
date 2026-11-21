@@ -747,12 +747,102 @@ fn attribute_suppliers_can_inspect_independent_unannotated_declarations() {
         }
     "#;
     assert_eq!(support::invoke(source, "run").unwrap(), Value::Bool(true));
-    for source in [
-        "^attrs.metadata(meta.attrs_of(A)) struct A {}",
-        "^attrs.metadata(meta.attrs_of(B)) struct A {}
-         ^attrs.metadata(meta.attrs_of(A)) struct B {}",
+}
+
+#[test]
+fn attribute_suppliers_follow_demand_and_reject_cycles() {
+    let source = r#"
+        ^attrs.metadata({ left: has_packed(middle), right: has_packed(middle) })
+        struct First {}
+        ^attrs.metadata({ inherited: meta.attrs_of(Last).has_key(.packed) })
+        fn middle() -> bool { true }
+        ^attrs.layout.packed
+        struct Last { tag: u8 }
+        comptime fn has_packed(f: fn() -> bool) -> bool {
+            meta.attrs_of(f).get<meta.Object>(.metadata) match {
+                data? => data.get<bool>(.inherited) matches true?,
+                null => false,
+            }
+        }
+        comptime fn run() -> bool {
+            First.attrs().get<meta.Object>(.metadata) match {
+                data? => (data.get<bool>(.left) matches true?)
+                    and (data.get<bool>(.right) matches true?),
+                null => false,
+            }
+        }
+    "#;
+    assert_eq!(support::invoke(source, "run").unwrap(), Value::Bool(true));
+    for (source, cycle) in [
+        ("^attrs.metadata(meta.attrs_of(A)) struct A {}", "A -> A"),
+        (
+            "^attrs.metadata(meta.attrs_of(B)) struct A {}
+          ^attrs.metadata(meta.attrs_of(A)) struct B {}",
+            "A -> B -> A",
+        ),
     ] {
         let failure = support::compile(source).unwrap_err();
-        assert!(failure.contains("pending publication"), "{failure}");
+        assert!(
+            failure.contains(&format!("cyclic definition attribute dependency: {cycle}")),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn attribute_supplier_depth_exhaustion_is_distinct_from_a_cycle() {
+    let chain = |edges: usize| {
+        let mut source = String::new();
+        for i in 0..edges {
+            source.push_str(&format!(
+                "^attrs.metadata({{ has_next: meta.attrs_of(D{}).has_key(.metadata) }}) struct D{i} {{}}\n", i + 1
+            ));
+        }
+        source.push_str(&format!(
+            "^attrs.metadata({{ ready: true }}) struct D{edges} {{}}"
+        ));
+        source
+    };
+    support::compile(&chain(7)).unwrap();
+    let failure = support::compile(&chain(8)).unwrap_err();
+    assert!(
+        failure.contains("attribute supplier depth exhausted"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn attribute_suppliers_build_each_generated_declaration_once() {
+    let package = support::compile(
+        r#"
+        comptime fn outer() -> meta.Object {
+            let witness = meta.StructBuilder.new(.name = .BeforeAttributeRead).Build();
+            let left = meta.attrs_of(Inner);
+            let right = meta.attrs_of(Inner);
+            let data: meta.Object = { generated: witness == witness, left: left.has_key(.metadata), right: right.has_key(.metadata) };
+            data
+        }
+        ^attrs.metadata(outer())
+        struct Outer {}
+        comptime fn inner() -> meta.Object {
+            let witness = meta.StructBuilder.new(.name = .DependencyWitness).Build();
+            let data: meta.Object = { generated: witness == witness };
+            data
+        }
+        ^attrs.metadata(inner())
+        struct Inner {}
+    "#,
+    )
+    .unwrap();
+    for name in ["BeforeAttributeRead", "DependencyWitness"] {
+        assert_eq!(
+            package
+                .structs
+                .iter()
+                .filter(|definition| definition.name == name)
+                .count(),
+            1,
+            "{name}"
+        );
     }
 }

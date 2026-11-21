@@ -554,6 +554,9 @@ impl PreparedRequired {
         *steps = preparation_budget.steps;
         let mut interpreter = prepared
             .map_err(|e| error(span, format!("required comptime preparation failed: {e}")))?;
+        if let Some(form) = reader.and_then(|reader| reader.attributes) {
+            interpreter = interpreter.with_attribute_resolver(form);
+        }
         if builder.is_some() {
             interpreter = interpreter
                 .with_struct_builder(&build)

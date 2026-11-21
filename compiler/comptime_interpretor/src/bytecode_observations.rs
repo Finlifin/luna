@@ -121,8 +121,24 @@ fn attribute_queries_keep_target_identity_and_the_invocations_publication_state(
         structs: vec![definition(target), definition(plain)],
         ..Default::default()
     };
-    for compiled in [false, true] {
+    for (compiled, supply) in [(false, false), (false, true), (true, false), (true, true)] {
+        let calls = std::cell::Cell::new(0);
+        let resolver = |requested, remaining: &mut u64| {
+            assert_eq!(requested, target);
+            *remaining -= 1;
+            calls.set(calls.get() + 1);
+            Ok(Some(Arc::new(nir::objects::value(vec![
+                nir::objects::entry(
+                    Some("ready"),
+                    Term::Primitive(Primitive::Bool),
+                    Term::Bool(true),
+                ),
+            ]))))
+        };
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        if supply {
+            vm = vm.with_attribute_resolver(&resolver);
+        }
         vm.associated_values.insert(
             (
                 InterfaceInstance {
@@ -153,12 +169,19 @@ fn attribute_queries_keep_target_identity_and_the_invocations_publication_state(
             }
         };
         for ty in [proj.clone(), nominal(target)] {
-            let error = read(ty).unwrap_err();
-            assert_eq!(error.kind, ErrorKind::PendingDefinitionAttributes(target));
-            assert_eq!(error.source, Some(source));
+            if supply {
+                assert!(
+                    matches!(read(ty).unwrap(), Flow::Value(Value::Object(o)) if o.entries().len() == 1)
+                );
+            } else {
+                let error = read(ty).unwrap_err();
+                assert_eq!(error.kind, ErrorKind::PendingDefinitionAttributes(target));
+                assert_eq!(error.source, Some(source));
+            }
             assert!(
                 matches!(read(nominal(plain)).unwrap(), Flow::Value(Value::Object(o)) if o.entries().is_empty())
             );
         }
+        assert_eq!(calls.get(), if supply { 2 } else { 0 });
     }
 }

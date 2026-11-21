@@ -202,6 +202,7 @@ impl<'a> Interpreter<'a> {
             type_solver: None,
             method_resolver: None,
             associated_resolver: None,
+            attribute_resolver: None,
             pointer_copy: None,
             method_parameters,
             declaration_parameter_domains,

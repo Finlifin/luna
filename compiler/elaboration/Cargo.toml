@@ -12,6 +12,7 @@ ptc = { path = "../ptc" }
 nir = { path = "../nir" }
 hir = { path = "../hir" }
 rustc_span = { workspace = true }
+stacker = "0.1.25"
 comptime_runtime = { path = "../comptime_runtime" }
 comptime_interpretor = { path = "../comptime_interpretor" }
 iir = { path = "../iir" }

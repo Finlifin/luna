@@ -83,10 +83,18 @@ pub fn merge<'a>(
     max_keys_per_target: usize,
     budget: &mut comptime_runtime::Budget,
 ) -> Result<Vec<MergedTarget<'a>>, MergeFailure> {
+    merge_entries(attributes.iter(), max_keys_per_target, budget)
+}
+
+pub(super) fn merge_entries<'a>(
+    attributes: impl Iterator<Item = &'a EvaluatedAttribute> + Clone,
+    max_keys_per_target: usize,
+    budget: &mut comptime_runtime::Budget,
+) -> Result<Vec<MergedTarget<'a>>, MergeFailure> {
     type Key = (OwnerId, Option<hir::ItemLocalId>);
     let mut groups: BTreeMap<Key, MergedTarget<'a>> = BTreeMap::new();
     for configuration in [true, false] {
-        for attribute in attributes {
+        for attribute in attributes.clone() {
             // Account for both scans, including entries skipped in this pass.
             budget.consume(1).map_err(|e| failure(attribute, e))?;
             if attribute.configuration_key.is_some() != configuration {

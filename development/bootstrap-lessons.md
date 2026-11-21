@@ -30,4 +30,8 @@
 
 在 `Decorated` 的属性构造器内读取 `Plain` 的属性时，`Plain` 可以在文件后面声明。只要它没有附加属性，读到的就应当是空 Object。早期实现用全包的“正在求值属性”标志处理循环，这个例子也被拒绝。现在 elaborator 根据 HIR 的定义目标预先登记有供应者的声明身份。发布前，读取登记过的声明仍会报告未就绪，其他已确定身份的声明可以返回空对象。所有供应者求值、合并和检查成功后，一次发布整张冻结表。[源码回归](../compiler/luna/tests/attrs_and_meta_reflection.rs)
 
-required invocation 的声明快照共享其创建时的不可变索引或冻结表，复制快照只保留所有者；读取才按声明查找并解码该属性 Object。发布不会改变早先捕获的快照。目前有一个保守限制：如果 A 读取带属性的 B，即使 B 不依赖 A，这一批的属性仍可能因 B 尚未发布而被拒绝。自举时可让读取操作挂起在具体目标上，B 的供应者完成后继续 A，真正的依赖环才报循环。验证时用跨文件的 A → B → C、A → B → A，以及挂起点前已有副作用的供应者，检查恢复后每个供应者只执行一次。[快照所有权与预算](../compiler/nir/src/copy_budget/package/tests.rs) · [VM 属性读取](../compiler/comptime_interpretor/src/observations.rs)
+required invocation 的声明快照共享其创建时的不可变索引或冻结表，复制快照只保留所有者；读取才按声明查找并解码该属性 Object。发布不会改变早先捕获的快照。在 `8a72d984`，如果 A 读取带属性的 B，即使 B 不依赖 A，这一批的属性也会因 B 尚未发布而被拒绝。[快照所有权与预算](../compiler/nir/src/copy_budget/package/tests.rs)
+
+现在，属性求值期间的 required invocation 可以向创建同一索引的 checker 请求 B。外层 VM 保留调用栈和局部值，B 在自己的声明作用域内使用剩余预算。每个供应者在这次属性求值期间保留已物化的结果，多个读取方共享按既有覆盖次序合并的冻结对象。整个包仍须通过属性消费者检查才能发布。本地取舍是同步进入源检查器，保留外层 VM，并在宿主线程栈不足时为下一层另接一段栈。仅设八层上限曾在默认测试线程上先触发栈溢出，因此现在单独控制两种资源：按剩余栈空间决定何时扩栈，同时活动的供应者仍暂限八层。当前按需读取和最终发布还会分别执行合并与冻结。自举时若采用显式 continuation，可将深度交由资源预算控制，并让最终发布复用已经验证的冻结结果。验收包括真正的环、超深的无环链，以及读取前先用 builder 生成声明，读取后检查包中同名见证只出现一次。[供应者调度](../compiler/elaboration/src/program/attributes/demands.rs) · [端到端用例](../compiler/luna/tests/attrs_and_meta_reflection.rs)
+
+还有一个已复现的交付缺口。B 用 `meta.StructBuilder.new().Build()` 生成类型，把该 Type 作为 `metadata` 的条目；仅编译 B 可以成功。若正在计算属性的 A 此时调用 `meta.attrs_of(B)`，A 的 VM 捕获的声明世界早于 B 生成的类型，解码这个 Object 会报告 `Type`。把 B 的条目改为普通 bool 后，同一次嵌套读取可以完成。后续交付冻结对象时还需要携带它引用的新增声明及其布局证据，验证通过后导入等待中的 VM；跳过 Type 检查会让后续反射失去依据。

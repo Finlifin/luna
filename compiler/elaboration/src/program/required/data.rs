@@ -7,6 +7,7 @@ use ::materialization::MemberDataSource;
 #[derive(Clone, Copy)]
 pub(super) struct Reader<'a> {
     pub owner: &'a MemberDataSource,
+    pub attributes: Option<&'a comptime_interpretor::AttributeResolver<'a>>,
     pub form: &'a dyn Fn(
         DeclarationId,
         DeclarationId,
