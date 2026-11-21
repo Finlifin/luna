@@ -2,6 +2,12 @@
 //! as declarations. The receiving source interface controls named supplies.
 use super::*;
 
+pub(in crate::program) struct OpenedCallable {
+    pub(in crate::program) input_ids: Vec<DeclarationId>,
+    pub(in crate::program) parameters: declaration_inputs::Parameters,
+    pub(in crate::program) collector: Option<nir::normal_forms::Collector>,
+}
+
 impl Checker<'_, '_> {
     pub(in crate::program) fn dynamic_normal_form_application(
         &mut self,
@@ -28,34 +34,13 @@ impl Checker<'_, '_> {
         inputs: &[Arg<'_>],
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
-        let Term::NormalFormFunction(signature, collector) = &callee.ty else {
-            return Err(error(
-                expr.span,
-                "normal-form application requires a normal-form callable",
-            ));
-        };
-        let Term::Function { parameters, result } = signature.callable_signature() else {
-            return Err(error(
-                expr.span,
-                "normal-form callable has no input telescope",
-            ));
-        };
-        if **result != p(P::Type) {
-            return Err(error(
-                expr.span,
-                "non-Type normal-form results are not implemented",
-            ));
-        }
-        let ids: Vec<_> = self
-            .fresh_callable_inputs(parameters.len(), expr.span)?
-            .collect();
-        let parameters = nominal_fields::metered(&mut self.required_steps, |fuel| {
-            nir::normal_forms::open_inputs(&callee.ty, &ids, fuel)
-        })
-        .map_err(|failure| error(expr.span, failure.to_string()))?;
-        let collector = self.value_collector(head, *collector, expr.span)?;
-        let inputs =
-            self.planned_callable_inputs(inputs, expr.span, parameters, collector.as_ref())?;
+        let callable = self.open_normal_callable(head, &callee.ty, expr.span)?;
+        let inputs = self.planned_callable_inputs(
+            inputs,
+            expr.span,
+            callable.parameters,
+            callable.collector.as_ref(),
+        )?;
         let ty = if inputs.diverges() {
             p(P::Never)
         } else {
@@ -69,10 +54,48 @@ impl Checker<'_, '_> {
             ty,
             kind: K::ApplyNormalForm {
                 callee: std::sync::Arc::new(callee),
-                input_ids: ids,
+                input_ids: callable.input_ids,
                 arguments: inputs.arguments,
                 plan: Some(inputs.plan),
             },
+        })
+    }
+
+    /// Open the public telescope with fresh declaration identities. Both
+    /// concrete input plans and definition-side descriptions use these slots.
+    pub(in crate::program) fn open_normal_callable(
+        &mut self,
+        head: &Expr<'_>,
+        ty: &Term,
+        span: Span,
+    ) -> Result<OpenedCallable, Error> {
+        let Term::NormalFormFunction(signature, collector) = ty else {
+            return Err(error(
+                span,
+                "normal-form application requires a normal-form callable",
+            ));
+        };
+        let Term::Function { parameters, result } = signature.callable_signature() else {
+            return Err(error(span, "normal-form callable has no input telescope"));
+        };
+        if **result != p(P::Type) {
+            return Err(error(
+                span,
+                "non-Type normal-form results are not implemented",
+            ));
+        }
+        let ids: Vec<_> = self
+            .fresh_callable_inputs(parameters.len(), span)?
+            .collect();
+        let parameters = nominal_fields::metered(&mut self.required_steps, |fuel| {
+            nir::normal_forms::open_inputs(ty, &ids, fuel)
+        })
+        .map_err(|failure| error(span, failure.to_string()))?;
+        let collector = self.value_collector(head, *collector, span)?;
+        Ok(OpenedCallable {
+            input_ids: ids,
+            parameters,
+            collector,
         })
     }
 }

@@ -251,3 +251,42 @@ fn open_definitions_do_not_treat_ordinary_function_values_as_normal_form_heads()
         "{failure}"
     );
 }
+
+#[test]
+fn projected_inputs_use_the_higher_order_signature_before_selecting_a_head() {
+    let definitions = r#"
+        struct Holder where T { pub typealias Payload = T; }
+        pure comptime fn First<...Items: meta.List<Type>> -> Type { bool }
+        pure comptime fn Second<...Types: meta.List<Type>> -> Type { bool }
+        comptime fn verify(comptime factory: pure comptime fn<...Fields: meta.List<Type>> -> Type,
+                           comptime C: Type, comptime expected: Type) -> bool {
+            const formed = factory<.Fields = [C.Payload, bool]>;
+            const positional = (do { factory })<C.Payload, bool>;
+            formed == expected and positional == expected
+        }
+    "#;
+    let source = format!(
+        "{definitions}
+        comptime fn check() -> bool {{
+            verify(First, Holder<u8>, First<u8, bool>)
+                and verify(Second, Holder<bool>, Second<bool, bool>)
+        }}
+        fn run() -> bool {{ const ok = check(); ok }}"
+    );
+    check_both(&source);
+    for (from, to, message) in [
+        (
+            ".Fields =",
+            ".Items =",
+            "unknown named normal-form argument",
+        ),
+        (
+            "C.Payload, bool]",
+            "C.Payload, true]",
+            "expected (primitive Type), found (primitive bool)",
+        ),
+    ] {
+        let failure = sysroot::compile(&definitions.replace(from, to)).unwrap_err();
+        assert!(failure.contains(message), "{failure}");
+    }
+}

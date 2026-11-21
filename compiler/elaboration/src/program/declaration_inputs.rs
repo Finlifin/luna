@@ -26,7 +26,7 @@ pub(super) use completion::Completion;
 pub(super) use environment::copy_term as copy_input_domain;
 pub(super) use environment::{Environment, copy_domains};
 
-type Parameters = Vec<(DeclarationId, Sort, Term)>;
+pub(super) type Parameters = Vec<(DeclarationId, Sort, Term)>;
 
 /// Moved from routing to slot checking and finally to the result consumer.
 /// Captured parent values precede the local declaration slots.

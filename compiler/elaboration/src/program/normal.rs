@@ -689,6 +689,23 @@ impl Checker<'_, '_> {
         })
     }
 
+    pub(super) fn normal_input_parameters(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<declaration_inputs::Parameters, Error> {
+        self.normal_parameters[&owner]
+            .iter()
+            .map(|(id, _, domain)| {
+                Ok((
+                    *id,
+                    Sort::of_comptime_domain(domain),
+                    declaration_inputs::copy_input_domain(domain, &mut self.required_steps, span)?,
+                ))
+            })
+            .collect()
+    }
+
     pub(super) fn normal_form_callable_type(
         &mut self,
         owner: OwnerId,

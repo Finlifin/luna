@@ -80,20 +80,7 @@ impl<'h> Frame<'h> {
         let owner = application.head;
         checker.ensure_signature(owner, span)?;
         checker.ensure_contract(owner, span)?;
-        let parameters = checker.normal_parameters[&owner]
-            .iter()
-            .map(|(id, _, domain)| {
-                Ok((
-                    *id,
-                    Sort::of_comptime_domain(domain),
-                    declaration_inputs::copy_input_domain(
-                        domain,
-                        &mut checker.required_steps,
-                        span,
-                    )?,
-                ))
-            })
-            .collect::<Result<Vec<_>, Error>>()?;
+        let parameters = checker.normal_input_parameters(owner, span)?;
         let completion = Complete {
             head: owner,
             destination,

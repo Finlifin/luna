@@ -12,13 +12,9 @@ impl Checker<'_, '_> {
         expected: Option<&D>,
         depth: usize,
     ) -> Result<D, Error> {
-        // A callable's signature is evidence even when its value is
-        // supplied by a parameter or local. Only declaration heads
-        // use the declaration telescope below; source syntax does not
-        // establish that a callable has a known declaration identity.
-        let H::ResolvedDef { def_id, .. } = head.kind else {
+        if matches!(head.kind, H::Builtin(_)) {
             return self.describe_known_region(expr, expected);
-        };
+        }
         let inputs = self.source_expression_inputs(expr.hir_id.owner, expr)?;
         // A local's domain can be Type while its namespace still depends on
         // the invocation. A projection through that local needs the receiver's
@@ -38,21 +34,38 @@ impl Checker<'_, '_> {
                 return self.describe_known_region(expr, expected);
             }
         }
-        let owner = self
-            .package
-            .definition_owner(def_id)
-            .ok_or_else(|| error(expr.span, "missing type application declaration"))?;
-        let Some(application) = self.static_normal_application(owner, expr.span)? else {
-            return self.describe_known_region(expr, expected);
+        let (parameters, supply) = if let H::ResolvedDef { def_id, .. } = head.kind {
+            let owner = self
+                .package
+                .definition_owner(def_id)
+                .ok_or_else(|| error(expr.span, "missing type application declaration"))?;
+            let Some(application) = self.static_normal_application(owner, expr.span)? else {
+                return self.describe_known_region(expr, expected);
+            };
+            self.ensure_signature(application.head, expr.span)?;
+            let parameters = self.normal_input_parameters(application.head, expr.span)?;
+            (parameters, application.interface)
+        } else {
+            // The public signature suffices here. The actual opaque head is
+            // supplied by the callee value when this application executes.
+            let D::Known(ty) =
+                self.describe_open_expression(head, locals, returns, None, depth + 1)?
+            else {
+                return self.describe_known_region(expr, expected);
+            };
+            if !ty.is_normal_form_callable() {
+                return self.describe_known_region(expr, expected);
+            }
+            let callable = self.open_normal_callable(head, &ty, expr.span)?;
+            (
+                callable.parameters,
+                normal::Supply::Callable {
+                    collector: callable.collector,
+                },
+            )
         };
-        self.ensure_signature(application.head, expr.span)?;
-        let parameters = self.normal_parameters[&application.head].clone();
-        let (mut routing, collector) = self.describe_normal_routing(
-            application.interface,
-            parameters.len(),
-            arguments,
-            expr.span,
-        )?;
+        let (mut routing, collector) =
+            self.describe_normal_routing(supply, parameters.len(), arguments, expr.span)?;
         // Retain source order. The final marker distinguishes a single
         // collected element from a whole input or collection spread.
         let mut routed = Vec::new();
