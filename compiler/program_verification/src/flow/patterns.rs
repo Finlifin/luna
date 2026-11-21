@@ -24,6 +24,7 @@ impl<'a> MatchCase<'a> {
         }
     }
 }
+
 fn conjunction(a: Condition, b: Condition) -> Condition {
     match (a, b) {
         (Condition::Bool(false), _) | (_, Condition::Bool(false)) => Condition::Bool(false),
@@ -32,6 +33,7 @@ fn conjunction(a: Condition, b: Condition) -> Condition {
         (a, b) => Condition::And(Box::new(a), Box::new(b)),
     }
 }
+
 fn disjunction(a: Condition, b: Condition) -> Condition {
     match (a, b) {
         (Condition::Bool(true), _) | (_, Condition::Bool(true)) => Condition::Bool(true),
@@ -40,6 +42,7 @@ fn disjunction(a: Condition, b: Condition) -> Condition {
         (a, b) => Condition::Or(Box::new(a), Box::new(b)),
     }
 }
+
 fn negation(condition: Condition) -> Condition {
     match condition {
         Condition::Bool(value) => Condition::Bool(!value),
@@ -50,11 +53,23 @@ fn negation(condition: Condition) -> Condition {
 
 impl State {
     pub(super) fn merge(mut self, other: Self, limits: &mut Limits) -> Result<Self, Unknown> {
+        if !self.facts.shares_lineage(&other.facts) {
+            return Err(Unknown::UnrelatedFacts);
+        }
+        if !self.facts.is_reachable() {
+            limits.step(1)?;
+            return Ok(other);
+        }
+        if !other.facts.is_reachable() {
+            limits.step(1)?;
+            return Ok(self);
+        }
         self.join_aggregates(&other, limits)?;
         self.join_paths_and_facts(&other, limits)?;
         self.domains.extend(other.domains);
         Ok(self)
     }
+
     pub(super) fn keep(
         &mut self,
         existing: &BTreeSet<PlaceId>,
@@ -64,6 +79,7 @@ impl State {
             self.domains
                 .len()
                 .saturating_add(self.reads.len())
+                .saturating_add(self.read_aliases.len())
                 .saturating_add(existing.len()),
         )?;
         self.reads
@@ -74,18 +90,33 @@ impl State {
         retained.extend(self.reads.values().map(|(_, root)| *root));
         self.domains.retain(|place, _| retained.contains(place));
         self.aggregates.retain(|place, _| retained.contains(place));
+        self.read_aliases.retain(|alias, (path, _, _)| {
+            retained.contains(alias) && retained.contains(&path.root)
+        });
         limits.step(self.paths.len())?;
         self.paths.retain(|path, _| retained.contains(&path.root));
         retained.extend(self.paths.values().map(|id| id.place));
         self.facts.retain_places(&retained, limits)
     }
 }
+
 impl Walker<'_> {
     fn split_condition(
         &mut self,
         mut state: State,
         condition: Option<&Condition>,
     ) -> Result<(State, State), Reason> {
+        match condition {
+            Some(Condition::Bool(true)) => {
+                let failure = state.unreachable(self.limits)?;
+                return Ok((state, failure));
+            }
+            Some(Condition::Bool(false)) => {
+                let unreachable = state.unreachable(self.limits)?;
+                return Ok((unreachable, state));
+            }
+            _ => {}
+        }
         let mut failure = state.fork(self.limits)?;
         if let Some(condition) = condition {
             state.facts.assume(condition, true, self.limits)?;
@@ -93,6 +124,7 @@ impl Walker<'_> {
         }
         Ok((state, failure))
     }
+
     fn input_range(&mut self, input: &Value, state: &State) -> Result<Option<Interval>, Reason> {
         if let Some(Scalar::Local(id)) = &input.scalar {
             if state.facts.value(id.place) == Some(*id) && state.facts.is_reachable() {
@@ -109,6 +141,7 @@ impl Walker<'_> {
             .map(|b| b.copy(self.limits))
             .transpose()?)
     }
+
     fn literal_condition(
         &mut self,
         input: &Value,
@@ -140,6 +173,7 @@ impl Walker<'_> {
             _ => None,
         })
     }
+
     fn pattern_selection_condition(
         &mut self,
         pattern: &Pattern,
@@ -375,6 +409,7 @@ impl Walker<'_> {
             _ => Err(Reason::InvalidSignature),
         }
     }
+
     fn variant_condition(
         &mut self,
         input: &Value,
@@ -423,6 +458,7 @@ impl Walker<'_> {
             _ => return Err(Reason::InvalidSignature),
         })
     }
+
     fn prime_payload_observations(
         &mut self,
         value: &mut Value,
@@ -538,6 +574,7 @@ impl Walker<'_> {
         }
         Ok(())
     }
+
     #[inline(never)]
     fn fields_pattern(
         &mut self,
@@ -556,10 +593,7 @@ impl Walker<'_> {
         {
             return Err(Reason::InvalidSignature);
         }
-        let mut failure = state.fork(self.limits)?;
-        failure
-            .facts
-            .assume(&Condition::Bool(false), true, self.limits)?;
+        let mut failure = state.unreachable(self.limits)?;
         for (index, (pattern, ty)) in patterns.iter().zip(types).enumerate() {
             let mut field = match &input.fields {
                 Some(fields) => fields[index].snapshot(self.limits, 0)?,
@@ -582,13 +616,14 @@ impl Walker<'_> {
         }
         Ok((state, failure))
     }
+
     #[inline(never)]
     fn pattern(
         &mut self,
         pattern: &Pattern,
         input: &Value,
         ty: &Term,
-        mut state: State,
+        state: State,
         depth: usize,
     ) -> Result<(State, State), Reason> {
         self.limits.step(1)?;
@@ -629,7 +664,8 @@ impl Walker<'_> {
                 fields,
             } => self.pattern_variant(*declaration, *index, fields, input, ty, state, depth),
             Pattern::Wild | Pattern::Unit => {
-                self.split_condition(state, Some(&Condition::Bool(true)))
+                let failure = state.unreachable(self.limits)?;
+                Ok((state, failure))
             }
             Pattern::Literal(literal) => self.pattern_literal(literal, input, state),
             Pattern::Observe { binding, inner } => {
@@ -1063,10 +1099,7 @@ impl Walker<'_> {
         depth: usize,
     ) -> Result<(State, State), Reason> {
         let existing: BTreeSet<_> = state.domains.keys().copied().collect();
-        let mut accepted = state.fork(self.limits)?;
-        accepted
-            .facts
-            .assume(&Condition::Bool(false), true, self.limits)?;
+        let mut accepted = state.unreachable(self.limits)?;
         for alternative in alternatives {
             let (yes, mut no) = self.pattern(alternative, input, ty, state, depth)?;
             accepted = accepted.merge(yes, self.limits)?;
@@ -1151,6 +1184,7 @@ impl Walker<'_> {
         }
         Ok((yes, no))
     }
+
     pub(super) fn let_pattern(
         &mut self,
         pattern: &Pattern,
@@ -1182,6 +1216,7 @@ impl Walker<'_> {
         *state = success;
         Ok(())
     }
+
     pub(super) fn match_expression(
         &mut self,
         value: &Expr,
@@ -1250,10 +1285,7 @@ impl Walker<'_> {
             result_scope.insert(root);
         }
         let pending = state.fork(self.limits)?;
-        let mut merged = state.fork(self.limits)?;
-        merged
-            .facts
-            .assume(&Condition::Bool(false), true, self.limits)?;
+        let merged = state.unreachable(self.limits)?;
         let mut join_state = MatchCasesState {
             pending: Some(pending),
             merged: Some(merged),

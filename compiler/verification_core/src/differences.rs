@@ -315,7 +315,7 @@ impl DifferenceBounds {
 }
 
 // Recognize k*x-k*y+c <= 0 with integer k>0, including one absent endpoint.
-fn difference(
+pub(super) fn difference(
     row: &Polynomial,
     limits: &mut Limits,
 ) -> Result<Option<(Option<ValueId>, Option<ValueId>, Integer)>, Unknown> {

@@ -246,6 +246,10 @@ impl Facts {
             return Ok(());
         }
         let rows = self.copy_relations(limits)?;
+        let mut is_difference = Vec::with_capacity(rows.len());
+        for row in &rows {
+            is_difference.push(super::differences::difference(row, limits)?.is_some());
+        }
         // A bounded pass count handles multi-row implication chains without
         // letting slow-converging cyclic inequalities over wide machine domains
         // exhaust the caller's shared work budget. Stopping early retains only
@@ -268,7 +272,10 @@ impl Facts {
                     return Ok(());
                 }
             }
-            for row in &rows {
+            for (row, &covered_by_graph) in rows.iter().zip(&is_difference) {
+                if graph.is_some() && covered_by_graph {
+                    continue;
+                }
                 let (range, _) = row.interval_enclosure(self, limits)?;
                 if limits.compare(&range.lower, &Integer::zero())?.is_gt() {
                     self.reachable = false;
@@ -1908,5 +1915,80 @@ mod relation_store_tests {
                 assert!(facts.is_reachable());
             }
         }
+    }
+
+    #[test]
+    fn propagate_relations_handles_equality_pairs_and_mixed_row_within_small_budget() {
+        let mut limits = Limits::default();
+        limits.arithmetic.steps = 50_000;
+        let mut facts = Facts::default();
+        let i32_range = Interval::machine(32, true, &mut limits).unwrap();
+        let mut pairs = Vec::new();
+        for local in 0..24u32 {
+            pairs.push(
+                facts
+                    .assign(
+                        PlaceId { owner: 46, local },
+                        i32_range.copy(&mut limits).unwrap(),
+                    )
+                    .unwrap(),
+            );
+        }
+        for pair in pairs.chunks_exact(2) {
+            let a = Polynomial::variable(pair[0], &mut limits).unwrap();
+            let b = Polynomial::variable(pair[1], &mut limits).unwrap();
+            facts
+                .assume_relation(a.subtract(&b, &mut limits).unwrap(), &mut limits)
+                .unwrap();
+            facts
+                .assume_relation(b.subtract(&a, &mut limits).unwrap(), &mut limits)
+                .unwrap();
+        }
+        let x = pairs[0];
+        let y = pairs[1];
+        facts
+            .refine(x, Some(&Integer::zero()), None, &mut limits)
+            .unwrap();
+        facts
+            .refine(y, Some(&Integer::from_u128(1)), None, &mut limits)
+            .unwrap();
+        // 2*x + z - 10 <= 0 combined with y == x == z >= 1 forces x <= 4,
+        // which difference closure then propagates to y <= 4 and z <= 4.
+        let z = pairs[2];
+        let x_p = Polynomial::variable(x, &mut limits).unwrap();
+        let z_p = Polynomial::variable(z, &mut limits).unwrap();
+        facts
+            .assume_relation(x_p.subtract(&z_p, &mut limits).unwrap(), &mut limits)
+            .unwrap();
+        facts
+            .assume_relation(z_p.subtract(&x_p, &mut limits).unwrap(), &mut limits)
+            .unwrap();
+        let mut mixed = Polynomial::default();
+        mixed
+            .insert(vec![x], &Integer::from_i128(2), &mut limits)
+            .unwrap();
+        mixed
+            .insert(vec![z], &Integer::from_i128(1), &mut limits)
+            .unwrap();
+        mixed
+            .insert(vec![], &Integer::from_i128(-10), &mut limits)
+            .unwrap();
+        facts.assume_relation(mixed, &mut limits).unwrap();
+
+        assert_eq!(facts.propagate_relations(&mut limits), Ok(()));
+        assert!(facts.is_reachable());
+        let expected =
+            Interval::new(Integer::from_u128(1), Integer::from_u128(4), &mut limits).unwrap();
+        assert_eq!(facts.bound(x, &mut limits).unwrap(), &expected);
+        assert_eq!(facts.bound(y, &mut limits).unwrap(), &expected);
+        assert_eq!(facts.bound(z, &mut limits).unwrap(), &expected);
+
+        let contradiction = Polynomial::constant(Integer::from_i128(5), &mut limits)
+            .unwrap()
+            .subtract(&Polynomial::variable(y, &mut limits).unwrap(), &mut limits)
+            .unwrap();
+        facts.assume_relation(contradiction, &mut limits).unwrap();
+        assert_eq!(facts.propagate_relations(&mut limits), Ok(()));
+        assert!(!facts.is_reachable());
     }
 }

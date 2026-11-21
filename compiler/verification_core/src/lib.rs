@@ -495,6 +495,10 @@ impl Facts {
         (&self.inequalities).into_iter()
     }
 
+    pub fn relation_count(&self) -> usize {
+        self.inequalities.len()
+    }
+
     pub fn contains_relation(
         &self,
         row: &Polynomial,
@@ -997,9 +1001,24 @@ impl Facts {
         })
     }
 
+    /// O(1) unreachable snapshot sharing the same version lineage.
+    pub fn unreachable_clone(&self, limits: &mut Limits) -> Result<Self, Unknown> {
+        limits.step(1)?;
+        Ok(Self {
+            current: BTreeMap::new(),
+            versions: self.versions.clone(),
+            reachable: false,
+            inequalities: relations::RelationStore::default(),
+            conditions: Vec::new(),
+        })
+    }
+
     /// Snapshot for a control-flow branch. Copying charges the shared budget;
     /// assignment identities remain unique across all forks of this analysis.
     pub fn fork(&self, limits: &mut Limits) -> Result<Self, Unknown> {
+        if !self.reachable {
+            return self.unreachable_clone(limits);
+        }
         limits.step(1)?;
         let mut current = BTreeMap::new();
         for (place, (version, bound)) in &self.current {
@@ -1678,6 +1697,61 @@ mod constant_assumption_tests {
             .assume(&Condition::Bool(true), true, &mut limits)
             .unwrap();
         assert!(!facts.is_reachable());
+    }
+
+    #[test]
+    fn unreachable_clone_fork_and_join_are_o1_and_preserve_lineage_check() {
+        let mut setup = Limits::default();
+        let mut facts = Facts::default();
+        let range = Interval::machine(16, false, &mut setup).unwrap();
+        let mut ids = Vec::new();
+        for local in 0..32u32 {
+            ids.push(
+                facts
+                    .assign(PlaceId { owner: 7, local }, range.copy(&mut setup).unwrap())
+                    .unwrap(),
+            );
+        }
+        for pair in ids.chunks_exact(2) {
+            let left = Polynomial::variable(pair[0], &mut setup).unwrap();
+            let right = Polynomial::variable(pair[1], &mut setup).unwrap();
+            facts
+                .assume(
+                    &Condition::PolynomialCompare {
+                        left,
+                        relation: Comparison::LessEqual,
+                        right,
+                    },
+                    true,
+                    &mut setup,
+                )
+                .unwrap();
+        }
+        let mut tiny = Limits::default();
+        tiny.arithmetic.steps = 10;
+        let dead_a = facts.unreachable_clone(&mut tiny).unwrap();
+        assert!(!dead_a.is_reachable());
+        assert!(dead_a.shares_lineage(&facts));
+        let dead_b = dead_a.fork(&mut tiny).unwrap();
+        assert!(!dead_b.is_reachable());
+        let joined = dead_a.join(&dead_b, &mut tiny).unwrap();
+        assert!(!joined.is_reachable());
+        assert!(tiny.arithmetic.steps > 0);
+
+        let mut contradicted = facts.fork(&mut setup).unwrap();
+        contradicted
+            .assume(&Condition::Bool(false), true, &mut setup)
+            .unwrap();
+        tiny.arithmetic.steps = 10;
+        let forked_contradicted = contradicted.fork(&mut tiny).unwrap();
+        assert!(!forked_contradicted.is_reachable());
+        assert!(tiny.arithmetic.steps >= 9);
+
+        let unrelated = Facts::default();
+        assert!(matches!(
+            dead_a.join(&unrelated, &mut setup),
+            Err(Unknown::UnrelatedFacts)
+        ));
     }
 }
 

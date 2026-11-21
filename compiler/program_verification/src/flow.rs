@@ -344,7 +344,24 @@ struct State {
 }
 
 impl State {
+    fn unreachable(&self, limits: &mut Limits) -> Result<Self, Unknown> {
+        Ok(Self {
+            target: self.target,
+            frame: self.frame,
+            facts: self.facts.unreachable_clone(limits)?,
+            domains: BTreeMap::new(),
+            aggregates: BTreeMap::new(),
+            paths: BTreeMap::new(),
+            frozen: BTreeMap::new(),
+            reads: BTreeMap::new(),
+            read_aliases: BTreeMap::new(),
+        })
+    }
+
     fn fork(&self, limits: &mut Limits) -> Result<Self, Unknown> {
+        if !self.facts.is_reachable() {
+            return self.unreachable(limits);
+        }
         limits.step(self.frozen.len())?;
         self.charge_read_paths(limits)?;
         let mut domains = BTreeMap::new();
@@ -5114,6 +5131,7 @@ impl Walker<'_> {
             if self.single_pass_exits.insert(identity, vec![]).is_some() {
                 return Err(Reason::InvalidSignature);
             }
+            let existing: BTreeSet<_> = state.domains.keys().copied().collect();
             let mut iteration = state.fork(self.limits)?;
             let checked = self.child(body, &mut iteration, depth);
             let exits = self.single_pass_exits.remove(&identity).unwrap();
@@ -5126,7 +5144,15 @@ impl Walker<'_> {
                     exit
                 });
             }
-            if let Some(exit) = merged {
+            if let Some(mut exit) = merged {
+                let mut retained = existing;
+                retained.extend(self.captured_values.values().map(|(_, root)| *root));
+                retained.extend(self.associated_scalars.iter().map(|(_, _, root)| *root));
+                retained.extend(exit.frozen.keys().copied());
+                if let Some(binding) = self.exit_contract.as_ref().and_then(|c| c.binding) {
+                    retained.insert(place(binding));
+                }
+                exit.keep(&retained, self.limits)?;
                 *state = exit;
             } else {
                 state
@@ -8611,6 +8637,120 @@ mod single_pass_loop_tests {
                 .reason,
             Reason::MissingPostconditionProof
         );
+    }
+
+    #[test]
+    fn single_pass_loop_prunes_loop_locals_while_preserving_outer_relations() {
+        let outer = LocalId { owner: 2, index: 0 };
+        let out = LocalId { owner: 2, index: 1 };
+        let inner = LocalId { owner: 2, index: 2 };
+        let loop_id = LocalId {
+            owner: u32::MAX,
+            index: 1,
+        };
+        let u8_lit = |v: u128| expr(K::Literal(Literal::UnsignedInteger(v)), P::U8);
+        let let_inner = expr(
+            K::Let {
+                binding: inner,
+                value: Box::new(expr(K::Local(outer), P::U8)),
+            },
+            P::Void,
+        );
+        let assign_out = expr(
+            K::Assign {
+                place: nir::program::Place {
+                    root: out,
+                    fields: vec![],
+                },
+                value: Box::new(expr(
+                    K::IntegerBinary {
+                        op: IntegerOp::Add,
+                        left: Box::new(expr(K::Local(inner), P::U8)),
+                        right: Box::new(u8_lit(1)),
+                    },
+                    P::U8,
+                )),
+            },
+            P::Void,
+        );
+        let single_loop = expr(
+            K::Loop {
+                identity: loop_id,
+                body: Box::new(expr(
+                    K::Block {
+                        statements: vec![let_inner, assign_out, expr(K::Break(loop_id), P::Never)],
+                        result: None,
+                    },
+                    P::Never,
+                )),
+            },
+            P::Void,
+        );
+        let func = Function {
+            interface: nir::program::FunctionDeclaration {
+                source: nir::program::SourceRange { start: 0, end: 0 },
+                declaration: DeclarationId {
+                    package: 1,
+                    local: 2,
+                },
+                name: "single_pass_prune".into(),
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![
+                        Parameter {
+                            sort: Sort::Runtime,
+                            ty: Term::Primitive(P::U8),
+                        },
+                        Parameter {
+                            sort: Sort::Runtime,
+                            ty: Term::Primitive(P::U8),
+                        },
+                    ],
+                    result: Box::new(Term::Primitive(P::Void)),
+                },
+                parameters: vec![outer, out],
+                env_parameters: vec![],
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![expr(
+                    K::ScalarLess(
+                        Box::new(expr(K::Local(outer), P::U8)),
+                        Box::new(u8_lit(200)),
+                    ),
+                    P::Bool,
+                )],
+                postconditions: vec![expr(
+                    K::ScalarEqual(
+                        Box::new(expr(K::Local(out), P::U8)),
+                        Box::new(expr(
+                            K::IntegerBinary {
+                                op: IntegerOp::Add,
+                                left: Box::new(expr(K::Local(outer), P::U8)),
+                                right: Box::new(u8_lit(1)),
+                            },
+                            P::U8,
+                        )),
+                    ),
+                    P::Bool,
+                )],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
+            body: single_loop,
+            runtime_deliveries: Default::default(),
+        };
+        let report = analyze(&func, &mut Limits::default()).unwrap();
+        assert!(report.exit.is_reachable());
+        assert!(report.exit.value(place(out)).is_some());
+        assert!(report.exit.value(place(outer)).is_some());
+        assert!(report.exit.value(place(inner)).is_none());
     }
 }
 

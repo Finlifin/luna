@@ -13,6 +13,7 @@ pub(super) struct PreparedCopy {
     fields: BTreeMap<Vec<Component>, ValueId>,
     children: Vec<(Component, std::sync::Arc<PreparedCopy>)>,
 }
+
 pub(super) struct InstalledCopy {
     source: std::sync::Arc<Facts>,
     mapping: BTreeMap<ValueId, ValueId>,
@@ -35,6 +36,7 @@ pub(super) fn observation_link(
         expression: None,
     })
 }
+
 impl Walker<'_> {
     /// Publish relations between observed exit-memory cells even when the call
     /// has no scalar result. Only current, explicitly transported identities
@@ -164,6 +166,7 @@ impl Walker<'_> {
                 .ok_or(Reason::InvalidSignature)?,
         )
     }
+
     pub(super) fn prepare_copy(
         &mut self,
         value: &Value,
@@ -255,6 +258,7 @@ impl Walker<'_> {
             children,
         })))
     }
+
     pub(super) fn install_copy(
         &mut self,
         state: &mut State,
@@ -263,6 +267,7 @@ impl Walker<'_> {
     ) -> Result<Vec<InstalledCopy>, Reason> {
         self.install_copy_at(state, place(binding), &[], copy)
     }
+
     pub(super) fn install_copy_at(
         &mut self,
         state: &mut State,
@@ -363,6 +368,7 @@ impl Walker<'_> {
         }
         Ok(installed)
     }
+
     pub(super) fn bind_related_value(
         &mut self,
         state: &mut State,
@@ -395,6 +401,7 @@ impl Walker<'_> {
         }
         Ok(())
     }
+
     pub(super) fn finish_copies(
         &mut self,
         state: &mut State,
@@ -402,11 +409,16 @@ impl Walker<'_> {
     ) -> Result<(), Reason> {
         self.finish_copy_batch(state, &copies)
     }
+
     pub(super) fn finish_copy_batch(
         &mut self,
         state: &mut State,
         copies: &[InstalledCopy],
     ) -> Result<(), Reason> {
+        if copies.is_empty() {
+            return Ok(());
+        }
+        let before_rows = state.facts.relation_count();
         // A shared frozen snapshot with the same complete substitution exports
         // the same evidence. Destination bounds only tighten during this batch;
         // individual expression/result equalities are still handled below.
@@ -566,10 +578,13 @@ impl Walker<'_> {
                 }
             }
         }
-        state.facts.propagate_relations(self.limits)?;
+        if state.facts.relation_count() > before_rows {
+            state.facts.propagate_relations(self.limits)?;
+        }
         Ok(())
     }
 }
+
 // A computed value is equal to its frozen polynomial. Eliminate that
 // expression from existing inequalities before later writes invalidate its
 // operands. Only retain rewrites that reduce nonlinear terms, avoiding an
@@ -660,6 +675,7 @@ fn rename(
     }
     Ok(Some(result))
 }
+
 fn add_equality(
     facts: &mut Facts,
     a: Polynomial,
@@ -691,6 +707,7 @@ fn add_equality(
     add_row(facts, a.subtract(&b, limits)?, limits)?;
     add_row(facts, b.subtract(&a, limits)?, limits)
 }
+
 pub(super) fn add_row(
     facts: &mut Facts,
     row: Polynomial,
@@ -776,6 +793,7 @@ impl Walker<'_> {
             local,
         }))
     }
+
     // Rewrite a branch predicate onto surviving input observations before
     // pattern bindings leave scope. Equality evidence, never field spelling,
     // authorizes each substitution.
@@ -808,6 +826,7 @@ impl Walker<'_> {
             .renamed(&mapping, &state.facts, true, self.limits, 0)?
             .ok_or(Reason::Unsupported)
     }
+
     pub(super) fn bind_result(
         &mut self,
         state: &mut State,
@@ -832,6 +851,7 @@ impl Walker<'_> {
         }
         Ok(())
     }
+
     pub(super) fn materialize_entry_fields(
         &mut self,
         state: &mut State,
@@ -846,6 +866,7 @@ impl Walker<'_> {
         }
         Ok(())
     }
+
     pub(super) fn expand_owned_shape(
         &mut self,
         value: &mut Value,
@@ -881,6 +902,7 @@ impl Walker<'_> {
         }
         Ok(())
     }
+
     /// Copy only immutable entry roots into a private invocation frame. These
     /// ghosts preserve caller-old/input relations without retaining mutable locals.
     pub(super) fn copy_frozen_frame(
@@ -905,6 +927,7 @@ impl Walker<'_> {
         self.finish_copy_batch(destination, &copies)?;
         Ok(copies)
     }
+
     pub(super) fn bind_call_result(
         &mut self,
         state: &mut State,
@@ -929,6 +952,7 @@ impl Walker<'_> {
         }
         Ok(())
     }
+
     fn track_result_components(
         &mut self,
         state: &mut State,
