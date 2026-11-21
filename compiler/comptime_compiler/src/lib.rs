@@ -488,7 +488,10 @@ pub enum Op {
     Unit(Register),
     EnterScope,
     LeaveScope,
-    Unwind(usize),
+    Unwind {
+        scopes: usize,
+        calls: usize,
+    },
     BreakEnclosing(LocalId),
     ContinueEnclosing(LocalId),
     Read {
@@ -541,6 +544,7 @@ pub struct LoopRegion {
     pub start: usize,
     pub end: usize,
     pub scope_depth: usize,
+    pub call_depth: usize,
 }
 
 impl Program {
@@ -621,8 +625,8 @@ impl fmt::Display for Program {
             for ((id, _), region) in &self.loop_regions {
                 write!(
                     f,
-                    " ({id} (continue {}) (break {}) (scope-depth {}))",
-                    region.start, region.end, region.scope_depth
+                    " ({id} (continue {}) (break {}) (scope-depth {}) (call-depth {}))",
+                    region.start, region.end, region.scope_depth, region.call_depth
                 )?;
             }
         }
@@ -1276,7 +1280,9 @@ impl fmt::Display for Program {
                 } => write!(f, "(select-trait-method {destination} {method})")?,
                 Op::EnterScope => write!(f, "(enter-scope)")?,
                 Op::LeaveScope => write!(f, "(leave-scope)")?,
-                Op::Unwind(depth) => write!(f, "(unwind {depth})")?,
+                Op::Unwind { scopes, calls } => {
+                    write!(f, "(unwind (scopes {scopes}) (calls {calls}))")?
+                }
                 Op::BreakEnclosing(id) => write!(f, "(break-to-enclosing-loop {id})")?,
                 Op::ContinueEnclosing(id) => write!(f, "(continue-enclosing-loop {id})")?,
                 Op::PrepareScalar(scalar) => write!(f, "(prepare-scalar {scalar})")?,
@@ -1432,6 +1438,7 @@ fn compile_root<'a>(
     let mut loop_regions = BTreeMap::new();
     let mut last_suspension = None;
     let mut scope_depth = 0;
+    let mut call_depth = 0usize;
     let (mut work, shape) = match root {
         Root::Expression(body) | Root::LexicalExpression(body) => (
             vec![
@@ -1517,6 +1524,17 @@ fn compile_root<'a>(
         *fuel = fuel.checked_sub(1).ok_or(Error::Budget(source))?;
         match task {
             Work::Emit(source, op) => {
+                // Operand programs can contain lexical loops. A transfer out
+                // of one of those loops must restore exactly its enclosing calls.
+                match op {
+                    Op::BeginCall { .. } => call_depth += 1,
+                    Op::Invoke { .. } => {
+                        call_depth = call_depth
+                            .checked_sub(1)
+                            .ok_or(Error::InvalidControl(source))?
+                    }
+                    _ => {}
+                }
                 if matches!(op, Op::TypeInputPlan { .. }) {
                     last_suspension = Some(instructions.len());
                 }
@@ -1524,7 +1542,7 @@ fn compile_root<'a>(
             }
             Work::Label(label) => labels[label] = Some(instructions.len()),
             Work::EndLoop(id) => {
-                let (start, end, scope_depth): (usize, usize, usize) =
+                let (start, end, scope_depth, call_depth): (usize, usize, usize, usize) =
                     loops.remove(&id).expect("active lexical loop");
                 let start = labels[start].expect("emitted loop header");
                 if last_suspension.is_some_and(|pc| pc >= start) {
@@ -1536,6 +1554,7 @@ fn compile_root<'a>(
                             start,
                             end,
                             scope_depth,
+                            call_depth,
                         },
                     );
                 }
@@ -3215,7 +3234,7 @@ fn compile_root<'a>(
                         labels.push(None);
                         let done = labels.len();
                         labels.push(None);
-                        loops.insert(*identity, (start, done, scope_depth));
+                        loops.insert(*identity, (start, done, scope_depth, call_depth));
                         work.push(Work::EndLoop(*identity));
                         emit(&mut work, Op::Unit(dst));
                         work.push(Work::Label(done));
@@ -3224,7 +3243,7 @@ fn compile_root<'a>(
                         work.push(Work::Label(start));
                     }
                     K::Break(id) | K::Continue(id) => {
-                        let Some((start, done, depth)) = loops.get(id) else {
+                        let Some((start, done, scopes, calls)) = loops.get(id) else {
                             if !lexical_input {
                                 return Err(Error::InvalidControl(source));
                             }
@@ -3244,7 +3263,13 @@ fn compile_root<'a>(
                                 *start
                             }),
                         );
-                        emit(&mut work, Op::Unwind(*depth));
+                        emit(
+                            &mut work,
+                            Op::Unwind {
+                                scopes: *scopes,
+                                calls: *calls,
+                            },
+                        );
                     }
                     K::Return(value) => {
                         let src = fresh();

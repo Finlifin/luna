@@ -246,3 +246,165 @@ fn generation_exhaustion_never_wraps_and_dumps_do_not_expose_owner_addresses() {
     assert_eq!(frame.preparations.generation(), u64::MAX);
     vm.prepare_bytecode_request(&mut frame, pending).unwrap();
 }
+
+#[test]
+fn transfers_during_an_operand_discard_only_calls_opened_inside_the_loop() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    use nir::program::{ArgumentPassing, CallArgument, NormalFormArgument};
+
+    let source = SourceRange { start: 1, end: 2 };
+    let function = LocalId { owner: 1, index: 0 };
+    let parameter = LocalId { owner: 2, index: 0 };
+    let identity = LocalId { owner: 1, index: 1 };
+    let boolean = Term::Primitive(Primitive::Bool);
+    let signature = Term::ComptimeFunction(Box::new(Term::Function {
+        parameters: vec![nir::Parameter {
+            sort: nir::Sort::ComptimeValue,
+            ty: boolean.clone(),
+        }],
+        result: Box::new(boolean.clone()),
+    }));
+    let expr = |ty: &Term, kind| Expr {
+        source,
+        ty: ty.clone(),
+        kind,
+    };
+    let target = Value::Closure(Arc::new(Closure {
+        definition_source: None,
+        parameters: vec![parameter],
+        environment: Environment::new(),
+        capture_order: vec![],
+        body: Arc::new(expr(&boolean, K::Local(parameter))),
+        ty: signature.clone(),
+    }));
+    let call = |value| {
+        expr(
+            &boolean,
+            K::Call {
+                callee: Box::new(expr(&signature, K::Local(function))),
+                arguments: vec![CallArgument {
+                    parameter: 0,
+                    value,
+                    is_default: false,
+                    passing: ArgumentPassing::Value,
+                }],
+                parameter_bindings: vec![parameter],
+                env_arguments: vec![],
+            },
+        )
+    };
+    let head = DeclarationId {
+        package: 3,
+        local: 0,
+    };
+    let package = Package {
+        normal_forms: vec![Head {
+            declaration: head,
+            collector: None,
+            role: Role::Opaque,
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: DeclarationId {
+                    package: 3,
+                    local: 1,
+                },
+                binding: LocalId { owner: 3, index: 0 },
+                kind: Kind::Value,
+                ty: boolean.clone(),
+            }],
+        }],
+        ..Default::default()
+    };
+    for (repeat, in_plan) in [(false, false), (true, false), (false, true), (true, true)] {
+        let transfer = if repeat {
+            K::Continue(identity)
+        } else {
+            K::Break(identity)
+        };
+        let transfer = expr(&Term::Primitive(Primitive::Never), transfer);
+        let operand = if in_plan {
+            expr(
+                &Term::Primitive(Primitive::Never),
+                K::NormalFormType {
+                    head,
+                    arguments: vec![NormalFormArgument::Value(transfer)],
+                    plan: None,
+                },
+            )
+        } else {
+            transfer
+        };
+        let inner = call(operand);
+        let region = expr(
+            &Term::Primitive(Primitive::Void),
+            K::Loop {
+                identity,
+                body: Box::new(inner),
+            },
+        );
+        let root = call(expr(
+            &boolean,
+            K::Block {
+                statements: vec![region],
+                result: Some(Box::new(expr(&boolean, K::Literal(Literal::Bool(true))))),
+            },
+        ));
+        let program = Arc::new(comptime_compiler::compile(&root, &mut 10000).unwrap());
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let mut environment = Environment::from([(function, target.clone())]);
+        let mut frame = vm.start_frame(&program, &mut environment).unwrap();
+        for depth in [1, 2] {
+            let prepare = request(&mut vm, &mut frame);
+            vm.prepare_bytecode_request(&mut frame, prepare).unwrap();
+            assert_eq!(frame.calls.len(), depth);
+        }
+        if in_plan {
+            let Progress::TypeInputPlan {
+                plan,
+                register_collision,
+                mut environment,
+                selected,
+            } = vm.resume_frame(&mut frame, 1000).unwrap()
+            else {
+                panic!("expected the inner operand to suspend for its declaration input");
+            };
+            let mut child = normal_plan::Frame::application(
+                &mut vm,
+                input_collection::Plan::Compiled {
+                    plan,
+                    register_collision,
+                },
+                &environment,
+                selected,
+            )
+            .unwrap();
+            let transfer = vm.run_normal_plan(&mut child, &mut environment).unwrap();
+            assert!(matches!(&transfer, Flow::Break(id) | Flow::Continue(id) if *id == identity));
+            assert!(
+                frame
+                    .receive_plan(Ok(transfer), environment)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        if repeat {
+            let next = request(&mut vm, &mut frame);
+            assert_eq!(frame.calls.len(), 1);
+            vm.prepare_bytecode_request(&mut frame, next).unwrap();
+            assert_eq!(frame.calls.len(), 2);
+        } else {
+            let Progress::Call { callee, arguments } = vm.resume_frame(&mut frame, 1000).unwrap()
+            else {
+                panic!("expected the enclosing call");
+            };
+            assert!(frame.calls.is_empty());
+            assert_eq!(arguments, [Value::Bool(true)]);
+            let result = vm.invoke_value_scoped(callee, arguments, None).unwrap();
+            frame.deliver(result).unwrap();
+            assert!(matches!(
+                vm.resume_frame(&mut frame, 1000).unwrap(),
+                Progress::Complete(Flow::Value(Value::Bool(true)))
+            ));
+        }
+    }
+}

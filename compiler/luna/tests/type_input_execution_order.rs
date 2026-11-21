@@ -644,3 +644,33 @@ fn open_annotations_project_their_captures_across_calls_with_unrelated_code() {
     let failure = sysroot::compile(&source.replace("false, 255", "false, true")).unwrap_err();
     assert!(failure.contains("type mismatch"), "{failure}");
 }
+
+#[test]
+fn transfers_inside_a_declaration_input_preserve_enclosing_ordinary_arguments() {
+    check_twice(
+        "pure comptime fn Key<index: Integer> -> Type { bool }
+         comptime fn prefix() -> Integer { 10 }
+         comptime fn probe() -> bool { true }
+         comptime fn accept(first: bool, key: Type) -> bool { first }
+         comptime fn combine(first: Integer, second: Integer) -> bool { first + second == 11 }
+         comptime fn check() -> bool {
+             var round: Integer = 0;
+             var completed: Integer = 0;
+             combine(prefix(), do {
+                 while round < 4 {
+                     let accepted = accept(probe(), Key<do {
+                         round = round + 1;
+                         if round == 1 { continue; };
+                         if round == 3 { break; };
+                         round
+                     }>);
+                     if accepted { completed = completed + 1; };
+                 };
+                 completed
+             })
+         }",
+        &[
+            "check", "prefix", "probe", "probe", "accept", "probe", "combine",
+        ],
+    );
+}

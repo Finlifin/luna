@@ -55,6 +55,7 @@ mod host_budget;
 
 pub use host_budget::checked as with_host_selection_budget;
 
+mod call_operands;
 mod immutable_storage;
 mod input_bodies;
 mod input_collection;
@@ -4461,7 +4462,11 @@ impl<'a> Interpreter<'a> {
     }
 
     #[inline(never)]
-    fn call_parameters(&self, callee: &Value, source: SourceRange) -> Result<Vec<LocalId>, Error> {
+    fn call_parameters<'v>(
+        &'v self,
+        callee: &'v Value,
+        source: SourceRange,
+    ) -> Result<&'v [LocalId], Error> {
         match callee {
             Value::RuntimeTraitMethod(_) => {
                 Err(self.failure(ErrorKind::PhaseMismatch, Some(source)))
@@ -4472,10 +4477,10 @@ impl<'a> Interpreter<'a> {
             } => self
                 .functions
                 .declaration(id)
-                .map(|f| f.parameters.clone())
+                .map(|f| f.parameters.as_slice())
                 .ok_or_else(|| self.failure(ErrorKind::UnknownFunction, Some(source))),
-            Value::IirCallable(handle) => Ok(self.iir_target(handle)?.parameters.clone()),
-            Value::Closure(closure) => Ok(closure.parameters.clone()),
+            Value::IirCallable(handle) => Ok(self.iir_target(handle)?.parameters.as_slice()),
+            Value::Closure(closure) => Ok(closure.parameters.as_slice()),
             _ => Err(self.failure(ErrorKind::Type, Some(source))),
         }
     }
@@ -4621,45 +4626,30 @@ impl<'a> Interpreter<'a> {
         if retain_callee {
             this.retain_residual(callee_source, &callee)?;
         }
-        let parameters = this.call_parameters(&callee, expr.source)?;
-        let preparation_parameters = interface_parameters.as_ref().unwrap_or(&parameters);
-        if !parameter_bindings.is_empty()
-            && (parameter_bindings != preparation_parameters
-                || parameter_bindings.len() != parameters.len())
-        {
-            return Err(this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
-        }
-        let mut slots = vec![None; parameters.len()];
-        let mut default_scope = Environment::new();
-        let mut defaults = false;
-        let mut last_default = None;
+        let mut operands = call_operands::CallOperands::open(
+            this,
+            &callee,
+            interface_parameters.as_deref(),
+            parameter_bindings,
+            arguments.iter().any(|arg| arg.is_default),
+            expr.source,
+        )?;
         for argument in arguments {
-            if argument.passing != nir::program::ArgumentPassing::Value
-                && (!this.comptime_only || argument.is_default || argument.parameter != 0)
-            {
-                return Err(this.failure(ErrorKind::InvalidCallPlan, Some(argument.value.source)));
-            }
-            if argument.parameter >= slots.len() || slots[argument.parameter].is_some() {
-                return Err(this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
-            }
-            if argument.is_default {
-                if parameter_bindings.is_empty()
-                    || last_default.is_some_and(|last| last >= argument.parameter)
-                {
-                    return Err(this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
-                }
-                defaults = true;
-                last_default = Some(argument.parameter);
-            } else if defaults {
-                return Err(this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)));
-            }
+            operands.begin(
+                this,
+                argument.parameter,
+                argument.is_default,
+                argument.passing,
+                argument.value.source,
+                expr.source,
+            )?;
             let value = if argument.is_default {
                 if let Some(inputs) = &trait_default_inputs {
                     prepared_value!(this.evaluate_bound_default(
                         expr.source,
                         argument,
                         inputs,
-                        &mut default_scope,
+                        &mut operands.defaults,
                         environment
                     ))
                 } else if dynamic_defaults {
@@ -4667,14 +4657,14 @@ impl<'a> Interpreter<'a> {
                         expr.source,
                         argument,
                         &callee,
-                        &mut default_scope,
+                        &mut operands.defaults,
                         environment
                     ))
                 } else {
                     prepared_value!(this.evaluate_default(
                         expr.source,
                         argument,
-                        &mut default_scope,
+                        &mut operands.defaults,
                         environment
                     ))
                 }
@@ -4693,20 +4683,16 @@ impl<'a> Interpreter<'a> {
             } else {
                 prepared_value!(this.eval(&argument.value, environment))
             };
-            let value = this.prepare_argument(argument.parameter, argument.value.source, value)?;
-            if !parameter_bindings.is_empty() {
-                default_scope.insert(parameter_bindings[argument.parameter], value.clone());
-            }
-            slots[argument.parameter] = Some(value);
+            operands.supply(this, argument.parameter, value, argument.value.source)?;
         }
-        let arguments = slots
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| this.failure(ErrorKind::Arity, Some(expr.source)))?;
+        let (arguments, mut default_scope) = operands.finish(this, expr.source)?;
         // The public interface domain is checked even when the chosen
         // implementation accepts a wider domain. Argument routing uses
         // declaration-side locals, independently of body parameter names.
         if !interface_program.is_empty() {
+            let preparation_parameters = interface_parameters
+                .as_deref()
+                .ok_or_else(|| this.failure(ErrorKind::InvalidCallPlan, Some(expr.source)))?;
             for (binding, value) in preparation_parameters.iter().zip(&arguments) {
                 let observed = match value {
                     Value::Storage(storage) => this.read_owned_value(storage)?,

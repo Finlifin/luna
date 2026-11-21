@@ -20,7 +20,7 @@ pub(super) struct Frame {
     interface: Option<Box<interface::InterfaceCall>>,
     waiting: Option<Waiting>,
     preparations: preparation::Authority,
-    calls: BTreeMap<usize, PendingCall>,
+    calls: Vec<(usize, PendingCall)>,
     newtype_conversions: BTreeMap<usize, nir::newtypes::Conversion>,
     error_conversions: BTreeMap<usize, comptime_compiler::ErrorConversion>,
     list_operations: BTreeMap<usize, (Term, Option<Term>)>,
@@ -110,13 +110,21 @@ impl Frame {
         Ok(scope.instance)
     }
 
-    fn unwind_to(&mut self, depth: usize, source: SourceRange) -> Result<(), Error> {
-        if depth > self.scopes.len() {
+    fn current_call(&mut self, register: usize) -> Option<&mut PendingCall> {
+        self.calls
+            .last_mut()
+            .filter(|(id, _)| *id == register)
+            .map(|(_, call)| call)
+    }
+
+    fn unwind_to(&mut self, depth: usize, calls: usize, source: SourceRange) -> Result<(), Error> {
+        if depth > self.scopes.len() || calls > self.calls.len() {
             return Err(Error {
                 kind: ErrorKind::InvalidControlFlow,
                 source: Some(source),
             });
         }
+        self.calls.truncate(calls);
         while self.scopes.len() > depth {
             self.leave_scope()?;
         }
@@ -162,10 +170,7 @@ struct PendingCall {
     callee: Value,
     trait_defaults: Option<method_catalog::Inputs<Term>>,
     interface: Option<(nir::contracts::ProgramContract, Vec<LocalId>)>,
-    arguments: Vec<Option<Value>>,
-    parameter_bindings: Vec<LocalId>,
-    defaults: Environment,
-    last_default: Option<usize>,
+    operands: call_operands::CallOperands,
 }
 
 struct PendingClosure {
@@ -336,22 +341,7 @@ impl fmt::Display for Frame {
             if let Some(inputs) = &call.trait_defaults {
                 write!(f, " {inputs}")?;
             }
-            write!(f, " (arguments")?;
-            for value in &call.arguments {
-                match value {
-                    Some(value) => write!(f, " (ready {value})")?,
-                    None => write!(f, " (pending)")?,
-                }
-            }
-            write!(f, ") (defaults")?;
-            for (binding, value) in &call.defaults {
-                write!(f, " ({binding} {value})")?;
-            }
-            write!(f, ") (last-default")?;
-            if let Some(parameter) = call.last_default {
-                write!(f, " {parameter}")?;
-            }
-            write!(f, "))")?;
+            write!(f, " {})", call.operands)?;
         }
         write!(f, ") (closures")?;
         for (id, closure) in &self.closures {
@@ -488,7 +478,11 @@ impl Frame {
         let Some(region) = self.code.enclosing_loop(target, at) else {
             return Ok(Some(flow));
         };
-        self.unwind_to(region.scope_depth, self.code.instructions()[at].source)?;
+        self.unwind_to(
+            region.scope_depth,
+            region.call_depth,
+            self.code.instructions()[at].source,
+        )?;
         self.pc = if matches!(flow, Flow::Break(_)) {
             region.end
         } else {
@@ -524,11 +518,11 @@ impl Frame {
                     source: None,
                 });
             };
-            let pending = self.calls.get_mut(&call).ok_or(Error {
+            let pending = self.current_call(call).ok_or(Error {
                 kind: ErrorKind::InvalidControlFlow,
                 source: None,
             })?;
-            pending.defaults = environment;
+            pending.operands.defaults = environment;
             self.waiting = Some(Waiting::Call(destination));
         }
         match result? {
@@ -1042,7 +1036,7 @@ impl<'a> Interpreter<'a> {
             interface: None,
             waiting: None,
             preparations: preparation::Authority::default(),
-            calls: BTreeMap::new(),
+            calls: Vec::new(),
             newtype_conversions: BTreeMap::new(),
             error_conversions: BTreeMap::new(),
             list_operations: BTreeMap::new(),
@@ -2318,29 +2312,15 @@ impl<'a> Interpreter<'a> {
                     passing,
                     argument_source,
                 } => {
-                    if *passing != nir::program::ArgumentPassing::Value
-                        && (*is_default || *parameter != 0)
-                    {
-                        return Err(
-                            self.failure(ErrorKind::InvalidCallPlan, Some(*argument_source))
-                        );
-                    }
-                    let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
-                    if *parameter >= pending.arguments.len()
-                        || pending.arguments[*parameter].is_some()
-                    {
-                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-                    }
-                    if *is_default {
-                        if pending.parameter_bindings.is_empty()
-                            || pending.last_default.is_some_and(|last| last >= *parameter)
-                        {
-                            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-                        }
-                        pending.last_default = Some(*parameter);
-                    } else if pending.last_default.is_some() {
-                        return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-                    }
+                    let pending = frame.current_call(*call).ok_or_else(missing)?;
+                    pending.operands.begin(
+                        self,
+                        *parameter,
+                        *is_default,
+                        *passing,
+                        *argument_source,
+                        source,
+                    )?;
                 }
                 Op::Reference {
                     destination,
@@ -2370,7 +2350,7 @@ impl<'a> Interpreter<'a> {
                     value,
                     dynamic,
                 } => {
-                    let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
+                    let pending = frame.current_call(*call).ok_or_else(missing)?;
                     let expression = self.specialized_default_code(
                         value,
                         pending.trait_defaults.as_ref(),
@@ -2378,7 +2358,7 @@ impl<'a> Interpreter<'a> {
                         &pending.callee,
                         source,
                     )?;
-                    let environment = std::mem::take(&mut pending.defaults);
+                    let environment = std::mem::take(&mut pending.operands.defaults);
                     frame.waiting = Some(Waiting::Default {
                         call: *call,
                         destination: *destination,
@@ -2394,23 +2374,16 @@ impl<'a> Interpreter<'a> {
                     value,
                 } => {
                     let value = frame.slots[*value].take().ok_or_else(missing)?;
-                    let pending = frame.calls.get_mut(call).ok_or_else(missing)?;
-                    let slot = pending.arguments.get_mut(*parameter).ok_or_else(missing)?;
-                    let value = self.prepare_argument(*parameter, source, value)?;
-                    if !pending.parameter_bindings.is_empty() {
-                        pending
-                            .defaults
-                            .insert(pending.parameter_bindings[*parameter], value.clone());
-                    }
-                    *slot = Some(value);
+                    let pending = frame.current_call(*call).ok_or_else(missing)?;
+                    pending.operands.supply(self, *parameter, value, source)?;
                 }
                 Op::Invoke { call, destination } => {
-                    let pending = frame.calls.remove(call).ok_or_else(missing)?;
-                    let arguments = pending
-                        .arguments
-                        .into_iter()
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| self.failure(ErrorKind::Arity, Some(source)))?;
+                    let (_, pending) = frame
+                        .calls
+                        .pop()
+                        .filter(|(id, _)| id == call)
+                        .ok_or_else(missing)?;
+                    let (arguments, defaults) = pending.operands.finish(self, source)?;
                     if let Some((program, parameters)) = pending.interface {
                         if !program.is_empty() {
                             let mut interface = Box::new(interface::InterfaceCall::new(
@@ -2419,7 +2392,7 @@ impl<'a> Interpreter<'a> {
                                 source,
                                 program,
                                 &parameters,
-                                pending.defaults,
+                                defaults,
                                 pending.callee,
                                 arguments,
                             )?);
@@ -2515,7 +2488,7 @@ impl<'a> Interpreter<'a> {
                     // jump drops it with the scopes unwound by unwind_to.
                     frame.finishing_instance = frame.leave_scope()?;
                 }
-                Op::Unwind(depth) => frame.unwind_to(*depth, source)?,
+                Op::Unwind { scopes, calls } => frame.unwind_to(*scopes, *calls, source)?,
                 Op::BreakEnclosing(id) => return Ok(Progress::Complete(Flow::Break(*id))),
                 Op::ContinueEnclosing(id) => return Ok(Progress::Complete(Flow::Continue(*id))),
                 Op::PrepareScalar(scalar) => {

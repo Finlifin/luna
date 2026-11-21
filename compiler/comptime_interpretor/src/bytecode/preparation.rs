@@ -452,31 +452,23 @@ impl<'a> Interpreter<'a> {
             parameters: interface_parameters,
         } = setup;
         self.check_transported_instance(&callee)?;
-        let parameters = self.call_parameters(&callee, source)?;
-        let count = parameters.len();
-        let preparation_parameters = interface_parameters.as_ref().unwrap_or(&parameters);
-        if !parameter_bindings.is_empty()
-            && (*parameter_bindings != *preparation_parameters || parameter_bindings.len() != count)
-        {
-            return Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)));
-        }
-        self.effect_charge(count, Some(source))?;
-        frame.calls.insert(
+        let operands = call_operands::CallOperands::open(
+            self,
+            &callee,
+            interface_parameters.as_deref(),
+            parameter_bindings,
+            *prepare_defaults,
+            source,
+        )?;
+        frame.calls.push((
             *call,
             PendingCall {
                 callee,
                 trait_defaults,
                 interface: interface_parameters.map(|parameters| (interface_program, parameters)),
-                arguments: vec![None; count],
-                parameter_bindings: if *prepare_defaults {
-                    parameter_bindings.clone()
-                } else {
-                    vec![]
-                },
-                defaults: Environment::new(),
-                last_default: None,
+                operands,
             },
-        );
+        ));
         Ok(())
     }
 }

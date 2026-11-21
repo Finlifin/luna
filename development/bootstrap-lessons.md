@@ -117,3 +117,9 @@ VM 在同一发布器中检查三种定义的形成条件及有限存储。对�
 `accept(if select(flag) { return false; } else { bool }, true)` 有两个执行出口，但只有 else 会把 Type 交给第一个参数槽。定义检查可以用 bool 检查第二个实参。VM 仍在原位置调用 select，提前返回时跳过剩余实参和 accept。对于一段顺序代码，例如 `do { return true; bool }`，定义检查仍可读取已检查的尾表达式；执行时不会到达它。[源码回归用例](../compiler/luna/tests/ordinary_input_identity.rs)
 
 检查器使用有预算的工作栈检查未知分支。如果能交付值的出口都给出相同身份，就保留该身份。未知条件或失败的 guard 可能改写外层绑定；处理后继出口前须使这些绑定上的旧事实失效。当前对 match 的写入分析合并所有 arm，因此会放弃某些实际可证明的身份。不同出口真的会交付不同类型时，调用者仍须从本次执行取得值。自举时值得比较这种静态观察与保留原 VM 调用现场各自的开销，特别是模式很多而每个分支可见绑定也很多的情况。[身份观察](../compiler/elaboration/src/program/input_observation/exits.rs)
+
+## 2026-11-21 · 调用实参求到一半时的循环出口
+
+`combine(prefix(), do { while ... { accept(probe(), Key<...>); }; result })` 同时有两次尚未完成的普通调用。Key 的输入执行 continue 或 break 时，prefix 的值仍属于 combine，已经求值的 probe 属于被中断的 accept。用寄存器作为未完成调用的键可以找到两者，却无法直接表达这次跳转结束了哪一个。现在字节码按求值嵌套保存调用，并在循环入口记录词法作用域深度与普通调用深度。直接跳转和声明实参子执行返回的跳转都恢复这两个深度。[字节码执行](../compiler/comptime_interpretor/src/bytecode.rs) · [源码用例](../compiler/luna/tests/type_input_execution_order.rs)
+
+两种解释器共用实参槽的开启、交付和完成规则。只有当前正在求值的槽能接收值；默认实参按声明序读取和改写自己的绑定环境，已交付给 callee 的普通值保留。没有默认实参的调用省去了为这个环境复制所有值的开销。自举时要保留的是求值前缀的所有权：`empty(Selected(flag))` 的两个正常出口若真能交付不同类型，仍须由活动 VM 把本次取得的值交给源码检查区域，后者才能继续检查依赖它的源码。当前工作落实了执行侧的槽与退出规则，这一双向交接仍待实现。[实参帧](../compiler/comptime_interpretor/src/call_operands.rs)
