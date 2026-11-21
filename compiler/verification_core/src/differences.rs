@@ -480,6 +480,7 @@ pub(super) fn join_guarantees(
     if a.contradiction() || b.contradiction() {
         return Ok(());
     }
+    let mut active = Vec::new();
     for (i, x) in a.nodes.iter().enumerate().skip(1) {
         let x = x.unwrap();
         if joined.value(x.place) != Some(x) {
@@ -488,23 +489,24 @@ pub(super) fn join_guarantees(
         let Ok(bi) = b.nodes.binary_search(&Some(x)) else {
             continue;
         };
-        for (j, y) in a.nodes.iter().enumerate().skip(1) {
+        active.push((i, bi, x, joined.bound(x, limits)?));
+    }
+    let mut pending = Vec::new();
+    let max_new = limits.max_terms.saturating_sub(joined.inequalities.len());
+    'outer: for &(i, bi, x, bx) in &active {
+        for &(j, bj, y, by) in &active {
+            if pending.len() >= max_new {
+                break 'outer;
+            }
             limits.step(1)?;
-            let y = y.unwrap();
-            if x == y || joined.value(y.place) != Some(y) {
+            if x == y {
                 continue;
             }
-            let Ok(bj) = b.nodes.binary_search(&Some(y)) else {
-                continue;
-            };
             let (Some(u), Some(v)) = (&a.bounds[i][j], &b.bounds[bi][bj]) else {
                 continue;
             };
             let upper = if limits.compare(u, v)?.is_gt() { u } else { v };
-            let independent = joined
-                .bound(x, limits)?
-                .upper
-                .subtract(&joined.bound(y, limits)?.lower, &mut limits.arithmetic)?;
+            let independent = bx.upper.subtract(&by.lower, &mut limits.arithmetic)?;
             if !limits.compare(upper, &independent)?.is_lt() {
                 continue;
             }
@@ -512,12 +514,16 @@ pub(super) fn join_guarantees(
                 .subtract(&Polynomial::variable(y, limits)?, limits)?;
             row.insert(vec![], &upper.negate(&mut limits.arithmetic)?, limits)?;
             if !joined.inequalities.contains(&row, limits)? {
-                if joined.inequalities.len() >= limits.max_terms {
-                    return Ok(());
-                }
-                joined.inequalities.insert(row, limits)?;
+                pending.push(row);
             }
         }
+    }
+    drop(active);
+    for row in pending {
+        if joined.inequalities.len() >= limits.max_terms {
+            break;
+        }
+        joined.inequalities.insert(row, limits)?;
     }
     Ok(())
 }
@@ -535,25 +541,25 @@ pub fn project_guarantees(
     let Some(graph) = DifferenceBounds::build(facts, limits)? else {
         return Ok(Vec::new());
     };
-    let mut rows = Vec::new();
+    let mut active = Vec::new();
     for (i, x) in graph.nodes.iter().enumerate().skip(1) {
         let x = x.unwrap();
         if !selected.contains(&x) {
             continue;
         }
-        for (j, y) in graph.nodes.iter().enumerate().skip(1) {
+        active.push((i, x, facts.bound(x, limits)?));
+    }
+    let mut rows = Vec::new();
+    for &(i, x, bx) in &active {
+        for &(j, y, by) in &active {
             limits.step(1)?;
-            let y = y.unwrap();
-            if x == y || !selected.contains(&y) {
+            if x == y {
                 continue;
             }
             let Some(upper) = &graph.bounds[i][j] else {
                 continue;
             };
-            let independent = facts
-                .bound(x, limits)?
-                .upper
-                .subtract(&facts.bound(y, limits)?.lower, &mut limits.arithmetic)?;
+            let independent = bx.upper.subtract(&by.lower, &mut limits.arithmetic)?;
             if !limits.compare(upper, &independent)?.is_lt() {
                 continue;
             }

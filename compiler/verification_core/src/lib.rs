@@ -928,6 +928,23 @@ impl Facts {
         limits: &mut Limits,
     ) -> Result<(), Unknown> {
         limits.step(self.current.len())?;
+        let mut dropped_relation = false;
+        for row in &self.inequalities {
+            limits.step(row.terms.len().saturating_add(1))?;
+            if row
+                .terms
+                .keys()
+                .flatten()
+                .any(|id| !places.contains(&id.place))
+            {
+                dropped_relation = true;
+                break;
+            }
+        }
+        if !dropped_relation {
+            self.current.retain(|place, _| places.contains(place));
+            return Ok(());
+        }
         let selected = self
             .current
             .iter()
@@ -957,16 +974,15 @@ impl Facts {
                 rows.push(row);
             }
         }
+        let mut store = relations::RelationStore::from_rows(rows, limits)?;
         for row in projected {
-            if rows.len() >= limits.max_terms {
+            if store.len() >= limits.max_terms {
                 break;
             }
-            if !relations::contains_relation(&rows, &row, limits)? {
-                rows.push(row);
-            }
+            store.insert(row, limits)?;
         }
         self.current.retain(|place, _| places.contains(place));
-        self.inequalities = relations::RelationStore::from_rows(rows, limits)?;
+        self.inequalities = store;
         Ok(())
     }
 
@@ -2042,6 +2058,100 @@ mod disjunction_complexity_tests {
             facts.bound(z, &mut setup).unwrap().upper,
             Integer::from_u128(5)
         );
+    }
+
+    #[test]
+    fn retain_places_skips_projection_without_dropped_relations_and_projects_when_needed() {
+        let mut setup = Limits::default();
+        let mut facts = Facts::default();
+        let bound = Interval::machine(16, false, &mut setup).unwrap();
+        let mut vars = Vec::new();
+        for local in 0..16u32 {
+            vars.push(
+                facts
+                    .assign(PlaceId { owner: 5, local }, bound.copy(&mut setup).unwrap())
+                    .unwrap(),
+            );
+        }
+        for pair in vars[..12].chunks_exact(2) {
+            let p0 = Polynomial::variable(pair[0], &mut setup).unwrap();
+            let p1 = Polynomial::variable(pair[1], &mut setup).unwrap();
+            facts
+                .assume(
+                    &Condition::PolynomialCompare {
+                        left: p0,
+                        relation: Comparison::LessEqual,
+                        right: p1,
+                    },
+                    true,
+                    &mut setup,
+                )
+                .unwrap();
+        }
+        let relation_count = facts.inequalities.len();
+        assert_eq!(relation_count, 6);
+
+        // Removing only unreferenced places (12..16) keeps relations verbatim under a tiny budget.
+        let keep_first_twelve: std::collections::BTreeSet<_> =
+            vars[..12].iter().map(|v| v.place).collect();
+        let mut fast_facts = facts.fork(&mut setup).unwrap();
+        let mut tiny = Limits::default();
+        tiny.arithmetic.steps = 200;
+        fast_facts
+            .retain_places(&keep_first_twelve, &mut tiny)
+            .unwrap();
+        assert_eq!(fast_facts.inequalities.len(), relation_count);
+        assert!(fast_facts.value(vars[15].place).is_none());
+
+        // Removing an intermediate referenced by x <= mid <= z still projects x <= z.
+        let mut chain = Facts::default();
+        let x = chain
+            .assign(
+                PlaceId { owner: 6, local: 0 },
+                bound.copy(&mut setup).unwrap(),
+            )
+            .unwrap();
+        let mid = chain
+            .assign(
+                PlaceId { owner: 6, local: 1 },
+                bound.copy(&mut setup).unwrap(),
+            )
+            .unwrap();
+        let z = chain.assign(PlaceId { owner: 6, local: 2 }, bound).unwrap();
+        chain
+            .assume(
+                &Condition::PolynomialCompare {
+                    left: Polynomial::variable(x, &mut setup).unwrap(),
+                    relation: Comparison::LessEqual,
+                    right: Polynomial::variable(mid, &mut setup).unwrap(),
+                },
+                true,
+                &mut setup,
+            )
+            .unwrap();
+        chain
+            .assume(
+                &Condition::PolynomialCompare {
+                    left: Polynomial::variable(mid, &mut setup).unwrap(),
+                    relation: Comparison::LessEqual,
+                    right: Polynomial::variable(z, &mut setup).unwrap(),
+                },
+                true,
+                &mut setup,
+            )
+            .unwrap();
+        chain
+            .retain_places(
+                &std::collections::BTreeSet::from([x.place, z.place]),
+                &mut setup,
+            )
+            .unwrap();
+        let diff = Polynomial::variable(x, &mut setup)
+            .unwrap()
+            .subtract(&Polynomial::variable(z, &mut setup).unwrap(), &mut setup)
+            .unwrap();
+        let (enclosure, _) = diff.enclosure(&chain, &mut setup).unwrap();
+        assert!(enclosure.upper <= Integer::zero());
     }
 }
 
