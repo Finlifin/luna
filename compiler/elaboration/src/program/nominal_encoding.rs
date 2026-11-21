@@ -183,9 +183,17 @@ impl Checker<'_, '_> {
         let mut variants = Vec::new();
         let mut payload_types = Vec::new();
         for (variant, name) in leaves {
-            if let hir::item::VariantKind::Const(expr) = &variant.kind {
+            let const_expr = match &variant.kind {
+                hir::item::VariantKind::Const(expr) => Some(*expr),
+                hir::item::VariantKind::Pattern(pattern) => match &pattern.kind {
+                    hir::PatternKind::Const(expr) => Some(*expr),
+                    _ => None,
+                },
+                _ => None,
+            };
+            if let Some(expr) = const_expr {
                 // The representation chooses the input domain. Do not accept
-                // arbitrary comptime values merely because this is `= expr`.
+                // arbitrary comptime values merely because this is constant.
                 let target = base_type.unwrap_or(P::BitVec(width));
                 let value = self.required_value(expr, target)?;
                 let bits = match value {

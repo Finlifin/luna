@@ -572,3 +572,110 @@ fn contiguous_niche_finds_largest_gap_for_scalar_widths() {
     .unwrap();
     assert_eq!(narrow.contiguous_niche(), None);
 }
+
+#[test]
+fn discriminant_intervals_decompose_contiguous_and_residual_variants_exactly() {
+    use nir::enum_encoding::merge_contiguous_ranges;
+    let mut budget = Budget::default();
+
+    let v_const = |name: &str, val: u32, budget: &mut Budget| {
+        Variant::new(name.into(), bits(8, 0xff), bits(8, val), vec![], budget).unwrap()
+    };
+    let v_p2 = Variant::new(
+        "p2".into(),
+        bits(8, 0xf0),
+        bits(8, 0x20),
+        vec![Field {
+            name: "x".into(),
+            start: 0,
+            width: 4,
+        }],
+        &mut budget,
+    )
+    .unwrap();
+    let v_p3 = Variant::new(
+        "p3".into(),
+        bits(8, 0xf0),
+        bits(8, 0x30),
+        vec![Field {
+            name: "y".into(),
+            start: 0,
+            width: 4,
+        }],
+        &mut budget,
+    )
+    .unwrap();
+    let v_mid = Variant::new(
+        "mid".into(),
+        bits(8, 0xc3),
+        bits(8, 0x81),
+        vec![Field {
+            name: "z".into(),
+            start: 2,
+            width: 4,
+        }],
+        &mut budget,
+    )
+    .unwrap();
+    let variants = vec![
+        v_const("c10", 0x10, &mut budget),
+        v_const("c11", 0x11, &mut budget),
+        v_const("c12", 0x12, &mut budget),
+        v_const("c13", 0x13, &mut budget),
+        v_p2,
+        v_p3,
+        v_mid,
+    ];
+    let layout = Layout::new(8, variants, &mut budget).unwrap();
+
+    // Constants 0x10..=0x13 plus prefix-tagged 0x20..=0x2F and 0x30..=0x3F merge into two exact
+    // ranges while middle-field `mid` (0b10_zzzz_01) stays residual.
+    let decomposed = layout
+        .discriminant_intervals(&[5, 0, 6, 3, 1, 4, 2, 0])
+        .unwrap();
+    assert_eq!(decomposed.ranges, vec![(0x10, 0x13), (0x20, 0x3f)]);
+    assert_eq!(decomposed.residual_variants, vec![6]);
+
+    for x in 0u32..=255 {
+        let bv = bits(8, x);
+        let in_decomposed = decomposed
+            .ranges
+            .iter()
+            .any(|&(lo, hi)| (lo..=hi).contains(&u128::from(x)))
+            || decomposed
+                .residual_variants
+                .iter()
+                .any(|&idx| layout.variants()[idx].accepts(&bv, &mut budget).unwrap());
+        let expected = layout.discriminate(&bv, &mut budget).is_ok();
+        assert_eq!(in_decomposed, expected, "mismatch at byte {x:#04x}");
+    }
+
+    assert!(layout.discriminant_intervals(&[99]).is_none());
+
+    // 128-bit range boundary check: 0 and u128::MAX must not overflow.
+    let zero128 = Variant::new(
+        "z".into(),
+        BitVec::from_words(128, &[u32::MAX; 4], &mut budget).unwrap(),
+        BitVec::from_words(128, &[0; 4], &mut budget).unwrap(),
+        vec![],
+        &mut budget,
+    )
+    .unwrap();
+    let max128 = Variant::new(
+        "m".into(),
+        BitVec::from_words(128, &[u32::MAX; 4], &mut budget).unwrap(),
+        BitVec::from_words(128, &[u32::MAX; 4], &mut budget).unwrap(),
+        vec![],
+        &mut budget,
+    )
+    .unwrap();
+    let layout128 = Layout::new(128, vec![zero128, max128], &mut budget).unwrap();
+    let dec128 = layout128.discriminant_intervals(&[0, 1]).unwrap();
+    assert_eq!(dec128.ranges, vec![(0, 0), (u128::MAX, u128::MAX)]);
+    assert!(dec128.residual_variants.is_empty());
+
+    assert_eq!(
+        merge_contiguous_ranges(vec![(u128::MAX - 1, u128::MAX - 1), (u128::MAX, u128::MAX)]),
+        vec![(u128::MAX - 1, u128::MAX)]
+    );
+}

@@ -1278,3 +1278,326 @@ fn unit_enum_widths_and_compositional_niches_execute_and_drop_cleanly() {
         assert!(stdout.ends_with("(bool true)\n"), "opt={opt}: {stdout}");
     }
 }
+
+#[test]
+fn base_type_unsigned_encodings_groups_and_reflection_work_natively() {
+    let source = r#"
+        use std.prelude.*;
+
+        const CODE8: u8 = 0x05;
+        enum E8 {
+            .base_type u8,
+            .discrete_tag true,
+            zero: 0,
+            mid: < CODE8 > ,
+            grp.{ c0 = 16, c1 = 17, c2: 18, c3: 19 },
+            pfx.{ p0: 0b0010 (x: BitVec<4>), p1: 0b0011 (y: BitVec<4>) },
+            midg.{ m0: 0b10 (a: BitVec<4>) 01, m1: 0b10 (b: BitVec<4>) 10 },
+        }
+
+        const K16: u16 = 0x1234;
+        enum E16 {
+            .base_type u16,
+            .discrete_tag true,
+            empty = 0,
+            fixed = K16,
+            hi: 0xAA (lo: u8),
+        }
+
+        const K32: u32 = 0x1234_5678;
+        enum E32 {
+            .base_type u32,
+            .discrete_tag true,
+            empty: 0,
+            fixed: < K32 > ,
+            op: 0x5 (val: u16) ABC,
+        }
+
+        const K64: u64 = 0x0102_0304_0506_0708;
+        enum E64 {
+            .base_type u64,
+            .discrete_tag true,
+            empty = 0,
+            fixed = K64,
+            pkt: 0xFE (body: u32) CAFE_01,
+        }
+
+        const K128: u128 = 1267650600228229401496703205376;
+        enum E128 {
+            .base_type u128,
+            .discrete_tag true,
+            empty = 0,
+            fixed = K128,
+            big: 0x5A (mid: u64) 0000_0000_0000_01,
+        }
+
+        const KUSIZE: usize = 99;
+        enum EPos {
+            .base_type usize,
+            .discrete_tag true,
+            zero = 0,
+            alt: < KUSIZE > ,
+        }
+
+        enum UGrp {
+            a.{ x, y, z },
+            tail,
+        }
+
+        enum TGrp {
+            a.{ x(u64), y(u32) },
+            none,
+        }
+
+        enum NGrp {
+            grp.{ k0, k1 },
+            other,
+            pay(bool),
+        }
+
+        enum NGrpData {
+            none,
+            grp.{ keep, pay(bool) },
+        }
+
+        comptime fn base_is(subject: Type, expected: Type) -> bool {
+            subject.enum_bit_base_type() match {
+                found? => found == expected,
+                null => false,
+            }
+        }
+
+        const REFLECT_OK: bool = do {
+            let bases_ok = base_is(E8, u8)
+                and base_is(E16, u16)
+                and base_is(E32, u32)
+                and base_is(E64, u64)
+                and base_is(E128, u128)
+                and base_is(EPos, usize);
+            let widths_ok = E8.enum_bit_width() == 8
+                and E16.enum_bit_width() == 16
+                and E32.enum_bit_width() == 32
+                and E64.enum_bit_width() == 64
+                and E128.enum_bit_width() == 128
+                and (if Type.size_of(usize) == 8 { EPos.enum_bit_width() == 64 } else { EPos.enum_bit_width() == 32 });
+            let masks = E8.enum_bit_masks();
+            let values = E8.enum_bit_values();
+            let offsets = E8.enum_bit_offsets();
+            let groups = E8.enum_group_paths();
+            let meta8_ok = masks.length() == 10
+                and values.length() == 10
+                and offsets.length() == 10
+                and masks[0] == 255
+                and values[1] == 5
+                and values[2] == 16
+                and masks[6] == 240
+                and values[6] == 32
+                and offsets[0].length() == 0
+                and offsets[6].length() == 1
+                and offsets[6][0] == 0
+                and offsets[8].length() == 1
+                and offsets[8][0] == 2
+                and groups.length() == 3;
+            bases_ok and widths_ok and meta8_ok
+        };
+
+        fn in_e8_grp(v: E8) -> bool {
+            v match { .grp => true, _ => false }
+        }
+
+        fn in_e8_pfx(v: E8) -> bool {
+            v match { .pfx => true, _ => false }
+        }
+
+        fn in_e8_midg(v: E8) -> bool {
+            v match { .midg => true, _ => false }
+        }
+
+        fn check_e8() -> bool {
+            let vals_ok = (E8.zero'bitvec).as(u8) == 0
+                and (E8.mid'bitvec).as(u8) == 5
+                and (E8.grp.c0'bitvec).as(u8) == 16
+                and (E8.grp.c3'bitvec).as(u8) == 19
+                and (E8.pfx.p0 { x: 0x0 }'bitvec).as(u8) == 0x20
+                and (E8.pfx.p1 { y: 0xf }'bitvec).as(u8) == 0x3f
+                and (E8.midg.m0 { a: 0xf }'bitvec).as(u8) == 0b1011_1101
+                and (E8.midg.m1 { b: 0x5 }'bitvec).as(u8) == 0b1001_0110;
+
+            let tags_ok = E8.zero'tag_name == "zero"
+                and E8.mid'tag_name == "mid"
+                and g2_tag(E8.grp.c3) == "grp.c3"
+                and E8.pfx.p1 { y: 0xf }'tag_name == "pfx.p1"
+                and E8.midg.m0 { a: 0xf }'tag_name == "midg.m0";
+
+            let grp_ok = in_e8_grp(E8.grp.c0) and in_e8_grp(E8.grp.c3)
+                and not in_e8_grp(E8.mid)
+                and not in_e8_grp(E8.pfx.p0 { x: 0x0 })
+                and not in_e8_grp(E8.midg.m0 { a: 0xf });
+            let pfx_ok = in_e8_pfx(E8.pfx.p0 { x: 0x0 })
+                and in_e8_pfx(E8.pfx.p1 { y: 0xf })
+                and not in_e8_pfx(E8.grp.c3)
+                and not in_e8_pfx(E8.midg.m0 { a: 0xf })
+                and not in_e8_pfx(E8.zero);
+            let mid_ok = in_e8_midg(E8.midg.m0 { a: 0xf })
+                and in_e8_midg(E8.midg.m1 { b: 0x5 })
+                and not in_e8_midg(E8.pfx.p1 { y: 0xf })
+                and not in_e8_midg(E8.grp.c0);
+            let p1 = E8.pfx.p1 { y: 0xf };
+            let extract_ok = p1 match {
+                E8.pfx.p1 { y: yv } => yv.as(u8) == 15,
+                _ => false,
+            };
+
+            vals_ok and tags_ok and grp_ok and pfx_ok and mid_ok and extract_ok
+        }
+
+        fn g2_tag(v: E8) -> str {
+            v'tag_name
+        }
+
+        fn check_wide_bases() -> bool {
+            let ok16 = Type.size_of(E16) == 2 and Type.align_of(E16) == 2
+                and (E16.empty'bitvec).as(u16) == 0
+                and (E16.fixed'bitvec).as(u16) == K16
+                and (E16.hi { lo: 0x3C }'bitvec).as(u16) == 0xAA3C
+                and (E16.fixed match { .fixed => true, _ => false })
+                and (E16.hi { lo: 0x3C } match { .hi { lo: l } => l == 0x3C, _ => false });
+
+            let ok32 = Type.size_of(E32) == 4 and Type.align_of(E32) == 4
+                and (E32.empty'bitvec).as(u32) == 0
+                and (E32.fixed'bitvec).as(u32) == K32
+                and (E32.op { val: 0x4242 }'bitvec).as(u32) == 0x5424_2ABC
+                and (E32.empty match { .empty => true, _ => false })
+                and (E32.op { val: 0x4242 } match { .op { val: v } => v == 0x4242, _ => false });
+
+            let ok64 = Type.size_of(E64) == 8 and Type.align_of(E64) == 8
+                and (E64.empty'bitvec).as(u64) == 0
+                and (E64.fixed'bitvec).as(u64) == K64
+                and (E64.pkt { body: 0xDEAD_BEEF }'bitvec).as(u64) == 0xFE_DEAD_BEEF_CAFE_01
+                and (E64.fixed match { .fixed => true, _ => false })
+                and (E64.pkt { body: 0xDEAD_BEEF } match { .pkt { body: b } => b == 0xDEAD_BEEF, _ => false });
+
+            let ok128 = Type.size_of(E128) == 16 and Type.align_of(E128) == 16
+                and (E128.empty'bitvec).as(u128) == 0
+                and (E128.fixed'bitvec).as(u128) == K128
+                and (E128.big { mid: 0x0123_4567_89AB_CDEF }'bitvec).as(u128) == 0x5A_0123_4567_89AB_CDEF_0000_0000_0000_01
+                and (E128.fixed match { .fixed => true, _ => false })
+                and (E128.big { mid: 0x0123_4567_89AB_CDEF } match { .big { mid: m } => m == 0x0123_4567_89AB_CDEF, _ => false });
+
+            let ok_pos = Type.size_of(EPos) == Type.size_of(usize)
+                and Type.align_of(EPos) == Type.align_of(usize)
+                and (EPos.zero'bitvec).as(usize) == 0
+                and (EPos.alt'bitvec).as(usize) == KUSIZE
+                and EPos.alt'tag_name == "alt"
+                and (EPos.alt match { .alt => true, _ => false });
+
+            ok16 and ok32 and ok64 and ok128 and ok_pos
+        }
+
+        fn check_other_groups() -> bool {
+            let u_ok = (UGrp.a.x match { .a => true, _ => false })
+                and (UGrp.a.z match { .a => true, _ => false })
+                and not (UGrp.tail match { .a => true, _ => false });
+
+            let t_ok = (TGrp.a.x(10) match { .a => true, _ => false })
+                and (TGrp.a.y(20) match { .a => true, _ => false })
+                and not (TGrp.none match { .a => true, _ => false });
+
+            let n_ok = Type.size_of(NGrp) == 1
+                and (NGrp.grp.k0 match { .grp => true, _ => false })
+                and (NGrp.grp.k1 match { .grp => true, _ => false })
+                and not (NGrp.other match { .grp => true, _ => false })
+                and not (NGrp.pay(false) match { .grp => true, _ => false });
+
+            let nd_ok = Type.size_of(NGrpData) == 1
+                and (NGrpData.grp.keep match { .grp => true, _ => false })
+                and (NGrpData.grp.pay(true) match { .grp => true, _ => false })
+                and not (NGrpData.none match { .grp => true, _ => false });
+
+            u_ok and t_ok and n_ok and nd_ok
+        }
+
+        fn run() -> bool {
+            REFLECT_OK and check_e8() and check_wide_bases() and check_other_groups()
+        }
+    "#;
+    for opt in ["0", "3"] {
+        let case = NativeCase::new(source);
+        let build = case.build(opt);
+        assert_success(&build);
+        let output = case.run();
+        assert_success(&output);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.ends_with("(bool true)\n"), "opt={opt}: {stdout}");
+    }
+
+    let usize_probe = r#"
+        const TARGET_CODE: usize = 77;
+        enum TargetTag {
+            .base_type usize,
+            .discrete_tag true,
+            empty: 0,
+            marked: < TARGET_CODE > ,
+        }
+
+        comptime fn is_usize_base(subject: Type) -> bool {
+            subject.enum_bit_base_type() match {
+                found? => found == usize,
+                null => false,
+            }
+        }
+
+        const WIDTH_OK: bool = TargetTag.enum_bit_width() == 32;
+        const BASE_OK: bool = is_usize_base(TargetTag);
+
+        fn run() -> bool {
+            WIDTH_OK
+                and Type.size_of(TargetTag) == 4
+                and Type.align_of(TargetTag) == 4
+                and BASE_OK
+        }
+    "#;
+    let probe64 = r#"
+        const TARGET_CODE: usize = 77;
+        enum TargetTag {
+            .base_type usize,
+            .discrete_tag true,
+            empty: 0,
+            marked: < TARGET_CODE > ,
+        }
+        const WIDTH64_OK: bool = TargetTag.enum_bit_width() == 64;
+        fn run() -> bool {
+            WIDTH64_OK
+                and Type.size_of(TargetTag) == 8
+                and Type.align_of(TargetTag) == 8
+        }
+    "#;
+    let prefixed32 = r#"
+        enum TargetTag {
+            .base_type usize,
+            .discrete_tag true,
+            prefixed: 0x0F (low: u16) FF,
+        }
+        const WIDTH32_OK: bool = TargetTag.enum_bit_width() == 32;
+        fn run() -> bool {
+            WIDTH32_OK and Type.size_of(TargetTag) == 4
+        }
+    "#;
+    assert_eq!(
+        run_with_target(usize_probe, "x86", "linux", "32").unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        run_with_target(usize_probe, "x86_64", "linux", "64").unwrap(),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        run_with_target(probe64, "x86_64", "linux", "64").unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        run_with_target(prefixed32, "x86", "linux", "32").unwrap(),
+        Value::Bool(true)
+    );
+    assert!(run_with_target(prefixed32, "x86_64", "linux", "64").is_err());
+}

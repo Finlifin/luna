@@ -278,6 +278,29 @@ impl Variant {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscriminantIntervals {
+    pub ranges: Vec<(u128, u128)>,
+    pub residual_variants: Vec<usize>,
+}
+
+/// Sort and coalesce overlapping or adjacent inclusive `[lo, hi]` intervals.
+pub fn merge_contiguous_ranges(mut intervals: Vec<(u128, u128)>) -> Vec<(u128, u128)> {
+    intervals.sort_unstable();
+    let mut merged: Vec<(u128, u128)> = Vec::with_capacity(intervals.len());
+    for (lo, hi) in intervals {
+        debug_assert!(lo <= hi);
+        if let Some((_, prev_hi)) = merged.last_mut()
+            && lo <= prev_hi.saturating_add(1)
+        {
+            *prev_hi = (*prev_hi).max(hi);
+        } else {
+            merged.push((lo, hi));
+        }
+    }
+    merged
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Layout {
     width: usize,
     variants: Vec<Variant>,
@@ -437,6 +460,49 @@ impl Layout {
             consider(&mut best, last_hi + 1, full_mask);
         }
         best
+    }
+
+    /// Decompose a subset of variants into exact contiguous closed ranges plus any
+    /// variants whose free bits are non-contiguous, for widths up to 128 bits.
+    pub fn discriminant_intervals(&self, indices: &[usize]) -> Option<DiscriminantIntervals> {
+        if self.width == 0 || self.width > 128 {
+            return None;
+        }
+        let mut unique = indices.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        if unique.iter().any(|&index| index >= self.variants.len()) {
+            return None;
+        }
+        let full_mask = if self.width == 128 {
+            u128::MAX
+        } else {
+            (1u128 << self.width) - 1
+        };
+        let words_u128 = |words: &[u32]| -> u128 {
+            let mut acc = 0u128;
+            for (k, word) in words.iter().take(4).enumerate() {
+                acc |= u128::from(*word) << (k * 32);
+            }
+            acc & full_mask
+        };
+        let mut intervals = Vec::new();
+        let mut residual_variants = Vec::new();
+        for index in unique {
+            let variant = &self.variants[index];
+            let mask = words_u128(variant.fixed_mask().words()) & full_mask;
+            let val = words_u128(variant.fixed_value().words()) & mask;
+            let free = !mask & full_mask;
+            if free & free.wrapping_add(1) == 0 {
+                intervals.push((val, val | free));
+            } else {
+                residual_variants.push(index);
+            }
+        }
+        Some(DiscriminantIntervals {
+            ranges: merge_contiguous_ranges(intervals),
+            residual_variants,
+        })
     }
 
     pub fn discriminate(&self, bits: &BitVec, budget: &mut Budget) -> Result<usize, Error> {

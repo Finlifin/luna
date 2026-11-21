@@ -219,6 +219,31 @@ impl Emitter<'_> {
                 receipt.extend(mapped_receipt);
             }
             Pattern::Or(alternatives) => {
+                if alternatives.is_empty() {
+                    self.branch(failure);
+                    return Ok(());
+                }
+                if matches!(value.ty, Ty::Enum(_))
+                    && alternatives.iter().all(|alt| {
+                        matches!(
+                            alt,
+                            Pattern::Variant { fields, .. }
+                                if fields.iter().all(|f| matches!(f, Pattern::Wild))
+                        )
+                    })
+                {
+                    let indices: Vec<usize> = alternatives
+                        .iter()
+                        .map(|alt| match alt {
+                            Pattern::Variant { index, .. } => *index,
+                            _ => unreachable!(),
+                        })
+                        .collect();
+                    if let Some(cond) = self.variant_set_condition(value, &indices)? {
+                        self.accept(cond, failure)?;
+                        return Ok(());
+                    }
+                }
                 let outer = self.locals.clone();
                 let original_receipt = receipt.clone();
                 let mut receipt_slots: Option<BTreeMap<LocalId, (Slot, Slot)>> = None;

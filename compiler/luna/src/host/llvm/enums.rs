@@ -825,6 +825,220 @@ impl Emitter<'_> {
             }
         }
     }
+
+    fn emit_unsigned_ranges_condition(
+        &mut self,
+        scalar_text: &str,
+        width: u32,
+        ranges: &[(u128, u128)],
+    ) -> Value {
+        if ranges.is_empty() {
+            return Value {
+                ty: Ty::Bool,
+                text: "false".into(),
+            };
+        }
+        let full_mask = if width == 128 {
+            u128::MAX
+        } else {
+            (1u128 << width) - 1
+        };
+        let mut combined: Option<Value> = None;
+        for &(lo, hi) in ranges {
+            if lo == 0 && hi == full_mask {
+                return Value {
+                    ty: Ty::Bool,
+                    text: "true".into(),
+                };
+            }
+            let cond = if lo == 0 {
+                self.instruction(Ty::Bool, format!("icmp ule i{width} {scalar_text}, {hi}"))
+            } else if hi == full_mask {
+                self.instruction(Ty::Bool, format!("icmp uge i{width} {scalar_text}, {lo}"))
+            } else if lo == hi {
+                self.instruction(Ty::Bool, format!("icmp eq i{width} {scalar_text}, {lo}"))
+            } else {
+                let shifted = self.instruction(
+                    Ty::Int(width, false),
+                    format!("sub i{width} {scalar_text}, {lo}"),
+                );
+                let span = hi - lo;
+                self.instruction(
+                    Ty::Bool,
+                    format!("icmp ule i{width} {}, {span}", shifted.text),
+                )
+            };
+            combined = Some(match combined {
+                None => cond,
+                Some(prev) => {
+                    self.instruction(Ty::Bool, format!("or i1 {}, {}", prev.text, cond.text))
+                }
+            });
+        }
+        combined.unwrap()
+    }
+
+    pub(super) fn variant_set_condition(
+        &mut self,
+        value: &Value,
+        indices: &[usize],
+    ) -> Result<Option<Value>, String> {
+        let Ty::Enum(layout) = value.ty.clone() else {
+            return Err("host variant set pattern has no enum representation".into());
+        };
+        *self.fuel = self
+            .fuel
+            .checked_sub(indices.len().max(1))
+            .ok_or("host variant set lowering budget exhausted")?;
+        if indices.iter().any(|&index| index >= layout.names.len()) {
+            return Err("host variant pattern index out of range".into());
+        }
+        let mut unique = indices.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        if unique.is_empty() {
+            return Ok(Some(Value {
+                ty: Ty::Bool,
+                text: "false".into(),
+            }));
+        }
+        match &layout.repr {
+            EnumRepr::Unit { width: 0 } | EnumRepr::SingleVariant { .. } => Ok(Some(Value {
+                ty: Ty::Bool,
+                text: if unique.contains(&0) { "true" } else { "false" }.into(),
+            })),
+            EnumRepr::Unit { width } => {
+                let ranges = nir::enum_encoding::merge_contiguous_ranges(
+                    unique.iter().map(|&i| (i as u128, i as u128)).collect(),
+                );
+                Ok(Some(self.emit_unsigned_ranges_condition(
+                    &value.text,
+                    *width,
+                    &ranges,
+                )))
+            }
+            EnumRepr::TaggedUnion { tag_bits, .. } => {
+                let tag_bits = *tag_bits;
+                let tag = self.instruction(
+                    Ty::Int(tag_bits, false),
+                    format!("extractvalue {} {}, 0", value.ty.llvm(), value.text),
+                );
+                let ranges = nir::enum_encoding::merge_contiguous_ranges(
+                    unique.iter().map(|&i| (i as u128, i as u128)).collect(),
+                );
+                Ok(Some(self.emit_unsigned_ranges_condition(
+                    &tag.text, tag_bits, &ranges,
+                )))
+            }
+            EnumRepr::Niche {
+                data_variant,
+                carrier,
+                niche,
+                ..
+            } => match niche.scalar {
+                nir::layout::NicheScalar::Int { bits } => {
+                    if !unique.contains(data_variant) {
+                        let raw = unique
+                            .iter()
+                            .map(|&idx| {
+                                let ord = if idx < *data_variant { idx } else { idx - 1 };
+                                let code = u128::from(niche.start) + ord as u128;
+                                (code, code)
+                            })
+                            .collect();
+                        let ranges = nir::enum_encoding::merge_contiguous_ranges(raw);
+                        let leaf = self.extract_niche_leaf(value, carrier, niche)?;
+                        Ok(Some(
+                            self.emit_unsigned_ranges_condition(&leaf.text, bits, &ranges),
+                        ))
+                    } else {
+                        let excluded: Vec<(u128, u128)> = (0..layout.names.len())
+                            .filter(|idx| *idx != *data_variant && !unique.contains(idx))
+                            .map(|idx| {
+                                let ord = if idx < *data_variant { idx } else { idx - 1 };
+                                let code = u128::from(niche.start) + ord as u128;
+                                (code, code)
+                            })
+                            .collect();
+                        if excluded.is_empty() {
+                            return Ok(Some(Value {
+                                ty: Ty::Bool,
+                                text: "true".into(),
+                            }));
+                        }
+                        let ranges = nir::enum_encoding::merge_contiguous_ranges(excluded);
+                        let leaf = self.extract_niche_leaf(value, carrier, niche)?;
+                        let is_excluded =
+                            self.emit_unsigned_ranges_condition(&leaf.text, bits, &ranges);
+                        Ok(Some(self.instruction(
+                            Ty::Bool,
+                            format!("xor i1 {}, true", is_excluded.text),
+                        )))
+                    }
+                }
+                nir::layout::NicheScalar::Pointer => {
+                    if unique.len() == layout.names.len() {
+                        Ok(Some(Value {
+                            ty: Ty::Bool,
+                            text: "true".into(),
+                        }))
+                    } else if unique.len() == 1 {
+                        Ok(Some(self.variant_condition(value, unique[0])?))
+                    } else {
+                        Ok(None)
+                    }
+                }
+            },
+            EnumRepr::FixedBits {
+                width,
+                codes,
+                masks,
+                ..
+            } if *width <= 128 => {
+                let full_mask = if *width == 128 {
+                    u128::MAX
+                } else {
+                    (1u128 << *width) - 1
+                };
+                let mut intervals = Vec::new();
+                let mut residual = Vec::new();
+                for &idx in &unique {
+                    let code = codes[idx]
+                        .parse::<u128>()
+                        .map_err(|_| "host fixed-bit variant code overflow")?;
+                    let mask = masks[idx]
+                        .parse::<u128>()
+                        .map_err(|_| "host fixed-bit variant mask overflow")?;
+                    let free = !mask & full_mask;
+                    let val = code & mask;
+                    if free & free.wrapping_add(1) == 0 {
+                        intervals.push((val, val | free));
+                    } else {
+                        residual.push(idx);
+                    }
+                }
+                let ranges = nir::enum_encoding::merge_contiguous_ranges(intervals);
+                let mut combined = if ranges.is_empty() {
+                    None
+                } else {
+                    Some(self.emit_unsigned_ranges_condition(&value.text, *width, &ranges))
+                };
+                for idx in residual {
+                    let cond = self.variant_condition(value, idx)?;
+                    combined = Some(match combined {
+                        None => cond,
+                        Some(prev) => self
+                            .instruction(Ty::Bool, format!("or i1 {}, {}", prev.text, cond.text)),
+                    });
+                }
+                Ok(Some(combined.unwrap_or(Value {
+                    ty: Ty::Bool,
+                    text: "false".into(),
+                })))
+            }
+            EnumRepr::FixedBits { .. } | EnumRepr::Symbol(_) => Ok(None),
+        }
+    }
 }
 
 impl Emitter<'_> {
@@ -1448,5 +1662,349 @@ mod tests {
         assert!(!optimized.contains("alloca"), "{optimized}");
         assert!(!optimized.contains("icmp"), "{optimized}");
         assert!(optimized.contains("select"), "{optimized}");
+    }
+
+    #[test]
+    fn variant_set_condition_lowers_contiguous_ranges_for_unit_tagged_niche_and_fixed_bits() {
+        use comptime_runtime::{Budget, bitvec::BitVec};
+        use nir::enum_encoding::{
+            Field as EncField, Layout as EncLayout, Representation, Variant as EncVariant,
+        };
+
+        let mut graph = iir::Package::default();
+        let (unit_ty, unit_inst) = enum_def(
+            1,
+            "Unit4",
+            vec![
+                ("u0", vec![]),
+                ("u1", vec![]),
+                ("u2", vec![]),
+                ("u3", vec![]),
+            ],
+        );
+        let (tagged_ty, tagged_inst) = enum_def(
+            2,
+            "Tagged4",
+            vec![
+                ("a", vec![Term::Primitive(P::U64)]),
+                ("b", vec![Term::Primitive(P::U32)]),
+                ("c", vec![]),
+                ("d", vec![]),
+            ],
+        );
+        let (niche_ty, niche_inst) = enum_def(
+            3,
+            "Niche4",
+            vec![
+                ("e0", vec![]),
+                ("e1", vec![]),
+                ("e2", vec![]),
+                ("flag", vec![Term::Primitive(P::Bool)]),
+            ],
+        );
+
+        let fixed_decl = nir::DeclarationId {
+            package: 0,
+            local: 4,
+        };
+        let fixed_ty = Term::Nominal {
+            declaration: fixed_decl,
+            arguments: vec![],
+        };
+        let mut budget = Budget::default();
+        let bv8 = |v: u32, budget: &mut Budget| BitVec::from_words(8, &[v], budget).unwrap();
+        let mk_const = |name: &str, val: u32, budget: &mut Budget| {
+            (
+                nir::program::Variant {
+                    name: name.into(),
+                    shape: nir::program::VariantShape::Unit,
+                    fields: vec![],
+                },
+                EncVariant::new(
+                    name.into(),
+                    bv8(0xff, budget),
+                    bv8(val, budget),
+                    vec![],
+                    budget,
+                )
+                .unwrap(),
+            )
+        };
+        let (c0_v, c0_e) = mk_const("c10", 0x10, &mut budget);
+        let (c1_v, c1_e) = mk_const("c11", 0x11, &mut budget);
+        let (c2_v, c2_e) = mk_const("c12", 0x12, &mut budget);
+        let (c3_v, c3_e) = mk_const("c13", 0x13, &mut budget);
+        let p2_v = nir::program::Variant {
+            name: "p2".into(),
+            shape: nir::program::VariantShape::Named(vec!["x".into()]),
+            fields: vec![Term::Primitive(P::BitVec(4))],
+        };
+        let p2_e = EncVariant::new(
+            "p2".into(),
+            bv8(0xf0, &mut budget),
+            bv8(0x20, &mut budget),
+            vec![EncField {
+                name: "x".into(),
+                start: 0,
+                width: 4,
+            }],
+            &mut budget,
+        )
+        .unwrap();
+        let p3_v = nir::program::Variant {
+            name: "p3".into(),
+            shape: nir::program::VariantShape::Named(vec!["y".into()]),
+            fields: vec![Term::Primitive(P::BitVec(4))],
+        };
+        let p3_e = EncVariant::new(
+            "p3".into(),
+            bv8(0xf0, &mut budget),
+            bv8(0x30, &mut budget),
+            vec![EncField {
+                name: "y".into(),
+                start: 0,
+                width: 4,
+            }],
+            &mut budget,
+        )
+        .unwrap();
+        let mid_v = nir::program::Variant {
+            name: "mid".into(),
+            shape: nir::program::VariantShape::Named(vec!["z".into()]),
+            fields: vec![Term::Primitive(P::BitVec(4))],
+        };
+        let mid_e = EncVariant::new(
+            "mid".into(),
+            bv8(0xc3, &mut budget),
+            bv8(0x81, &mut budget),
+            vec![EncField {
+                name: "z".into(),
+                start: 2,
+                width: 4,
+            }],
+            &mut budget,
+        )
+        .unwrap();
+        let enc_layout = EncLayout::new(
+            8,
+            vec![c0_e, c1_e, c2_e, c3_e, p2_e, p3_e, mid_e],
+            &mut budget,
+        )
+        .unwrap();
+        let fixed_inst = iir::NominalInstance {
+            ty: fixed_ty.clone(),
+            definition: iir::NominalDefinition::Enum(nir::program::Enum {
+                is_intrinsic: false,
+                parameter_types: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration: fixed_decl,
+                name: "Mixed8".into(),
+                groups: vec![],
+                encoding: Some(Representation {
+                    base_type: Some(P::U8),
+                    layout: enc_layout,
+                }),
+                symbol_encoding: None,
+                variants: vec![c0_v, c1_v, c2_v, c3_v, p2_v, p3_v, mid_v],
+            }),
+        };
+        graph.nominals = vec![unit_inst, tagged_inst, niche_inst, fixed_inst];
+
+        let lambdas = BTreeMap::new();
+        let template_identities = callables::TemplateIdentities::default();
+        let mut declarations = BTreeSet::new();
+        let mut fuel = 10_000;
+        let mut emitter = Emitter {
+            graph: &graph,
+            cleanup: None,
+            schedules: None,
+            resource_unwinds: vec![],
+            checked: true,
+            function: None,
+            closure_body: None,
+            failure_result: None,
+            effects: vec![],
+            effect_resume: None,
+            native_return: None,
+            loop_destinations: Default::default(),
+            outlined_return: None,
+            outlined_loops: BTreeMap::new(),
+            lambdas: &lambdas,
+            template_identities: &template_identities,
+            locals: BTreeMap::new(),
+            live: BTreeMap::new(),
+            temporaries: BTreeMap::new(),
+            temporary_live: BTreeMap::new(),
+            prepared: BTreeMap::new(),
+            receipt_paths: vec![],
+            pattern_orders: BTreeMap::new(),
+            temporary_fields: BTreeMap::new(),
+            loops: BTreeMap::new(),
+            prologue: String::new(),
+            body: String::new(),
+            declarations: &mut declarations,
+            text_constants: &mut strings::TextConstants::default(),
+            attr_table: None,
+            serial: 0,
+            terminated: false,
+            fuel: &mut fuel,
+        };
+
+        let unit_llvm = repr(&graph, &unit_ty, true).unwrap();
+        let u_cond = emitter
+            .variant_set_condition(
+                &Value {
+                    ty: unit_llvm,
+                    text: "%u".into(),
+                },
+                &[1, 2],
+            )
+            .unwrap()
+            .unwrap();
+        assert!(emitter.body.contains("sub i8 %u, 1"), "{}", emitter.body);
+        assert!(emitter.body.contains("icmp ule i8"), "{}", emitter.body);
+        assert!(!emitter.body.contains("icmp eq"), "{}", emitter.body);
+        let _ = u_cond;
+
+        let body_before_tagged = emitter.body.len();
+        let tagged_llvm = repr(&graph, &tagged_ty, true).unwrap();
+        let _ = emitter
+            .variant_set_condition(
+                &Value {
+                    ty: tagged_llvm,
+                    text: "%tg".into(),
+                },
+                &[1, 2],
+            )
+            .unwrap()
+            .unwrap();
+        let tagged_ir = &emitter.body[body_before_tagged..];
+        assert!(
+            tagged_ir.matches("extractvalue").count() == 1,
+            "{tagged_ir}"
+        );
+        assert!(tagged_ir.contains("sub i8"), "{tagged_ir}");
+        assert!(tagged_ir.contains("icmp ule i8"), "{tagged_ir}");
+
+        let body_before_niche = emitter.body.len();
+        let niche_llvm = repr(&graph, &niche_ty, true).unwrap();
+        let _ = emitter
+            .variant_set_condition(
+                &Value {
+                    ty: niche_llvm.clone(),
+                    text: "%ni".into(),
+                },
+                &[0, 1],
+            )
+            .unwrap()
+            .unwrap();
+        let _ = emitter
+            .variant_set_condition(
+                &Value {
+                    ty: niche_llvm,
+                    text: "%ni".into(),
+                },
+                &[1, 2, 3],
+            )
+            .unwrap()
+            .unwrap();
+        let niche_ir = &emitter.body[body_before_niche..];
+        assert!(niche_ir.contains("sub i8 %ni, 2"), "{niche_ir}");
+        assert!(niche_ir.contains("xor i1"), "{niche_ir}");
+
+        emitter.body.clear();
+        emitter.prologue.clear();
+        let fixed_llvm = repr(&graph, &fixed_ty, true).unwrap();
+        let arg = Value {
+            ty: fixed_llvm.clone(),
+            text: "%raw".into(),
+        };
+        let c_range = emitter
+            .variant_set_condition(&arg, &[0, 1, 2, 3])
+            .unwrap()
+            .unwrap();
+        assert!(emitter.body.contains("sub i8 %raw, 16"), "{}", emitter.body);
+        assert!(emitter.body.contains("icmp ule i8"), "{}", emitter.body);
+        assert!(!emitter.body.contains("icmp eq"), "{}", emitter.body);
+
+        let before_prefix = emitter.body.len();
+        let p_range = emitter
+            .variant_set_condition(&arg, &[4, 5])
+            .unwrap()
+            .unwrap();
+        let prefix_ir = &emitter.body[before_prefix..];
+        assert!(prefix_ir.contains("sub i8 %raw, 32"), "{prefix_ir}");
+        assert!(prefix_ir.contains("icmp ule i8"), "{prefix_ir}");
+        assert!(!prefix_ir.contains("icmp eq"), "{prefix_ir}");
+
+        let before_mixed = emitter.body.len();
+        let m_range = emitter
+            .variant_set_condition(&arg, &[4, 5, 6])
+            .unwrap()
+            .unwrap();
+        let mixed_ir = &emitter.body[before_mixed..];
+        assert!(mixed_ir.contains("sub i8 %raw, 32"), "{mixed_ir}");
+        assert!(mixed_ir.contains("and i8 %raw, 195"), "{mixed_ir}");
+        assert!(mixed_ir.contains("icmp eq i8"), "{mixed_ir}");
+        assert!(mixed_ir.contains("or i1"), "{mixed_ir}");
+
+        let pack = emitter.instruction(
+            Ty::Int(8, false),
+            format!("select i1 {}, i8 1, i8 0", c_range.text),
+        );
+        let p_bit = emitter.instruction(
+            Ty::Int(8, false),
+            format!("select i1 {}, i8 2, i8 0", p_range.text),
+        );
+        let m_bit = emitter.instruction(
+            Ty::Int(8, false),
+            format!("select i1 {}, i8 4, i8 0", m_range.text),
+        );
+        let p01 = emitter.instruction(
+            Ty::Int(8, false),
+            format!("or i8 {}, {}", pack.text, p_bit.text),
+        );
+        let all = emitter.instruction(
+            Ty::Int(8, false),
+            format!("or i8 {}, {}", p01.text, m_bit.text),
+        );
+        emitter.line(format!("ret i8 {}", all.text));
+
+        let check_cases = [
+            (0x0F, 0),
+            (0x10, 1),
+            (0x13, 1),
+            (0x14, 0),
+            (0x1F, 0),
+            (0x20, 2 | 4),
+            (0x3F, 2 | 4),
+            (0x40, 0),
+            (0x81, 4),
+            (0xBD, 4),
+            (0x80, 0),
+        ];
+        let mut checks = String::new();
+        for (input, expected) in check_cases {
+            checks.push_str(&format!(
+                "  %r_{input} = call i8 @classify(i8 {input})\n  %ok_{input} = icmp eq i8 %r_{input}, {expected}\n  br i1 %ok_{input}, label %next_{input}, label %fail\nnext_{input}:\n"
+            ));
+        }
+        let ir = format!(
+            "declare void @llvm.trap()\ndefine i8 @classify(i8 %raw) {{\nentry:\n{}{}}}\ndefine i32 @main() {{\nentry:\n{checks}  ret i32 0\nfail:\n  call void @llvm.trap()\n  unreachable\n}}\n",
+            emitter.prologue, emitter.body
+        );
+        for optimization in [
+            crate::host::OptimizationLevel::O0,
+            crate::host::OptimizationLevel::O3,
+        ] {
+            let toolchain = crate::host::Toolchain {
+                optimization,
+                ..Default::default()
+            };
+            let output = toolchain.execute_test_ir(&ir).unwrap();
+            assert!(output.status.success(), "{optimization:?}: {ir}");
+        }
     }
 }
