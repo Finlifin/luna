@@ -136,6 +136,7 @@ dependencies = [
  "comptime_runtime",
  "iir",
  "nir",
+ "stacker",
 ]
 
 [[package]]

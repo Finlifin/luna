@@ -40,12 +40,6 @@ impl<'a> Catalog<'a> {
             owned: HashMap::new(),
         }
     }
-    pub(super) fn get(&self, key: &Key) -> Option<&Expr> {
-        self.owned
-            .get(key)
-            .map(Arc::as_ref)
-            .or_else(|| self.get_static(key))
-    }
     pub(super) fn get_body(&self, key: &Key) -> Option<invocation::Body<'a>> {
         self.owned
             .get(key)

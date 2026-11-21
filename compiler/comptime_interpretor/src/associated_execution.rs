@@ -107,8 +107,18 @@ impl<'a> Interpreter<'a> {
         else {
             unreachable!()
         };
-        let prepared =
-            self.prepare_associated_value(interface, subject, *member, &expr.ty, expr.source)?;
+        self.eval_associated_member(interface, subject, *member, &expr.ty, expr.source)
+    }
+
+    pub(super) fn eval_associated_member(
+        &mut self,
+        interface: &InterfaceInstance,
+        subject: &Term,
+        member: DeclarationId,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<Flow, Error> {
+        let prepared = self.prepare_associated_value(interface, subject, member, ty, source)?;
         if !self.bytecode_invocation_available() {
             let active = match prepared {
                 Preparation::Ready(active) => active,

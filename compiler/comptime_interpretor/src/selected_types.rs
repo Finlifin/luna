@@ -7,28 +7,8 @@ mod observation_tests;
 type Values<'a> = associated_catalog::Catalog<'a>;
 
 type Key = (InterfaceInstance, Term, DeclarationId);
-trait Lookup {
-    fn get(&self, key: &Key) -> Option<&Expr>;
-}
-impl Lookup for Values<'_> {
-    fn get(&self, key: &Key) -> Option<&Expr> {
-        self.get(key)
-    }
-}
-struct Tracked<'v, 'p> {
-    values: &'v Values<'p>,
-    observed: &'v HashMap<Key, Expr>,
-    missing: std::cell::RefCell<Option<Key>>,
-}
-impl Lookup for Tracked<'_, '_> {
-    fn get(&self, key: &Key) -> Option<&Expr> {
-        let value = self.observed.get(key).or_else(|| self.values.get(key));
-        if value.is_none() {
-            *self.missing.borrow_mut() = Some(key.clone());
-        }
-        value
-    }
-}
+mod projection;
+use projection::{Lookup, Observation};
 
 impl Interpreter<'_> {
     /// Invocation-owned identity comparison may demand associated Type views.
@@ -59,61 +39,10 @@ impl Interpreter<'_> {
         ty: &Term,
         source: Option<SourceRange>,
     ) -> Result<Term, Error> {
-        // These are observations of this type query, never entries in the VM's
-        // execution catalogue. Nested programs and independent domain queries
-        // must still execute their own reads, even while this query is active.
-        let mut observed = HashMap::new();
-        loop {
-            let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
-            let mut fuel = before;
-            let tracked = Tracked {
-                values: &self.associated_values,
-                observed: &observed,
-                missing: Default::default(),
-            };
-            // normalize meters each node and variable-size payload before
-            // constructing it; a second full-tree copy preflight is redundant.
-            let selected = normalize(ty, &tracked, &mut fuel, 0);
-            let missing = tracked.missing.into_inner();
-            self.budget.steps -= (before - fuel) as u64;
-            // Phase and world authorize an active observation. The common
-            // associated admission path decides whether a body is already
-            // selected or a resolver is needed; a host callback is not execution
-            // permission and its absence does not hide retained initializers.
-            let Some(key) = missing.filter(|_| self.comptime_only && self.graph.is_none()) else {
-                return selected.map_err(|kind| self.failure(kind, source));
-            };
-            let source = source.unwrap_or(SourceRange { start: 0, end: 0 });
-            let access = Expr {
-                source,
-                ty: Term::Primitive(Primitive::Type),
-                kind: K::AssociatedValue {
-                    interface: key.0.clone(),
-                    subject: key.1.clone(),
-                    member: key.2,
-                },
-            };
-            let value = self.eval_associated_value(&access)?;
-            // Repeated projections in this query can reuse its observed Type.
-            // Do not let that result shadow the program for any VM execution.
-            if !self.associated_values.contains_key(&key) {
-                let value = match value {
-                    Flow::Value(Value::Type(ty)) => ty,
-                    Flow::Value(Value::TypeParameter(declaration)) => Term::Rigid {
-                        declaration,
-                        sort: nir::Sort::Type,
-                    },
-                    _ => return Err(self.failure(ErrorKind::Type, Some(source))),
-                };
-                observed.insert(
-                    key,
-                    Expr {
-                        source,
-                        ty: Term::Primitive(Primitive::Type),
-                        kind: K::TypeValue(value),
-                    },
-                );
-            }
+        if self.comptime_only && self.graph.is_none() {
+            Observation::run(self, ty, source)
+        } else {
+            self.query_descriptions(source, |vm, fuel| view(ty, &vm.associated_values, fuel))
         }
     }
 }
@@ -197,27 +126,42 @@ pub(super) fn predicate(
 
 fn normalize(
     ty: &Term,
-    values: &impl Lookup,
+    mut values: &Values<'_>,
     fuel: &mut usize,
     depth: usize,
 ) -> Result<Term, ErrorKind> {
+    walk(ty, &mut values, fuel, depth)
+}
+
+fn walk_many<'p, L: Lookup<'p>>(
+    items: &[Term],
+    values: &mut L,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Vec<Term>, L::Failure> {
+    if items.len() > *fuel {
+        return Err(ErrorKind::StepsExhausted.into());
+    }
+    items
+        .iter()
+        .map(|ty| walk(ty, values, fuel, depth))
+        .collect()
+}
+
+fn walk<'p, L: Lookup<'p>>(
+    ty: &Term,
+    values: &mut L,
+    fuel: &mut usize,
+    depth: usize,
+) -> Result<Term, L::Failure> {
     if depth >= 64 {
-        return Err(ErrorKind::DepthExhausted);
+        return Err(ErrorKind::DepthExhausted.into());
     }
     *fuel = fuel.checked_sub(1).ok_or(ErrorKind::StepsExhausted)?;
-    let many = |items: &[Term], fuel: &mut usize| -> Result<Vec<Term>, ErrorKind> {
-        if items.len() > *fuel {
-            return Err(ErrorKind::StepsExhausted);
-        }
-        items
-            .iter()
-            .map(|ty| normalize(ty, values, fuel, depth + 1))
-            .collect()
-    };
     Ok(match ty {
         Term::ErrorResult { errors, result } => {
-            let observed_errors = many(errors, fuel)?;
-            let observed_result = normalize(result, values, fuel, depth + 1)?;
+            let observed_errors = walk_many(errors, values, fuel, depth + 1)?;
+            let observed_result = walk(result, values, fuel, depth + 1)?;
             // An already selected row may carry an explicit physical order.
             // Observation must not silently retag its existing payload.
             charge_copy(ty, fuel)?;
@@ -239,11 +183,11 @@ fn normalize(
                 .map(|operation| {
                     Ok(nir::effects::Operation {
                         declaration: operation.declaration,
-                        arguments: many(&operation.arguments, fuel)?,
+                        arguments: walk_many(&operation.arguments, values, fuel, depth + 1)?,
                     })
                 })
-                .collect::<Result<Vec<_>, ErrorKind>>()?;
-            Term::computation(operations, normalize(result, values, fuel, depth + 1)?)
+                .collect::<Result<Vec<_>, L::Failure>>()?;
+            Term::computation(operations, walk(result, values, fuel, depth + 1)?)
         }
         Term::AssociatedType {
             origin,
@@ -252,27 +196,26 @@ fn normalize(
         } => {
             let interface = InterfaceInstance {
                 declaration: origin.interface,
-                arguments: many(arguments, fuel)?,
+                arguments: walk_many(arguments, values, fuel, depth + 1)?,
             };
-            let subject = normalize(subject, values, fuel, depth + 1)?;
-            let value = values
-                .get(&(interface, subject, origin.member))
-                .ok_or(ErrorKind::UnmaterializedDispatch)?;
+            let subject = walk(subject, values, fuel, depth + 1)?;
+            let body = values.resolve((interface, subject, origin.member), fuel)?;
+            let value = body.expression();
             if value.ty != Term::Primitive(Primitive::Type) {
-                return Err(ErrorKind::Type);
+                return Err(ErrorKind::Type.into());
             }
             let K::TypeValue(ty) = &value.kind else {
-                return Err(ErrorKind::Type);
+                return Err(ErrorKind::Type.into());
             };
             charge_copy(ty, fuel)?;
-            normalize(ty, values, fuel, depth + 1)?
+            walk(ty, values, fuel, depth + 1)?
         }
         Term::Nominal {
             declaration,
             arguments,
         } => Term::Nominal {
             declaration: *declaration,
-            arguments: many(arguments, fuel)?,
+            arguments: walk_many(arguments, values, fuel, depth + 1)?,
         },
         Term::NormalForm {
             head,
@@ -281,43 +224,46 @@ fn normalize(
         } => Term::NormalForm {
             head: *head,
             sort: *sort,
-            arguments: many(arguments, fuel)?,
+            arguments: walk_many(arguments, values, fuel, depth + 1)?,
         },
         Term::MethodValue(method) => Term::MethodValue(Box::new(TraitMethodIdentity {
             interface: InterfaceInstance {
                 declaration: method.interface.declaration,
-                arguments: many(&method.interface.arguments, fuel)?,
+                arguments: walk_many(&method.interface.arguments, values, fuel, depth + 1)?,
             },
-            subject: normalize(&method.subject, values, fuel, depth + 1)?,
+            subject: walk(&method.subject, values, fuel, depth + 1)?,
             member: method.member,
-            method_arguments: many(&method.method_arguments, fuel)?,
+            method_arguments: walk_many(&method.method_arguments, values, fuel, depth + 1)?,
         })),
         Term::FunctionValue {
             declaration,
             arguments,
         } => Term::FunctionValue {
             declaration: *declaration,
-            arguments: many(arguments, fuel)?,
+            arguments: walk_many(arguments, values, fuel, depth + 1)?,
         },
         Term::ClosureSnapshot { factory, arguments } => Term::ClosureSnapshot {
             factory: *factory,
-            arguments: many(arguments, fuel)?,
+            arguments: walk_many(arguments, values, fuel, depth + 1)?,
         },
-        Term::Tuple(items) => Term::Tuple(many(items, fuel)?),
-        Term::TupleValue(items) => Term::TupleValue(many(items, fuel)?),
-        Term::ClosureContextValue(items) => Term::ClosureContextValue(many(items, fuel)?),
+        Term::Tuple(items) => Term::Tuple(walk_many(items, values, fuel, depth + 1)?),
+        Term::TupleValue(items) => Term::TupleValue(walk_many(items, values, fuel, depth + 1)?),
+        Term::ClosureContextValue(items) => {
+            Term::ClosureContextValue(walk_many(items, values, fuel, depth + 1)?)
+        }
         Term::ContextualClosure { context, signature } => Term::contextual_closure(
-            normalize(context, values, fuel, depth + 1)?,
-            normalize(signature, values, fuel, depth + 1)?,
+            walk(context, values, fuel, depth + 1)?,
+            walk(signature, values, fuel, depth + 1)?,
         )
         .map_err(|_| ErrorKind::Type)?,
-        Term::ListConcat { ty, parts } => {
-            Term::list_concat(normalize(ty, values, fuel, depth + 1)?, many(parts, fuel)?)
-                .map_err(|_| ErrorKind::Type)?
-        }
+        Term::ListConcat { ty, parts } => Term::list_concat(
+            walk(ty, values, fuel, depth + 1)?,
+            walk_many(parts, values, fuel, depth + 1)?,
+        )
+        .map_err(|_| ErrorKind::Type)?,
         Term::Record(fields) => {
             if fields.len() > *fuel {
-                return Err(ErrorKind::StepsExhausted);
+                return Err(ErrorKind::StepsExhausted.into());
             }
             Term::Record(
                 fields
@@ -326,30 +272,30 @@ fn normalize(
                         *fuel = fuel
                             .checked_sub(name.len())
                             .ok_or(ErrorKind::StepsExhausted)?;
-                        Ok((name.clone(), normalize(ty, values, fuel, depth + 1)?))
+                        Ok((name.clone(), walk(ty, values, fuel, depth + 1)?))
                     })
-                    .collect::<Result<_, ErrorKind>>()?,
+                    .collect::<Result<_, L::Failure>>()?,
             )
         }
         Term::OptionalValue { ty, value } => Term::OptionalValue {
-            ty: Box::new(normalize(ty, values, fuel, depth + 1)?),
+            ty: Box::new(walk(ty, values, fuel, depth + 1)?),
             value: value
                 .as_ref()
-                .map(|value| normalize(value, values, fuel, depth + 1).map(Box::new))
+                .map(|value| walk(value, values, fuel, depth + 1).map(Box::new))
                 .transpose()?,
         },
         Term::ErrorValue { ty, label, value } => {
             let Term::ErrorResult { errors, result } = ty.as_ref() else {
-                return Err(ErrorKind::Type);
+                return Err(ErrorKind::Type.into());
             };
             Term::error_value(
-                many(errors, fuel)?,
-                normalize(result, values, fuel, depth + 1)?,
+                walk_many(errors, values, fuel, depth + 1)?,
+                walk(result, values, fuel, depth + 1)?,
                 match label {
-                    Some(label) => Some(Box::new(normalize(label, values, fuel, depth + 1)?)),
+                    Some(label) => Some(Box::new(walk(label, values, fuel, depth + 1)?)),
                     None => None,
                 },
-                normalize(value, values, fuel, depth + 1)?,
+                walk(value, values, fuel, depth + 1)?,
             )
             .map_err(|_| ErrorKind::Type)?
         }
@@ -358,13 +304,13 @@ fn normalize(
             variant,
             fields,
         } => Term::NominalValue {
-            ty: Box::new(normalize(ty, values, fuel, depth + 1)?),
+            ty: Box::new(walk(ty, values, fuel, depth + 1)?),
             variant: *variant,
-            fields: many(fields, fuel)?,
+            fields: walk_many(fields, values, fuel, depth + 1)?,
         },
         Term::RecordValue(fields) => {
             if fields.len() > *fuel {
-                return Err(ErrorKind::StepsExhausted);
+                return Err(ErrorKind::StepsExhausted.into());
             }
             Term::RecordValue(
                 fields
@@ -373,40 +319,37 @@ fn normalize(
                         *fuel = fuel
                             .checked_sub(name.len())
                             .ok_or(ErrorKind::StepsExhausted)?;
-                        Ok((name.clone(), normalize(ty, values, fuel, depth + 1)?))
+                        Ok((name.clone(), walk(ty, values, fuel, depth + 1)?))
                     })
-                    .collect::<Result<_, ErrorKind>>()?,
+                    .collect::<Result<_, L::Failure>>()?,
             )
         }
-        Term::Optional(inner) => {
-            Term::Optional(Box::new(normalize(inner, values, fuel, depth + 1)?))
-        }
+        Term::Optional(inner) => Term::Optional(Box::new(walk(inner, values, fuel, depth + 1)?)),
         Term::RuntimeField { base, index } => Term::RuntimeField {
-            base: Box::new(normalize(base, values, fuel, depth + 1)?),
+            base: Box::new(walk(base, values, fuel, depth + 1)?),
             index: *index,
         },
-        Term::Pointer(inner) => Term::Pointer(Box::new(normalize(inner, values, fuel, depth + 1)?)),
-        Term::Lift(inner) => Term::Lift(Box::new(normalize(inner, values, fuel, depth + 1)?)),
-        Term::NormalFormFunction(inner, collector) => Term::NormalFormFunction(
-            Box::new(normalize(inner, values, fuel, depth + 1)?),
-            *collector,
-        ),
+        Term::Pointer(inner) => Term::Pointer(Box::new(walk(inner, values, fuel, depth + 1)?)),
+        Term::Lift(inner) => Term::Lift(Box::new(walk(inner, values, fuel, depth + 1)?)),
+        Term::NormalFormFunction(inner, collector) => {
+            Term::NormalFormFunction(Box::new(walk(inner, values, fuel, depth + 1)?), *collector)
+        }
         Term::ComptimeFunction(inner) => {
-            Term::ComptimeFunction(Box::new(normalize(inner, values, fuel, depth + 1)?))
+            Term::ComptimeFunction(Box::new(walk(inner, values, fuel, depth + 1)?))
         }
         Term::UnsafeFunction(inner) => {
-            Term::UnsafeFunction(Box::new(normalize(inner, values, fuel, depth + 1)?))
+            Term::UnsafeFunction(Box::new(walk(inner, values, fuel, depth + 1)?))
         }
         Term::Closure {
             environment,
             signature,
         } => Term::Closure {
-            environment: many(environment, fuel)?,
-            signature: Box::new(normalize(signature, values, fuel, depth + 1)?),
+            environment: walk_many(environment, values, fuel, depth + 1)?,
+            signature: Box::new(walk(signature, values, fuel, depth + 1)?),
         },
         Term::Function { parameters, result } => {
             if parameters.len() > *fuel {
-                return Err(ErrorKind::StepsExhausted);
+                return Err(ErrorKind::StepsExhausted.into());
             }
             Term::Function {
                 parameters: parameters
@@ -414,11 +357,11 @@ fn normalize(
                     .map(|p| {
                         Ok(nir::Parameter {
                             sort: p.sort,
-                            ty: normalize(&p.ty, values, fuel, depth + 1)?,
+                            ty: walk(&p.ty, values, fuel, depth + 1)?,
                         })
                     })
-                    .collect::<Result<_, ErrorKind>>()?,
-                result: Box::new(normalize(result, values, fuel, depth + 1)?),
+                    .collect::<Result<_, L::Failure>>()?,
+                result: Box::new(walk(result, values, fuel, depth + 1)?),
             }
         }
         Term::Primitive(_)

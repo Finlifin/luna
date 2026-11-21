@@ -187,6 +187,52 @@ fn observation_values_never_shadow_nested_program_reads() {
 }
 
 #[test]
+fn demanding_distinct_projections_traverses_the_record_prefix_once() {
+    let package = package();
+    for compiled in [false, true] {
+        let observe = |width| {
+            let mut vm = Interpreter::for_comptime(&package, Budget::default())
+                .unwrap()
+                .with_associated_resolver(&select);
+            vm.bytecode_enabled = compiled;
+            let label = "p".repeat(width);
+            let input = Term::Record(vec![
+                (label.clone(), ty(Primitive::Bool)),
+                (
+                    "read".into(),
+                    Term::Tuple(vec![projection(3), projection(4), projection(3)]),
+                ),
+            ]);
+            let before = vm.remaining_steps();
+            let result = vm.selected_type_view(&input, Some(SOURCE)).unwrap();
+            assert_eq!(
+                result,
+                Term::Record(vec![
+                    (label, ty(Primitive::Bool)),
+                    (
+                        "read".into(),
+                        Term::Tuple(vec![
+                            ty(Primitive::Bool),
+                            ty(Primitive::Char),
+                            ty(Primitive::Bool)
+                        ])
+                    ),
+                ])
+            );
+            assert_eq!(entries(&vm, 0), [id(9), id(10), id(9)]);
+            before - vm.remaining_steps()
+        };
+        let short = observe(1);
+        let long = observe(4097);
+        assert_eq!(
+            long - short,
+            4096,
+            "steps {short} -> {long}, bytecode={compiled}"
+        );
+    }
+}
+
+#[test]
 fn incomplete_observations_leave_no_values_for_a_later_query() {
     let package = package();
     for compiled in [false, true] {
@@ -423,4 +469,68 @@ fn observation_cannot_use_a_resolver_to_escape_runtime_or_graph_authority() {
         assert!(vm.events.is_empty());
     }
     assert_eq!(calls.get(), 0);
+}
+
+#[test]
+fn failed_initializer_accounts_for_both_sides_of_the_projection_boundary() {
+    use std::cell::Cell;
+    let package = package();
+    let supplier = SourceRange { start: 40, end: 48 };
+    let seen = Cell::new(0);
+    let resolver = |_: &Expr, fuel: &mut u64| {
+        seen.set(*fuel);
+        *fuel -= 7;
+        Err(Error {
+            kind: ErrorKind::TypeContractUnresolved,
+            source: Some(supplier),
+        })
+    };
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_associated_resolver(&resolver);
+        vm.bytecode_enabled = compiled;
+        let mut probe = |width| {
+            vm.budget.steps = 10_000;
+            let input = Term::Record(vec![("x".repeat(width), projection(3))]);
+            let error = vm.selected_type_view(&input, Some(SOURCE)).unwrap_err();
+            assert_eq!(
+                error,
+                Error {
+                    kind: ErrorKind::TypeContractUnresolved,
+                    source: Some(supplier)
+                }
+            );
+            assert_eq!(vm.remaining_steps(), seen.get() - 7);
+            assert!(vm.active_associated_initializers.is_empty());
+            seen.get()
+        };
+        assert_eq!(probe(1) - probe(513), 512);
+    }
+}
+
+#[test]
+fn nested_structural_prefix_can_demand_an_initializer_at_its_leaf() {
+    let nest = |leaf, count| (0..count).fold(leaf, |inner, _| Term::Optional(Box::new(inner)));
+    let package = package();
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_associated_resolver(&select);
+        vm.bytecode_enabled = compiled;
+        assert_eq!(
+            vm.selected_type_view(&nest(projection(3), 61), Some(SOURCE))
+                .unwrap(),
+            nest(ty(Primitive::Bool), 61)
+        );
+        assert_eq!(entries(&vm, 0), [id(9)]);
+        let start = vm.events.len();
+        assert_eq!(
+            vm.selected_type_view(&nest(projection(3), 64), Some(SOURCE))
+                .unwrap_err()
+                .kind,
+            ErrorKind::DepthExhausted
+        );
+        assert!(entries(&vm, start).is_empty());
+    }
 }
