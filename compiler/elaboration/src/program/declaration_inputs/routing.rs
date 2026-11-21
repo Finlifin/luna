@@ -115,17 +115,16 @@ impl<'h> Frame<'h> {
         checker: &mut Checker<'_, '_>,
         inputs: &[Arg<'h>],
         span: Span,
-        parameters: Parameters,
+        telescope: domain::Telescope,
         prefix: KnownInputs,
         entries: Vec<input_routing::Entry<hir::Symbol>>,
     ) -> Result<Self, Error> {
-        if parameters.len() != entries.len() {
+        if telescope.parameters.len() != entries.len() {
             return Err(error(span, "input routing interface arity mismatch"));
         }
         environment::charge(&mut checker.required_steps, inputs.len(), span)?;
         let collector = entries.iter().position(|entry| entry.variadic);
         let routing = clause_inputs::ClauseInputRouting::from_entries(entries, inputs, span)?;
-        let telescope = domain::Telescope::new(parameters, &mut checker.required_steps, span)?;
         let routed = (0..telescope.parameters.len()).map(|_| None).collect();
         let widths = PacketWidths::new(inputs, routing.has_open_collector());
         Ok(Self {
@@ -265,17 +264,14 @@ impl<'h> Frame<'h> {
     ) -> Result<crate::calls::InputContext, Error> {
         use crate::calls::InputContext as C;
         let fields = self.packet_domains(checker, slots, span)?;
-        if slots
-            .iter()
-            .all(|&slot| self.telescope.direct(slot).is_empty())
-        {
+        if slots.iter().all(|&slot| self.telescope.independent(slot)) {
             return Ok(C::Known(checker.tuple_value_type(fields, span)?));
         }
         let fields = slots
             .iter()
             .zip(fields)
             .map(|(&slot, ty)| {
-                if self.telescope.direct(slot).is_empty() {
+                if self.telescope.independent(slot) {
                     C::Known(ty)
                 } else {
                     C::Unknown

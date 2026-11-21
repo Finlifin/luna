@@ -88,16 +88,23 @@ impl<'h> Frame<'h> {
                 .then(|| std::mem::take(&mut checker.preserve_effect_value)),
         };
         match application.interface {
-            normal::Supply::Declaration(owner) => preparation::Frame::begin(
-                checker,
-                owner,
-                inputs,
-                span,
-                parameters,
-                declaration_inputs::KnownInputs::default(),
-                None,
-                completion,
-            ),
+            normal::Supply::Declaration(owner) => {
+                let telescope = declaration_inputs::Telescope::new(
+                    parameters,
+                    &mut checker.required_steps,
+                    span,
+                )?;
+                preparation::Frame::begin(
+                    checker,
+                    owner,
+                    inputs,
+                    span,
+                    telescope,
+                    declaration_inputs::KnownInputs::default(),
+                    None,
+                    completion,
+                )
+            }
             normal::Supply::Callable { collector } => preparation::Frame::callable(
                 checker,
                 inputs,

@@ -259,15 +259,23 @@ impl Checker<'_, '_> {
         if let Some(expanded) = normal::literal_spreads(args) {
             return self.contextual_nominal_expression_in(owner, &expanded, span, expected, caller);
         }
+        let mut dynamic_captures = BTreeSet::new();
         let mut capture_binders = Vec::new();
         let mut capture_values = Vec::new();
         for binder in self.input_binders(&captures) {
             if let Some(value) = self.alias_substitution.shared(&binder.declaration).cloned() {
                 capture_values.push(self.copy_alias_type(&value, span)?);
                 capture_binders.push(binder);
+            } else if self.alias_value_bindings.contains_key(&binder.declaration)
+                || self
+                    .normal_default_bindings
+                    .contains_key(&binder.declaration)
+            {
+                dynamic_captures.insert(binder.declaration);
             }
         }
-        let domains = domains
+        let templates = domains;
+        let domains = templates
             .iter()
             .map(|domain| {
                 self.instantiate_trait_domain(domain, &capture_binders, &capture_values, span)
@@ -293,14 +301,28 @@ impl Checker<'_, '_> {
                 .zip(&domains)
                 .map(|(binder, domain)| (binder.declaration, binder.sort, domain.clone()))
                 .collect::<Vec<_>>();
+            let mut telescope =
+                declaration_inputs::Telescope::new(telescope, &mut self.required_steps, span)?;
+            telescope.track_captures(
+                &templates,
+                &dynamic_captures,
+                &mut self.required_steps,
+                span,
+            )?;
             let defaults = InputEnvironment {
                 substitution: &saved_aliases,
                 bindings: &saved_values,
                 normal_bindings: &saved_normal,
                 context: &saved_context,
             };
-            let prepared =
-                self.planned_declaration_inputs(owner, args, span, telescope, Some(&defaults))?;
+            let prepared = self.complete_declaration_inputs(
+                owner,
+                args,
+                span,
+                telescope,
+                Some(&defaults),
+                declaration_inputs::Contextual,
+            )?;
             let n::NormalFormInputPlan {
                 order: mut slots,
                 mut preparations,

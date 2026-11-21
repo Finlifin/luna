@@ -15,7 +15,7 @@ pub(in crate::program) trait Completion: std::fmt::Display {
     ) -> Result<Self::Output, Error>;
 }
 
-pub(super) struct Contextual;
+pub(in crate::program) struct Contextual;
 pub(super) struct Typed;
 
 impl Completion for Contextual {

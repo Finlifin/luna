@@ -3,6 +3,7 @@ use super::*;
 mod collections;
 mod completion;
 mod domain;
+pub(super) use domain::Telescope;
 mod environment;
 mod interface;
 mod observations;
@@ -22,7 +23,7 @@ pub(super) enum InputChecking {
     Typed,
 }
 
-pub(super) use completion::Completion;
+pub(super) use completion::{Completion, Contextual};
 pub(super) use environment::copy_term as copy_input_domain;
 pub(super) use environment::{Environment, copy_domains};
 
@@ -346,26 +347,6 @@ impl Checker<'_, '_> {
         Ok(value)
     }
 
-    /// Prepare explicit inputs in source order, then omitted inputs in their
-    /// declaration telescope. All reuse goes through fresh local bindings.
-    pub(super) fn planned_declaration_inputs(
-        &mut self,
-        owner: OwnerId,
-        inputs: &[Arg<'_>],
-        span: Span,
-        parameters: Vec<(DeclarationId, Sort, Term)>,
-        defaults: Option<&nominal::InputEnvironment<'_>>,
-    ) -> Result<PreparedDeclarationInputs, Error> {
-        self.plan_declaration_inputs(
-            owner,
-            inputs,
-            span,
-            parameters,
-            defaults,
-            completion::Contextual,
-        )
-    }
-
     pub(super) fn planned_typed_declaration_inputs(
         &mut self,
         owner: OwnerId,
@@ -374,20 +355,15 @@ impl Checker<'_, '_> {
         parameters: Vec<(DeclarationId, Sort, Term)>,
         defaults: Option<&nominal::InputEnvironment<'_>>,
     ) -> Result<CheckedDeclarationInputs, Error> {
-        self.plan_declaration_inputs(owner, inputs, span, parameters, defaults, completion::Typed)
-    }
-
-    fn plan_declaration_inputs<C: Completion>(
-        &mut self,
-        owner: OwnerId,
-        inputs: &[Arg<'_>],
-        span: Span,
-        parameters: Vec<(DeclarationId, Sort, Term)>,
-        defaults: Option<&nominal::InputEnvironment<'_>>,
-        completion: C,
-    ) -> Result<C::Output, Error> {
-        let defaults = defaults.map(Environment::retain);
-        self.complete_declaration_inputs(owner, inputs, span, parameters, defaults, completion)
+        let telescope = Telescope::new(parameters, &mut self.required_steps, span)?;
+        self.complete_declaration_inputs(
+            owner,
+            inputs,
+            span,
+            telescope,
+            defaults,
+            completion::Typed,
+        )
     }
 
     pub(super) fn complete_declaration_inputs<C: Completion>(
@@ -395,8 +371,8 @@ impl Checker<'_, '_> {
         owner: OwnerId,
         inputs: &[Arg<'_>],
         span: Span,
-        parameters: Vec<(DeclarationId, Sort, Term)>,
-        defaults: Option<Environment>,
+        telescope: Telescope,
+        defaults: Option<&nominal::InputEnvironment<'_>>,
         completion: C,
     ) -> Result<C::Output, Error> {
         let preparation = preparation::Frame::begin(
@@ -404,9 +380,9 @@ impl Checker<'_, '_> {
             owner,
             inputs,
             span,
-            parameters,
+            telescope,
             KnownInputs::default(),
-            defaults,
+            defaults.map(Environment::retain),
             completion,
         )?;
         self.check_declaration_inputs_region(preparation)

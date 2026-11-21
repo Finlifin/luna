@@ -173,12 +173,18 @@ impl Progress {
         span: Span,
     ) -> Result<BTreeSet<DeclarationId>, Error> {
         let direct = self.telescope.direct(slot);
-        environment::charge(fuel, direct.len(), span)?;
+        let captures = self
+            .telescope
+            .waiting_captures
+            .get(&slot)
+            .map_or(&[][..], Vec::as_slice);
+        environment::charge(fuel, direct.len() + captures.len(), span)?;
         Ok(direct
             .iter()
             .copied()
             .filter(|&index| self.identity(index).is_none())
             .map(|index| self.telescope.parameters[index].0)
+            .chain(captures.iter().copied())
             .collect())
     }
 
@@ -345,6 +351,13 @@ impl std::fmt::Display for Progress {
                 " (slot {index} {declaration} {sort} (binding {}) (domain {domain})",
                 slot.binding
             )?;
+            if let Some(captures) = self.telescope.waiting_captures.get(&index) {
+                f.write_str(" (waiting-captures")?;
+                for id in captures {
+                    write!(f, " {id}")?;
+                }
+                f.write_str(")")?;
+            }
             if let Some(prepared) = &slot.prepared {
                 write!(
                     f,

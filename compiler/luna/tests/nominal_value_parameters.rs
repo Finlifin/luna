@@ -1250,6 +1250,65 @@ fn comptime_member_value_domains_wait_for_dynamic_parent_types() {
 }
 
 #[test]
+fn member_capture_can_supply_type_as_the_index_domain_across_invocations() {
+    let source = "typealias Type=.Type'builtin;
+        struct Holder where T {
+            pub newtype Entry<value:T,flag:bool> = bool;
+        }
+        comptime fn Build(ty:Type)->Type {Holder<ty>.Entry<bool,true>}
+        comptime fn Expected()->Type {Holder<Type>.Entry<bool,true>}";
+    let package = support::compile(source);
+    let mut vm =
+        comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let build = support::id(&package, "Build");
+    let expected = vm
+        .invoke(support::id(&package, "Expected"), vec![])
+        .unwrap();
+    let ty = |primitive| Value::Type(nir::Term::Primitive(primitive));
+    for _ in 0..2 {
+        assert!(vm.invoke(build, vec![ty(nir::Primitive::Bool)]).is_err());
+        assert_eq!(
+            vm.invoke(build, vec![ty(nir::Primitive::Type)]).unwrap(),
+            expected
+        );
+    }
+
+    // The second slot is independent of the selected T and must fail while
+    // checking the definition, even if nobody invokes Build.
+    let invalid = source.replace("Holder<ty>.Entry<bool,true>", "Holder<ty>.Entry<bool,'x'>");
+    let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(error.contains("expected (primitive bool)"), "{error}");
+}
+
+#[test]
+fn computed_member_packet_uses_each_fields_selected_capture_domain() {
+    let source = "typealias Type=.Type'builtin;
+        struct Holder where T { pub newtype Entry<value:T,flag:bool> = bool; }
+        comptime fn supply()->bool {true}
+        comptime fn Build(ty:Type)->Type {
+            Holder<ty>.Entry<...do {let flag=supply(); (bool,flag)}>
+        }
+        comptime fn Expected()->Type {Holder<Type>.Entry<bool,true>}";
+    let package = support::compile(source);
+    let mut vm =
+        comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let ty = |primitive| Value::Type(nir::Term::Primitive(primitive));
+    let build = support::id(&package, "Build");
+    let actual = vm.invoke(build, vec![ty(nir::Primitive::Type)]).unwrap();
+    assert_eq!(support::calls(&package, &vm), ["Build", "supply"]);
+    assert_eq!(
+        actual,
+        vm.invoke(support::id(&package, "Expected"), vec![])
+            .unwrap()
+    );
+    assert!(vm.invoke(build, vec![ty(nir::Primitive::Bool)]).is_err());
+
+    let invalid = source.replace("(bool,flag)", "(bool,'x')");
+    let error = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(error.contains("expected (primitive bool)"), "{error}");
+}
+
+#[test]
 fn comptime_member_domains_do_not_inherit_the_callers_container_instance() {
     let source = "typealias Type=.Type'builtin;
         struct Holder where T,tag:bool {

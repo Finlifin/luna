@@ -32,21 +32,25 @@ impl<'h, C: Completion> Frame<'h, C> {
         owner: OwnerId,
         inputs: &[Arg<'h>],
         span: Span,
-        parameters: Vec<(DeclarationId, Sort, Term)>,
+        telescope: domain::Telescope,
         prefix: KnownInputs,
         defaults: Option<Environment>,
         completion: C,
     ) -> Result<Self, Error> {
         let clauses = checker.type_clause_params(owner);
-        if parameters.len() != clauses.len() {
+        if telescope.parameters.len() != clauses.len() {
             return Err(error(span, "declaration input telescope arity mismatch"));
         }
-        environment::charge(&mut checker.required_steps, parameters.len(), span)?;
+        environment::charge(
+            &mut checker.required_steps,
+            telescope.parameters.len(),
+            span,
+        )?;
         Self::new(
             checker,
             inputs,
             span,
-            parameters,
+            telescope,
             prefix,
             interface::Interface::declaration(owner, &clauses),
             defaults,
@@ -64,11 +68,12 @@ impl<'h, C: Completion> Frame<'h, C> {
     ) -> Result<Self, Error> {
         environment::charge(&mut checker.required_steps, parameters.len(), span)?;
         let interface = interface::Interface::callable(parameters.len(), collector, span)?;
+        let telescope = domain::Telescope::new(parameters, &mut checker.required_steps, span)?;
         Self::new(
             checker,
             inputs,
             span,
-            parameters,
+            telescope,
             KnownInputs::default(),
             interface,
             None,
@@ -80,7 +85,7 @@ impl<'h, C: Completion> Frame<'h, C> {
         checker: &mut Checker<'_, '_>,
         inputs: &[Arg<'h>],
         span: Span,
-        parameters: Parameters,
+        telescope: domain::Telescope,
         prefix: KnownInputs,
         interface: interface::Interface<'h>,
         defaults: Option<environment::Environment>,
@@ -91,7 +96,7 @@ impl<'h, C: Completion> Frame<'h, C> {
             checker,
             inputs,
             span,
-            parameters,
+            telescope,
             prefix,
             interface.entries().to_vec(),
         ) {

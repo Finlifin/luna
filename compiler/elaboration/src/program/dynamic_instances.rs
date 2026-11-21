@@ -541,6 +541,8 @@ impl<'a, 'arena> Checker<'a, 'arena> {
             .zip(local_domains)
             .map(|(&id, domain)| (id, Sort::of_comptime_domain(&domain), domain))
             .collect();
+        let telescope =
+            declaration_inputs::Telescope::new(telescope, &mut self.required_steps, expr.span)?;
         declaration_inputs::preparation::Frame::begin(
             self,
             owner,

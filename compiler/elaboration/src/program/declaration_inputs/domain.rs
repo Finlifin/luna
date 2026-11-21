@@ -13,14 +13,19 @@ pub(super) enum Poll {
 
 /// Edges refer to callee slots, never to names in the caller's replacement
 /// terms. External declaration inputs remain in their enclosing telescope.
-pub(super) struct Telescope {
+pub(in crate::program) struct Telescope {
     pub(super) parameters: Parameters,
     pub(super) positions: BTreeMap<DeclarationId, usize>,
     edges: Vec<Vec<usize>>,
+    pub(super) waiting_captures: BTreeMap<usize, Vec<DeclarationId>>,
 }
 
 impl Telescope {
-    pub(super) fn new(parameters: Parameters, fuel: &mut u64, span: Span) -> Result<Self, Error> {
+    pub(in crate::program) fn new(
+        parameters: Parameters,
+        fuel: &mut u64,
+        span: Span,
+    ) -> Result<Self, Error> {
         environment::charge(fuel, parameters.len(), span)?;
         let positions: BTreeMap<_, _> = parameters
             .iter()
@@ -43,7 +48,36 @@ impl Telescope {
             parameters,
             positions,
             edges,
+            waiting_captures: BTreeMap::new(),
         })
+    }
+
+    /// Read only declaration templates. A rigid in a replacement belongs to
+    /// the caller even when its spelling or declaration ID matches a capture.
+    pub(in crate::program) fn track_captures(
+        &mut self,
+        templates: &[Term],
+        dynamic: &BTreeSet<DeclarationId>,
+        fuel: &mut u64,
+        span: Span,
+    ) -> Result<(), Error> {
+        if templates.len() != self.parameters.len() {
+            return Err(error(span, "capture domain telescope arity mismatch"));
+        }
+        if !dynamic.is_empty() {
+            for (slot, template) in templates.iter().enumerate() {
+                let refs = input_observation::term_inputs(template, fuel, span)?.declarations;
+                let waiting: Vec<_> = refs.into_keys().filter(|id| dynamic.contains(id)).collect();
+                if !waiting.is_empty() {
+                    self.waiting_captures.insert(slot, waiting);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn independent(&self, slot: usize) -> bool {
+        self.edges[slot].is_empty() && !self.waiting_captures.contains_key(&slot)
     }
 
     pub(super) fn direct(&self, slot: usize) -> &[usize] {
@@ -337,6 +371,26 @@ mod tests {
             |slot| slot == 1024,
         );
         assert_eq!(order, [1020, 1021, 1023, 1024]);
+    }
+
+    #[test]
+    fn a_caller_replacement_does_not_introduce_a_pending_capture() {
+        let templates = [dependency(7), dependency(8), dependency(9)];
+        // The second domain acquired id(7) from a caller replacement. Only
+        // the original reference in the first domain reads that capture.
+        let parameters = (0..3)
+            .map(|slot| (id(slot), Sort::ComptimeValue, dependency(7)))
+            .collect();
+        let mut fuel = 100;
+        let span = Span::default();
+        let mut telescope = Telescope::new(parameters, &mut fuel, span).unwrap();
+        telescope
+            .track_captures(&templates, &BTreeSet::from([id(7)]), &mut fuel, span)
+            .unwrap();
+        assert_eq!(
+            telescope.waiting_captures,
+            BTreeMap::from([(0, vec![id(7)])])
+        );
     }
 
     #[test]
