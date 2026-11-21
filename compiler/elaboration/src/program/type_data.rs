@@ -276,39 +276,80 @@ impl Checker<'_, '_> {
                 "associated value used as a type does not contain a completed Type",
             ));
         }
-        if let K::AssociatedValue {
-            interface, subject, ..
+        let K::AssociatedValue {
+            interface,
+            subject,
+            member,
         } = &value.kind
-        {
-            let open = nominal_fields::metered(&mut self.required_steps, |fuel| {
-                for input in std::iter::once(subject).chain(&interface.arguments) {
-                    if nir::type_computations::has_rigid_parameters_bounded(input, fuel)? {
-                        return Ok(true);
-                    }
+        else {
+            return self.complete_checked_type(expr, value);
+        };
+        let open = nominal_fields::metered(&mut self.required_steps, |fuel| {
+            for input in std::iter::once(subject).chain(&interface.arguments) {
+                if nir::type_computations::has_rigid_parameters_bounded(input, fuel)? {
+                    return Ok(true);
                 }
-                Ok(false)
-            })
-            .map_err(|failure| error(expr.span, failure.to_string()))?;
-            if open {
-                let K::AssociatedValue {
-                    interface,
-                    subject,
-                    member,
-                } = value.kind
-                else {
-                    unreachable!()
-                };
-                return Ok(CompletedType::Identity(Term::AssociatedType {
-                    origin: Box::new(nir::AssociatedTypeOrigin {
-                        interface: interface.declaration,
-                        member,
-                    }),
-                    arguments: interface.arguments,
-                    subject: Box::new(subject),
-                }));
             }
+            Ok(false)
+        })
+        .map_err(|failure| error(expr.span, failure.to_string()))?;
+        if open {
+            let K::AssociatedValue {
+                interface,
+                subject,
+                member,
+            } = value.kind
+            else {
+                unreachable!()
+            };
+            return Ok(CompletedType::Identity(Term::AssociatedType {
+                origin: Box::new(nir::AssociatedTypeOrigin {
+                    interface: interface.declaration,
+                    member,
+                }),
+                arguments: interface.arguments,
+                subject: Box::new(subject),
+            }));
         }
-        self.complete_checked_type(expr, value)
+        if !self.interfaces_ready {
+            return self.complete_checked_type(expr, value);
+        }
+        let mut budget = crate::ptc::Budget::default();
+        for input in std::iter::once(subject).chain(&interface.arguments) {
+            crate::associated::charge_projection_copy(input, &mut budget.steps)
+                .map_err(|failure| error(expr.span, failure))?;
+        }
+        let key = Term::AssociatedType {
+            origin: Box::new(nir::AssociatedTypeOrigin {
+                interface: interface.declaration,
+                member: *member,
+            }),
+            subject: Box::new(subject.clone()),
+            arguments: interface.arguments.clone(),
+        };
+        let assumptions = self.capability_assumptions();
+        let selected = crate::capabilities::World {
+            index: &self.implementation_index,
+            implementations: &self.checked_implementations,
+            traits: &self.checked_traits,
+            context: &self.context,
+            assumptions: &assumptions,
+        }
+        .prepare_associated_type_metered(&key, &mut budget)
+        .map_err(|failure| error(expr.span, failure))?;
+        let data = self.complete_checked_type(expr, value)?;
+        match (selected, data) {
+            (crate::associated::TypeProjection::Initializer(work), CompletedType::Identity(ty)) => {
+                let (result, fact) = work
+                    .observed(ty, source(expr.span), &mut budget.steps)
+                    .map_err(|failure| error(expr.span, failure))?;
+                self.observed_associated_types
+                    .publish(vec![(key, fact)], &mut budget.steps)
+                    .map_err(|failure| error(expr.span, failure.to_string()))?;
+                Ok(CompletedType::Identity(result.value))
+            }
+            (_, data) => Ok(data),
+        }
     }
 
     fn bare_nominal_identity(&mut self, owner: OwnerId, span: Span) -> Result<Term, Error> {

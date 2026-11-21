@@ -51,7 +51,8 @@ pub(super) fn charge_world_tables(
 ) -> Result<(), Error> {
     let Package {
         refinements: _, // Borrowed immutable registry; no VM index is constructed.
-        formed_nullary_nominals: _, // Shared with PTC; the VM builds no model domain.
+        observed_associated_types: _, // Frozen compiler evidence; VM member reads select their own source.
+        formed_nullary_nominals: _,   // Shared with PTC; the VM builds no model domain.
         definition_attributes: _,
         runtime_domains,
         builtin_implementation_packages,

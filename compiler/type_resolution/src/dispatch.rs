@@ -31,6 +31,9 @@ pub struct DeclarationScope<'a> {
     assumptions: Arc<[n::TraitRequirement]>,
 }
 impl<'a> DeclarationScope<'a> {
+    pub(crate) fn observed_associated_types(&self) -> &n::ObservedAssociatedTypes {
+        &self.source.package().observed_associated_types
+    }
     pub(crate) fn accepts_data(&self, owner: &MemberDataSource, row: Id, member: Id) -> bool {
         matches!(self.source, DeclarationSource::Snapshot(snapshot) if snapshot.accepts_data(owner, row, member))
     }
@@ -414,6 +417,16 @@ impl<'a> DeclarationWorld<'a> {
     pub fn input_binders(&self, parameters: &[Id]) -> Vec<nir::DeclarationParameter> {
         nir::DeclarationParameter::from_domains(parameters, self.index().parameter_domains())
     }
+    pub fn delivered_scoped_type_view(
+        &self,
+        ty: &Term,
+        budget: &mut Budget,
+        cache: &mut HashMap<Term, Term>,
+    ) -> Result<crate::associated::AssociatedTypeNormalization, AdmissionError> {
+        let (view, completed) = self.scope.delivered_type_view(ty, budget, cache, true)?;
+        cache.extend(completed);
+        Ok(view)
+    }
     pub fn normalized_type(
         &mut self,
         ty: &Term,
@@ -429,11 +442,9 @@ impl<'a> DeclarationWorld<'a> {
             steps: *fuel,
             ..budget
         };
-        let prepared = self.capabilities().prepare_normalized_types(
-            ty,
-            &mut query_budget,
-            &self.normalized_types,
-        );
+        let prepared =
+            self.scope
+                .delivered_type_view(ty, &mut query_budget, &self.normalized_types, false);
         *fuel = query_budget.steps;
         let (normalized, completed) = prepared?;
         // Retaining the root is part of this transaction. Failed retention

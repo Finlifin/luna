@@ -26,12 +26,40 @@ pub enum TypeProjection {
 }
 
 pub struct SelectedTypeInitializer {
+    program: nir::associated_initializers::ProgramIdentity,
     open_inputs: bool,
     evidence: TypeEvidence,
     qualification: Qualification,
 }
 
 impl SelectedTypeInitializer {
+    pub fn observed(
+        self,
+        value: Term,
+        source: nir::program::SourceRange,
+        fuel: &mut usize,
+    ) -> Result<
+        (
+            AssociatedTypeResolution,
+            nir::program::ObservedAssociatedType,
+        ),
+        QueryError,
+    > {
+        let program = self.program.clone();
+        let result = self.complete(value, fuel)?;
+        charge_projection_copy(&result.value, fuel)?;
+        for argument in &result.evidence.type_arguments {
+            charge_projection_copy(argument, fuel)?;
+        }
+        let fact = nir::program::ObservedAssociatedType {
+            implementation: result.evidence.implementation,
+            arguments: result.evidence.type_arguments.clone(),
+            result: result.value.clone(),
+            program,
+            source,
+        };
+        Ok((result, fact))
+    }
     pub fn needs_inputs(&self) -> bool {
         self.open_inputs
     }
@@ -71,7 +99,7 @@ impl TypeProjection {
     }
 }
 
-impl World<'_> {
+impl<'w> World<'w> {
     fn check_associated_formation(
         &self,
         contract: &nir::program::Trait,
@@ -196,6 +224,16 @@ impl World<'_> {
             &mut Budget,
         ) -> Result<crate::capabilities::Resolution, QueryError>,
     ) -> Result<TypeProjection, QueryError> {
+        self.select_type_projection(projection, budget, resolve)?
+            .prepare_type(projection, budget, None)
+    }
+
+    fn select_type_projection<'a>(
+        &'a self,
+        projection: &Term,
+        budget: &mut Budget,
+        resolve: &mut InstanceResolver<'_>,
+    ) -> Result<values::SelectedAssociatedMember<'a, 'w>, QueryError> {
         charge_projection_copy(projection, &mut budget.steps)?;
         projection.check_scope(&[]).map_err(|e| e.to_string())?;
         let Term::AssociatedType {
@@ -210,15 +248,14 @@ impl World<'_> {
             declaration: origin.interface,
             arguments: arguments.clone(),
         };
-        let selected = self.select_scoped_member(
+        self.select_scoped_member(
             &interface,
             origin.member,
             subject,
             values::Access::TypeProjection,
             budget,
             resolve,
-        )?;
-        selected.prepare_type(projection, budget)
+        )
     }
 }
 
@@ -504,6 +541,81 @@ impl TypeProjectionEnvironment for PassiveProjectionWorld<'_, '_> {
             self.world
                 .prepare_associated_type_metered(projection, budget)
         }
+    }
+}
+
+/// Passive normalization may use an identity delivered by elaboration only
+/// after this world independently proves the same concrete selection.
+struct DeliveredTypeWorld<'a, 's> {
+    scope: &'a crate::dispatch::DeclarationScope<'s>,
+}
+
+impl TypeProjectionEnvironment for DeliveredTypeWorld<'_, '_> {
+    fn world(&self) -> World<'_> {
+        self.scope.capabilities()
+    }
+
+    fn resolve_type(
+        &mut self,
+        key: &Term,
+        budget: &mut Budget,
+    ) -> Result<TypeProjection, QueryError> {
+        let world = self.scope.capabilities();
+        let selected =
+            world.select_type_projection(key, budget, &mut |interface, subject, allowance| {
+                world.resolve_projected_instance_metered(interface, subject, allowance)
+            })?;
+        let captured = self
+            .scope
+            .member_program(selected.implementation(), selected.member());
+        let selection = selected.prepare_type(key, budget, captured)?;
+        let TypeProjection::Initializer(pending) = selection else {
+            return Ok(selection);
+        };
+        if !pending.needs_inputs()
+            && let Some(value) = self.scope.observed_associated_types().lookup(
+                key,
+                pending.evidence.implementation,
+                &pending.evidence.type_arguments,
+                &pending.program,
+                &mut budget.steps,
+            )?
+        {
+            charge_projection_copy(value, &mut budget.steps)?;
+            return pending
+                .complete(value.clone(), &mut budget.steps)
+                .map(TypeProjection::Ready);
+        }
+        Ok(TypeProjection::Initializer(pending))
+    }
+}
+
+impl crate::dispatch::DeclarationScope<'_> {
+    pub(crate) fn delivered_type_view(
+        &self,
+        ty: &Term,
+        budget: &mut Budget,
+        cache: &std::collections::HashMap<Term, Term>,
+        scoped: bool,
+    ) -> Result<
+        (
+            AssociatedTypeNormalization,
+            std::collections::HashMap<Term, Term>,
+        ),
+        QueryError,
+    > {
+        normalize_type_in(
+            &mut DeliveredTypeWorld { scope: self },
+            ty,
+            budget,
+            if scoped {
+                ProjectionView::ScopedType
+            } else {
+                ProjectionView::ConcreteType
+            },
+            Some(cache),
+        )
+        .map(|(view, _, completed)| (view, completed))
     }
 }
 

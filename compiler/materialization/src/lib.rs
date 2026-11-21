@@ -3358,7 +3358,8 @@ impl Builder<'_, '_> {
         };
         let world = self.world.capabilities();
         let view = if self.instances.is_some() {
-            world.associated_type_view_cached_metered(term, &mut budget, &mut self.staging_views)
+            self.world
+                .delivered_scoped_type_view(term, &mut budget, &mut self.staging_views)
         } else {
             world.staged_dispatch_type_view_cached_metered(
                 term,

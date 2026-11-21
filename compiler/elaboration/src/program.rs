@@ -589,6 +589,7 @@ fn elaborate_in_mode(
         pending_contract_projections: Vec::new(),
         checked_traits: Default::default(),
         checked_implementations: Vec::new(),
+        observed_associated_types: Default::default(),
         implementation_positions: BTreeMap::new(),
         associated_initializers: BTreeMap::new(),
         implementation_relationships: BTreeMap::new(),
@@ -1650,6 +1651,8 @@ fn elaborate_candidate<'a, 'h>(
     output.global_runtime_deliveries = checker.global_runtime_deliveries.clone();
     output.quote_identity_cursor = checker.next_temporary_binding;
     output.definition_identity_cursor = checker.definition_identities.next();
+    output.observed_associated_types =
+        std::sync::Arc::new(std::mem::take(&mut checker.observed_associated_types));
     if output
         .implementations
         .iter()
@@ -2394,6 +2397,7 @@ struct Checker<'a, 'h> {
     pending_contract_projections: Vec<interfaces::PendingProjection>,
     checked_traits: std::sync::Arc<interfaces::CheckedTraits>,
     checked_implementations: Vec<n::Implementation>,
+    observed_associated_types: n::ObservedAssociatedTypes,
     implementation_positions: BTreeMap<DeclarationId, usize>,
     associated_initializers: BTreeMap<(DeclarationId, DeclarationId), interfaces::AssociatedRecipe>,
     implementation_relationships: BTreeMap<DeclarationId, DeclarationId>,

@@ -545,26 +545,38 @@ impl<'a, 'world> SelectedAssociatedMember<'a, 'world> {
         self,
         projection: &Term,
         budget: &mut Budget,
+        captured: Option<&AssociatedInitializer>,
     ) -> Result<TypeProjection, QueryError> {
-        let Some(source) = self
-            .row()
-            .associated_source(self.facts.member, &mut budget.steps)?
-        else {
-            return Err("selected implementation has no associated Type value".into());
-        };
-        let MemberSource::Value(source) = source else {
-            // A dependent result domain is compared after the selected substitution.
-            if source.expression().ty != Term::Primitive(Primitive::Type) {
-                self.member_result(source.expression(), budget)?;
+        budget.steps = budget.steps.checked_sub(1).ok_or(QueryError::Budget)?;
+        let source = match (
+            self.row()
+                .associated_source(self.facts.member, &mut budget.steps)?,
+            captured,
+        ) {
+            (Some(source), None) => source,
+            (None, Some(program)) => MemberSource::Initializer(program),
+            (Some(_), Some(_)) => return Err("duplicate associated Type supply".into()),
+            (None, None) => {
+                return Err("selected implementation has no associated Type value".into());
             }
-            return Ok(TypeProjection::Initializer(SelectedTypeInitializer {
-                open_inputs: nir::type_computations::has_rigid_parameters_bounded(
-                    projection,
-                    &mut budget.steps,
-                )?,
-                evidence: self.facts.evidence,
-                qualification: self.facts.qualification,
-            }));
+        };
+        let source = match source {
+            MemberSource::Value(value) => value,
+            MemberSource::Initializer(program) => {
+                // A dependent result domain is compared after the selected substitution.
+                if program.expression().ty != Term::Primitive(Primitive::Type) {
+                    self.member_result(program.expression(), budget)?;
+                }
+                return Ok(TypeProjection::Initializer(SelectedTypeInitializer {
+                    program: program.identity(),
+                    open_inputs: nir::type_computations::has_rigid_parameters_bounded(
+                        projection,
+                        &mut budget.steps,
+                    )?,
+                    evidence: self.facts.evidence,
+                    qualification: self.facts.qualification,
+                }));
+            }
         };
         let fuel = &mut budget.steps;
         let completed = self.instantiate(source, fuel)?;

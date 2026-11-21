@@ -50,18 +50,25 @@ impl Checker<'_, '_> {
             .map_err(|failure| error(site.span, failure))?;
         input.observe(|ty| {
             let mut environment = CallTypeEnvironment {
+                observations: Vec::new(),
                 assumptions: self.capability_assumptions(),
                 checker: self,
                 site,
                 invocation_error: None,
             };
-            crate::associated::scoped_type_view_in(&mut environment, ty, &mut budget)
+            let value = crate::associated::scoped_type_view_in(&mut environment, ty, &mut budget)
                 .map(|view| view.value)
                 .map_err(|failure| {
                     environment
                         .invocation_error
                         .unwrap_or_else(|| error(site.span, failure))
-                })
+                })?;
+            environment
+                .checker
+                .observed_associated_types
+                .publish(environment.observations, &mut budget.steps)
+                .map_err(|failure| error(site.span, failure.to_string()))?;
+            Ok(value)
         })
     }
 
@@ -119,6 +126,7 @@ impl CallableViewInput<'_> {
 }
 
 struct CallTypeEnvironment<'c, 'p, 'a, 'h> {
+    observations: Vec<(Term, n::ObservedAssociatedType)>,
     checker: &'c mut Checker<'p, 'a>,
     site: &'c Expr<'h>,
     assumptions: Vec<n::TraitRequirement>,
@@ -193,8 +201,9 @@ impl crate::associated::TypeProjectionEnvironment for CallTypeEnvironment<'_, '_
             self.invocation_error = Some(failure);
             nir::NominalAdmissionError::Invalid("associated Type invocation failed".into())
         })?;
-        pending
-            .complete(value, &mut budget.steps)
-            .map(TypeProjection::Ready)
+        let (result, fact) = pending.observed(value, source(self.site.span), &mut budget.steps)?;
+        crate::associated::charge_projection_copy(key, &mut budget.steps)?;
+        self.observations.push((key.clone(), fact));
+        Ok(TypeProjection::Ready(result))
     }
 }

@@ -520,3 +520,105 @@ fn dispatch_views_retain_selected_type_programs_without_publishing_a_strict_iden
     assert!(world.normalize_associated_types(&key, budget).is_err());
     assert!(budget.steps < Budget::default().steps);
 }
+
+#[test]
+fn frozen_iir_uses_each_instances_observed_type_in_nested_signatures() {
+    let source = format!(
+        "{COMPUTED_ITEM}
+        struct Boxed where T {{ value: T }}
+        fn get(value: Boxed<T.as(Source<flag>).Item>) -> T.as(Source<flag>).Item
+        where flag: bool, T :- Source<flag>
+        {{ value.value }}
+        fn yes() -> bool {{ get<true, Holder<true>>(Boxed<bool>{{ value: true }}) }}
+        fn no() -> char {{ get<false, Holder<false>>(Boxed<char>{{ value: 'n' }}) }}"
+    );
+    let package = support::compile(&source);
+    for (entry, expected) in [("yes", Value::Bool(true)), ("no", Value::Char('n'))] {
+        let graph = luna::instantiation::instantiate(&package, entry, 100_000).unwrap();
+        let mut vm =
+            comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+        assert_eq!(
+            vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn a_passive_type_delivery_rechecks_the_initializer_in_its_declaration_source() {
+    use type_resolution::dispatch::{DeclarationSnapshot, DeclarationSource};
+    use type_resolution::ptc::Budget;
+    let source = format!(
+        "{COMPUTED_ITEM}
+        fn keep(value: T.as(Source<flag>).Item) -> T.as(Source<flag>).Item
+        where flag: bool, T :- Source<flag>
+        {{ value }}
+        fn run() -> bool {{ keep<true, Holder<true>>(true) }}"
+    );
+    let mut package = support::compile(&source);
+    let row = package
+        .dispatch_instances
+        .iter()
+        .find(|r| !r.associated_initializers.is_empty())
+        .unwrap();
+    let key = nir::Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: row.interface,
+            member: row.associated_initializers[0].0,
+        }),
+        arguments: row.interface_arguments.clone(),
+        subject: Box::new(row.subject.clone()),
+    };
+    let resolve = |source: DeclarationSource<'_>| {
+        let mut budget = Budget::default();
+        let mut world = source.world(&mut budget, None)?;
+        world.normalized_type(&key, budget, &mut budget.steps)
+    };
+    let expected = nir::Term::Primitive(nir::Primitive::Bool);
+    assert_eq!(
+        resolve(DeclarationSource::Borrowed(&package)).unwrap(),
+        expected
+    );
+    let captured =
+        DeclarationSnapshot::capture_member_programs(package.clone(), &mut 100_000).unwrap();
+    assert_eq!(
+        resolve(DeclarationSource::Snapshot(&captured)).unwrap(),
+        expected
+    );
+    let detached = DeclarationSource::Borrowed(&package)
+        .retain_for_invocation(&mut 100_000)
+        .unwrap();
+    assert_eq!(
+        resolve(DeclarationSource::Snapshot(&detached)).unwrap(),
+        expected
+    );
+    let (_, program) = &mut package
+        .implementations
+        .iter_mut()
+        .find(|r| !r.associated_initializers.is_empty())
+        .unwrap()
+        .associated_initializers[0];
+    *program = nir::associated_initializers::AssociatedInitializer::new(
+        program.expression().clone(),
+        &mut 100_000,
+    )
+    .unwrap();
+    assert!(resolve(DeclarationSource::Borrowed(&package)).is_err());
+}
+
+#[test]
+fn a_concrete_annotation_delivers_its_result_without_a_concrete_call_signature() {
+    let source = format!(
+        "{COMPUTED_ITEM}
+        typealias Item = Holder<false>.as(Source<false>).Item;
+        fn leaf(value: Holder<flag>.as(Source<flag>).Item) -> Holder<flag>.as(Source<flag>).Item
+        where flag: bool
+        {{ value }}
+        fn relay() -> bool where flag: bool {{
+            let callback = leaf<flag>;
+            true
+        }}
+        fn run() -> bool {{ let x: Item = 'x'; relay<false>() }}"
+    );
+    assert_eq!(support::run_iir(&source, "run", vec![]), Value::Bool(true));
+}

@@ -11,7 +11,9 @@ mod definition_attributes;
 pub use definition_attributes::DefinitionAttributes;
 
 mod formed_nominals;
+mod observed_types;
 pub use formed_nominals::FormedNullaryNominals;
+pub use observed_types::{ObservedAssociatedType, ObservedAssociatedTypes};
 
 mod input_schedule;
 
@@ -2231,6 +2233,7 @@ pub struct Package {
     /// function parameters so Type/value interleaving is never reconstructed.
     pub normal_forms: Vec<crate::normal_forms::Head>,
     pub dispatch_instances: Vec<DispatchInstance>,
+    pub observed_associated_types: std::sync::Arc<ObservedAssociatedTypes>,
     pub traits: Vec<Trait>,
     pub implementations: Vec<Implementation>,
     pub functions: Vec<Function>,
@@ -3855,6 +3858,9 @@ impl fmt::Display for ExprKind {
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(nir-package")?;
+        if !self.observed_associated_types.is_empty() {
+            write!(f, "\n {}", self.observed_associated_types)?;
+        }
         if !self.formed_nullary_nominals.is_empty() {
             write!(f, " {}", self.formed_nullary_nominals)?;
         }

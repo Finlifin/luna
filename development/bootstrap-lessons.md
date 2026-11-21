@@ -71,3 +71,11 @@ VM 在绑定实参前会遍历签名，按节点与载荷扣除预算，并检�
 源码 VM 还需要能执行这个程序。收集 dispatch 时将闭合投影及其所选程序保留为依赖，闭包构造检查具体捕获值时才向 VM 索取结果。例如同一个泛型闭包分别可以捕获 bool 和 char。闭包的保留值检查与具体 IIR 查询继续只读已交付的证据；缺失证据时不能把尚未执行的程序视为类型等式。[依赖收集](../compiler/materialization/src/lib.rs) · [VM 的捕获检查](../compiler/comptime_interpretor/src/selected_types/observation_tests.rs)
 
 自举时有两笔开销值得处理。请求方交付具体的接口实例、接收者与成员，required VM 会在自己的声明快照里重新验证选择；当前节省了复制整个声明世界，代价是两次选择。逻辑查询使用类型查询预算，程序运行使用调用者的 required comptime 预算。运行时泛型函数的源码检查现在也可以完成，但具体 IIR 冻结仍缺少交付已观察类型的通道：把上例中的 `keep` 和入口改成 runtime 函数，实例化时仍报告 `selected associated value is not a completed Type template`。后续交付须保留完整选择依据、生成定义的身份以及求值失败的来源，避免在只读 IIR 查询中再执行用户代码。
+
+## 2026-11-21 · 向具体 IIR 交付已求出的关联类型
+
+若 `get` 的参数为 `Boxed<T.as(Source<flag>).Item>`，函数体可以只读字段。调用处对 flag=true 与 flag=false 分别得到 bool 与 char。此前在源码检查后丢弃了这次选择，IIR 再看同一函数签名时只看得到泛型初始化程序。现在每次成功的源码类型观察同时保留完整投影、实现声明、实现实参、初始化程序身份、结果类型及源码位置。IIR 在当前声明世界中重新选择，再按这几项取回类型。检查同一源码调用的不同部分时，仍只有一次初始化执行。用 `meta.StructBuilder` 作为类型程序的用例验证了 IIR 使用源码已经发布的那个结构体声明。[源码交付](../compiler/elaboration/src/program/interfaces/call_types.rs) · [生成类型的端到端用例](../compiler/luna/tests/required_definition_publication.rs)
+
+冻结表随同一次编译的 NIR 与不可变声明快照共享，弱引用标记具体的已检查程序。独立构造的另一份初始化器即使正文相同也无法消费旧记录。源码表达式读取成员仍遵守原有的执行规则；如果两次观察为同一选择交付不同类型，仅在请求这个具体身份时报告冲突并附两个位置。自举时若要跨进程或跨修订重用记录，需要为初始化器和其调用的声明提供可校验的版本身份。进程内的程序身份只适用于本次冻结的声明世界。[记录和冲突检查](../compiler/nir/src/program/observed_types.rs) · [匹配原声明快照](../compiler/type_resolution/src/associated.rs)
+
+本阶段还实测了没有源码观察可供交付的情形：泛型 `relay<flag>` 仅在函数体中取得 `leaf<flag>`，由入口调用 `relay<false>()`。如果 leaf 的签名引用上述 Item，投影要到 relay 实例化才首次闭合。已有交付可以支持这条路径；首次闭合时的缺项需要由实例化的编译阶段向源码 comptime 世界发起请求。

@@ -129,7 +129,21 @@ impl fmt::Display for AssociatedSelection {
 pub struct AssociatedInitializer {
     expression: Arc<Expr>,
 }
+/// Attribution to an immutable checked initializer without retaining its body.
+#[derive(Clone, Debug)]
+pub struct ProgramIdentity(std::sync::Weak<Expr>);
+
+impl PartialEq for ProgramIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+}
+
 impl AssociatedInitializer {
+    pub fn identity(&self) -> ProgramIdentity {
+        ProgramIdentity(Arc::downgrade(&self.expression))
+    }
+
     pub fn new(expression: Expr, fuel: &mut usize) -> Result<Self, Error> {
         if !crate::free_bindings::collect(&expression, fuel)?.is_empty() {
             return Err("associated initializer cannot capture caller locals".into());

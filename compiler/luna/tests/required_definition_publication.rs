@@ -244,3 +244,40 @@ fn a_closed_default_can_publish_with_unrelated_clause_binders_in_scope() {
         nir::Term::Primitive(nir::Primitive::Bool)
     );
 }
+
+#[test]
+fn a_frozen_runtime_signature_keeps_the_nominal_identity_generated_by_its_type_program() {
+    let source = r#"
+        comptime fn Built(flag: bool) -> Type {
+            let draft = meta.StructBuilder.new(.name = .ProjectedRecord);
+            if flag { draft.add_field(.flag, bool); }
+            draft.Build()
+        }
+        trait Source where flag: bool { assoc Item: Type = Built(flag); }
+        struct Holder where flag: bool {}
+        impl Source<flag> for Holder<flag> where flag: bool {}
+        fn empty() -> ?T.as(Source<flag>).Item
+        where flag: bool, T :- Source<flag>
+        { null }
+        fn run() -> bool {
+            empty<true, Holder<true>>() match { null => true, _ => false }
+        }
+    "#;
+    let package = sysroot::compile(source).unwrap();
+    let record = package
+        .structs
+        .iter()
+        .find(|record| record.name == "ProjectedRecord")
+        .unwrap();
+    let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+    assert!(graph.nominals.iter().any(|nominal| nominal.ty
+        == nir::Term::Nominal {
+            declaration: record.declaration,
+            arguments: vec![]
+        }));
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
