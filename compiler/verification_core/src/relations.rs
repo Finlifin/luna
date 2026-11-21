@@ -246,12 +246,16 @@ impl Facts {
             return Ok(());
         }
         let rows = self.copy_relations(limits)?;
-        // Monotone contraction. No unbounded fixed point: every term, integer
-        // operation and pass consumes the caller's shared work budget.
-        loop {
+        // A bounded pass count handles multi-row implication chains without
+        // letting slow-converging cyclic inequalities over wide machine domains
+        // exhaust the caller's shared work budget. Stopping early retains only
+        // sound interval over-approximations.
+        let max_passes = rows.len().saturating_mul(2).clamp(8, 32);
+        for _ in 0..max_passes {
             limits.step(1)?;
             let mut changed = false;
-            if let Some(graph) = super::differences::DifferenceBounds::build(self, limits)? {
+            let graph = super::differences::DifferenceBounds::build(self, limits)?;
+            if let Some(graph) = &graph {
                 if graph.contradiction() {
                     self.reachable = false;
                     return Ok(());
@@ -265,7 +269,15 @@ impl Facts {
                 }
             }
             for row in &rows {
-                let (range, _) = row.interval_enclosure(self, limits)?;
+                let (mut range, _) = row.interval_enclosure(self, limits)?;
+                let interval_satisfied = !limits.compare(&range.upper, &Integer::zero())?.is_gt();
+                if let Some(graph) = &graph {
+                    graph.enclose(row, self, &mut range, limits)?;
+                    if limits.compare(&range.lower, &range.upper)?.is_gt() {
+                        self.reachable = false;
+                        return Ok(());
+                    }
+                }
                 if limits.compare(&range.lower, &Integer::zero())?.is_gt() {
                     self.reachable = false;
                     return Ok(());
@@ -273,7 +285,7 @@ impl Facts {
                 // Every point in the current interval box already satisfies
                 // this row. Isolating its variables cannot narrow that box.
                 // Keep the stored row: a later join can widen the intervals.
-                if !limits.compare(&range.upper, &Integer::zero())?.is_gt() {
+                if interval_satisfied {
                     continue;
                 }
                 for (factors, coefficient) in &row.terms {
@@ -307,6 +319,7 @@ impl Facts {
                 return Ok(());
             }
         }
+        Ok(())
     }
 }
 
@@ -366,6 +379,23 @@ impl Polynomial {
         facts: &Facts,
         limits: &mut Limits,
     ) -> Result<(), Unknown> {
+        self.refine_row_difference_enclosure_until(
+            enclosure,
+            premises,
+            facts,
+            limits,
+            |range, limits| range.within(target, limits),
+        )
+    }
+
+    pub(super) fn refine_row_difference_enclosure_until(
+        &self,
+        enclosure: &mut Interval,
+        premises: &mut BTreeMap<ValueId, Interval>,
+        facts: &Facts,
+        limits: &mut Limits,
+        mut satisfied: impl FnMut(&Interval, &mut Limits) -> Result<bool, Unknown>,
+    ) -> Result<(), Unknown> {
         if facts.inequalities.is_empty()
             || limits.compare(&enclosure.lower, &enclosure.upper)?.is_eq()
         {
@@ -413,7 +443,7 @@ impl Polynomial {
                 if limits.compare(&enclosure.lower, &enclosure.upper)?.is_gt() {
                     return Err(Unknown::InsufficientBounds);
                 }
-                if enclosure.within(target, limits)? {
+                if satisfied(enclosure, limits)? {
                     return Ok(());
                 }
             }
@@ -1705,5 +1735,194 @@ mod relation_store_tests {
             query.prove_within(&u64_range, &facts, &mut limits),
             Outcome::Unknown(Unknown::InsufficientBounds)
         );
+    }
+
+    #[test]
+    fn truth_by_enclosure_composes_row_with_difference_bounds_for_u64_sum() {
+        let mut limits = Limits::default();
+        let mut facts = Facts::default();
+        let u64_range = Interval::machine(64, false, &mut limits).unwrap();
+        let length = facts
+            .assign(
+                PlaceId {
+                    owner: 44,
+                    local: 0,
+                },
+                u64_range.clone(),
+            )
+            .unwrap();
+        let start = facts
+            .assign(
+                PlaceId {
+                    owner: 44,
+                    local: 1,
+                },
+                u64_range.clone(),
+            )
+            .unwrap();
+        let pattern_length = facts
+            .assign(
+                PlaceId {
+                    owner: 44,
+                    local: 2,
+                },
+                u64_range.clone(),
+            )
+            .unwrap();
+        let index = facts
+            .assign(
+                PlaceId {
+                    owner: 44,
+                    local: 3,
+                },
+                u64_range,
+            )
+            .unwrap();
+
+        let length_p = Polynomial::variable(length, &mut limits).unwrap();
+        let start_p = Polynomial::variable(start, &mut limits).unwrap();
+        let pattern_length_p = Polynomial::variable(pattern_length, &mut limits).unwrap();
+        let index_p = Polynomial::variable(index, &mut limits).unwrap();
+        let u64_max_p =
+            Polynomial::constant(Integer::from_u128(u64::MAX as u128), &mut limits).unwrap();
+
+        facts
+            .assume(
+                &Condition::PolynomialCompare {
+                    left: start_p.copy(&mut limits).unwrap(),
+                    relation: Comparison::LessEqual,
+                    right: length_p.copy(&mut limits).unwrap(),
+                },
+                true,
+                &mut limits,
+            )
+            .unwrap();
+        facts
+            .assume(
+                &Condition::PolynomialCompare {
+                    left: pattern_length_p.add(&start_p, &mut limits).unwrap(),
+                    relation: Comparison::LessEqual,
+                    right: length_p,
+                },
+                true,
+                &mut limits,
+            )
+            .unwrap();
+        facts
+            .assume(
+                &Condition::PolynomialCompare {
+                    left: index_p.copy(&mut limits).unwrap(),
+                    relation: Comparison::Less,
+                    right: pattern_length_p,
+                },
+                true,
+                &mut limits,
+            )
+            .unwrap();
+
+        let sum = index_p.add(&start_p, &mut limits).unwrap();
+        let gt_max = Condition::PolynomialCompare {
+            left: sum.copy(&mut limits).unwrap(),
+            relation: Comparison::Greater,
+            right: u64_max_p.copy(&mut limits).unwrap(),
+        };
+        let le_max = Condition::PolynomialCompare {
+            left: sum,
+            relation: Comparison::LessEqual,
+            right: u64_max_p,
+        };
+        assert_eq!(
+            gt_max.truth_by_enclosure(&facts, &mut limits, 0),
+            Ok(Some(false))
+        );
+        assert_eq!(
+            le_max.truth_by_enclosure(&facts, &mut limits, 0),
+            Ok(Some(true))
+        );
+    }
+
+    #[test]
+    fn propagate_relations_bounds_slow_converging_cyclic_u64_inequalities() {
+        for c in [u64::MAX as u128 + 1, (u64::MAX - 10) as u128] {
+            let mut limits = Limits::default();
+            limits.arithmetic.steps = 50_000;
+            let mut facts = Facts::default();
+            let u64_range = Interval::machine(64, false, &mut limits).unwrap();
+            let length = facts
+                .assign(
+                    PlaceId {
+                        owner: 45,
+                        local: 0,
+                    },
+                    u64_range.clone(),
+                )
+                .unwrap();
+            let start = facts
+                .assign(
+                    PlaceId {
+                        owner: 45,
+                        local: 1,
+                    },
+                    u64_range.clone(),
+                )
+                .unwrap();
+            let pattern_length = facts
+                .assign(
+                    PlaceId {
+                        owner: 45,
+                        local: 2,
+                    },
+                    u64_range.clone(),
+                )
+                .unwrap();
+            let index = facts
+                .assign(
+                    PlaceId {
+                        owner: 45,
+                        local: 3,
+                    },
+                    u64_range,
+                )
+                .unwrap();
+
+            let length_p = Polynomial::variable(length, &mut limits).unwrap();
+            let start_p = Polynomial::variable(start, &mut limits).unwrap();
+            let pattern_length_p = Polynomial::variable(pattern_length, &mut limits).unwrap();
+            let index_p = Polynomial::variable(index, &mut limits).unwrap();
+            let one = Polynomial::constant(Integer::from_u128(1), &mut limits).unwrap();
+            let threshold = Polynomial::constant(Integer::from_u128(c), &mut limits).unwrap();
+
+            facts
+                .assume_relation(
+                    pattern_length_p
+                        .add(&start_p, &mut limits)
+                        .unwrap()
+                        .subtract(&length_p, &mut limits)
+                        .unwrap(),
+                    &mut limits,
+                )
+                .unwrap();
+            facts
+                .assume_relation(
+                    index_p
+                        .subtract(&pattern_length_p, &mut limits)
+                        .unwrap()
+                        .add(&one, &mut limits)
+                        .unwrap(),
+                    &mut limits,
+                )
+                .unwrap();
+            let neg_sum_plus_c = threshold
+                .subtract(&index_p, &mut limits)
+                .unwrap()
+                .subtract(&start_p, &mut limits)
+                .unwrap();
+            facts.assume_relation(neg_sum_plus_c, &mut limits).unwrap();
+
+            assert_eq!(facts.propagate_relations(&mut limits), Ok(()));
+            if c == (u64::MAX - 10) as u128 {
+                assert!(facts.is_reachable());
+            }
+        }
     }
 }
