@@ -152,6 +152,134 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
+    /// A definition-side call checks a supplier with the callee's staged
+    /// parameters still abstract. Executable calls retain their own suppliers.
+    pub(super) fn parameter_default_behavior(
+        &mut self,
+        owner: OwnerId,
+        slot: usize,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let key = (owner, slot);
+        if self.active_function_defaults.len() >= 64 || !self.active_function_defaults.insert(key) {
+            return Err(error(
+                span,
+                "cyclic or excessively deep function default dependency",
+            ));
+        }
+        let saved = std::mem::replace(&mut self.checking_default_behavior, true);
+        let result = self.in_formal_declaration(owner, |this| {
+            this.checking_open_behavior = true;
+            this.describing_open_call = true;
+            let (_, value) = this.check_parameter_default(owner, slot, span, None)?;
+            let value = value.ok_or_else(|| error(span, "missing default supplier"))?;
+            let value = this.close_default_behavior(value, owner, span)?;
+            Ok((
+                value,
+                std::mem::take(&mut this.definition_refinements.staged_values),
+            ))
+        });
+        self.checking_default_behavior = saved;
+        self.active_function_defaults.remove(&key);
+        let (value, binders) = result?;
+        self.definition_refinements.staged_values.extend(binders);
+        Ok(value)
+    }
+
+    fn close_default_behavior(
+        &mut self,
+        mut value: n::Expr,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        if self.ordinary_behavior_inputs.is_empty() {
+            return Ok(value);
+        }
+        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let before = fuel;
+        let accesses = nir::free_bindings::access(
+            &value,
+            |binding| self.ordinary_behavior_inputs.contains_key(&binding),
+            &mut fuel,
+        );
+        self.required_steps -= (before - fuel) as u64;
+        let accesses = accesses.map_err(|message| error(span, message))?;
+        let mut statements = Vec::new();
+        let mut reads = BTreeMap::new();
+        for (place, bindings) in [(false, accesses.readonly), (true, accesses.writable)] {
+            for binding in bindings {
+                let domain = self
+                    .ordinary_behavior_inputs
+                    .shared(&binding)
+                    .expect("selected behavior input")
+                    .clone();
+                let ty = self.copy_alias_type(&domain, span)?;
+                let binder = if ty == p(P::Type) {
+                    self.fresh_type_binder(owner, span)?
+                } else {
+                    self.fresh_value_binder(owner, span)?
+                };
+                let symbol = Term::Rigid {
+                    declaration: binder.declaration,
+                    sort: binder.sort,
+                };
+                let kind = if binder.sort == Sort::Type {
+                    K::TypeValue(symbol)
+                } else {
+                    K::ComptimeValue(symbol)
+                };
+                self.definition_refinements
+                    .staged_values
+                    .push((binder.declaration, ty));
+                if place {
+                    // A capture or place operation still needs a local cell.
+                    statements.push(n::Expr {
+                        source: value.source,
+                        ty: p(P::Void),
+                        kind: K::Let {
+                            binding,
+                            value: Box::new(n::Expr {
+                                source: value.source,
+                                ty: self.copy_alias_type(&domain, span)?,
+                                kind,
+                            }),
+                        },
+                    });
+                } else {
+                    reads.insert(binding, kind);
+                }
+            }
+        }
+        if !reads.is_empty() {
+            // Substituting at each read keeps comptime-only values at their
+            // consumer's stage and preserves the caller's earlier parameters.
+            let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+            let before = fuel;
+            let result =
+                nir::visit::expression_mut_in_caller_frame(&mut value, &mut fuel, |node, _| {
+                    if let K::Local(binding) = node.kind
+                        && let Some(witness) = reads.get(&binding)
+                    {
+                        node.kind = witness.clone();
+                    }
+                    Ok(())
+                });
+            self.required_steps -= (before - fuel) as u64;
+            result.map_err(|message| error(span, message))?;
+        }
+        if statements.is_empty() {
+            return Ok(value);
+        }
+        Ok(n::Expr {
+            source: value.source,
+            ty: value.ty.clone(),
+            kind: K::Block {
+                statements,
+                result: Some(Box::new(value)),
+            },
+        })
+    }
+
     fn check_parameter_default(
         &mut self,
         owner: OwnerId,
@@ -319,6 +447,15 @@ impl Checker<'_, '_> {
                 if let Some(parameters) = self.type_parameters.get(&owner) {
                     scope.parameters = self.input_binders(parameters);
                 }
+                staged.extend(self.ordinary_behavior_inputs.keys().copied());
+                scope
+                    .parameters
+                    .extend(self.definition_refinements.staged_values.iter().map(
+                        |(declaration, domain)| nir::DeclarationParameter {
+                            declaration: *declaration,
+                            sort: Sort::of_comptime_domain(domain),
+                        },
+                    ));
                 scope.requirements = self.definition_requirements(owner);
                 scope.input_scope = self.lexical_input_domains().map(|(sort, _)| sort).collect();
                 if let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =

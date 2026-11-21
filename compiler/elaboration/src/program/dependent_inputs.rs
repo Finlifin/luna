@@ -45,6 +45,7 @@ impl InputProducers {
 pub(super) struct CallSite<'h> {
     pub(super) callee: n::Expr,
     pub(super) owner: Option<OwnerId>,
+    pub(super) call_use: CallUse,
     pub(super) routes: Vec<arguments::RoutedArgument<'h>>,
     pub(super) source: Expr<'h>,
 }
@@ -53,9 +54,13 @@ impl std::fmt::Display for CallSite<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(call-site (source {} {}) (callee {}) (routes",
+            "(call-site (source {} {}) (use {}) (callee {}) (routes",
             self.source.hir_id,
             source(self.source.span),
+            match self.call_use {
+                CallUse::Invocation => "invocation",
+                CallUse::DefinitionBehavior => "definition-behavior",
+            },
             self.callee
         )?;
         for route in &self.routes {
@@ -474,13 +479,13 @@ impl Checker<'_, '_> {
     pub(super) fn call_input_demands(
         &mut self,
         signature: CallSignature<'_>,
-        callee: &n::Expr,
-        direct: Option<OwnerId>,
+        site: &CallSite<'_>,
         assigned: &[bool],
         offset: usize,
         expr: &Expr<'_>,
         defaults: &mut [Option<n::Expr>],
     ) -> Result<BTreeSet<usize>, Error> {
+        let direct = site.owner;
         let mut demanded = BTreeSet::new();
         for ty in signature
             .parameters
@@ -532,7 +537,7 @@ impl Checker<'_, '_> {
                     "default computation needs declaration parameter metadata",
                 )
             })?;
-            let value = self.call_default(owner, parameter, callee, expr.span)?;
+            let value = self.call_default(site, owner, parameter, expr.span)?;
             demanded.extend(
                 self.checked_substitution_inputs(&value, expr.span)?
                     .into_keys(),
@@ -544,11 +549,21 @@ impl Checker<'_, '_> {
 
     pub(super) fn call_default(
         &mut self,
+        site: &CallSite<'_>,
         owner: OwnerId,
         parameter: usize,
-        callee: &n::Expr,
         span: Span,
     ) -> Result<n::Expr, Error> {
+        let callee = &site.callee;
+        if site.call_use == CallUse::DefinitionBehavior
+            && self.open_functions.contains_key(&owner)
+            && !callee.ty.is_comptime_callable()
+            && CallSignature::of(&callee.ty)
+                .is_some_and(|signature| signature.parameters[parameter].sort == Sort::Runtime)
+        {
+            let behavior = self.parameter_default_behavior(owner, parameter, span)?;
+            return self.instantiate_call_default(behavior, owner, callee, span);
+        }
         self.ensure_parameter_default(owner, parameter, span)?;
         let value = self
             .defaults
@@ -562,6 +577,16 @@ impl Checker<'_, '_> {
                 )
             })?
             .clone();
+        self.instantiate_call_default(value, owner, callee, span)
+    }
+
+    fn instantiate_call_default(
+        &mut self,
+        value: n::Expr,
+        owner: OwnerId,
+        callee: &n::Expr,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
         let (parameters, arguments) = match &callee.kind {
             K::PlannedFunctionInstance { .. }
             | K::ComptimeFunctionInstance { .. }

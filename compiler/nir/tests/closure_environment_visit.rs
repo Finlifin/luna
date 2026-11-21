@@ -251,3 +251,36 @@ fn mutable_handler_scope_keeps_nested_arm_and_closure_control_separate() {
     })
     .unwrap();
 }
+
+#[test]
+fn caller_frame_rewrites_explicit_operands_and_leaves_default_and_closure_frames_intact() {
+    let mut tree = tree();
+    let K::Block { statements, .. } = &mut tree.kind else {
+        unreachable!()
+    };
+    let K::Call {
+        arguments,
+        env_arguments,
+        ..
+    } = &mut statements[1].kind
+    else {
+        unreachable!()
+    };
+    arguments.insert(
+        0,
+        CallArgument {
+            passing: Default::default(),
+            parameter: 1,
+            value: flag(12),
+            is_default: false,
+        },
+    );
+    env_arguments.push(flag(13));
+    let mut visited = BTreeSet::new();
+    nir::visit::expression_mut_in_caller_frame(&mut tree, &mut 100, |node, _| {
+        visited.insert(node.source.start);
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(visited, [0, 1, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13].into());
+}

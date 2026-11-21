@@ -166,6 +166,83 @@ fn single_iteration_defaults_require_no_fallthrough_or_backedge() {
 }
 
 #[test]
+fn nested_defaults_keep_staged_guard_selection_at_the_actual_call() {
+    let (supplier, _) = include_str!("../../../development/repros/default-conditional-constant.fl")
+        .split_once("fn run()")
+        .unwrap();
+    let wrappers = "
+        fn relay(comptime mode: bool, .answer: bool = take(mode)) -> bool { answer }
+        fn outer(comptime mode: bool, .value: bool = relay(mode)) -> bool { value }
+        fn run() -> bool { outer(true) and not outer(false) and relay(false, .answer = true) }
+    ";
+    let source = format!("{supplier}{wrappers}");
+    for candidate in [
+        source.clone(),
+        source.replace("= take(mode)", "= take(mode) and take(mode)"),
+        source
+            .replace("found if mode = true", "T if mode = bool")
+            .replace("selected = found", "let found: T = true; selected = found"),
+        format!(
+            "typealias Type = .Type'builtin; comptime fn accepts(t: Type) -> bool {{ true }} {}",
+            source
+                .replace("found if mode = true", "found if mode = bool")
+                .replace(
+                    "selected = found",
+                    "selected = inline if accepts(found) { true } else { false }"
+                )
+        ),
+        source
+            .replace("take(mode)", "take<bool>(mode)")
+            .replace(") -> bool {\n    next", ") -> bool where T {\n    next"),
+    ] {
+        let package = execution_support::compile_with_protocols(&candidate, &Default::default())
+            .unwrap_or_else(|error| panic!("{candidate}: {error}"));
+        assert_eq!(
+            luna::execution::interpret(&package, "run", 100_000).unwrap(),
+            Value::Bool(true)
+        );
+    }
+    for (candidate, diagnostic) in [
+        (
+            source.replace("else { break; }", "else { continue; }"),
+            "P3",
+        ),
+        (
+            source.replace("comptime mode: bool,", "mode: bool,"),
+            "runtime parameter",
+        ),
+        (source.replace("= take(mode)", "= relay(mode)"), "cyclic"),
+    ] {
+        let error =
+            execution_support::compile_with_protocols(&candidate, &Default::default()).unwrap_err();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}
+
+#[test]
+fn nested_defaults_observe_an_earlier_runtime_input_once() {
+    let source = "
+        fn observe() -> bool { true }
+        fn take(comptime mode: bool, value: bool, .selected: bool = inline if mode { value } else { not value }) -> bool { selected }
+        fn relay(comptime mode: bool, seed: bool, .answer: bool = take(mode, seed)) -> bool { answer }
+        fn run() -> bool { relay(true, observe()) and not relay(false, observe()) and relay(false, observe(), .answer = true) }
+    ";
+    let package = compile(source);
+    let mut vm = Interpreter::new(&package, Budget::default()).unwrap();
+    assert_eq!(
+        vm.invoke(id(&package, "run"), vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        calls(&package, &vm)
+            .iter()
+            .filter(|name| name.as_str() == "observe")
+            .count(),
+        3
+    );
+}
+
+#[test]
 fn conditional_constants_in_defaults_wait_for_guard_inputs() {
     let source = include_str!("../../../development/repros/default-conditional-constant.fl");
     for candidate in [

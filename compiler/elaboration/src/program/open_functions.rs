@@ -2083,6 +2083,10 @@ impl Checker<'_, '_> {
                 let description = annotation.description();
                 if let TyParamKind::Optional(_, _, default) = parameter.ty.kind {
                     let mut default_locals = locals.clone();
+                    // A supplier owns its abstract staged operands. They are
+                    // not extra parameters of the function body or its siblings.
+                    let enclosing_inputs = this.ordinary_behavior_inputs.clone();
+                    let staged_count = this.definition_refinements.staged_values.len();
                     let actual = this.with_staged_input(
                         sig.modifiers.is_comptime || *sort != Sort::Runtime,
                         |this| {
@@ -2160,8 +2164,10 @@ impl Checker<'_, '_> {
                             this.check_open_fragment(&value, default.span, true)?;
                             Ok(actual)
                         },
-                    )?;
-                    if let D::Known(ty) = actual {
+                    );
+                    this.ordinary_behavior_inputs = enclosing_inputs;
+                    this.definition_refinements.staged_values.truncate(staged_count);
+                    if let D::Known(ty) = actual? {
                         default_types.insert(slot, ty);
                     }
                 }
@@ -7447,6 +7453,7 @@ impl Checker<'_, '_> {
                             vec![],
                             plan,
                             None,
+                            CallUse::DefinitionBehavior,
                         )
                     },
                 )?
@@ -7460,7 +7467,18 @@ impl Checker<'_, '_> {
                     None => self.lexical_function_arguments(owner, expr.span)?,
                 },
             };
-            self.generic_call_with_receiver(expr, owner, args, expected, None, vec![], known, None)
+            let plan = self.function_type_plan(owner, &known, expr.span)?;
+            self.generic_call_with_plan(
+                expr,
+                owner,
+                args,
+                expected,
+                None,
+                vec![],
+                plan,
+                None,
+                CallUse::DefinitionBehavior,
+            )
         };
         result.map(Some)
     }

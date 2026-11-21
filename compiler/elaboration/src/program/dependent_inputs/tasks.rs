@@ -240,8 +240,7 @@ impl Frame {
         let view = CallSignature::of(&signature).expect("selected callable signature");
         let demanded = checker.call_input_demands(
             view,
-            &site.callee,
-            site.owner,
+            site,
             assigned,
             offset,
             source,
@@ -404,7 +403,7 @@ impl Frame {
                     })?;
                     let mut value = match prepared.defaults[slot].take() {
                         Some(value) => value,
-                        None => checker.call_default(owner, slot, callee, source.span)?,
+                        None => checker.call_default(site, owner, slot, source.span)?,
                     };
                     checker.specialize_default_annotations(
                         &mut value,

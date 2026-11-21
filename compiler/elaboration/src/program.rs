@@ -5848,6 +5848,7 @@ impl Checker<'_, '_> {
             prefix,
             plan,
             selected_method,
+            CallUse::Invocation,
         )
     }
 
@@ -5861,6 +5862,7 @@ impl Checker<'_, '_> {
         prefix: Vec<n::Expr>,
         plan: type_defaults::FunctionTypePlan<'_>,
         selected_method: Option<interfaces::SelectedMethod>,
+        call_use: CallUse,
     ) -> Result<n::Expr, Error> {
         if self.is_quote_function(owner) {
             self.record_quote_application(expr.span)?;
@@ -5952,6 +5954,7 @@ impl Checker<'_, '_> {
         let site = dependent_inputs::CallSite {
             callee: preview,
             owner: Some(owner),
+            call_use,
             routes,
             source: expr.clone(),
         };

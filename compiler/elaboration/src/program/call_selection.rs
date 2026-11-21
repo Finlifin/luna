@@ -245,6 +245,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                             vec![],
                             plan,
                             None,
+                            CallUse::Invocation,
                         )
                     },
                 )?
@@ -513,6 +514,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         let site = dependent_inputs::CallSite {
             callee,
             owner: direct,
+            call_use,
             routes,
             source: expr.clone(),
         };

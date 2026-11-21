@@ -445,7 +445,7 @@ pub fn expression_mut_pruned(
     fuel: &mut usize,
     visit: impl FnMut(&mut Expr, &mut usize) -> Result<bool, String>,
 ) -> Result<(), String> {
-    walk_mut(expression, fuel, visit, true, true)
+    walk_mut(expression, fuel, visit, MutableScope::Complete)
 }
 
 /// Rewrite formation-time evaluations without entering newly constructed
@@ -461,8 +461,7 @@ pub fn expression_mut_in_closure_environment(
         expression,
         fuel,
         |expr, fuel| visit(expr, fuel).map(|_| true),
-        false,
-        true,
+        MutableScope::ClosureEnvironment,
     )
 }
 
@@ -478,17 +477,39 @@ pub fn expression_mut_in_handler_scope(
         expression,
         fuel,
         |expr, fuel| visit(expr, fuel).map(|_| true),
-        false,
-        false,
+        MutableScope::Handler,
     )
+}
+
+/// Rewrite operands in the caller's lexical frame, including explicit call
+/// arguments, capture initializers and handler arms. Omitted arguments read
+/// the callee's parameter frame, and a closure body reads its own captures.
+pub fn expression_mut_in_caller_frame(
+    expression: &mut Expr,
+    fuel: &mut usize,
+    mut visit: impl FnMut(&mut Expr, &mut usize) -> Result<(), String>,
+) -> Result<(), String> {
+    walk_mut(
+        expression,
+        fuel,
+        |expr, fuel| visit(expr, fuel).map(|_| true),
+        MutableScope::CallerFrame,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MutableScope {
+    Complete,
+    ClosureEnvironment,
+    Handler,
+    CallerFrame,
 }
 
 fn walk_mut(
     expression: &mut Expr,
     fuel: &mut usize,
     mut visit: impl FnMut(&mut Expr, &mut usize) -> Result<bool, String>,
-    include_closure_bodies: bool,
-    include_handler_arms: bool,
+    scope: MutableScope,
 ) -> Result<(), String> {
     enum Node<'a> {
         Expr(&'a mut Expr),
@@ -581,11 +602,11 @@ fn walk_mut(
                         ..
                     } => {
                         push!(work, fuel, Node::Expr(computation));
-                        if include_handler_arms {
+                        if scope != MutableScope::Handler {
                             work::charge_entries(fuel, handlers.len())?;
                         }
                         // Avoid scanning an excluded handler list through a filter.
-                        let handlers = if include_handler_arms {
+                        let handlers = if scope != MutableScope::Handler {
                             handlers.as_mut_slice()
                         } else {
                             &mut []
@@ -611,7 +632,7 @@ fn walk_mut(
                     }
                     K::Closure { captures, body, .. } => {
                         work::charge_entries(fuel, captures.len())?;
-                        if include_closure_bodies {
+                        if scope == MutableScope::Complete {
                             push!(work, fuel, Node::Expr(std::sync::Arc::make_mut(body)));
                         }
                         extend!(
@@ -842,7 +863,10 @@ fn walk_mut(
                         extend!(
                             work,
                             fuel,
-                            arguments.iter_mut().map(|a| Node::Expr(&mut a.value))
+                            arguments
+                                .iter_mut()
+                                .filter(|arg| scope != MutableScope::CallerFrame || !arg.is_default)
+                                .map(|a| Node::Expr(&mut a.value))
                         );
                         extend!(work, fuel, env_arguments.iter_mut().map(Node::Expr));
                     }
