@@ -60,7 +60,7 @@ impl Checker<'_, '_> {
 
     // Use only established caller-local layouts or closed declaration results.
     // A packet is still evaluated and checked at its source position later.
-    pub(in crate::program::cmtt) fn generator_expression_type_hint(
+    pub(in crate::program) fn generator_expression_type_hint(
         &mut self,
         value: &Expr<'_>,
         depth: usize,
@@ -95,6 +95,9 @@ impl Checker<'_, '_> {
             self.required_steps = fuel as u64;
             charged.map_err(|failure| error(value.span, failure.to_string()))?;
             return Ok(Some(output.clone()));
+        }
+        if let Some(ty) = self.qualified_variant_type_hint(value, depth)? {
+            return Ok(Some(ty));
         }
         let ty = match &value.kind {
             H::Block(block) => {
@@ -601,6 +604,60 @@ impl Checker<'_, '_> {
         );
         self.required_steps -= (before - fuel) as u64;
         Ok(fields.map(|fields| (variant.shape.clone(), fields)))
+    }
+
+    // The declared leaf fixes the outer type. Source checking still owns the
+    // payload and any required computation of the qualified type arguments.
+    fn qualified_variant_type_hint(
+        &mut self,
+        value: &Expr<'_>,
+        depth: usize,
+    ) -> Result<Option<Term>, Error> {
+        let mut root = match value.kind {
+            H::Projection(..) => value,
+            H::Application(head, _) | H::ExtendedApplication(head, _) => head,
+            _ => return Ok(None),
+        };
+        let mut names = Vec::new();
+        while let H::Projection(parent, field) = &root.kind {
+            if names.len() >= 64 {
+                return Ok(None);
+            }
+            names.push(field.name.as_str());
+            root = parent;
+        }
+        if names.is_empty() || !matches!(root.kind, H::ResolvedDef { .. } | H::NFApplication(..)) {
+            return Ok(None);
+        }
+        let Some(ty @ Term::Nominal { declaration, .. }) =
+            self.generator_static_type_hint(root, depth + 1, None)?
+        else {
+            return Ok(None);
+        };
+        // Forming a layout can invoke enum encodings or payload type producers.
+        // Only an already available namespace is evidence at this point.
+        let Some(definition) = self.enums.get(&declaration) else {
+            return Ok(None);
+        };
+        self.required_steps = self
+            .required_steps
+            .checked_sub(definition.variants.len() as u64 + names.len() as u64)
+            .ok_or_else(|| error(value.span, "enum variant evidence budget exhausted"))?;
+        names.reverse();
+        let name = names.join(".");
+        Ok(definition
+            .variants
+            .iter()
+            .any(|variant| {
+                variant.name == name
+                    && matches!(
+                        (&variant.shape, &value.kind),
+                        (n::VariantShape::Unit, H::Projection(..))
+                            | (n::VariantShape::Tuple, H::Application(..))
+                            | (n::VariantShape::Named(_), H::ExtendedApplication(..))
+                    )
+            })
+            .then_some(ty))
     }
 
     // Built-in owned fields have a layout-derived type. Reading that layout

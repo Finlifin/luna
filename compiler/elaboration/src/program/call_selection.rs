@@ -228,8 +228,14 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
             }
             if let Some((_, clauses)) = explicit
                 && !comptime
-                && let Some(call) =
-                    self.with_partial_named_call_plan(owner, clauses, callee.span, |this, plan| {
+                && let Some(call) = self.with_partial_named_call_plan(
+                    owner,
+                    clauses,
+                    expr,
+                    args,
+                    expected,
+                    partial,
+                    |this, plan| {
                         this.generic_call_with_plan(
                             expr,
                             owner,
@@ -240,7 +246,8 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
                             plan,
                             None,
                         )
-                    })?
+                    },
+                )?
             {
                 return Ok(call);
             }

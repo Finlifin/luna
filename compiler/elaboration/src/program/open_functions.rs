@@ -5167,12 +5167,18 @@ impl Checker<'_, '_> {
         if self.open_functions.contains_key(&owner) && !self.type_parameters[&owner].is_empty() {
             let arguments = if let Some(explicit) = explicit {
                 let saved_open_call = std::mem::replace(&mut self.describing_open_call, true);
-                let partial =
-                    self.with_partial_named_call_plan(owner, explicit, expr.span, |this, plan| {
-                        let target = match expected {
-                            Some(D::Known(ty)) => Some(ty),
-                            _ => None,
-                        };
+                let target = match expected {
+                    Some(D::Known(ty)) => Some(ty),
+                    _ => None,
+                };
+                let partial = self.with_partial_named_call_plan(
+                    owner,
+                    explicit,
+                    expr,
+                    args,
+                    target,
+                    None,
+                    |this, plan| {
                         this.infer_open_clauses_with_plan(
                             expr,
                             owner,
@@ -5181,7 +5187,8 @@ impl Checker<'_, '_> {
                             Some((locals, returns, depth)),
                             plan,
                         )
-                    });
+                    },
+                );
                 self.describing_open_call = saved_open_call;
                 match partial? {
                     Some(OpenClauseInference::Ready(arguments, _, _)) => arguments,
@@ -5820,8 +5827,17 @@ impl Checker<'_, '_> {
         let signature = signature.clone();
         if let Some(types) = explicit {
             let saved = std::mem::replace(&mut self.describing_open_call, true);
-            let partial =
-                self.with_partial_named_call_plan(owner, types, expr.span, |this, plan| {
+            let partial = self.with_partial_named_call_plan(
+                owner,
+                types,
+                expr,
+                args,
+                match expected {
+                    Some(D::Known(ty)) => Some(ty),
+                    _ => None,
+                },
+                None,
+                |this, plan| {
                     this.describing_open_call = saved;
                     this.describe_generic_call_with_plan(
                         expr,
@@ -5836,7 +5852,8 @@ impl Checker<'_, '_> {
                         constrained,
                         plan,
                     )
-                });
+                },
+            );
             self.describing_open_call = saved;
             if let Some(description) = partial? {
                 return Ok(description);
@@ -7458,8 +7475,14 @@ impl Checker<'_, '_> {
         } else {
             if fixed.is_none()
                 && let Some(clauses) = clauses
-                && let Some(call) =
-                    self.with_partial_named_call_plan(owner, clauses, expr.span, |this, plan| {
+                && let Some(call) = self.with_partial_named_call_plan(
+                    owner,
+                    clauses,
+                    expr,
+                    args,
+                    expected,
+                    None,
+                    |this, plan| {
                         this.generic_call_with_plan(
                             expr,
                             owner,
@@ -7470,7 +7493,8 @@ impl Checker<'_, '_> {
                             plan,
                             None,
                         )
-                    })?
+                    },
+                )?
             {
                 return Ok(Some(call));
             }
@@ -7500,14 +7524,20 @@ impl Checker<'_, '_> {
             return Ok(call);
         }
         if let Some(clauses) = clauses {
-            if let Some(call) =
-                self.with_partial_named_call_plan(owner, clauses, expr.span, |this, plan| {
+            if let Some(call) = self.with_partial_named_call_plan(
+                owner,
+                clauses,
+                expr,
+                args,
+                expected,
+                None,
+                |this, plan| {
                     this.check_open_definition(owner)?;
                     let inferred =
                         this.infer_open_clauses_with_plan(expr, owner, args, expected, None, plan)?;
                     this.finish_inferred_open_call(expr, owner, args, expected, inferred)
-                })?
-            {
+                },
+            )? {
                 return Ok(call);
             }
             return self.with_explicit_open_clauses(owner, clauses, expr, |this| {

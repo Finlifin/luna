@@ -1,6 +1,7 @@
 //! Source trait input domains and declaration-ordered supplied/default indices.
 use super::*;
 
+mod call_evidence;
 mod selection;
 
 #[derive(Clone)]
@@ -530,8 +531,18 @@ impl Checker<'_, '_> {
         defaults: Option<&BTreeMap<DeclarationId, std::sync::Arc<Term>>>,
         prefix: Vec<Term>,
     ) -> Result<Vec<Term>, Error> {
-        self.prepare_clause_arguments(owner, args, subject, span, domains, defaults, prefix, None)
-            .map(|plan| plan.1)
+        self.prepare_clause_arguments(
+            owner,
+            args,
+            subject,
+            span,
+            domains,
+            defaults,
+            prefix,
+            None,
+            vec![],
+        )
+        .map(|plan| plan.1)
     }
 
     /// A direct invocation can solve missing mandatory slots from its ordinary
@@ -540,9 +551,13 @@ impl Checker<'_, '_> {
         &mut self,
         owner: OwnerId,
         args: &[Arg<'src>],
-        span: Span,
+        site: &Expr<'_>,
+        ordinary: &[Arg<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
         finish: impl FnOnce(&mut Self, type_defaults::FunctionTypePlan<'src>) -> Result<R, Error>,
     ) -> Result<Option<R>, Error> {
+        let span = site.span;
         if !args.iter().any(|arg| matches!(arg, Arg::Named(..)))
             || self.clause_collector(owner).is_some()
         {
@@ -551,26 +566,59 @@ impl Checker<'_, '_> {
         let Some(flat) = arguments::literal_spread_arguments(args) else {
             return Ok(None);
         };
-        let required = self
-            .type_clause_params(owner)
+        let clauses = self.type_clause_params(owner);
+        let positional = flat
             .iter()
-            .filter(|clause| {
+            .filter(|arg| matches!(arg, Arg::Positional(_)))
+            .count();
+        let omitted: Vec<_> = clauses
+            .iter()
+            .enumerate()
+            .filter(|(_, clause)| {
                 !matches!(
                     clause.kind.unquoted(),
                     hir::clause::ClauseParamKind::Optional(..)
                 )
             })
-            .count();
-        if flat
-            .iter()
-            .filter(|arg| matches!(arg, Arg::Positional(_)))
-            .count()
-            >= required
-        {
+            .skip(positional)
+            .map(|(slot, _)| slot)
+            .collect();
+        if omitted.is_empty() {
             return Ok(None);
         }
         let domains = self.trait_domains(owner)?;
         let prefix = self.lexical_function_arguments(owner, span)?;
+        let ids = &self.type_parameters[&owner];
+        let missing_types: Vec<_> = omitted
+            .into_iter()
+            .map(|slot| slot + prefix.len())
+            .filter(|slot| domains.get(*slot) == Some(&p(P::Type)))
+            .filter_map(|slot| ids.get(slot).copied())
+            .collect();
+        let mut needed = BTreeSet::new();
+        if !missing_types.is_empty() {
+            for argument in &flat {
+                if let Arg::Named(name, _) = argument
+                    && let Some(index) = clauses
+                        .iter()
+                        .position(|clause| clause.name.name == name.name)
+                    && let Some(domain) = domains.get(prefix.len() + index)
+                {
+                    needed.extend(input_observation::pending_domain_inputs(
+                        domain,
+                        missing_types.iter().map(|id| (*id, false)),
+                        &mut self.required_steps,
+                        span,
+                    )?);
+                }
+            }
+        }
+        let needed: Vec<_> = missing_types
+            .into_iter()
+            .filter(|id| needed.contains(id))
+            .collect();
+        let evidence =
+            self.observed_call_clause_types(owner, site, ordinary, expected, partial, &needed)?;
         let mut locals = Vec::new();
         let result = self
             .prepare_clause_arguments(
@@ -582,6 +630,7 @@ impl Checker<'_, '_> {
                 None,
                 prefix,
                 Some(&mut locals),
+                evidence,
             )
             .and_then(|plan| finish(self, plan));
         for id in locals {
@@ -642,6 +691,7 @@ impl Checker<'_, '_> {
         defaults: Option<&BTreeMap<DeclarationId, std::sync::Arc<Term>>>,
         prefix: Vec<Term>,
         mut inference_locals: Option<&mut Vec<DeclarationId>>,
+        evidence: Vec<(DeclarationId, Term)>,
     ) -> Result<type_defaults::FunctionTypePlan<'src>, Error> {
         let clauses = self.type_clause_params(owner);
         let all_parameters = self.type_parameters[&owner].clone();
@@ -653,6 +703,13 @@ impl Checker<'_, '_> {
         let parameters = all_parameters[prefix.len()..].to_vec();
         let domains = &domains[prefix.len()..];
         let mut supplied: Vec<Option<Term>> = vec![None; clauses.len()];
+        for (id, ty) in evidence {
+            let slot = parameters
+                .iter()
+                .position(|p| *p == id)
+                .ok_or_else(|| error(span, "inferred input is outside the call telescope"))?;
+            supplied[slot] = Some(ty);
+        }
         let mut pending_explicit = vec![None; clauses.len()];
         let mut pending_runtime = vec![None; clauses.len()];
         let mut positional = 0;

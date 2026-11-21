@@ -614,3 +614,107 @@ fn list_elements_resolve_enum_constructors_from_the_inferred_domain() {
     "#;
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn ordinary_type_evidence_selects_the_clause_namespace_before_invocation() {
+    let source = r#"
+        enum Packet { group.{byte(u8)}, waiting }
+        fn first(witness: T) -> T where T, .items: meta.List<T> = [] {
+            const value = items[0];
+            value
+        }
+        fn nested(witness: *T) -> T where T, .items: meta.List<T> = [] {
+            const value = items[0];
+            value
+        }
+        struct Slot where T { value: T }
+        fn slot(witness: T) -> Slot<T> where T, .items: meta.List<T> = [] {
+            const value = items[0];
+            Slot<T> { value: value }
+        }
+        fn independent(left: T, right: U) -> T where T, U, .items: meta.List<T> = [] {
+            const value = items[0];
+            value
+        }
+        fn run() -> bool {
+            let empty: ?u8 = null;
+            let byte = first<.items = [.group.byte(0)]>(empty);
+            let selected = first<.items = [.group.byte(0)]>(Packet.waiting);
+            let packet = Packet.waiting;
+            let other = nested<.items = [.group.byte(7)]>(packet.ref);
+            let another = independent<.items = [.group.byte(9)]>(Packet.group.byte(4), true);
+            let wrapped: Slot<?Packet> = slot<.items = [.group.byte(5)]>(null);
+            let lifted: Slot<?Packet> = slot<.items = [.group.byte(6)]>(Packet.waiting);
+            (wrapped.value matches .group.byte(5)?) and (lifted.value matches .group.byte(6)?)
+                and (another matches .group.byte(9)) and (byte matches 103?) and (selected matches .group.byte(0))
+                and (other matches .group.byte(7))
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let invalid = source.replace("Packet.group.byte(4)", "Packet.group.byte(false)");
+    let error = sysroot::compile(&invalid).unwrap_err();
+    assert!(error.contains("u8") && error.contains("bool"), "{error}");
+}
+
+#[test]
+fn clause_evidence_reads_signatures_without_invoking_an_ordinary_producer() {
+    let source = r#"
+        enum Packet { group.{record_mark(u8)}, waiting }
+        comptime fn event(name: Symbol, value: u8) -> u8 {
+            let generated = meta.StructBuilder.new(.name = name).Build();
+            value
+        }
+        pure comptime trait MarkSymbol { comptime fn record_mark(self, value: u8) -> ?u8; }
+        comptime impl MarkSymbol for Symbol {
+            comptime fn record_mark(self, value: u8) -> ?u8 { event(.EvidenceMethod, value) }
+        }
+        comptime fn absent() -> ?u8 { null }
+        comptime fn witness() -> Packet {
+            let mark = event(.EvidenceWitness, 0);
+            Packet.waiting
+        }
+        fn take(comptime w: T) -> T
+        where T, .items: meta.List<T> = [], .stamp: u8 = 0
+        {
+            const first = items[0];
+            first
+        }
+        fn from_result() -> T where T, .items: meta.List<T> = [] {
+            const first = items[0];
+            first
+        }
+        fn run() -> bool {
+            let value = take<.stamp = event(.EvidenceStamp, 1),
+                .items = [.group.record_mark(event(.EvidenceField, 7))]>(witness());
+            let other: Packet = from_result<.items = [.group.record_mark(8)]>();
+            let ordinary = take<.items = [.group.record_mark(event(.EvidenceArgument, 4))],
+                .stamp = event(.EvidenceFollowing, 0)>(absent());
+            (ordinary matches 4?) and (value matches .group.record_mark(7)) and (other matches .group.record_mark(8))
+        }
+    "#;
+    let package = sysroot::compile(source).unwrap();
+    let mut events: Vec<_> = package
+        .structs
+        .iter()
+        .filter(|item| item.name.starts_with("Evidence"))
+        .map(|item| (item.declaration, item.name.as_str()))
+        .collect();
+    events.sort_unstable();
+    assert_eq!(
+        events.into_iter().map(|(_, name)| name).collect::<Vec<_>>(),
+        [
+            "EvidenceStamp",
+            "EvidenceField",
+            "EvidenceWitness",
+            "EvidenceArgument",
+            "EvidenceMethod",
+            "EvidenceFollowing"
+        ]
+    );
+    let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
