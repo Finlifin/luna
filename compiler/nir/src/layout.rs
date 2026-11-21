@@ -1,7 +1,8 @@
 //! Target-aware physical storage layout calculation for NIR types.
 //!
 //! Matches host LLVM type lowering (`ptr`, `{ i1, payload }`, `{ i{8,16,32}, union }`
-//! for error results, sequential structs, transparent newtypes, fixed-bit/symbol/aggregate enums).
+//! for error results and aggregate enums, sequential structs, transparent newtypes,
+//! and unit/symbol/fixed-bit enums).
 //! Pointers and function pointers do not recurse into pointees or parameter/result
 //! bodies; direct or indirect by-value cycles and comptime-only domains are rejected.
 
@@ -382,17 +383,18 @@ fn layout_at(
                 NominalLayout::EnumFixedBits(width) => int_layout(width, ty),
                 NominalLayout::EnumAggregate(variants) => {
                     charge(fuel, variants.len())?;
-                    let mut fields = Vec::with_capacity(variants.len() + 1);
-                    fields.push(TypeLayout { size: 4, align: 4 });
+                    let mut variant_layouts = Vec::with_capacity(variants.len());
                     for variant_fields in variants {
                         charge(fuel, variant_fields.len())?;
                         let v_layouts = variant_fields
                             .iter()
                             .map(|f_ty| layout_at(world, f_ty, depth + 1, visiting, fuel))
                             .collect::<Result<Vec<_>, _>>()?;
-                        fields.push(struct_layout(&v_layouts)?);
+                        variant_layouts.push(struct_layout(&v_layouts)?);
                     }
-                    struct_layout(&fields)
+                    let tag = integer_layout(sum_tag_bits(variant_layouts.len())?)?;
+                    let payload = union_layout(&variant_layouts)?;
+                    struct_layout(&[tag, payload])
                 }
             };
             visiting.pop();
@@ -879,5 +881,143 @@ mod tests {
         assert_eq!(sum_tag_bits(257), Ok(16));
         assert_eq!(sum_tag_bits(65_536), Ok(16));
         assert_eq!(sum_tag_bits(65_537), Ok(32));
+    }
+
+    #[test]
+    fn aggregate_enum_uses_tagged_union_sum_layout() {
+        let mut world = TestWorldVec::new(Some(TargetData::new(64).unwrap()));
+        let mut fuel = 10_000;
+
+        let packed_9b = Term::Nominal {
+            declaration: id(20),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            packed_9b.clone(),
+            NominalLayout::PackedStruct(vec![
+                Term::Primitive(Primitive::U64),
+                Term::Primitive(Primitive::U8),
+            ]),
+        ));
+
+        let empty_struct = Term::Nominal {
+            declaration: id(21),
+            arguments: vec![],
+        };
+        world
+            .nominals
+            .push((empty_struct.clone(), NominalLayout::Struct(vec![])));
+
+        let small = Term::Nominal {
+            declaration: id(22),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            small.clone(),
+            NominalLayout::EnumAggregate(vec![
+                vec![],
+                vec![Term::Primitive(Primitive::U8)],
+                vec![
+                    Term::Primitive(Primitive::U8),
+                    Term::Primitive(Primitive::U8),
+                ],
+            ]),
+        ));
+        assert_eq!(
+            compute_layout(&world, &small, &mut fuel),
+            Ok(TypeLayout { size: 3, align: 1 })
+        );
+
+        let multi = Term::Nominal {
+            declaration: id(23),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            multi.clone(),
+            NominalLayout::EnumAggregate(vec![
+                vec![],
+                vec![
+                    Term::Primitive(Primitive::U64),
+                    Term::Primitive(Primitive::U64),
+                ],
+                vec![
+                    Term::Primitive(Primitive::U64),
+                    Term::Primitive(Primitive::U64),
+                ],
+                vec![
+                    Term::Primitive(Primitive::U64),
+                    Term::Primitive(Primitive::U64),
+                ],
+            ]),
+        ));
+        assert_eq!(
+            compute_layout(&world, &multi, &mut fuel),
+            Ok(TypeLayout { size: 24, align: 8 })
+        );
+
+        let wide = Term::Nominal {
+            declaration: id(24),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            wide.clone(),
+            NominalLayout::EnumAggregate(vec![
+                vec![Term::Primitive(Primitive::U8)],
+                vec![Term::Primitive(Primitive::U128)],
+            ]),
+        ));
+        assert_eq!(
+            compute_layout(&world, &wide, &mut fuel),
+            Ok(TypeLayout {
+                size: 32,
+                align: 16,
+            })
+        );
+
+        let mixed_packed = Term::Nominal {
+            declaration: id(25),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            mixed_packed.clone(),
+            NominalLayout::EnumAggregate(vec![
+                vec![packed_9b],
+                vec![Term::Primitive(Primitive::U64)],
+            ]),
+        ));
+        assert_eq!(
+            compute_layout(&world, &mixed_packed, &mut fuel),
+            Ok(TypeLayout { size: 24, align: 8 })
+        );
+
+        let zero_payload = Term::Nominal {
+            declaration: id(26),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            zero_payload.clone(),
+            NominalLayout::EnumAggregate(vec![
+                vec![Term::Primitive(Primitive::Void)],
+                vec![empty_struct],
+            ]),
+        ));
+        assert_eq!(
+            compute_layout(&world, &zero_payload, &mut fuel),
+            Ok(TypeLayout { size: 1, align: 1 })
+        );
+
+        let many_257 = Term::Nominal {
+            declaration: id(27),
+            arguments: vec![],
+        };
+        let mut variants = vec![vec![Term::Primitive(Primitive::U8)]];
+        variants.extend((1..257).map(|_| Vec::new()));
+        world
+            .nominals
+            .push((many_257.clone(), NominalLayout::EnumAggregate(variants)));
+        assert_eq!(
+            compute_layout(&world, &many_257, &mut fuel),
+            Ok(TypeLayout { size: 4, align: 2 })
+        );
     }
 }

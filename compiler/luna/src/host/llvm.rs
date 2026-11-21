@@ -57,6 +57,16 @@ impl ErrorResultLayout {
     }
 }
 
+fn sum_union_llvm(tag_bits: u32, payload_size: u64, payload_align: u64) -> String {
+    if payload_size == 0 {
+        format!("{{ i{tag_bits}, {{}} }}")
+    } else {
+        let count = payload_size / payload_align;
+        let element_bits = payload_align * 8;
+        format!("{{ i{tag_bits}, [{count} x i{element_bits}] }}")
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
     Unit,
@@ -96,28 +106,11 @@ impl Ty {
                 }
             ),
             Self::ErrorResult(layout) => {
-                if layout.payload_size == 0 {
-                    format!("{{ i{}, {{}} }}", layout.tag_bits)
-                } else {
-                    let count = layout.payload_size / layout.payload_align;
-                    let element_bits = layout.payload_align * 8;
-                    format!("{{ i{}, [{count} x i{element_bits}] }}", layout.tag_bits)
-                }
+                sum_union_llvm(layout.tag_bits, layout.payload_size, layout.payload_align)
             }
             Self::Enum(layout) if layout.symbols.is_some() => Self::String.llvm(),
             Self::Enum(layout) if layout.aggregate => {
-                let payloads = layout
-                    .fields
-                    .iter()
-                    .map(|fields| {
-                        Ty::Record(std::sync::Arc::new(
-                            fields.iter().map(|(_, ty)| ty.clone()).collect(),
-                        ))
-                        .llvm()
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{{ i32, {payloads} }}")
+                sum_union_llvm(layout.tag_bits, layout.payload_size, layout.payload_align)
             }
             Self::Enum(layout) => format!("i{}", layout.width),
             Self::Closure(fields) => format!(
@@ -227,20 +220,13 @@ impl Ty {
                     .map_err(|e| e.to_string())
             }
             Self::Enum(layout) if layout.aggregate => {
-                let mut fields = Vec::with_capacity(layout.fields.len() + 1);
-                fields.push(nir::TypeLayout { size: 4, align: 4 });
-                for variant_fields in &layout.fields {
-                    let mut v_layouts = Vec::with_capacity(variant_fields.len());
-                    for (_, field_ty) in variant_fields {
-                        v_layouts.push(field_ty.storage_layout_at(
-                            pointer_bits,
-                            depth + 1,
-                            fuel,
-                        )?);
-                    }
-                    fields.push(nir::layout::struct_layout(&v_layouts).map_err(|e| e.to_string())?);
-                }
-                nir::layout::struct_layout(&fields).map_err(|e| e.to_string())
+                let tag =
+                    nir::layout::integer_layout(layout.tag_bits).map_err(|e| e.to_string())?;
+                let payload = nir::TypeLayout {
+                    size: layout.payload_size,
+                    align: layout.payload_align,
+                };
+                nir::layout::struct_layout(&[tag, payload]).map_err(|e| e.to_string())
             }
             Self::Enum(layout) => {
                 nir::layout::integer_layout(layout.width).map_err(|e| e.to_string())

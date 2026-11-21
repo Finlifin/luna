@@ -1025,20 +1025,24 @@ impl Emitter<'_> {
     fn cleanup_field_slot(&mut self, mut slot: Slot, path: &[usize]) -> Result<Slot, String> {
         for index in path {
             let packed = slot.align == Some(1) || matches!(slot.ty, Ty::PackedRecord(_));
-            let (ty, indices) = field_layout(&slot.ty, *index, None)
+            let (ty, steps) = field_layout(&slot.ty, *index, None)
                 .ok_or("host cleanup field requires a product layout")?;
-            let path = indices
-                .iter()
-                .map(|i| format!(", i32 {i}"))
-                .collect::<String>();
-            let pointer = self.instruction(
-                Ty::Pointer,
-                format!(
-                    "getelementptr {}, ptr {}, i32 0{path}",
-                    slot.ty.llvm(),
-                    slot.pointer
-                ),
-            );
+            let mut pointer = slot.pointer.clone();
+            for (gep_ty, indices) in steps {
+                let path = indices
+                    .iter()
+                    .map(|i| format!(", i32 {i}"))
+                    .collect::<String>();
+                pointer = self
+                    .instruction(
+                        Ty::Pointer,
+                        format!(
+                            "getelementptr {}, ptr {pointer}, i32 0{path}",
+                            gep_ty.llvm()
+                        ),
+                    )
+                    .text;
+            }
             slot = Slot {
                 align: if packed || matches!(ty, Ty::PackedRecord(_)) {
                     Some(1)
@@ -1046,7 +1050,7 @@ impl Emitter<'_> {
                     slot.align
                 },
                 ty,
-                pointer: pointer.text,
+                pointer,
             };
         }
         Ok(slot)
@@ -1078,7 +1082,7 @@ impl Emitter<'_> {
         let mut logical = logical.cloned();
         for (depth, field) in path.iter().enumerate() {
             let packed = slot.align == Some(1) || matches!(slot.ty, Ty::PackedRecord(_));
-            let (next, ty, indices) = cleanup_field_layout(
+            let (next, ty, steps) = cleanup_field_layout(
                 self.graph,
                 logical.as_ref(),
                 &slot.ty,
@@ -1087,25 +1091,29 @@ impl Emitter<'_> {
             )
             .ok_or("host cleanup payload path lacks a supported active variant")?;
             logical = next;
-            if indices.is_empty() {
+            if steps.is_empty() {
                 if packed || matches!(ty, Ty::PackedRecord(_)) {
                     slot.align = Some(1);
                 }
                 slot.ty = ty;
                 continue;
             }
-            let indices = indices
-                .iter()
-                .map(|i| format!(", i32 {i}"))
-                .collect::<String>();
-            let pointer = self.instruction(
-                Ty::Pointer,
-                format!(
-                    "getelementptr {}, ptr {}, i32 0{indices}",
-                    slot.ty.llvm(),
-                    slot.pointer
-                ),
-            );
+            let mut pointer = slot.pointer.clone();
+            for (gep_ty, indices) in steps {
+                let indices = indices
+                    .iter()
+                    .map(|i| format!(", i32 {i}"))
+                    .collect::<String>();
+                pointer = self
+                    .instruction(
+                        Ty::Pointer,
+                        format!(
+                            "getelementptr {}, ptr {pointer}, i32 0{indices}",
+                            gep_ty.llvm()
+                        ),
+                    )
+                    .text;
+            }
             slot = Slot {
                 align: if packed || matches!(ty, Ty::PackedRecord(_)) {
                     Some(1)
@@ -1113,7 +1121,7 @@ impl Emitter<'_> {
                     slot.align
                 },
                 ty,
-                pointer: pointer.text,
+                pointer,
             };
         }
         Ok(slot)
@@ -1526,25 +1534,33 @@ fn variant_count(ty: &Ty) -> Option<usize> {
     }
 }
 
-fn field_layout(ty: &Ty, field: usize, tag: Option<usize>) -> Option<(Ty, Vec<usize>)> {
+fn field_layout(ty: &Ty, field: usize, tag: Option<usize>) -> Option<(Ty, Vec<(Ty, Vec<usize>)>)> {
     match ty {
         Ty::Record(fields) | Ty::PackedRecord(fields) => {
-            Some((fields.get(field)?.clone(), vec![field]))
+            Some((fields.get(field)?.clone(), vec![(ty.clone(), vec![field])]))
         }
-        Ty::Closure(fields) => Some((fields.get(field)?.clone(), vec![1, field])),
+        Ty::Closure(fields) => Some((
+            fields.get(field)?.clone(),
+            vec![(ty.clone(), vec![1, field])],
+        )),
         Ty::Enum(layout) if layout.aggregate => {
             let tag = tag?;
+            let field_ty = layout.fields.get(tag)?.get(field)?.1.clone();
+            let variant_ty = layout.variant_record_ty(tag)?;
             Some((
-                layout.fields.get(tag)?.get(field)?.1.clone(),
-                vec![tag + 1, field],
+                field_ty,
+                vec![(ty.clone(), vec![1]), (variant_ty, vec![field])],
             ))
         }
         Ty::Optional(payload) if field == 0 && tag == Some(1) => {
-            Some(((**payload).clone(), vec![1]))
+            Some(((**payload).clone(), vec![(ty.clone(), vec![1])]))
         }
         Ty::ErrorResult(layout) if field == 0 => {
             let tag = tag?;
-            Some((layout.branches.get(tag)?.1.clone(), vec![1]))
+            Some((
+                layout.branches.get(tag)?.1.clone(),
+                vec![(ty.clone(), vec![1])],
+            ))
         }
         _ => None,
     }
@@ -1558,7 +1574,7 @@ fn cleanup_field_layout(
     physical: &Ty,
     field: usize,
     tag: Option<usize>,
-) -> Option<(Option<Term>, Ty, Vec<usize>)> {
+) -> Option<(Option<Term>, Ty, Vec<(Ty, Vec<usize>)>)> {
     let next = match logical {
         None => None,
         Some(Term::Nominal { .. }) => {

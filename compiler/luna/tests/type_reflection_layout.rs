@@ -650,3 +650,305 @@ fn error_qualified_sum_type_abi_layout_indexing_and_drop_work_natively() {
         );
     }
 }
+
+#[test]
+fn aggregate_enum_sum_type_abi_layout_const_vec_and_drop_work_natively() {
+    let source = r#"
+        use std.prelude.*;
+        use std.collections.Vec;
+        use std.mem.AllocErr;
+
+        enum Small {
+            none,
+            byte(u8),
+            pair(u8, u8),
+        }
+
+        enum Rich {
+            none,
+            pair(u64, u64),
+            text(str, u64),
+            triple(u8, u64, u8),
+        }
+
+        impl Clone for Rich {
+            fn clone(*self) -> Self {
+                self.* match {
+                    Rich.none => Rich.none,
+                    Rich.pair(a, b) => Rich.pair(a, b),
+                    Rich.text(s, n) => Rich.text(s, n),
+                    Rich.triple(a, b, c) => Rich.triple(a, b, c),
+                }
+            }
+        }
+
+        impl Copy for Rich {}
+
+        enum Wide {
+            small(u8),
+            huge(u128),
+        }
+
+        ^attrs.layout.packed
+        struct Packed9 {
+            head: u64,
+            tail: u8,
+        }
+
+        enum PackedPayload {
+            packed(Packed9),
+            word(u64),
+        }
+
+        struct ZeroStruct {}
+
+        enum ZeroPayload {
+            a(void),
+            b(ZeroStruct),
+        }
+
+        enum ConstRich {
+            none,
+            pair(u64, u64),
+            sym(Symbol, u64),
+            triple(u8, u64, u8),
+        }
+
+        struct ConstRichSeed {
+            sym: Symbol,
+            n: u64,
+        }
+
+        impl Splice for ConstRichSeed {
+            assoc RuntimeTarget: Type = ConstRich;
+
+            fn splice(comptime data: ConstRichSeed) -> ConstRich {
+                ConstRich.sym(data.sym, data.n)
+            }
+        }
+
+        impl Clone for ConstRich {
+            fn clone(*self) -> Self {
+                self.* match {
+                    ConstRich.none => ConstRich.none,
+                    ConstRich.pair(a, b) => ConstRich.pair(a, b),
+                    ConstRich.sym(s, n) => ConstRich.sym(s, n),
+                    ConstRich.triple(a, b, c) => ConstRich.triple(a, b, c),
+                }
+            }
+        }
+
+        impl Copy for ConstRich {}
+
+        struct ConstWrap {
+            lead: u8,
+            item: ConstRich,
+            tail: u8,
+        }
+
+        struct ConstWrapSeed {
+            lead: u8,
+            a: u8,
+            b: u64,
+            c: u8,
+            tail: u8,
+        }
+
+        impl Splice for ConstWrapSeed {
+            assoc RuntimeTarget: Type = ConstWrap;
+
+            fn splice(comptime data: ConstWrapSeed) -> ConstWrap {
+                ConstWrap {
+                    lead: data.lead,
+                    item: ConstRich.triple(data.a, data.b, data.c),
+                    tail: data.tail,
+                }
+            }
+        }
+
+        impl Clone for ConstWrap {
+            fn clone(*self) -> Self {
+                ConstWrap {
+                    lead: self.lead.*,
+                    item: self.item.*.clone(),
+                    tail: self.tail.*,
+                }
+            }
+        }
+
+        impl Copy for ConstWrap {}
+
+        const CONST_RICH = ConstRichSeed {
+            sym: .union_const,
+            n: 777,
+        };
+        const CONST_WRAP = ConstWrapSeed {
+            lead: 11,
+            a: 3,
+            b: 999,
+            c: 7,
+            tail: 22,
+        };
+
+        struct OwnedA {
+            id: u64,
+        }
+
+        impl Drop for OwnedA {
+            fn drop(*self) {
+                let _ = std.fmt.println("drop-a:{}", self.id.*);
+            }
+        }
+
+        struct OwnedB {
+            id: u64,
+        }
+
+        impl Drop for OwnedB {
+            fn drop(*self) {
+                let _ = std.fmt.println("drop-b:{}", self.id.*);
+            }
+        }
+
+        enum OwnedChoice {
+            empty,
+            one(OwnedA),
+            two(u8, OwnedA, OwnedB),
+        }
+
+        fn check_sizes() -> bool {
+            Type.size_of(Small) == 3
+                and Type.align_of(Small) == 1
+                and Type.size_of(Rich) == 32
+                and Type.align_of(Rich) == 8
+                and Type.size_of(ConstRich) == 32
+                and Type.align_of(ConstRich) == 8
+                and Type.size_of(Wide) == 32
+                and Type.align_of(Wide) == 16
+                and Type.size_of(PackedPayload) == 24
+                and Type.align_of(PackedPayload) == 8
+                and Type.size_of(ZeroPayload) == 1
+                and Type.align_of(ZeroPayload) == 1
+        }
+
+        fn check_vec_enum_elements() -> !AllocErr bool {
+            var items = Vec<ConstRich>.new();
+            items.push(ConstRich.none)!;
+            items.push(ConstRich.pair(101, 202))!;
+            items.push(ConstRich.sym(.hello_sum, 55))!;
+            items.push(ConstRich.triple(9, 888, 4))!;
+
+            let fourth = items.pop() match {
+                found? => found match {
+                    ConstRich.triple(a, b, c) => a == 9 and b == 888 and c == 4,
+                    _ => false,
+                },
+                null => false,
+            };
+            let third = items.pop() match {
+                found? => found match {
+                    ConstRich.sym(s, n) => s == .hello_sum and n == 55,
+                    _ => false,
+                },
+                null => false,
+            };
+            let second = items.pop() match {
+                found? => found match {
+                    ConstRich.pair(a, b) => a == 101 and b == 202,
+                    _ => false,
+                },
+                null => false,
+            };
+            let first = items.pop() match {
+                found? => found match {
+                    ConstRich.none => true,
+                    _ => false,
+                },
+                null => false,
+            };
+            let runtime_text = make_rich_text("hello-sum", 55) match {
+                Rich.text(s, n) => s == "hello-sum" and n == 55,
+                _ => false,
+            };
+            fourth and third and second and first and runtime_text
+        }
+
+        fn make_rich_text(s: str, n: u64) -> Rich {
+            Rich.text(s, n)
+        }
+
+        fn read_const_rich(p: *ConstRich) -> bool {
+            p.* match {
+                ConstRich.sym(s, n) => s == .union_const and n == 777,
+                _ => false,
+            }
+        }
+
+        fn read_const_wrap(p: *ConstWrap) -> bool {
+            let w = p.*;
+            let item_ok = w.item match {
+                ConstRich.triple(a, b, c) => a == 3 and b == 999 and c == 7,
+                _ => false,
+            };
+            w.lead == 11 and w.tail == 22 and item_ok
+        }
+
+        fn check_consts() -> bool {
+            read_const_rich(CONST_RICH.ref) and read_const_wrap(CONST_WRAP.ref)
+        }
+
+        fn partial_move_choice() -> u64 {
+            let choice = OwnedChoice.two(9, OwnedA { id: 40 }, OwnedB { id: 50 });
+            choice match {
+                OwnedChoice.two(tag_byte, first, _) => {
+                    if tag_byte == 9 {
+                        let consumed = first;
+                        consumed.id
+                    } else {
+                        0
+                    }
+                },
+                _ => 0,
+            }
+        }
+
+        fn exercise_drops() -> bool {
+            do {
+                let _two = OwnedChoice.two(5, OwnedA { id: 10 }, OwnedB { id: 20 });
+                let _one = OwnedChoice.one(OwnedA { id: 30 });
+                let _empty = OwnedChoice.empty;
+            };
+            partial_move_choice() == 40
+        }
+
+        fn run() -> bool {
+            let sizes_ok = check_sizes();
+            let vec_ok = check_vec_enum_elements() match {
+                v! => v,
+                error _ => false,
+            };
+            let const_ok = check_consts();
+            let drop_ok = exercise_drops();
+            sizes_ok and vec_ok and const_ok and drop_ok
+        }
+    "#;
+    for opt in ["0", "3"] {
+        let case = NativeCase::new(source);
+        let build = case.build(opt);
+        assert_success(&build);
+        let output = case.run();
+        assert_success(&output);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let drop_lines: Vec<&str> = stdout.lines().filter(|l| l.starts_with("drop-")).collect();
+        assert!(
+            stdout.contains("drop-b:20\n")
+                && stdout.contains("drop-a:10\n")
+                && stdout.contains("drop-a:30\n")
+                && stdout.contains("drop-a:40\n")
+                && stdout.contains("drop-b:50\n")
+                && drop_lines.len() == 5
+                && stdout.ends_with("(bool true)\n"),
+            "opt={opt}: {stdout}"
+        );
+    }
+}
