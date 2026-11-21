@@ -283,7 +283,30 @@ impl<'a> Interpreter<'a> {
     ) -> Completion<'a> {
         match context {
             StackContext::Execution(mut execution) => {
-                *execution.parts().2 = code.restore_environment();
+                // Only a continuation that observes locals needs them moved
+                // back out of the bytecode registers. Returned values and
+                // shared receiver cells already own their storage.
+                let destination = match &mut execution {
+                    Execution::Default { environment, .. }
+                    | Execution::Contract { environment, .. } => Some(environment),
+                    Execution::Associated { .. } => None,
+                    Execution::Invocation(active) => {
+                        let frame = &mut active.frame;
+                        let body_finishes_here =
+                            matches!(frame.progress, contracts::Progress::Body { .. })
+                                && self.cleanup_schedule.is_none()
+                                && frame
+                                    .target
+                                    .declaration()
+                                    .is_none_or(|f| f.postconditions.is_empty());
+                        (flow.is_ok() && !body_finishes_here).then_some(&mut frame.environment)
+                    }
+                };
+                if let Some(environment) = destination {
+                    *environment = code.restore_environment();
+                } else {
+                    drop(code);
+                }
                 self.complete_execution(execution, flow)
             }
             StackContext::Input(finish) => Completion::Input(finish.complete(self, code, flow)),

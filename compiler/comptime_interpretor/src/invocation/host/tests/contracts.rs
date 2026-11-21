@@ -117,6 +117,52 @@ fn entry_body_and_exit_share_a_suspendable_activation() {
 }
 
 #[test]
+fn exit_contract_reads_the_parameter_written_by_the_body() {
+    let mut package = package(false);
+    let function = &mut package.functions[0];
+    let flag = local(0);
+    let incoming = local(1);
+    let boolean = ty(Primitive::Bool);
+    let parameter = nir::Parameter {
+        sort: nir::Sort::Runtime,
+        ty: boolean.clone(),
+    };
+    function.interface.signature = Term::Function {
+        parameters: vec![parameter.clone(), parameter],
+        result: Box::new(boolean.clone()),
+    };
+    function.interface.parameters = vec![flag, incoming];
+    function.interface.preconditions.clear();
+    function.interface.postconditions = vec![expr(boolean.clone(), K::Local(flag))];
+    function.body = expr(
+        boolean.clone(),
+        K::Block {
+            statements: vec![expr(
+                ty(Primitive::Void),
+                K::Assign {
+                    place: Place {
+                        root: flag,
+                        fields: vec![],
+                    },
+                    value: Box::new(expr(boolean.clone(), K::Local(incoming))),
+                },
+            )],
+            result: Some(Box::new(expr(boolean, K::Literal(Literal::Bool(true))))),
+        },
+    );
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for value in [false, true] {
+        let result = vm.invoke(id(10), vec![Value::Bool(!value), Value::Bool(value)]);
+        if value {
+            assert_eq!(result.unwrap(), Value::Bool(true));
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::ProgramContractRejected);
+        }
+    }
+    assert_eq!(vm.bytecode_invocations(), 2);
+}
+
+#[test]
 fn rejected_contracts_stop_at_the_current_stage_and_restore_the_caller() {
     for failed in [2, 4] {
         let package = package(false);
