@@ -7,6 +7,8 @@ pub(super) struct StagedInputs {
     pub(super) values: Vec<Option<n::Expr>>,
     pub(super) symbols: Vec<Option<Term>>,
     pub(super) live: Vec<Option<comptime_interpretor::Value>>,
+    /// Post-default slot contents, separate from the arguments delivered to the body.
+    pub(super) default_writes: BTreeMap<usize, Term>,
 }
 
 impl StagedInputs {
@@ -15,6 +17,7 @@ impl StagedInputs {
             values: vec![None; count],
             symbols: vec![None; count],
             live: vec![None; count],
+            default_writes: BTreeMap::new(),
         }
     }
 }
@@ -430,6 +433,7 @@ impl Checker<'_, '_> {
         slot: usize,
         parameters: &[Parameter],
         symbols: &[Option<Term>],
+        writes: &mut BTreeMap<usize, Term>,
         force_staged: bool,
         span: Span,
     ) -> Result<(n::Expr, Option<Term>), Error> {
@@ -437,7 +441,15 @@ impl Checker<'_, '_> {
             .iter()
             .map(|p| (p.sort, Some(p.ty.clone())))
             .collect::<Vec<_>>();
-        self.prepare_open_default_in_scope(owner, slot, &domains, symbols, force_staged, span)
+        self.prepare_open_default_in_scope(
+            owner,
+            slot,
+            &domains,
+            symbols,
+            writes,
+            force_staged,
+            span,
+        )
     }
 
     pub(super) fn prepare_open_default_in_scope(
@@ -446,6 +458,7 @@ impl Checker<'_, '_> {
         slot: usize,
         parameters: &[(Sort, Option<Term>)],
         symbols: &[Option<Term>],
+        writes: &mut BTreeMap<usize, Term>,
         force_staged: bool,
         span: Span,
     ) -> Result<(n::Expr, Option<Term>), Error> {
@@ -465,6 +478,7 @@ impl Checker<'_, '_> {
             };
             this.default_input_scope = Some(parameters.into());
             this.default_input_owner = Some(owner);
+            let mut slots = BTreeMap::new();
             for (index, parameter) in sig.params.iter().enumerate().take(slot) {
                 let binding = local(parameter.hir_id);
                 let (sort, domain) = &parameters[index];
@@ -472,7 +486,8 @@ impl Checker<'_, '_> {
                     continue;
                 };
                 this.locals.insert(binding, domain.clone());
-                if let Some(value) = &symbols[index] {
+                if let Some(value) = writes.get(&index).or(symbols[index].as_ref()) {
+                    slots.insert(binding, (index, domain));
                     this.input_facts
                         .specialized
                         .push((binding, domain.clone(), value.clone()));
@@ -489,7 +504,7 @@ impl Checker<'_, '_> {
             this.in_staged_input = staged;
             let value = this.expr(default, Some(expected))?;
             if staged {
-                let (value, symbol) = this.freeze_dependency_input(default, value, vec![])?;
+                let (value, symbol) = this.evaluate_open_default(default, value, slots, writes)?;
                 Ok((value, Some(symbol)))
             } else {
                 if !sig.modifiers.is_comptime {
@@ -498,5 +513,65 @@ impl Checker<'_, '_> {
                 Ok((value, None))
             }
         })
+    }
+
+    fn evaluate_open_default(
+        &mut self,
+        default: &Expr<'_>,
+        value: n::Expr,
+        slots: BTreeMap<n::LocalId, (usize, &Term)>,
+        writes: &mut BTreeMap<usize, Term>,
+    ) -> Result<(n::Expr, Term), Error> {
+        let span = default.span;
+        let outputs = self.with_observation_budget(span, |_, budget| {
+            let free = nir::free_bindings::collect(&value, &mut budget.steps)?;
+            let mut candidates: BTreeMap<_, _> = free
+                .iter()
+                .filter_map(|id| Some((*id, *slots.get(id)?)))
+                .collect();
+            budget.consume(candidates.len())?;
+            Self::invalidate_mutated_type_bindings(&value, &mut candidates, &mut budget.steps)?;
+            Ok(free
+                .into_iter()
+                .filter_map(|id| {
+                    let &(slot, domain) = slots.get(&id)?;
+                    (!candidates.contains_key(&id)).then_some((id, slot, domain))
+                })
+                .collect::<Vec<_>>())
+        })?;
+        if outputs.is_empty() {
+            return self.freeze_dependency_input(default, value, vec![]);
+        }
+        // Evaluate the selected default once, then read back only the slots
+        // it could have modified from the same execution environment.
+        let result_ty = value.ty.clone();
+        let mut fields = vec![value];
+        fields.extend(outputs.iter().map(|&(id, _, domain)| n::Expr {
+            source: source(span),
+            ty: domain.clone(),
+            kind: K::Local(id),
+        }));
+        let ty = self.tuple_value_type(fields.iter().map(|v| v.ty.clone()).collect(), span)?;
+        let packet = n::Expr {
+            source: source(span),
+            ty,
+            kind: K::Tuple(fields),
+        };
+        let (completed, _) = self.required_normal_input(default, packet, vec![])?;
+        let comptime_interpretor::Value::Tuple(fields) = completed else {
+            return Err(error(span, "default frame did not return its slot values"));
+        };
+        if fields.len() != outputs.len() + 1 {
+            return Err(error(span, "invalid default frame output count"));
+        }
+        let mut fields = fields.into_iter();
+        let result = self.freeze_completed_dependency(fields.next().unwrap(), result_ty, span)?;
+        let mut updated = Vec::with_capacity(outputs.len());
+        for ((_, slot, domain), field) in outputs.into_iter().zip(fields) {
+            let (_, symbol) = self.freeze_completed_dependency(field, domain.clone(), span)?;
+            updated.push((slot, symbol));
+        }
+        writes.extend(updated);
+        Ok(result)
     }
 }

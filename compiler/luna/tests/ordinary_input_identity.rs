@@ -722,3 +722,41 @@ fn dependent_inputs_preserve_optional_error_and_object_values() {
     let mismatch = source.replace("Stamp<?bool, null> {", "Stamp<?bool, true> {");
     assert!(sysroot::compile(&mismatch).is_err());
 }
+
+#[test]
+fn staged_runtime_defaults_share_writes_but_keep_delivered_arguments() {
+    let source = "
+        comptime fn Select() -> Type { bool }
+        fn gate(comptime .T: Type = bool,
+            comptime .U: Type = do { T = char; Select() },
+            comptime .V: Type = T, x: U, y: V) -> bool {
+            const valid = T == bool and U == bool and V == char;
+            valid
+        }
+        fn run() -> bool {
+            gate(true, 'z') and not gate(true, false, .U = bool)
+        }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let error =
+        sysroot::compile(&source.replace("gate(true, 'z')", "gate(true, false)")).unwrap_err();
+    assert!(
+        error.contains("expected (primitive char), found (primitive bool)"),
+        "{error}"
+    );
+}
+
+#[test]
+fn selected_defaults_publish_only_the_executed_branch() {
+    let source = "
+        fn readback(item: A, comptime .flag: bool = true,
+            comptime .seed: bool = false,
+            comptime .update: bool = do { if flag { seed = not seed; }; seed },
+            comptime .next: bool = seed) -> bool where A {
+            const checked = not seed and update == flag and next == flag;
+            checked
+        }
+        fn run() -> bool {
+            readback(true) and readback('z', .flag = false)
+        }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}

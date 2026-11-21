@@ -6643,9 +6643,22 @@ impl Checker<'_, '_> {
                         .enumerate()
                         .filter_map(|(slot, (sort, _))| (*sort != Sort::Runtime).then_some(slot)),
                 );
-                if let Some(last) = needed.iter().copied().filter(|slot| !assigned[*slot]).max() {
-                    needed.extend((0..=last).filter(|slot| !assigned[*slot]));
-                }
+            }
+            if let Some(last) = needed
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    !assigned[i]
+                        && (sig.modifiers.is_comptime
+                            || definition.parameters[i].0 != Sort::Runtime)
+                })
+                .max()
+            {
+                needed.extend((0..=last).filter(|&i| {
+                    !assigned[i]
+                        && (sig.modifiers.is_comptime
+                            || definition.parameters[i].0 != Sort::Runtime)
+                }));
             }
             // Follow only selected defaults. Overridden defaults contribute
             // neither values nor dependency edges to this invocation.
@@ -6852,13 +6865,13 @@ impl Checker<'_, '_> {
                         self.with_staged_input(true, |this| this.expr(&input, Some(&domain)))?;
                     self.freeze_open_call_input(&input, value)?
                 } else {
-                    if sig.modifiers.is_comptime
-                        && (0..slot).any(|earlier| {
-                            !assigned[earlier]
-                                && checked.symbols[earlier].is_none()
-                                && checked.live[earlier].is_none()
-                        })
-                    {
+                    if (0..slot).any(|earlier| {
+                        !assigned[earlier]
+                            && (sig.modifiers.is_comptime
+                                || definition.parameters[earlier].0 != Sort::Runtime)
+                            && checked.symbols[earlier].is_none()
+                            && checked.live[earlier].is_none()
+                    }) {
                         // A later default cannot overtake an earlier default
                         // waiting for declaration arguments, even if unrelated.
                         continue;
@@ -6927,6 +6940,7 @@ impl Checker<'_, '_> {
                         slot,
                         &prefix,
                         &checked.symbols,
+                        &mut checked.default_writes,
                         true,
                         expr.span,
                     )?;
@@ -7681,6 +7695,7 @@ impl Checker<'_, '_> {
         let mut symbols = checked.symbols;
         let mut values = checked.values;
         let mut live = checked.live;
+        let mut default_writes = checked.default_writes;
         let mut parameters = Vec::new();
         // Type formation is declaration ordered. Runtime evaluation remains in
         // source order in the emitted call argument plan below.
@@ -7805,6 +7820,7 @@ impl Checker<'_, '_> {
                         slot,
                         &parameters,
                         &symbols,
+                        &mut default_writes,
                         true,
                         expr.span,
                     )?;
@@ -7923,6 +7939,7 @@ impl Checker<'_, '_> {
                         slot,
                         &parameters,
                         &symbols,
+                        &mut default_writes,
                         false,
                         expr.span,
                     )?
