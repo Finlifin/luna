@@ -390,7 +390,7 @@ fn packed_mode_constants_preserve_symbol_and_object_entry_type() {
         };
         assert_eq!(object.entries().len(), 1);
         let entry = &object.entries()[0];
-        assert_eq!(entry.key(), Some("__flurry_packed"));
+        assert_eq!(entry.key(), Some("__flurry_packed_mode"));
         assert_eq!(entry.value().ty, Term::Primitive(Primitive::Symbol));
         assert_eq!(entry.value().value, Value::Symbol(expected_mode.into()));
     }
@@ -437,7 +437,7 @@ fn repository_attribute_package_inspects_packed_byte_and_bit_with_merge_override
     let dump = String::from_utf8_lossy(&output.stdout);
     assert_eq!(dump.matches("(evaluated-attribute ").count(), 4, "{dump}");
     assert_eq!(
-        dump.matches("(property \"__flurry_packed\")").count(),
+        dump.matches("(property \"__flurry_packed_mode\")").count(),
         4,
         "{dump}"
     );
@@ -459,7 +459,7 @@ fn repository_attribute_package_inspects_packed_byte_and_bit_with_merge_override
         "{selected}"
     );
     assert_eq!(
-        selected.matches("(key \"__flurry_packed\")").count(),
+        selected.matches("(key \"__flurry_packed_mode\")").count(),
         3,
         "{selected}"
     );
@@ -468,6 +468,6 @@ fn repository_attribute_package_inspects_packed_byte_and_bit_with_merge_override
     *ordinary.last_mut().unwrap() = "nir";
     let rejected = run(&ordinary);
     assert_eq!(rejected.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("__flurry_packed"));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("__flurry_packed_mode"));
     std::fs::remove_dir_all(directory).unwrap();
 }

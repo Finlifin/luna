@@ -127,7 +127,7 @@ impl Type {
 
     {- Report the merged packed layout mode (`.byte` or `.bit`), or `null` for default layout. -}
     pub pure comptime fn packed_mode(self) -> ?Symbol {
-        self.attrs().get<Symbol>(.__flurry_packed) match {
+        self.attrs().get<Symbol>(.__flurry_packed_mode) match {
             mode? => {
                 if mode == .byte or mode == .bit {
                     mode

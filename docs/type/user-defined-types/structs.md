@@ -39,10 +39,10 @@ property -> id: expr
 
 需要关闭编译器重排与填充时，应通过官方属性（见[官方属性键集中规范](../../comptime/official-attribute-keys.md)）显式选择**字节级**或**位级**紧凑布局，禁止使用裸键或定义体内 `.packed` 配置：
 
-- `^attrs.packed.byte` 展开为 `{ __flurry_packed: .byte }`；
-- `^attrs.packed.bit` 展开为 `{ __flurry_packed: .bit }`。
+- `^attrs.packed.byte` 展开为 `{ __flurry_packed_mode: .byte }`；
+- `^attrs.packed.bit` 展开为 `{ __flurry_packed_mode: .bit }`。
 
-两者共用单一内部键 `__flurry_packed`（`Symbol` 域，`.byte` | `.bit`），因此外层前缀属性会自动覆盖内层同键设置，两者互斥。`__flurry_packed` 仅适用于 `struct` 定义。
+两者共用单一内部键 `__flurry_packed_mode`（`Symbol` 域，`.byte` | `.bit`），因此外层前缀属性会自动覆盖内层同键设置，两者互斥。`__flurry_packed_mode` 仅适用于 `struct` 定义。
 
 #### 1. `attrs.packed.byte`（字节级紧凑布局）
 
@@ -84,9 +84,9 @@ property -> id: expr
 
 #### 3. 当前实现现状
 
-- `library/attrs` 已提供 `^attrs.packed.byte` 与 `^attrs.packed.bit`（生成 `{ __flurry_packed: .byte | .bit }`），`library/meta` 已提供 `Type.packed_mode() -> ?Symbol` 与 `Type.is_packed() -> bool`。
+- `library/attrs` 已提供 `^attrs.packed.byte` 与 `^attrs.packed.bit`（生成 `{ __flurry_packed_mode: .byte | .bit }`），`library/meta` 已提供 `Type.packed_mode() -> ?Symbol` 与 `Type.is_packed() -> bool`。
 - **已接通的字节级紧凑链路**：编译器当前通过过渡键 `attrs.layout.packed`（`{ packed: bool }`）完整支持字节级紧凑布局检查、禁用字段对齐指针及 LLVM `<{ ... }>` (`align 1`) 代码生成。
-- **待接通的编译器工作**：`elaboration` / `nir` 消费 `__flurry_packed`（`PackedMode` 替换 `packed: bool`）、`attrs.packed.bit` 的字段可位表示校验与到 `BitVec<W>` / `bitvec_opt` 的直接降码，以及超过 256 位时的 `Level::Warning` 诊断通道。
+- **待接通的编译器工作**：`elaboration` / `nir` 消费 `__flurry_packed_mode`（`PackedMode` 替换 `packed: bool`）、`attrs.packed.bit` 的字段可位表示校验与到 `BitVec<W>` / `bitvec_opt` 的直接降码，以及超过 256 位时的 `Level::Warning` 诊断通道。
 
 ## 常见示例
 
@@ -154,7 +154,7 @@ let unknown = Window { width: 1, depth: 2 }
 
 ### 紧凑布局示意（设计示例）
 
-> 以下示例展示 `attrs.packed.byte` 与 `attrs.packed.bit` 的目标设计语义；编译器当前仍在将下游布局消费者从过渡键 `.packed` 迁至 `__flurry_packed` 与 `BitVec<W>`/`bitvec_opt` 降码。
+> 以下示例展示 `attrs.packed.byte` 与 `attrs.packed.bit` 的目标设计语义；编译器当前仍在将下游布局消费者从过渡键 `.packed` 迁至 `__flurry_packed_mode` 与 `BitVec<W>`/`bitvec_opt` 降码。
 
 ~~~flurry
 ^attrs.packed.byte

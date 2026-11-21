@@ -11,8 +11,8 @@
 `attrs.prelude` 导出 `abi`、`comptime_phase`、`metadata` 和 `stable_since`。
 
 命名子模块另提供：
-- `attrs.packed.byte` 与 `attrs.packed.bit`：分别产生 `{ __flurry_packed: .byte }` 与 `{ __flurry_packed: .bit }`，对应字节级紧凑布局（`align = 1`）与直接翻译为 `BitVec<W>` 并复用 `bitvec_opt` 的位级紧凑布局（`attrs.packed.bit` 总位宽超过 256 位时发出非致命编译警告）。
-- `attrs.layout.{packed, packed_layout}`：过渡期旧入口，产生 `{ packed: bool }`，供当前结构体字节级紧凑布局检查与降码消费（随 `__flurry_packed` 消费者接通后统一收口）。
+- `attrs.packed.byte` 与 `attrs.packed.bit`：分别产生 `{ __flurry_packed_mode: .byte }` 与 `{ __flurry_packed_mode: .bit }`，对应字节级紧凑布局（`align = 1`）与直接翻译为 `BitVec<W>` 并复用 `bitvec_opt` 的位级紧凑布局（`attrs.packed.bit` 总位宽超过 256 位时发出非致命编译警告）。
+- `attrs.layout.{packed, packed_layout}`：过渡期旧入口，产生 `{ packed: bool }`，供当前结构体字节级紧凑布局检查与降码消费（随 `__flurry_packed_mode` 消费者接通后统一收口）。
 - `attrs.effects.direct_passing`：产生 `{ direct_passing: true }`，供直接传递效应声明检查消费。
 - `attrs.derivation`：编译器已消费 `{ derivation_default: bool }`；`attrs.derivation.default` 导出仍待 `default` 成员声明语法决定（见 `derivation/README.md`）。
 
@@ -77,4 +77,4 @@ comptime fn run() -> bool {
 单个 comptime 实现、泛型主体及该相可用的默认方法已有源码调用路径。
 同一关系的普通与 comptime 源码实现支持方法和关联项的合并，包括泛型参数改名。
 关联项按成员 phase 检查；共享值必须一致，泛型初始化程序目前要求替换参数后的
-结构一致。`derivation_default`、`packed`、`direct_passing` 与 `metadata` 已接通对应编译器消费者；`abi` 降码、`__flurry_packed`（`attrs.packed.{byte, bit}`）与 `stable_since`（`__flurry_stable_since`）消费者仍未接通，普通 NIR 编译会明确拒绝 `abi`、`__flurry_packed`、`__flurry_stable_since` 及其他未消费属性。
+结构一致。`derivation_default`、`packed`、`direct_passing` 与 `metadata` 已接通对应编译器消费者；`abi` 降码、`__flurry_packed_mode`（`attrs.packed.{byte, bit}`）与 `stable_since`（`__flurry_stable_since`）消费者仍未接通，普通 NIR 编译会明确拒绝 `abi`、`__flurry_packed_mode`、`__flurry_stable_since` 及其他未消费属性。
