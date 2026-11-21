@@ -10,9 +10,10 @@ mod nominal_layout_tests;
 mod text_regions;
 
 use super::pattern_facts::{constant_bool, known_pattern, outer_guards};
+pub(crate) use borrowed_layout::TypeLayoutCacheStorage;
 pub use borrowed_layout::{
-    BorrowedInputLeaf, PointerInputLeaf, TextInputLeaf, TextProvenance, borrowed_input_layout,
-    pointer_input_layout, pointer_input_layout_for,
+    BorrowedInputLeaf, PointerInputLeaf, TextInputLeaf, TextProvenance, TypeLayoutCache,
+    borrowed_input_layout, pointer_input_layout, pointer_input_layout_for,
 };
 pub use method_contracts::{
     MethodInvocation, MethodSummary, infer_method_in_package, infer_method_with_code_inputs,
@@ -2251,9 +2252,7 @@ impl<'a> Infer<'a, '_> {
         ty: &Term,
     ) -> Result<(), String> {
         let view = self.type_view(ty)?;
-        for (fields, _) in
-            symbolic_pointer_fields_for(self.package, &view, self.round.text_provenance, self.fuel)?
-        {
+        for (fields, _) in self.symbolic_pointer_fields(&view)? {
             if fields.is_empty() {
                 continue;
             }
@@ -2390,8 +2389,7 @@ impl<'a> Infer<'a, '_> {
         depth: usize,
     ) -> Result<BTreeMap<Vec<usize>, Targets>, String> {
         let ty = self.ty(&capture.ty)?;
-        let paths =
-            symbolic_pointer_fields_for(self.package, &ty, self.round.text_provenance, self.fuel)?;
+        let paths = self.symbolic_pointer_fields(&ty)?;
         let mut fields = if let Some(value) = &capture.value {
             self.pointer_fields_for(value)?
         } else {
@@ -2613,11 +2611,67 @@ impl<'a> Infer<'a, '_> {
         Ok(())
     }
 
+    pub(super) fn pointer_input_layout(
+        &mut self,
+        ty: &Term,
+    ) -> Result<Vec<PointerInputLeaf>, String> {
+        self.round.layout_cache.as_mut().pointer_input_layout_for(
+            self.package,
+            ty,
+            self.round.text_provenance,
+            self.fuel,
+        )
+    }
+
+    pub(super) fn pointer_representation(
+        &mut self,
+        ty: &Term,
+    ) -> Result<Option<(usize, Term)>, String> {
+        self.round
+            .layout_cache
+            .as_mut()
+            .pointer_representation(self.package, ty, self.fuel)
+    }
+
+    pub(super) fn readable_representation(&mut self, ty: &Term) -> Result<bool, String> {
+        self.round
+            .layout_cache
+            .as_mut()
+            .readable_representation_for(self.package, ty, self.round.text_provenance, self.fuel)
+    }
+
+    pub(super) fn copy_readable_representation(&mut self, ty: &Term) -> Result<bool, String> {
+        self.round
+            .layout_cache
+            .as_mut()
+            .copy_readable_representation_for(
+                self.package,
+                ty,
+                self.round.text_provenance,
+                self.fuel,
+            )
+    }
+
+    pub(super) fn owned_variant_fields(&mut self, ty: &Term) -> Result<Vec<Vec<Term>>, String> {
+        self.round
+            .layout_cache
+            .as_mut()
+            .owned_variant_fields(self.package, ty, self.fuel)
+    }
+
+    fn symbolic_pointer_fields(&mut self, ty: &Term) -> Result<BTreeMap<Vec<usize>, Term>, String> {
+        Ok(self
+            .pointer_input_layout(ty)?
+            .into_iter()
+            .map(|leaf| (leaf.input_fields, leaf.pointee))
+            .collect())
+    }
+
     // Pointer provenance follows a single representation leaf while source
     // operations and nominal signatures keep their declared types.
     fn local_pointer_value(&mut self, ty: &Term) -> Result<bool, String> {
         let ty = self.ty(ty)?;
-        Ok(pointer_representation(self.package, &ty, self.fuel)?.is_some())
+        Ok(self.pointer_representation(&ty)?.is_some())
     }
 
     fn pointer_free_owned(&mut self, ty: &Term, depth: usize) -> Result<(), String> {
@@ -5016,9 +5070,9 @@ impl<'a> Infer<'a, '_> {
         // when no assignment node occurs in this body. Such writes also need
         // cleanup-time transition evidence before value snapshots may suffice.
         if write && self.round.cleanup.is_some() && !self.round.mutates_pointer_storage {
-            self.round.mutates_pointer_storage =
-                pointer_input_layout_for(self.package, &ty, self.round.text_provenance, self.fuel)
-                    .map_or(true, |leaves| !leaves.is_empty());
+            self.round.mutates_pointer_storage = self
+                .pointer_input_layout(&ty)
+                .map_or(true, |leaves| !leaves.is_empty());
         }
         let targets = self.resolve_local_loads(targets)?;
         self.target_work(&targets)?;
@@ -5617,12 +5671,7 @@ impl<'a> Infer<'a, '_> {
                     let ty = self.ty(&argument.value.ty)?;
                     if !scalar(&ty)
                         && !matches!(ty, Term::Pointer(_))
-                        && !copy_readable_representation_for(
-                            self.package,
-                            &ty,
-                            self.round.text_provenance,
-                            self.fuel,
-                        )?
+                        && !self.copy_readable_representation(&ty)?
                     {
                         return Err(
                             "memory guard argument requires a known readable representation".into(),
@@ -5758,14 +5807,7 @@ impl<'a> Infer<'a, '_> {
         let data_subject = effect_data_layout(self.package, &subject_ty, self.fuel, 0)?;
         let pointer_subject = self.local_pointer_value(&subject_ty)?;
         if !pointer_subject && !data_subject {
-            if symbolic_pointer_fields_for(
-                self.package,
-                &subject_ty,
-                self.round.text_provenance,
-                self.fuel,
-            )?
-            .is_empty()
-            {
+            if self.symbolic_pointer_fields(&subject_ty)?.is_empty() {
                 self.pointer_free_owned(&subject_ty, depth + 1)?;
             }
         }
@@ -6001,18 +6043,12 @@ impl<'a> Infer<'a, '_> {
         depth: usize,
     ) -> Result<(), String> {
         let ty = self.ty(&expr.ty)?;
-        if !copy_readable_representation_for(
-            self.package,
-            &ty,
-            self.round.text_provenance,
-            self.fuel,
-        )? {
+        if !self.copy_readable_representation(&ty)? {
             return Err("owned read requires a richer contract".into());
         }
         self.walk(pointer, depth + 1)?;
         let targets = self.target(pointer, depth + 1)?;
-        let layout =
-            symbolic_pointer_fields_for(self.package, &ty, self.round.text_provenance, self.fuel)?;
+        let layout = self.symbolic_pointer_fields(&ty)?;
         if !self.local_pointer_value(&ty)? && !layout.is_empty() {
             let mut loaded = BTreeMap::new();
             for path in layout.keys() {
@@ -6674,18 +6710,15 @@ impl<'a> Infer<'a, '_> {
                 // pending/ready tag must not invent a rejection path.
                 let scalar_packet = matches!(&ty,Term::Nominal {declaration,..}
                     if self.package.is_some_and(|package|package.internal_return_packets.contains(declaration)))
-                    && owned_variant_fields(self.package, &ty, self.fuel)?
-                        .iter()
-                        .all(|variant| {
-                            variant.iter().all(|field| {
-                                matches!(field, Term::Primitive(_))
-                                    && intrinsic_pointer_value(field)
-                                    || matches!(
-                                        field,
-                                        Term::Primitive(Primitive::Void | Primitive::Never)
-                                    )
-                            })
-                        });
+                    && self.owned_variant_fields(&ty)?.iter().all(|variant| {
+                        variant.iter().all(|field| {
+                            matches!(field, Term::Primitive(_)) && intrinsic_pointer_value(field)
+                                || matches!(
+                                    field,
+                                    Term::Primitive(Primitive::Void | Primitive::Never)
+                                )
+                        })
+                    });
                 if !scalar_packet {
                     // Payload evaluation was checked above. For ordinary owned
                     // aggregates, retirement is the remaining rejection source;
@@ -6720,12 +6753,7 @@ impl<'a> Infer<'a, '_> {
                     return Err("memory field projection type mismatch".into());
                 }
                 let view = self.type_view(&field)?;
-                symbolic_pointer_fields_for(
-                    self.package,
-                    &view,
-                    self.round.text_provenance,
-                    self.fuel,
-                )?;
+                self.symbolic_pointer_fields(&view)?;
                 let mut pointers = BTreeMap::new();
                 for (path, targets) in self.pointer_fields_for(value)? {
                     self.step(path.len())?;
@@ -6789,21 +6817,11 @@ impl<'a> Infer<'a, '_> {
                 let ty = self.ty(&value.ty)?;
                 let code_storage =
                     !owned_callable_bottom(self.package, &ty, self.fuel, true)?.is_empty();
-                let pointer_layout = pointer_input_layout_for(
-                    self.package,
-                    &ty,
-                    self.round.text_provenance,
-                    self.fuel,
-                )?;
+                let pointer_layout = self.pointer_input_layout(&ty)?;
                 let aggregate_pointers =
                     !pointer_layout.is_empty() && !self.local_pointer_value(&ty)?;
                 if code_storage || aggregate_pointers {
-                    if !copy_readable_representation_for(
-                        self.package,
-                        &ty,
-                        self.round.text_provenance,
-                        self.fuel,
-                    )? {
+                    if !self.copy_readable_representation(&ty)? {
                         return Err(
                             "code pointer replacement requires a callable transition contract"
                                 .into(),
@@ -6837,13 +6855,7 @@ impl<'a> Infer<'a, '_> {
                     self.write_local_pointer_slot(targets, values, ty, expr.source)?;
                     return Ok(());
                 }
-                if !readable_representation_for(
-                    self.package,
-                    &ty,
-                    self.round.text_provenance,
-                    self.fuel,
-                )? || self.local_pointer_value(&ty)?
-                {
+                if !self.readable_representation(&ty)? || self.local_pointer_value(&ty)? {
                     return Err("pointer store or owned write requires a richer contract".into());
                 }
                 self.walk(pointer, depth + 1)?;
@@ -8045,6 +8057,7 @@ struct Round<'cleanup> {
     cleanup_protocol_present: Option<bool>,
     parameter_domains: Option<std::sync::Arc<BTreeMap<DeclarationId, Term>>>,
     methods: MethodCalleesStorage<'cleanup>,
+    layout_cache: TypeLayoutCacheStorage<'cleanup>,
     completed_types: HashMap<Term, Term>,
     effects: Vec<EffectInput>,
     complete_calls: bool,
@@ -8171,6 +8184,7 @@ pub(crate) fn infer_in_package_with_metadata_and_cache<'a>(
         None,
         declarations,
         cache,
+        None,
         fuel,
     )
 }
@@ -8185,6 +8199,7 @@ pub(crate) fn infer_in_package_with_full_context<'a>(
     methods: Option<&'a mut MethodCallees>,
     declarations: Option<&'a crate::declarations::Metadata<'a>>,
     cache: &'a mut SummaryCache,
+    layout_cache: Option<&'a mut TypeLayoutCache>,
     fuel: &mut usize,
 ) -> Result<Summary, String> {
     infer_borrowed_context_with_full_context(
@@ -8201,6 +8216,7 @@ pub(crate) fn infer_in_package_with_full_context<'a>(
         declarations,
         text_provenance,
         Some(cache),
+        layout_cache,
         fuel,
     )
 }
@@ -8756,6 +8772,7 @@ pub(crate) fn infer_with_effect_inputs_cached<'a>(
         declarations,
         text_provenance,
         summary_cache,
+        None,
         fuel,
     )
 }
@@ -8773,6 +8790,7 @@ pub(crate) fn infer_with_effect_inputs_full_context<'a>(
     declarations: Option<&'a crate::declarations::Metadata<'a>>,
     text_provenance: TextProvenance,
     summary_cache: Option<&'a mut SummaryCache>,
+    layout_cache: Option<&'a mut TypeLayoutCache>,
     fuel: &mut usize,
 ) -> Result<Summary, String> {
     let effects = effects::copy_inputs(effects, fuel)?;
@@ -8800,6 +8818,7 @@ pub(crate) fn infer_with_effect_inputs_full_context<'a>(
         declarations,
         text_provenance,
         summary_cache,
+        layout_cache,
         fuel,
     )
 }
@@ -8833,6 +8852,7 @@ pub(crate) fn infer_borrowed_context_with_cleanup_cached<'a>(
         declarations,
         text_provenance,
         summary_cache,
+        None,
         fuel,
     )
 }
@@ -8852,6 +8872,7 @@ pub(crate) fn infer_borrowed_context_with_full_context<'a>(
     declarations: Option<&'a crate::declarations::Metadata<'a>>,
     text_provenance: TextProvenance,
     summary_cache: Option<&'a mut SummaryCache>,
+    layout_cache: Option<&'a mut TypeLayoutCache>,
     fuel: &mut usize,
 ) -> Result<Summary, String> {
     let root_context_free = inputs.is_empty()
@@ -8881,6 +8902,7 @@ pub(crate) fn infer_borrowed_context_with_full_context<'a>(
         text_provenance,
         summary_cache,
         methods: methods.map_or_else(Default::default, MethodCalleesStorage::Borrowed),
+        layout_cache: layout_cache.map_or_else(Default::default, TypeLayoutCacheStorage::Borrowed),
         effects: effects::copy_inputs(effects, fuel)?,
         ..Round::default()
     };
@@ -9145,6 +9167,7 @@ fn derive_with_borrowed(
             round.declarations,
             round.text_provenance,
             round.summary_cache.as_deref_mut(),
+            Some(round.layout_cache.as_mut()),
             fuel,
         );
     }
@@ -9307,12 +9330,18 @@ fn derive_with_borrowed(
             | Term::Closure { .. }
             | Term::ErrorResult { .. }
             | Term::Optional(_)
-    ) && pointer_representation(Some(package), result_value, fuel)?
+    ) && round
+        .layout_cache
+        .as_mut()
+        .pointer_representation(Some(package), result_value, fuel)?
         .is_none()
     {
-        symbolic_pointer_fields_for(Some(package), result_value, round.text_provenance, fuel)?
-            .into_keys()
-            .map(|path| (path, Some(BTreeSet::new())))
+        round
+            .layout_cache
+            .as_mut()
+            .pointer_input_layout_for(Some(package), result_value, round.text_provenance, fuel)?
+            .into_iter()
+            .map(|leaf| (leaf.input_fields, Some(BTreeSet::new())))
             .collect()
     } else {
         BTreeMap::new()
@@ -9855,6 +9884,7 @@ pub fn infer_argument(
         None,
         TextProvenance::Unchecked,
         None,
+        None,
         fuel,
     )
 }
@@ -9869,22 +9899,31 @@ pub(crate) fn infer_argument_full_context<'a>(
     declarations: Option<&'a crate::declarations::Metadata<'a>>,
     text_provenance: TextProvenance,
     summary_cache: Option<&'a mut SummaryCache>,
+    layout_cache: Option<&'a mut TypeLayoutCache>,
     fuel: &mut usize,
 ) -> Result<ArgumentSummary, String> {
+    let mut layout_cache =
+        layout_cache.map_or_else(Default::default, TypeLayoutCacheStorage::Borrowed);
     if !intrinsic_pointer_value(&expression.ty)
         && !matches!(
             expression.ty,
             Term::Function { .. } | Term::UnsafeFunction(_)
         )
         && expression.ty != Term::Primitive(Primitive::Void)
-        && pointer_representation(Some(package), &expression.ty, fuel)?.is_none()
+        && layout_cache
+            .as_mut()
+            .pointer_representation(Some(package), &expression.ty, fuel)?
+            .is_none()
     {
         // The footprint only needs to rule out untracked escaping pointers.
         // Ownership, moves and cleanup are checked separately by the caller's
         // isolated default-evaluation frame, including aggregate results.
-        symbolic_pointer_fields_for(Some(package), &expression.ty, text_provenance, fuel).map_err(
-            |reason| format!("default argument requires an ownership contract: {reason}"),
-        )?;
+        layout_cache
+            .as_mut()
+            .pointer_input_layout_for(Some(package), &expression.ty, text_provenance, fuel)
+            .map_err(|reason| {
+                format!("default argument requires an ownership contract: {reason}")
+            })?;
     }
     let mut round = Round {
         complete_calls: true,
@@ -9893,6 +9932,7 @@ pub(crate) fn infer_argument_full_context<'a>(
         text_provenance,
         summary_cache,
         methods: methods.map_or_else(Default::default, MethodCalleesStorage::Borrowed),
+        layout_cache,
         ..Default::default()
     };
     let mut infer = Infer {
@@ -12112,6 +12152,7 @@ mod effect_cache_tests {
             None,
             TextProvenance::Unchecked,
             Some(&mut cache),
+            None,
             &mut fuel,
         )
         .unwrap();
@@ -12155,6 +12196,7 @@ mod effect_cache_tests {
             None,
             TextProvenance::Unchecked,
             Some(&mut cold_cache),
+            None,
             &mut cold_fuel,
         )
         .unwrap_err();
@@ -12173,6 +12215,7 @@ mod effect_cache_tests {
             None,
             TextProvenance::Unchecked,
             Some(&mut cache),
+            None,
             &mut tight_fuel,
         )
         .unwrap();

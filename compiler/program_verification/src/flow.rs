@@ -2203,6 +2203,7 @@ impl Walker<'_> {
                     Some(self.method_callees.as_mut()),
                     Some(self.declarations.as_ref()),
                     self.memory_summaries.as_mut(),
+                    None,
                     &mut fuel,
                 ) {
                     Ok(inferred) => {

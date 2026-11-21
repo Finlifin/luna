@@ -7,6 +7,7 @@ pub(super) fn charge_read(read: &Access, fuel: &mut usize) -> Result<(), String>
         .ok_or("cleanup read copy budget exhausted")?;
     bound_type(&read.ty, fuel)
 }
+
 fn private_storage_roots(body: &Expr, fuel: &mut usize) -> Result<BTreeSet<LocalId>, String> {
     let mut candidates = BTreeSet::new();
     let mut exposed = BTreeSet::new();
@@ -154,6 +155,7 @@ fn collect_pattern_storage(
     }
     Ok(())
 }
+
 impl Infer<'_, '_> {
     pub(super) fn prepare_private_storage_roots(&mut self, body: &Expr) -> Result<(), String> {
         if self.round.cleanup.is_some() {
@@ -161,6 +163,7 @@ impl Infer<'_, '_> {
         }
         Ok(())
     }
+
     pub(super) fn note_cleanup_pointer_mutation(&mut self, expr: &Expr) -> Result<(), String> {
         if self.round.cleanup.is_none() || self.round.mutates_pointer_storage {
             return Ok(());
@@ -180,12 +183,13 @@ impl Infer<'_, '_> {
         }
         if let K::Assign { value, .. } = &expr.kind {
             let ty = self.ty(&value.ty)?;
-            self.round.mutates_pointer_storage =
-                pointer_input_layout_for(self.package, &ty, self.round.text_provenance, self.fuel)
-                    .map_or(true, |leaves| !leaves.is_empty());
+            self.round.mutates_pointer_storage = self
+                .pointer_input_layout(&ty)
+                .map_or(true, |leaves| !leaves.is_empty());
         }
         Ok(())
     }
+
     pub(super) fn write_local_value_slots(
         &mut self,
         targets: BTreeSet<PointerPlace>,
@@ -275,6 +279,7 @@ impl Infer<'_, '_> {
         self.environment = joined.ok_or("local code store has no continuation")?;
         Ok(())
     }
+
     pub(super) fn write_local_pointer_slot(
         &mut self,
         targets: BTreeSet<PointerPlace>,
@@ -362,6 +367,7 @@ impl Infer<'_, '_> {
         }
         Ok(())
     }
+
     pub(super) fn record_parameter_cleanup_reads(
         &mut self,
         bindings: &[LocalId],
@@ -382,6 +388,7 @@ impl Infer<'_, '_> {
         }
         Ok(())
     }
+
     pub(super) fn record_value_cleanup_reads(&mut self, expr: &Expr) -> Result<(), String> {
         if self.round.cleanup_reads.is_empty() {
             return Ok(());
@@ -395,13 +402,12 @@ impl Infer<'_, '_> {
             charge_read(read, self.fuel)?;
         }
         let reads = reads.clone();
-        let fields = if pointer_representation(self.package, &ty, self.fuel)?.is_some() {
+        let fields = if self.pointer_representation(&ty)?.is_some() {
             BTreeMap::from([(vec![], self.optional_target(expr, 0)?)])
         } else {
             self.pointer_fields_for(expr)?
         };
-        let layout =
-            pointer_input_layout_for(self.package, &ty, self.round.text_provenance, self.fuel)?;
+        let layout = self.pointer_input_layout(&ty)?;
         for read in reads {
             let Some(slot) = read.target.through.first() else {
                 continue;
@@ -467,12 +473,15 @@ impl Infer<'_, '_> {
 mod private_storage_tests {
     use super::*;
     use nir::program::{Capture, SourceRange};
+
     fn id(index: u32) -> LocalId {
         LocalId { owner: 17, index }
     }
+
     fn pointer() -> Term {
         Term::Pointer(Box::new(Term::Primitive(Primitive::Bool)))
     }
+
     fn node(kind: K) -> Expr {
         Expr {
             source: SourceRange { start: 0, end: 1 },
@@ -480,18 +489,21 @@ mod private_storage_tests {
             kind,
         }
     }
+
     fn binding(index: u32) -> Expr {
         node(K::Let {
             binding: id(index),
             value: Box::new(node(K::Local(id(0)))),
         })
     }
+
     fn block(statements: Vec<Expr>) -> Expr {
         node(K::Block {
             statements,
             result: None,
         })
     }
+
     #[test]
     fn whole_body_exposure_excludes_early_and_late_addresses() {
         let address = node(K::AddressOf(Box::new(node(K::Local(id(1))))));
@@ -505,6 +517,7 @@ mod private_storage_tests {
             );
         }
     }
+
     #[test]
     fn captures_are_excluded_and_closure_locals_are_not_imported() {
         for value in [None, Some(Box::new(node(K::Local(id(1)))))] {
@@ -524,6 +537,7 @@ mod private_storage_tests {
             );
         }
     }
+
     #[test]
     fn pattern_remaps_preserve_ownership_and_observation_aliases() {
         let pattern = Pattern::Remap {
@@ -549,6 +563,7 @@ mod private_storage_tests {
                 .is_err()
         );
     }
+
     #[test]
     fn reverse_remap_chains_fit_a_linear_budget() {
         let pattern = Pattern::Remap {
@@ -562,6 +577,7 @@ mod private_storage_tests {
         collect_pattern_storage(&pattern, &mut owned, &mut BTreeSet::new(), &mut 7000).unwrap();
         assert_eq!(owned, (1..=1025).map(id).collect());
     }
+
     #[test]
     fn remap_cycles_need_seeds_and_preserve_alias_dominance() {
         let pattern = Pattern::Remap {
@@ -594,6 +610,7 @@ mod private_storage_tests {
         assert_eq!(aliases, BTreeSet::from([id(2), id(3), id(4)]));
         assert!(!owned.contains(&id(8)) && !owned.contains(&id(9)));
     }
+
     #[test]
     fn budget_failure_does_not_publish_partial_candidates() {
         let body = block(vec![binding(1), binding(2)]);

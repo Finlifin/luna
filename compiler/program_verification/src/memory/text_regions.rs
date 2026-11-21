@@ -13,6 +13,7 @@ pub enum TextRegionOrigin {
         fields: Vec<usize>,
     },
 }
+
 impl fmt::Display for TextRegionOrigin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -25,15 +26,21 @@ impl fmt::Display for TextRegionOrigin {
         }
     }
 }
+
 type TextFields = BTreeMap<Vec<usize>, BTreeSet<TextRegionOrigin>>;
+
 type CodeFields = BTreeMap<Vec<usize>, Option<CallbackKey>>;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum DescriptorRoot {
     Local(LocalId),
     Frame(usize),
 }
+
 type DescriptorTargets = BTreeSet<(DescriptorRoot, Vec<usize>)>;
+
 type DescriptorPlaces = BTreeMap<Vec<usize>, Option<DescriptorTargets>>;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Regions {
     text: TextFields,
@@ -41,22 +48,27 @@ struct Regions {
     code: CodeFields,
     places: DescriptorPlaces,
 }
+
 impl Regions {
     fn new() -> Self {
         Self::default()
     }
 }
+
 impl std::ops::Deref for Regions {
     type Target = TextFields;
+
     fn deref(&self) -> &TextFields {
         &self.text
     }
 }
+
 impl std::ops::DerefMut for Regions {
     fn deref_mut(&mut self) -> &mut TextFields {
         &mut self.text
     }
 }
+
 impl From<TextFields> for Regions {
     fn from(text: TextFields) -> Self {
         Self {
@@ -66,6 +78,7 @@ impl From<TextFields> for Regions {
         }
     }
 }
+
 #[derive(Clone, PartialEq, Eq)]
 struct Summary {
     declaration: DeclarationId,
@@ -73,24 +86,29 @@ struct Summary {
     reads: BTreeSet<TextRegionOrigin>,
     returned: Option<Regions>,
 }
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Locals {
     bindings: BTreeMap<LocalId, Regions>,
     frames: BTreeMap<usize, Regions>,
 }
+
 impl Locals {
     fn new() -> Self {
         Self::default()
     }
+
     fn contains_storage(&self, root: &DescriptorRoot) -> bool {
         self.get_storage(root).is_some()
     }
+
     fn get_storage(&self, root: &DescriptorRoot) -> Option<&Regions> {
         match root {
             DescriptorRoot::Local(id) => self.bindings.get(id),
             DescriptorRoot::Frame(id) => self.frames.get(id),
         }
     }
+
     fn get_storage_mut(&mut self, root: &DescriptorRoot) -> Option<&mut Regions> {
         match root {
             DescriptorRoot::Local(id) => self.bindings.get_mut(id),
@@ -98,17 +116,21 @@ impl Locals {
         }
     }
 }
+
 impl std::ops::Deref for Locals {
     type Target = BTreeMap<LocalId, Regions>;
+
     fn deref(&self) -> &Self::Target {
         &self.bindings
     }
 }
+
 impl std::ops::DerefMut for Locals {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.bindings
     }
 }
+
 fn remap_descriptor_roots(value: &mut Regions, mapping: &BTreeMap<DescriptorRoot, DescriptorRoot>) {
     for targets in value.places.values_mut().flatten() {
         *targets = std::mem::take(targets)
@@ -229,12 +251,14 @@ struct StorageKey {
     storage: BTreeMap<usize, Regions>,
     readonly: Option<&'static str>,
 }
+
 #[derive(Clone, Default, PartialEq, Eq)]
 struct StorageSummary {
     returned: Option<Regions>,
     storage: Option<BTreeMap<usize, Regions>>,
     reads: BTreeSet<TextRegionOrigin>,
 }
+
 struct StorageEntry {
     key: StorageKey,
     summary: StorageSummary,
@@ -248,6 +272,7 @@ enum CallbackKey {
     Alternatives(Vec<iir::InstanceKey>),
     ClosureAlternatives(Vec<usize>),
 }
+
 impl fmt::Display for CallbackKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -270,11 +295,13 @@ impl fmt::Display for CallbackKey {
         }
     }
 }
+
 #[derive(Clone, PartialEq)]
 struct CodeValue {
     expression: std::sync::Arc<Expr>,
     closure: Option<usize>,
 }
+
 impl CodeValue {
     fn key(&self) -> Option<CallbackKey> {
         if let Some(id) = self.closure {
@@ -295,6 +322,7 @@ impl CodeValue {
             _ => None,
         }
     }
+
     fn new(expression: Expr) -> Self {
         Self {
             expression: std::sync::Arc::new(expression),
@@ -302,12 +330,14 @@ impl CodeValue {
         }
     }
 }
+
 struct ClosedClosure {
     expression: std::sync::Arc<Expr>,
     definitions: BTreeMap<LocalId, CodeValue>,
     changed: BTreeSet<LocalId>,
     cost: usize,
 }
+
 fn index_code_expression(
     expr: &Expr,
     fuel: &mut usize,
@@ -348,6 +378,7 @@ struct SummaryKey {
     instance: iir::InstanceKey,
     callbacks: Vec<(usize, Vec<usize>, CallbackKey)>,
 }
+
 impl fmt::Display for SummaryKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(text-summary-key {} (callbacks", self.instance)?;
@@ -368,6 +399,7 @@ struct LoopRegions {
     exits: Option<Locals>,
     backedges: Option<Locals>,
 }
+
 struct ExitRegions {
     bindings: Vec<LocalId>,
     locals: Option<Locals>,
@@ -411,6 +443,7 @@ pub struct TextRegionSummary {
     /// guarded leaves can be absent on a particular returned variant.
     pub returned: Option<BTreeMap<Vec<usize>, BTreeSet<TextRegionOrigin>>>,
 }
+
 impl fmt::Display for TextRegionSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -450,6 +483,7 @@ fn charge(fuel: &mut usize, amount: usize) -> Result<(), String> {
         .ok_or("text region inference budget exhausted")?;
     Ok(())
 }
+
 fn charge_callback(code: &CallbackKey, fuel: &mut usize) -> Result<(), String> {
     let keys = match code {
         CallbackKey::Named(key) => std::slice::from_ref(key),
@@ -471,6 +505,7 @@ fn charge_callback(code: &CallbackKey, fuel: &mut usize) -> Result<(), String> {
     }
     Ok(())
 }
+
 fn charge_regions(regions: &Regions, fuel: &mut usize) -> Result<(), String> {
     for (path, place) in &regions.places {
         charge(fuel, path.len().saturating_add(1))?;
@@ -500,6 +535,7 @@ fn charge_regions(regions: &Regions, fuel: &mut usize) -> Result<(), String> {
     }
     Ok(())
 }
+
 fn merge_known(
     target: &mut CodeFields,
     source: CodeFields,
@@ -558,6 +594,7 @@ fn merge_known(
     }
     Ok(())
 }
+
 fn merge_places(target: &mut DescriptorPlaces, source: DescriptorPlaces) {
     for (path, targets) in source {
         match target.entry(path) {
@@ -574,6 +611,7 @@ fn merge_places(target: &mut DescriptorPlaces, source: DescriptorPlaces) {
         }
     }
 }
+
 fn merge(
     target: &mut Option<Regions>,
     source: Option<Regions>,
@@ -590,6 +628,7 @@ fn merge(
     }
     Ok(())
 }
+
 fn project(regions: Regions, prefix: &[usize], fuel: &mut usize) -> Result<Regions, String> {
     charge_regions(&regions, fuel)?;
     Ok(Regions {
@@ -616,6 +655,7 @@ fn project(regions: Regions, prefix: &[usize], fuel: &mut usize) -> Result<Regio
             .collect(),
     })
 }
+
 fn prefix(regions: Regions, prefix: &[usize], fuel: &mut usize) -> Result<Regions, String> {
     charge_regions(&regions, fuel)?;
     let mut output = Regions::new();
@@ -665,6 +705,7 @@ pub(crate) fn infer_text_regions_with_metadata(
         None,
         declarations,
         &mut methods,
+        None,
         declaration,
         arguments,
         fuel,
@@ -676,6 +717,7 @@ pub(crate) fn infer_text_regions_with_context<'a>(
     source: Option<::materialization::DeclarationSource<'a>>,
     declarations: &crate::declarations::Metadata<'a>,
     methods: &mut MethodCallees,
+    layout_cache: Option<&mut TypeLayoutCache>,
     declaration: DeclarationId,
     arguments: &[Term],
     fuel: &mut usize,
@@ -708,6 +750,7 @@ pub(crate) fn infer_text_regions_with_context<'a>(
         exits: vec![],
         cache: HashMap::new(),
         methods,
+        layout_cache: layout_cache.map_or_else(Default::default, TypeLayoutCacheStorage::Borrowed),
     }
     .solve(declaration, arguments)
     .map(|summary| TextRegionSummary {
@@ -717,7 +760,8 @@ pub(crate) fn infer_text_regions_with_context<'a>(
         returned: summary.returned.map(|value| value.text),
     })
 }
-struct Query<'a, 'd, 'm, 'f> {
+
+struct Query<'a, 'd, 'm, 'f, 'l> {
     package: &'a Package,
     source: Option<::materialization::DeclarationSource<'a>>,
     declarations: &'d crate::declarations::Metadata<'a>,
@@ -745,8 +789,19 @@ struct Query<'a, 'd, 'm, 'f> {
     exits: Vec<Option<ExitRegions>>,
     cache: HashMap<SummaryKey, Summary>,
     methods: &'m mut MethodCallees,
+    layout_cache: TypeLayoutCacheStorage<'l>,
 }
-impl Query<'_, '_, '_, '_> {
+
+impl Query<'_, '_, '_, '_, '_> {
+    pub(super) fn borrowed_input_layout(
+        &mut self,
+        ty: &Term,
+    ) -> Result<Vec<BorrowedInputLeaf>, String> {
+        self.layout_cache
+            .as_mut()
+            .borrowed_input_layout(Some(self.package), ty, self.fuel)
+    }
+
     fn record_exit(&mut self, locals: &Locals) -> Result<(), String> {
         if let Some(Some(exit)) = self.exits.last_mut() {
             join_locals(&mut exit.locals, locals, &exit.bindings, self.fuel)?;
@@ -1048,6 +1103,7 @@ impl Query<'_, '_, '_, '_> {
     fn callable_input(&mut self, value: &Expr) -> Result<Option<CodeValue>, String> {
         self.callable_input_at(value, 0)
     }
+
     fn callable_input_at(
         &mut self,
         value: &Expr,
@@ -1068,6 +1124,7 @@ impl Query<'_, '_, '_, '_> {
             .map(|value| self.close_callable(value, depth))
             .transpose()
     }
+
     fn close_callable(&mut self, mut value: CodeValue, depth: usize) -> Result<CodeValue, String> {
         if depth >= 128 {
             return Err("text callback environment depth exhausted".into());
@@ -1172,6 +1229,7 @@ impl Query<'_, '_, '_, '_> {
             })),
         }
     }
+
     fn result_code(&self, value: &Regions, expr: &Expr) -> Result<Option<CodeValue>, String> {
         value
             .code
@@ -1477,7 +1535,7 @@ impl Query<'_, '_, '_, '_> {
             {
                 regions.code.insert(path.clone(), Some(code.clone()));
             }
-            for leaf in borrowed_input_layout(Some(self.package), &ty.ty, self.fuel)? {
+            for leaf in self.borrowed_input_layout(&ty.ty)? {
                 if let BorrowedInputLeaf::Pointer(leaf) = &leaf {
                     regions.places.insert(leaf.input_fields.clone(), None);
                 }
@@ -1507,7 +1565,7 @@ impl Query<'_, '_, '_, '_> {
             {
                 regions.code.insert(path.clone(), Some(code.clone()));
             }
-            for leaf in borrowed_input_layout(Some(self.package), &env.ty, self.fuel)? {
+            for leaf in self.borrowed_input_layout(&env.ty)? {
                 if let BorrowedInputLeaf::Pointer(leaf) = &leaf {
                     regions.places.insert(leaf.input_fields.clone(), None);
                 }
@@ -1581,7 +1639,7 @@ impl Query<'_, '_, '_, '_> {
             while let Term::Computation { result: inner, .. } = completion {
                 completion = inner.as_ref();
             }
-            for leaf in borrowed_input_layout(Some(self.package), completion, self.fuel)? {
+            for leaf in self.borrowed_input_layout(completion)? {
                 if let BorrowedInputLeaf::Text(leaf) = leaf {
                     if leaf.guards.is_empty()
                         && returned
@@ -1947,6 +2005,7 @@ impl Query<'_, '_, '_, '_> {
         }
         Ok(locals.clone())
     }
+
     fn invoke_named(
         &mut self,
         declaration: DeclarationId,
@@ -1977,6 +2036,7 @@ impl Query<'_, '_, '_, '_> {
         }
         Ok(output)
     }
+
     fn named_call(
         &mut self,
         candidates: &[iir::InstanceKey],
@@ -2115,6 +2175,7 @@ impl Query<'_, '_, '_, '_> {
         }
         Ok(output)
     }
+
     fn invoke_closed_callback(
         &mut self,
         resolved: &CodeValue,
@@ -2358,7 +2419,7 @@ impl Query<'_, '_, '_, '_> {
                     return Ok(empty);
                 }
                 let mut regions = Regions::new();
-                for leaf in borrowed_input_layout(Some(self.package), &expr.ty, self.fuel)? {
+                for leaf in self.borrowed_input_layout(&expr.ty)? {
                     match leaf {
                         BorrowedInputLeaf::Pointer(_) => {
                             return Err("text region comptime value cannot embed a pointer".into());

@@ -322,7 +322,7 @@ fn affected_cleanup_instances(
 /// Publish schedules for every reachable concrete function, including captured
 /// destructors. Unmapped responsibilities are rejected before execution.
 fn field_borrows(
-    package: &Package,
+    session: &mut elaboration::verification::PackageSession<'_>,
     function: &nir::program::Function,
     text_provenance: elaboration::verification::memory::TextProvenance,
     fuel: &mut usize,
@@ -342,12 +342,7 @@ fn field_borrows(
         }
         // Closure code identity is supplied separately, but its owned
         // environment still needs parameter-relative pointee premises.
-        for leaf in elaboration::verification::memory::pointer_input_layout_for(
-            Some(package),
-            &input.ty,
-            text_provenance,
-            fuel,
-        )? {
+        for leaf in session.pointer_input_layout(&input.ty, text_provenance, fuel)? {
             let path = leaf.input_fields;
             let pointee = leaf.pointee;
             if !path.is_empty() {
@@ -361,12 +356,7 @@ fn field_borrows(
     }
     for (offset, env) in function.env_parameters.iter().enumerate() {
         let parameter = parameters.len() + offset;
-        for leaf in elaboration::verification::memory::pointer_input_layout_for(
-            Some(package),
-            &env.ty,
-            text_provenance,
-            fuel,
-        )? {
+        for leaf in session.pointer_input_layout(&env.ty, text_provenance, fuel)? {
             let path = leaf.input_fields;
             let pointee = leaf.pointee;
             if !path.is_empty() {
@@ -489,7 +479,7 @@ fn prepare_source_impl(
     let mut scheduled_roots: std::collections::HashSet<iir::InstanceKey> =
         std::collections::HashSet::new();
     let mut graph_has_text = false;
-    let mut retained_summaries = elaboration::verification::memory::SummaryCache::default();
+    let mut retained_caches = elaboration::verification::SessionCaches::default();
     let mut owned_layouts: Option<Package> = None;
     let mut copy_cache = std::collections::HashMap::new();
     let mut cached_graph: Option<(Vec<iir::InstanceKey>, Vec<nir::Term>, iir::Package)> = None;
@@ -544,7 +534,7 @@ fn prepare_source_impl(
                 // Recompute schedules against this graph's identities and sources.
                 schedule = Schedule::default();
                 copy_cache.clear();
-                retained_summaries = Default::default();
+                retained_caches = Default::default();
                 verified_text_roots.clear();
                 validated_instances.clear();
                 instance_deps.clear();
@@ -697,7 +687,7 @@ fn prepare_source_impl(
             .with_source(dispatch_source)
             .with_dispatch(&graph.dispatch)
             .with_global_runtime_deliveries(&graph.global_runtime_deliveries)
-            .with_summaries(std::mem::take(&mut retained_summaries));
+            .with_caches(std::mem::take(&mut retained_caches));
         let text_provenance = if graph_has_text {
             for root in &roots {
                 if !verified_text_roots.contains(root) {
@@ -735,14 +725,14 @@ fn prepare_source_impl(
             }
             // Higher-order bodies are verified against each call's concrete
             // inputs below, never published as an unconditional root schedule.
-            if !moves::callable_parameter_paths(
-                package,
-                &instance.function.signature,
-                fuel,
-                instance.function.body.source,
-            )
-            .map_err(|error| error.to_string())?
-            .is_empty()
+            if !verification_session
+                .callable_parameter_paths(
+                    &instance.function.signature,
+                    fuel,
+                    instance.function.body.source,
+                )
+                .map_err(|error| error.to_string())?
+                .is_empty()
                 || !moves::effect_result_slots_with_envs(
                     package,
                     &instance.function.signature,
@@ -774,11 +764,7 @@ fn prepare_source_impl(
                 borrows.push((0, subject.clone()));
                 for (offset, env) in function.env_parameters.iter().enumerate() {
                     if let Some((_, env_subject)) =
-                        elaboration::verification::memory::pointer_representation(
-                            Some(package),
-                            &env.ty,
-                            fuel,
-                        )?
+                        verification_session.pointer_representation(&env.ty, fuel)?
                     {
                         borrows.push((1 + offset, env_subject));
                     }
@@ -791,27 +777,19 @@ fn prepare_source_impl(
                 };
                 for (index, parameter) in parameters.iter().enumerate() {
                     if let Some((_, subject)) =
-                        elaboration::verification::memory::pointer_representation(
-                            Some(package),
-                            &parameter.ty,
-                            fuel,
-                        )?
+                        verification_session.pointer_representation(&parameter.ty, fuel)?
                     {
                         borrows.push((index, subject));
                     }
                 }
                 for (offset, env) in function.env_parameters.iter().enumerate() {
                     if let Some((_, subject)) =
-                        elaboration::verification::memory::pointer_representation(
-                            Some(package),
-                            &env.ty,
-                            fuel,
-                        )?
+                        verification_session.pointer_representation(&env.ty, fuel)?
                     {
                         borrows.push((parameters.len() + offset, subject));
                     }
                 }
-                fields = field_borrows(package, function, text_provenance, fuel)?;
+                fields = field_borrows(&mut verification_session, function, text_provenance, fuel)?;
                 if !fields.is_empty() {
                     // Moving an aggregate need not borrow its pointees. Try an
                     // unconditional plan before demanding field validity.
@@ -1323,28 +1301,21 @@ fn prepare_source_impl(
                     {
                         for (slot, parameter) in parameters.iter().enumerate() {
                             if let Some((_, subject)) =
-                                elaboration::verification::memory::pointer_representation(
-                                    Some(package),
-                                    &parameter.ty,
-                                    fuel,
-                                )?
+                                verification_session.pointer_representation(&parameter.ty, fuel)?
                             {
                                 borrows.push((slot, subject));
                             }
                         }
                         for (offset, env) in child.env_parameters.iter().enumerate() {
                             if let Some((_, subject)) =
-                                elaboration::verification::memory::pointer_representation(
-                                    Some(package),
-                                    &env.ty,
-                                    fuel,
-                                )?
+                                verification_session.pointer_representation(&env.ty, fuel)?
                             {
                                 borrows.push((parameters.len() + offset, subject));
                             }
                         }
                     }
-                    let mut fields = field_borrows(package, &child, text_provenance, fuel)?;
+                    let mut fields =
+                        field_borrows(&mut verification_session, &child, text_provenance, fuel)?;
                     let mut independent_invocation = None;
                     if !fields.is_empty() && call.borrowed_code.is_empty() {
                         let effects = moves::copy_effect_inputs(&call.effects, fuel, call.source)
@@ -1920,8 +1891,8 @@ fn prepare_source_impl(
             // Every caller must be rechecked against the grown transitive footprint.
             // No schedule from a provisional body-only round is published.
             drop(cleanup_session);
-            retained_summaries = verification_session.into_summaries();
-            retained_summaries.retain_unaffected(&changed_cleanup_keys);
+            retained_caches = verification_session.into_caches();
+            retained_caches.retain_unaffected(&changed_cleanup_keys);
             schedule = Schedule::default();
             scheduled_roots.clear();
             schedule_deps.clear();
@@ -1931,8 +1902,8 @@ fn prepare_source_impl(
             // Every caller must be rechecked against the grown transitive footprint.
             // Retain unaffected schedules across fixpoint rounds.
             drop(cleanup_session);
-            retained_summaries = verification_session.into_summaries();
-            retained_summaries.retain_unaffected(&changed_cleanup_keys);
+            retained_caches = verification_session.into_caches();
+            retained_caches.retain_unaffected(&changed_cleanup_keys);
             let affected = affected_cleanup_instances(
                 &changed_cleanup_keys,
                 &instance_deps,
@@ -1957,8 +1928,8 @@ fn prepare_source_impl(
         }
         if deferred {
             drop(cleanup_session);
-            retained_summaries = verification_session.into_summaries();
-            retained_summaries.retain_unaffected(&changed_cleanup_keys);
+            retained_caches = verification_session.into_caches();
+            retained_caches.retain_unaffected(&changed_cleanup_keys);
             continue;
         }
         if previous == (roots.len(), types.len()) {
@@ -2004,8 +1975,8 @@ fn prepare_source_impl(
             });
         }
         drop(cleanup_session);
-        retained_summaries = verification_session.into_summaries();
-        retained_summaries.retain_unaffected(&changed_cleanup_keys);
+        retained_caches = verification_session.into_caches();
+        retained_caches.retain_unaffected(&changed_cleanup_keys);
     }
 }
 

@@ -458,12 +458,8 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                                 );
                             }
                         }
-                        if let Some((_, subject)) = crate::memory::pointer_representation(
-                            this.package,
-                            &capture.ty,
-                            &mut this.fuel,
-                        )
-                        .map_err(|reason| error(source, reason))?
+                        if let Some((_, subject)) =
+                            this.pointer_representation(&capture.ty, source)?
                         {
                             this.declare_closure_borrow(
                                 &mut inner,
@@ -521,12 +517,8 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     parameters.iter().zip(parameter_types).enumerate()
                 {
                     self.declare(&mut inner, *binding, &parameter.ty, source)?;
-                    if let Some((_, subject)) = crate::memory::pointer_representation(
-                        self.package,
-                        &parameter.ty,
-                        &mut self.fuel,
-                    )
-                    .map_err(|reason| error(source, reason))?
+                    if let Some((_, subject)) =
+                        self.pointer_representation(&parameter.ty, source)?
                     {
                         self.declare_closure_borrow(&mut inner, slot, *binding, &subject, source)?;
                         borrowed_roots.insert(
@@ -795,14 +787,14 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     // observable as a pointer-valued root argument. Inspect
                     // evaluation structure without evaluating it twice or
                     // treating deferred closure bodies as argument effects.
+                    let package = self.package;
+                    let layout_cache = &mut self.layout_cache;
                     nir::visit::expression_in_scope(argument, &mut self.fuel, |node, fuel| {
                         if !pointer_arguments {
-                            pointer_arguments = crate::memory::pointer_representation(
-                                self.package,
-                                &node.ty,
-                                fuel,
-                            )?
-                            .is_some();
+                            pointer_arguments = layout_cache
+                                .as_mut()
+                                .pointer_representation(package, &node.ty, fuel)?
+                                .is_some();
                         }
                         Ok(())
                     })
@@ -1048,9 +1040,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         match &expr.kind {
             K::ReadPointer(pointer) => {
                 if !self.pointer_input_layout(&expr.ty, source)?.is_empty()
-                    && crate::memory::pointer_representation(self.package, &expr.ty, &mut self.fuel)
-                        .map_err(|reason| error(source, reason))?
-                        .is_none()
+                    && self.pointer_representation(&expr.ty, source)?.is_none()
                 {
                     self.read_aggregate_origins(expr, pointer, flow, depth + 1)?;
                     return Ok(());

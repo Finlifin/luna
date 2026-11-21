@@ -133,12 +133,8 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         if matches!(expr.kind, K::Call { .. } | K::ReadPointer(_))
             && !matches!(completion_type(&expr.ty), Term::Pointer(_))
         {
-            if let Some((pointer_depth, _)) = crate::memory::pointer_representation(
-                self.package,
-                completion_type(&expr.ty),
-                &mut self.fuel,
-            )
-            .map_err(|reason| error(expr.source, reason))?
+            if let Some((pointer_depth, _)) =
+                self.pointer_representation(completion_type(&expr.ty), expr.source)?
             {
                 let targets = self.evaluate_pointer_value(expr, flow, depth + 1)?;
                 flow.value_pointer_guards.clear();
@@ -156,14 +152,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         }
         match &expr.kind {
             K::ReadPointer(pointer)
-                if !crate::memory::pointer_input_layout_for(
-                    self.package,
-                    &expr.ty,
-                    self.text_provenance,
-                    &mut self.fuel,
-                )
-                .map_err(|reason| error(expr.source, reason))?
-                .is_empty() =>
+                if !self.pointer_input_layout(&expr.ty, expr.source)?.is_empty() =>
             {
                 self.read_aggregate_origins(expr, pointer, flow, depth + 1)
             }
@@ -184,14 +173,9 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                         | Term::Optional(_)
                 )
                 && self.storage_inputs_are_closed(completion_type(&expr.ty), expr.source)?
-                && !crate::memory::pointer_input_layout_for(
-                    self.package,
-                    completion_type(&expr.ty),
-                    self.text_provenance,
-                    &mut self.fuel,
-                )
-                .map_err(|reason| error(expr.source, reason))?
-                .is_empty() =>
+                && !self
+                    .pointer_input_layout(completion_type(&expr.ty), expr.source)?
+                    .is_empty() =>
             {
                 let (origins, guards) = self.evaluate_named_pointer_aggregate(
                     expr,
@@ -396,6 +380,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         }
         unreachable!("installed_effect_origins dispatcher")
     }
+
     #[inline(never)]
     fn converted_value_origins(
         &mut self,
@@ -491,6 +476,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
         }
         unreachable!("converted_value_origins dispatcher")
     }
+
     #[inline(never)]
     fn constructed_value_origins(
         &mut self,
@@ -595,6 +581,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             _ => unreachable!("constructed_value_origins dispatcher"),
         }
     }
+
     #[inline(never)]
     fn block_value_origins(
         &mut self,
@@ -644,6 +631,7 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             _ => unreachable!("block_value_origins dispatcher"),
         }
     }
+
     #[inline(never)]
     fn conditional_value_origins(
         &mut self,

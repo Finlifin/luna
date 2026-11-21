@@ -9,11 +9,13 @@ pub enum BorrowedCallableValue {
     /// The caller proved an enclosing variant absent, not an unknown target.
     Absent,
 }
+
 impl From<CallableResult> for BorrowedCallableValue {
     fn from(value: CallableResult) -> Self {
         Self::Named(value)
     }
 }
+
 impl fmt::Display for BorrowedCallableValue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -22,6 +24,7 @@ impl fmt::Display for BorrowedCallableValue {
         }
     }
 }
+
 impl BorrowedCallableValue {
     fn charge(&self, fuel: &mut usize) -> Result<(), String> {
         match self {
@@ -35,6 +38,7 @@ impl BorrowedCallableValue {
         }
     }
 }
+
 /// Outer key selects a pointer-bearing owned argument leaf; inner paths select
 /// function leaves in its pointee using the usual guarded owned-layout paths.
 /// Missing entries mean unknown, never an empty set of candidate functions.
@@ -127,6 +131,7 @@ pub(crate) fn infer_with_borrowed_callable_inputs_and_cleanup_cached<'a>(
         declarations,
         text_provenance,
         summary_cache,
+        None,
         fuel,
     )
 }
@@ -146,6 +151,7 @@ pub(crate) fn infer_with_borrowed_callable_inputs_and_cleanup_full_context<'a>(
     declarations: Option<&'a crate::declarations::Metadata<'a>>,
     text_provenance: TextProvenance,
     summary_cache: Option<&'a mut SummaryCache>,
+    layout_cache: Option<&'a mut TypeLayoutCache>,
     fuel: &mut usize,
 ) -> Result<Summary, String> {
     for value in inputs.values() {
@@ -182,6 +188,7 @@ pub(crate) fn infer_with_borrowed_callable_inputs_and_cleanup_full_context<'a>(
         declarations,
         text_provenance,
         summary_cache,
+        layout_cache,
         fuel,
     )
 }
@@ -286,20 +293,13 @@ impl Infer<'_, '_> {
             let Some(actuals) = targets.get(&index) else {
                 continue;
             };
-            let leaves = if let Some((_, pointee)) =
-                pointer_representation(self.package, &parameter.ty, self.fuel)?
-            {
+            let leaves = if let Some((_, pointee)) = self.pointer_representation(&parameter.ty)? {
                 vec![(vec![], pointee)]
             } else {
-                pointer_input_layout_for(
-                    self.package,
-                    &parameter.ty,
-                    self.round.text_provenance,
-                    self.fuel,
-                )?
-                .into_iter()
-                .map(|leaf| (leaf.input_fields, leaf.pointee))
-                .collect()
+                self.pointer_input_layout(&parameter.ty)?
+                    .into_iter()
+                    .map(|leaf| (leaf.input_fields, leaf.pointee))
+                    .collect()
             };
             for (input_fields, pointee) in leaves {
                 let Some(actual) = actuals

@@ -292,3 +292,108 @@ fn nominal_move_views_reject_invalid_arguments_then_accept_valid_queries() {
         }
     }
 }
+
+#[test]
+fn move_and_ownership_shape_caches_reuse_results_preserve_depth_and_never_cache_errors() {
+    let source = SourceRange { start: 11, end: 13 };
+    let code = Term::Function {
+        parameters: vec![],
+        result: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    let (package, wide_ty) = fixture(false, code, 64);
+    let Term::Nominal { declaration, .. } = wide_ty else {
+        unreachable!()
+    };
+    let invalid_ty = Term::Nominal {
+        declaration,
+        arguments: vec![Term::Bool(true)],
+    };
+
+    // MoveLayoutCache: tight-fuel cold failure & invalid arguments are never cached.
+    let mut move_cache = MoveLayoutCache::default();
+    assert!(
+        move_cache
+            .callable_value_paths(Some(&package), &wide_ty, &mut 10, source)
+            .unwrap_err()
+            .reason
+            .contains("budget")
+    );
+    assert!(
+        move_cache
+            .callable_value_paths(Some(&package), &invalid_ty, &mut 10_000, source)
+            .is_err()
+    );
+    assert!(
+        move_cache
+            .callable_value_paths(Some(&package), &invalid_ty, &mut 10_000, source)
+            .is_err()
+    );
+
+    let mut warm_fuel = 100_000;
+    let paths = move_cache
+        .callable_value_paths(Some(&package), &wide_ty, &mut warm_fuel, source)
+        .unwrap();
+    assert_eq!(paths.len(), 64);
+    assert!(
+        move_cache
+            .contains_return_evidence(Some(&package), &wide_ty, &mut warm_fuel, source)
+            .unwrap()
+    );
+    assert!(
+        move_cache
+            .callable_value_paths(Some(&package), &wide_ty, &mut 200, source)
+            .unwrap()
+            == paths
+    );
+    assert!(
+        move_cache
+            .contains_return_evidence(Some(&package), &wide_ty, &mut 1, source)
+            .unwrap()
+    );
+    assert!(
+        move_cache
+            .callable_value_paths(Some(&package), &wide_ty, &mut 0, source)
+            .is_err()
+    );
+    assert!(
+        move_cache
+            .contains_return_evidence(Some(&package), &wide_ty, &mut 0, source)
+            .is_err()
+    );
+
+    // OwnershipShapeCache: reuses wide shapes cheaply, never caches errors, and
+    // preserves the 128-level nesting bound even when inner layers are cached first.
+    let mut shape_cache = OwnershipShapeCache::default();
+    assert!(
+        shape_cache
+            .shape(&package, &wide_ty, &mut 10)
+            .unwrap_err()
+            .contains("budget")
+    );
+    assert!(
+        shape_cache
+            .shape(&package, &invalid_ty, &mut 10_000)
+            .is_err()
+    );
+
+    shape_cache.shape(&package, &wide_ty, &mut 100_000).unwrap();
+    let mut tight = 1;
+    shape_cache.shape(&package, &wide_ty, &mut tight).unwrap();
+    assert_eq!(tight, 0);
+    assert!(shape_cache.shape(&package, &wide_ty, &mut 0).is_err());
+
+    let mut chain = Term::Primitive(Primitive::Bool);
+    let mut deep_cache = OwnershipShapeCache::default();
+    for depth in 1..=128 {
+        chain = Term::Tuple(vec![chain]);
+        let res = deep_cache.shape(&package, &chain, &mut 100_000);
+        assert!(res.is_ok(), "depth {depth} should succeed: {res:?}");
+    }
+    let over_limit = Term::Tuple(vec![chain]);
+    assert!(
+        deep_cache
+            .shape(&package, &over_limit, &mut 100_000)
+            .unwrap_err()
+            .contains("budget")
+    );
+}

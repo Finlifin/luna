@@ -367,6 +367,7 @@ pub(super) fn check_access_with_context(
             Some(&mut *ctx.methods),
             Some(ctx.declarations),
             &mut *ctx.summaries,
+            None,
             fuel,
         )?
     } else {

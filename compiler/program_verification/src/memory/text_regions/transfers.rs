@@ -2,7 +2,7 @@
 //! Depth and fuel are charged by `Query::expr`, before dispatch.
 use super::*;
 
-impl Query<'_, '_, '_, '_> {
+impl Query<'_, '_, '_, '_, '_> {
     #[inline(never)]
     pub(super) fn transfer_function(
         &mut self,
@@ -1176,7 +1176,7 @@ impl Query<'_, '_, '_, '_> {
                     .extend(origins.iter().cloned());
             }
         }
-        for leaf in borrowed_input_layout(Some(self.package), &expr.ty, self.fuel)? {
+        for leaf in self.borrowed_input_layout(&expr.ty)? {
             if matches!(leaf, BorrowedInputLeaf::Text(_)) {
                 return Err(
                     "intrinsic cannot synthesize text view without backing-region provenance"

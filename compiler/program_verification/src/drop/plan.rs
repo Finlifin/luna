@@ -1489,6 +1489,7 @@ impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
                     Some(&mut self.methods),
                     Some(declarations.as_ref()),
                     &mut self.summaries,
+                    None,
                     fuel,
                 )?;
                 if summary.may_reject

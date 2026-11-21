@@ -43,6 +43,24 @@ pub(crate) fn is_const_global_place(id: PlaceId) -> bool {
 
 use type_resolution::{associated, capabilities, implementation, ptc};
 
+/// Reusable package-scoped verification caches retained across fixpoint rounds
+/// whose type declarations remain unchanged.
+#[derive(Default)]
+pub struct SessionCaches {
+    summaries: memory::SummaryCache,
+    layouts: memory::TypeLayoutCache,
+    move_layouts: moves::MoveLayoutCache,
+    ownership_shapes: moves::OwnershipShapeCache,
+}
+
+impl SessionCaches {
+    /// Retain entries unaffected by updates to `changed` runtime instances.
+    /// Layout and ownership-shape caches depend only on type declarations.
+    pub fn retain_unaffected(&mut self, changed: &std::collections::HashSet<iir::InstanceKey>) {
+        self.summaries.retain_unaffected(changed);
+    }
+}
+
 /// Shared package-scoped verification caches for declaration metadata,
 /// dispatch preparation, method selections, memory summaries, and rejection
 /// analysis across a single immutable package pass.
@@ -56,6 +74,9 @@ pub struct PackageSession<'a> {
     pub(crate) summaries: memory::SummaryCache,
     pub(crate) rejection: rejection::Memo,
     pub(crate) return_results: moves::ReturnResultCache,
+    pub(crate) layout_cache: memory::TypeLayoutCache,
+    pub(crate) move_layouts: moves::MoveLayoutCache,
+    pub(crate) ownership_shapes: moves::OwnershipShapeCache,
 }
 
 impl<'a> PackageSession<'a> {
@@ -69,6 +90,9 @@ impl<'a> PackageSession<'a> {
             summaries: memory::SummaryCache::default(),
             rejection: rejection::Memo::default(),
             return_results: moves::ReturnResultCache::default(),
+            layout_cache: memory::TypeLayoutCache::default(),
+            move_layouts: moves::MoveLayoutCache::default(),
+            ownership_shapes: moves::OwnershipShapeCache::default(),
         }
     }
 
@@ -110,6 +134,52 @@ impl<'a> PackageSession<'a> {
         self.summaries
     }
 
+    pub fn with_caches(mut self, caches: SessionCaches) -> Self {
+        self.summaries = caches.summaries;
+        self.layout_cache = caches.layouts;
+        self.move_layouts = caches.move_layouts;
+        self.ownership_shapes = caches.ownership_shapes;
+        self
+    }
+
+    pub fn into_caches(self) -> SessionCaches {
+        SessionCaches {
+            summaries: self.summaries,
+            layouts: self.layout_cache,
+            move_layouts: self.move_layouts,
+            ownership_shapes: self.ownership_shapes,
+        }
+    }
+
+    pub fn pointer_input_layout(
+        &mut self,
+        ty: &nir::Term,
+        provenance: memory::TextProvenance,
+        fuel: &mut usize,
+    ) -> Result<Vec<memory::PointerInputLeaf>, String> {
+        self.layout_cache
+            .pointer_input_layout_for(Some(self.package), ty, provenance, fuel)
+    }
+
+    pub fn pointer_representation(
+        &mut self,
+        ty: &nir::Term,
+        fuel: &mut usize,
+    ) -> Result<Option<(usize, nir::Term)>, String> {
+        self.layout_cache
+            .pointer_representation(Some(self.package), ty, fuel)
+    }
+
+    pub fn callable_parameter_paths(
+        &mut self,
+        signature: &nir::Term,
+        fuel: &mut usize,
+        source: nir::program::SourceRange,
+    ) -> Result<Vec<(usize, Vec<usize>)>, moves::Error> {
+        self.move_layouts
+            .callable_parameter_paths(self.package, signature, fuel, source)
+    }
+
     pub fn cleanup_session<'w>(
         &self,
         world: &'a capabilities::World<'w>,
@@ -137,6 +207,7 @@ impl<'a> PackageSession<'a> {
             self.source,
             self.declarations.as_ref(),
             &mut self.methods,
+            Some(&mut self.layout_cache),
             declaration,
             arguments,
             fuel,
@@ -159,6 +230,7 @@ impl<'a> PackageSession<'a> {
             Some(&mut self.methods),
             Some(self.declarations.as_ref()),
             &mut self.summaries,
+            Some(&mut self.layout_cache),
             fuel,
         )
     }

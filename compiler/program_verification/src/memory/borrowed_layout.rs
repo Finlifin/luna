@@ -12,6 +12,7 @@ pub struct PointerInputLeaf {
     pub guards: Vec<(Vec<usize>, usize)>,
     pub pointee: Term,
 }
+
 impl fmt::Display for PointerInputLeaf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(pointer-input (input-fields")?;
@@ -40,6 +41,7 @@ pub struct TextInputLeaf {
     pub storage_fields: Vec<usize>,
     pub guards: Vec<(Vec<usize>, usize)>,
 }
+
 impl fmt::Display for TextInputLeaf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(text-input (input-fields")?;
@@ -65,6 +67,7 @@ pub enum BorrowedInputLeaf {
     Pointer(PointerInputLeaf),
     Text(TextInputLeaf),
 }
+
 impl fmt::Display for BorrowedInputLeaf {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -123,6 +126,7 @@ enum Children<'a> {
     Borrowed(std::iter::Enumerate<std::slice::Iter<'a, Term>>),
     Owned(std::iter::Enumerate<std::vec::IntoIter<Term>>),
 }
+
 impl<'a> Children<'a> {
     fn next(&mut self) -> Option<(usize, Cow<'a, Term>)> {
         match self {
@@ -131,6 +135,7 @@ impl<'a> Children<'a> {
         }
     }
 }
+
 enum Frame<'a> {
     Visit(Cow<'a, Term>),
     Fields {
@@ -305,6 +310,205 @@ pub fn borrowed_input_layout(
     }
     Ok(output)
 }
+
+/// Package-scoped cache for structural memory layout queries over closed types.
+/// Failed or budget-exhausted lookups are never cached; cache hits continue
+/// deducting bounded work from `fuel` so exhausted budgets still fail closed.
+#[derive(Default)]
+pub struct TypeLayoutCache {
+    borrowed_layouts: HashMap<Term, Vec<BorrowedInputLeaf>>,
+    pointer_layouts_unchecked: HashMap<Term, Vec<PointerInputLeaf>>,
+    pointer_layouts_verified: HashMap<Term, Vec<PointerInputLeaf>>,
+    pointer_representations: HashMap<Term, Option<(usize, Term)>>,
+    readable_unchecked: HashMap<Term, bool>,
+    readable_verified: HashMap<Term, bool>,
+    copy_readable_unchecked: HashMap<Term, bool>,
+    copy_readable_verified: HashMap<Term, bool>,
+    owned_variants: HashMap<Term, Vec<Vec<Term>>>,
+}
+
+impl TypeLayoutCache {
+    pub fn borrowed_input_layout(
+        &mut self,
+        package: Option<&Package>,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Vec<BorrowedInputLeaf>, String> {
+        if let Some(cached) = self.borrowed_layouts.get(ty) {
+            *fuel = fuel
+                .checked_sub(cached.len().saturating_add(1))
+                .ok_or("input pointer layout budget exhausted")?;
+            return Ok(cached.clone());
+        }
+        let result = borrowed_input_layout(package, ty, fuel)?;
+        self.borrowed_layouts.insert(ty.clone(), result.clone());
+        Ok(result)
+    }
+
+    pub fn pointer_input_layout_for(
+        &mut self,
+        package: Option<&Package>,
+        ty: &Term,
+        provenance: TextProvenance,
+        fuel: &mut usize,
+    ) -> Result<Vec<PointerInputLeaf>, String> {
+        let cache = match provenance {
+            TextProvenance::Unchecked => &self.pointer_layouts_unchecked,
+            TextProvenance::VerifiedByRegionAnalysis => &self.pointer_layouts_verified,
+        };
+        if let Some(cached) = cache.get(ty) {
+            *fuel = fuel
+                .checked_sub(cached.len().saturating_add(1))
+                .ok_or("input pointer layout budget exhausted")?;
+            return Ok(cached.clone());
+        }
+        let leaves = self.borrowed_input_layout(package, ty, fuel)?;
+        let result = match provenance {
+            TextProvenance::Unchecked => leaves
+                .into_iter()
+                .map(|leaf| match leaf {
+                    BorrowedInputLeaf::Pointer(leaf) => Ok(leaf),
+                    BorrowedInputLeaf::Text(leaf) => Err(format!(
+                        "string-view memory provenance is not implemented; str requires its backing character storage to remain valid; {leaf}"
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+            TextProvenance::VerifiedByRegionAnalysis => leaves
+                .into_iter()
+                .filter_map(|leaf| match leaf {
+                    BorrowedInputLeaf::Pointer(leaf) => Some(leaf),
+                    BorrowedInputLeaf::Text(_) => None,
+                })
+                .collect(),
+        };
+        let cache = match provenance {
+            TextProvenance::Unchecked => &mut self.pointer_layouts_unchecked,
+            TextProvenance::VerifiedByRegionAnalysis => &mut self.pointer_layouts_verified,
+        };
+        cache.insert(ty.clone(), result.clone());
+        Ok(result)
+    }
+
+    pub fn pointer_representation(
+        &mut self,
+        package: Option<&Package>,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<(usize, Term)>, String> {
+        if let Some(cached) = self.pointer_representations.get(ty) {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("pointer representation budget exhausted")?;
+            return Ok(cached.clone());
+        }
+        let result = pointer_representation(package, ty, fuel)?;
+        self.pointer_representations
+            .insert(ty.clone(), result.clone());
+        Ok(result)
+    }
+
+    fn cached_bool_query(
+        unchecked: &mut HashMap<Term, bool>,
+        verified: &mut HashMap<Term, bool>,
+        package: Option<&Package>,
+        ty: &Term,
+        provenance: TextProvenance,
+        fuel: &mut usize,
+        compute: fn(Option<&Package>, &Term, TextProvenance, &mut usize) -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        let cache = match provenance {
+            TextProvenance::Unchecked => &mut *unchecked,
+            TextProvenance::VerifiedByRegionAnalysis => &mut *verified,
+        };
+        if let Some(&cached) = cache.get(ty) {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("read representation budget exhausted")?;
+            return Ok(cached);
+        }
+        let result = compute(package, ty, provenance, fuel)?;
+        let cache = match provenance {
+            TextProvenance::Unchecked => unchecked,
+            TextProvenance::VerifiedByRegionAnalysis => verified,
+        };
+        cache.insert(ty.clone(), result);
+        Ok(result)
+    }
+
+    pub(crate) fn readable_representation_for(
+        &mut self,
+        package: Option<&Package>,
+        ty: &Term,
+        provenance: TextProvenance,
+        fuel: &mut usize,
+    ) -> Result<bool, String> {
+        Self::cached_bool_query(
+            &mut self.readable_unchecked,
+            &mut self.readable_verified,
+            package,
+            ty,
+            provenance,
+            fuel,
+            readable_representation_for,
+        )
+    }
+
+    pub(crate) fn copy_readable_representation_for(
+        &mut self,
+        package: Option<&Package>,
+        ty: &Term,
+        provenance: TextProvenance,
+        fuel: &mut usize,
+    ) -> Result<bool, String> {
+        Self::cached_bool_query(
+            &mut self.copy_readable_unchecked,
+            &mut self.copy_readable_verified,
+            package,
+            ty,
+            provenance,
+            fuel,
+            copy_readable_representation_for,
+        )
+    }
+
+    pub(crate) fn owned_variant_fields(
+        &mut self,
+        package: Option<&Package>,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Vec<Vec<Term>>, String> {
+        if let Some(cached) = self.owned_variants.get(ty) {
+            *fuel = fuel
+                .checked_sub(cached.len().saturating_add(1))
+                .ok_or("memory variant lookup budget exhausted")?;
+            return Ok(cached.clone());
+        }
+        let result = owned_variant_fields(package, ty, fuel)?;
+        self.owned_variants.insert(ty.clone(), result.clone());
+        Ok(result)
+    }
+}
+
+pub(crate) enum TypeLayoutCacheStorage<'a> {
+    Owned(TypeLayoutCache),
+    Borrowed(&'a mut TypeLayoutCache),
+}
+
+impl Default for TypeLayoutCacheStorage<'_> {
+    fn default() -> Self {
+        Self::Owned(TypeLayoutCache::default())
+    }
+}
+
+impl TypeLayoutCacheStorage<'_> {
+    pub(crate) fn as_mut(&mut self) -> &mut TypeLayoutCache {
+        match self {
+            Self::Owned(cache) => cache,
+            Self::Borrowed(cache) => cache,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,5 +761,238 @@ mod tests {
             sort: nir::Sort::Type,
         };
         assert!(borrowed_input_layout(None, &unknown_rigid, &mut 1000).is_err());
+    }
+
+    #[test]
+    fn type_layout_cache_reuses_closed_results_under_tight_budget_and_never_caches_errors() {
+        let ptr_bool = Term::Pointer(Box::new(Term::Primitive(Primitive::Bool)));
+        let wide_struct_id = DeclarationId {
+            package: 92,
+            local: 1,
+        };
+        let wide_enum_id = DeclarationId {
+            package: 92,
+            local: 2,
+        };
+        let wide_newtype_id = DeclarationId {
+            package: 92,
+            local: 3,
+        };
+        let param = DeclarationId {
+            package: 92,
+            local: 4,
+        };
+        let mut package = Package::default();
+        package.structs.push(nir::program::Struct {
+            declaration: wide_struct_id,
+            name: "WideStruct".into(),
+            type_parameters: vec![param],
+            parameter_types: vec![Term::Primitive(Primitive::Type)],
+            requirements: vec![],
+            capabilities: vec![],
+            fields: (0..40)
+                .map(|i| {
+                    (
+                        format!("f{i}"),
+                        if i == 39 {
+                            Term::Primitive(Primitive::Str)
+                        } else {
+                            Term::Rigid {
+                                declaration: param,
+                                sort: nir::Sort::Type,
+                            }
+                        },
+                    )
+                })
+                .collect(),
+            packed: false,
+        });
+        package.enums.push(nir::program::Enum {
+            declaration: wide_enum_id,
+            name: "WideEnum".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            groups: vec![],
+            encoding: None,
+            symbol_encoding: None,
+            is_intrinsic: false,
+            variants: vec![nir::program::Variant {
+                name: "a".into(),
+                shape: nir::program::VariantShape::Unit,
+                fields: vec![],
+            }],
+        });
+        package.newtypes.push(nir::newtypes::Newtype {
+            declaration: wide_newtype_id,
+            name: "WidePtr".into(),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            capture_count: 0,
+            requirements: vec![],
+            capabilities: vec![],
+            representation: ptr_bool.clone(),
+        });
+
+        let ty = Term::Nominal {
+            declaration: wide_struct_id,
+            arguments: vec![ptr_bool.clone()],
+        };
+        let newtype_ty = Term::Nominal {
+            declaration: wide_newtype_id,
+            arguments: vec![],
+        };
+        let err_ty = Term::ErrorResult {
+            errors: (0..12)
+                .map(|_| Term::Nominal {
+                    declaration: wide_enum_id,
+                    arguments: vec![],
+                })
+                .collect(),
+            result: Box::new(Term::Primitive(Primitive::U32)),
+        };
+
+        // Cold failure under tiny budget must not be cached.
+        let mut cache = TypeLayoutCache::default();
+        let err = cache
+            .pointer_input_layout_for(
+                Some(&package),
+                &ty,
+                TextProvenance::VerifiedByRegionAnalysis,
+                &mut 5,
+            )
+            .unwrap_err();
+        assert!(err.contains("budget"), "{err}");
+
+        // Invalid nominal argument error must not be cached either.
+        let bad_ty = Term::Nominal {
+            declaration: wide_struct_id,
+            arguments: vec![Term::Bool(true)],
+        };
+        assert!(
+            cache
+                .borrowed_input_layout(Some(&package), &bad_ty, &mut 100_000)
+                .is_err()
+        );
+        assert!(
+            cache
+                .borrowed_input_layout(Some(&package), &bad_ty, &mut 100_000)
+                .is_err()
+        );
+
+        // Warm all layout tables on valid types.
+        let mut warm = 100_000;
+        let cold_before = warm;
+        let verified_leaves = cache
+            .pointer_input_layout_for(
+                Some(&package),
+                &ty,
+                TextProvenance::VerifiedByRegionAnalysis,
+                &mut warm,
+            )
+            .unwrap();
+        let cold_cost = cold_before - warm;
+        assert_eq!(verified_leaves.len(), 39);
+        assert!(cold_cost > verified_leaves.len() + 1);
+
+        // Unchecked provenance must still reject `str` even after borrowed_layouts was warmed.
+        assert!(
+            cache
+                .pointer_input_layout_for(Some(&package), &ty, TextProvenance::Unchecked, &mut 500)
+                .unwrap_err()
+                .contains("string-view memory provenance")
+        );
+
+        assert_eq!(
+            cache
+                .pointer_representation(Some(&package), &newtype_ty, &mut 500)
+                .unwrap(),
+            Some((1, Term::Primitive(Primitive::Bool)))
+        );
+        assert!(
+            !cache
+                .readable_representation_for(
+                    Some(&package),
+                    &ty,
+                    TextProvenance::VerifiedByRegionAnalysis,
+                    &mut 5_000,
+                )
+                .unwrap()
+        );
+        assert!(
+            cache
+                .copy_readable_representation_for(
+                    Some(&package),
+                    &ty,
+                    TextProvenance::VerifiedByRegionAnalysis,
+                    &mut 5_000,
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            cache
+                .owned_variant_fields(Some(&package), &err_ty, &mut 500)
+                .unwrap()
+                .len(),
+            13
+        );
+
+        // Repeated queries succeed well below cold cost (40 < 100 each) and still
+        // fail closed when `fuel == 0`.
+        let mut tight = 256;
+        for _ in 0..4 {
+            assert_eq!(
+                cache
+                    .pointer_input_layout_for(
+                        Some(&package),
+                        &ty,
+                        TextProvenance::VerifiedByRegionAnalysis,
+                        &mut tight,
+                    )
+                    .unwrap(),
+                verified_leaves
+            );
+        }
+        assert!(
+            cache
+                .pointer_input_layout_for(
+                    Some(&package),
+                    &ty,
+                    TextProvenance::VerifiedByRegionAnalysis,
+                    &mut 0,
+                )
+                .is_err()
+        );
+        assert!(
+            cache
+                .pointer_representation(Some(&package), &newtype_ty, &mut 0)
+                .is_err()
+        );
+        assert!(
+            cache
+                .readable_representation_for(
+                    Some(&package),
+                    &ty,
+                    TextProvenance::VerifiedByRegionAnalysis,
+                    &mut 0,
+                )
+                .is_err()
+        );
+        assert!(
+            cache
+                .copy_readable_representation_for(
+                    Some(&package),
+                    &ty,
+                    TextProvenance::VerifiedByRegionAnalysis,
+                    &mut 0,
+                )
+                .is_err()
+        );
+        assert!(
+            cache
+                .owned_variant_fields(Some(&package), &err_ty, &mut 0)
+                .is_err()
+        );
     }
 }

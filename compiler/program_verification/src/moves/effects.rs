@@ -1080,8 +1080,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                             "handler lexical capture has no checked storage type",
                         )
                     })?;
-                    let code_paths =
-                        callable_value_paths(self.package, ty, &mut self.fuel, installation, 0)?;
+                    let code_paths = self.callable_value_paths(ty, installation)?;
                     let layout = self.pointer_input_layout(ty, installation)?;
                     if !layout.is_empty() {
                         let allowed = if let Some(allowed) = borrowed_result_delivery {
@@ -1810,11 +1809,21 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                         if reads_pointer_fields {
                             let package = this.package;
                             let text_provenance = this.text_provenance;
+                            let layout_cache = &mut this.layout_cache;
                             nir::visit::expression_in_closure_environment(expression, &mut this.fuel, |node, fuel| {
                                 // Pointer writes through an alias require a request-time
                                 // transition summary; an installation snapshot is insufficient.
                                 if let K::WritePointer { value, .. } = &node.kind {
-                                    if !super::super::memory::pointer_input_layout_for(package, &value.ty, text_provenance, fuel)?.is_empty() {
+                                    if !layout_cache
+                                        .as_mut()
+                                        .pointer_input_layout_for(
+                                            package,
+                                            &value.ty,
+                                            text_provenance,
+                                            fuel,
+                                        )?
+                                        .is_empty()
+                                    {
                                         return Err("handler borrowed pointer fields require stable storage during installation".into());
                                     }
                                 }
@@ -2230,15 +2239,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .types
             .get(&root(binding))
             .ok_or_else(|| error(source, "closure borrowed binding type is missing"))?;
-        let (pointer_depth, _) =
-            super::super::memory::pointer_representation(self.package, ty, &mut self.fuel)
-                .map_err(|reason| error(source, reason))?
-                .ok_or_else(|| {
-                    error(
-                        source,
-                        "closure borrowed binding has no pointer representation",
-                    )
-                })?;
+        let (pointer_depth, _) = self.pointer_representation(ty, source)?.ok_or_else(|| {
+            error(
+                source,
+                "closure borrowed binding has no pointer representation",
+            )
+        })?;
         let borrowed = inner
             .pointers
             .get(&Place {

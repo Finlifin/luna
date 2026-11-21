@@ -384,6 +384,7 @@ impl CleanupSession<'_, '_> {
                     Some(declarations.as_ref()),
                     text_provenance,
                     None,
+                    None,
                     fuel,
                 );
                 let summary = match summary {

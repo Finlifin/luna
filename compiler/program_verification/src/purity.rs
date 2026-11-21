@@ -3947,6 +3947,7 @@ impl<'a> Analysis<'a> {
                     Some(self.declarations.as_ref()),
                     text_provenance,
                     None,
+                    None,
                     &mut self.fuel,
                 )
                 .ok()?

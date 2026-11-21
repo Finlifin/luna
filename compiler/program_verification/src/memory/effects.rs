@@ -794,12 +794,7 @@ impl<'a> Infer<'a, '_> {
                     bound_type(ty, self.fuel)?;
                     let ty = ty.clone();
                     captures.push((binding, ty.clone()));
-                    let layout = pointer_input_layout_for(
-                        self.package,
-                        &ty,
-                        self.round.text_provenance,
-                        self.fuel,
-                    )?;
+                    let layout = self.pointer_input_layout(&ty)?;
                     if !layout.is_empty() {
                         pointer_captures.insert(binding);
                     } else if !effect_storage_layout(
