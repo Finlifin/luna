@@ -6351,3 +6351,29 @@ fn staged_trait_values_specialize_and_only_guard_implied_branches() {
         assert!(compile(&source).is_err(), "{body}");
     }
 }
+
+#[test]
+fn staged_trait_queries_in_calls_and_defaults_use_the_callers_inputs() {
+    let source = "
+        trait Enabled {}
+        impl Enabled for bool {}
+        struct Plain {}
+        fn forward(comptime flag: bool) -> bool { flag }
+        fn send(comptime active: bool) -> bool where T {
+            forward(active and (T :- Enabled))
+        }
+        fn defaulted(comptime active: bool,
+                     comptime .choose: bool = active and (T :- Enabled)) -> bool where T {
+            choose
+        }
+        fn run() -> bool {
+            send<bool>(true) and not send<Plain>(true) and not send<bool>(false)
+                and defaulted<bool>(true) and not defaulted<Plain>(true)
+                and not defaulted<bool>(false) and defaulted<Plain>(false, .choose = true)
+        }
+    ";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+    let wrong_phase = source.replace("fn send(comptime active:", "fn send(active:");
+    let failure = compile(&wrong_phase).unwrap_err();
+    assert!(failure.contains("runtime parameter"), "{failure}");
+}

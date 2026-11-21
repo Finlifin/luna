@@ -684,6 +684,26 @@ impl Checker<'_, '_> {
                 }
             }
             if self.scan_callable_requirements(root, |this, expression| {
+                // A trait query supplied directly to a staged argument can
+                // depend on the caller even when both signatures are closed.
+                // Route that free function through the existing source instance.
+                if matches!(expression.kind, H::TraitBound(..))
+                    && !sig.modifiers.is_comptime
+                    && !this.self_containers.contains_key(&owner)
+                    && !this.self_types.contains_key(&owner)
+                {
+                    let inputs = this.expression_declaration_dependencies(owner, expression)?;
+                    if this.type_parameters[&owner]
+                        .iter()
+                        .any(|id| inputs.contains(id))
+                        || !pending_inputs.is_empty()
+                            && !this
+                                .expression_free_local_dependencies(owner, expression)?
+                                .is_disjoint(&pending_inputs)
+                    {
+                        return Ok(true);
+                    }
+                }
                 let selectors: Vec<_> = match expression.kind {
                     H::InlineControl(value) => {
                         if !is_default {

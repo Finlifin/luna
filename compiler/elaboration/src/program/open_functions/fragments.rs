@@ -55,6 +55,14 @@ impl Checker<'_, '_> {
                         "required comptime computation cannot read a runtime parameter",
                     ));
                 }
+                // The fragment installs these synthetic staged operands in
+                // its telescope below. Runtime captures still need evidence
+                // of their availability at this particular stage.
+                if self.open_staged_locals.contains(&binding)
+                    && self.ordinary_behavior_inputs.contains_key(&binding)
+                {
+                    continue;
+                }
                 if !self.input_facts.has_identity(&binding) {
                     if self.input_facts.is_staged(&binding) {
                         return Err(error(

@@ -516,20 +516,35 @@ impl Checker<'_, '_> {
                     || self.checking_open_behavior
                     || self.executable_refinement_owner == Some(expr.hir_id.owner) =>
             {
-                let value = if self.in_unselected_inline || self.checking_open_behavior {
-                    let _ = self.type_predicate(expr)?;
-                    false
-                } else {
-                    self.refinement_trait_value(expr)?
-                };
                 let ty = p(P::Bool);
                 if let Some(expected) = expected {
                     self.require_expression(&ty, expected, expr.span)?;
                 }
+                let abstract_query = self.in_unselected_inline
+                    || self.checking_open_behavior
+                    || (self.describing_open_call && self.in_staged_input);
+                let kind = if abstract_query {
+                    let predicate = self.type_predicate(expr)?;
+                    self.context
+                        .validate_formula(
+                            &crate::ptc::Formula::from_predicate(&predicate),
+                            &mut crate::ptc::Budget::default(),
+                        )
+                        .map_err(|e| error(expr.span, e.to_string()))?;
+                    // Behavior checking needs a staged Boolean input. Its
+                    // truth belongs to the source instance, and a literal
+                    // here would spuriously select or discard control flow.
+                    let binding = self.spread_binding(expr.span)?;
+                    self.ordinary_behavior_inputs.insert(binding, ty.clone());
+                    self.open_staged_locals.insert(binding);
+                    K::Local(binding)
+                } else {
+                    K::Literal(n::Literal::Bool(self.refinement_trait_value(expr)?))
+                };
                 return Ok(Some(n::Expr {
                     source: source(expr.span),
                     ty,
-                    kind: K::Literal(n::Literal::Bool(value)),
+                    kind,
                 }));
             }
             H::TyClosure(context, _) if matches!(context.kind, H::ResolvedClauseParam(..)) => {
