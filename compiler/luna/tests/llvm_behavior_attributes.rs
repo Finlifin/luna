@@ -381,3 +381,58 @@ fn pointer_params_indirect_callsites_and_dealloc_attributes_pass_llvm23_opt_o3()
     assert_success(&out);
     assert_eq!(out.stdout, b"(unsigned-integer 0)\n");
 }
+
+#[test]
+fn reloaded_pointer_and_unknown_memory_callee_preserve_mutations_under_o3() {
+    let source = r#"
+        fn overwrite_via_local_ref(p: *u32) {
+            var slot = p;
+            let r = slot.ref;
+            let q = r.*;
+            q.* = 99;
+        }
+
+        fn trapping_write(p: *u32, x: u32) where requires x < 1000 {
+            p.* = x + 1;
+        }
+
+        fn write_through_trapping_callee(p: *u32, x: u32) where requires x < 1000 {
+            trapping_write(p, x);
+        }
+
+        fn run() -> u32 {
+            var a: u32 = 1;
+            var b: u32 = 10;
+            overwrite_via_local_ref(a.ref);
+            write_through_trapping_callee(b.ref, 40);
+            builtin.math.saturating_add(a, b)
+        }
+    "#;
+
+    let case = NativeCase::new(source);
+    let ir = case.emit_llvm().unwrap();
+
+    // Neither `overwrite_via_local_ref` nor `write_through_trapping_callee` (whose first
+    // pointer parameter is written) may attach `readonly` to that `ptr` parameter in LLVM IR.
+    let ptr_defines: Vec<&str> = ir
+        .lines()
+        .filter(|line| line.starts_with("define internal void @flurry_") && line.contains("ptr "))
+        .collect();
+    assert!(
+        ptr_defines.len() >= 3,
+        "expected internal pointer-taking helper definitions in IR:\n{ir}"
+    );
+    for define_line in ptr_defines {
+        assert!(
+            !define_line.contains("readonly"),
+            "written pointer helper must NOT emit `readonly` on ptr param `{define_line}`:\n{ir}"
+        );
+    }
+
+    for opt in ["0", "3"] {
+        assert_success(&case.build(opt));
+        let out = case.run();
+        assert_success(&out);
+        assert_eq!(out.stdout, b"(unsigned-integer 140)\n");
+    }
+}

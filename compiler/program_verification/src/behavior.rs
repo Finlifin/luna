@@ -752,6 +752,7 @@ impl<'a, 'b> Analyzer<'a, 'b> {
 
     fn mark_written(&mut self, origin: &PtrOrigin) {
         let mut saw_param = false;
+        let mut saw_unknown = false;
         let mut saw_other = false;
         for &src in &origin.sources {
             match src {
@@ -760,11 +761,14 @@ impl<'a, 'b> Analyzer<'a, 'b> {
                     saw_param = true;
                 }
                 PtrSource::LocalAlloc(_) => {}
-                PtrSource::ConstGlobal | PtrSource::Unknown => saw_other = true,
-                PtrSource::Param(_) => saw_other = true,
+                PtrSource::ConstGlobal => saw_other = true,
+                PtrSource::Unknown | PtrSource::Param(_) => saw_unknown = true,
             }
         }
-        if saw_other || origin.is_empty() {
+        if saw_unknown || origin.is_empty() {
+            self.written.fill(true);
+            self.memory = MemoryEffect::Unknown;
+        } else if saw_other {
             self.memory = MemoryEffect::Unknown;
         } else if saw_param {
             self.memory = self.memory.join(MemoryEffect::ArgMemReadWrite);
@@ -969,7 +973,15 @@ impl<'a, 'b> Analyzer<'a, 'b> {
                     self.mark_read(&origin);
                 }
                 if type_may_contain_pointer(self.index.graph, &expr.ty, self.fuel) {
-                    Some(PtrOrigin::unknown())
+                    let mut result = PtrOrigin::unknown();
+                    for &src in &origin.sources {
+                        if let PtrSource::LocalAlloc(local_id) = src
+                            && let Some(stored) = self.local_origins.get(&local_id)
+                        {
+                            result.join(stored);
+                        }
+                    }
+                    Some(result)
                 } else {
                     Some(PtrOrigin::default())
                 }
@@ -1250,7 +1262,11 @@ impl<'a, 'b> Analyzer<'a, 'b> {
                     self.mark_escaped(&o);
                 }
                 self.apply_intrinsic(expr);
-                Some(PtrOrigin::default())
+                if type_may_contain_pointer(self.index.graph, &expr.ty, self.fuel) {
+                    Some(PtrOrigin::unknown())
+                } else {
+                    Some(PtrOrigin::default())
+                }
             }
 
             K::Call {
@@ -1466,7 +1482,21 @@ impl<'a, 'b> Analyzer<'a, 'b> {
         match callee.memory {
             MemoryEffect::None => {}
             MemoryEffect::ReadOnly => self.memory = self.memory.join(MemoryEffect::ReadOnly),
-            MemoryEffect::Unknown => self.memory = MemoryEffect::Unknown,
+            MemoryEffect::Unknown => {
+                self.memory = MemoryEffect::Unknown;
+                for (slot, origin) in arg_origins.iter().chain(env_origins).enumerate() {
+                    if origin.is_empty() {
+                        continue;
+                    }
+                    let param_readonly =
+                        callee.pointer_params.get(slot).is_some_and(|p| p.readonly);
+                    if !param_readonly {
+                        self.mark_written(origin);
+                    } else {
+                        self.mark_read(origin);
+                    }
+                }
+            }
             MemoryEffect::ArgMemRead | MemoryEffect::ArgMemReadWrite => {
                 let writing = callee.memory == MemoryEffect::ArgMemReadWrite;
                 for (slot, origin) in arg_origins.iter().chain(env_origins).enumerate() {
@@ -1554,23 +1584,29 @@ impl<'a, 'b> Analyzer<'a, 'b> {
             }
             Op::MemRawWrite | Op::MemCopy | Op::MemCopyNonOverlapping | Op::MemSetBytes => {
                 self.memory = MemoryEffect::Unknown;
+                self.written.fill(true);
             }
             Op::LinuxDealloc => {
                 self.memory = MemoryEffect::Unknown;
+                self.written.fill(true);
                 self.no_free = false;
+                self.no_sync = false;
+                self.no_trap_or_unwind = false;
+            }
+            Op::LinuxReadByte | Op::LinuxReadRaw => {
+                self.memory = MemoryEffect::Unknown;
+                self.written.fill(true);
                 self.no_sync = false;
                 self.no_trap_or_unwind = false;
             }
             Op::LinuxWrite
             | Op::LinuxWriteByte
-            | Op::LinuxReadByte
             | Op::LinuxOpen
             | Op::LinuxClose
             | Op::LinuxUnlink
             | Op::LinuxGetPid
             | Op::LinuxAlloc
-            | Op::LinuxWriteRaw
-            | Op::LinuxReadRaw => {
+            | Op::LinuxWriteRaw => {
                 self.memory = MemoryEffect::Unknown;
                 self.no_sync = false;
                 self.no_trap_or_unwind = false;
@@ -1988,6 +2024,219 @@ mod tests {
         assert_eq!(
             pkg.functions[2].callsite_behaviors[0].behavior.memory,
             MemoryEffect::None
+        );
+    }
+
+    #[test]
+    fn reloaded_pointer_and_unknown_memory_callee_clear_param_readonly() {
+        let u32_ty = Term::Primitive(P::U32);
+        let ptr_u32_ty = Term::Pointer(Box::new(u32_ty.clone()));
+        let ptr_ptr_u32_ty = Term::Pointer(Box::new(ptr_u32_ty.clone()));
+        let p0 = lid(0);
+        let p1 = lid(1);
+        let slot_id = lid(2);
+        let ref_id = lid(3);
+        let q_id = lid(4);
+
+        // (a) Write through pointer reloaded via ReadPointer on a local holding a param:
+        // let slot = p; let r = slot.ref; let q = r.*; q.* = 99;
+        let reload_write = runtime_fn(
+            1,
+            "reload_write",
+            vec![(p0, ptr_u32_ty.clone())],
+            Term::Primitive(P::Void),
+            expr(
+                Term::Primitive(P::Void),
+                K::Block {
+                    statements: vec![
+                        expr(
+                            Term::Primitive(P::Void),
+                            K::Let {
+                                binding: slot_id,
+                                value: Box::new(expr(ptr_u32_ty.clone(), K::Local(p0))),
+                            },
+                        ),
+                        expr(
+                            Term::Primitive(P::Void),
+                            K::Let {
+                                binding: ref_id,
+                                value: Box::new(expr(
+                                    ptr_ptr_u32_ty.clone(),
+                                    K::AddressOf(Box::new(expr(
+                                        ptr_u32_ty.clone(),
+                                        K::Local(slot_id),
+                                    ))),
+                                )),
+                            },
+                        ),
+                        expr(
+                            Term::Primitive(P::Void),
+                            K::Let {
+                                binding: q_id,
+                                value: Box::new(expr(
+                                    ptr_u32_ty.clone(),
+                                    K::ReadPointer(Box::new(expr(
+                                        ptr_ptr_u32_ty.clone(),
+                                        K::Local(ref_id),
+                                    ))),
+                                )),
+                            },
+                        ),
+                        expr(
+                            Term::Primitive(P::Void),
+                            K::WritePointer {
+                                pointer: Box::new(expr(ptr_u32_ty.clone(), K::Local(q_id))),
+                                value: Box::new(expr(
+                                    u32_ty.clone(),
+                                    K::Literal(Literal::UnsignedInteger(99)),
+                                )),
+                            },
+                        ),
+                    ],
+                    result: Some(Box::new(expr(Term::Primitive(P::Void), K::Unit))),
+                },
+            ),
+        );
+
+        // (b) Returning a pointer reloaded via ReadPointer on a local holding a param
+        // must clear captures_none, readonly, and noalias.
+        let reload_escape = runtime_fn(
+            2,
+            "reload_escape",
+            vec![(p0, ptr_u32_ty.clone())],
+            ptr_u32_ty.clone(),
+            expr(
+                ptr_u32_ty.clone(),
+                K::Block {
+                    statements: vec![
+                        expr(
+                            Term::Primitive(P::Void),
+                            K::Let {
+                                binding: slot_id,
+                                value: Box::new(expr(ptr_u32_ty.clone(), K::Local(p0))),
+                            },
+                        ),
+                        expr(
+                            Term::Primitive(P::Void),
+                            K::Let {
+                                binding: ref_id,
+                                value: Box::new(expr(
+                                    ptr_ptr_u32_ty.clone(),
+                                    K::AddressOf(Box::new(expr(
+                                        ptr_u32_ty.clone(),
+                                        K::Local(slot_id),
+                                    ))),
+                                )),
+                            },
+                        ),
+                    ],
+                    result: Some(Box::new(expr(
+                        ptr_u32_ty.clone(),
+                        K::ReadPointer(Box::new(expr(ptr_ptr_u32_ty, K::Local(ref_id)))),
+                    ))),
+                },
+            ),
+        );
+
+        // (c) Callee writes param AND traps (MemoryEffect::Unknown); caller passing p0
+        // must also clear readonly on p0.
+        let callee_sig = Term::Function {
+            parameters: vec![
+                nir::Parameter {
+                    sort: Sort::Runtime,
+                    ty: ptr_u32_ty.clone(),
+                },
+                nir::Parameter {
+                    sort: Sort::Runtime,
+                    ty: u32_ty.clone(),
+                },
+            ],
+            result: Box::new(Term::Primitive(P::Void)),
+        };
+        let trapping_writer = runtime_fn(
+            3,
+            "trapping_writer",
+            vec![(p0, ptr_u32_ty.clone()), (p1, u32_ty.clone())],
+            Term::Primitive(P::Void),
+            expr(
+                Term::Primitive(P::Void),
+                K::WritePointer {
+                    pointer: Box::new(expr(ptr_u32_ty.clone(), K::Local(p0))),
+                    value: Box::new(expr(
+                        u32_ty.clone(),
+                        K::IntegerBinary {
+                            op: IntegerOp::Add,
+                            left: Box::new(expr(u32_ty.clone(), K::Local(p1))),
+                            right: Box::new(expr(
+                                u32_ty.clone(),
+                                K::Literal(Literal::UnsignedInteger(1)),
+                            )),
+                        },
+                    )),
+                },
+            ),
+        );
+        let caller_of_trapping_writer = runtime_fn(
+            4,
+            "caller_of_trapping_writer",
+            vec![(p0, ptr_u32_ty.clone()), (p1, u32_ty.clone())],
+            Term::Primitive(P::Void),
+            expr(
+                Term::Primitive(P::Void),
+                K::Call {
+                    callee: Box::new(expr(callee_sig, K::Function(decl(3)))),
+                    arguments: vec![
+                        nir::program::CallArgument {
+                            passing: nir::program::ArgumentPassing::Value,
+                            parameter: 0,
+                            value: expr(ptr_u32_ty, K::Local(p0)),
+                            is_default: false,
+                        },
+                        nir::program::CallArgument {
+                            passing: nir::program::ArgumentPassing::Value,
+                            parameter: 1,
+                            value: expr(u32_ty, K::Local(p1)),
+                            is_default: false,
+                        },
+                    ],
+                    parameter_bindings: vec![p0, p1],
+                    env_arguments: vec![],
+                },
+            ),
+        );
+
+        let mut pkg = iir::Package {
+            functions: vec![
+                reload_write,
+                reload_escape,
+                trapping_writer,
+                caller_of_trapping_writer,
+            ],
+            ..Default::default()
+        };
+        certify_iir_package(&mut pkg, None, &mut 100_000);
+
+        let b_write = pkg.functions[0].behavior.as_ref().unwrap();
+        assert_eq!(b_write.memory, MemoryEffect::Unknown);
+        assert!(
+            !b_write.pointer_params[0].readonly,
+            "writing through reloaded pointer must clear param readonly"
+        );
+
+        let b_escape = pkg.functions[1].behavior.as_ref().unwrap();
+        assert!(!b_escape.pointer_params[0].captures_none);
+        assert!(!b_escape.pointer_params[0].readonly);
+        assert!(!b_escape.pointer_params[0].noalias);
+
+        let b_callee = pkg.functions[2].behavior.as_ref().unwrap();
+        assert_eq!(b_callee.memory, MemoryEffect::Unknown);
+        assert!(!b_callee.pointer_params[0].readonly);
+
+        let b_caller = pkg.functions[3].behavior.as_ref().unwrap();
+        assert_eq!(b_caller.memory, MemoryEffect::Unknown);
+        assert!(
+            !b_caller.pointer_params[0].readonly,
+            "passing param to MemoryEffect::Unknown non-readonly param must clear caller readonly"
         );
     }
 }
