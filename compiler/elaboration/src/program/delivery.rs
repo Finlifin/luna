@@ -202,6 +202,10 @@ impl Checker<'_, '_> {
         if matches!(target.as_ref(), Term::Primitive(_)) {
             return Ok(Step::Unadapted(target));
         }
+        // An aggregate literal constructs its fields here. Its outer value
+        // cannot already carry the destination's optional or error tag. Pass
+        // the payload context down before a field defaults to its own type.
+        let constructs_fields = matches!(expr.kind, H::Tuple(_) | H::List(_));
         if let Term::ErrorResult { result, .. } = target.as_ref() {
             // Branching rules pass the whole destination to yielded paths.
             let directed = matches!(
@@ -216,7 +220,9 @@ impl Checker<'_, '_> {
                     | H::EffectHandle(..)
             );
             if !directed {
-                if let Some(value) = self.argument_attempt(expr, None, partial)? {
+                if !constructs_fields
+                    && let Some(value) = self.argument_attempt(expr, None, partial)?
+                {
                     return Delivery::Error {
                         target,
                         span: expr.span,
@@ -264,7 +270,9 @@ impl Checker<'_, '_> {
                     || matches!(&expr.kind, H::Application(head,_) | H::ExtendedApplication(head,_)
                         if enum_groups::symbol_path(head).is_some());
                 if !directed {
-                    if let Some(value) = self.argument_attempt(expr, None, partial)? {
+                    if !constructs_fields
+                        && let Some(value) = self.argument_attempt(expr, None, partial)?
+                    {
                         return self
                             .inject_optional_value(value, &target, expr.span)
                             .map(Step::Checked);

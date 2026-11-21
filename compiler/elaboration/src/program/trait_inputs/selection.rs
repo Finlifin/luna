@@ -2,6 +2,7 @@
 //! The selector runs as one required expression, so block locals, guards, and
 //! nested subjects all remain in the same source activation.
 use super::*;
+mod aggregates;
 
 #[derive(Clone)]
 pub(in crate::program) struct Selection<'hir> {
@@ -17,9 +18,19 @@ enum Alternative<'hir> {
         domain: Option<Term>,
     },
     Frozen {
-        span: Span,
+        site: &'hir Expr<'hir>,
         value: Box<n::Expr>,
     },
+    Aggregate {
+        site: &'hir Expr<'hir>,
+        fields: Vec<Position<'hir>>,
+    },
+}
+
+#[derive(Default)]
+struct Position<'hir> {
+    sites: Vec<Alternative<'hir>>,
+    selected: Option<usize>,
 }
 
 impl<'hir> Selection<'hir> {
@@ -33,7 +44,12 @@ impl<'hir> Selection<'hir> {
     ) -> Result<Option<ExplicitClause<'hir>>, Error> {
         if !matches!(
             source.kind,
-            H::Block(_) | H::If(_, _, Some(_)) | H::When(_) | H::Match(..)
+            H::Tuple(_)
+                | H::List(_)
+                | H::Block(_)
+                | H::If(_, _, Some(_))
+                | H::When(_)
+                | H::Match(..)
         ) {
             return Ok(None);
         }
@@ -42,10 +58,12 @@ impl<'hir> Selection<'hir> {
         let Some(selector) = project(checker, &arena, source, &mut alternatives, 0)? else {
             return Ok(None);
         };
-        if !alternatives
-            .iter()
-            .any(|site| matches!(site, Alternative::Literal(_)))
-        {
+        if !alternatives.iter().any(|site| {
+            matches!(
+                site,
+                Alternative::Literal(_) | Alternative::Aggregate { .. }
+            )
+        }) {
             return Ok(None);
         }
         // Describing an open body has no invocation-time selector. Its ordinary
@@ -83,34 +101,7 @@ impl<'hir> Selection<'hir> {
             source.hir_id.owner,
             source.span,
         )?;
-        let comptime_interpretor::Value::Object(packet) = packet else {
-            return Err(error(source.span, "invalid clause selection packet"));
-        };
-        let mut entries = packet
-            .into_entries()
-            .into_iter()
-            .map(|entry| entry.into_value());
-        let selected = match entries.next().map(|entry| entry.value) {
-            Some(comptime_interpretor::Value::Integer(index)) => index
-                .to_u128()
-                .ok()
-                .and_then(|index| usize::try_from(index).ok()),
-            _ => None,
-        }
-        .filter(|index| *index < alternatives.len())
-        .ok_or_else(|| error(source.span, "invalid clause selection index"))?;
-        match (&mut alternatives[selected], entries.next()) {
-            (Alternative::Literal(_), None) => {}
-            (Alternative::Producer { site, .. }, Some(entry)) => {
-                let span = site.span;
-                let identity = checker.required_normal_term(entry.value, span)?;
-                alternatives[selected] = Alternative::Frozen {
-                    span,
-                    value: frozen_operand(identity, entry.ty, span),
-                };
-            }
-            _ => return Err(error(source.span, "invalid selected clause payload")),
-        }
+        let selected = receive(checker, packet, &mut alternatives, source.span)?;
         Ok(Some(ExplicitClause::Selection(Self {
             source,
             alternatives: alternatives.into(),
@@ -150,16 +141,33 @@ impl<'hir> Selection<'hir> {
                             })?;
                             this.computed_delivery(actual, domain, site.span)?;
                         }
-                        Alternative::Frozen { span, value } => {
-                            let delivered = this.deliver_computed_value(value, domain, *span)?;
+                        Alternative::Aggregate { site, fields } => {
+                            let value = aggregates::check(
+                                this,
+                                site,
+                                fields,
+                                domain,
+                                index == self.selected,
+                            )?;
+                            if index == self.selected {
+                                result = Some(value);
+                            }
+                        }
+                        Alternative::Frozen { site, value } => {
+                            let span = site.span;
+                            let delivered = this.deliver_computed_value(value, domain, span)?;
                             if let std::borrow::Cow::Borrowed(operand) = &delivered {
-                                constants::charge_copy(operand, &mut this.required_steps, *span)?;
+                                constants::charge_copy(operand, &mut this.required_steps, span)?;
                             }
                             result = Some(delivered.into_owned());
                         }
                     }
                 }
-                Ok((result.expect("validated selection index"), ()))
+                Ok((
+                    result
+                        .ok_or_else(|| error(self.source.span, "missing selected clause result"))?,
+                    (),
+                ))
             },
         )?;
         let (value, _) = checker.invoke_required_publishing(
@@ -170,6 +178,62 @@ impl<'hir> Selection<'hir> {
         )?;
         checker.required_normal_term(value, self.source.span)
     }
+}
+
+// The tree of selected packets mirrors the source aggregate. A skipped
+// alternative has domains for checking, but cannot supply a field value.
+fn receive(
+    checker: &mut Checker<'_, '_>,
+    packet: comptime_interpretor::Value,
+    alternatives: &mut [Alternative<'_>],
+    span: Span,
+) -> Result<usize, Error> {
+    checker.required_steps = checker
+        .required_steps
+        .checked_sub(1)
+        .ok_or_else(|| error(span, "clause result delivery budget exhausted"))?;
+    let comptime_interpretor::Value::Object(packet) = packet else {
+        return Err(error(span, "invalid clause selection packet"));
+    };
+    let mut entries = packet
+        .into_entries()
+        .into_iter()
+        .map(|entry| entry.into_value());
+    let selected = match entries.next().map(|entry| entry.value) {
+        Some(comptime_interpretor::Value::Integer(index)) => index
+            .to_u128()
+            .ok()
+            .and_then(|index| usize::try_from(index).ok()),
+        _ => None,
+    }
+    .filter(|index| *index < alternatives.len())
+    .ok_or_else(|| error(span, "invalid clause selection index"))?;
+    if let Alternative::Aggregate { fields, .. } = &mut alternatives[selected] {
+        if entries.len() != fields.len() {
+            return Err(error(span, "staged aggregate field count mismatch"));
+        }
+        for (field, entry) in fields.iter_mut().zip(entries) {
+            field.selected = Some(receive(checker, entry.value, &mut field.sites, span)?);
+        }
+        return Ok(selected);
+    }
+    match (&mut alternatives[selected], entries.next()) {
+        (Alternative::Literal(_), None) => {}
+        (Alternative::Producer { site, .. }, Some(entry)) => {
+            let span = site.span;
+            let site = *site;
+            let identity = checker.required_normal_term(entry.value, span)?;
+            alternatives[selected] = Alternative::Frozen {
+                site,
+                value: frozen_operand(identity, entry.ty, span),
+            };
+        }
+        _ => return Err(error(span, "invalid selected clause payload")),
+    }
+    if entries.next().is_some() {
+        return Err(error(span, "unexpected clause selection payload"));
+    }
+    Ok(selected)
 }
 
 // Follow only the normalized control's result edges. Inner Objects, calls and
@@ -201,21 +265,30 @@ fn retain_producer_domains(
                 pending.extend(result.as_deref())
             }
             K::Object { fields, .. } => {
-                if let [tag, value] = fields.as_slice() {
-                    let index = match &tag.kind {
-                        K::Literal(n::Literal::Integer(index)) => index.parse::<usize>().ok(),
-                        _ => None,
-                    };
-                    let Some(Alternative::Producer { site, domain }) =
-                        index.and_then(|index| alternatives.get_mut(index))
-                    else {
-                        return Err(error(span, "invalid staged producer site"));
-                    };
-                    *domain = Some(declaration_inputs::copy_input_domain(
-                        &value.ty,
-                        &mut checker.required_steps,
-                        site.span,
-                    )?);
+                let Some((tag, operands)) = fields.split_first() else {
+                    return Err(error(span, "missing clause site index"));
+                };
+                let index = match &tag.kind {
+                    K::Literal(n::Literal::Integer(index)) => index.parse::<usize>().ok(),
+                    _ => None,
+                };
+                match index.and_then(|index| alternatives.get_mut(index)) {
+                    Some(Alternative::Literal(_)) if operands.is_empty() => {}
+                    Some(Alternative::Producer { site, domain }) if operands.len() == 1 => {
+                        *domain = Some(declaration_inputs::copy_input_domain(
+                            &operands[0].ty,
+                            &mut checker.required_steps,
+                            site.span,
+                        )?);
+                    }
+                    Some(Alternative::Aggregate { fields, .. })
+                        if fields.len() == operands.len() =>
+                    {
+                        for (field, operand) in fields.iter_mut().zip(operands) {
+                            retain_producer_domains(checker, operand, &mut field.sites, span)?;
+                        }
+                    }
+                    _ => return Err(error(span, "invalid staged clause result site")),
                 }
             }
             _ => return Err(error(span, "missing contextual result packet")),
@@ -311,6 +384,21 @@ fn project<'tree, 'src: 'tree>(
             let mut fields = vec![hir::expr::ObjectEntry::Value(index)];
             if checker.is_closed_clause_literal(source)? {
                 alternatives.push(Alternative::Literal(source));
+            } else if let H::Tuple(items) | H::List(items) = source.kind {
+                let mut positions = Vec::with_capacity(items.len());
+                for item in items {
+                    let mut field = Position::default();
+                    let Some(packet) = project(checker, arena, item, &mut field.sites, depth + 1)?
+                    else {
+                        return Ok(None);
+                    };
+                    fields.push(hir::expr::ObjectEntry::Value(packet));
+                    positions.push(field);
+                }
+                alternatives.push(Alternative::Aggregate {
+                    site: source,
+                    fields: positions,
+                });
             } else {
                 fields.push(hir::expr::ObjectEntry::Value(source));
                 alternatives.push(Alternative::Producer {

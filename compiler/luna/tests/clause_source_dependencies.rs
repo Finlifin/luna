@@ -421,3 +421,101 @@ fn computed_clause_delivery_preserves_error_tags_and_optional_success() {
     "#;
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn mixed_aggregate_clause_stages_lexical_fields_before_following_inputs() {
+    let source = r#"
+        comptime fn event(name: Symbol, value: u8) -> u8 {
+            let generated = meta.StructBuilder.new(.name = name).Build();
+            value
+        }
+        fn keep(value: T) -> ?T where T, .tag: ?T = null, .stamp: u8 = 0 {
+            if stamp == 9 { tag } else { null }
+        }
+        fn run() -> bool {
+            let witness: Tuple<?u8, u8> = (null, 0);
+            let chosen = keep<.tag = if event(.Outer, 1) == 1 {
+                (if event(.Guard, 0) == 0 { null } else { event(.Skipped, 3) },
+                 do { let a = event(.Chosen, 42); a })
+            } else { null }, .stamp = event(.Following, 9)>(witness);
+            chosen matches (null, 42)?
+        }
+    "#;
+    let package = sysroot::compile(source).unwrap();
+    let mut events: Vec<_> = package
+        .structs
+        .iter()
+        .filter_map(|def| {
+            let name = def.name.as_str();
+            matches!(name, "Outer" | "Guard" | "Skipped" | "Chosen" | "Following")
+                .then_some((def.declaration, name))
+        })
+        .collect();
+    events.sort_unstable();
+    assert_eq!(
+        events.into_iter().map(|(_, name)| name).collect::<Vec<_>>(),
+        ["Outer", "Guard", "Chosen", "Following"]
+    );
+    let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+
+    // The other branch delivers a u8 to the optional first field. Reducing
+    // the selected path must retain the field context inside the outer tag.
+    let present = source
+        .replace("event(.Guard, 0)", "event(.Guard, 1)")
+        .replace("(null, 42)?", "(3?, 42)?");
+    assert_eq!(sysroot::run(&present), Value::Bool(true));
+
+    // Check a skipped field both when its containing tuple is constructed
+    // and when control skips the entire tuple.
+    let wrong = source.replace("event(.Skipped, 3)", "event(.Skipped, 3) == 3");
+    for invalid in [
+        wrong.clone(),
+        wrong.replace("event(.Outer, 1)", "event(.Outer, 0)"),
+    ] {
+        let error = sysroot::compile(&invalid).unwrap_err();
+        assert!(error.contains("bool") && error.contains("u8"), "{error}");
+    }
+}
+
+#[test]
+fn contextual_lists_use_the_inferred_element_domain_for_each_staged_field() {
+    let source = r#"
+        comptime fn byte() -> u8 { 42 }
+        fn check(value: T) -> bool where T, .values: meta.List<?T> = [] {
+            const ok = values.length() == 2 and (values[0] matches null)
+                and (values[1] matches _?);
+            ok
+        }
+        fn run() -> bool {
+            let byte_witness: u8 = 0;
+            let pair_witness: Tuple<?u8, u8> = (null, 0);
+            check<.values = [null, byte()]>(byte_witness) and
+                check<.values = [null, (null, byte())]>(pair_witness)
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let wrong = source.replace("(null, byte())]", "(null, byte() == 0)]");
+    let error = sysroot::compile(&wrong).unwrap_err();
+    assert!(error.contains("bool") && error.contains("u8"), "{error}");
+}
+
+#[test]
+fn computed_fields_receive_payload_context_through_error_and_optional_tags() {
+    let source = r#"
+        enum ReadErr { Missing }
+        comptime fn byte() -> u8 { 42 }
+        fn keep(witness: T) -> !ReadErr ?T where T, .value: !ReadErr ?T = null { value }
+        fn run() -> bool {
+            let witness: Tuple<?u8, u8> = (null, 0);
+            let inferred = keep<.value = (byte(), byte())>(witness);
+            let explicit = keep<Tuple<?u8, u8>, .value = (byte(), byte())>(witness);
+            (inferred matches (42?, 42)?!) and (explicit matches (42?, 42)?!)
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
