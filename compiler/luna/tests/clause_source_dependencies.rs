@@ -820,3 +820,46 @@ fn selected_type_defaults_contextualize_inputs_before_default_evaluation() {
     let error = sysroot::compile(&failing).unwrap_err();
     assert!(error.contains("ProgramContractRejected"), "{error}");
 }
+
+#[test]
+fn computed_type_suppliers_select_context_without_replaying_call_operands() {
+    let source = r#"
+        enum Packet { group.{byte(u8)} }
+        pure comptime fn Choose(flag: bool, stamp: u8, .yes: Type = bool, .no: Type = bool) -> Type {
+            if flag { yes } else { no }
+        }
+        pure comptime fn Relay(flag: bool, stamp: u8) -> Type {
+            Choose(flag, stamp, .no = ?u8, .yes = Packet)
+        }
+        pure comptime fn Fixed(stamp: u8) -> Type { Packet }
+        pure comptime fn Escape(flag: bool) -> Type {
+            Fixed(do { if flag { return ?u8; }; 0 })
+        }
+        pure comptime fn InGuard(flag: bool) -> Type {
+            if do { if flag { return ?u8; }; true } { Packet } else { Packet }
+        }
+        comptime fn mark(name: Symbol, value: u8) -> u8 {
+            let generated = meta.StructBuilder.new(.name = name).Build();
+            value
+        }
+        fn read() -> T where .T: Type = bool, .items: meta.List<T> = [], .stamp: u8 = 0 {
+            const item = items[0];
+            item
+        }
+        fn run() -> bool {
+            let a = read<.items = [.group.byte(mark(.CallField, 7))], .stamp = mark(.CallMiddle, 1),
+                .T = Relay(true, mark(.CallSupplier, 2))>();
+            let b = read<.items = [.group.byte(0)], .T = Relay(false, 3)>();
+            let c = read<.items = [.group.byte(0)], .T = Escape(true)>();
+            let d = read<.items = [.group.byte(0)], .T = InGuard(true)>();
+            (a matches .group.byte(7)) and (b matches 103?) and (c matches 103?) and (d matches 103?)
+        }
+    "#;
+    check_struct_events(source, "Call", &["CallField", "CallMiddle", "CallSupplier"]);
+    let invalid = source.replace(
+        "let generated =",
+        "assumes name != .CallSupplier; let generated =",
+    );
+    let error = sysroot::compile(&invalid).unwrap_err();
+    assert!(error.contains("ProgramContractRejected"), "{error}");
+}

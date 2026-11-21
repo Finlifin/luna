@@ -3,6 +3,8 @@
 //! Actual calls still validate constraints, phases, contracts and evaluation.
 use super::*;
 
+mod result_evidence;
+
 impl Checker<'_, '_> {
     // Keep incomplete aggregate evidence private to the call candidate. A
     // numeric literal with no completed target contributes no default type.
@@ -1225,11 +1227,15 @@ impl Checker<'_, '_> {
         depth: usize,
         bindings: Option<(&[DeclarationId], &[Term])>,
     ) -> Result<Option<Term>, Error> {
+        if *domain == p(P::Type) {
+            return self.generator_static_type_hint(argument, depth, bindings);
+        }
+        self.required_steps = self
+            .required_steps
+            .checked_sub(1)
+            .ok_or_else(|| error(argument.span, "generator value evidence budget exhausted"))?;
         if depth >= 64 {
             return Ok(None);
-        }
-        if *domain == p(P::Type) {
-            return self.generator_static_type_hint(argument, depth + 1, bindings);
         }
         if let H::ResolvedClauseParam(_, id) = argument.kind {
             let id = self.visible_clause_input(id, argument.span)?;
@@ -1280,15 +1286,11 @@ impl Checker<'_, '_> {
                     None => Ok(None),
                 };
             }
-            H::If(_, yes, Some(no)) if yes.stmts.is_empty() => {
-                let Some(yes) = yes.expr else { return Ok(None) };
-                let Some(left) =
-                    self.generator_static_value_hint(yes, domain, depth + 1, bindings)?
-                else {
-                    return Ok(None);
-                };
-                let right = self.generator_static_value_hint(no, domain, depth + 1, bindings)?;
-                return Ok((right.as_ref() == Some(&left)).then_some(left));
+            H::If(guard, yes, Some(no)) => {
+                return self.static_conditional_result(guard, yes, no, domain, depth, bindings);
+            }
+            H::Application(callee, args) => {
+                return self.static_call_result(callee, args, domain, depth, bindings);
             }
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id)
                 if self.immutable.contains(&local(*id)) =>
@@ -1416,13 +1418,11 @@ impl Checker<'_, '_> {
                 Some(value) => self.generator_static_type_hint(value, depth + 1, bindings),
                 None => Ok(None),
             },
-            H::If(_, yes, Some(no)) if yes.stmts.is_empty() => {
-                let Some(yes) = yes.expr else { return Ok(None) };
-                let Some(left) = self.generator_static_type_hint(yes, depth + 1, bindings)? else {
-                    return Ok(None);
-                };
-                let right = self.generator_static_type_hint(no, depth + 1, bindings)?;
-                Ok((right.as_ref() == Some(&left)).then_some(left))
+            H::If(guard, yes, Some(no)) => {
+                self.static_conditional_result(guard, yes, no, &p(P::Type), depth, bindings)
+            }
+            H::Application(callee, args) => {
+                self.static_call_result(callee, args, &p(P::Type), depth, bindings)
             }
             H::TyOptional(inner) => Ok(self
                 .generator_static_type_hint(inner, depth + 1, bindings)?

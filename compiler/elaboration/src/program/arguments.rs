@@ -363,14 +363,24 @@ pub(super) fn post_lambda_target(
         .map_err(|failure| routing_error(failure, args, span))
 }
 
+/// Route source positions without materializing aggregate or tactic operands.
+pub(super) fn argument_routes(
+    args: &[Arg<'_>],
+    declarations: Option<&[hir::common::FnParam<'_>]>,
+    count: usize,
+    span: Span,
+) -> Result<input_routing::Plan, Error> {
+    input_routing::route(&input_entries(declarations, count), &routing_inputs(args))
+        .map_err(|failure| routing_error(failure, args, span))
+}
+
 pub(super) fn route_arguments<'h>(
     args: &[Arg<'h>],
     declarations: Option<&[hir::common::FnParam<'_>]>,
     count: usize,
     span: Span,
 ) -> Result<(Vec<RoutedArgument<'h>>, Vec<bool>), Error> {
-    let plan = input_routing::route(&input_entries(declarations, count), &routing_inputs(args))
-        .map_err(|failure| routing_error(failure, args, span))?;
+    let plan = argument_routes(args, declarations, count, span)?;
     let routes = plan
         .routes
         .into_iter()
