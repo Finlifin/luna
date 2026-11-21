@@ -154,17 +154,12 @@ impl Checker<'_, '_> {
                 }
             }
         };
-        let Some(definition) = declaration.and_then(|declaration| self.enums.get(&declaration))
-        else {
+        let Some(declaration) = declaration else {
             return Ok(None);
         };
-        let work = reversed_names.iter().try_fold(
-            definition
-                .groups
-                .len()
-                .saturating_add(definition.variants.len()) as u64,
-            |work, name| work.checked_add(name.len() as u64 + 1),
-        );
+        let work = reversed_names
+            .iter()
+            .try_fold(0u64, |work, name| work.checked_add(name.len() as u64 + 1));
         self.required_steps = work
             .and_then(|work| self.required_steps.checked_sub(work))
             .ok_or_else(|| error(base.span, "enum namespace observation budget exhausted"))?;
@@ -174,18 +169,38 @@ impl Checker<'_, '_> {
             .map(String::as_str)
             .collect::<Vec<_>>()
             .join(".");
-        if !definition.groups.contains(&name)
-            && !definition
-                .variants
-                .iter()
-                .any(|variant| variant.name == name)
-        {
+        if !self.enum_namespace_contains(declaration, &name, base.span)? {
             return Ok(None);
         }
         // Namespace observation is not execution. Once this is a constructor
         // or group, use ordinary required type formation so input producers,
         // contracts and failures are not erased by a known identity.
         self.type_expr(base).map(Some)
+    }
+
+    pub(super) fn enum_namespace_contains(
+        &mut self,
+        declaration: DeclarationId,
+        name: &str,
+        span: Span,
+    ) -> Result<bool, Error> {
+        let Some(definition) = self.enums.get(&declaration) else {
+            return Ok(false);
+        };
+        self.required_steps = self
+            .required_steps
+            .checked_sub(
+                definition
+                    .groups
+                    .len()
+                    .saturating_add(definition.variants.len()) as u64,
+            )
+            .ok_or_else(|| error(span, "enum namespace observation budget exhausted"))?;
+        Ok(definition.groups.iter().any(|group| group == name)
+            || definition
+                .variants
+                .iter()
+                .any(|variant| variant.name == name))
     }
 
     pub(super) fn enum_group_pattern(

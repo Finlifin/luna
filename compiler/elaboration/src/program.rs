@@ -5598,9 +5598,13 @@ impl Checker<'_, '_> {
     ) -> Result<n::Expr, Error> {
         use crate::calls::InputContext as C;
         if let C::Optional(payload_context) = context {
-            let source = delivery::optional_input(input);
-            if source != delivery::OptionalInput::Whole {
-                if source == delivery::OptionalInput::Probe
+            let source =
+                self.tag_input(input, delivery::PayloadTarget::Context(payload_context))?;
+            if !matches!(
+                source,
+                delivery::TagInput::Whole | delivery::TagInput::Receiver
+            ) {
+                if source == delivery::TagInput::Probe
                     && let Some(mut value) = self.argument_attempt(input, None, None)?
                 {
                     if is_never(&value.ty) {

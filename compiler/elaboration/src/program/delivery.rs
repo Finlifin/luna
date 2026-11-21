@@ -7,35 +7,96 @@ mod computed;
 
 /// The same source rule applies to a partial call context and a settled type.
 #[derive(Clone, Copy, PartialEq)]
-pub(super) enum OptionalInput {
+pub(super) enum TagInput {
     Whole,
     Payload,
     Probe,
+    // When the payload has no such member, the receiver can use the ordinary
+    // Symbol literal default as soon as the enclosing check enables defaults.
+    Receiver,
 }
 
-fn constructs_payload(expr: &Expr<'_>) -> bool {
-    matches!(expr.kind, H::Tuple(_) | H::List(_)) || enum_groups::has_bare_symbol_head(expr)
+/// A projected Symbol can denote an enum leaf or an ordinary receiver. Only
+/// the destination namespace can decide which interpretation supplies a tag.
+pub(super) enum PayloadTarget<'a> {
+    Type(&'a Term),
+    Context(&'a crate::calls::InputContext),
 }
 
-pub(super) fn optional_input(expr: &Expr<'_>) -> OptionalInput {
-    match &expr.kind {
-        _ if constructs_payload(expr) => OptionalInput::Payload,
-        H::Null
-        | H::Block(_)
-        | H::If(..)
-        | H::Match(..)
-        | H::When(_)
-        | H::Return(_)
-        | H::EffectRequest(_)
-        | H::ErrorHandle { .. }
-        | H::EffectHandle(..) => OptionalInput::Whole,
-        H::Application(head, _) | H::ExtendedApplication(head, _)
-            if enum_groups::symbol_path(head).is_some() =>
-        {
-            OptionalInput::Whole
-        }
-        H::Projection(..) if enum_groups::symbol_path(expr).is_some() => OptionalInput::Whole,
-        _ => OptionalInput::Probe,
+impl Checker<'_, '_> {
+    fn enum_payload_member(
+        &mut self,
+        mut target: PayloadTarget<'_>,
+        name: &str,
+        span: Span,
+    ) -> Result<bool, Error> {
+        use crate::calls::InputContext as C;
+        let declaration = loop {
+            self.charge_expression_delivery(span)?;
+            match target {
+                PayloadTarget::Context(C::Known(ty)) => target = PayloadTarget::Type(ty),
+                PayloadTarget::Context(
+                    C::Optional(inner) | C::ErrorResult { result: inner, .. },
+                ) => target = PayloadTarget::Context(inner),
+                PayloadTarget::Context(C::Nominal { declaration, .. }) => break *declaration,
+                PayloadTarget::Type(
+                    Term::Optional(inner) | Term::ErrorResult { result: inner, .. },
+                ) => target = PayloadTarget::Type(inner),
+                PayloadTarget::Type(ty) => {
+                    let view = self.type_identity_view(ty, span)?;
+                    let mut leaf = &view;
+                    while let Term::Optional(inner) | Term::ErrorResult { result: inner, .. } = leaf
+                    {
+                        self.charge_expression_delivery(span)?;
+                        leaf = inner;
+                    }
+                    let Term::Nominal { declaration, .. } = leaf else {
+                        return Ok(false);
+                    };
+                    self.ensure_nominal_type(leaf, span)?;
+                    break *declaration;
+                }
+                _ => return Ok(false),
+            }
+        };
+        self.enum_namespace_contains(declaration, name, span)
+    }
+
+    pub(super) fn tag_input(
+        &mut self,
+        expr: &Expr<'_>,
+        target: PayloadTarget<'_>,
+    ) -> Result<TagInput, Error> {
+        Ok(match &expr.kind {
+            H::Tuple(_) | H::List(_) => TagInput::Payload,
+            _ if enum_groups::has_bare_symbol_head(expr) => TagInput::Payload,
+            H::Null
+            | H::Block(_)
+            | H::If(..)
+            | H::Match(..)
+            | H::When(_)
+            | H::Return(_)
+            | H::EffectRequest(_)
+            | H::ErrorHandle { .. }
+            | H::EffectHandle(..) => TagInput::Whole,
+            _ => {
+                let head = match expr.kind {
+                    H::Application(head, _) | H::ExtendedApplication(head, _) => head,
+                    _ => expr,
+                };
+                if matches!(head.kind, H::Projection(..))
+                    && let Some(name) = enum_groups::symbol_path(head)
+                {
+                    if self.enum_payload_member(target, &name, expr.span)? {
+                        TagInput::Payload
+                    } else {
+                        TagInput::Receiver
+                    }
+                } else {
+                    TagInput::Probe
+                }
+            }
+        })
     }
 }
 
@@ -250,8 +311,14 @@ impl Checker<'_, '_> {
                     | H::EffectHandle(..)
             );
             if !directed {
-                if !constructs_payload(expr)
-                    && let Some(value) = self.argument_attempt(expr, None, partial)?
+                let input = self.tag_input(expr, PayloadTarget::Type(result))?;
+                if input != TagInput::Payload
+                    && let Some(value) = self.argument_attempt_with_defaults(
+                        expr,
+                        None,
+                        partial,
+                        input == TagInput::Receiver && self.numeric_defaults,
+                    )?
                 {
                     return Delivery::Error {
                         target,
@@ -283,16 +350,24 @@ impl Checker<'_, '_> {
         }
         if self.optional_target_probe != Some(expr.hir_id) {
             if let Ok(payload) = self.optional_payload(&target, expr.span) {
-                let input = optional_input(expr);
-                if input != OptionalInput::Whole {
-                    if input == OptionalInput::Probe
-                        && let Some(value) = self.argument_attempt(expr, None, partial)?
+                let input = self.tag_input(expr, PayloadTarget::Type(&payload))?;
+                if input != TagInput::Whole {
+                    if matches!(input, TagInput::Probe | TagInput::Receiver)
+                        && let Some(value) = self.argument_attempt_with_defaults(
+                            expr,
+                            None,
+                            partial,
+                            input == TagInput::Receiver && self.numeric_defaults,
+                        )?
                     {
                         return self
                             .inject_optional_value(value, &target, expr.span)
                             .map(Step::Checked);
                     }
-                    if input == OptionalInput::Probe
+                    if input == TagInput::Receiver {
+                        return Ok(Step::Unadapted(target));
+                    }
+                    if input == TagInput::Probe
                         && matches!(
                             expr.kind,
                             H::Application(..) | H::ExtendedApplication(..) | H::OptionPropagate(_)

@@ -301,3 +301,28 @@ fn contextual_variant_and_symbol_literals_deliver_through_result_tags() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn grouped_qualified_values_follow_the_payload_namespace_through_tags() {
+    let source = r#"
+        enum Packet { group.{byte(u8), idle} }
+        enum ReadErr { Missing }
+        comptime fn inspect() -> bool {
+            let value: !ReadErr ?Packet = .group.byte(7);
+            let idle: ?Packet = .group.idle;
+            let present: ?u8 = .group.byte(0);
+            let absent: ??u8 = .group.byte(99);
+            (value matches .group.byte(7)?!) and (idle matches .group.idle?)
+                and (present matches 103?) and (absent matches null?)
+        }
+        enum Message where T { group.{byte(T)} }
+        fn present(value: ?Message<T>) -> bool where T { value matches .group.byte(_)? }
+        fn run() -> bool {
+            let item: u8 = 7;
+            inspect() and present(.group.byte(item))
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let invalid = source.replace(".group.byte(7);", ".group.byte(256);");
+    assert!(sysroot::compile(&invalid).is_err());
+}
