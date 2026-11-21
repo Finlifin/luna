@@ -154,6 +154,16 @@ fn at_use_import_forms_shadowing_diamond_dedup_ambiguity_and_visibility() {
         ) -> Result<Vec<MacroToken>, MacroError> {
             unreachable!()
         }
+
+        fn execute_ast(
+            &mut self,
+            _descriptor: &MacroDescriptor,
+            _args: &[macro_expander::AstArgValue],
+            _call_site: Span,
+            _budget: &mut MacroBudget,
+        ) -> Result<Vec<MacroToken>, MacroError> {
+            unreachable!()
+        }
     }
 
     // 1. Diamond dedup + nested multi-group + optional semicolon after brace + alias
@@ -405,6 +415,23 @@ fn mode3_token_macros_compose_and_enforce_delimiters_depth_and_budgets() {
                 ]),
                 _ => unreachable!(),
             }
+        }
+
+        fn execute_ast(
+            &mut self,
+            descriptor: &MacroDescriptor,
+            _args: &[macro_expander::AstArgValue],
+            call_site: Span,
+            _budget: &mut MacroBudget,
+        ) -> Result<Vec<MacroToken>, MacroError> {
+            Err(MacroError::new(
+                MacroErrorKind::HandlerExecutionError,
+                format!(
+                    "unexpected AST macro call `@{}` in MockMode3Executor",
+                    descriptor.full_path()
+                ),
+                call_site,
+            ))
         }
     }
 

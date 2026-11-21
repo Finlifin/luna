@@ -181,3 +181,28 @@ fn unterminated_and_invalid_dollar_in_token_buffer_report_clear_errors() {
         "{err_empty_interp}"
     );
 }
+
+#[test]
+fn token_buffer_works_in_match_when_lambda_and_do_bodies() {
+    let (_map, ast) = parse_file_ast(
+        r#"
+        fn arm_and_lambda(opt: ?i32) -> i32 {
+            let _a = opt match {
+                e? => {{ $e + 1 }},
+                null => {{ 0 }},
+            };
+            let _b = when {
+                true => {{ 1 }},
+                else => { { 2 } },
+            };
+            let _f = |x| {{ $x }};
+            let _d = helper do {{ 42 }};
+            1
+        }
+        "#,
+    );
+    let top_items = ast
+        .get_multi_child_slice(ast.get_children(ast.root)[0])
+        .unwrap();
+    assert_eq!(top_items.len(), 1);
+}

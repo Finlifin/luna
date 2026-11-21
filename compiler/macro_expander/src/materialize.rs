@@ -179,7 +179,7 @@ fn is_keyword(kind: TokenKind) -> bool {
     )
 }
 
-fn needs_safety_space(prev: &MacroToken, curr: &MacroToken) -> bool {
+pub(crate) fn needs_safety_space(prev: &MacroToken, curr: &MacroToken) -> bool {
     if is_literal_with_suffix_base(prev.kind) && curr.kind == TokenKind::Id {
         return false;
     }
@@ -228,16 +228,21 @@ fn needs_safety_space(prev: &MacroToken, curr: &MacroToken) -> bool {
     )
 }
 
-/// Materialize `macro_tokens` into a synthetic `SourceFile` registered in `source_map`.
-pub fn materialize_expanded(
-    source_map: &SourceMap,
-    orig_file: &SourceFile,
-    macro_tokens: &[MacroToken],
-    mut provenance: ExpansionMap,
-) -> ExpandedFile {
+/// Rendered token stream image together with per-token byte offsets inside `text`.
+pub(crate) struct RenderedTokenStream {
+    pub(crate) text: String,
+    pub(crate) tokens: Vec<Token>,
+    pub(crate) symbols: HashMap<usize, Symbol>,
+    pub(crate) macro_token_ranges: Vec<(usize, usize)>,
+}
+
+/// Render `macro_tokens` into contiguous UTF-8 source text while preserving lexeme
+/// boundaries, safety spaces, and separated operators.
+pub(crate) fn render_macro_tokens(macro_tokens: &[MacroToken]) -> RenderedTokenStream {
     let mut expanded_src = String::new();
     let mut out_tokens = Vec::with_capacity(macro_tokens.len() + 2);
     let mut out_symbols = HashMap::new();
+    let mut macro_token_ranges = Vec::with_capacity(macro_tokens.len());
 
     out_tokens.push(Token::new(TokenKind::Sof, 0, 0));
 
@@ -249,6 +254,7 @@ pub fn materialize_expanded(
                 TokenSpacing::Alone | TokenSpacing::Separated => expanded_src.push(' '),
                 TokenSpacing::Joint => {
                     if mt.spacing == TokenSpacing::Separated
+                        || crate::provenance::is_separated_kind(prev.kind)
                         || crate::provenance::is_separated_kind(mt.kind)
                         || needs_safety_space(prev, mt)
                     {
@@ -265,24 +271,12 @@ pub fn materialize_expanded(
         let from = expanded_src.len();
         expanded_src.push_str(&mt.text);
         let to = expanded_src.len();
+        macro_token_ranges.push((from, to));
 
         let tok_idx = out_tokens.len();
         out_tokens.push(Token::new(mt.kind, from, to));
         if mt.kind == TokenKind::Id {
             out_symbols.insert(tok_idx, Symbol::intern(&mt.text));
-        }
-
-        if let Some(exp_id) = mt.expansion_id {
-            let mut cursor = Some(exp_id);
-            let mut guard = 0usize;
-            while let Some(id) = cursor {
-                if guard > provenance.len() {
-                    break;
-                }
-                guard += 1;
-                provenance.extend_output_range(id, from, to);
-                cursor = provenance.get(id).and_then(|rec| rec.parent);
-            }
         }
     }
 
@@ -296,6 +290,39 @@ pub fn materialize_expanded(
     let eof_pos = expanded_src.len();
     out_tokens.push(Token::new(TokenKind::Eof, eof_pos, eof_pos));
 
+    RenderedTokenStream {
+        text: expanded_src,
+        tokens: out_tokens,
+        symbols: out_symbols,
+        macro_token_ranges,
+    }
+}
+
+/// Materialize `macro_tokens` into a synthetic `SourceFile` registered in `source_map`.
+pub fn materialize_expanded(
+    source_map: &SourceMap,
+    orig_file: &SourceFile,
+    macro_tokens: &[MacroToken],
+    mut provenance: ExpansionMap,
+) -> ExpandedFile {
+    let rendered = render_macro_tokens(macro_tokens);
+
+    for (idx, mt) in macro_tokens.iter().enumerate() {
+        if let Some(exp_id) = mt.expansion_id {
+            let (from, to) = rendered.macro_token_ranges[idx];
+            let mut cursor = Some(exp_id);
+            let mut guard = 0usize;
+            while let Some(id) = cursor {
+                if guard > provenance.len() {
+                    break;
+                }
+                guard += 1;
+                provenance.extend_output_range(id, from, to);
+                cursor = provenance.get(id).and_then(|rec| rec.parent);
+            }
+        }
+    }
+
     let label = orig_file
         .name
         .display(FileNameDisplayPreference::Local)
@@ -305,14 +332,14 @@ pub fn materialize_expanded(
         "<macro-expanded:{label}:{}>",
         orig_file.start_pos.0
     ));
-    let synthetic_file = source_map.new_source_file(synthetic_name, expanded_src.clone());
+    let synthetic_file = source_map.new_source_file(synthetic_name, rendered.text.clone());
 
     ExpandedFile {
-        tokens: out_tokens,
-        symbols: out_symbols,
+        tokens: rendered.tokens,
+        symbols: rendered.symbols,
         start_pos: synthetic_file.start_pos,
         expanded: true,
         provenance,
-        source_text: Some(expanded_src),
+        source_text: Some(rendered.text),
     }
 }

@@ -794,7 +794,11 @@ impl Parser<'_> {
             };
 
             // 解析函数体（块或表达式）
-            let body = match p.try_block()? {
+            let body = match if p.is_token_buffer_start() {
+                0
+            } else {
+                p.try_block()?
+            } {
                 0 => {
                     let expr = p.try_expr_with_option(option)?;
                     if expr == 0 {
@@ -1924,7 +1928,7 @@ impl Parser<'_> {
             // Try lambda first (|params| body)
             let body = if p.peek(TokenKind::Pipe.as_ref()) {
                 p.try_lambda(opt)?
-            } else if p.peek(TokenKind::LBrace.as_ref()) {
+            } else if p.peek(TokenKind::LBrace.as_ref()) && !p.is_token_buffer_start() {
                 // Try block
                 p.try_block()?
             } else {

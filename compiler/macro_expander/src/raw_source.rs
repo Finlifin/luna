@@ -897,6 +897,43 @@ fn collect_at_use_scan_targets(
     pos
 }
 
+fn collect_path_segments_lossy(
+    src: &str,
+    after_first: usize,
+    first_seg: String,
+) -> (Vec<String>, usize) {
+    let mut segments = vec![first_seg];
+    let mut scan_end = after_first;
+    loop {
+        let ws_end = skip_ws_and_comments_lossy(src, scan_end);
+        if src.as_bytes().get(ws_end) != Some(&b'.') {
+            break;
+        }
+        let next_pos = skip_ws_and_comments_lossy(src, ws_end + 1);
+        let Some((seg, seg_end)) = scan_ident_at(src, next_pos) else {
+            break;
+        };
+        segments.push(seg);
+        scan_end = seg_end;
+    }
+    (segments, scan_end)
+}
+
+fn is_meta_macros_import_path(src: &str, root_pos: usize) -> bool {
+    let Some((root_seg, root_end)) = scan_ident_at(src, root_pos) else {
+        return false;
+    };
+    if root_seg != "meta" {
+        return false;
+    }
+    let ws1 = skip_ws_and_comments_lossy(src, root_end);
+    if src.as_bytes().get(ws1) != Some(&b'.') {
+        return false;
+    }
+    let second_pos = skip_ws_and_comments_lossy(src, ws1 + 1);
+    matches!(scan_ident_at(src, second_pos), Some((ref seg, _)) if seg == "macros")
+}
+
 /// Fast read-only pre-scan collecting macro package/script roots referenced in a source string.
 pub fn scan_referenced_macro_roots(src: &str) -> ReferencedMacros {
     let mut out = ReferencedMacros::default();
@@ -906,6 +943,7 @@ pub fn scan_referenced_macro_roots(src: &str) -> ReferencedMacros {
 
     let mut builtin_leaves = HashSet::new();
     let mut has_builtin_glob = false;
+    let mut has_meta_macros_glob = false;
     let mut non_builtin_leaves = HashSet::new();
     let mut has_non_builtin_glob = false;
 
@@ -931,6 +969,9 @@ pub fn scan_referenced_macro_roots(src: &str) -> ReferencedMacros {
                 if root_seg == "builtin" {
                     builtin_leaves.extend(leaves);
                     has_builtin_glob |= glob;
+                } else if is_meta_macros_import_path(src, root_pos) {
+                    builtin_leaves.extend(leaves);
+                    has_meta_macros_glob |= glob;
                 } else {
                     out.has_non_builtin_macros = true;
                     out.roots.insert(root_seg.clone());
@@ -945,43 +986,42 @@ pub fn scan_referenced_macro_roots(src: &str) -> ReferencedMacros {
             continue;
         }
 
-        let mut seg_count = 1usize;
-        let mut scan_end = after_first;
-        loop {
-            let ws_end = skip_ws_and_comments_lossy(src, scan_end);
-            if src.as_bytes().get(ws_end) != Some(&b'.') {
-                break;
-            }
-            let next_pos = skip_ws_and_comments_lossy(src, ws_end + 1);
-            let Some((_, seg_end)) = scan_ident_at(src, next_pos) else {
-                break;
-            };
-            seg_count += 1;
-            scan_end = seg_end;
-        }
+        let (segments, scan_end) = collect_path_segments_lossy(src, after_first, first_seg);
+        let seg0 = segments[0].as_str();
+        let seg_count = segments.len();
 
-        if matches!(
-            first_seg.as_str(),
-            "builtin" | "define_macro1" | "define_macro2"
-        ) {
+        let is_builtin_qualified = seg0 == "builtin"
+            || matches!(
+                segments
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+                ["meta", "macros", "define_macro1" | "define_macro2"]
+            );
+        if is_builtin_qualified || matches!(seg0, "define_macro1" | "define_macro2") {
             cursor.jump(scan_end, true, false, None);
             continue;
         }
 
-        if seg_count == 1
-            && (builtin_leaves.contains(&first_seg)
+        let is_builtin_imported_leaf = seg_count == 1
+            && (builtin_leaves.contains(seg0)
                 || (has_builtin_glob
-                    && first_seg == "raw"
-                    && !non_builtin_leaves.contains(&first_seg)
-                    && !has_non_builtin_glob))
-        {
+                    && seg0 == "raw"
+                    && !non_builtin_leaves.contains(seg0)
+                    && !has_non_builtin_glob)
+                || (has_meta_macros_glob
+                    && matches!(seg0, "define_macro1" | "define_macro2")
+                    && !non_builtin_leaves.contains(seg0)
+                    && !has_non_builtin_glob));
+        if is_builtin_imported_leaf {
             cursor.jump(scan_end, true, false, None);
             continue;
         }
 
         out.has_non_builtin_macros = true;
-        if !(seg_count == 1 && non_builtin_leaves.contains(&first_seg)) {
-            out.roots.insert(first_seg);
+        if !(seg_count == 1 && non_builtin_leaves.contains(seg0)) {
+            out.roots.insert(segments[0].clone());
         }
         cursor.jump(scan_end, true, false, None);
     }
@@ -1031,12 +1071,18 @@ pub fn process_raw_source_and_imports(
             continue;
         }
 
-        if first_seg == "define_macro1" || first_seg == "define_macro2" {
+        if first_seg == "define_macro2" {
             cursor.jump(after_first, false, false, None);
             continue;
         }
 
         let (path_segments, path_end) = scan_call_path(src, first_seg, after_first, base_pos)?;
+        if path_segments.iter().map(String::as_str).collect::<Vec<_>>()
+            == ["meta", "macros", "define_macro2"]
+        {
+            cursor.jump(path_end, true, false, None);
+            continue;
+        }
         let path_span = Span::new(
             base_pos + BytePos(pos as u32),
             base_pos + BytePos(path_end as u32),
@@ -1120,7 +1166,9 @@ pub fn process_raw_source_and_imports(
                         }
                         out
                     }
-                    MacroInputMode::Tokens => unreachable!(),
+                    MacroInputMode::Tokens
+                    | MacroInputMode::BuiltinDefineMacro1
+                    | MacroInputMode::Ast { .. } => unreachable!(),
                 };
 
                 builder.flush_slice(slice_start, pos, Some(pos), false);
@@ -1129,7 +1177,9 @@ pub fn process_raw_source_and_imports(
                 slice_start = call_end;
                 cursor.jump(call_end, true, false, None);
             }
-            MacroInputMode::Tokens => {
+            MacroInputMode::Tokens
+            | MacroInputMode::BuiltinDefineMacro1
+            | MacroInputMode::Ast { .. } => {
                 cursor.jump(path_end, true, false, None);
             }
         }

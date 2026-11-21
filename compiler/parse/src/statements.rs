@@ -1067,7 +1067,7 @@ impl Parser<'_> {
 
     pub fn try_block_or_statement(&mut self) -> ParseResult {
         self.scoped(|p| {
-            if p.peek(TokenKind::LBrace.as_ref()) {
+            if p.peek(TokenKind::LBrace.as_ref()) && !p.is_token_buffer_start() {
                 p.try_block()
             } else {
                 p.try_statement_or_definition()

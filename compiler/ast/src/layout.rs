@@ -8,6 +8,7 @@ pub struct LayoutError {
     pub expected: usize,
     pub actual: Option<usize>,
 }
+
 impl fmt::Display for LayoutError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -22,6 +23,7 @@ impl fmt::Display for LayoutError {
         f.write_str("))")
     }
 }
+
 impl std::error::Error for LayoutError {}
 
 impl NodeType {
@@ -45,6 +47,7 @@ impl NodeType {
         }
     }
 }
+
 impl NodeKind {
     pub fn storage_slots(self) -> usize {
         match self {
@@ -55,6 +58,7 @@ impl NodeKind {
         }
     }
 }
+
 impl Ast {
     /// Check node-local storage, including nodes retained during parser
     /// backtracking. This does not establish graph acyclicity or name validity.
@@ -86,6 +90,7 @@ pub enum StructureError {
         list: bool,
     },
 }
+
 impl StructureError {
     pub fn node(&self) -> NodeIndex {
         match self {
@@ -94,6 +99,7 @@ impl StructureError {
         }
     }
 }
+
 impl fmt::Display for StructureError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -122,10 +128,11 @@ impl fmt::Display for StructureError {
         }
     }
 }
+
 impl std::error::Error for StructureError {}
 
 impl NodeType {
-    fn list_slots(self) -> &'static [usize] {
+    pub fn list_slots(self) -> &'static [usize] {
         use NodeType::*;
         match self {
             MultiChildren => &[0],
@@ -141,6 +148,7 @@ impl NodeType {
         }
     }
 }
+
 impl Ast {
     /// Validate storage and referenced handles without following graph edges.
     /// Zero direct-node slots denote absent optional syntax. List elements
@@ -189,5 +197,36 @@ impl Ast {
             }
         }
         Ok(())
+    }
+
+    /// Return all child `NodeIndex` references owned by `node` in declaration order,
+    /// flattening multi-child list slots and skipping absent (`0`) and raw metadata slots
+    /// (`NodeKind::Id` symbol words and `NodeKind::FnType` modifier flags at slot 0).
+    pub fn direct_child_nodes(&self, node: NodeIndex) -> Vec<NodeIndex> {
+        let Some(kind) = self.get_node_kind(node) else {
+            return Vec::new();
+        };
+        if kind == NodeKind::Id {
+            return Vec::new();
+        }
+        let lists = kind.node_type().list_slots();
+        let mut out = Vec::new();
+        for (slot, &target) in self.get_children(node).iter().enumerate() {
+            if kind == NodeKind::FnType && slot == 0 {
+                continue;
+            }
+            if lists.contains(&slot) {
+                if let Some(values) = self.get_multi_child_slice(target) {
+                    for &elem in values {
+                        if elem != 0 && self.get_node_kind(elem).is_some() {
+                            out.push(elem);
+                        }
+                    }
+                }
+            } else if target != 0 && self.get_node_kind(target).is_some() {
+                out.push(target);
+            }
+        }
+        out
     }
 }

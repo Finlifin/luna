@@ -102,7 +102,7 @@ pub use generated.packet.Packet;
 
 const alternatives = @define_macro1 {
     fn(...patterns: Repetition<meta.ast.FlurryPattern>) -> TokenBuffer {
-        let combined = patterns.fold({{ not _ }}, |acc, pattern_ast| {
+        let combined = patterns.fold({{ (not _) }}, |acc, pattern_ast| {
             {{ $acc or $pattern_ast }}
         });
         {{ $combined => }}

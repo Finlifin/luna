@@ -1,4 +1,5 @@
 //! Macro registry, visibility descriptors, and execution host trait.
+use crate::ast_input::{AstArgValue, AstParamShape};
 use crate::provenance::{MacroToken, escape_sexp_str};
 use crate::{MacroBudget, MacroError};
 use rustc_span::Span;
@@ -17,6 +18,12 @@ impl MacroId {
     pub const BUILTIN_RAW_STR: Self = Self {
         package: u32::MAX,
         local: 1,
+    };
+
+    /// Synthetic identity reserved for built-in `@meta.macros.define_macro1`.
+    pub const BUILTIN_DEFINE_MACRO1: Self = Self {
+        package: u32::MAX,
+        local: 2,
     };
 }
 
@@ -113,6 +120,10 @@ impl fmt::Display for AstNodeKind {
 pub enum MacroInputMode {
     /// Built-in `@builtin.str.raw { raw_source }` encoded into a `str` literal token.
     BuiltinRawStr,
+    /// Built-in `@meta.macros.define_macro1 { mapping_definition }`.
+    BuiltinDefineMacro1,
+    /// Mode 1 AST construction macro defined via `@define_macro1`.
+    Ast { params: Vec<AstParamShape> },
     /// User Mode 4 construction macro (`^macro4`) receiving raw UTF-8 `str` inside `{ ... }`.
     RawSource,
     /// User Mode 3 construction macro (`^macro3`) receiving `meta.ast.TokenBuffer` inside `{ ... }`.
@@ -123,6 +134,8 @@ impl MacroInputMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::BuiltinRawStr => "builtin-raw-str",
+            Self::BuiltinDefineMacro1 => "builtin-define-macro1",
+            Self::Ast { .. } => "ast",
             Self::RawSource => "raw-source",
             Self::Tokens => "tokens",
         }
@@ -131,7 +144,16 @@ impl MacroInputMode {
 
 impl fmt::Display for MacroInputMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        match self {
+            Self::Ast { params } => {
+                f.write_str("(ast")?;
+                for param in params {
+                    write!(f, " {param}")?;
+                }
+                f.write_str(")")
+            }
+            other => f.write_str(other.as_str()),
+        }
     }
 }
 
@@ -189,10 +211,11 @@ impl MacroRegistry {
         Self::default()
     }
 
-    /// Registry populated with built-in macros such as `builtin.str.raw`.
+    /// Registry populated with built-in macros such as `builtin.str.raw` and `meta.macros.define_macro1`.
     pub fn with_builtins() -> Self {
         let mut reg = Self::new();
         reg.register_module_root("builtin");
+        reg.register_module_root("meta");
         reg.register(MacroDescriptor {
             id: MacroId::BUILTIN_RAW_STR,
             canonical_path: vec!["builtin".into(), "str".into(), "raw".into()],
@@ -201,6 +224,15 @@ impl MacroRegistry {
             vis: MacroVisibility::Public,
             def_site: None,
             mode: MacroInputMode::BuiltinRawStr,
+        });
+        reg.register(MacroDescriptor {
+            id: MacroId::BUILTIN_DEFINE_MACRO1,
+            canonical_path: vec!["meta".into(), "macros".into(), "define_macro1".into()],
+            package: u32::MAX,
+            module_path: vec!["meta".into(), "macros".into()],
+            vis: MacroVisibility::Public,
+            def_site: None,
+            mode: MacroInputMode::BuiltinDefineMacro1,
         });
         reg
     }
@@ -298,6 +330,14 @@ pub trait MacroExecutor {
         &mut self,
         descriptor: &MacroDescriptor,
         input_tokens: &[MacroToken],
+        call_site: Span,
+        budget: &mut MacroBudget,
+    ) -> Result<Vec<MacroToken>, MacroError>;
+
+    fn execute_ast(
+        &mut self,
+        descriptor: &MacroDescriptor,
+        args: &[AstArgValue],
         call_site: Span,
         budget: &mut MacroBudget,
     ) -> Result<Vec<MacroToken>, MacroError>;

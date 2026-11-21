@@ -1,11 +1,15 @@
 //! Flurry macro expansion engine (template macros, construction macros, provenance, and budgets).
+pub mod ast_input;
 pub mod construction;
+pub mod define_macros;
 pub mod imports;
 pub mod materialize;
 pub mod provenance;
 pub mod raw_source;
 pub mod registry;
 pub mod template;
+
+pub use ast_input::{AstArgValue, AstParamShape, ParsedSyntaxNode, ParsedSyntaxTree};
 
 use diagnostic::{DiagnosticBuilder, DiagnosticContext, FlurryError};
 use lex::{LexError, Symbol, Token, TokenKind};

@@ -71,7 +71,7 @@ PEG 输入方式对花括号内的 token 使用 Entry 规则。规则可复用 F
 
 const alternatives = @define_macro1 {
     fn(...patterns: Repetition<meta.ast.FlurryPattern>) -> TokenBuffer {
-        let combined_pattern = patterns.fold({{ not _ }}, |acc, pattern_ast| {
+        let combined_pattern = patterns.fold({{ (not _) }}, |acc, pattern_ast| {
             {{ $acc or $pattern_ast }}
         });
 

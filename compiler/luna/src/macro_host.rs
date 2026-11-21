@@ -1,4 +1,4 @@
-//! Host compiler bridge for executing Flurry comptime construction macros (`^macro3` & `^macro4`).
+//! Host compiler bridge for executing Flurry comptime construction macros (`^macro1`/`^macro3`/`^macro4`).
 use crate::invocation::MacroPackageSession;
 use crate::packages::{CompilationInputs, SourcePackage};
 use comptime_interpretor::{ListValues, Value};
@@ -7,8 +7,9 @@ use diagnostic::{DiagnosticContext, FlurryError};
 use lex::TokenKind;
 use macro_expander::provenance::{MacroToken, TokenSpacing, is_separated_kind};
 use macro_expander::{
-    ExpansionContext, MacroBudget, MacroDescriptor, MacroError, MacroErrorKind, MacroExecutor,
-    MacroId, MacroInputMode, MacroRegistry, MacroVisibility, scan_referenced_macro_roots,
+    AstArgValue, AstNodeKind, AstParamShape, ExpansionContext, MacroBudget, MacroDescriptor,
+    MacroError, MacroErrorKind, MacroExecutor, MacroId, MacroInputMode, MacroRegistry,
+    MacroVisibility, ParsedSyntaxNode, ParsedSyntaxTree, scan_referenced_macro_roots,
 };
 use nir::objects::entry_parts;
 use nir::program::{FunctionPhase, Package};
@@ -114,6 +115,13 @@ struct MacroAstTypes {
     token: StructLayout,
     token_buffer: StructLayout,
     token_list_ty: Term,
+    syntax_node: StructLayout,
+    syntax_tree: StructLayout,
+    int_list_ty: Term,
+    syntax_node_list_ty: Term,
+    meta_list_head: DeclarationId,
+    wrapper_by_kind: HashMap<AstNodeKind, StructLayout>,
+    kind_by_decl: HashMap<DeclarationId, AstNodeKind>,
 }
 
 impl MacroAstTypes {
@@ -149,6 +157,8 @@ impl MacroAstTypes {
         let span_decl = lookup_decl("SourceSpan")?;
         let token_decl = lookup_decl("Token")?;
         let tb_decl = lookup_decl("TokenBuffer")?;
+        let syntax_node_decl = lookup_decl("SyntaxNode")?;
+        let syntax_tree_decl = lookup_decl("SyntaxTree")?;
 
         let source_span =
             StructLayout::from_nir(nir, span_decl, &["file", "start", "end", "expansion_id"])?;
@@ -158,12 +168,57 @@ impl MacroAstTypes {
             .field_index("tokens")
             .ok_or("missing `tokens` field on `TokenBuffer`")?;
         let token_list_ty = token_buffer.field_types[tokens_idx].clone();
+        let Term::NormalForm {
+            head: meta_list_head,
+            ..
+        } = &token_list_ty
+        else {
+            return Err(format!(
+                "expected `TokenBuffer.tokens` to use `meta.List`, found {token_list_ty}"
+            ));
+        };
+        let meta_list_head = *meta_list_head;
+
+        let syntax_node =
+            StructLayout::from_nir(nir, syntax_node_decl, &["kind", "span", "children", "text"])?;
+        let int_list_ty = syntax_node.field_types[2].clone();
+        let syntax_tree =
+            StructLayout::from_nir(nir, syntax_tree_decl, &["nodes", "root", "tokens"])?;
+        let syntax_node_list_ty = syntax_tree.field_types[0].clone();
+
+        const ALL_AST_KINDS: [AstNodeKind; 10] = [
+            AstNodeKind::FlurryPattern,
+            AstNodeKind::FlurryExpr,
+            AstNodeKind::FlurryStatement,
+            AstNodeKind::FlurryExtendedStatement,
+            AstNodeKind::FlurryItem,
+            AstNodeKind::FlurryType,
+            AstNodeKind::FlurryIdent,
+            AstNodeKind::FlurryLiteral,
+            AstNodeKind::FlurryBlock,
+            AstNodeKind::FlurryPath,
+        ];
+        let mut wrapper_by_kind = HashMap::with_capacity(ALL_AST_KINDS.len());
+        let mut kind_by_decl = HashMap::with_capacity(ALL_AST_KINDS.len());
+        for kind in ALL_AST_KINDS {
+            let decl = lookup_decl(kind.as_str())?;
+            let layout = StructLayout::from_nir(nir, decl, &["tree", "node"])?;
+            wrapper_by_kind.insert(kind, layout);
+            kind_by_decl.insert(decl, kind);
+        }
 
         Ok(Self {
             source_span,
             token,
             token_buffer,
             token_list_ty,
+            syntax_node,
+            syntax_tree,
+            int_list_ty,
+            syntax_node_list_ty,
+            meta_list_head,
+            wrapper_by_kind,
+            kind_by_decl,
         })
     }
 }
@@ -175,12 +230,14 @@ struct ExtractedMacro {
     vis: Visibility,
     def_site: Option<Span>,
     mode: MacroInputMode,
+    param_tys: Vec<Term>,
 }
 
 #[derive(Clone, Debug)]
 struct CompiledMacroEntry {
     provider: ProviderKey,
     declaration: DeclarationId,
+    param_tys: Vec<Term>,
 }
 
 struct PreparedMacroProvider {
@@ -784,6 +841,7 @@ impl MacroHost {
                 CompiledMacroEntry {
                     provider: key,
                     declaration: m.declaration,
+                    param_tys: m.param_tys.clone(),
                 },
             );
         }
@@ -857,7 +915,7 @@ impl MacroHost {
     fn execute_provider_macro(
         &mut self,
         descriptor: &MacroDescriptor,
-        arg_value: Value,
+        arg_values: Vec<Value>,
         call_site: Span,
         budget: &mut MacroBudget,
     ) -> Result<Vec<MacroToken>, MacroError> {
@@ -887,7 +945,7 @@ impl MacroHost {
         let ast_types = provider.ast_types.clone();
         let output = provider
             .session
-            .invoke_declaration(entry.declaration, vec![arg_value], fuel)
+            .invoke_declaration(entry.declaration, arg_values, fuel)
             .map_err(|msg| {
                 let kind = if msg.contains("steps") || msg.contains("budget") {
                     MacroErrorKind::BudgetExhausted
@@ -925,7 +983,7 @@ impl MacroExecutor for MacroHost {
         budget: &mut MacroBudget,
     ) -> Result<Vec<MacroToken>, MacroError> {
         let arg = Value::String(Arc::from(raw_source));
-        self.execute_provider_macro(descriptor, arg, call_site, budget)
+        self.execute_provider_macro(descriptor, vec![arg], call_site, budget)
     }
 
     fn execute_tokens(
@@ -954,7 +1012,77 @@ impl MacroExecutor for MacroHost {
         })?;
         // Use empty SourceMap reference fallback when Span is out-of-range; encode BytePos directly.
         let arg = encode_token_buffer_value(input_tokens, &provider.ast_types);
-        self.execute_provider_macro(descriptor, arg, call_site, budget)
+        self.execute_provider_macro(descriptor, vec![arg], call_site, budget)
+    }
+
+    fn execute_ast(
+        &mut self,
+        descriptor: &MacroDescriptor,
+        args: &[AstArgValue],
+        call_site: Span,
+        budget: &mut MacroBudget,
+    ) -> Result<Vec<MacroToken>, MacroError> {
+        let Some(entry) = self.compiled_macros.get(&descriptor.id).cloned() else {
+            return Err(MacroError::new(
+                MacroErrorKind::HandlerExecutionError,
+                format!("missing prepared handler for `@{}`", descriptor.full_path()),
+                call_site,
+            ));
+        };
+        let ast_types = self
+            .providers
+            .get(&entry.provider)
+            .ok_or_else(|| {
+                MacroError::new(
+                    MacroErrorKind::HandlerExecutionError,
+                    format!(
+                        "missing prepared provider for `@{}`",
+                        descriptor.full_path()
+                    ),
+                    call_site,
+                )
+            })?
+            .ast_types
+            .clone();
+        let MacroInputMode::Ast { params } = &descriptor.mode else {
+            return Err(MacroError::new(
+                MacroErrorKind::HandlerExecutionError,
+                format!(
+                    "internal error: `execute_ast` called for non-AST macro `@{}`",
+                    descriptor.full_path()
+                ),
+                call_site,
+            ));
+        };
+        if args.len() != params.len() || params.len() != entry.param_tys.len() {
+            return Err(MacroError::new(
+                MacroErrorKind::HandlerExecutionError,
+                format!(
+                    "AST macro `@{}` parameter count mismatch: expected {}, got {}",
+                    descriptor.full_path(),
+                    params.len(),
+                    args.len()
+                ),
+                call_site,
+            ));
+        }
+        let mut arg_values = Vec::with_capacity(args.len());
+        for ((arg, &shape), param_ty) in args.iter().zip(params.iter()).zip(entry.param_tys.iter())
+        {
+            let encoded =
+                encode_ast_arg_value(arg, shape, param_ty, &ast_types).map_err(|reason| {
+                    MacroError::new(
+                        MacroErrorKind::HandlerExecutionError,
+                        format!(
+                            "failed to marshal AST argument for `@{}`: {reason}",
+                            descriptor.full_path()
+                        ),
+                        call_site,
+                    )
+                })?;
+            arg_values.push(encoded);
+        }
+        self.execute_provider_macro(descriptor, arg_values, call_site, budget)
     }
 }
 
@@ -1113,10 +1241,17 @@ fn collect_scope_exports_inner(
     result
 }
 
+#[derive(Clone, Copy, Debug)]
+enum DecodedMacroKind {
+    Tokens,
+    RawSource,
+    Ast { variadic: bool },
+}
+
 fn decode_macro_kind_attribute(
     nir: &Package,
     decl_id: DeclarationId,
-) -> Result<Option<MacroInputMode>, String> {
+) -> Result<Option<DecodedMacroKind>, String> {
     let Some(attr_term) = nir.definition_attributes.get(&decl_id) else {
         return Ok(None);
     };
@@ -1146,23 +1281,46 @@ fn decode_macro_kind_attribute(
         else {
             continue;
         };
+        let mut kind_term: Option<&Term> = None;
+        let mut variadic: Option<bool> = None;
         for meta_entry in meta_fields {
             let Some((mkey, _, mval)) = entry_parts(meta_entry) else {
                 continue;
             };
-            if mkey == Some("flurry_macro_kind") {
-                match mval {
-                    Term::Symbol(s) if s.as_ref() == "tokens" => {
-                        return Ok(Some(MacroInputMode::Tokens));
-                    }
-                    Term::Symbol(s) if s.as_ref() == "source" => {
-                        return Ok(Some(MacroInputMode::RawSource));
+            match mkey {
+                Some("flurry_macro_kind") => {
+                    kind_term = Some(mval);
+                }
+                Some("flurry_macro_variadic") => match mval {
+                    Term::Bool(b) => {
+                        variadic = Some(*b);
                     }
                     other => {
                         return Err(format!(
-                            "unsupported `flurry_macro_kind` metadata value {other}"
+                            "invalid `flurry_macro_variadic` metadata value {other}; expected bool"
                         ));
                     }
+                },
+                _ => {}
+            }
+        }
+        if let Some(mval) = kind_term {
+            match mval {
+                Term::Symbol(s) if s.as_ref() == "tokens" => {
+                    return Ok(Some(DecodedMacroKind::Tokens));
+                }
+                Term::Symbol(s) if s.as_ref() == "source" => {
+                    return Ok(Some(DecodedMacroKind::RawSource));
+                }
+                Term::Symbol(s) if s.as_ref() == "ast" => {
+                    return Ok(Some(DecodedMacroKind::Ast {
+                        variadic: variadic.unwrap_or(false),
+                    }));
+                }
+                other => {
+                    return Err(format!(
+                        "unsupported `flurry_macro_kind` metadata value {other}"
+                    ));
                 }
             }
         }
@@ -1170,13 +1328,44 @@ fn decode_macro_kind_attribute(
     Ok(None)
 }
 
+fn decode_flurry_ast_kind(ty: &Term, ast_types: &MacroAstTypes) -> Option<AstNodeKind> {
+    let Term::Nominal {
+        declaration,
+        arguments,
+    } = ty
+    else {
+        return None;
+    };
+    if !arguments.is_empty() {
+        return None;
+    }
+    ast_types.kind_by_decl.get(declaration).copied()
+}
+
+fn decode_ast_param_shape(ty: &Term, ast_types: &MacroAstTypes) -> Option<AstParamShape> {
+    if let Some(kind) = decode_flurry_ast_kind(ty, ast_types) {
+        return Some(AstParamShape::Single(kind));
+    }
+    match ty {
+        Term::Optional(inner) => {
+            decode_flurry_ast_kind(inner, ast_types).map(AstParamShape::Optional)
+        }
+        Term::NormalForm {
+            head, arguments, ..
+        } if *head == ast_types.meta_list_head && arguments.len() == 1 => {
+            decode_flurry_ast_kind(&arguments[0], ast_types).map(AstParamShape::Repetition)
+        }
+        _ => None,
+    }
+}
+
 fn validate_macro_handler_signature(
     nir: &Package,
     decl_id: DeclarationId,
-    mode: &MacroInputMode,
+    decoded: DecodedMacroKind,
     ast_types: &MacroAstTypes,
     macro_name: &str,
-) -> Result<Option<Span>, String> {
+) -> Result<(MacroInputMode, Vec<Term>, Option<Span>), String> {
     let func = nir
         .functions
         .iter()
@@ -1200,42 +1389,115 @@ fn validate_macro_handler_signature(
             "macro handler `{macro_name}` has invalid signature"
         ));
     };
-    if parameters.len() != 1 {
-        return Err(format!(
-            "macro handler `{macro_name}` must take exactly 1 parameter, found {}",
-            parameters.len()
-        ));
-    }
     let tb_ty = Term::Nominal {
         declaration: ast_types.token_buffer.declaration,
         arguments: vec![],
     };
-    let expected_param_ty = match mode {
-        MacroInputMode::Tokens => tb_ty.clone(),
-        MacroInputMode::RawSource => Term::Primitive(Primitive::Str),
-        MacroInputMode::BuiltinRawStr => unreachable!(),
-    };
-    if parameters[0].ty != expected_param_ty {
-        let expected_name = match mode {
-            MacroInputMode::Tokens => "meta.ast.TokenBuffer",
-            MacroInputMode::RawSource => "str",
-            MacroInputMode::BuiltinRawStr => unreachable!(),
-        };
-        return Err(format!(
-            "macro handler `{macro_name}` parameter must have type `{expected_name}`, found {}",
-            parameters[0].ty
-        ));
-    }
     if **result != tb_ty {
         return Err(format!(
             "macro handler `{macro_name}` return type must be `meta.ast.TokenBuffer`, found {}",
             result
         ));
     }
-    Ok(
-        (iface.source.start <= iface.source.end && iface.source.start != u32::MAX)
-            .then(|| Span::new(BytePos(iface.source.start), BytePos(iface.source.end))),
-    )
+
+    let param_tys: Vec<Term> = parameters.iter().map(|p| p.ty.clone()).collect();
+    let def_site = (iface.source.start <= iface.source.end && iface.source.start != u32::MAX)
+        .then(|| Span::new(BytePos(iface.source.start), BytePos(iface.source.end)));
+
+    match decoded {
+        DecodedMacroKind::Tokens => {
+            if parameters.len() != 1 {
+                return Err(format!(
+                    "macro handler `{macro_name}` must take exactly 1 parameter, found {}",
+                    parameters.len()
+                ));
+            }
+            if parameters[0].ty != tb_ty {
+                return Err(format!(
+                    "macro handler `{macro_name}` parameter must have type `meta.ast.TokenBuffer`, found {}",
+                    parameters[0].ty
+                ));
+            }
+            Ok((MacroInputMode::Tokens, param_tys, def_site))
+        }
+        DecodedMacroKind::RawSource => {
+            if parameters.len() != 1 {
+                return Err(format!(
+                    "macro handler `{macro_name}` must take exactly 1 parameter, found {}",
+                    parameters.len()
+                ));
+            }
+            if parameters[0].ty != Term::Primitive(Primitive::Str) {
+                return Err(format!(
+                    "macro handler `{macro_name}` parameter must have type `str`, found {}",
+                    parameters[0].ty
+                ));
+            }
+            Ok((MacroInputMode::RawSource, param_tys, def_site))
+        }
+        DecodedMacroKind::Ast { variadic } => {
+            let mut params = Vec::with_capacity(parameters.len());
+            let mut saw_optional = false;
+            let mut saw_repetition = false;
+
+            for (idx, param) in parameters.iter().enumerate() {
+                let shape = decode_ast_param_shape(&param.ty, ast_types).ok_or_else(|| {
+                    format!(
+                        "macro handler `{macro_name}` parameter #{} must have type `meta.ast.Flurry*`, `Optional<Flurry*>`, or `Repetition<Flurry*>`, found {}",
+                        idx + 1,
+                        param.ty
+                    )
+                })?;
+
+                match shape {
+                    AstParamShape::Single(_) => {
+                        if saw_optional || saw_repetition {
+                            return Err(format!(
+                                "macro handler `{macro_name}` parameter #{} cannot follow an `Optional` or `Repetition` parameter",
+                                idx + 1
+                            ));
+                        }
+                    }
+                    AstParamShape::Optional(_) => {
+                        if saw_repetition {
+                            return Err(format!(
+                                "macro handler `{macro_name}` parameter #{} cannot follow a `Repetition` parameter",
+                                idx + 1
+                            ));
+                        }
+                        saw_optional = true;
+                    }
+                    AstParamShape::Repetition(_) => {
+                        if idx + 1 != parameters.len() {
+                            return Err(format!(
+                                "macro handler `{macro_name}` `Repetition` parameter #{} must be the last parameter",
+                                idx + 1
+                            ));
+                        }
+                        saw_repetition = true;
+                    }
+                }
+                params.push(shape);
+            }
+
+            if variadic {
+                if !matches!(params.last(), Some(AstParamShape::Repetition(_))) {
+                    return Err(format!(
+                        "variadic `...` parameter in macro handler `{macro_name}` must have type `meta.ast.Repetition<meta.ast.Flurry*>`"
+                    ));
+                }
+            } else if params
+                .iter()
+                .any(|p| matches!(p, AstParamShape::Repetition(_)))
+            {
+                return Err(format!(
+                    "`Repetition<...>` parameter in `@define_macro1` macro `{macro_name}` must be marked variadic with `...`"
+                ));
+            }
+
+            Ok((MacroInputMode::Ast { params }, param_tys, def_site))
+        }
+    }
 }
 
 fn extract_provider_macros(
@@ -1310,21 +1572,22 @@ fn extract_provider_macros(
             let Ok(decl_id) = def_to_declaration_id(def_id, identities) else {
                 continue;
             };
-            let Some(mode) = decode_macro_kind_attribute(nir, decl_id)? else {
+            let Some(decoded_kind) = decode_macro_kind_attribute(nir, decl_id)? else {
                 continue;
             };
             if !seen_decls.insert((next_path.clone(), decl_id)) {
                 continue;
             }
             let joined = next_path.join(".");
-            let def_site =
-                validate_macro_handler_signature(nir, decl_id, &mode, ast_types, &joined)?;
+            let (mode, param_tys, def_site) =
+                validate_macro_handler_signature(nir, decl_id, decoded_kind, ast_types, &joined)?;
             out.push(ExtractedMacro {
                 relative_path: next_path,
                 declaration: decl_id,
                 vis: eff_vis,
                 def_site,
                 mode,
+                param_tys,
             });
         }
         Ok(())
@@ -1393,6 +1656,102 @@ fn encode_token_buffer_value(tokens: &[MacroToken], types: &MacroAstTypes) -> Va
         arguments: vec![],
         declaration: types.token_buffer.declaration,
         fields: vec![list_val],
+    }
+}
+
+fn encode_syntax_node_value(node: &ParsedSyntaxNode, types: &MacroAstTypes) -> Value {
+    let children: Vec<Value> = node
+        .children
+        .iter()
+        .map(|&idx| Value::Integer(Integer::from_u128(idx as u128)))
+        .collect();
+    Value::Record {
+        arguments: vec![],
+        declaration: types.syntax_node.declaration,
+        fields: vec![
+            Value::Symbol(Arc::from(node.kind.as_str())),
+            encode_source_span_value(node.span, &types.source_span),
+            Value::List {
+                ty: types.int_list_ty.clone(),
+                values: ListValues::from(children),
+            },
+            Value::String(Arc::from(node.text.as_str())),
+        ],
+    }
+}
+
+fn encode_syntax_tree_value(tree: &ParsedSyntaxTree, types: &MacroAstTypes) -> Value {
+    let nodes: Vec<Value> = tree
+        .nodes
+        .iter()
+        .map(|node| encode_syntax_node_value(node, types))
+        .collect();
+    Value::Record {
+        arguments: vec![],
+        declaration: types.syntax_tree.declaration,
+        fields: vec![
+            Value::List {
+                ty: types.syntax_node_list_ty.clone(),
+                values: ListValues::from(nodes),
+            },
+            Value::Integer(Integer::from_u128(tree.root as u128)),
+            encode_token_buffer_value(&tree.tokens, types),
+        ],
+    }
+}
+
+fn encode_flurry_wrapper_value(
+    kind: AstNodeKind,
+    tree: &ParsedSyntaxTree,
+    types: &MacroAstTypes,
+) -> Result<Value, String> {
+    let layout = types
+        .wrapper_by_kind
+        .get(&kind)
+        .ok_or_else(|| format!("missing AST wrapper layout for `{kind}`"))?;
+    Ok(Value::Record {
+        arguments: vec![],
+        declaration: layout.declaration,
+        fields: vec![
+            encode_syntax_tree_value(tree, types),
+            Value::Integer(Integer::from_u128(tree.root as u128)),
+        ],
+    })
+}
+
+fn encode_ast_arg_value(
+    arg: &AstArgValue,
+    shape: AstParamShape,
+    param_ty: &Term,
+    types: &MacroAstTypes,
+) -> Result<Value, String> {
+    match (arg, shape) {
+        (AstArgValue::Single(tree), AstParamShape::Single(kind)) => {
+            encode_flurry_wrapper_value(kind, tree, types)
+        }
+        (AstArgValue::Optional(opt), AstParamShape::Optional(kind)) => {
+            let encoded = opt
+                .as_ref()
+                .map(|tree| encode_flurry_wrapper_value(kind, tree, types).map(Box::new))
+                .transpose()?;
+            Ok(Value::Optional {
+                ty: param_ty.clone(),
+                value: encoded,
+            })
+        }
+        (AstArgValue::Repetition(trees), AstParamShape::Repetition(kind)) => {
+            let mut items = Vec::with_capacity(trees.len());
+            for tree in trees {
+                items.push(encode_flurry_wrapper_value(kind, tree, types)?);
+            }
+            Ok(Value::List {
+                ty: param_ty.clone(),
+                values: ListValues::from(items),
+            })
+        }
+        _ => Err(format!(
+            "mismatched AST argument representation ({arg}) for parameter shape {shape}"
+        )),
     }
 }
 

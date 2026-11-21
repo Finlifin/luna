@@ -927,6 +927,27 @@ impl Display for NodeKind {
     }
 }
 
+/// Convert an AST `NodeKind` variant name to a snake_case symbol name for `meta.ast.SyntaxNode`.
+pub fn node_kind_symbol_name(kind: NodeKind) -> String {
+    let raw = format!("{kind:?}");
+    let chars: Vec<char> = raw.chars().collect();
+    let mut out = String::with_capacity(raw.len() + 4);
+    for (idx, &ch) in chars.iter().enumerate() {
+        if idx > 0 && ch.is_ascii_uppercase() {
+            let prev = chars[idx - 1];
+            let next_lower = chars.get(idx + 1).is_some_and(|c| c.is_ascii_lowercase());
+            if prev.is_ascii_lowercase()
+                || prev.is_ascii_digit()
+                || (prev.is_ascii_uppercase() && next_lower)
+            {
+                out.push('_');
+            }
+        }
+        out.push(ch.to_ascii_lowercase());
+    }
+    out
+}
+
 impl Ast {
     pub fn source_content(&self, node_index: NodeIndex, source_map: &SourceMap) -> Option<String> {
         if node_index == 0 {

@@ -206,5 +206,139 @@ pub(crate) fn expand_at_call(
 
             Ok((produced, exp_id, close_tok.spacing, close_idx + 1))
         }
+        MacroInputMode::BuiltinDefineMacro1 => Err(MacroError::new(
+            MacroErrorKind::AstInputParseError,
+            format!(
+                "`@{}` must be bound to a `const` item: `[pub] const name = @define_macro1 {{ fn(...) -> TokenBuffer {{ ... }} }}`",
+                desc.full_path()
+            ),
+            path_span,
+        )
+        .with_chain(provenance, parent_exp)),
+        MacroInputMode::Ast { ref params } => {
+            let Some(open_tok) = tokens.get(idx) else {
+                return Err(MacroError::new(
+                    MacroErrorKind::DelimiterMismatch,
+                    format!(
+                        "AST macro `@{}` requires `(...)` parenthesis delimiters",
+                        desc.full_path()
+                    ),
+                    path_span,
+                )
+                .with_chain(provenance, parent_exp));
+            };
+            if open_tok.kind != TokenKind::LParen {
+                return Err(MacroError::new(
+                    MacroErrorKind::DelimiterMismatch,
+                    format!(
+                        "AST macro `@{}` requires `(...)` parenthesis delimiters, found `{}`",
+                        desc.full_path(),
+                        open_tok.text
+                    ),
+                    open_tok.span,
+                )
+                .with_label(path_span, "macro called here")
+                .with_chain(provenance, parent_exp));
+            }
+
+            let open_idx = idx;
+            let mut paren_depth = 1usize;
+            let mut scan = open_idx + 1;
+            let mut close_idx = None;
+            while scan < tokens.len() {
+                match tokens[scan].kind {
+                    TokenKind::LParen => paren_depth += 1,
+                    TokenKind::RParen => {
+                        paren_depth -= 1;
+                        if paren_depth == 0 {
+                            close_idx = Some(scan);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                scan += 1;
+            }
+            let Some(close_idx) = close_idx else {
+                return Err(MacroError::new(
+                    MacroErrorKind::UnterminatedMacroInput,
+                    format!(
+                        "unterminated AST macro arguments `(...)` for `@{}`; expected closing `)`",
+                        desc.full_path()
+                    ),
+                    open_tok.span,
+                )
+                .with_label(path_span, "macro called here")
+                .with_chain(provenance, parent_exp));
+            };
+
+            let close_tok = &tokens[close_idx];
+            let call_span = Span::new(at_tok.span.lo(), close_tok.span.hi());
+            if depth + 1 > budget.max_depth {
+                return Err(MacroError::new(
+                    MacroErrorKind::DepthExceeded,
+                    format!(
+                        "macro expansion depth limit ({}) exceeded while expanding `@{}`",
+                        budget.max_depth,
+                        desc.full_path()
+                    ),
+                    call_span,
+                )
+                .with_chain(provenance, parent_exp));
+            }
+
+            budget
+                .consume_step()
+                .map_err(|e| e.with_chain_if_empty(provenance, parent_exp, call_span))?;
+
+            let exp_id = provenance.record(
+                ExpansionKind::ConstructionAst,
+                desc.full_path(),
+                call_span,
+                desc.def_site,
+                parent_exp,
+            );
+
+            let arg_tokens = &tokens[open_idx + 1..close_idx];
+            let parsed_args = crate::ast_input::parse_ast_arguments(
+                arg_tokens,
+                &params,
+                &desc.full_path(),
+                call_span,
+                budget,
+            )
+            .map_err(|e| e.with_chain_if_empty(provenance, Some(exp_id), call_span))?;
+
+            let Some(executor) = host.ctx.executor.as_deref_mut() else {
+                return Err(MacroError::new(
+                    MacroErrorKind::HandlerExecutionError,
+                    format!(
+                        "cannot evaluate AST macro `@{}` without a comptime macro executor",
+                        desc.full_path()
+                    ),
+                    call_span,
+                )
+                .with_chain(provenance, Some(exp_id)));
+            };
+
+            let mut produced = executor
+                .execute_ast(&desc, &parsed_args, call_span, budget)
+                .map_err(|e| e.with_chain_if_empty(provenance, Some(exp_id), call_span))?;
+
+            budget
+                .consume_tokens(produced.len())
+                .map_err(|e| e.with_chain_if_empty(provenance, Some(exp_id), call_span))?;
+
+            for tok in &mut produced {
+                if tok.expansion_id.is_none() {
+                    tok.expansion_id = Some(exp_id);
+                }
+                if tok.span == rustc_span::DUMMY_SP {
+                    tok.span = call_span;
+                }
+            }
+
+            Ok((produced, exp_id, close_tok.spacing, close_idx + 1))
+        }
     }
 }

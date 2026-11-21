@@ -156,6 +156,37 @@ fn expand_slice_with_construction(
             continue;
         }
 
+        if !in_use_stmt
+            && matches!(
+                tok.kind,
+                TokenKind::Pub | TokenKind::Private | TokenKind::Const
+            )
+        {
+            if let Some(host) = construction.as_deref_mut() {
+                if let Some((produced, exp_id, trailing_spacing, next_cursor)) =
+                    crate::define_macros::try_expand_define_macro1(
+                        tokens, cursor, host, provenance, budget, parent_exp,
+                    )?
+                {
+                    *expanded_any = true;
+                    finish_expanded_replacement(
+                        produced,
+                        exp_id,
+                        trailing_spacing,
+                        env,
+                        Some(host),
+                        provenance,
+                        budget,
+                        depth,
+                        expanded_any,
+                        &mut out,
+                    )?;
+                    cursor = next_cursor;
+                    continue;
+                }
+            }
+        }
+
         if tok.kind == TokenKind::At && !in_use_stmt {
             if let Some(host) = construction.as_deref_mut() {
                 *expanded_any = true;
