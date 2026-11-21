@@ -154,7 +154,7 @@ fn dependent_default_unknown_prefix_runs_in_the_original_invocation() {
 }
 
 #[test]
-fn only_selected_prior_defaults_can_invalidate_a_parameter_observation() {
+fn only_selected_defaults_write_the_type_seen_by_later_parameters() {
     let source = format!(
         "{FLAG}
         comptime fn mark() -> bool {{ true }}
@@ -166,8 +166,14 @@ fn only_selected_prior_defaults_can_invalidate_a_parameter_observation() {
     );
     let failure = sysroot::compile(&source.replace("CALL", "accept(true)")).unwrap_err();
     assert!(
-        failure.contains("parameter state left by an earlier default"),
+        failure.contains("not established") && failure.contains("(primitive char)"),
         "{failure}"
+    );
+    check_events(
+        &source
+            .replace("impl Flag for bool", "impl Flag for char")
+            .replace("CALL", "accept('z')"),
+        &[("accept", 1), ("mark", 1)],
     );
     check_events(
         &source.replace("CALL", "accept(true, .change = false)"),
@@ -176,19 +182,72 @@ fn only_selected_prior_defaults_can_invalidate_a_parameter_observation() {
 }
 
 #[test]
-fn a_write_inside_the_default_invalidates_its_entry_snapshot() {
-    let source = format!(
-        "{FLAG}
+fn each_default_reads_the_version_at_its_declaration_slot() {
+    check_events(
+        "comptime fn Initial() -> Type { bool }
+        comptime fn note() -> bool { true }
         comptime fn accept(comptime .T: Type = bool,
-            comptime .U: Type = do {{ T = char; T }}, value: U) -> bool
-        where requires U :- Flag {{ true }}
-        comptime fn unused() -> bool {{ accept(true) }}"
+            .first: bool = do { T = do { note(); char }; true },
+            comptime .U: Type = T,
+            .second: bool = do { T = u8; true },
+            comptime .V: Type = T, x: U, y: V) -> bool {
+            U == char and V == u8
+        }
+        comptime fn check() -> bool { accept('a', 7, .T = Initial()) }",
+        &[("accept", 1), ("Initial", 1), ("note", 1)],
     );
-    let error = sysroot::compile(&source).unwrap_err();
+}
+
+#[test]
+fn stored_values_depend_on_the_inputs_of_each_call() {
+    let source = "
+        trait Enabled where flag: bool {}
+        impl Enabled<true> for bool {}
+        comptime fn accept(comptime seed: bool, comptime .flag: bool = false,
+            .change: bool = do { let inverted = not seed; flag = inverted; true },
+            comptime .copy: bool = flag) -> bool
+        where requires bool :- Enabled<copy> { copy }
+        comptime fn check() -> bool { accept(false) }";
+    check_both(source, 1);
+    let failure = sysroot::compile(&source.replace("accept(false)", "accept(true)")).unwrap_err();
     assert!(
-        error.contains("needs its original comptime invocation")
-            || error.contains("not established")
-            || error.contains("type mismatch"),
+        failure.contains("not established") || failure.contains("not satisfied"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn an_opaque_store_drops_the_old_version_until_a_definite_overwrite() {
+    let source = "
+        trait Flag {} impl Flag for char {}
+        comptime fn Hidden() -> Type { bool }
+        comptime fn accept(comptime .T: Type = char,
+            .write: bool = do { T = Hidden(); true },
+            .overwrite: bool = do { T = char; true },
+            comptime .U: Type = T, x: U) -> bool
+        where requires U :- Flag { true }
+        comptime fn check() -> bool { accept('z') }";
+    check_events(source, &[("Hidden", 1), ("accept", 1)]);
+    let failure =
+        sysroot::compile(&source.replace("accept('z')", "accept('z', .overwrite = false)"))
+            .unwrap_err();
+    assert!(failure.contains("original invocation"), "{failure}");
+}
+
+#[test]
+fn writes_inside_a_default_replace_its_entry_snapshot() {
+    let source = "
+        trait Flag {} impl Flag for char {}
+        comptime fn mark() -> bool { true }
+        comptime fn accept(comptime .T: Type = bool,
+            comptime .U: Type = do { T = char; mark(); T }, value: U) -> bool
+        where requires U :- Flag { true }
+        comptime fn check() -> bool { accept('z') }";
+    check_events(source, &[("accept", 1), ("mark", 1)]);
+    let error =
+        sysroot::compile(&source.replace("impl Flag for char", "impl Flag for bool")).unwrap_err();
+    assert!(
+        error.contains("not established") && error.contains("(primitive char)"),
         "{error}"
     );
 }

@@ -226,6 +226,23 @@ impl Checker<'_, '_> {
                     .is_some()
             };
             if !observed {
+                // A whole-slot store reads the pre-statement facts. Publish its
+                // value only after invalidating the effects of the whole RHS.
+                let operation = match &statement.kind {
+                    K::Discard(value) => &value.kind,
+                    kind => kind,
+                };
+                let stored = match operation {
+                    K::Assign { place, value }
+                        if place.is_root()
+                            && snapshots.contains(&place.root)
+                            && input_facts_cover(value, facts, budget)? =>
+                    {
+                        observation::hint(self.observe_normal_input_in(value, 0, budget, facts))?
+                            .map(|value| (place.root, std::sync::Arc::new(value)))
+                    }
+                    _ => None,
+                };
                 // A by-value scalar has no shared mutable payload. Check for a
                 // write or an escaping place, including value-reference receivers.
                 if snapshots.is_empty() {
@@ -240,6 +257,9 @@ impl Checker<'_, '_> {
                             &mut budget.steps,
                         )?;
                     }
+                }
+                if let Some((id, value)) = stored {
+                    facts.insert(id, value);
                 }
             }
         }

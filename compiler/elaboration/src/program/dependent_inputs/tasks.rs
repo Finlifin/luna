@@ -1,6 +1,7 @@
 //! Dependency checking retains its continuation and default expression explicitly.
 //! The work stack is a checking schedule, never an execution schedule or VM frame.
 use super::*;
+use default_writes::{Read, Writes};
 
 enum Task {
     Enter(usize),
@@ -9,6 +10,7 @@ enum Task {
         slot: usize,
         value: n::Expr,
         references: BTreeMap<n::LocalId, usize>,
+        stores: BTreeSet<usize>,
     },
 }
 impl std::fmt::Display for Task {
@@ -20,10 +22,15 @@ impl std::fmt::Display for Task {
                 slot,
                 value,
                 references,
+                stores,
             } => {
                 write!(f, "(complete-default {slot} (references")?;
                 for (binding, dependency) in references {
                     write!(f, " (input {dependency} {binding})")?;
+                }
+                f.write_str(") (stores")?;
+                for id in stores {
+                    write!(f, " {id}")?;
                 }
                 write!(f, ") (producer {value}))")
             }
@@ -99,14 +106,14 @@ impl std::fmt::Display for Progress {
         f.write_str("))")
     }
 }
-fn spend(fuel: &mut u64, steps: usize, span: Span) -> Result<(), Error> {
+pub(super) fn spend(fuel: &mut u64, steps: usize, span: Span) -> Result<(), Error> {
     *fuel = fuel
         .checked_sub(steps as u64)
         .ok_or_else(|| error(span, "dependent input preparation budget exhausted"))?;
     Ok(())
 }
 
-fn copy_evidence(value: &Term, steps: &mut u64, span: Span) -> Result<Term, Error> {
+pub(super) fn copy_evidence(value: &Term, steps: &mut u64, span: Span) -> Result<Term, Error> {
     let before = usize::try_from(*steps).unwrap_or(usize::MAX);
     let mut fuel = before;
     let result = nir::copy_budget::clone_term(value, &mut fuel);
@@ -119,44 +126,11 @@ fn copy_evidence(value: &Term, steps: &mut u64, span: Span) -> Result<Term, Erro
     })
 }
 
-/// Collect writes before the scheduling walk takes ownership of the defaults.
-/// Only selected defaults execute. A default cannot reference a later formal.
-fn selected_default_writes(
-    defaults: &[Option<n::Expr>],
-    steps: &mut u64,
-    span: Span,
-) -> Result<BTreeMap<n::LocalId, usize>, Error> {
-    let mut writes = BTreeMap::new();
-    spend(steps, defaults.len(), span)?;
-    let mut selected = defaults
-        .iter()
-        .enumerate()
-        .filter_map(|(i, expr)| Some((i, expr.as_ref()?)))
-        .peekable();
-    while let Some((slot, expr)) = selected.next() {
-        if selected.peek().is_none() {
-            break;
-        }
-        let before = usize::try_from(*steps).unwrap_or(usize::MAX);
-        let mut fuel = before;
-        let result = (|| -> Result<(), String> {
-            let free = nir::free_bindings::collect(expr, &mut fuel)?;
-            fuel = fuel
-                .checked_sub(free.len())
-                .ok_or("default frame observation budget exhausted")?;
-            let mut retained = free.iter().map(|&id| (id, expr)).collect();
-            Checker::invalidate_mutated_type_bindings(expr, &mut retained, &mut fuel)?;
-            for id in free {
-                if !retained.contains_key(&id) {
-                    writes.entry(id).or_insert(slot);
-                }
-            }
-            Ok(())
-        })();
-        *steps -= (before - fuel) as u64;
-        result.map_err(|reason| error(span, reason))?;
-    }
-    Ok(writes)
+struct Capture<'a> {
+    domain: &'a Term,
+    symbol: &'a Term,
+    detached: bool,
+    written: bool,
 }
 
 /// The parent owns checked inputs and default continuations across child checks.
@@ -168,7 +142,7 @@ pub(in crate::program) struct Frame {
     call: Option<nir::FunctionCallPreparation<Term>>,
     by_slot: BTreeMap<usize, usize>,
     default_slots: Option<BTreeMap<n::LocalId, usize>>,
-    first_default_write: BTreeMap<n::LocalId, usize>,
+    default_writes: Writes,
     progress: Progress,
     phase: Phase,
 }
@@ -245,10 +219,16 @@ impl Frame {
                 .map(|(index, input)| (offset + input.parameter, index))
                 .collect()
         };
-        let first_default_write = if demanded.is_empty() {
-            BTreeMap::new()
+        let default_writes = if demanded.is_empty() {
+            Writes::default()
         } else {
-            selected_default_writes(&prepared.defaults, &mut checker.required_steps, source.span)?
+            Writes::collect(
+                checker,
+                site.owner,
+                view.parameters,
+                &prepared.defaults,
+                source.span,
+            )?
         };
         let call = nir::FunctionCallPreparation::new(signature, checker.call_input_frames())
             .map_err(|failure| error(source.span, failure.to_string()))?;
@@ -256,7 +236,7 @@ impl Frame {
             call: Some(call),
             by_slot,
             default_slots: None,
-            first_default_write,
+            default_writes,
             span: source.span,
             prepared,
             progress: Progress {
@@ -416,28 +396,29 @@ impl Frame {
                         .into_iter()
                         .filter_map(|binding| ids.get(&binding).map(|slot| (binding, *slot)))
                         .collect();
-                    // The default frame is shared by all selected defaults in
-                    // declaration order. A parameter's entry value no longer
-                    // describes its slot after an earlier default can write it.
-                    if references.keys().any(|id| {
-                        self.first_default_write
-                            .get(id)
-                            .is_some_and(|&writer| writer < slot)
-                    }) {
-                        return Err(context_error(
+                    if references
+                        .values()
+                        .any(|&i| call.parameters()[i].sort == Sort::Runtime)
+                    {
+                        return Err(error(
                             source.span,
-                            "dependent default needs the parameter state left by an earlier default in the original invocation",
+                            "dependent comptime input cannot read a runtime argument",
                         ));
                     }
-                    // Own the checked default while its referenced inputs are
-                    // prepared. Resuming does not rebuild or invoke the default.
-                    let dependencies: Vec<_> = references.values().copied().collect();
+                    let (dependencies, stores) = self.default_writes.dependencies(
+                        references
+                            .iter()
+                            .map(|(&id, &arg)| self.default_writes.read(id, arg, slot)),
+                        &mut checker.required_steps,
+                        source.span,
+                    )?;
                     progress.after(
                         dependencies.into_iter(),
                         Task::Default {
                             slot,
                             value,
                             references,
+                            stores,
                         },
                         &mut checker.required_steps,
                         source.span,
@@ -451,8 +432,6 @@ impl Frame {
                     route.is_some(),
                     value,
                     BTreeMap::new(),
-                    prepared,
-                    call.binding().observations(),
                 )?;
                 return self.resolved(slot, resolution);
             }
@@ -460,6 +439,7 @@ impl Frame {
                 slot,
                 mut value,
                 references,
+                stores,
             } => {
                 value
                     .rewrite_types(&mut |ty| call.binding().substitute(ty))
@@ -467,16 +447,30 @@ impl Frame {
                 value.rewrite_types(&mut |term| {
                     checker.callable_argument_term_view(term, source.span)
                 })?;
-                let resolution = checker.resolve_type_dependency(
-                    owner,
-                    callee,
-                    source,
-                    false,
-                    value,
-                    references,
-                    prepared,
-                    call.binding().observations(),
-                )?;
+                let symbols = call.binding().observations();
+                self.default_writes
+                    .observe(checker, stores, symbols, source.span)?;
+                let receiver = checker.has_comptime_value_receiver(owner);
+                let mut captures = BTreeMap::new();
+                for (id, arg) in references {
+                    let read = self.default_writes.read(id, arg, slot);
+                    let symbol = self.default_writes.value(read, symbols, source.span)?;
+                    let domain = prepared.values[arg]
+                        .as_ref()
+                        .map_or(&call.parameters()[arg].ty, |v| &v.ty);
+                    captures.insert(
+                        id,
+                        Capture {
+                            domain,
+                            symbol,
+                            detached: !(receiver && arg == 0)
+                                && matches!(domain, Term::Primitive(p) if *p != P::Object),
+                            written: !matches!(read, Read::Argument(i) if i == arg),
+                        },
+                    );
+                }
+                let resolution = checker
+                    .resolve_type_dependency(owner, callee, source, false, value, captures)?;
                 return self.resolved(slot, resolution);
             }
         }
@@ -506,12 +500,6 @@ impl Frame {
             true,
             value,
             BTreeMap::new(),
-            &self.prepared,
-            self.call
-                .as_ref()
-                .expect("active input frame")
-                .binding()
-                .observations(),
         )?;
         self.resolved(slot, resolution)
     }
@@ -592,13 +580,9 @@ impl std::fmt::Display for Frame {
         }
         write!(
             f,
-            ") {} {} (first-default-writes",
-            self.progress, self.prepared
+            ") {} {} {}",
+            self.progress, self.prepared, self.default_writes
         )?;
-        for (id, slot) in &self.first_default_write {
-            write!(f, " (write {id} {slot})")?;
-        }
-        f.write_str(")")?;
         if let Some(call) = &self.call {
             write!(f, " {call}")?;
         }
@@ -632,40 +616,23 @@ impl Checker<'_, '_> {
         source: &Expr<'_>,
         has_source: bool,
         value: n::Expr,
-        references: BTreeMap<n::LocalId, usize>,
-        prepared: &InputProducers,
-        symbols: &[Option<Term>],
+        captures: BTreeMap<n::LocalId, Capture<'_>>,
     ) -> Result<Resolution, Error> {
-        // Defaults see a fresh frame populated by earlier arguments. Primitive
-        // by-value arguments can survive unrelated work in this frame. A method
-        // receiver can alias its caller, and Object may contain shared state.
-        let mut snapshots = BTreeSet::new();
-        if !references.is_empty() {
-            spend(&mut self.required_steps, references.len(), source.span)?;
-            let receiver = self.has_comptime_value_receiver(owner);
-            for (&binding, &slot) in &references {
-                if !(receiver && slot == 0)
-                    && prepared.values[slot]
-                        .as_ref()
-                        .is_some_and(|v| matches!(v.ty, Term::Primitive(p) if p != P::Object))
-                {
-                    snapshots.insert(binding);
-                }
-            }
-        }
+        spend(&mut self.required_steps, captures.len(), source.span)?;
+        let snapshots = captures
+            .iter()
+            .filter_map(|(&id, capture)| capture.detached.then_some(id))
+            .collect();
         let identity = match &value.kind {
             K::TypeValue(ty) => Some(copy_evidence(ty, &mut self.required_steps, source.span)?),
             _ => self.preserved_input_with_snapshots(
                 &value,
                 |id, fuel| {
-                    let Some(slot) = references.get(&id) else {
+                    let Some(capture) = captures.get(&id) else {
                         return Ok(None);
                     };
-                    let symbol = symbols[*slot].as_ref().ok_or_else(|| {
-                        error(source.span, "dependent default identity is incomplete")
-                    })?;
                     Ok(Some(std::sync::Arc::new(copy_evidence(
-                        symbol,
+                        capture.symbol,
                         fuel,
                         source.span,
                     )?)))
@@ -723,7 +690,7 @@ impl Checker<'_, '_> {
                 ));
             }
         }
-        self.prepare_unobserved_call_input(callee, source, value, &references, prepared, symbols)
+        self.prepare_unobserved_call_input(callee, source, value, &captures)
     }
 
     fn prepare_unobserved_call_input(
@@ -731,13 +698,11 @@ impl Checker<'_, '_> {
         callee: &n::Expr,
         source: &Expr<'_>,
         value: n::Expr,
-        references: &BTreeMap<n::LocalId, usize>,
-        prepared: &InputProducers,
-        symbols: &[Option<Term>],
+        captures: &BTreeMap<n::LocalId, Capture<'_>>,
     ) -> Result<Resolution, Error> {
         let callable = self.structural_type(&callee.ty, source.span)?;
         let callable = self.callable_input_view(&callable, source.span)?;
-        if callable.is_comptime_callable() {
+        if callable.is_comptime_callable() || captures.values().any(|c| c.written) {
             // The dependency walk is not the invocation's execution order.
             // In particular, bindings above are identity evidence, not values
             // delivered by an executed prefix. A separate required invocation
@@ -750,17 +715,11 @@ impl Checker<'_, '_> {
             ));
         }
         let mut bindings = Vec::new();
-        for (&binding, &slot) in references {
-            let producer = prepared.values[slot]
-                .as_ref()
-                .ok_or_else(|| error(source.span, "dependent default producer is incomplete"))?;
-            let symbol = symbols[slot]
-                .as_ref()
-                .ok_or_else(|| error(source.span, "dependent default identity is incomplete"))?;
+        for (&binding, capture) in captures {
             bindings.push((
                 binding,
-                copy_evidence(&producer.ty, &mut self.required_steps, source.span)?,
-                copy_evidence(symbol, &mut self.required_steps, source.span)?,
+                copy_evidence(capture.domain, &mut self.required_steps, source.span)?,
+                copy_evidence(capture.symbol, &mut self.required_steps, source.span)?,
             ));
         }
         let prepared =
@@ -818,7 +777,7 @@ mod tests {
             span,
             by_slot: BTreeMap::new(),
             default_slots: None,
-            first_default_write: [(n::LocalId { owner: 5, index: 7 }, 1)].into(),
+            default_writes: Writes::default(),
             prepared,
             progress: Progress::new(1),
             phase: Phase::Child {
@@ -830,7 +789,7 @@ mod tests {
         assert!(dump.starts_with("(dependent-input-frame "), "{dump}");
         for text in [
             "(phase (child 1 (caller-staged false)))",
-            "(first-default-writes (write (local 5 7) 1))",
+            "(default-writes)",
             "(slot 0 (producer",
             "(slot 1 (producer)",
             "retained\\\"\\n",
@@ -916,6 +875,7 @@ mod tests {
             slot: 3,
             value,
             references: BTreeMap::from([(n::LocalId { owner: 4, index: 2 }, 1)]),
+            stores: BTreeSet::new(),
         };
         let mut progress = Progress::new(3);
         progress.tasks.clear();
