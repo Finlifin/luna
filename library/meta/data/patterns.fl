@@ -6,6 +6,11 @@ pub pure comptime trait ComptimeListPatternView {
 
     comptime fn list_pattern_view_get_len(self) -> usize;
     comptime fn list_pattern_view_get_element(self, index: usize) -> Element;
+
+    comptime fn list_pattern_view_rest(self, start: usize) -> Self {
+        assumes false;
+        self
+    }
 }
 
 comptime impl ComptimeListPatternView for List<T> where T {
@@ -19,5 +24,12 @@ comptime impl ComptimeListPatternView for List<T> where T {
         -- A local index lets the VM copy only the selected element.
         let position = from_usize(index);
         self[position]
+    }
+
+    comptime fn list_pattern_view_rest(self, start: usize) -> List<T> {
+        self.slice(from_usize(start), self.length()) match {
+            rest? => rest,
+            null => [],
+        }
     }
 }

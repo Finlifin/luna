@@ -490,7 +490,7 @@ impl Checker<'_, '_> {
         Ok(Some(owner))
     }
 
-    fn type_member_base(&mut self, mut base: &Expr<'_>) -> Result<bool, Error> {
+    pub(super) fn type_member_base(&mut self, mut base: &Expr<'_>) -> Result<bool, Error> {
         loop {
             if matches!(base.kind, H::Projection(..))
                 && self.local_field_domain(base)? == Some(p(P::Type))

@@ -14,6 +14,7 @@ impl Checker<'_, '_> {
     ) -> Result<bool, Failure> {
         PatternInspector {
             tuple_head: self.bound_tuple_metadata(),
+            type_list_head: self.protocols.meta_list,
             evaluate:
                 |expr: &n::Expr,
                  depth,
@@ -29,6 +30,7 @@ impl Checker<'_, '_> {
 pub(in crate::program) struct PatternInspector<E> {
     pub(in crate::program) evaluate: E,
     pub(in crate::program) tuple_head: Option<nir::normal_forms::Head>,
+    pub(in crate::program) type_list_head: Option<DeclarationId>,
 }
 
 impl<E> PatternInspector<E>
@@ -87,7 +89,60 @@ where
                     _ => Err(Failure::Unavailable),
                 }
             }
-            Pat::Observe { .. } | Pat::NominalType { .. } => Err(Failure::Unavailable),
+            Pat::Observe { binding, inner } => {
+                let cloned =
+                    std::sync::Arc::new(nir::copy_budget::clone_term(value, &mut budget.steps)?);
+                let previous = bindings.insert(*binding, cloned);
+                let result = self.inspect(inner, value, depth + 1, budget, bindings);
+                match previous {
+                    Some(prev) => {
+                        bindings.insert(*binding, prev);
+                    }
+                    None => {
+                        bindings.remove(binding);
+                    }
+                }
+                result
+            }
+            Pat::NominalType {
+                declaration,
+                fields,
+            } => {
+                let (actual, values) = match value {
+                    Term::Nominal {
+                        declaration,
+                        arguments,
+                    } => (declaration, arguments),
+                    Term::Primitive(_)
+                    | Term::NormalForm { .. }
+                    | Term::Tuple(_)
+                    | Term::Record(_)
+                    | Term::Optional(_)
+                    | Term::ErrorResult { .. }
+                    | Term::Pointer(_)
+                    | Term::Lift(_)
+                    | Term::Function { .. }
+                    | Term::ComptimeFunction(_)
+                    | Term::NormalFormFunction(..)
+                    | Term::UnsafeFunction(_)
+                    | Term::Closure { .. } => return Ok(false),
+                    _ => return Err(Failure::Unavailable),
+                };
+                if declaration != actual {
+                    return Ok(false);
+                }
+                if fields.len() != values.len() {
+                    return Err(Failure::Invalid(
+                        "nominal type pattern arity mismatch".into(),
+                    ));
+                }
+                for (pattern, value) in fields.iter().zip(values) {
+                    if !self.inspect(pattern, value, depth + 1, budget, bindings)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
             Pat::Wild => Ok(true),
             Pat::Unit => match value {
                 Term::Unit => Ok(true),
@@ -179,24 +234,33 @@ where
                 let values = match (pattern, value) {
                     (Pat::Tuple(_), Term::TupleValue(values))
                     | (Pat::TypeTuple(_), Term::Tuple(values)) => values,
-                    (Pat::TypeTuple(_), Term::NormalForm { .. }) => self
-                        .tuple_head
-                        .as_ref()
-                        .ok_or(Failure::Unavailable)?
-                        .tuple_elements(value)
-                        .ok_or(Failure::Unavailable)?,
+                    (Pat::TypeTuple(_), Term::NormalForm { head, .. }) => {
+                        if Some(*head) == self.type_list_head {
+                            return Ok(false);
+                        }
+                        self.tuple_head
+                            .as_ref()
+                            .ok_or(Failure::Unavailable)?
+                            .tuple_elements(value)
+                            .ok_or(Failure::Unavailable)?
+                    }
                     (Pat::TypeTuple(_), Term::Primitive(P::Unit)) => {
                         return Err(Failure::Unavailable);
                     }
                     (
                         Pat::TypeTuple(_),
                         Term::Primitive(_)
+                        | Term::Nominal { .. }
+                        | Term::Record(_)
+                        | Term::Optional(_)
+                        | Term::ErrorResult { .. }
                         | Term::Pointer(_)
                         | Term::Lift(_)
                         | Term::Function { .. }
                         | Term::ComptimeFunction(_)
                         | Term::NormalFormFunction(..)
-                        | Term::UnsafeFunction(_),
+                        | Term::UnsafeFunction(_)
+                        | Term::Closure { .. },
                     ) => return Ok(false),
                     _ => return Err(Failure::Unavailable),
                 };
@@ -288,6 +352,8 @@ where
                     | Term::Nominal { .. }
                     | Term::Tuple(_)
                     | Term::Record(_)
+                    | Term::Optional(_)
+                    | Term::ErrorResult { .. }
                     | Term::Pointer(_)
                     | Term::Lift(_)
                     | Term::Function { .. }
@@ -404,6 +470,7 @@ mod tests {
                 max_limbs: 128,
             };
             let result = PatternInspector {
+                type_list_head: None,
                 tuple_head: None,
                 evaluate: |_: &n::Expr,
                            _: usize,
@@ -443,6 +510,7 @@ mod tests {
             max_limbs: 128,
         };
         let matched = PatternInspector {
+            type_list_head: None,
             tuple_head: None,
             evaluate:
                 |expr: &n::Expr,
@@ -488,6 +556,7 @@ mod tests {
                 max_limbs: 128,
             };
             let matched = PatternInspector {
+                type_list_head: None,
                 tuple_head: None,
                 evaluate:
                     |_: &n::Expr,
@@ -538,6 +607,7 @@ mod tests {
                 inner: Box::new(n::Pattern::Wild),
             };
             let result = PatternInspector {
+                type_list_head: None,
                 tuple_head: None,
                 evaluate:
                     |_: &n::Expr,
@@ -557,6 +627,7 @@ mod tests {
             assert_eq!(result, Err(Failure::Unavailable));
         }
     }
+
     #[test]
     fn type_tuple_inspection_reads_declared_payloads_and_keeps_unknown_order() {
         use nir::normal_forms::{Head, Kind, Parameter, Role};
@@ -600,6 +671,7 @@ mod tests {
              bindings: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>| {
                 PatternInspector {
                     tuple_head: head,
+                    type_list_head: Some(decl(1)),
                     evaluate:
                         |_: &n::Expr,
                          _: usize,
@@ -668,6 +740,31 @@ mod tests {
             );
             assert!(!bindings.contains_key(&id(9)));
         }
+        assert_eq!(
+            inspect(
+                &pattern,
+                &domain,
+                Some(metadata.clone()),
+                &mut Default::default(),
+                &mut BTreeMap::new()
+            ),
+            Ok(false)
+        );
+        let opaque_normal = Term::NormalForm {
+            head: decl(8),
+            sort: Sort::Type,
+            arguments: vec![p(P::Type)],
+        };
+        assert_eq!(
+            inspect(
+                &pattern,
+                &opaque_normal,
+                Some(metadata.clone()),
+                &mut Default::default(),
+                &mut BTreeMap::new()
+            ),
+            Err(Failure::Unavailable)
+        );
         let empty = tuple(Term::NominalValue {
             ty: Box::new(domain),
             variant: None,
@@ -708,6 +805,7 @@ mod tests {
             Ok(true)
         );
     }
+
     fn no_evaluation(
         _: &n::Expr,
         _: usize,
@@ -720,6 +818,7 @@ mod tests {
     #[test]
     fn literal_patterns_parse_directly_and_distinguish_invalid_from_mismatch() {
         let mut inspector = PatternInspector {
+            type_list_head: None,
             tuple_head: None,
             evaluate: no_evaluation,
         };
@@ -788,6 +887,7 @@ mod tests {
             let original = bindings.clone();
             let mut calls = 0;
             let result = PatternInspector {
+                type_list_head: None,
                 tuple_head: None,
                 evaluate:
                     |_: &n::Expr,
@@ -812,6 +912,7 @@ mod tests {
         }
         let mut bindings = BTreeMap::new();
         let result = PatternInspector {
+            type_list_head: None,
             tuple_head: None,
             evaluate: |_: &n::Expr,
                        _: usize,
@@ -841,6 +942,7 @@ mod tests {
         let pattern = n::Pattern::Or(vec![binding(1), binding(2)]);
         let value = Term::ClosureContextValue(vec![Term::String("x".repeat(128).into())]);
         let mut inspector = PatternInspector {
+            type_list_head: None,
             tuple_head: None,
             evaluate: no_evaluation,
         };

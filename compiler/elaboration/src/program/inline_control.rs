@@ -161,6 +161,7 @@ impl Checker<'_, '_> {
         let mut failure = None;
         let matches = normal::known_patterns::PatternInspector {
             tuple_head: self.bound_tuple_metadata(),
+            type_list_head: self.protocols.meta_list,
             evaluate:
                 |expr: &n::Expr,
                  depth,

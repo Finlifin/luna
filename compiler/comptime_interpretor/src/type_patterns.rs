@@ -7,6 +7,7 @@ pub(super) struct TypePattern {
     next: usize,
     binders: Vec<nir::DeclarationParameter>,
 }
+
 impl fmt::Display for TypePattern {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -28,18 +29,30 @@ impl<'a> Interpreter<'a> {
         };
         Ok(Some(match ty {
             Term::Tuple(types) => types,
-            Term::NormalForm { head, .. } => self
-                .normal_forms
-                .get(head)
-                .and_then(|metadata| metadata.tuple_elements(ty))
-                .ok_or_else(|| self.failure(ErrorKind::TypeContractUnresolved, None))?,
+            Term::NormalForm { head, .. } => match self.normal_forms.get(head) {
+                Some(metadata) if metadata.role == nir::normal_forms::Role::TypeList => {
+                    return Ok(None);
+                }
+                Some(metadata) => metadata
+                    .tuple_elements(ty)
+                    .ok_or_else(|| self.failure(ErrorKind::TypeContractUnresolved, None))?,
+                None => return Err(self.failure(ErrorKind::TypeContractUnresolved, None)),
+            },
             Term::Primitive(Primitive::Unit) => {
                 return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
             }
             Term::Primitive(_)
+            | Term::Nominal { .. }
+            | Term::Record(_)
+            | Term::Optional(_)
+            | Term::ErrorResult { .. }
             | Term::Pointer(_)
+            | Term::Lift(_)
             | Term::Function { .. }
-            | Term::ComptimeFunction(_) => return Ok(None),
+            | Term::ComptimeFunction(_)
+            | Term::NormalFormFunction(..)
+            | Term::UnsafeFunction(_)
+            | Term::Closure { .. } => return Ok(None),
             _ => return Err(self.failure(ErrorKind::TypeContractUnresolved, None)),
         }))
     }
@@ -88,10 +101,13 @@ impl<'a> Interpreter<'a> {
                 declaration,
                 fields,
             } => {
-                let Value::Type(Term::Nominal {
+                let Value::Type(ty) = input else {
+                    return Err(self.failure(ErrorKind::Type, None));
+                };
+                let Term::Nominal {
                     declaration: actual,
                     arguments,
-                }) = input
+                } = ty
                 else {
                     return Ok(None);
                 };
@@ -102,6 +118,8 @@ impl<'a> Interpreter<'a> {
                 if arguments.len() != fields || binders.len() != fields {
                     return Err(self.failure(ErrorKind::Type, None));
                 }
+                self.check_type_description(ty, None)?;
+                self.effect_charge(binders.len(), None)?;
                 binders
             }
             S::Normal { head, fields } => {
@@ -208,27 +226,30 @@ impl<'a> Interpreter<'a> {
                     return Err(self.failure(ErrorKind::Type, None));
                 };
                 self.tick(None)?;
-                let struct_definition = self.structs.get(&declaration).cloned();
-                let enum_definition = self.enums.get(&declaration).cloned();
-                let newtype_definition = self.newtypes.handle(&declaration);
-                let domains = if let Some(def) = struct_definition.as_ref() {
-                    def.parameter_types.as_slice()
-                } else if let Some(def) = enum_definition.as_ref() {
-                    def.parameter_types.as_slice()
-                } else if let Some(def) = newtype_definition.as_ref() {
-                    def.parameter_types.as_slice()
+                if wild {
+                    None
                 } else {
-                    return Err(self.failure(ErrorKind::Type, None));
-                };
-                let domain = domains
-                    .get(index)
-                    .unwrap_or(&Term::Primitive(Primitive::Type));
-                let domain = self.type_pattern_domain(domain, &state.binders, arguments)?;
-                let argument = arguments
-                    .get(index)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                let value = self.normal_pattern_value(argument, &domain)?;
-                if wild { None } else { Some(value) }
+                    let struct_definition = self.structs.get(&declaration).cloned();
+                    let enum_definition = self.enums.get(&declaration).cloned();
+                    let newtype_definition = self.newtypes.handle(&declaration);
+                    let domains = if let Some(def) = struct_definition.as_ref() {
+                        def.parameter_types.as_slice()
+                    } else if let Some(def) = enum_definition.as_ref() {
+                        def.parameter_types.as_slice()
+                    } else if let Some(def) = newtype_definition.as_ref() {
+                        def.parameter_types.as_slice()
+                    } else {
+                        return Err(self.failure(ErrorKind::Type, None));
+                    };
+                    let domain = domains
+                        .get(index)
+                        .unwrap_or(&Term::Primitive(Primitive::Type));
+                    let domain = self.type_pattern_domain(domain, &state.binders, arguments)?;
+                    let argument = arguments
+                        .get(index)
+                        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+                    Some(self.normal_pattern_value(argument, &domain)?)
+                }
             }
             S::Normal { head, .. } => {
                 let metadata = self

@@ -1,6 +1,7 @@
 //! Scalar selection and lowering share one operand-context search. Comparisons
 //! and arithmetic obtain checked children from the same region driver.
 use super::*;
+
 pub(in crate::program) mod peers;
 
 pub(super) fn native_arithmetic_operand(
@@ -66,7 +67,7 @@ impl Checker<'_, '_> {
         }
     }
 
-    fn proved_ordered_scalar_family(&self, ty: &Term) -> bool {
+    pub(super) fn proved_ordered_scalar_family(&self, ty: &Term) -> bool {
         // Every member uses the same scalar comparison node. The chosen
         // concrete domain still determines signedness and IEEE unordered cases.
         self.proved_primitive_family(
@@ -106,6 +107,7 @@ impl Checker<'_, '_> {
             || self.proved_integer_family(shape, matches!(op, BinOp::Div | BinOp::Rem))
             || (*op != BinOp::Rem && self.proved_float_family(shape))
     }
+
     /// Classify an existing rigid type from proved alternatives. This does not
     /// add requirements or infer a domain from the calls seen so far; concrete
     /// operations still retain their substituted types during instantiation.
@@ -129,6 +131,7 @@ impl Checker<'_, '_> {
             crate::ptc::Outcome::Entailed(_)
         )
     }
+
     /// Divergence contributes no argument type. Recover a uniquely established
     /// protocol input instead of querying for an implementation on Never.
     pub(super) fn finish_binary_protocol_call(
@@ -262,6 +265,7 @@ impl Checker<'_, '_> {
             kind,
         })
     }
+
     #[inline(never)]
     pub(super) fn unary_protocol_result(
         &mut self,
@@ -377,6 +381,7 @@ impl Checker<'_, '_> {
             },
         })
     }
+
     #[inline(never)]
     pub(super) fn finish_comparison_expression(
         &mut self,
@@ -530,6 +535,7 @@ impl Checker<'_, '_> {
             kind,
         })
     }
+
     #[inline(never)]
     pub(super) fn concat_expression(
         &mut self,

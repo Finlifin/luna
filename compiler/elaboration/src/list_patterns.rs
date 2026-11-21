@@ -8,6 +8,8 @@ pub struct Protocol {
     pub by_value: bool,
     pub length: &'static str,
     pub element: &'static str,
+    pub rest: Option<&'static str>,
+    pub rest_default: Option<DeclarationId>,
 }
 
 pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<Protocol, String> {
@@ -43,23 +45,26 @@ fn has_staged_contract(traits: &[Trait], id: DeclarationId) -> bool {
                         method.name.as_str(),
                         "list_pattern_view_get_len_comptime"
                             | "list_pattern_view_get_element_comptime"
+                            | "list_pattern_view_rest_comptime"
                     )
                 })
         })
 }
 
 fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<Protocol, String> {
-    let (element_name, length_name, get_name) = if staged {
+    let (element_name, length_name, get_name, rest_name) = if staged {
         (
             "ElementComptime",
             "list_pattern_view_get_len_comptime",
             "list_pattern_view_get_element_comptime",
+            "list_pattern_view_rest_comptime",
         )
     } else {
         (
             "Element",
             "list_pattern_view_get_len",
             "list_pattern_view_get_element",
+            "list_pattern_view_rest",
         )
     };
     let mut candidates = traits.iter().filter(|item| item.declaration == id);
@@ -131,21 +136,19 @@ fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<P
         arguments: vec![],
         subject: Box::new(subject),
     };
+    let index_param = Parameter {
+        sort: if staged || interface.comptime_only {
+            Sort::Runtime
+        } else {
+            Sort::ComptimeValue
+        },
+        ty: size.clone(),
+    };
     for (name, parameters, result) in [
         (length_name, vec![receiver.clone()], size.clone()),
         (
             get_name,
-            vec![
-                receiver,
-                Parameter {
-                    sort: if staged || interface.comptime_only {
-                        Sort::Runtime
-                    } else {
-                        Sort::ComptimeValue
-                    },
-                    ty: size.clone(),
-                },
-            ],
+            vec![receiver.clone(), index_param.clone()],
             element_type,
         ),
     ] {
@@ -172,11 +175,44 @@ fn phase_protocol(traits: &[Trait], id: DeclarationId, staged: bool) -> Result<P
             return Err(format!("invalid ListPatternView {name} signature"));
         }
     }
+    let rest_methods = interface
+        .methods
+        .iter()
+        .filter(|method| method.name == rest_name)
+        .collect::<Vec<_>>();
+    let (rest, rest_default) = match rest_methods.as_slice() {
+        [] => (None, None),
+        [method] => {
+            let expected_params = vec![receiver, index_param];
+            let valid_signature = matches!(
+                method.signature.callable_signature(),
+                Ok(Term::Function { parameters, .. }) if *parameters == expected_params
+            );
+            if method.signature.is_comptime_callable() != comptime
+                || !valid_signature
+                || method.by_reference_receiver == comptime
+                || method.by_value_receiver != comptime
+                || (staged && method.phase != TraitPhase::Comptime)
+                || !method.type_parameters.is_empty()
+                || !method.type_arguments.is_empty()
+            {
+                return Err(format!("invalid ListPatternView {rest_name} signature"));
+            }
+            (Some(rest_name), method.default)
+        }
+        _ => {
+            return Err(format!(
+                "ListPatternView requires at most one {rest_name} method"
+            ));
+        }
+    };
     Ok(Protocol {
         size,
         comptime,
         by_value: comptime,
         length: length_name,
         element: get_name,
+        rest,
+        rest_default,
     })
 }

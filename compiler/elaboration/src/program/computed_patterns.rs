@@ -167,6 +167,8 @@ impl Checker<'_, '_> {
                 | P::U32
                 | P::U64
                 | P::U128
+                | P::F16
+                | P::Bf16
                 | P::F32
                 | P::F64
                 | P::Unit

@@ -1,10 +1,12 @@
 //! Source pattern checking with candidate-local bindings and type evidence.
 //! Resource delivery remains the responsibility of program verification.
 use super::*;
+
 mod errors;
 mod evidence;
 mod matches;
 mod records;
+
 pub(super) use evidence::{
     PatternGuard, boolean_pattern_coverage, matched_type_pattern_value, pattern_binding_ids,
     pattern_bindings, pattern_guard_evidence, readonly_guard_comparison, readonly_guard_operand,
@@ -19,6 +21,7 @@ impl Checker<'_, '_> {
     ) -> Result<n::Pattern, Error> {
         self.pattern_observed(pattern, ty, None)
     }
+
     pub(super) fn pattern_observed(
         &mut self,
         pattern: &hir::pattern::Pattern<'_>,
@@ -83,15 +86,7 @@ impl Checker<'_, '_> {
                         _ => n::Pattern::Or(Vec::new()),
                     });
                 }
-                if !self
-                    .negated_pattern_domain(
-                        ty,
-                        &mut 100_000,
-                        0,
-                        &mut std::collections::HashMap::new(),
-                    )
-                    .map_err(|message| error(pattern.span, message))?
-                {
+                if !self.can_negate_pattern_domain(ty, pattern.span)? {
                     return Err(error(
                         pattern.span,
                         "negated pattern elaboration for this domain is not implemented",
@@ -157,13 +152,33 @@ impl Checker<'_, '_> {
                     return Ok(n::Pattern::Wild);
                 }
                 let shape = self.structural_type(ty, pattern.span)?;
-                if !matches!(&shape, Term::Primitive(primitive) if matches!(primitive, P::Integer | P::Float | P::F32 | P::F64 | P::Char) || self.integer_layout(*primitive).is_some())
-                {
-                    return Err(error(
-                        pattern.span,
-                        "range pattern ordering protocol for this type is not implemented",
-                    ));
-                }
+                let native_ordered = matches!(
+                    &shape,
+                    Term::Primitive(primitive)
+                        if matches!(
+                            primitive,
+                            P::Integer
+                                | P::Char
+                                | P::Float
+                                | P::F16
+                                | P::Bf16
+                                | P::F32
+                                | P::F64
+                                | P::Usize
+                                | P::Isize
+                                | P::Never
+                        ) || self.integer_layout(*primitive).is_some()
+                ) || self.proved_ordered_scalar_family(&shape);
+                let ordering_protocol = if native_ordered {
+                    None
+                } else {
+                    Some(self.protocols.ordering.ok_or_else(|| {
+                        error(
+                            pattern.span,
+                            "range pattern ordering protocol for this type is not implemented",
+                        )
+                    })?)
+                };
                 let mut fresh = || {
                     let index = self.next_temporary_binding;
                     self.next_temporary_binding = index.checked_add(1).ok_or_else(|| {
@@ -189,8 +204,10 @@ impl Checker<'_, '_> {
                     (*lower, lower_binding, false),
                     (*upper, upper_binding, true),
                 ] {
-                    let Some(endpoint) = endpoint else { continue };
-                    let endpoint = self.expr(endpoint, Some(ty))?;
+                    let Some(endpoint_hir) = endpoint else {
+                        continue;
+                    };
+                    let endpoint = self.expr(endpoint_hir, Some(ty))?;
                     diverges |= is_never(&endpoint.ty);
                     statements.push(n::Expr {
                         ty: if is_never(&endpoint.ty) {
@@ -211,28 +228,57 @@ impl Checker<'_, '_> {
                     } else {
                         (local_expr(binding), local_expr(observed))
                     };
-                    let kind = if shape == p(P::Integer) {
-                        K::IntegerBinary {
-                            op: if exclusive {
-                                n::IntegerOp::Less
-                            } else {
-                                n::IntegerOp::LessEqual
-                            },
-                            left: Box::new(left),
-                            right: Box::new(right),
-                        }
-                    } else if exclusive {
-                        // NaN is unordered: `not (upper <= value)` is not
-                        // equivalent to the required ordered `value < upper`.
-                        K::ScalarLess(Box::new(left), Box::new(right))
+                    let check = if let Some(protocol) = ordering_protocol {
+                        let method = if exclusive { "lt" } else { "le" };
+                        let callee = self
+                            .selected_method(
+                                left.ty.clone(),
+                                Some(n::InterfaceInstance {
+                                    declaration: protocol,
+                                    arguments: vec![],
+                                }),
+                                method,
+                                endpoint_hir.span,
+                            )?
+                            .ok_or_else(|| {
+                                error(
+                                    endpoint_hir.span,
+                                    "Ord protocol has no selected comparison method",
+                                )
+                            })?;
+                        self.finish_call(
+                            endpoint_hir,
+                            callee,
+                            &[],
+                            vec![left, right],
+                            Some(&p(P::Bool)),
+                            None,
+                        )?
                     } else {
-                        K::ScalarLessEqual(Box::new(left), Box::new(right))
+                        let kind = if shape == p(P::Integer) {
+                            K::IntegerBinary {
+                                op: if exclusive {
+                                    n::IntegerOp::Less
+                                } else {
+                                    n::IntegerOp::LessEqual
+                                },
+                                left: Box::new(left),
+                                right: Box::new(right),
+                            }
+                        } else if exclusive {
+                            // NaN is unordered: `not (upper <= value)` is not
+                            // equivalent to the required ordered `value < upper`.
+                            K::ScalarLess(Box::new(left), Box::new(right))
+                        } else {
+                            K::ScalarLessEqual(Box::new(left), Box::new(right))
+                        };
+                        n::Expr {
+                            ty: p(P::Bool),
+                            source: source(pattern.span),
+                            kind,
+                        }
                     };
-                    let check = n::Expr {
-                        ty: p(P::Bool),
-                        source: source(pattern.span),
-                        kind,
-                    };
+                    diverges |= is_never(&check.ty);
                     checks.push(check);
                 }
                 let first = checks.remove(0);
@@ -428,150 +474,101 @@ impl Checker<'_, '_> {
                         "normal-form patterns require a Type value",
                     ));
                 }
-                let H::ResolvedDef { def_id, .. } = head.kind else {
-                    return Err(error(
-                        head.span,
-                        "normal-form pattern head requires a resolved declaration",
-                    ));
-                };
-                let owner = self
-                    .package
-                    .definition_owner(def_id)
-                    .ok_or_else(|| error(head.span, "missing normal-form head"))?;
-                let Some(ItemKind::Fn(sig, _)) = self.package.item(owner).map(|item| &item.kind)
-                else {
-                    return Err(error(
-                        head.span,
-                        "pattern head is not a normal-form definition",
-                    ));
-                };
-                if !sig.modifiers.is_normal_form_head {
-                    return Err(error(
-                        head.span,
-                        "pattern head is not a normal-form definition",
-                    ));
-                }
-                self.ensure_signature(owner, head.span)?;
-                let parameters = self.normal_parameters[&owner].clone();
-                if arguments.len() != parameters.len() {
-                    return Err(error(
-                        pattern.span,
-                        "normal-form pattern argument count mismatch",
-                    ));
-                }
-                // Route names first, then elaborate in declaration order: a
-                // later parameter's type may depend on an earlier Type input
-                // even when the named patterns were written in reverse order.
-                let mut routed = vec![None; parameters.len()];
-                let mut positional = 0;
-                for argument in *arguments {
-                    let slot = if let Some(name) = argument.name {
-                        sig.clause_params
-                            .iter()
-                            .position(|parameter| parameter.name.name == name.name)
-                            .ok_or_else(|| {
-                                error(name.span, "unknown normal-form pattern argument")
-                            })?
-                    } else {
-                        while positional < routed.len() && routed[positional].is_some() {
-                            positional += 1;
+                let owner = self.resolve_pattern_head_owner(head)?;
+                if let Some(application) = self.static_normal_application(owner, head.span)? {
+                    let target = application.head;
+                    if matches!(
+                        self.package.item(target).map(|item| &item.kind),
+                        Some(ItemKind::Fn(..))
+                    ) {
+                        self.ensure_signature(target, head.span)?;
+                    }
+                    let parameters = self.normal_parameters[&target].clone();
+                    let head_id = declaration(self.package, &self.package_identities, target);
+                    let observed_arguments = match observed {
+                        Some(Term::NormalForm {
+                            head, arguments, ..
+                        }) if *head == head_id && arguments.len() == parameters.len() => {
+                            Some(arguments.as_slice())
                         }
-                        let slot = positional;
-                        positional += 1;
-                        slot
+                        _ => None,
                     };
-                    if slot >= routed.len() || routed[slot].replace(&argument.pattern).is_some() {
-                        return Err(error(
-                            argument.pattern.span,
-                            "duplicate normal-form pattern argument",
-                        ));
-                    }
-                }
-                let head_id = declaration(self.package, &self.package_identities, owner);
-                let observed_arguments = match observed {
-                    Some(Term::NormalForm {
-                        head, arguments, ..
-                    }) if *head == head_id && arguments.len() == parameters.len() => {
-                        Some(arguments)
-                    }
-                    _ => None,
-                };
-                let mut fields = Vec::with_capacity(parameters.len());
-                let mut known_parameters = Vec::new();
-                let mut known_types = Vec::new();
-                for (slot, (argument, (parameter, _, declared_ty))) in
-                    routed.into_iter().zip(&parameters).enumerate()
-                {
-                    let argument = argument.expect("arity and routing cover every parameter");
-                    let ty = declared_ty
-                        .instantiate_parameters(&known_parameters, &known_types)
-                        .map_err(|failure| error(argument.span, failure.to_string()))?;
-                    let dependent = parameters
+                    let inputs = parameters
                         .iter()
-                        .any(|(parameter, _, _)| ty.mentions_rigid(*parameter));
-                    let observed_type = if ty == p(P::Type) {
-                        observed_arguments
-                            .and_then(|arguments| arguments.get(slot))
-                            .filter(|value| value.sort() == Sort::Type)
-                    } else {
-                        None
-                    };
-                    let field = if dependent {
-                        if matches!(argument.kind, HP::Wild) {
-                            n::Pattern::Wild
-                        } else {
-                            return Err(error(
-                                argument.span,
-                                "dependent normal-form value patterns require contextual pattern elaboration not yet implemented",
-                            ));
-                        }
-                    } else {
-                        self.pattern_observed(argument, &ty, observed_type)?
-                    };
-                    if ty == p(P::Type) {
-                        let mut evidence = matched_type_pattern_value(
-                            &field,
-                            &mut self.required_steps,
-                            argument.span,
-                            0,
-                        )?
-                        .cloned();
-                        if evidence.is_none() {
-                            evidence = self.known_type_equality_pattern(&field, argument.span)?;
-                        }
-                        if let Some(value) = evidence.or_else(|| observed_type.cloned()) {
-                            // This evidence belongs only to the successful
-                            // candidate; do not install a global solver fact.
-                            known_parameters.push(nir::DeclarationParameter {
-                                declaration: *parameter,
-                                sort: Sort::Type,
-                            });
-                            known_types.push(value.clone());
-                        }
-                    }
-                    if ty != p(P::Type) {
-                        let evidence = self
-                            .matched_value_pattern_input(&field, &ty, argument.span, 0)?
-                            .or_else(|| {
-                                observed_arguments
-                                    .and_then(|args| args.get(slot))
-                                    .filter(|value| value.sort() == Sort::ComptimeValue)
-                                    .cloned()
-                            });
-                        if let Some(value) = evidence {
-                            known_parameters.push(nir::DeclarationParameter {
-                                declaration: *parameter,
-                                sort: Sort::ComptimeValue,
-                            });
-                            known_types.push(value);
-                        }
-                    }
-                    fields.push(field);
+                        .map(|(declaration, _, declared_ty)| {
+                            (*declaration, declared_ty.clone(), false)
+                        })
+                        .collect::<Vec<_>>();
+                    let fields = self.elaborate_type_application_fields(
+                        pattern,
+                        arguments,
+                        &application.interface,
+                        &inputs,
+                        observed_arguments,
+                    )?;
+                    return Ok(n::Pattern::NormalForm {
+                        head: head_id,
+                        arguments: fields,
+                    });
                 }
-                Ok(n::Pattern::NormalForm {
-                    head: declaration(self.package, &self.package_identities, owner),
-                    arguments: fields,
-                })
+                if matches!(
+                    self.package.item(owner).map(|item| &item.kind),
+                    Some(ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(..))
+                ) {
+                    self.ensure_nominal(owner, head.span)?;
+                    let parameter_ids = self.type_parameters[&owner].clone();
+                    let clauses = self.type_clause_params(owner);
+                    let mut domains = self.trait_domains(owner)?;
+                    if domains.is_empty() {
+                        domains.resize(parameter_ids.len(), p(P::Type));
+                    }
+                    let head_id = declaration(self.package, &self.package_identities, owner);
+                    let observed_arguments = match observed {
+                        Some(Term::Nominal {
+                            declaration,
+                            arguments,
+                        }) if *declaration == head_id && arguments.len() >= parameter_ids.len() => {
+                            Some(arguments.as_slice())
+                        }
+                        _ => None,
+                    };
+                    let inputs = parameter_ids
+                        .iter()
+                        .zip(&domains)
+                        .enumerate()
+                        .map(|(slot, (id, domain))| {
+                            let is_quote = clauses
+                                .get(slot)
+                                .is_some_and(|clause| clause.kind.is_quote());
+                            (*id, domain.clone(), is_quote)
+                        })
+                        .collect::<Vec<_>>();
+                    let mut fields = self.elaborate_type_application_fields(
+                        pattern,
+                        arguments,
+                        &normal::Supply::Declaration(owner),
+                        &inputs,
+                        observed_arguments,
+                    )?;
+                    for parameter in self.nominal_captures(owner, head.span)? {
+                        let capture_expr = self.captured_input_expression(parameter, head.span)?;
+                        let capture_ty = capture_expr.ty.clone();
+                        fields.push(self.equality_guard_pattern(
+                            &capture_ty,
+                            capture_expr,
+                            head.hir_id,
+                            head.span,
+                        )?);
+                    }
+                    return Ok(n::Pattern::NominalType {
+                        declaration: head_id,
+                        fields,
+                    });
+                }
+                Err(error(
+                    head.span,
+                    "pattern head is not a normal-form definition",
+                ))
             }
             HP::Tuple(fields) => {
                 let shape = self.structural_type(ty, pattern.span)?;
@@ -738,42 +735,10 @@ impl Checker<'_, '_> {
                 if let Some(group) = self.enum_group_pattern(value, ty)? {
                     return Ok(group);
                 }
+                let site_hir_id = value.hir_id;
                 let value = self.expr(value, Some(ty))?;
                 if self.structural_type(ty, pattern.span)? == p(P::Type) {
-                    let index = self.next_temporary_binding;
-                    self.next_temporary_binding = index.checked_add(1).ok_or_else(|| {
-                        error(pattern.span, "pattern temporary binding space exhausted")
-                    })?;
-                    let binding = n::LocalId {
-                        owner: u32::MAX,
-                        index,
-                    };
-                    let condition = n::Expr {
-                        source: source(pattern.span),
-                        ty: if is_never(&value.ty) {
-                            p(P::Never)
-                        } else {
-                            p(P::Bool)
-                        },
-                        kind: K::TypeEqual(
-                            Box::new(n::Expr {
-                                source: source(pattern.span),
-                                ty: p(P::Type),
-                                kind: K::Local(binding),
-                            }),
-                            Box::new(value),
-                        ),
-                    };
-                    // Equality matching is an observation, not inversion of a
-                    // normal-form head. A guard leaves coverage conservative
-                    // and uses the existing candidate-local rollback protocol.
-                    return Ok(n::Pattern::Guard {
-                        pattern: Box::new(n::Pattern::Binding {
-                            binding,
-                            inner: Box::new(n::Pattern::Wild),
-                        }),
-                        condition: Box::new(condition),
-                    });
+                    return self.equality_guard_pattern(ty, value, site_hir_id, pattern.span);
                 }
                 match value.kind {
                     K::Literal(literal) => Ok(n::Pattern::Literal(literal)),
@@ -793,31 +758,7 @@ impl Checker<'_, '_> {
                         index,
                         fields: Vec::new(),
                     }),
-                    _ => {
-                        let shape = self.structural_type(ty, pattern.span)?;
-                        let index = self.next_temporary_binding;
-                        self.next_temporary_binding = index.checked_add(1).ok_or_else(|| {
-                            error(pattern.span, "pattern temporary binding space exhausted")
-                        })?;
-                        let binding = n::LocalId {
-                            owner: u32::MAX,
-                            index,
-                        };
-                        let observed = n::Expr {
-                            ty: ty.clone(),
-                            source: source(pattern.span),
-                            kind: K::Local(binding),
-                        };
-                        let condition =
-                            self.equality_expression(observed, value, &shape, pattern.span)?;
-                        Ok(n::Pattern::Guard {
-                            pattern: Box::new(n::Pattern::Binding {
-                                binding,
-                                inner: Box::new(n::Pattern::Wild),
-                            }),
-                            condition: Box::new(condition),
-                        })
-                    }
+                    _ => self.equality_guard_pattern(ty, value, site_hir_id, pattern.span),
                 }
             }
             HP::Or(patterns) => {
@@ -861,6 +802,497 @@ impl Checker<'_, '_> {
                 pattern.span,
                 "pattern view/protocol elaboration is not implemented for this pattern",
             )),
+        }
+    }
+
+    fn resolve_pattern_head_owner(&mut self, head: &Expr<'_>) -> Result<OwnerId, Error> {
+        let def_id = match head.kind {
+            H::ResolvedDef { def_id, .. } => def_id,
+            H::Projection(container, _) => {
+                if let Some(def_id) = self.package.member_projections.get(&head.hir_id).copied() {
+                    def_id
+                } else if let Some(candidates) = self
+                    .package
+                    .deferred_member_projections
+                    .get(&head.hir_id)
+                    .cloned()
+                {
+                    let invalid = || {
+                        error(
+                            head.span,
+                            "normal-form pattern head requires a resolved declaration",
+                        )
+                    };
+                    if !self.type_member_base(container)? {
+                        return Err(invalid());
+                    }
+                    let Term::Nominal {
+                        declaration: parent,
+                        ..
+                    } = self.type_expr(container)?
+                    else {
+                        return Err(invalid());
+                    };
+                    candidates
+                        .iter()
+                        .find_map(|(container, member)| {
+                            let owner = self.package.definition_owner(*container)?;
+                            (declaration(self.package, &self.package_identities, owner) == parent)
+                                .then_some(*member)
+                        })
+                        .ok_or_else(invalid)?
+                } else {
+                    return Err(error(
+                        head.span,
+                        "normal-form pattern head requires a resolved declaration",
+                    ));
+                }
+            }
+            _ => {
+                return Err(error(
+                    head.span,
+                    "normal-form pattern head requires a resolved declaration",
+                ));
+            }
+        };
+        self.package
+            .definition_owner(def_id)
+            .ok_or_else(|| error(head.span, "missing normal-form head"))
+    }
+
+    fn elaborate_type_application_fields(
+        &mut self,
+        pattern: &hir::pattern::Pattern<'_>,
+        arguments: &[hir::pattern::TypePatternArg<'_>],
+        interface: &normal::Supply,
+        parameters: &[(DeclarationId, Term, bool)],
+        observed_arguments: Option<&[Term]>,
+    ) -> Result<Vec<n::Pattern>, Error> {
+        let entries = match interface {
+            normal::Supply::Declaration(decl_owner) => self
+                .type_clause_params(*decl_owner)
+                .iter()
+                .map(|clause| input_routing::Entry {
+                    name: (!clause.name.name.as_str().is_empty()).then_some(clause.name.name),
+                    optional: false,
+                    variadic: matches!(
+                        clause.kind.unquoted(),
+                        hir::clause::ClauseParamKind::Varadic(..)
+                    ),
+                    post_target: false,
+                    ..input_routing::Entry::anchored()
+                })
+                .collect::<Vec<_>>(),
+            normal::Supply::Callable { collector } => {
+                let mut entries = vec![
+                    input_routing::Entry {
+                        post_target: false,
+                        ..input_routing::Entry::anchored()
+                    };
+                    parameters.len()
+                ];
+                if let Some(collector) = collector
+                    && let Some(entry) = entries.get_mut(collector.slot)
+                {
+                    entry.variadic = true;
+                    entry.name = collector.name.as_deref().map(hir::Symbol::intern);
+                }
+                entries
+            }
+        };
+        if entries.len() != parameters.len() {
+            return Err(error(
+                pattern.span,
+                "normal-form pattern argument count mismatch",
+            ));
+        }
+        let inputs = arguments
+            .iter()
+            .map(|argument| match argument.name {
+                Some(name) => input_routing::Input::Named(name.name),
+                None => input_routing::Input::Positional,
+            })
+            .collect::<Vec<_>>();
+        let plan = input_routing::route(&entries, &inputs).map_err(|failure| {
+            let failure_span = failure
+                .input
+                .and_then(|pos| arguments.get(pos))
+                .map(|arg| {
+                    if matches!(failure.kind, input_routing::FailureKind::UnknownName) {
+                        arg.name.map_or(arg.pattern.span, |name| name.span)
+                    } else {
+                        arg.pattern.span
+                    }
+                })
+                .unwrap_or(pattern.span);
+            let message = match failure.kind {
+                input_routing::FailureKind::UnknownName => "unknown normal-form pattern argument",
+                input_routing::FailureKind::Duplicate
+                | input_routing::FailureKind::AppendToComplete => {
+                    "duplicate normal-form pattern argument"
+                }
+                _ => "normal-form pattern argument count mismatch",
+            };
+            error(failure_span, message)
+        })?;
+        if plan.assigned.iter().any(|assigned| !*assigned) {
+            return Err(error(
+                pattern.span,
+                "normal-form pattern argument count mismatch",
+            ));
+        }
+        let mut by_slot: Vec<Option<&input_routing::Route>> = vec![None; parameters.len()];
+        for route in &plan.routes {
+            by_slot[route.parameter] = Some(route);
+        }
+
+        // Elaborate fields in declaration order: a later parameter's type may
+        // depend on an earlier input even when named patterns appear out of order.
+        let mut fields = Vec::with_capacity(parameters.len());
+        let mut known_parameters = Vec::new();
+        let mut known_types = Vec::new();
+        for (slot, (parameter, declared_ty, is_quote)) in parameters.iter().enumerate() {
+            let route = by_slot[slot].expect("assigned check guarantees every slot is routed");
+            let ty = declared_ty
+                .instantiate_parameters(&known_parameters, &known_types)
+                .map_err(|failure| error(pattern.span, failure.to_string()))?;
+            let err_span = route
+                .sources
+                .first()
+                .and_then(|pos| arguments.get(*pos))
+                .map_or(pattern.span, |arg| arg.pattern.span);
+            if *is_quote || matches!(ty, Term::Lift(_)) {
+                return Err(error(
+                    err_span,
+                    "nominal type patterns cannot match runtime dependency clauses",
+                ));
+            }
+            let dependent = parameters
+                .iter()
+                .any(|(parameter, _, _)| ty.mentions_rigid(*parameter));
+            let field = if route.collected {
+                if dependent {
+                    return Err(error(
+                        err_span,
+                        "dependent normal-form value patterns require contextual pattern elaboration not yet implemented",
+                    ));
+                }
+                let elements = route
+                    .sources
+                    .iter()
+                    .map(|pos| arguments[*pos].pattern.clone())
+                    .collect::<Vec<_>>();
+                self.list_pattern(pattern, &elements, None, &ty)?
+            } else {
+                let argument = &arguments[route.sources[0]].pattern;
+                let observed_type = if ty == p(P::Type) {
+                    observed_arguments
+                        .and_then(|arguments| arguments.get(slot))
+                        .filter(|value| value.sort() == Sort::Type)
+                } else {
+                    None
+                };
+                if dependent {
+                    if matches!(argument.kind, hir::pattern::PatternKind::Wild) {
+                        n::Pattern::Wild
+                    } else {
+                        return Err(error(
+                            argument.span,
+                            "dependent normal-form value patterns require contextual pattern elaboration not yet implemented",
+                        ));
+                    }
+                } else {
+                    self.pattern_observed(argument, &ty, observed_type)?
+                }
+            };
+            if ty == p(P::Type) {
+                let mut evidence =
+                    matched_type_pattern_value(&field, &mut self.required_steps, err_span, 0)?
+                        .cloned();
+                if evidence.is_none() {
+                    evidence = self.known_type_equality_pattern(&field, err_span)?;
+                }
+                let observed_type = observed_arguments
+                    .and_then(|arguments| arguments.get(slot))
+                    .filter(|value| value.sort() == Sort::Type);
+                if let Some(value) = evidence.or_else(|| observed_type.cloned()) {
+                    // This evidence belongs only to the successful
+                    // candidate; do not install a global solver fact.
+                    known_parameters.push(nir::DeclarationParameter {
+                        declaration: *parameter,
+                        sort: Sort::Type,
+                    });
+                    known_types.push(value);
+                }
+            } else {
+                let evidence = self
+                    .matched_value_pattern_input(&field, &ty, err_span, 0)?
+                    .or_else(|| {
+                        observed_arguments
+                            .and_then(|args| args.get(slot))
+                            .filter(|value| value.sort() == Sort::ComptimeValue)
+                            .cloned()
+                    });
+                if let Some(value) = evidence {
+                    known_parameters.push(nir::DeclarationParameter {
+                        declaration: *parameter,
+                        sort: Sort::ComptimeValue,
+                    });
+                    known_types.push(value);
+                }
+            }
+            fields.push(field);
+        }
+        Ok(fields)
+    }
+
+    fn equality_guard_pattern(
+        &mut self,
+        observed_ty: &Term,
+        value: n::Expr,
+        site_hir_id: hir::hir_id::HirId,
+        span: Span,
+    ) -> Result<n::Pattern, Error> {
+        let shape = self.structural_type(observed_ty, span)?;
+        let index = self.next_temporary_binding;
+        self.next_temporary_binding = index
+            .checked_add(1)
+            .ok_or_else(|| error(span, "pattern temporary binding space exhausted"))?;
+        let binding = n::LocalId {
+            owner: u32::MAX,
+            index,
+        };
+        let observed = n::Expr {
+            source: source(span),
+            ty: observed_ty.clone(),
+            kind: K::Local(binding),
+        };
+        let condition = if shape == p(P::Type) {
+            n::Expr {
+                source: source(span),
+                ty: if is_never(&value.ty) {
+                    p(P::Never)
+                } else {
+                    p(P::Bool)
+                },
+                kind: K::TypeEqual(Box::new(observed), Box::new(value)),
+            }
+        } else if self.native_equality_shape(&shape) {
+            self.equality_expression(observed, value, &shape, span)?
+        } else {
+            let protocol = self.protocols.equality.ok_or_else(|| {
+                error(
+                    span,
+                    "equality protocol for this type is not implemented without an Eq binding",
+                )
+            })?;
+            let callee = self
+                .selected_method(
+                    observed.ty.clone(),
+                    Some(n::InterfaceInstance {
+                        declaration: protocol,
+                        arguments: vec![],
+                    }),
+                    "eq",
+                    span,
+                )?
+                .ok_or_else(|| error(span, "Eq protocol has no selected comparison method"))?;
+            let site = Expr {
+                hir_id: site_hir_id,
+                span,
+                kind: H::Unit,
+            };
+            self.finish_call(
+                &site,
+                callee,
+                &[],
+                vec![observed, value],
+                Some(&p(P::Bool)),
+                None,
+            )?
+        };
+        // Equality matching is an observation, not inversion of a constructor
+        // head. A guard leaves coverage conservative and uses rollback.
+        Ok(n::Pattern::Guard {
+            pattern: Box::new(n::Pattern::Binding {
+                binding,
+                inner: Box::new(n::Pattern::Wild),
+            }),
+            condition: Box::new(condition),
+        })
+    }
+
+    fn can_negate_pattern_domain(&mut self, ty: &Term, span: Span) -> Result<bool, Error> {
+        let mut visited = Vec::new();
+        self.can_negate_pattern_domain_at(ty, span, 0, &mut visited)
+    }
+
+    fn can_negate_pattern_domain_at(
+        &mut self,
+        ty: &Term,
+        span: Span,
+        depth: usize,
+        visited: &mut Vec<Term>,
+    ) -> Result<bool, Error> {
+        if depth >= 64 {
+            return Err(error(span, "negated pattern domain depth limit exceeded"));
+        }
+        let shape = self.structural_type(ty, span)?;
+        match &shape {
+            Term::Primitive(primitive) => Ok(matches!(
+                primitive,
+                P::Void
+                    | P::Bool
+                    | P::Char
+                    | P::Str
+                    | P::Symbol
+                    | P::Integer
+                    | P::Float
+                    | P::F16
+                    | P::Bf16
+                    | P::F32
+                    | P::F64
+                    | P::Type
+                    | P::Object
+                    | P::BitVec(_)
+            ) || self.integer_layout(*primitive).is_some()),
+            Term::Optional(inner) => {
+                self.can_negate_pattern_domain_at(inner, span, depth + 1, visited)
+            }
+            Term::NormalForm { head, .. } if Some(*head) == self.protocols.meta_list => Ok(true),
+            Term::Nominal {
+                declaration,
+                arguments,
+            } => {
+                if visited.iter().any(|seen| *seen == shape) {
+                    return Ok(true);
+                }
+                self.ensure_nominal_type(&shape, span)?;
+                let variants = self.enums.get(declaration).map(|item| item.variants.len());
+                let mut fuel = 100_000usize;
+                let mut collected = Some(Vec::new());
+                for index in 0..variants.unwrap_or(1) {
+                    let Some(fields) = nir::normal_forms::nominal_value_fields_with_collections_in(
+                        &shape,
+                        variants.map(|_| index as u32),
+                        &mut fuel,
+                        &|id, fuel| {
+                            *fuel = fuel.checked_sub(1)?;
+                            self.structs
+                                .get(&id)
+                                .map(nir::normal_forms::NominalValueDeclaration::Struct)
+                                .or_else(|| {
+                                    self.enums
+                                        .get(&id)
+                                        .map(nir::normal_forms::NominalValueDeclaration::Enum)
+                                })
+                                .or_else(|| {
+                                    self.newtypes
+                                        .get(&id)
+                                        .map(nir::normal_forms::NominalValueDeclaration::Newtype)
+                                })
+                        },
+                        &|domain, fuel| self.collection_domain_budgeted(domain, fuel),
+                        self.target,
+                    ) else {
+                        collected = None;
+                        break;
+                    };
+                    if let Some(list) = collected.as_mut() {
+                        list.extend(fields);
+                    }
+                }
+                let fields_to_check = if let Some(fields) = collected {
+                    fields
+                } else {
+                    let mut fallback = Vec::new();
+                    if let Some(def) = self.newtypes.get(declaration) {
+                        let arity = def.type_parameters.len().min(arguments.len());
+                        let field_ty = self.instantiate_input_types(
+                            &def.representation,
+                            &def.type_parameters[..arity],
+                            &arguments[..arity],
+                            span,
+                        )?;
+                        fallback.push(field_ty);
+                    } else if let Some(def) = self.structs.get(declaration).cloned() {
+                        let arity = def.type_parameters.len().min(arguments.len());
+                        for (_, field_ty) in &def.fields {
+                            let field_ty = self.instantiate_input_types(
+                                field_ty,
+                                &def.type_parameters[..arity],
+                                &arguments[..arity],
+                                span,
+                            )?;
+                            fallback.push(field_ty);
+                        }
+                    } else if let Some(def) = self.enums.get(declaration).cloned() {
+                        let arity = def.type_parameters.len().min(arguments.len());
+                        for variant in &def.variants {
+                            for field_ty in &variant.fields {
+                                let field_ty = self.instantiate_input_types(
+                                    field_ty,
+                                    &def.type_parameters[..arity],
+                                    &arguments[..arity],
+                                    span,
+                                )?;
+                                fallback.push(field_ty);
+                            }
+                        }
+                    } else {
+                        return Ok(false);
+                    }
+                    fallback
+                };
+                visited.push(shape);
+                let result = (|| {
+                    for field_ty in fields_to_check {
+                        if !self.can_negate_pattern_domain_at(
+                            &field_ty,
+                            span,
+                            depth + 1,
+                            visited,
+                        )? {
+                            return Ok(false);
+                        }
+                    }
+                    Ok(true)
+                })();
+                visited.pop();
+                result
+            }
+            Term::Tuple(elements) => {
+                for element in elements {
+                    if !self.can_negate_pattern_domain_at(element, span, depth + 1, visited)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Term::Record(fields) => {
+                for (_, field_ty) in fields {
+                    if !self.can_negate_pattern_domain_at(field_ty, span, depth + 1, visited)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            Term::ErrorResult { errors, result } => {
+                for err_ty in errors {
+                    if !self.can_negate_pattern_domain_at(err_ty, span, depth + 1, visited)? {
+                        return Ok(false);
+                    }
+                }
+                self.can_negate_pattern_domain_at(result, span, depth + 1, visited)
+            }
+            _ => self
+                .negated_pattern_domain(
+                    &shape,
+                    &mut 100_000,
+                    0,
+                    &mut std::collections::HashMap::new(),
+                )
+                .map_err(|message| error(span, message)),
         }
     }
 }

@@ -14,9 +14,12 @@ pub(crate) struct Domain {
     mask: u64,
     infinity: u64,
 }
+
 impl Domain {
     pub(crate) fn new(primitive: Primitive) -> Option<Self> {
         let (sign, mask, infinity) = match primitive {
+            Primitive::F16 => (1 << 15, u16::MAX as u64, 0x7c00),
+            Primitive::Bf16 => (1 << 15, u16::MAX as u64, 0x7f80),
             Primitive::F32 => (1 << 31, u32::MAX as u64, 0x7f800000),
             Primitive::F64 => (1 << 63, u64::MAX, 0x7ff0000000000000),
             _ => return None,
@@ -28,9 +31,11 @@ impl Domain {
             infinity,
         })
     }
+
     fn nan(self) -> u64 {
         self.sign | self.infinity
     }
+
     fn key(self, bits: u64) -> u64 {
         let magnitude = bits & (self.sign - 1);
         if magnitude > self.infinity {
@@ -41,6 +46,7 @@ impl Domain {
             (bits | self.sign) - 1
         }
     }
+
     pub(crate) fn ranges(self) -> Vec<Interval> {
         vec![Interval {
             start: Edge::Finite(Integer::from_u128(
@@ -49,19 +55,25 @@ impl Domain {
             end: Edge::Finite(Integer::from_u128(self.nan() as u128 + 1)),
         }]
     }
+
     fn bits(self, literal: &Literal) -> Option<u64> {
         match (self.primitive, literal) {
+            (Primitive::F16, Literal::Float16(bits)) => Some(*bits as u64),
+            (Primitive::Bf16, Literal::BFloat16(bits)) => Some(*bits as u64),
             (Primitive::F32, Literal::Float32(bits)) => Some(*bits as u64),
             (Primitive::F64, Literal::Float64(bits)) => Some(*bits),
             _ => None,
         }
     }
+
     pub(crate) fn extract(self, pattern: &Pattern, fuel: &mut usize) -> Result<Vec<Interval>, ()> {
         crate::interval_coverage::extract_exact(&self.pattern(pattern, fuel, 0)?, fuel)
     }
+
     fn pattern(self, pattern: &Pattern, fuel: &mut usize, depth: usize) -> Result<Pattern, ()> {
         self.pattern_subject(pattern, false, fuel, depth)
     }
+
     fn pattern_subject(
         self,
         pattern: &Pattern,
@@ -137,6 +149,7 @@ impl Domain {
             _ => return Err(()),
         })
     }
+
     fn constant(self, expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Option<u64>, ()> {
         charge(fuel, depth)?;
         Ok(match &expr.kind {
@@ -147,6 +160,7 @@ impl Domain {
             _ => None,
         })
     }
+
     // Calls remain unknown predicates. Their inputs are copied without the
     // IEEE-to-integer projection: interval evaluation never invokes a callee or
     // observes an argument. Bound the accepted copy shapes explicitly instead
@@ -215,6 +229,7 @@ impl Domain {
             kind,
         })
     }
+
     fn opaque_arguments(
         self,
         values: &[Expr],
@@ -229,6 +244,7 @@ impl Domain {
             .map(|value| self.opaque_argument(value, fuel, depth))
             .collect()
     }
+
     fn expr(self, expr: &Expr, fuel: &mut usize, depth: usize) -> Result<Expr, ()> {
         charge(fuel, depth)?;
         let integer = Term::Primitive(Primitive::Integer);
@@ -422,6 +438,7 @@ impl Domain {
         })
     }
 }
+
 fn charge(fuel: &mut usize, depth: usize) -> Result<(), ()> {
     *fuel = fuel.checked_sub(1).ok_or(())?;
     if depth > 128 { Err(()) } else { Ok(()) }
@@ -430,9 +447,15 @@ fn charge(fuel: &mut usize, depth: usize) -> Result<(), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn quotient_preserves_adjacent_values_zeros_and_unordered_class() {
-        for primitive in [Primitive::F32, Primitive::F64] {
+        for primitive in [
+            Primitive::F16,
+            Primitive::Bf16,
+            Primitive::F32,
+            Primitive::F64,
+        ] {
             let domain = Domain::new(primitive).unwrap();
             let sign = domain.sign;
             assert_eq!(domain.key(0), domain.key(sign));
@@ -445,6 +468,7 @@ mod tests {
             }
         }
     }
+
     #[test]
     fn opaque_argument_copy_exhaustion_remains_unknown_and_retry_is_independent() {
         use crate::coverage::{Coverage, check};
@@ -499,7 +523,12 @@ mod tests {
                 ),
             }),
         };
-        for primitive in [Primitive::F32, Primitive::F64] {
+        for primitive in [
+            Primitive::F16,
+            Primitive::Bf16,
+            Primitive::F32,
+            Primitive::F64,
+        ] {
             let ty = Term::Primitive(primitive);
             let skipped = predicate(true);
             assert_eq!(
@@ -516,6 +545,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn budget_failure_does_not_poison_coverage_retry() {
         use crate::coverage::{Coverage, check};

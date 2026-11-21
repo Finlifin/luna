@@ -10,12 +10,6 @@ impl Checker<'_, '_> {
         rest: Option<&hir::pattern::Pattern<'_>>,
         ty: &Term,
     ) -> Result<n::Pattern, Error> {
-        if rest.is_some_and(|rest| !matches!(rest.kind, hir::pattern::PatternKind::Wild)) {
-            return Err(error(
-                pattern.span,
-                "list rest patterns require a slicing protocol",
-            ));
-        }
         let comptime = !self.runtime_value_context() && !self.in_code_body;
         let selected = if comptime {
             self.protocols
@@ -66,8 +60,10 @@ impl Checker<'_, '_> {
                 kind: K::AddressOf(Box::new(subject)),
             }
         };
-        let call = |this: &mut Self, name: &str, index: Option<usize>| {
-            let location = index.map(|index| &elements[index]).unwrap_or(pattern);
+        let call = |this: &mut Self,
+                    location: &hir::pattern::Pattern<'_>,
+                    name: &str,
+                    index: Option<usize>| {
             let site = Expr {
                 hir_id: location.hir_id,
                 span: location.span,
@@ -90,7 +86,7 @@ impl Checker<'_, '_> {
                     &index.to_string(),
                     false,
                     Some(&size),
-                    pattern.span,
+                    location.span,
                 )?);
             }
             this.finish_call(&site, method, &[], inputs, None, None)
@@ -101,7 +97,7 @@ impl Checker<'_, '_> {
             Some(&size),
             pattern.span,
         )?;
-        let length = call(self, contract.length, None)?;
+        let length = call(self, pattern, contract.length, None)?;
         let (value, next) = if rest.is_some() {
             (
                 n::Expr {
@@ -132,12 +128,61 @@ impl Checker<'_, '_> {
         };
         let mut steps = vec![length_check];
         for (index, element) in elements.iter().enumerate() {
-            let value = call(self, contract.element, Some(index))?;
+            let value = call(self, element, contract.element, Some(index))?;
             let next = self.pattern(element, &value.ty)?;
             steps.push(n::Pattern::Then {
                 first: Box::new(n::Pattern::Wild),
                 value: Box::new(value),
                 next: Box::new(next),
+            });
+        }
+        if let Some(rest_pat) = rest
+            && !matches!(rest_pat.kind, hir::pattern::PatternKind::Wild)
+        {
+            let rest_name = contract.rest.ok_or_else(|| {
+                error(
+                    rest_pat.span,
+                    "list rest patterns require a slicing protocol",
+                )
+            })?;
+            if let Some(default_body) = contract.rest_default {
+                let resolution = self
+                    .resolve_trait_capability(
+                        &n::InterfaceInstance {
+                            declaration: protocol,
+                            arguments: vec![],
+                        },
+                        ty,
+                        crate::ptc::Budget::default(),
+                    )
+                    .map_err(|e| error(rest_pat.span, format!("trait resolution failed: {e:?}")))?;
+                let overridden = matches!(
+                    resolution.selection,
+                    crate::implementation::Selection::Selected(selected_id)
+                        if self
+                            .implementation_positions
+                            .get(&selected_id)
+                            .and_then(|pos| self.checked_implementations.get(*pos))
+                            .is_some_and(|implementation| {
+                                implementation
+                                    .methods
+                                    .iter()
+                                    .any(|(method, body)| method == rest_name && *body != default_body)
+                            })
+                );
+                if !overridden {
+                    return Err(error(
+                        rest_pat.span,
+                        "list rest patterns require a slicing protocol",
+                    ));
+                }
+            }
+            let rest_value = call(self, rest_pat, rest_name, Some(elements.len()))?;
+            let rest_next = self.pattern(rest_pat, &rest_value.ty)?;
+            steps.push(n::Pattern::Then {
+                first: Box::new(n::Pattern::Wild),
+                value: Box::new(rest_value),
+                next: Box::new(rest_next),
             });
         }
         // Each generated step observes the alias, not its incoming subject.
