@@ -114,7 +114,11 @@ impl Checker<'_, '_> {
         }
     }
 
-    pub(super) fn complete_type_data(&mut self, expr: &Expr<'_>) -> Result<CompletedType, Error> {
+    pub(super) fn complete_type_data(
+        &mut self,
+        expr: &Expr<'_>,
+        describe_input: bool,
+    ) -> Result<CompletedType, Error> {
         if let H::DeliveredType(ty) = &expr.kind {
             return self
                 .delivered_type(expr.hir_id, ty, expr.span)
@@ -217,6 +221,24 @@ impl Checker<'_, '_> {
                 // a Type field's declared domain alone is not its identity.
                 if !self.generator_data.is_empty() && self.data_consumer_call(expr)?.is_none() {
                     return self.generator_type_data(expr);
+                }
+                if describe_input {
+                    let checked = self.with_staged_input(true, |this| {
+                        let checked = this.expr(expr, Some(&p(P::Type)))?;
+                        this.check_open_fragment(&checked, expr.span, false)?;
+                        Ok(checked)
+                    })?;
+                    if let Some(identity) =
+                        self.preserved_input_identity(&checked, |_, _| Ok(None), expr.span)?
+                    {
+                        return Ok(CompletedType::Identity(identity));
+                    }
+                    if let Some(identity) =
+                        self.deferred_definition_input(expr.hir_id.owner, &checked, expr.span)?
+                    {
+                        return Ok(CompletedType::Identity(identity));
+                    }
+                    return self.complete_checked_type(expr, checked);
                 }
                 let value = self.required_value(expr, P::Type)?;
                 CompletedType::from_value(value, expr.span)

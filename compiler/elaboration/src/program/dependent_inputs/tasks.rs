@@ -802,6 +802,18 @@ impl Checker<'_, '_> {
                 ));
             }
         }
+        // This frame belongs to the suspended source definition. Keep the
+        // producer for phase and effect checking, with a fresh identity used
+        // only for typing the remaining slots and result of this call.
+        let lexical_owner = source.hir_id.owner;
+        if has_source
+            && captures.is_empty()
+            && self.describing_input_of(lexical_owner)
+            && let Some(identity) =
+                self.deferred_definition_input(lexical_owner, &value, source.span)?
+        {
+            return Ok(Resolution::Known(value, identity));
+        }
         self.prepare_unobserved_call_input(callee, source, value, &captures)
     }
 

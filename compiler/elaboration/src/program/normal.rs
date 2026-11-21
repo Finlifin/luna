@@ -374,38 +374,9 @@ impl Checker<'_, '_> {
             {
                 return Ok(identity);
             }
-            let mut staged_bindings: std::collections::BTreeSet<_> = self
-                .signature_owner
-                .and_then(|owner| self.package.item(owner))
-                .map(|item| match &item.kind {
-                    ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => sig
-                        .params
-                        .iter()
-                        .filter(|parameter| parameter.ty.is_comptime())
-                        .map(|parameter| local(parameter.hir_id))
-                        .collect(),
-                    _ => std::collections::BTreeSet::new(),
-                })
-                .unwrap_or_default();
-            staged_bindings.extend(self.open_staged_locals.iter().copied());
-            staged_bindings.extend(self.ordinary_behavior_inputs.keys().copied());
-            let declaration_inputs = self.visible_comptime_parameters(value.span)?;
-            if self.staged_input_can_defer(
-                &checked,
-                false,
-                &std::collections::BTreeSet::new(),
-                &staged_bindings,
-                &declaration_inputs,
-                value.span,
-            )? {
-                let binder = self.fresh_value_binder(value.hir_id.owner, value.span)?;
-                let symbol = Term::Rigid {
-                    declaration: binder.declaration,
-                    sort: Sort::ComptimeValue,
-                };
-                self.definition_refinements
-                    .staged_values
-                    .push((binder.declaration, checked.ty.clone()));
+            if let Some(symbol) =
+                self.deferred_definition_input(value.hir_id.owner, &checked, value.span)?
+            {
                 if let H::ResolvedLocal(_, id) = value.kind {
                     let binding = local(id);
                     if self.locals.contains_key(&binding) {
@@ -424,6 +395,67 @@ impl Checker<'_, '_> {
         // root; individual elements do not become separate invocations.
         let result = self.required_expression(value, Some(ty))?;
         self.required_normal_term(result, value.span)
+    }
+
+    pub(super) fn describing_input_of(&self, owner: OwnerId) -> bool {
+        !self.in_required_comptime
+            && self.open_instance.is_none()
+            && self.signature_owner == Some(owner)
+            && self.active_open_definitions.contains(&owner)
+            && self.open_functions.contains_key(&owner)
+    }
+
+    /// Give an already stage-checked producer its own abstract identity while
+    /// describing a definition. Concrete instances check the original source.
+    pub(super) fn deferred_definition_input(
+        &mut self,
+        owner: OwnerId,
+        checked: &n::Expr,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        let sort = Sort::of_comptime_domain(&checked.ty);
+        if sort == Sort::Runtime {
+            return Ok(None);
+        }
+        let mut staged_bindings: std::collections::BTreeSet<_> = self
+            .signature_owner
+            .and_then(|owner| self.package.item(owner))
+            .map(|item| match &item.kind {
+                ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => sig
+                    .params
+                    .iter()
+                    .filter(|parameter| parameter.ty.is_comptime())
+                    .map(|parameter| local(parameter.hir_id))
+                    .collect(),
+                _ => std::collections::BTreeSet::new(),
+            })
+            .unwrap_or_default();
+        staged_bindings.extend(self.open_staged_locals.iter().copied());
+        staged_bindings.extend(self.ordinary_behavior_inputs.keys().copied());
+        let declaration_inputs = self.visible_comptime_parameters(span)?;
+        if self.staged_input_can_defer(
+            checked,
+            false,
+            &std::collections::BTreeSet::new(),
+            &staged_bindings,
+            &declaration_inputs,
+            span,
+        )? {
+            let binder = if sort == Sort::Type {
+                self.fresh_type_binder(owner, span)?
+            } else {
+                self.fresh_value_binder(owner, span)?
+            };
+            let symbol = Term::Rigid {
+                declaration: binder.declaration,
+                sort: binder.sort,
+            };
+            self.definition_refinements
+                .staged_values
+                .push((binder.declaration, checked.ty.clone()));
+            return Ok(Some(symbol));
+        }
+        Ok(None)
     }
 
     /// Forward the identity in a quote binder without reading its runtime payload.

@@ -1530,6 +1530,40 @@ impl Checker<'_, '_> {
         !sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head && !sig.modifiers.is_quote
     }
 
+    fn forwarded_call_demands<'a>(
+        &mut self,
+        target: OwnerId,
+        cache: &'a mut BTreeMap<OwnerId, BTreeSet<usize>>,
+        span: Span,
+    ) -> Result<&'a BTreeSet<usize>, Error> {
+        use std::collections::btree_map::Entry;
+        Ok(match cache.entry(target) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => {
+                let demands = match self
+                    .signatures
+                    .get(&target)
+                    .and_then(dependent_inputs::CallSignature::of)
+                {
+                    Some(signature) => signature.demanded_inputs(
+                        self.capabilities
+                            .get(&target)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default(),
+                        self.requirements
+                            .get(&target)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default(),
+                        &mut self.required_steps,
+                        span,
+                    )?,
+                    None => BTreeSet::new(),
+                };
+                entry.insert(demands)
+            }
+        })
+    }
+
     // A fixed outer signature can still contain a call whose domain needs a
     // forwarded staged input. Propagate that requirement through direct calls
     // before checking bodies, independently of declaration order.
@@ -1538,6 +1572,7 @@ impl Checker<'_, '_> {
         owners: impl IntoIterator<Item = OwnerId>,
     ) -> Result<(), Error> {
         let mut callers: BTreeMap<OwnerId, BTreeSet<OwnerId>> = BTreeMap::new();
+        let mut target_demands = BTreeMap::new();
         let mut needs_instance = BTreeSet::new();
         for owner in owners {
             if self.open_functions.contains_key(&owner)
@@ -1562,7 +1597,8 @@ impl Checker<'_, '_> {
                 .filter(|parameter| parameter.ty.is_comptime())
                 .map(|parameter| local(parameter.hir_id))
                 .collect();
-            if staged.is_empty() {
+            let has_clauses = !self.type_parameters[&owner].is_empty();
+            if staged.is_empty() && !has_clauses {
                 continue;
             }
             let body = self
@@ -1619,8 +1655,11 @@ impl Checker<'_, '_> {
                     Ok(false)
                 })?;
             }
+            let mut computed_inputs = BTreeSet::new();
+            let mut computed_clause = false;
             let mut routed_calls = Vec::new();
             for (target, callee, arguments, span, extended) in calls {
+                let mut forwarded_clause = false;
                 let mut inputs = if self.is_runtime_specialization(&callee) {
                     BTreeSet::new()
                 } else {
@@ -1775,18 +1814,51 @@ impl Checker<'_, '_> {
                         target_sig.params.len(),
                         span,
                     ) {
+                        let demanded = if !target_sig.params.iter().any(|p| p.ty.is_comptime())
+                            || target_sig.modifiers.is_comptime
+                            || target_sig.modifiers.is_normal_form_head
+                            || target_sig.modifiers.is_quote
+                        {
+                            None
+                        } else {
+                            Some(self.forwarded_call_demands(target, &mut target_demands, span)?)
+                        };
                         for route in routes
                             .iter()
                             .filter(|route| target_sig.params[route.parameter].ty.is_comptime())
                         {
                             for (_, value) in route.source_inputs() {
-                                inputs
-                                    .extend(self.expression_free_local_dependencies(owner, value)?);
+                                // Direct staged binders already carry their symbolic value.
+                                // A producer depending on them may have no identity until
+                                // this invocation supplies the enclosing inputs.
+                                let carries_identity = matches!(
+                                    value.kind,
+                                    H::ResolvedClauseParam(..) | H::ResolvedFnParam(..)
+                                );
+                                let computed = !carries_identity
+                                    && demanded
+                                        .is_some_and(|slots| slots.contains(&route.parameter));
+                                if computed || has_clauses {
+                                    let uses = self.source_expression_inputs(owner, value)?;
+                                    let reads_clause = self.type_parameters[&owner]
+                                        .iter()
+                                        .any(|id| uses.declarations.contains(id));
+                                    forwarded_clause |= reads_clause;
+                                    if computed {
+                                        computed_clause |= reads_clause;
+                                        computed_inputs.extend(uses.locals.iter().copied());
+                                    }
+                                    inputs.extend(uses.locals);
+                                } else {
+                                    inputs.extend(
+                                        self.expression_free_local_dependencies(owner, value)?,
+                                    );
+                                }
                             }
                         }
                     }
                 }
-                routed_calls.push((target, inputs));
+                routed_calls.push((target, inputs, forwarded_clause));
             }
             let mut alias_dependencies = Vec::new();
             for (bindings, init) in aliases {
@@ -1811,13 +1883,15 @@ impl Checker<'_, '_> {
                     break;
                 }
             }
-            for (target, inputs) in routed_calls {
-                let forwarded = inputs.iter().any(|binding| staged.contains(binding));
-                if forwarded {
+            for (target, inputs, forwarded_clause) in routed_calls {
+                if forwarded_clause || !inputs.is_disjoint(&staged) {
                     callers.entry(target).or_default().insert(owner);
                 }
             }
-            if !clause_dependencies.is_disjoint(&staged) {
+            if computed_clause
+                || !computed_inputs.is_disjoint(&staged)
+                || !clause_dependencies.is_disjoint(&staged)
+            {
                 needs_instance.insert(owner);
             }
         }
@@ -6171,7 +6245,13 @@ impl Checker<'_, '_> {
             let domain = domain
                 .substitute_partial(symbols)
                 .map_err(|failure| error(call.span, failure.to_string()))?;
-            symbols[slot] = Some(self.normal_value_argument(&route.expression(call), &domain)?);
+            let input = route.expression(call);
+            let identity = if domain == p(P::Type) && self.describing_input_of(input.hir_id.owner) {
+                self.completed_type_in(&input, true)?.identity(input.span)?
+            } else {
+                self.normal_value_argument(&input, &domain)?
+            };
+            symbols[slot] = Some(identity);
             return Ok(());
         }
         let term = self.in_open_function_scope(owner, None, |this| {

@@ -492,3 +492,57 @@ fn staged_operands_publish_generated_layouts_with_their_function_instances() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn computed_builder_input_supplies_a_dependent_optional_result() {
+    let package = sysroot::compile(
+        r#"
+        comptime fn Payload(flag: bool) -> Type {
+            let row = meta.StructBuilder.new(.name = .BranchPayload);
+            if flag { row.add_field(.content, bool); }
+            else { row.add_field(.content, char); }
+            row.Build()
+        }
+        fn empty(comptime ty: Type) -> ?ty { null }
+        fn inspect() -> bool where flag: bool {
+            empty(Payload(flag)) match { null => true, _ => false }
+        }
+        fn run() -> bool { inspect<true>() and inspect<false>() }
+    "#,
+    )
+    .unwrap();
+    let graph = luna::instantiation::instantiate(&package, "run", 10_000_000).unwrap();
+    let mut payloads = Vec::new();
+    for instance in graph
+        .functions
+        .iter()
+        .filter(|f| f.function.name == "empty")
+    {
+        let [ty] = instance.key.arguments.as_ref() else {
+            panic!("unexpected key {}", instance.key)
+        };
+        let nir::Term::Function { result, .. } = instance.function.signature.callable_signature()
+        else {
+            panic!("expected function signature")
+        };
+        assert_eq!(result.as_ref(), &nir::Term::Optional(Box::new(ty.clone())));
+        let def = graph.nominals.iter().find(|def| &def.ty == ty).unwrap();
+        let iir::NominalDefinition::Struct(record) = &def.definition else {
+            panic!("expected generated struct")
+        };
+        assert_eq!(record.name, "BranchPayload");
+        let [(field, content)] = record.fields.as_slice() else {
+            panic!("expected one field")
+        };
+        assert_eq!(field, "content");
+        payloads.push(content.clone());
+    }
+    assert_eq!(payloads.len(), 2);
+    assert!(payloads.contains(&nir::Term::Primitive(nir::Primitive::Bool)));
+    assert!(payloads.contains(&nir::Term::Primitive(nir::Primitive::Char)));
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}

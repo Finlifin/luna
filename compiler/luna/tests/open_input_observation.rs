@@ -77,3 +77,74 @@ fn pending_inference_still_checks_operand_contents() {
         );
     }
 }
+
+const DEPENDENT_SUBJECT: &str = "
+comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+fn empty(comptime ty: Type) -> ?ty { null }
+fn forwarded() -> bool where flag: bool { from_parameter(flag) }
+fn discarded(comptime flag: bool) -> bool { let unused = empty(Selected(flag)); true }
+fn from_clause() -> bool where flag: bool {
+    empty(Selected(flag)) match { null => true, _ => false }
+}
+fn from_parameter(comptime flag: bool) -> bool {
+    empty(Selected(flag)) match { null => true, _ => false }
+}
+";
+
+#[test]
+fn computed_type_operands_remain_abstract_until_their_enclosing_call() {
+    let source = format!(
+        "{DEPENDENT_SUBJECT}
+        fn run() -> bool {{
+            from_clause<true>() and from_clause<false>()
+                and from_parameter(true) and from_parameter(false)
+                and forwarded<true>() and forwarded<false>() and discarded(false)
+        }}"
+    );
+    let package = sysroot::compile(&source).unwrap();
+    let graph = luna::instantiation::instantiate(&package, "run", 5_000_000).unwrap();
+    let domains: std::collections::HashSet<_> = graph
+        .functions
+        .iter()
+        .filter(|instance| instance.function.name == "empty")
+        .map(|instance| instance.key.arguments.to_vec())
+        .collect();
+    assert_eq!(
+        domains,
+        [nir::Primitive::Bool, nir::Primitive::Char]
+            .into_iter()
+            .map(|p| vec![nir::Term::Primitive(p)])
+            .collect()
+    );
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn abstract_type_operands_still_check_unused_definitions() {
+    for (source, expected) in [
+        (
+            DEPENDENT_SUBJECT.replace(", _ => false", ""),
+            "non-exhaustive",
+        ),
+        (
+            DEPENDENT_SUBJECT.replace("_ => false", "payload? => not payload"),
+            "no-applicable-candidate",
+        ),
+        (
+            DEPENDENT_SUBJECT.replace("from_parameter(comptime flag", "from_parameter(flag"),
+            "runtime",
+        ),
+    ] {
+        let error = sysroot::compile(&source)
+            .err()
+            .expect("invalid open body accepted");
+        assert!(
+            error.contains(expected) && !error.contains("AbstractValueUnresolved"),
+            "{error}"
+        );
+    }
+}

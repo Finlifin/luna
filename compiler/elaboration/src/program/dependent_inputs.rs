@@ -23,6 +23,37 @@ impl<'a> CallSignature<'a> {
         };
         Some(Self { parameters, result })
     }
+
+    /// Inputs that must supply a value for a declared domain or obligation.
+    pub(super) fn demanded_inputs(
+        &self,
+        capabilities: &[n::TraitRequirement],
+        requirements: &[n::TypePredicate],
+        steps: &mut u64,
+        span: Span,
+    ) -> Result<BTreeSet<usize>, Error> {
+        let mut demanded = BTreeSet::new();
+        let mut observe = |ty: &Term| -> Result<(), Error> {
+            demanded.extend(input_observation::substitution_term(ty, steps, span)?.into_keys());
+            Ok(())
+        };
+        for parameter in self.parameters {
+            observe(&parameter.ty)?;
+        }
+        observe(self.result)?;
+        for requirement in capabilities {
+            observe(&requirement.subject)?;
+            for ty in &requirement.interface_arguments {
+                observe(ty)?;
+            }
+        }
+        for requirement in requirements {
+            for ty in required::requirement_terms(requirement, span)? {
+                observe(ty)?;
+            }
+        }
+        Ok(demanded)
+    }
 }
 
 #[derive(Default)]
@@ -486,45 +517,18 @@ impl Checker<'_, '_> {
         defaults: &mut [Option<n::Expr>],
     ) -> Result<BTreeSet<usize>, Error> {
         let direct = site.owner;
-        let mut demanded = BTreeSet::new();
-        for ty in signature
-            .parameters
-            .iter()
-            .map(|parameter| &parameter.ty)
-            .chain(std::iter::once(signature.result))
-        {
-            demanded.extend(self.term_substitution_inputs(ty, expr.span)?.into_keys());
-        }
-        if let Some(requirements) = direct.and_then(|owner| self.capabilities.get(&owner)) {
-            for requirement in requirements {
-                for ty in
-                    std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
-                {
-                    demanded.extend(
-                        input_observation::substitution_term(
-                            ty,
-                            &mut self.required_steps,
-                            expr.span,
-                        )?
-                        .into_keys(),
-                    );
-                }
-            }
-        }
-        if let Some(requirements) = direct.and_then(|owner| self.requirements.get(&owner)) {
-            for requirement in requirements {
-                for ty in required::requirement_terms(requirement, expr.span)? {
-                    demanded.extend(
-                        input_observation::substitution_term(
-                            ty,
-                            &mut self.required_steps,
-                            expr.span,
-                        )?
-                        .into_keys(),
-                    );
-                }
-            }
-        }
+        let mut demanded = signature.demanded_inputs(
+            direct
+                .and_then(|owner| self.capabilities.get(&owner))
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            direct
+                .and_then(|owner| self.requirements.get(&owner))
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            &mut self.required_steps,
+            expr.span,
+        )?;
         // Internal default annotations can have additional Type dependencies.
         for (parameter, assigned) in assigned.iter().enumerate() {
             if *assigned {

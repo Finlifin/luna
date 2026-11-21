@@ -16,12 +16,20 @@ impl Checker<'_, '_> {
         &mut self,
         expr: &Expr<'_>,
     ) -> Result<type_data::CompletedType, Error> {
+        self.completed_type_in(expr, false)
+    }
+
+    pub(super) fn completed_type_in(
+        &mut self,
+        expr: &Expr<'_>,
+        describe_input: bool,
+    ) -> Result<type_data::CompletedType, Error> {
         let first = self.next_runtime_id;
         let parent = std::mem::replace(
             &mut self.local_runtime_origins.child_type_inputs,
             ChildPlans::Forming(None),
         );
-        let result = self.complete_type_data(expr);
+        let result = self.complete_type_data(expr, describe_input);
         let ChildPlans::Forming(children) =
             std::mem::replace(&mut self.local_runtime_origins.child_type_inputs, parent)
         else {
