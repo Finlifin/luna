@@ -3119,12 +3119,19 @@ fn generic_associated_initializers_invoke_after_instance_selection() {
 fn generic_associated_initializers_freeze_dependencies_and_check_contracts() {
     let source = "comptime fn checked(value:bool)->bool where requires value {value}
         trait Flags where enabled:bool {
-            assoc flag:bool=checked(enabled);
+            assoc flag:bool=do { assumes enabled; checked(enabled) };
             assoc copy:bool=if enabled {Self.as(Flags<enabled>).flag} else {false};
         }
         struct Holder where enabled:bool {}
         impl Flags<enabled> for Holder<enabled> where enabled:bool {}
         fn run()->bool {Holder<true>.as(Flags<true>).copy and not Holder<false>.as(Flags<false>).copy}";
+    let unchecked = source.replace("assumes enabled;", "");
+    let error = support::compile_with_protocols(&unchecked, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("program precondition is not proven"),
+        "{error}"
+    );
+
     let package = support::compile(source);
     assert!(
         package
@@ -3149,7 +3156,8 @@ fn generic_associated_initializers_freeze_dependencies_and_check_contracts() {
         "not Holder<false>.as(Flags<false>).flag",
     );
     let invalid = support::compile(&invalid);
-    assert!(luna::instantiation::instantiate(&invalid, "run", 100_000).is_err());
+    let error = luna::instantiation::instantiate(&invalid, "run", 100_000).unwrap_err();
+    assert!(error.contains("ProgramContractRejected"), "{error}");
 }
 
 #[test]
@@ -3592,7 +3600,7 @@ fn generic_associated_initializers_execute_only_in_comptime_interpreter() {
 #[test]
 fn generic_associated_initializers_recover_after_failed_comptime_contract() {
     let source = "comptime fn checked(value:bool)->bool where requires value {value}
-        trait Flags where enabled:bool {assoc flag:bool=checked(enabled);}
+        trait Flags where enabled:bool {assoc flag:bool=do { assumes enabled; checked(enabled) };}
         struct Holder where enabled:bool {}
         impl Flags<enabled> for Holder<enabled> where enabled:bool {}
         comptime fn fail()->bool {Holder<false>.as(Flags<false>).flag}
@@ -3600,11 +3608,19 @@ fn generic_associated_initializers_recover_after_failed_comptime_contract() {
     let package = support::compile(source);
     let mut vm =
         comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
-    assert!(vm.invoke(support::id(&package, "fail"), vec![]).is_err());
-    assert_eq!(
-        vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
-        Value::Bool(true)
-    );
+    for _ in 0..2 {
+        let error = vm
+            .invoke(support::id(&package, "fail"), vec![])
+            .unwrap_err();
+        assert_eq!(
+            error.kind,
+            comptime_interpretor::ErrorKind::ProgramContractRejected
+        );
+        assert_eq!(
+            vm.invoke(support::id(&package, "run"), vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
 }
 
 #[test]
