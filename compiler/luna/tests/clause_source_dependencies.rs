@@ -330,3 +330,71 @@ fn a_returned_specialization_retains_its_own_clause_inputs() {
     "#;
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn mixed_clause_results_keep_lexical_values_and_check_unselected_producers() {
+    let source = r#"
+        comptime fn event(name: Symbol, value: u8) -> u8 {
+            let generated = meta.StructBuilder.new(.name = name).Build();
+            value
+        }
+        fn check(value: T) -> ?T where T, .tag: ?T = null, .stamp: u8 = 0 {
+            if stamp == 9 { tag } else { null }
+        }
+        fn run() -> bool {
+            let byte: u8 = 0;
+            let result = check<.tag = do {
+                let value = event(.BeforeMatch, 42);
+                value match {
+                    0 => null,
+                    1 => event(.Skipped, value),
+                    payload => event(.Selected, payload),
+                }
+            }, .stamp = event(.AfterMatch, 9)>(byte);
+            result matches 42?
+        }
+    "#;
+    let package = sysroot::compile(source).unwrap();
+    let mut events: Vec<_> = package
+        .structs
+        .iter()
+        .filter_map(|def| {
+            let name = def.name.as_str();
+            matches!(name, "BeforeMatch" | "Skipped" | "Selected" | "AfterMatch")
+                .then_some((def.declaration, name))
+        })
+        .collect();
+    events.sort_unstable();
+    assert_eq!(
+        events.iter().map(|(_, name)| *name).collect::<Vec<_>>(),
+        ["BeforeMatch", "Selected", "AfterMatch"]
+    );
+    let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let bad = source.replace("event(.Skipped, value)", "event(.Skipped, value) == 1");
+    let error = sysroot::compile(&bad).unwrap_err();
+    assert!(error.contains("bool") && error.contains("u8"), "{error}");
+}
+
+#[test]
+fn mixed_clause_results_distinguish_absence_from_an_absent_payload() {
+    let source = r#"
+        comptime fn choose(value: bool) -> bool { value }
+        comptime fn absent() -> ?u8 { null }
+        fn read(value: T) -> ?T where T, .tag: ?T = null { tag }
+        fn staged(value: ?u8, comptime flag: bool) -> ??u8 {
+            read<.tag = if choose(flag) { null } else { absent() }>(value)
+        }
+        fn run() -> bool {
+            let witness: ?u8 = null;
+            let outer = staged(witness, true);
+            let inner = staged(witness, false);
+            (outer matches null) and (inner matches null?)
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}

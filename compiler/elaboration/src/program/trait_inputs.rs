@@ -11,19 +11,23 @@ pub(super) enum ExplicitClause<'hir> {
     Computed { value: Box<n::Expr>, span: Span },
 }
 
+fn frozen_operand(value: Term, actual: Term, span: Span) -> Box<n::Expr> {
+    let kind = if actual == p(P::Type) {
+        K::TypeValue(value)
+    } else {
+        K::ComptimeValue(value)
+    };
+    Box::new(n::Expr {
+        source: source(span),
+        ty: actual,
+        kind,
+    })
+}
+
 impl ExplicitClause<'_> {
     fn computed(value: Term, actual: Term, span: Span) -> Self {
-        let kind = if actual == p(P::Type) {
-            K::TypeValue(value)
-        } else {
-            K::ComptimeValue(value)
-        };
         Self::Computed {
-            value: Box::new(n::Expr {
-                source: source(span),
-                ty: actual,
-                kind,
-            }),
+            value: frozen_operand(value, actual, span),
             span,
         }
     }

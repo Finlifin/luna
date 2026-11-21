@@ -1,4 +1,4 @@
-//! Separate control evaluation from the contextual delivery of literal results.
+//! Separate control and producer evaluation from contextual result delivery.
 //! The selector runs as one required expression, so block locals, guards, and
 //! nested subjects all remain in the same source activation.
 use super::*;
@@ -6,8 +6,16 @@ use super::*;
 #[derive(Clone)]
 pub(in crate::program) struct Selection<'hir> {
     source: &'hir Expr<'hir>,
-    alternatives: std::sync::Arc<[&'hir Expr<'hir>]>,
+    alternatives: std::sync::Arc<[Alternative<'hir>]>,
     selected: usize,
+}
+
+enum Alternative<'hir> {
+    Literal(&'hir Expr<'hir>),
+    Producer {
+        site: &'hir Expr<'hir>,
+        checked: Option<Box<n::Expr>>,
+    },
 }
 
 impl<'hir> Selection<'hir> {
@@ -30,6 +38,12 @@ impl<'hir> Selection<'hir> {
         let Some(selector) = project(checker, &arena, source, &mut alternatives, 0)? else {
             return Ok(None);
         };
+        if !alternatives
+            .iter()
+            .any(|site| matches!(site, Alternative::Literal(_)))
+        {
+            return Ok(None);
+        }
         // Describing an open body has no invocation-time selector. Its ordinary
         // staging rules check the original control when its domain is inferred.
         if !checker.in_required_comptime
@@ -45,20 +59,50 @@ impl<'hir> Selection<'hir> {
                 ExplicitClause::Contextual(source)
             }));
         }
-        let comptime_interpretor::Value::Integer(index) =
-            checker.required_value(selector, P::Integer)?
-        else {
-            return Err(error(
-                source.span,
-                "clause selection did not produce an index",
-            ));
+        // The Object is local to this invocation. Each selected producer keeps
+        // its checked domain, including when it reads a block or pattern local.
+        let (prepared, ()) = checker.prepare_required_root_with_live_inputs(
+            source,
+            required::RootKind::Expression,
+            Vec::new(),
+            false,
+            &[],
+            |this| {
+                let root = this.expr(selector, Some(&p(P::Object)))?;
+                retain_producers(this, &root, &mut alternatives, source.span)?;
+                Ok((root, ()))
+            },
+        )?;
+        let (packet, _) = checker.invoke_required_publishing(
+            prepared,
+            Vec::new(),
+            source.hir_id.owner,
+            source.span,
+        )?;
+        let comptime_interpretor::Value::Object(packet) = packet else {
+            return Err(error(source.span, "invalid clause selection packet"));
         };
-        let selected = index
-            .to_u128()
-            .ok()
-            .and_then(|index| usize::try_from(index).ok())
-            .filter(|i| *i < alternatives.len())
-            .ok_or_else(|| error(source.span, "invalid clause selection index"))?;
+        let mut entries = packet
+            .into_entries()
+            .into_iter()
+            .map(|entry| entry.into_value());
+        let selected = match entries.next().map(|entry| entry.value) {
+            Some(comptime_interpretor::Value::Integer(index)) => index
+                .to_u128()
+                .ok()
+                .and_then(|index| usize::try_from(index).ok()),
+            _ => None,
+        }
+        .filter(|index| *index < alternatives.len())
+        .ok_or_else(|| error(source.span, "invalid clause selection index"))?;
+        match (&mut alternatives[selected], entries.next()) {
+            (Alternative::Literal(_), None) => {}
+            (Alternative::Producer { site, checked }, Some(entry)) => {
+                let identity = checker.required_normal_term(entry.value, site.span)?;
+                *checked = Some(frozen_operand(identity, entry.ty, site.span));
+            }
+            _ => return Err(error(source.span, "invalid selected clause payload")),
+        }
         Ok(Some(ExplicitClause::Selection(Self {
             source,
             alternatives: alternatives.into(),
@@ -81,10 +125,24 @@ impl<'hir> Selection<'hir> {
             &[],
             |this| {
                 let mut result = None;
-                for (index, expr) in self.alternatives.iter().enumerate() {
-                    let checked = this.expr(expr, Some(domain))?;
-                    if index == self.selected {
-                        result = Some(checked);
+                for (index, alternative) in self.alternatives.iter().enumerate() {
+                    match alternative {
+                        Alternative::Literal(expr) => {
+                            let literal = this.expr(expr, Some(domain))?;
+                            if index == self.selected {
+                                result = Some(literal);
+                            }
+                        }
+                        Alternative::Producer { site, checked } => {
+                            let operand = checked.as_deref().ok_or_else(|| {
+                                error(site.span, "missing checked clause producer")
+                            })?;
+                            let delivered =
+                                this.deliver_computed_value(operand, domain, site.span)?;
+                            if index == self.selected {
+                                result = Some(delivered.into_owned());
+                            }
+                        }
                     }
                 }
                 Ok((result.expect("validated selection index"), ()))
@@ -100,14 +158,62 @@ impl<'hir> Selection<'hir> {
     }
 }
 
-// Only replace whole literal results. In particular, an application at a
-// result site must keep its own source-order evaluation and lexical captures.
-// Projecting is read-only until every arm has a representation.
+// Follow only the normalized control's result edges. Inner Objects, calls and
+// guards belong to user code. A retained producer is checked after inference
+// even if this invocation selected a different arm; it is never run again.
+fn retain_producers(
+    checker: &mut Checker<'_, '_>,
+    root: &n::Expr,
+    alternatives: &mut [Alternative<'_>],
+    span: Span,
+) -> Result<(), Error> {
+    let mut pending = vec![root];
+    while let Some(result) = pending.pop() {
+        checker.required_steps = checker
+            .required_steps
+            .checked_sub(1)
+            .ok_or_else(|| error(span, "clause result inspection budget exhausted"))?;
+        match &result.kind {
+            K::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                pending.push(then_branch);
+                pending.extend(else_branch.as_deref());
+            }
+            K::Match { arms, .. } => pending.extend(arms.iter().map(|arm| &arm.body)),
+            K::Block { result, .. } | K::CallPreparation { result, .. } => {
+                pending.extend(result.as_deref())
+            }
+            K::Object { fields, .. } => {
+                if let [tag, value] = fields.as_slice() {
+                    let index = match &tag.kind {
+                        K::Literal(n::Literal::Integer(index)) => index.parse::<usize>().ok(),
+                        _ => None,
+                    };
+                    let Some(Alternative::Producer { site, checked }) =
+                        index.and_then(|index| alternatives.get_mut(index))
+                    else {
+                        return Err(error(span, "invalid staged producer site"));
+                    };
+                    constants::charge_copy(value, &mut checker.required_steps, site.span)?;
+                    *checked = Some(Box::new(value.clone()));
+                }
+            }
+            _ => return Err(error(span, "missing contextual result packet")),
+        }
+    }
+    Ok(())
+}
+
+// A contextual literal keeps its source site. Other yields run inside their
+// original lexical scope and return their typed value beside the site index.
 fn project<'tree, 'src: 'tree>(
     checker: &mut Checker<'_, '_>,
     arena: &'tree hir::HirArena,
     source: &'src Expr<'src>,
-    alternatives: &mut Vec<&'src Expr<'src>>,
+    alternatives: &mut Vec<Alternative<'src>>,
     depth: usize,
 ) -> Result<Option<&'tree Expr<'tree>>, Error> {
     if depth >= 128 {
@@ -176,15 +282,27 @@ fn project<'tree, 'src: 'tree>(
             }
             H::When(arena.alloc_cond_arm_slice(projected))
         }
-        _ if checker.is_closed_clause_literal(source)? => {
-            let spelling = alternatives.len().to_string();
-            alternatives.push(source);
-            H::Lit(hir::Lit {
-                kind: hir::LitKind::Integer(spelling),
+        _ => {
+            let index = arena.alloc_expr(Expr {
+                hir_id: source.hir_id,
                 span: source.span,
-            })
+                kind: H::Lit(hir::Lit {
+                    kind: hir::LitKind::Integer(alternatives.len().to_string()),
+                    span: source.span,
+                }),
+            });
+            let mut fields = vec![hir::expr::ObjectEntry::Value(index)];
+            if checker.is_closed_clause_literal(source)? {
+                alternatives.push(Alternative::Literal(source));
+            } else {
+                fields.push(hir::expr::ObjectEntry::Value(source));
+                alternatives.push(Alternative::Producer {
+                    site: source,
+                    checked: None,
+                });
+            }
+            H::Object(fields)
         }
-        _ => return Ok(None),
     };
     Ok(Some(arena.alloc_expr(Expr {
         hir_id: source.hir_id,
