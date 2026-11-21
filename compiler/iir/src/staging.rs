@@ -153,24 +153,6 @@ pub fn bind_inputs_with_layouts<'layout>(
     fuel: &mut usize,
 ) -> Result<Function, String> {
     let mut heads = heads.into();
-    bind_inputs_with_type_view(
-        template,
-        inputs,
-        fuel,
-        &mut heads,
-        |heads| *heads,
-        |_, ty, _| Ok(ty.clone()),
-    )
-}
-
-fn bind_inputs_with_type_view<C>(
-    template: &Function,
-    inputs: &[Option<Expr>],
-    fuel: &mut usize,
-    context: &mut C,
-    layouts: impl Fn(&C) -> Layouts<'_>,
-    mut type_view: impl FnMut(&mut C, &Term, &mut usize) -> Result<Term, String>,
-) -> Result<Function, String> {
     let Term::Function { parameters, .. } = template.signature.callable_signature() else {
         return Err("staged input template is not a function".into());
     };
@@ -187,16 +169,44 @@ fn bind_inputs_with_type_view<C>(
             if parameter.sort == Sort::Runtime {
                 return Err("runtime input cannot be erased as a staged input".into());
             }
-            Some(constant(layouts(context), value, fuel, 0)?)
+            Some(constant(heads, value, fuel, 0)?)
         } else {
             None
         };
         symbols.push(symbol);
     }
     let scope =
-        prepare_binding_with_type_view(&template.signature, &symbols, fuel, &mut |ty, fuel| {
-            type_view(context, ty, fuel)
+        prepare_binding_with_type_view(&template.signature, &symbols, fuel, &mut |ty, _| {
+            Ok(ty.clone())
         })?;
+    let (function, _) = specialize_bound_inputs(
+        template,
+        inputs,
+        &scope,
+        &unique,
+        fuel,
+        &mut heads,
+        |heads| *heads,
+        |_, ty, _| Ok(ty.clone()),
+    )?;
+    Ok(function)
+}
+
+/// Reconstruct the body and its runtime slot map using the same binding that
+/// supplied the instance key and the residual call's parameter frame.
+fn specialize_bound_inputs<C>(
+    template: &Function,
+    inputs: &[Option<Expr>],
+    scope: &nir::FunctionInputBinding,
+    unique: &BTreeSet<LocalId>,
+    fuel: &mut usize,
+    context: &mut C,
+    layouts: impl Fn(&C) -> Layouts<'_>,
+    mut type_view: impl FnMut(&mut C, &Term, &mut usize) -> Result<Term, String>,
+) -> Result<(Function, Vec<Option<usize>>), String> {
+    let Term::Function { parameters, .. } = template.signature.callable_signature() else {
+        return Err("staged input template is not a function".into());
+    };
     let mut bindings = Vec::new();
     for ((parameter, binding), input) in parameters.iter().zip(&template.parameters).zip(inputs) {
         if let Some(value) = input {
@@ -235,7 +245,7 @@ fn bind_inputs_with_type_view<C>(
         })?;
     }
     for requirement in &mut result.capabilities {
-        rebind_requirement(requirement, &scope, fuel)?;
+        rebind_requirement(requirement, scope, fuel)?;
     }
     let mut predicates = result
         .interface
@@ -248,7 +258,7 @@ fn bind_inputs_with_type_view<C>(
         use nir::program::TypePredicate as P;
         match predicate {
             P::Bool(_) => {}
-            P::Trait(requirement) => rebind_requirement(requirement, &scope, fuel)?,
+            P::Trait(requirement) => rebind_requirement(requirement, scope, fuel)?,
             P::Equal(left, right) => {
                 *left = scope.rebind(left).map_err(|e| e.to_string())?;
                 *right = scope.rebind(right).map_err(|e| e.to_string())?;
@@ -312,7 +322,7 @@ fn bind_inputs_with_type_view<C>(
             result.interface.defaults.push((*slot, expression));
         }
     }
-    Ok(result)
+    Ok((result, slots))
 }
 
 fn binding_type_view(
@@ -1627,15 +1637,8 @@ pub fn bind_call_in_world<C>(
     if seen.contains(&false) {
         return Err("missing staged call argument".into());
     }
-    if template.parameters.len() != parameters.len()
-        || template
-            .parameters
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .len()
-            != parameters.len()
-    {
+    let unique: BTreeSet<_> = template.parameters.iter().copied().collect();
+    if template.parameters.len() != parameters.len() || unique.len() != parameters.len() {
         return Err("invalid staged template parameter bindings".into());
     }
     // Validate the complete routing plan before executing any user input.
@@ -1684,29 +1687,20 @@ pub fn bind_call_in_world<C>(
         symbols[argument.parameter] = Some(symbol);
         inputs[argument.parameter] = Some(value);
     }
-    let function =
-        bind_inputs_with_type_view(template, &inputs, fuel, context, &layouts, &mut type_view)?;
-    let mut key_arguments = declaration_arguments.to_vec();
-    key_arguments.extend(symbols.iter().flatten().cloned());
-    let key = crate::InstanceKey {
-        declaration: template.declaration,
-        arguments: (key_arguments).into(),
-    };
-    let mut slots = Vec::new();
-    let mut next = 0;
-    for input in &inputs {
-        slots.push(if input.is_none() {
-            let index = next;
-            next += 1;
-            Some(index)
-        } else {
-            None
-        });
-    }
     let scope =
         prepare_binding_with_type_view(&template.signature, &symbols, fuel, &mut |ty, fuel| {
             type_view(context, ty, fuel)
         })?;
+    let (function, slots) = specialize_bound_inputs(
+        template,
+        &inputs,
+        &scope,
+        &unique,
+        fuel,
+        context,
+        &layouts,
+        &mut type_view,
+    )?;
     if signature_differs {
         // Interface and implementation annotations can differ under their
         // ordinary Type contract. Validate equivalence after binding actual
@@ -1737,6 +1731,12 @@ pub fn bind_call_in_world<C>(
             }
         }
     }
+    let mut key_arguments = declaration_arguments.to_vec();
+    key_arguments.extend(symbols.into_iter().flatten());
+    let key = crate::InstanceKey {
+        declaration: template.declaration,
+        arguments: (key_arguments).into(),
+    };
     let heads = layouts(context);
     let mut runtime_arguments = Vec::new();
     for argument in arguments {

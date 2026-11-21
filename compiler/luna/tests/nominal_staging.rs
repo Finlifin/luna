@@ -539,7 +539,9 @@ fn staged_normal_callables_specialize_by_head_and_check_obligations_at_applicati
 fn a_newtype_published_by_one_input_is_visible_to_its_default_and_instance_key() {
     use nir::program::{CallArgument, Expr, ExprKind as K, Literal};
     let package = compile(
-        "newtype Tag=bool; fn choose(comptime tag:Tag, comptime .copy:Tag=tag)->bool {true}",
+        "typealias char = .char'builtin;
+         newtype Tag=bool;
+         fn choose(comptime tag:Tag, keep:char, comptime .copy:Tag=tag)->bool {true}",
     );
     let template = package
         .functions
@@ -577,6 +579,15 @@ fn a_newtype_published_by_one_input_is_visible_to_its_default_and_instance_key()
                 },
                 CallArgument {
                     parameter: 1,
+                    value: make(
+                        K::Literal(Literal::Char('x')),
+                        Term::Primitive(Primitive::Char),
+                    ),
+                    passing: Default::default(),
+                    is_default: false,
+                },
+                CallArgument {
+                    parameter: 2,
                     value: make(K::Local(template.parameters[0]), ty.clone()),
                     passing: Default::default(),
                     is_default: true,
@@ -587,7 +598,8 @@ fn a_newtype_published_by_one_input_is_visible_to_its_default_and_instance_key()
     );
     let mut layouts = Vec::new();
     let mut evaluations = 0;
-    let (instance, _) = iir::staging::bind_call_in_world(
+    let mut retained_domain_queries = 0;
+    let (instance, residual) = iir::staging::bind_call_in_world(
         template,
         &[],
         &call,
@@ -601,7 +613,12 @@ fn a_newtype_published_by_one_input_is_visible_to_its_default_and_instance_key()
             }
             Ok(input.clone())
         },
-        |_, ty, _| Ok(ty.clone()),
+        |_, ty, _| {
+            if ty == &Term::Primitive(Primitive::Char) {
+                retained_domain_queries += 1;
+            }
+            Ok(ty.clone())
+        },
     )
     .unwrap();
     let expected = Term::NominalValue {
@@ -614,4 +631,21 @@ fn a_newtype_published_by_one_input_is_visible_to_its_default_and_instance_key()
         [expected.clone(), expected]
     );
     assert_eq!(evaluations, 2);
+    // The default needs the partial telescope. Body and call share the final one.
+    assert_eq!(retained_domain_queries, 2);
+    let K::Call {
+        arguments,
+        parameter_bindings,
+        ..
+    } = residual.kind
+    else {
+        panic!("expected residual call")
+    };
+    assert_eq!(parameter_bindings, [template.parameters[1]]);
+    assert_eq!(arguments.len(), 1);
+    assert_eq!(arguments[0].parameter, 0);
+    assert!(matches!(
+        arguments[0].value.kind,
+        K::Literal(Literal::Char('x'))
+    ));
 }
