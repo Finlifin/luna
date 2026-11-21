@@ -1,5 +1,6 @@
 //! Static input identity is evidence, not a replacement for its producer.
 use comptime_interpretor::{Budget, Event, Value};
+
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
@@ -876,6 +877,130 @@ fn explicit_operands_wait_for_default_dependent_comptime_domains() {
     assert!(
         error.contains("expected (primitive bool), found (primitive char)"),
         "{error}"
+    );
+}
+
+#[test]
+fn pending_comptime_inputs_resume_selected_control_with_the_declared_width() {
+    let source = "
+        comptime fn enabled() -> bool { true }
+        comptime fn fail() -> u16 { assumes false; 0 }
+        comptime fn consume(.wide: bool = enabled(),
+            .value: defer if wide { u16 } else { u8 } = 0)
+            -> defer if wide { u16 } else { u8 } { value }
+        comptime fn describe(.wide: bool = enabled(),
+            ...fields: defer if wide { Tuple<Any> } else { Tuple<char> }) -> bool { true }
+        const described = describe(if enabled() { 321 } else { 123 });
+        const selected = consume(.value = if enabled() { 256 } else { fail() });
+        const from_match = consume(.value = do {
+            let value: u16 = 357;
+            enabled() match { true => value, false => 1 }
+        });
+        fn run() -> bool { selected == 256 and from_match == 357 and described }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let wrong_branch = source.replace("else { fail() }", "else { 65536 }");
+    let error = sysroot::compile(&wrong_branch).unwrap_err();
+    assert!(error.contains("integer does not fit"), "{error}");
+}
+
+#[test]
+fn pending_comptime_selection_checks_aggregate_fields_and_preserves_aliases() {
+    let source = "
+        typealias Switch = %{flag: bool} comptime fn() -> bool;
+        comptime fn toggle() -> Switch { var flag = false; || { flag = not flag; flag } }
+        comptime fn branch() -> bool { true }
+        comptime fn accept(.wide: bool = branch(), ...fields: defer if wide {
+            Tuple<Tuple<u16, Switch, Switch>>
+        } else { Tuple<Tuple<u8, Switch, Switch>> })
+            -> defer if wide { Tuple<Tuple<u16, Switch, Switch>> } else { Tuple<Tuple<u8, Switch, Switch>> } { fields }
+        const ok = do {
+            let answer = accept(do {
+                let flip = toggle();
+                (if branch() { 511 } else { 0 }, flip, flip)
+            });
+            let ((width, first, second),) = answer;
+            width == 511 and first() and not second()
+        };
+        fn run() -> bool { ok }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
+fn literal_signature_inputs_leave_control_transfers_and_effects_in_the_caller() {
+    let source = "
+        comptime fn bad() -> bool { assumes false; true }
+        comptime fn enabled() -> bool { true }
+        comptime fn consume(.wide: bool = true,
+            .item: defer if wide { u16 } else { u8 } = 0) -> bool { false }
+        comptime fn unused() -> bool {
+            consume(.item = if bad() { 512 } else { 0 })
+        }
+        comptime fn outer(flag: bool) -> bool {
+            consume(.item = do {
+                if flag { return true; }
+                if enabled() { 256 } else { 0 }
+            })
+        }
+        const ok = outer(true) and not outer(false);
+        const skipped = if false { consume(.item = if bad() { 256 } else { 0 }) } else { true };
+        fn run() -> bool { ok and skipped }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
+fn unobserved_open_calls_do_not_start_contextual_producers() {
+    // The general effectful default still needs the caller's VM continuation.
+    // Reporting that boundary must not execute either the selector or default.
+    let source = "
+        comptime fn trap() -> bool { assumes false; true }
+        comptime fn consume(.wide: bool = trap(),
+            .item: defer if wide { u16 } else { u8 } = 0) -> bool { true }
+        const answer = if false { consume(.item = if trap() { 256 } else { 0 }) } else { true };
+        fn run() -> bool { answer }";
+    let error = sysroot::compile(source).unwrap_err();
+    assert!(
+        error.contains("awaits control reaching its original comptime invocation"),
+        "{error}"
+    );
+    assert!(!error.contains("ProgramContractRejected"), "{error}");
+}
+
+#[test]
+fn selected_comptime_producers_publish_once_in_source_order() {
+    let source = r#"
+        comptime fn observed(name: Symbol, result: bool) -> bool {
+            let generated = meta.StructBuilder.new(.name = name).Build();
+            result
+        }
+        comptime fn consume(.wide: bool = observed(.DomainDefault, true),
+            .value: defer if wide { ?bool } else { ?char } = true,
+            .other: bool = false) -> bool { other }
+        const ok = consume(.value = if observed(.Condition, true) {
+            observed(.Selected, true)
+        } else { observed(.Skipped, false); null }, .other = observed(.NextOperand, true));
+        fn run() -> bool { ok }
+    "#;
+    let package = sysroot::compile(source).unwrap();
+    let names = [
+        "Condition",
+        "Selected",
+        "Skipped",
+        "NextOperand",
+        "DomainDefault",
+    ];
+    let mut observed: Vec<_> = package
+        .structs
+        .iter()
+        .filter(|item| names.contains(&item.name.as_str()))
+        .map(|item| (item.declaration, item.name.as_str()))
+        .collect();
+    observed.sort_by_key(|(id, _)| *id);
+    assert_eq!(
+        observed
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>(),
+        ["Condition", "Selected", "NextOperand", "DomainDefault"]
     );
 }
 

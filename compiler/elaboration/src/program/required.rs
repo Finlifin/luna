@@ -30,6 +30,34 @@ pub(super) enum RootKind {
     CallableInputs,
 }
 
+// Preparing code for the VM also checks unentered branches and callable bodies.
+// Only carry entry evidence along edges reached before any preceding computation.
+fn entry_call(mut expr: &Expr<'_>, steps: &mut u64) -> Result<Option<(hir::HirId, Span)>, Error> {
+    loop {
+        *steps = steps
+            .checked_sub(1)
+            .ok_or_else(|| error(expr.span, "required entry observation budget exhausted"))?;
+        expr = match expr.kind {
+            H::Application(..) | H::ExtendedApplication(..) => {
+                return Ok(Some((expr.hir_id, expr.span)));
+            }
+            H::Block(block) | H::UnsafeBlock(block) => match block.stmts.first().or(block.expr) {
+                Some(first) => first,
+                None => return Ok(None),
+            },
+            H::Let(decl) => match decl.init {
+                Some(value) => value,
+                None => return Ok(None),
+            },
+            H::If(condition, _, _)
+            | H::Match(condition, _)
+            | H::Binary(_, condition, _)
+            | H::Unary(_, condition) => condition,
+            _ => return Ok(None),
+        };
+    }
+}
+
 /// A prepared operation owns its selection world and live inputs. Its source
 /// owner forms requested declarations in their original lexical environments.
 pub(super) struct Invocation {
@@ -954,20 +982,7 @@ impl Checker<'_, '_> {
             false,
             &live,
         )?;
-        let selected: BTreeSet<_> = prepared
-            .inputs
-            .iter()
-            .map(|(binding, _, _)| *binding)
-            .collect();
-        self.invoke_required_publishing(
-            prepared,
-            live.into_iter()
-                .filter(|(binding, _, _)| selected.contains(binding))
-                .map(|(binding, _, value)| (binding, value))
-                .collect(),
-            source.hir_id.owner,
-            source.span,
-        )
+        self.invoke_required_with_live_inputs(prepared, live, source)
     }
 
     pub(super) fn required_expression_with_live_inputs(
@@ -984,6 +999,23 @@ impl Checker<'_, '_> {
             false,
             &live,
         )?;
+        self.invoke_required_with_live_inputs(prepared, live, source)
+    }
+
+    pub(super) fn invoke_required_with_live_inputs(
+        &mut self,
+        prepared: PreparedRequired,
+        live: Vec<(n::LocalId, Term, Value)>,
+        source: &Expr<'_>,
+    ) -> Result<(Value, Term), Error> {
+        if live.is_empty() {
+            return self.invoke_required_publishing(
+                prepared,
+                Vec::new(),
+                source.hir_id.owner,
+                source.span,
+            );
+        }
         let selected: BTreeSet<_> = prepared
             .inputs
             .iter()
@@ -1045,6 +1077,7 @@ impl Checker<'_, '_> {
                 return Err(error(expr.span, "duplicate required comptime input"));
             }
         }
+        let entry = entry_call(expr, &mut self.required_steps)?;
         let query = (local(expr.hir_id), kind);
         if self.active_required.len() >= 32 || !self.active_required.insert(query) {
             return Err(error(
@@ -1052,6 +1085,7 @@ impl Checker<'_, '_> {
                 "cyclic or excessively deep required comptime dependency",
             ));
         }
+        let saved_entry = std::mem::replace(&mut self.required_entry_call, entry);
         let saved_control = std::mem::take(&mut self.control);
         let saved_captures = std::mem::take(&mut self.captures);
         let saved_code = std::mem::replace(&mut self.in_code_body, false);
@@ -1710,6 +1744,7 @@ impl Checker<'_, '_> {
         self.in_code_body = saved_code;
         self.in_required_comptime = saved_mode;
         self.numeric_defaults = saved_numeric;
+        self.required_entry_call = saved_entry;
         self.active_required.remove(&query);
         result
     }

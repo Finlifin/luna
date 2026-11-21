@@ -1,9 +1,11 @@
 //! Caller operands acquired before an omitted input determines their destination.
 use super::*;
+use crate::program::input_selection::LiveSelection;
 use comptime_interpretor::Value;
 use std::borrow::Cow;
 
-enum Operand {
+enum Operand<'src> {
+    Selection(LiveSelection<'src>),
     Literal,
     Completed {
         ty: Term,
@@ -13,11 +15,11 @@ enum Operand {
 }
 
 #[derive(Default)]
-pub(super) struct PendingInputs {
-    slots: BTreeMap<usize, BTreeMap<usize, Operand>>,
+pub(super) struct PendingInputs<'src> {
+    slots: BTreeMap<usize, BTreeMap<usize, Operand<'src>>>,
 }
 
-impl PendingInputs {
+impl<'src> PendingInputs<'src> {
     pub(super) fn contains(&self, slot: usize) -> bool {
         self.slots.contains_key(&slot)
     }
@@ -28,6 +30,8 @@ impl PendingInputs {
         slot: usize,
         field: usize,
         input: &Expr<'_>,
+        original: &'src Expr<'src>,
+        call: &Expr<'_>,
     ) -> Result<(), Error> {
         let fields = self.slots.entry(slot).or_default();
         if fields.contains_key(&field) {
@@ -37,6 +41,11 @@ impl PendingInputs {
         // run here, at their source position, before any declaration default.
         let operand = if checker.is_closed_input_literal(input)? {
             Operand::Literal
+        } else if !matches!(input.kind, H::TacticArgument(_))
+            && let Some(selection) = checker
+                .with_staged_input(true, |this| LiveSelection::acquire(this, original, call))?
+        {
+            Operand::Selection(selection)
         } else {
             let checked = checker
                 .with_staged_input(true, |this| this.argument_attempt(input, None, None))?
@@ -79,6 +88,15 @@ impl PendingInputs {
         for (field, (_, input)) in route.source_inputs().enumerate() {
             let ty = match &self.slots[&route.parameter][&field] {
                 Operand::Completed { ty, .. } => ty.clone(),
+                Operand::Selection(selection) => {
+                    let Some(ty) = checker.with_staged_input(true, |this| {
+                        selection.actual_domain(this, allow_numeric_defaults)
+                    })?
+                    else {
+                        return Ok(None);
+                    };
+                    ty
+                }
                 Operand::Literal => {
                     let Some(checked) = checker.with_staged_input(true, |this| {
                         this.argument_attempt_with_defaults(
@@ -133,6 +151,14 @@ impl PendingInputs {
             let domain = domains.next().expect("checked arity");
             let operand = operands.remove(&field).expect("acquired source field");
             let (expr, value) = match operand {
+                Operand::Selection(selection) => {
+                    let (value, actual) =
+                        checker.with_staged_input(true, |this| selection.deliver(this, &domain))?;
+                    (
+                        checker.materialize_local_constant(value.clone(), actual, input.span)?,
+                        value,
+                    )
+                }
                 Operand::Literal => {
                     let expr =
                         checker.with_staged_input(true, |this| this.expr(input, Some(&domain)))?;

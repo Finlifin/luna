@@ -147,8 +147,12 @@ fn subject_pattern_bindings(
 }
 
 // A pending ordinary description is not a frozen inference candidate or IR.
-enum OpenClauseInference {
-    Ready(Vec<Term>, StagedInputs, BTreeMap<usize, CompletedType>),
+enum OpenClauseInference<'src> {
+    Ready(
+        Vec<Term>,
+        StagedInputs<'src>,
+        BTreeMap<usize, CompletedType>,
+    ),
     Pending(D),
 }
 
@@ -6553,28 +6557,28 @@ impl Checker<'_, '_> {
         computation.uses_declaration_inputs(clauses, &mut self.required_steps, span)
     }
 
-    fn infer_open_clause_arguments(
+    fn infer_open_clause_arguments<'src>(
         &mut self,
         expr: &Expr<'_>,
         owner: OwnerId,
-        args: &[Arg<'_>],
+        args: &[Arg<'src>],
         expected: Option<&Term>,
         description: Option<(&mut BTreeMap<n::LocalId, D>, Option<&D>, usize)>,
-    ) -> Result<OpenClauseInference, Error> {
+    ) -> Result<OpenClauseInference<'src>, Error> {
         let lexical = self.lexical_function_arguments(owner, expr.span)?;
         let plan = self.function_type_plan(owner, &lexical, expr.span)?;
         self.infer_open_clauses_with_plan(expr, owner, args, expected, description, plan)
     }
 
-    fn infer_open_clauses_with_plan(
+    fn infer_open_clauses_with_plan<'src>(
         &mut self,
         expr: &Expr<'_>,
         owner: OwnerId,
-        args: &[Arg<'_>],
+        args: &[Arg<'src>],
         expected: Option<&Term>,
         mut description: Option<(&mut BTreeMap<n::LocalId, D>, Option<&D>, usize)>,
         plan: type_defaults::FunctionTypePlan<'_>,
-    ) -> Result<OpenClauseInference, Error> {
+    ) -> Result<OpenClauseInference<'src>, Error> {
         self.check_open_interface_dependency(owner)?;
         let mut definition = self.open_functions[&owner].clone();
         let ItemKind::Fn(sig, _) = &self.package.item(owner).unwrap().kind else {
@@ -6680,6 +6684,13 @@ impl Checker<'_, '_> {
                     }
                 }
             }
+            let independent = self.signature_independent_of_producers(
+                &definition,
+                sig,
+                &routes,
+                &needed,
+                expr.span,
+            )?;
             for slot in 0..=sig.params.len() {
                 let annotation = definition
                     .parameters
@@ -6783,7 +6794,7 @@ impl Checker<'_, '_> {
                 {
                     continue;
                 }
-                if sig.modifiers.is_comptime {
+                if sig.modifiers.is_comptime && !independent {
                     // Inference may need ordinary inputs to form a callback
                     // domain. Use the same source-order preparation as final
                     // invocation, and retain its values for that invocation.
@@ -7596,13 +7607,13 @@ impl Checker<'_, '_> {
         self.finish_inferred_open_call(expr, owner, args, expected, inferred)
     }
 
-    fn finish_inferred_open_call(
+    fn finish_inferred_open_call<'src>(
         &mut self,
         expr: &Expr<'_>,
         owner: OwnerId,
-        args: &[Arg<'_>],
+        args: &[Arg<'src>],
         expected: Option<&Term>,
-        inferred: OpenClauseInference,
+        inferred: OpenClauseInference<'src>,
     ) -> Result<n::Expr, Error> {
         let OpenClauseInference::Ready(arguments, checked, formed) = inferred else {
             unreachable!("concrete calls cannot suspend inference");
@@ -7618,13 +7629,13 @@ impl Checker<'_, '_> {
         result
     }
 
-    fn open_function_call(
+    fn open_function_call<'src>(
         &mut self,
         expr: &Expr<'_>,
         owner: OwnerId,
-        args: &[Arg<'_>],
+        args: &[Arg<'src>],
         expected: Option<&Term>,
-        checked: StagedInputs,
+        checked: StagedInputs<'src>,
         formed: BTreeMap<usize, CompletedType>,
     ) -> Result<n::Expr, Error> {
         let written_types = self.acquire_written_call_types(expr)?;
@@ -7715,6 +7726,13 @@ impl Checker<'_, '_> {
                 }
             }
         }
+        let independent = self.signature_independent_of_producers(
+            &definition,
+            sig,
+            &routes,
+            &ordinary_dependencies,
+            expr.span,
+        )?;
         let mut symbols = checked.symbols;
         let mut values = checked.values;
         let mut live = checked.live;
@@ -7789,7 +7807,7 @@ impl Checker<'_, '_> {
                 live[slot] = Some(completed);
             }
             if *sort != Sort::Runtime || ordinary_dependencies.contains(&slot) {
-                if sig.modifiers.is_comptime {
+                if sig.modifiers.is_comptime && !independent {
                     let early_domains = self.prepare_open_comptime_prefix(
                         expr,
                         owner,

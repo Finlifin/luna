@@ -23,6 +23,7 @@ mod inline_loops;
 pub mod inlining;
 mod input_observation;
 mod input_routing;
+mod input_selection;
 mod intrinsics;
 mod lexical_domains;
 mod nominal_fields;
@@ -40,8 +41,11 @@ mod builtin_bindings;
 mod call_selection;
 mod checking_attempts;
 mod closure_bodies;
+
 use closure_bodies::ClosureConstRegions;
+
 mod clause_inputs;
+
 use clause_inputs::CallableClauseView;
 
 use checking_attempts::Disposition as CheckingDisposition;
@@ -675,6 +679,7 @@ fn elaborate_in_mode(
         active_constants: BTreeSet::new(),
         active_nominals: BTreeSet::new(),
         active_required: BTreeSet::new(),
+        required_entry_call: None,
         active_contracts: BTreeSet::new(),
         active_function_defaults: BTreeSet::new(),
         active_type_defaults: BTreeSet::new(),
@@ -2452,6 +2457,7 @@ struct Checker<'a, 'h> {
     active_constants: BTreeSet<OwnerId>,
     active_nominals: BTreeSet<OwnerId>,
     active_required: BTreeSet<(n::LocalId, required::RootKind)>,
+    required_entry_call: Option<(hir::HirId, Span)>,
     active_contracts: BTreeSet<OwnerId>,
     active_function_defaults: BTreeSet<(OwnerId, usize)>,
     active_type_defaults: BTreeSet<(OwnerId, usize)>,

@@ -83,33 +83,7 @@ fn aggregate<'a, 'h: 'a>(
     let mut items = Vec::with_capacity(fields.len());
     for field in fields {
         let item = if view == View::All && field.sites.len() > 1 {
-            // Preserve all return sites for contextual checking in one tree.
-            // This witness is discarded before invocation; no guard is replayed.
-            let mut arms = Vec::with_capacity(field.sites.len());
-            for (index, alt) in field.sites.iter().enumerate() {
-                let body = arena.alloc_expr(render(checker, arena, alt, view, lets)?);
-                let cond = (index + 1 < field.sites.len()).then(|| {
-                    arena.alloc_expr(Expr {
-                        hir_id: body.hir_id,
-                        span: body.span,
-                        kind: H::Lit(hir::Lit {
-                            span: body.span,
-                            kind: hir::LitKind::Bool(false),
-                        }),
-                    })
-                });
-                arms.push(hir::CondictionArm {
-                    hir_id: body.hir_id,
-                    span: body.span,
-                    cond,
-                    body,
-                });
-            }
-            Expr {
-                hir_id: site.hir_id,
-                span: site.span,
-                kind: H::When(arena.alloc_cond_arm_slice(arms)),
-            }
+            witness(checker, arena, &field.sites, site)?
         } else {
             let index = match view {
                 View::All => 0,
@@ -153,12 +127,50 @@ fn aggregate<'a, 'h: 'a>(
                 H::Application(head, args)
             }
         }
-        _ => return Err(error(site.span, "invalid aggregate clause result")),
+        _ => return Err(error(site.span, "invalid aggregate input result")),
     };
     Ok(Expr {
         span: site.span,
         hir_id: site.hir_id,
         kind,
+    })
+}
+
+pub(super) fn witness<'a, 'h: 'a>(
+    checker: &mut Checker<'_, '_>,
+    arena: &'a hir::HirArena,
+    sites: &[Alternative<'h>],
+    site: &Expr<'h>,
+) -> Result<Expr<'a>, Error> {
+    if sites.len() == 1 {
+        return render(checker, arena, &sites[0], View::All, &mut Vec::new());
+    }
+    // Preserve all return sites for contextual checking in one tree.
+    // This witness is discarded before invocation; no guard is replayed.
+    let mut arms = Vec::with_capacity(sites.len());
+    for (index, alt) in sites.iter().enumerate() {
+        let body = arena.alloc_expr(render(checker, arena, alt, View::All, &mut Vec::new())?);
+        let cond = (index + 1 < sites.len()).then(|| {
+            arena.alloc_expr(Expr {
+                hir_id: body.hir_id,
+                span: body.span,
+                kind: H::Lit(hir::Lit {
+                    span: body.span,
+                    kind: hir::LitKind::Bool(false),
+                }),
+            })
+        });
+        arms.push(hir::CondictionArm {
+            hir_id: body.hir_id,
+            span: body.span,
+            cond,
+            body,
+        });
+    }
+    Ok(Expr {
+        hir_id: site.hir_id,
+        span: site.span,
+        kind: H::When(arena.alloc_cond_arm_slice(arms)),
     })
 }
 
@@ -184,7 +196,7 @@ fn render<'a, 'h: 'a>(
         Alternative::Producer { site, .. } => {
             return Err(error(site.span, "missing selected aggregate producer"));
         }
-        Alternative::Frozen { site, value } => (*site, &value.ty, Some(value)),
+        Alternative::Retained { site, value } => (*site, &value.ty, Some(value)),
     };
     // The enclosing required root scopes these fresh locals. Only the selected
     // tree enters the VM, with a real binding for every producer it reads.
@@ -207,7 +219,7 @@ fn render<'a, 'h: 'a>(
         hir_id: site.hir_id,
         span: site.span,
         kind: H::ResolvedLocal(
-            hir::common::Ident::new("$clause-field", site.span).name,
+            hir::common::Ident::new("$input-field", site.span).name,
             hir::HirId::new(hir::OwnerId::INVALID, hir::ItemLocalId::new(binding.index)),
         ),
     })

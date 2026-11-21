@@ -1,11 +1,13 @@
 //! Separate control and producer evaluation from contextual result delivery.
 //! The selector runs as one required expression, so block locals, guards, and
 //! nested subjects all remain in the same source activation.
+use super::trait_inputs::{ExplicitClause, frozen_operand};
 use super::*;
+
 mod aggregates;
 
 #[derive(Clone)]
-pub(in crate::program) struct Selection<'hir> {
+pub(super) struct Selection<'hir> {
     source: &'hir Expr<'hir>,
     alternatives: std::sync::Arc<[Alternative<'hir>]>,
     selected: usize,
@@ -17,7 +19,7 @@ enum Alternative<'hir> {
         site: &'hir Expr<'hir>,
         domain: Option<Term>,
     },
-    Frozen {
+    Retained {
         site: &'hir Expr<'hir>,
         value: Box<n::Expr>,
     },
@@ -38,10 +40,15 @@ impl<'hir> Selection<'hir> {
         self.source.span
     }
 
-    pub(super) fn prepare(
+    fn projection<'tree>(
         checker: &mut Checker<'_, '_>,
+        arena: &'tree hir::HirArena,
         source: &'hir Expr<'hir>,
-    ) -> Result<Option<ExplicitClause<'hir>>, Error> {
+        alternatives: &mut Vec<Alternative<'hir>>,
+    ) -> Result<Option<&'tree Expr<'tree>>, Error>
+    where
+        'hir: 'tree,
+    {
         if !matches!(
             source.kind,
             H::Block(_) | H::If(_, _, Some(_)) | H::When(_) | H::Match(..)
@@ -49,9 +56,7 @@ impl<'hir> Selection<'hir> {
         {
             return Ok(None);
         }
-        let arena = hir::HirArena::new();
-        let mut alternatives = Vec::new();
-        let Some(selector) = project(checker, &arena, source, &mut alternatives, 0)? else {
+        let Some(selector) = project(checker, arena, source, alternatives, 0)? else {
             return Ok(None);
         };
         if !alternatives.iter().any(|site| {
@@ -62,6 +67,18 @@ impl<'hir> Selection<'hir> {
         }) {
             return Ok(None);
         }
+        Ok(Some(selector))
+    }
+
+    pub(super) fn prepare_clause(
+        checker: &mut Checker<'_, '_>,
+        source: &'hir Expr<'hir>,
+    ) -> Result<Option<ExplicitClause<'hir>>, Error> {
+        let arena = hir::HirArena::new();
+        let mut alternatives = Vec::new();
+        let Some(selector) = Self::projection(checker, &arena, source, &mut alternatives)? else {
+            return Ok(None);
+        };
         // Describing an open body has no invocation-time selector. Its ordinary
         // staging rules check the original control when its domain is inferred.
         if !checker.in_required_comptime
@@ -77,6 +94,17 @@ impl<'hir> Selection<'hir> {
                 ExplicitClause::Contextual(source)
             }));
         }
+        Self::execute(checker, source, selector, alternatives, None)
+            .map(|value| Some(ExplicitClause::Selection(value)))
+    }
+
+    fn execute(
+        checker: &mut Checker<'_, '_>,
+        source: &'hir Expr<'hir>,
+        selector: &Expr<'_>,
+        mut alternatives: Vec<Alternative<'hir>>,
+        live: Option<&mut LiveInputs>,
+    ) -> Result<Self, Error> {
         // The Object is local to this invocation. Each selected producer keeps
         // its checked domain, including when it reads a block or pattern local.
         let (prepared, ()) = checker.prepare_required_root_with_live_inputs(
@@ -97,12 +125,12 @@ impl<'hir> Selection<'hir> {
             source.hir_id.owner,
             source.span,
         )?;
-        let selected = receive(checker, packet, &mut alternatives, source.span)?;
-        Ok(Some(ExplicitClause::Selection(Self {
+        let selected = receive(checker, packet, &mut alternatives, source.span, live)?;
+        Ok(Self {
             source,
             alternatives: alternatives.into(),
             selected,
-        })))
+        })
     }
 
     pub(super) fn admit(
@@ -110,6 +138,16 @@ impl<'hir> Selection<'hir> {
         checker: &mut Checker<'_, '_>,
         domain: &Term,
     ) -> Result<Term, Error> {
+        let (value, _) = self.deliver(checker, domain, vec![])?;
+        checker.required_normal_term(value, self.source.span)
+    }
+
+    fn deliver(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        domain: &Term,
+        live: LiveInputs,
+    ) -> Result<(comptime_interpretor::Value, Term), Error> {
         // Every reachable yield site is checked, including sites the selector
         // did not take. Execute only the selected delivery in the caller frame.
         let (root, ()) = checker.prepare_required_root_with_live_inputs(
@@ -117,7 +155,7 @@ impl<'hir> Selection<'hir> {
             required::RootKind::Expression,
             Vec::new(),
             false,
-            &[],
+            &live,
             |this| {
                 let mut result = None;
                 for (index, alternative) in self.alternatives.iter().enumerate() {
@@ -133,7 +171,7 @@ impl<'hir> Selection<'hir> {
                             domain: actual,
                         } => {
                             let actual = actual.as_ref().ok_or_else(|| {
-                                error(site.span, "missing checked clause producer domain")
+                                error(site.span, "missing checked input producer domain")
                             })?;
                             this.computed_delivery(actual, domain, site.span)?;
                         }
@@ -149,7 +187,7 @@ impl<'hir> Selection<'hir> {
                                 result = Some(value);
                             }
                         }
-                        Alternative::Frozen { site, value } => {
+                        Alternative::Retained { site, value } => {
                             let span = site.span;
                             let delivered = this.deliver_computed_value(value, domain, span)?;
                             if let std::borrow::Cow::Borrowed(operand) = &delivered {
@@ -161,18 +199,79 @@ impl<'hir> Selection<'hir> {
                 }
                 Ok((
                     result
-                        .ok_or_else(|| error(self.source.span, "missing selected clause result"))?,
+                        .ok_or_else(|| error(self.source.span, "missing selected input result"))?,
                     (),
                 ))
             },
         )?;
-        let (value, _) = checker.invoke_required_publishing(
-            root,
-            Vec::new(),
-            self.source.hir_id.owner,
-            self.source.span,
-        )?;
-        checker.required_normal_term(value, self.source.span)
+        checker.invoke_required_with_live_inputs(root, live, self.source)
+    }
+}
+
+type LiveInputs = Vec<(n::LocalId, Term, comptime_interpretor::Value)>;
+
+/// Ordinary inputs can carry live closure graphs across domain formation.
+/// Only declaration clauses require a stable normal identity at acquisition.
+pub(super) struct LiveSelection<'hir> {
+    selection: Selection<'hir>,
+    live: LiveInputs,
+}
+
+impl<'hir> LiveSelection<'hir> {
+    pub(super) fn acquire(
+        checker: &mut Checker<'_, '_>,
+        source: &'hir Expr<'hir>,
+        call: &Expr<'_>,
+    ) -> Result<Option<Self>, Error> {
+        let arena = hir::HirArena::new();
+        let mut alternatives = Vec::new();
+        let Some(selector) = Selection::projection(checker, &arena, source, &mut alternatives)?
+        else {
+            return Ok(None);
+        };
+        if checker.required_entry_call != Some((call.hir_id, call.span)) {
+            return Err(context_error(
+                source.span,
+                "contextual operand awaits control reaching its original comptime invocation",
+            ));
+        }
+        let mut live = Vec::new();
+        let selection =
+            Selection::execute(checker, source, selector, alternatives, Some(&mut live))?;
+        Ok(Some(Self { selection, live }))
+    }
+
+    pub(super) fn actual_domain(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        defaults: bool,
+    ) -> Result<Option<Term>, Error> {
+        let arena = hir::HirArena::new();
+        let selection = &self.selection;
+        Ok(checker
+            .checking_attempt(
+                selection.source.span,
+                defaults,
+                CheckingDisposition::Probe,
+                |checker| {
+                    let witness = aggregates::witness(
+                        checker,
+                        &arena,
+                        &selection.alternatives,
+                        selection.source,
+                    )?;
+                    checker.expr(&witness, None)
+                },
+            )?
+            .map(|expr| expr.ty))
+    }
+
+    pub(super) fn deliver(
+        self,
+        checker: &mut Checker<'_, '_>,
+        domain: &Term,
+    ) -> Result<(comptime_interpretor::Value, Term), Error> {
+        self.selection.deliver(checker, domain, self.live)
     }
 }
 
@@ -183,13 +282,14 @@ fn receive(
     packet: comptime_interpretor::Value,
     alternatives: &mut [Alternative<'_>],
     span: Span,
+    mut live: Option<&mut LiveInputs>,
 ) -> Result<usize, Error> {
     checker.required_steps = checker
         .required_steps
         .checked_sub(1)
-        .ok_or_else(|| error(span, "clause result delivery budget exhausted"))?;
+        .ok_or_else(|| error(span, "input result delivery budget exhausted"))?;
     let comptime_interpretor::Value::Object(packet) = packet else {
-        return Err(error(span, "invalid clause selection packet"));
+        return Err(error(span, "invalid input selection packet"));
     };
     let mut entries = packet
         .into_entries()
@@ -203,13 +303,19 @@ fn receive(
         _ => None,
     }
     .filter(|index| *index < alternatives.len())
-    .ok_or_else(|| error(span, "invalid clause selection index"))?;
+    .ok_or_else(|| error(span, "invalid input selection index"))?;
     if let Alternative::Aggregate { fields, .. } = &mut alternatives[selected] {
         if entries.len() != fields.len() {
             return Err(error(span, "staged aggregate field count mismatch"));
         }
         for (field, entry) in fields.iter_mut().zip(entries) {
-            field.selected = Some(receive(checker, entry.value, &mut field.sites, span)?);
+            field.selected = Some(receive(
+                checker,
+                entry.value,
+                &mut field.sites,
+                span,
+                live.as_deref_mut(),
+            )?);
         }
         return Ok(selected);
     }
@@ -218,16 +324,24 @@ fn receive(
         (Alternative::Producer { site, .. }, Some(entry)) => {
             let span = site.span;
             let site = *site;
-            let identity = checker.required_normal_term(entry.value, span)?;
-            alternatives[selected] = Alternative::Frozen {
-                site,
-                value: frozen_operand(identity, entry.ty, span),
+            let value = if let Some(live) = live {
+                let binding = checker.spread_binding(span)?;
+                live.push((binding, entry.ty.clone(), entry.value));
+                Box::new(n::Expr {
+                    source: source(span),
+                    ty: entry.ty,
+                    kind: K::Local(binding),
+                })
+            } else {
+                let identity = checker.required_normal_term(entry.value, span)?;
+                frozen_operand(identity, entry.ty, span)
             };
+            alternatives[selected] = Alternative::Retained { site, value };
         }
-        _ => return Err(error(span, "invalid selected clause payload")),
+        _ => return Err(error(span, "invalid selected input payload")),
     }
     if entries.next().is_some() {
-        return Err(error(span, "unexpected clause selection payload"));
+        return Err(error(span, "unexpected input selection payload"));
     }
     Ok(selected)
 }
@@ -246,7 +360,7 @@ fn retain_producer_domains(
         checker.required_steps = checker
             .required_steps
             .checked_sub(1)
-            .ok_or_else(|| error(span, "clause result inspection budget exhausted"))?;
+            .ok_or_else(|| error(span, "input result inspection budget exhausted"))?;
         match &result.kind {
             K::If {
                 then_branch,
@@ -262,7 +376,7 @@ fn retain_producer_domains(
             }
             K::Object { fields, .. } => {
                 let Some((tag, operands)) = fields.split_first() else {
-                    return Err(error(span, "missing clause site index"));
+                    return Err(error(span, "missing input site index"));
                 };
                 let index = match &tag.kind {
                     K::Literal(n::Literal::Integer(index)) => index.parse::<usize>().ok(),
@@ -284,7 +398,7 @@ fn retain_producer_domains(
                             retain_producer_domains(checker, operand, &mut field.sites, span)?;
                         }
                     }
-                    _ => return Err(error(span, "invalid staged clause result site")),
+                    _ => return Err(error(span, "invalid staged input result site")),
                 }
             }
             _ => return Err(error(span, "missing contextual result packet")),
@@ -311,7 +425,7 @@ fn project<'tree, 'src: 'tree>(
     checker.required_steps = checker
         .required_steps
         .checked_sub(1)
-        .ok_or_else(|| error(source.span, "clause selection budget exhausted"))?;
+        .ok_or_else(|| error(source.span, "input selection budget exhausted"))?;
     let mut child = |value| project(checker, arena, value, alternatives, depth + 1);
     let kind = match source.kind {
         H::Block(block) => {

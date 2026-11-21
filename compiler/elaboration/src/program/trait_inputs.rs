@@ -3,17 +3,18 @@ use super::*;
 
 mod call_evidence;
 mod forward;
-mod selection;
+
+use super::input_selection::Selection;
 
 #[derive(Clone)]
 pub(super) enum ExplicitClause<'hir> {
     Contextual(&'hir Expr<'hir>),
     OpenDescription(&'hir Expr<'hir>),
-    Selection(selection::Selection<'hir>),
+    Selection(Selection<'hir>),
     Computed { value: Box<n::Expr>, span: Span },
 }
 
-fn frozen_operand(value: Term, actual: Term, span: Span) -> Box<n::Expr> {
+pub(super) fn frozen_operand(value: Term, actual: Term, span: Span) -> Box<n::Expr> {
     let kind = if actual == p(P::Type) {
         K::TypeValue(value)
     } else {
@@ -865,7 +866,7 @@ impl Checker<'_, '_> {
                 pending_explicit[slot] = Some(ExplicitClause::Contextual(value));
                 continue;
             }
-            if !ready && let Some(selection) = selection::Selection::prepare(self, value)? {
+            if !ready && let Some(selection) = Selection::prepare_clause(self, value)? {
                 pending_explicit[slot] = Some(selection);
                 continue;
             }

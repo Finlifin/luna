@@ -10,17 +10,17 @@ use super::live_defaults::LiveWrites;
 
 /// Open signature formation can receive an executed value in addition to a
 /// producer and its static identity. Ordinary source checking owns no VM values.
-pub(super) struct StagedInputs {
+pub(super) struct StagedInputs<'src> {
     pub(super) values: Vec<Option<n::Expr>>,
     pub(super) symbols: Vec<Option<Term>>,
     pub(super) live: Vec<Option<comptime_interpretor::Value>>,
-    pub(super) pending: PendingInputs,
+    pub(super) pending: PendingInputs<'src>,
     /// Post-default slot contents, separate from the arguments delivered to the body.
     pub(super) default_writes: DefaultWrites,
     pub(super) live_writes: LiveWrites,
 }
 
-impl StagedInputs {
+impl StagedInputs<'_> {
     pub(super) fn new(count: usize) -> Self {
         Self {
             values: vec![None; count],
@@ -41,6 +41,99 @@ struct StagedCollection {
 }
 
 impl Checker<'_, '_> {
+    /// If signature formation only reads closed literal suppliers, the caller
+    /// can retain every other operand in its own control flow and activation.
+    pub(super) fn signature_independent_of_producers(
+        &mut self,
+        definition: &Definition,
+        sig: &hir::item::FnSig<'_>,
+        routes: &[arguments::RoutedArgument<'_>],
+        needed: &BTreeSet<usize>,
+        span: Span,
+    ) -> Result<bool, Error> {
+        if !sig.modifiers.is_comptime || needed.is_empty() {
+            return Ok(false);
+        }
+        for slot in needed {
+            if let Some(route) = routes.iter().find(|route| route.parameter == *slot) {
+                for (_, input) in route.source_inputs() {
+                    if !self.is_closed_input_literal(input)? {
+                        return Ok(false);
+                    }
+                }
+            } else {
+                let TyParamKind::Optional(_, _, default) = sig.params[*slot].ty.kind else {
+                    return Ok(false);
+                };
+                if !self.is_closed_input_literal(default)? {
+                    return Ok(false);
+                }
+            }
+        }
+        for (slot, annotation) in definition
+            .parameters
+            .iter()
+            .map(|(_, annotation)| annotation)
+            .chain(std::iter::once(&definition.result))
+            .enumerate()
+        {
+            if let Annotation::Pending(_) | Annotation::Suspended { .. } = annotation {
+                let source = annotation_source(sig, slot)
+                    .ok_or_else(|| error(span, "missing deferred input annotation"))?;
+                if !self.annotation_only_reads_inputs(source)? {
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    // A source-only annotation can still be inspected before any VM entry
+    // exists. Follow transparent unconstrained aliases; calls, projections
+    // and constructors requiring user code keep ordinary evaluation order.
+    fn annotation_only_reads_inputs(&mut self, source: &Expr<'_>) -> Result<bool, Error> {
+        let mut pending = vec![source];
+        let mut aliases = BTreeSet::new();
+        while let Some(value) = pending.pop() {
+            self.required_steps = self
+                .required_steps
+                .checked_sub(1)
+                .ok_or_else(|| error(value.span, "annotation observation budget exhausted"))?;
+            match value.kind {
+                H::Builtin(_)
+                | H::ResolvedFnParam(..)
+                | H::DeliveredType(_)
+                | H::Lit(_)
+                | H::TyAny
+                | H::TyType
+                | H::TyVoid
+                | H::TyNoReturn => {}
+                H::Defer(inner) | H::TyOptional(inner) => pending.push(inner),
+                H::Block(block) if block.stmts.is_empty() => pending.extend(block.expr),
+                H::If(cond, yes, no) if yes.stmts.is_empty() => {
+                    pending.push(cond);
+                    pending.extend(yes.expr);
+                    pending.extend(no);
+                }
+                H::ResolvedDef { def_id, .. } => {
+                    let item = self
+                        .package
+                        .definition_owner(def_id)
+                        .and_then(|owner| self.package.item(owner));
+                    let Some(ItemKind::TypeAlias(target, [], [])) = item.map(|item| &item.kind)
+                    else {
+                        return Ok(false);
+                    };
+                    if aliases.insert(def_id) {
+                        pending.push(target);
+                    }
+                }
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
     pub(super) fn open_comptime_prefix_end(
         routes: &[arguments::RoutedArgument<'_>],
         target: usize,
@@ -72,19 +165,19 @@ impl Checker<'_, '_> {
 
     // Signature dependencies may demand ordinary comptime inputs. Complete
     // their source prefix first, so no producer is replayed or overtaken.
-    pub(super) fn prepare_open_comptime_prefix(
+    pub(super) fn prepare_open_comptime_prefix<'src>(
         &mut self,
         call: &Expr<'_>,
         owner: OwnerId,
         sig: &hir::item::FnSig<'_>,
         definition: &Definition,
-        routes: &[arguments::RoutedArgument<'_>],
+        routes: &[arguments::RoutedArgument<'src>],
         target: usize,
         parameters: &[Parameter],
         values: &mut [Option<n::Expr>],
         symbols: &mut [Option<Term>],
         live: &mut [Option<comptime_interpretor::Value>],
-        pending: &mut PendingInputs,
+        pending: &mut PendingInputs<'src>,
     ) -> Result<BTreeMap<usize, Term>, Error> {
         let mut early_domains = BTreeMap::new();
         let end = Self::open_comptime_prefix_end(routes, target);
@@ -104,25 +197,25 @@ impl Checker<'_, '_> {
             {
                 continue;
             }
-            for (field, (position, _)) in route.source_inputs().enumerate() {
+            for (field, (position, original)) in route.source_inputs().enumerate() {
                 if position <= end {
-                    inputs.push((position, route_index, field));
+                    inputs.push((position, route_index, field, original));
                 }
             }
         }
-        inputs.sort_unstable_by_key(|(position, _, _)| *position);
+        inputs.sort_unstable_by_key(|(position, ..)| *position);
         let mut collections = BTreeMap::<usize, StagedCollection>::new();
-        for (_, route_index, field) in inputs {
+        for (_, route_index, field, original) in inputs {
             let route = &routes[route_index];
             let slot = route.parameter;
             let aggregate = route.expression(call);
             let input = if route.is_collected() {
-                route.source_inputs().nth(field).unwrap().1
+                original
             } else {
                 &aggregate
             };
             if pending.contains(slot) {
-                pending.acquire(self, slot, field, input)?;
+                pending.acquire(self, slot, field, input, original, call)?;
                 continue;
             }
             if parameters.get(slot).is_none() && !collections.contains_key(&slot) {
@@ -148,7 +241,7 @@ impl Checker<'_, '_> {
                     }
                 };
                 if waits {
-                    pending.acquire(self, slot, field, input)?;
+                    pending.acquire(self, slot, field, input, original, call)?;
                     continue;
                 }
             }
