@@ -1,0 +1,14 @@
+use bindings.Object;
+
+{-
+    Construction-macro metadata attributes for Mode 3 (raw TokenBuffer input) and
+    Mode 4 (raw UTF-8 source text input). Mode 1 and Mode 2 use `@define_macro1`
+    and `@define_macro2`.
+-}
+pub const macro3: Object = {
+    metadata: { flurry_macro_kind: .tokens },
+}
+
+pub const macro4: Object = {
+    metadata: { flurry_macro_kind: .source },
+}

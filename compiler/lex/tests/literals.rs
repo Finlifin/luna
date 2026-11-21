@@ -502,3 +502,23 @@ fn dollar_and_at_do_not_continue_identifiers() {
         ]
     );
 }
+
+#[test]
+fn token_kind_symbol_names_round_trip_and_lex_as_identifiers() {
+    let mut seen = std::collections::HashSet::new();
+    for &kind in TokenKind::ALL {
+        let name = kind.symbol_name();
+        assert!(seen.insert(name), "duplicate symbol name `{name}`");
+        assert_eq!(
+            TokenKind::from_symbol_name(name),
+            Some(kind),
+            "round-trip failed for `{name}`"
+        );
+        let lexed = tokens(name);
+        assert_eq!(
+            lexed,
+            vec![(TokenKind::Id, name)],
+            "symbol name `{name}` for {kind:?} must lex as a single Id"
+        );
+    }
+}

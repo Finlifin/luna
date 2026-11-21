@@ -505,9 +505,9 @@ fn token_can_start_node(node_kind: Option<NodeKind>, tok: TokenKind) -> bool {
     }
     // Check specific node kinds whose leading token is unambiguous.
     match node_kind {
-        Some(NodeKind::Block | NodeKind::Object | NodeKind::StructPattern) => {
-            tok == TokenKind::LBrace
-        }
+        Some(
+            NodeKind::Block | NodeKind::Object | NodeKind::TokenBuffer | NodeKind::StructPattern,
+        ) => tok == TokenKind::LBrace,
         Some(NodeKind::ListOf | NodeKind::ListPattern) => tok == TokenKind::LBracket,
         Some(NodeKind::Tuple | NodeKind::TuplePattern | NodeKind::Unit) => tok == TokenKind::LParen,
         Some(NodeKind::StructDef) => tok == TokenKind::Struct,

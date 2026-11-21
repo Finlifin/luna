@@ -2,6 +2,7 @@ use std::fmt::Display;
 
 pub mod ast_visitor;
 pub mod layout;
+
 use rustc_span::{BytePos, SourceMap, Span};
 
 /// Node index type, for future extensibility
@@ -209,6 +210,14 @@ pub enum NodeKind {
     ListOf,
     Tuple,
     Object,
+    /// `{{ token_part* }}` macro token-buffer literal (children: MultiChildren of part nodes).
+    TokenBuffer,
+    /// Verbatim non-interpolated source token inside `{{ ... }}`.
+    TokenBufferToken,
+    /// `$id`, `$self`, `${expr}`, or `$(expr)` interpolation inside `{{ ... }}` (child: expr/id).
+    TokenBufferInterp,
+    /// Escaped `$$` inside `{{ ... }}`, emitting a single literal `$` token.
+    TokenBufferDollar,
     Lambda, // a, b, N (return_type, body, params)
 
     BoolNot,  // a
@@ -578,13 +587,20 @@ pub enum NodeKind {
 
 // FnType modifier flags (packed into a u32 stored as children[0]).
 pub const FN_MOD_PURE: u32 = 1 << 0;
+
 pub const FN_MOD_COMPTIME: u32 = 1 << 1;
+
 pub const FN_MOD_INLINE: u32 = 1 << 2;
+
 pub const FN_MOD_UNSAFE: u32 = 1 << 3;
+
 pub const FN_MOD_SPEC: u32 = 1 << 4;
+
 pub const FN_MOD_VERIFIED: u32 = 1 << 5;
+
 // Angle-bracket inputs distinguish an opaque normal-form callable type.
 pub const FN_MOD_NORMAL_FORM: u32 = 1 << 6;
+
 pub const FN_MOD_ATOMIC: u32 = 1 << 7; // only for function definitions, not fn_type
 
 pub fn fn_mod_flags_to_string(flags: u32) -> String {
@@ -669,7 +685,9 @@ impl NodeKind {
             // No children
             Invalid | Id | Str | Int | Real | Char | Bool | Unit | Symbol | Wildcard
             | SelfLower | SelfCap | Null | Undefined | SelfParam | SelfRefParam | ItselfParam
-            | ItselfRefParam | RangeFull => NodeType::NoChild,
+            | ItselfRefParam | RangeFull | TokenBufferToken | TokenBufferDollar => {
+                NodeType::NoChild
+            }
 
             // Single child (a)
             TypeDeclClause
@@ -725,7 +743,8 @@ impl NodeKind {
             | PackagePath
             | Pub
             | Private
-            | ExpandArg => NodeType::SingleChild,
+            | ExpandArg
+            | TokenBufferInterp => NodeType::SingleChild,
 
             // Double children (a, b)
             LiteralExtension
@@ -833,9 +852,9 @@ impl NodeKind {
             }
 
             // Multi children (N)
-            StringConcat | ListOf | Tuple | Object | ClosureEnvironment | Block | StructPattern
-            | ListPattern | TuplePattern | WhenStatement | BitVecBinPattern | BitVecOctPattern
-            | BitVecHexPattern | FileScope => NodeType::MultiChildren,
+            StringConcat | ListOf | Tuple | Object | TokenBuffer | ClosureEnvironment | Block
+            | StructPattern | ListPattern | TuplePattern | WhenStatement | BitVecBinPattern
+            | BitVecOctPattern | BitVecHexPattern | FileScope => NodeType::MultiChildren,
 
             // Single with multi children (a, N)
             ForallType
@@ -952,7 +971,15 @@ impl Ast {
                         - source_file.start_pos.0) as usize;
                     let byte_end = (self.get_span(node_index).unwrap().hi().0
                         - source_file.start_pos.0) as usize;
-                    format!("({} {})", kind, source_content[byte_start..byte_end].trim())
+                    let snippet = source_content[byte_start..byte_end].trim();
+                    if matches!(
+                        kind,
+                        NodeKind::TokenBufferToken | NodeKind::TokenBufferDollar
+                    ) {
+                        format!("({} {:?})", kind, snippet)
+                    } else {
+                        format!("({} {})", kind, snippet)
+                    }
                 }
                 NodeType::SingleChild => {
                     let children = self.get_children(node_index);

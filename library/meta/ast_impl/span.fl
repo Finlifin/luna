@@ -1,0 +1,76 @@
+use builtin.{Integer, bool, str}
+use numeric.equality.ComptimeEq;
+
+{-
+    Byte-offset source span carried by AST tokens, syntax tree nodes, and PEG
+    captures during macro expansion.
+-}
+pub struct SourceSpan {
+    file: str,
+    start: Integer,
+    end: Integer,
+    expansion_id: Integer,
+}
+
+impl SourceSpan {
+    pub pure comptime fn synthetic() -> SourceSpan {
+        SourceSpan {
+            file: "<synthetic>",
+            start: 0,
+            end: 0,
+            expansion_id: 0,
+        }
+    }
+
+    pub pure comptime fn new(
+        file: str,
+        start: Integer,
+        end: Integer,
+        expansion_id: Integer,
+    ) -> SourceSpan {
+        SourceSpan {
+            file: file,
+            start: start,
+            end: end,
+            expansion_id: expansion_id,
+        }
+    }
+
+    pub pure comptime fn is_synthetic(self) -> bool {
+        self.file == "<synthetic>" and self.start == 0 and self.end == 0
+    }
+
+    pub pure comptime fn merge(self, other: SourceSpan) -> SourceSpan {
+        if self.is_synthetic() {
+            return other;
+        }
+        if other.is_synthetic() {
+            return self;
+        }
+        let lo = if self.start < other.start {
+            self.start
+        } else {
+            other.start
+        }
+        let hi = if self.end > other.end {
+            self.end
+        } else {
+            other.end
+        }
+        SourceSpan {
+            file: self.file,
+            start: lo,
+            end: hi,
+            expansion_id: self.expansion_id,
+        }
+    }
+}
+
+comptime impl ComptimeEq for SourceSpan {
+    comptime fn eq(self, other: Self) -> bool {
+        self.file == other.file
+            and self.start == other.start
+            and self.end == other.end
+            and self.expansion_id == other.expansion_id
+    }
+}

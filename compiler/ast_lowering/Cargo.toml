@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 ast = { path = "../ast" }
 hir = { path = "../hir" }
+lex = { path = "../lex" }
 diagnostic = { path = "../diagnostic" }
 resolve = { path = "../resolve" }
 vfs = { path = "../vfs" }

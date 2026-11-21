@@ -335,7 +335,7 @@ fn compile_bound_for_target_with_invocation(
         .source_map
         .load_file(&options.input)
         .map_err(|error| format!("cannot read input '{}': {error}", options.input.display()))?;
-    let src = source_file
+    let _ = source_file
         .src
         .as_ref()
         .ok_or_else(|| format!("source text unavailable for '{}'", options.input.display()))?;
@@ -347,28 +347,22 @@ fn compile_bound_for_target_with_invocation(
     );
     instance.vfs_mut().selected_root = Some(file_id);
 
-    let (tokens, symbols, lex_errors) = lex::lex(src, source_file.start_pos);
+    let mut macro_budget = macro_expander::MacroBudget::default();
+    let (expanded, lex_errors) =
+        match macro_expander::expand_source_file(&sess.source_map, &source_file, &mut macro_budget)
+        {
+            Ok(result) => result,
+            Err(error) => {
+                error.emit(&instance.diag_ctx, source_file.start_pos);
+                return Err(instance.diag_ctx.failure_summary("macro expansion"));
+            }
+        };
     for error in &lex_errors {
         error.emit(&instance.diag_ctx, source_file.start_pos);
     }
     if instance.diag_ctx.has_errors() {
         return Err(instance.diag_ctx.failure_summary("lexing"));
     }
-
-    let mut macro_budget = macro_expander::MacroBudget::default();
-    let expanded = match macro_expander::expand_source(
-        &sess.source_map,
-        &source_file,
-        tokens,
-        symbols,
-        &mut macro_budget,
-    ) {
-        Ok(expanded) => expanded,
-        Err(error) => {
-            error.emit(&instance.diag_ctx, source_file.start_pos);
-            return Err(instance.diag_ctx.failure_summary("macro expansion"));
-        }
-    };
 
     let mut parser = Parser::new(
         &sess.source_map,

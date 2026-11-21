@@ -316,7 +316,13 @@ impl Parser<'_> {
                 TokenKind::When => p.try_when_statement(),
                 TokenKind::LParen => p.try_unit_or_parenthesis_or_tuple(),
                 TokenKind::LBracket => p.try_list(),
-                TokenKind::LBrace => p.try_object(),
+                TokenKind::LBrace => {
+                    if p.is_token_buffer_start() {
+                        p.try_token_buffer()
+                    } else {
+                        p.try_object()
+                    }
+                }
                 TokenKind::Dot => p.try_prefix_range_expr_or_symbol(option),
                 TokenKind::Pipe => p.try_lambda(option),
                 TokenKind::Forall => p.try_forall_prefix(option),
@@ -545,6 +551,181 @@ impl Parser<'_> {
         Ok(NodeBuilder::new(NodeKind::ListOf, self.current_span())
             .add_multiple_children(nodes)
             .build(&mut self.ast))
+    }
+
+    /// True when the next two tokens are an adjacent `{{` opening a token buffer literal.
+    pub(crate) fn is_token_buffer_start(&self) -> bool {
+        let first = self.peek_nth_token(1);
+        let second = self.peek_nth_token(2);
+        first.kind == TokenKind::LBrace
+            && second.kind == TokenKind::LBrace
+            && Self::tokens_adjacent(first, second)
+    }
+
+    /// Parse a token buffer literal: `{{ token_part* }}` where `token_part` is a raw token,
+    /// an escaped `$$`, or an interpolation `$id` / `$self` / `${expr}` / `$(expr)`.
+    pub fn try_token_buffer(&mut self) -> ParseResult {
+        self.scoped(|p| {
+            let first = p.peek_nth_token(1);
+            let second = p.peek_nth_token(2);
+            if first.kind != TokenKind::LBrace
+                || second.kind != TokenKind::LBrace
+                || !Self::tokens_adjacent(first, second)
+            {
+                return Ok(0);
+            }
+
+            let open_span =
+                rustc_span::Span::new(p.token_span(first).lo(), p.token_span(second).hi());
+            p.eat_tokens(2);
+
+            let mut parts: Vec<NodeIndex> = Vec::new();
+            let mut brace_depth: usize = 0;
+
+            while !p.is_eof() {
+                let tok = p.peek_nth_token(1);
+                let next = p.peek_nth_token(2);
+
+                if brace_depth == 0
+                    && tok.kind == TokenKind::RBrace
+                    && next.kind == TokenKind::RBrace
+                    && Self::tokens_adjacent(tok, next)
+                {
+                    let close_hi = p.token_span(next).hi();
+                    p.eat_tokens(2);
+                    let full_span = rustc_span::Span::new(open_span.lo(), close_hi);
+                    return Ok(NodeBuilder::new(NodeKind::TokenBuffer, full_span)
+                        .add_multiple_children(parts)
+                        .build(&mut p.ast));
+                }
+
+                if tok.kind == TokenKind::Dollar {
+                    let tok_span = p.token_span(tok);
+                    let adjacent = Self::tokens_adjacent(tok, next);
+                    if adjacent && next.kind == TokenKind::Dollar {
+                        let dollar_span =
+                            rustc_span::Span::new(tok_span.lo(), p.token_span(next).hi());
+                        p.eat_tokens(2);
+                        let node = NodeBuilder::new(NodeKind::TokenBufferDollar, dollar_span)
+                            .build(&mut p.ast);
+                        parts.push(node);
+                        continue;
+                    }
+                    if adjacent && next.kind == TokenKind::Id {
+                        p.eat_tokens(1);
+                        let id = p.try_id()?;
+                        let hi = p.ast.get_span(id).map_or(tok_span.hi(), |s| s.hi());
+                        let interp_span = rustc_span::Span::new(tok_span.lo(), hi);
+                        let node = NodeBuilder::new(NodeKind::TokenBufferInterp, interp_span)
+                            .add_single_child(id)
+                            .build(&mut p.ast);
+                        parts.push(node);
+                        continue;
+                    }
+                    if adjacent && next.kind == TokenKind::SelfLower {
+                        p.eat_tokens(1);
+                        let self_node = p.try_atomic()?;
+                        let hi = p
+                            .ast
+                            .get_span(self_node)
+                            .map_or(tok_span.hi(), |s| s.hi());
+                        let interp_span = rustc_span::Span::new(tok_span.lo(), hi);
+                        let node = NodeBuilder::new(NodeKind::TokenBufferInterp, interp_span)
+                            .add_single_child(self_node)
+                            .build(&mut p.ast);
+                        parts.push(node);
+                        continue;
+                    }
+                    if adjacent && next.kind == TokenKind::LBrace {
+                        p.eat_tokens(2);
+                        let expr = p.try_expr()?;
+                        if expr == 0 {
+                            return Err(ParseError::invalid_syntax(
+                                "expected an expression inside `${...}` in token buffer"
+                                    .to_string(),
+                                p.peek_next_token().kind,
+                                p.next_token_span(),
+                            )
+                            .with_secondary_label(tok_span, "interpolation starts here"));
+                        }
+                        if !p.eat_token(TokenKind::RBrace) {
+                            return Err(ParseError::unexpected_token(
+                                TokenKind::RBrace,
+                                p.peek_next_token().kind,
+                                p.next_token_span(),
+                            )
+                            .with_secondary_label(
+                                p.token_span(next),
+                                "interpolation `${` opened here",
+                            ));
+                        }
+                        let close_hi = p.prev_token_span().hi();
+                        let interp_span = rustc_span::Span::new(tok_span.lo(), close_hi);
+                        let node = NodeBuilder::new(NodeKind::TokenBufferInterp, interp_span)
+                            .add_single_child(expr)
+                            .build(&mut p.ast);
+                        parts.push(node);
+                        continue;
+                    }
+                    if adjacent && next.kind == TokenKind::LParen {
+                        p.eat_tokens(2);
+                        let expr = p.try_expr()?;
+                        if expr == 0 {
+                            return Err(ParseError::invalid_syntax(
+                                "expected an expression inside `$(...)` in token buffer"
+                                    .to_string(),
+                                p.peek_next_token().kind,
+                                p.next_token_span(),
+                            )
+                            .with_secondary_label(tok_span, "interpolation starts here"));
+                        }
+                        if !p.eat_token(TokenKind::RParen) {
+                            return Err(ParseError::unexpected_token(
+                                TokenKind::RParen,
+                                p.peek_next_token().kind,
+                                p.next_token_span(),
+                            )
+                            .with_secondary_label(
+                                p.token_span(next),
+                                "interpolation `$(` opened here",
+                            ));
+                        }
+                        let close_hi = p.prev_token_span().hi();
+                        let interp_span = rustc_span::Span::new(tok_span.lo(), close_hi);
+                        let node = NodeBuilder::new(NodeKind::TokenBufferInterp, interp_span)
+                            .add_single_child(expr)
+                            .build(&mut p.ast);
+                        parts.push(node);
+                        continue;
+                    }
+                    return Err(ParseError::invalid_syntax(
+                        "invalid `$` in token buffer `{{ ... }}`; use `$ident`, `$self`, `${expr}`, `$(expr)`, or `$$` for a literal `$`".to_string(),
+                        tok.kind,
+                        tok_span,
+                    )
+                    .with_secondary_label(open_span, "token buffer opened here"));
+                }
+
+                if tok.kind == TokenKind::LBrace {
+                    brace_depth += 1;
+                } else if tok.kind == TokenKind::RBrace {
+                    brace_depth = brace_depth.saturating_sub(1);
+                }
+
+                let tok_span = p.token_span(tok);
+                p.eat_tokens(1);
+                let node = NodeBuilder::new(NodeKind::TokenBufferToken, tok_span)
+                    .build(&mut p.ast);
+                parts.push(node);
+            }
+
+            Err(ParseError::invalid_syntax(
+                "unterminated token buffer literal `{{ ... }}`; expected closing `}}`".to_string(),
+                p.peek_next_token().kind,
+                p.next_token_span(),
+            )
+            .with_secondary_label(open_span, "unclosed `{{` opened here"))
+        })
     }
 
     /// 解析对象表达式

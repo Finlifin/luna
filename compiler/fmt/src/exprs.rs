@@ -358,6 +358,7 @@ impl<'a> Formatter<'a> {
                 );
                 (doc, true)
             }
+            NodeKind::TokenBuffer => (Doc::text(self.literal_slice(node, slot.first)), true),
 
             // Postfix expressions & method/field chains
             NodeKind::Projection

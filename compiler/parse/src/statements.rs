@@ -28,7 +28,13 @@ impl Parser<'_> {
                 TokenKind::Resume => p.try_resume_statement(),
                 TokenKind::Break => p.try_break_statement(),
                 TokenKind::Continue => p.try_continue_statement(),
-                TokenKind::LBrace => p.try_block(),
+                TokenKind::LBrace => {
+                    if p.is_token_buffer_start() {
+                        p.try_expr_statement()
+                    } else {
+                        p.try_block()
+                    }
+                }
                 TokenKind::Inline
                     if [
                         TokenKind::Effect,

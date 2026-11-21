@@ -1,0 +1,188 @@
+use List;
+use ast_impl.nodes.{
+    FlurryBlock,
+    FlurryExpr,
+    FlurryExtendedStatement,
+    FlurryIdent,
+    FlurryItem,
+    FlurryLiteral,
+    FlurryPath,
+    FlurryPattern,
+    FlurryStatement,
+    FlurryType,
+    PegNode,
+    SyntaxTree,
+}
+use ast_impl.token.Token;
+use ast_impl.token_buffer.TokenBuffer;
+use builtin.{Integer, Symbol, bool, str}
+
+{-
+    Conversion protocol for values spliced into `{{ ... }}` via `$id` / `${expr}`.
+    Negative integers tokenize as two tokens (`.minus` followed immediately by an
+    integer magnitude) to match Flurry's lexical specification.
+-}
+pub pure comptime trait ToTokens {
+    pure comptime fn to_tokens(self) -> TokenBuffer;
+}
+
+pub pure comptime fn into_tokens(value: T) -> TokenBuffer
+where
+    T :- ToTokens,
+{
+    value.as(ToTokens).to_tokens()
+}
+
+pub pure comptime fn into_tokens_with_spacing(value: T, spacing: Symbol) -> TokenBuffer
+where
+    T :- ToTokens,
+{
+    value.as(ToTokens).to_tokens().with_trailing_spacing(spacing)
+}
+
+comptime impl ToTokens for TokenBuffer {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self
+    }
+}
+
+comptime impl ToTokens for Token {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        TokenBuffer.from_token(self)
+    }
+}
+
+comptime impl ToTokens for SyntaxTree {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.to_tokens()
+    }
+}
+
+comptime impl ToTokens for FlurryPattern {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.to_tokens()
+    }
+}
+
+comptime impl ToTokens for FlurryExpr {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.to_tokens()
+    }
+}
+
+comptime impl ToTokens for FlurryStatement {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.to_tokens()
+    }
+}
+
+comptime impl ToTokens for FlurryExtendedStatement {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.to_tokens()
+    }
+}
+
+comptime impl ToTokens for FlurryItem {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.to_tokens()
+    }
+}
+
+comptime impl ToTokens for FlurryType {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.to_tokens()
+    }
+}
+
+comptime impl ToTokens for FlurryIdent {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.to_tokens()
+    }
+}
+
+comptime impl ToTokens for FlurryLiteral {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.to_tokens()
+    }
+}
+
+comptime impl ToTokens for FlurryBlock {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.to_tokens()
+    }
+}
+
+comptime impl ToTokens for FlurryPath {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.to_tokens()
+    }
+}
+
+comptime impl ToTokens for PegNode {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.to_tokens()
+    }
+}
+
+comptime impl ToTokens for bool {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        TokenBuffer.from_token(Token.bool_literal(self))
+    }
+}
+
+comptime impl ToTokens for Integer {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        if self < 0 {
+            TokenBuffer.from_tokens([
+                Token.punct(.minus, "-").with_spacing(.joint),
+                Token.int_literal(-self),
+            ])
+        } else {
+            TokenBuffer.from_token(Token.int_literal(self))
+        }
+    }
+}
+
+comptime impl ToTokens for str {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        TokenBuffer.from_str_literal(self)
+    }
+}
+
+comptime impl ToTokens for Symbol {
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        let name = self'tag_name;
+        TokenBuffer.from_tokens([
+            Token.punct(.dot, ".").with_spacing(.joint),
+            Token.ident(name),
+        ])
+    }
+}
+
+comptime impl ToTokens for List<T>
+where
+    T :- ToTokens,
+{
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        var out: List<TokenBuffer> = [];
+        let count = self.length();
+        var i: Integer = 0;
+        while i < count {
+            out = out.concat([self[i].as(ToTokens).to_tokens()]);
+            i = i + 1;
+        }
+        TokenBuffer.concat_all(out)
+    }
+}
+
+comptime impl ToTokens for ?T
+where
+    T :- ToTokens,
+{
+    pure comptime fn to_tokens(self) -> TokenBuffer {
+        self match {
+            value? => value.as(ToTokens).to_tokens(),
+            null => TokenBuffer.empty(),
+        }
+    }
+}

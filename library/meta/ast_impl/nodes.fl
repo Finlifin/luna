@@ -1,0 +1,557 @@
+use List;
+use ast_impl.span.SourceSpan;
+use ast_impl.token_buffer.TokenBuffer;
+use builtin.{Integer, Symbol, Type, str}
+
+{- Generic list and optional aliases used by AST and PEG macro signatures. -}
+pub typealias Repetition<T: Type> = List<T>;
+pub typealias Optional<T: Type> = ?T;
+
+{- Single arena node inside a `SyntaxTree` AST snapshot. -}
+pub struct SyntaxNode {
+    kind: Symbol,
+    span: SourceSpan,
+    children: List<Integer>,
+    text: str,
+}
+
+{- Arena-backed AST snapshot with an exact source token sequence. -}
+pub struct SyntaxTree {
+    nodes: List<SyntaxNode>,
+    root: Integer,
+    tokens: TokenBuffer,
+}
+
+impl SyntaxTree {
+    pub pure comptime fn new(
+        nodes: List<SyntaxNode>,
+        root: Integer,
+        tokens: TokenBuffer,
+    ) -> SyntaxTree {
+        SyntaxTree {
+            nodes: nodes,
+            root: root,
+            tokens: tokens,
+        }
+    }
+
+    pub pure comptime fn empty() -> SyntaxTree {
+        SyntaxTree {
+            nodes: [],
+            root: 0,
+            tokens: TokenBuffer.empty(),
+        }
+    }
+
+    pub pure comptime fn node(self, index: Integer) -> ?SyntaxNode {
+        self.nodes.get(index)
+    }
+
+    pub pure comptime fn root_node(self) -> ?SyntaxNode {
+        self.nodes.get(self.root)
+    }
+
+    pub pure comptime fn children_of(self, index: Integer) -> List<SyntaxNode> {
+        let target = self.nodes.get(index) match {
+            n? => n,
+            null => return [],
+        }
+        var out: List<SyntaxNode> = [];
+        let child_count = target.children.length();
+        var i: Integer = 0;
+        while i < child_count {
+            self.nodes.get(target.children[i]) match {
+                child? => {
+                    out = out.concat([child]);
+                },
+                null => {},
+            }
+            i = i + 1;
+        }
+        out
+    }
+
+    pub pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.tokens
+    }
+
+    pub pure comptime fn source_text(self) -> str {
+        self.root_node() match {
+            n? => n.text,
+            null => "",
+        }
+    }
+}
+
+pub struct FlurryPattern {
+    tree: SyntaxTree,
+    node: Integer,
+}
+
+impl FlurryPattern {
+    pub pure comptime fn from_tree(tree: SyntaxTree) -> FlurryPattern {
+        FlurryPattern {
+            tree: tree,
+            node: tree.root,
+        }
+    }
+
+    pub pure comptime fn syntax_tree(self) -> SyntaxTree {
+        self.tree
+    }
+
+    pub pure comptime fn syntax_node(self) -> ?SyntaxNode {
+        self.tree.node(self.node)
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.syntax_node() match {
+            n? => n.span,
+            null => SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn text(self) -> str {
+        self.syntax_node() match {
+            n? => n.text,
+            null => "",
+        }
+    }
+
+    pub pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.tree.tokens
+    }
+}
+
+pub struct FlurryExpr {
+    tree: SyntaxTree,
+    node: Integer,
+}
+
+impl FlurryExpr {
+    pub pure comptime fn from_tree(tree: SyntaxTree) -> FlurryExpr {
+        FlurryExpr {
+            tree: tree,
+            node: tree.root,
+        }
+    }
+
+    pub pure comptime fn syntax_tree(self) -> SyntaxTree {
+        self.tree
+    }
+
+    pub pure comptime fn syntax_node(self) -> ?SyntaxNode {
+        self.tree.node(self.node)
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.syntax_node() match {
+            n? => n.span,
+            null => SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn text(self) -> str {
+        self.syntax_node() match {
+            n? => n.text,
+            null => "",
+        }
+    }
+
+    pub pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.tree.tokens
+    }
+}
+
+pub struct FlurryStatement {
+    tree: SyntaxTree,
+    node: Integer,
+}
+
+impl FlurryStatement {
+    pub pure comptime fn from_tree(tree: SyntaxTree) -> FlurryStatement {
+        FlurryStatement {
+            tree: tree,
+            node: tree.root,
+        }
+    }
+
+    pub pure comptime fn syntax_tree(self) -> SyntaxTree {
+        self.tree
+    }
+
+    pub pure comptime fn syntax_node(self) -> ?SyntaxNode {
+        self.tree.node(self.node)
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.syntax_node() match {
+            n? => n.span,
+            null => SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn text(self) -> str {
+        self.syntax_node() match {
+            n? => n.text,
+            null => "",
+        }
+    }
+
+    pub pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.tree.tokens
+    }
+}
+
+pub struct FlurryExtendedStatement {
+    tree: SyntaxTree,
+    node: Integer,
+}
+
+impl FlurryExtendedStatement {
+    pub pure comptime fn from_tree(tree: SyntaxTree) -> FlurryExtendedStatement {
+        FlurryExtendedStatement {
+            tree: tree,
+            node: tree.root,
+        }
+    }
+
+    pub pure comptime fn syntax_tree(self) -> SyntaxTree {
+        self.tree
+    }
+
+    pub pure comptime fn syntax_node(self) -> ?SyntaxNode {
+        self.tree.node(self.node)
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.syntax_node() match {
+            n? => n.span,
+            null => SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn text(self) -> str {
+        self.syntax_node() match {
+            n? => n.text,
+            null => "",
+        }
+    }
+
+    pub pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.tree.tokens
+    }
+}
+
+pub struct FlurryItem {
+    tree: SyntaxTree,
+    node: Integer,
+}
+
+impl FlurryItem {
+    pub pure comptime fn from_tree(tree: SyntaxTree) -> FlurryItem {
+        FlurryItem {
+            tree: tree,
+            node: tree.root,
+        }
+    }
+
+    pub pure comptime fn syntax_tree(self) -> SyntaxTree {
+        self.tree
+    }
+
+    pub pure comptime fn syntax_node(self) -> ?SyntaxNode {
+        self.tree.node(self.node)
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.syntax_node() match {
+            n? => n.span,
+            null => SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn text(self) -> str {
+        self.syntax_node() match {
+            n? => n.text,
+            null => "",
+        }
+    }
+
+    pub pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.tree.tokens
+    }
+}
+
+pub struct FlurryType {
+    tree: SyntaxTree,
+    node: Integer,
+}
+
+impl FlurryType {
+    pub pure comptime fn from_tree(tree: SyntaxTree) -> FlurryType {
+        FlurryType {
+            tree: tree,
+            node: tree.root,
+        }
+    }
+
+    pub pure comptime fn syntax_tree(self) -> SyntaxTree {
+        self.tree
+    }
+
+    pub pure comptime fn syntax_node(self) -> ?SyntaxNode {
+        self.tree.node(self.node)
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.syntax_node() match {
+            n? => n.span,
+            null => SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn text(self) -> str {
+        self.syntax_node() match {
+            n? => n.text,
+            null => "",
+        }
+    }
+
+    pub pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.tree.tokens
+    }
+}
+
+pub struct FlurryIdent {
+    tree: SyntaxTree,
+    node: Integer,
+}
+
+impl FlurryIdent {
+    pub pure comptime fn from_tree(tree: SyntaxTree) -> FlurryIdent {
+        FlurryIdent {
+            tree: tree,
+            node: tree.root,
+        }
+    }
+
+    pub pure comptime fn syntax_tree(self) -> SyntaxTree {
+        self.tree
+    }
+
+    pub pure comptime fn syntax_node(self) -> ?SyntaxNode {
+        self.tree.node(self.node)
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.syntax_node() match {
+            n? => n.span,
+            null => SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn text(self) -> str {
+        self.syntax_node() match {
+            n? => n.text,
+            null => "",
+        }
+    }
+
+    pub pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.tree.tokens
+    }
+}
+
+pub struct FlurryLiteral {
+    tree: SyntaxTree,
+    node: Integer,
+}
+
+impl FlurryLiteral {
+    pub pure comptime fn from_tree(tree: SyntaxTree) -> FlurryLiteral {
+        FlurryLiteral {
+            tree: tree,
+            node: tree.root,
+        }
+    }
+
+    pub pure comptime fn syntax_tree(self) -> SyntaxTree {
+        self.tree
+    }
+
+    pub pure comptime fn syntax_node(self) -> ?SyntaxNode {
+        self.tree.node(self.node)
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.syntax_node() match {
+            n? => n.span,
+            null => SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn text(self) -> str {
+        self.syntax_node() match {
+            n? => n.text,
+            null => "",
+        }
+    }
+
+    pub pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.tree.tokens
+    }
+}
+
+pub struct FlurryBlock {
+    tree: SyntaxTree,
+    node: Integer,
+}
+
+impl FlurryBlock {
+    pub pure comptime fn from_tree(tree: SyntaxTree) -> FlurryBlock {
+        FlurryBlock {
+            tree: tree,
+            node: tree.root,
+        }
+    }
+
+    pub pure comptime fn syntax_tree(self) -> SyntaxTree {
+        self.tree
+    }
+
+    pub pure comptime fn syntax_node(self) -> ?SyntaxNode {
+        self.tree.node(self.node)
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.syntax_node() match {
+            n? => n.span,
+            null => SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn text(self) -> str {
+        self.syntax_node() match {
+            n? => n.text,
+            null => "",
+        }
+    }
+
+    pub pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.tree.tokens
+    }
+}
+
+pub struct FlurryPath {
+    tree: SyntaxTree,
+    node: Integer,
+}
+
+impl FlurryPath {
+    pub pure comptime fn from_tree(tree: SyntaxTree) -> FlurryPath {
+        FlurryPath {
+            tree: tree,
+            node: tree.root,
+        }
+    }
+
+    pub pure comptime fn syntax_tree(self) -> SyntaxTree {
+        self.tree
+    }
+
+    pub pure comptime fn syntax_node(self) -> ?SyntaxNode {
+        self.tree.node(self.node)
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.syntax_node() match {
+            n? => n.span,
+            null => SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn text(self) -> str {
+        self.syntax_node() match {
+            n? => n.text,
+            null => "",
+        }
+    }
+
+    pub pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.tree.tokens
+    }
+}
+
+{- Arena node backing `PegNode` so custom PEG trees remain acyclic data. -}
+pub struct PegTreeNode {
+    rule: Symbol,
+    span: SourceSpan,
+    text: str,
+    tokens: TokenBuffer,
+    child_indices: List<Integer>,
+}
+
+pub struct PegNode {
+    tree: List<PegTreeNode>,
+    root: Integer,
+}
+
+impl PegNode {
+    pub pure comptime fn new(tree: List<PegTreeNode>, root: Integer) -> PegNode {
+        PegNode {
+            tree: tree,
+            root: root,
+        }
+    }
+
+    pub pure comptime fn current_entry(self) -> ?PegTreeNode {
+        self.tree.get(self.root)
+    }
+
+    pub pure comptime fn rule(self) -> Symbol {
+        self.current_entry() match {
+            entry? => entry.rule,
+            null => .invalid,
+        }
+    }
+
+    pub pure comptime fn span(self) -> SourceSpan {
+        self.current_entry() match {
+            entry? => entry.span,
+            null => SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn text(self) -> str {
+        self.current_entry() match {
+            entry? => entry.text,
+            null => "",
+        }
+    }
+
+    pub pure comptime fn children(self) -> List<PegNode> {
+        let entry = self.current_entry() match {
+            value? => value,
+            null => return [],
+        }
+        var out: List<PegNode> = [];
+        let count = entry.child_indices.length();
+        var i: Integer = 0;
+        while i < count {
+            out = out.concat([PegNode {
+                tree: self.tree,
+                root: entry.child_indices[i],
+            }]);
+            i = i + 1;
+        }
+        out
+    }
+
+    pub pure comptime fn to_tokens(self) -> TokenBuffer {
+        self.current_entry() match {
+            entry? => entry.tokens,
+            null => TokenBuffer.empty(),
+        }
+    }
+}

@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use ast::Ast;
 use diagnostic::{DiagnosticContext, FlurryError};
-use lex::lex;
 use parse::parser::Parser;
 use rustc_span::{SourceFile, SourceMap};
 use symbol::Symbol;
@@ -265,26 +264,12 @@ impl<'a> VfsScanner<'a> {
                 message: "Source file content is None".into(),
                 span: rustc_span::DUMMY_SP,
             })?;
+        let _ = content;
 
-        let (tokens, symbols, lex_errors) = lex(content, source_file.start_pos);
-
-        let lex_failed = !lex_errors.is_empty();
-        for err in lex_errors {
-            err.emit(self.diag_ctx, source_file.start_pos);
-        }
-
-        let (tokens, symbols, parse_start_pos) = if lex_failed {
-            (tokens, symbols, source_file.start_pos)
-        } else {
-            let mut budget = macro_expander::MacroBudget::default();
-            match macro_expander::expand_source(
-                self.source_map,
-                source_file,
-                tokens,
-                symbols,
-                &mut budget,
-            ) {
-                Ok(expanded) => (expanded.tokens, expanded.symbols, expanded.start_pos),
+        let mut budget = macro_expander::MacroBudget::default();
+        let (expanded, lex_errors) =
+            match macro_expander::expand_source_file(self.source_map, source_file, &mut budget) {
+                Ok(result) => result,
                 Err(err) => {
                     err.emit(self.diag_ctx, source_file.start_pos);
                     return Err(ResolveError::FileParsingFailed {
@@ -292,8 +277,15 @@ impl<'a> VfsScanner<'a> {
                         span: err.span,
                     });
                 }
-            }
-        };
+            };
+
+        let lex_failed = !lex_errors.is_empty();
+        for err in lex_errors {
+            err.emit(self.diag_ctx, source_file.start_pos);
+        }
+
+        let (tokens, symbols, parse_start_pos) =
+            (expanded.tokens, expanded.symbols, expanded.start_pos);
 
         let mut parser = Parser::new(self.source_map, tokens, symbols, parse_start_pos);
         let parsed = parser.parse(self.diag_ctx);

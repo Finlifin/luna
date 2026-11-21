@@ -57,6 +57,7 @@ dependencies = [
  "ast",
  "diagnostic",
  "hir",
+ "lex",
  "middle",
  "resolve",
  "rustc_span",

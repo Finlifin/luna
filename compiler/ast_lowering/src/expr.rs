@@ -795,6 +795,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     kind: ExprKind::Object(entries),
                 }
             }
+            NodeKind::TokenBuffer => self.lower_token_buffer(ctx, children[0], span),
             NodeKind::Tuple => self.lower_tuple_expr(ctx, children[0], span),
             NodeKind::ListOf => self.lower_list_expr(ctx, children[0], span),
             NodeKind::Block
@@ -1691,6 +1692,321 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             hir_id: self.next_hir_id(),
             kind: ExprKind::List(elems_slice),
             span,
+        }
+    }
+
+    fn resolve_meta_ast_fn(&mut self, name: &str, span: Span) -> Result<hir::common::DefId, ()> {
+        let segments = [
+            Symbol::intern("meta"),
+            Symbol::intern("ast"),
+            Symbol::intern(name),
+        ];
+        match self
+            .resolver
+            .resolve_root_path(&segments, self.file_scope, span)
+        {
+            Ok(resolve::Resolution {
+                kind: BindingKind::Definition(def_id, _),
+            }) => Ok(def_id),
+            Ok(_) => {
+                self.emit_malformed(
+                    &format!("`meta.ast.{name}` is not a callable definition"),
+                    span,
+                );
+                Err(())
+            }
+            Err(_) => {
+                self.emit_malformed(
+                    "token buffer literal `{{ ... }}` requires the `meta` package (pass `--sysroot`)",
+                    span,
+                );
+                Err(())
+            }
+        }
+    }
+
+    fn make_resolved_def_expr(
+        &mut self,
+        name: &str,
+        def_id: hir::common::DefId,
+        span: Span,
+    ) -> Expr<'hir> {
+        Expr {
+            hir_id: self.next_hir_id(),
+            kind: ExprKind::ResolvedDef {
+                name: Symbol::intern(name),
+                has_clause_param: false,
+                def_id,
+            },
+            span,
+        }
+    }
+
+    fn make_call_expr(
+        &mut self,
+        fn_name: &str,
+        def_id: hir::common::DefId,
+        args: Vec<Expr<'hir>>,
+        span: Span,
+    ) -> Expr<'hir> {
+        let callee = self.make_resolved_def_expr(fn_name, def_id, span);
+        let callee_ref = self.arena.alloc_expr(callee);
+        let arg_items: Vec<Arg<'hir>> = args
+            .into_iter()
+            .map(|expr| Arg::Positional(self.arena.alloc_expr(expr)))
+            .collect();
+        let arg_slice = self.arena.alloc_arg_slice(arg_items);
+        Expr {
+            hir_id: self.next_hir_id(),
+            kind: ExprKind::Application(callee_ref, arg_slice),
+            span,
+        }
+    }
+
+    fn lower_token_buffer(
+        &mut self,
+        ctx: ExprContext,
+        parts_multi: NodeIndex,
+        span: Span,
+    ) -> Expr<'hir> {
+        let Ok(empty_buffer_def) = self.resolve_meta_ast_fn("empty_buffer", span) else {
+            return self.make_invalid_expr(span);
+        };
+        let Ok(token_literal_def) = self.resolve_meta_ast_fn("token_literal", span) else {
+            return self.make_invalid_expr(span);
+        };
+        let Ok(buffer_from_tokens_def) = self.resolve_meta_ast_fn("buffer_from_tokens", span)
+        else {
+            return self.make_invalid_expr(span);
+        };
+        let Ok(concat_buffers_def) = self.resolve_meta_ast_fn("concat_buffers", span) else {
+            return self.make_invalid_expr(span);
+        };
+        let Ok(into_tokens_def) = self.resolve_meta_ast_fn("into_tokens", span) else {
+            return self.make_invalid_expr(span);
+        };
+        let Ok(into_tokens_with_spacing_def) =
+            self.resolve_meta_ast_fn("into_tokens_with_spacing", span)
+        else {
+            return self.make_invalid_expr(span);
+        };
+
+        let parts = self
+            .ast
+            .get_multi_child_slice(parts_multi)
+            .unwrap_or(&[])
+            .to_vec();
+        if parts.is_empty() {
+            return self.make_call_expr("empty_buffer", empty_buffer_def, Vec::new(), span);
+        }
+
+        let source_file = self.source_map.lookup_source_file(span.lo());
+        let file_name = match &source_file.name {
+            rustc_span::FileName::Real(real) => real
+                .local_path()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| format!("{:?}", real)),
+            other => format!("{other:?}"),
+        };
+        let file_base = source_file.start_pos.0;
+        let file_src = source_file.src.as_deref().map(String::as_str).unwrap_or("");
+
+        let gap_between = |lo: u32, hi: u32| -> &str {
+            let start = lo.saturating_sub(file_base) as usize;
+            let end = hi.saturating_sub(file_base) as usize;
+            file_src.get(start..end).unwrap_or("")
+        };
+
+        let classify_token_kind =
+            |snippet: &str, lead_ws: bool, trail_ws: bool| -> lex::TokenKind {
+                let mut probe = String::with_capacity(snippet.len() + 2);
+                if lead_ws {
+                    probe.push(' ');
+                }
+                probe.push_str(snippet);
+                if trail_ws {
+                    probe.push(' ');
+                }
+                let (lexed, _, _) = lex::lex(&probe, rustc_span::BytePos(0));
+                lexed
+                    .into_iter()
+                    .find(|tok| {
+                        !matches!(
+                            tok.kind,
+                            lex::TokenKind::Sof | lex::TokenKind::Eof | lex::TokenKind::Comment
+                        )
+                    })
+                    .map(|tok| tok.kind)
+                    .unwrap_or(lex::TokenKind::Invalid)
+            };
+
+        let spacing_symbol = |gap: &str| -> &'static str {
+            if gap.is_empty() {
+                "joint"
+            } else if gap.contains('\n') {
+                "newline"
+            } else {
+                "alone"
+            }
+        };
+
+        let mut segments: Vec<Expr<'hir>> = Vec::new();
+        let mut static_tokens: Vec<Expr<'hir>> = Vec::new();
+
+        for (idx, &part) in parts.iter().enumerate() {
+            let Some((part_kind, part_span, part_children)) = self.ast.get_node(part) else {
+                return self.make_invalid_expr(span);
+            };
+            let prev_hi = if idx == 0 {
+                span.lo().0.saturating_add(2)
+            } else {
+                self.ast
+                    .get_span(parts[idx - 1])
+                    .map_or(span.lo().0, |s| s.hi().0)
+            };
+            let next_lo = if idx + 1 < parts.len() {
+                self.ast
+                    .get_span(parts[idx + 1])
+                    .map_or(span.hi().0.saturating_sub(2), |s| s.lo().0)
+            } else {
+                span.hi().0.saturating_sub(2)
+            };
+            let lead_gap = gap_between(prev_hi, part_span.lo().0);
+            let trail_gap = gap_between(part_span.hi().0, next_lo);
+            let trail_spacing = if idx + 1 < parts.len() {
+                spacing_symbol(trail_gap)
+            } else {
+                "alone"
+            };
+
+            let rel_start = part_span.lo().0.saturating_sub(file_base);
+            let rel_end = part_span.hi().0.saturating_sub(file_base);
+
+            match part_kind {
+                NodeKind::TokenBufferToken => {
+                    let snippet = file_src
+                        .get(rel_start as usize..rel_end as usize)
+                        .unwrap_or("")
+                        .to_string();
+                    let tok_kind =
+                        classify_token_kind(&snippet, !lead_gap.is_empty(), !trail_gap.is_empty());
+                    let args = vec![
+                        self.make_lit_expr(
+                            LitKind::Symbol(Symbol::intern(tok_kind.symbol_name())),
+                            part_span,
+                        ),
+                        self.make_lit_expr(LitKind::String(snippet), part_span),
+                        self.make_lit_expr(
+                            LitKind::Symbol(Symbol::intern(trail_spacing)),
+                            part_span,
+                        ),
+                        self.make_lit_expr(LitKind::String(file_name.clone()), part_span),
+                        self.make_lit_expr(LitKind::Integer(rel_start.to_string()), part_span),
+                        self.make_lit_expr(LitKind::Integer(rel_end.to_string()), part_span),
+                    ];
+                    static_tokens.push(self.make_call_expr(
+                        "token_literal",
+                        token_literal_def,
+                        args,
+                        part_span,
+                    ));
+                }
+                NodeKind::TokenBufferDollar => {
+                    let args = vec![
+                        self.make_lit_expr(
+                            LitKind::Symbol(Symbol::intern(lex::TokenKind::Dollar.symbol_name())),
+                            part_span,
+                        ),
+                        self.make_lit_expr(LitKind::String("$".to_string()), part_span),
+                        self.make_lit_expr(
+                            LitKind::Symbol(Symbol::intern(trail_spacing)),
+                            part_span,
+                        ),
+                        self.make_lit_expr(LitKind::String(file_name.clone()), part_span),
+                        self.make_lit_expr(LitKind::Integer(rel_start.to_string()), part_span),
+                        self.make_lit_expr(LitKind::Integer(rel_end.to_string()), part_span),
+                    ];
+                    static_tokens.push(self.make_call_expr(
+                        "token_literal",
+                        token_literal_def,
+                        args,
+                        part_span,
+                    ));
+                }
+                NodeKind::TokenBufferInterp => {
+                    if !static_tokens.is_empty() {
+                        let batch = std::mem::take(&mut static_tokens);
+                        let list_expr = Expr {
+                            hir_id: self.next_hir_id(),
+                            kind: ExprKind::List(self.arena.alloc_expr_slice(batch)),
+                            span,
+                        };
+                        segments.push(self.make_call_expr(
+                            "buffer_from_tokens",
+                            buffer_from_tokens_def,
+                            vec![list_expr],
+                            span,
+                        ));
+                    }
+                    let inner_node = part_children.first().copied().unwrap_or(0);
+                    let lowered_inner = if inner_node == 0 {
+                        self.make_invalid_expr(part_span)
+                    } else {
+                        self.lower_expr(ctx, inner_node)
+                    };
+                    if idx + 1 < parts.len() {
+                        let spacing_arg = self.make_lit_expr(
+                            LitKind::Symbol(Symbol::intern(trail_spacing)),
+                            part_span,
+                        );
+                        segments.push(self.make_call_expr(
+                            "into_tokens_with_spacing",
+                            into_tokens_with_spacing_def,
+                            vec![lowered_inner, spacing_arg],
+                            part_span,
+                        ));
+                    } else {
+                        segments.push(self.make_call_expr(
+                            "into_tokens",
+                            into_tokens_def,
+                            vec![lowered_inner],
+                            part_span,
+                        ));
+                    }
+                }
+                other => {
+                    self.emit_malformed(
+                        &format!("unexpected node `{other:?}` in token buffer"),
+                        part_span,
+                    );
+                    return self.make_invalid_expr(span);
+                }
+            }
+        }
+
+        if !static_tokens.is_empty() {
+            let list_expr = Expr {
+                hir_id: self.next_hir_id(),
+                kind: ExprKind::List(self.arena.alloc_expr_slice(static_tokens)),
+                span,
+            };
+            segments.push(self.make_call_expr(
+                "buffer_from_tokens",
+                buffer_from_tokens_def,
+                vec![list_expr],
+                span,
+            ));
+        }
+
+        if segments.len() == 1 {
+            segments.pop().unwrap()
+        } else {
+            let list_expr = Expr {
+                hir_id: self.next_hir_id(),
+                kind: ExprKind::List(self.arena.alloc_expr_slice(segments)),
+                span,
+            };
+            self.make_call_expr("concat_buffers", concat_buffers_def, vec![list_expr], span)
         }
     }
 

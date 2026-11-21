@@ -1,4 +1,5 @@
 mod trait_sources;
+
 use trait_sources::TraitSourceIndex;
 pub use trait_sources::TraitSourcePlan;
 
@@ -353,6 +354,51 @@ impl<'a> Resolver<'a> {
     /// The underlying scope tree.
     pub fn scope_tree(&self) -> &ScopeTree {
         &self.tree.scope_tree
+    }
+
+    /// Resolve a multi-segment path anchored at `requester`'s compilation root scope
+    /// (such as `meta.ast.TokenBuffer`).
+    pub fn resolve_root_path(
+        &self,
+        segments: &[Symbol],
+        requester: ScopeId,
+        span: rustc_span::Span,
+    ) -> ResolveResult<Resolution> {
+        let Some((&first, rest)) = segments.split_first() else {
+            return Err(ResolveError::InvalidNodeType {
+                message: "empty root path".into(),
+                span,
+            });
+        };
+        let root_scope = self
+            .scope_tree()
+            .ancestors(requester)
+            .find(|scope| scope.kind == crate::scope::ScopeKind::Root)
+            .ok_or_else(|| ResolveError::ModuleNotFound {
+                message: "root package scope is not present".into(),
+                span,
+            })?;
+        if root_scope.items.ambiguous_glob(first) {
+            return Err(self.ambiguous_trait_glob(first, root_scope.id, span));
+        }
+        let binding = self.lookup_in_scope(first, root_scope.id).ok_or_else(|| {
+            ResolveError::UnresolvedIdentifier {
+                name: first.to_string(),
+                span,
+            }
+        })?;
+        self.check_access(&binding, requester, span)?;
+        let mut resolution = Resolution::from_binding(&binding);
+        for &segment in rest {
+            let crate::binding::BindingKind::Definition(container, _) = resolution.kind else {
+                return Err(ResolveError::InvalidNodeType {
+                    message: format!("expected module or container before `{segment}`"),
+                    span,
+                });
+            };
+            resolution = self.resolve_member(container, segment, requester, span)?;
+        }
+        Ok(resolution)
     }
 
     /// The underlying module tree.

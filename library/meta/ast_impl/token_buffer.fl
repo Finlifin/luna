@@ -1,0 +1,193 @@
+use List;
+use ast_impl.span.SourceSpan;
+use ast_impl.token.Token;
+use builtin.{Integer, Symbol, Type, bool, str}
+use numeric.equality.ComptimeEq;
+
+{-
+    Comptime token sequence produced by `{{ ... }}` literals, AST node views,
+    and macro handlers. Mutating methods use Flurry comptime value-reference
+    `self` semantics; pure concatenators construct independent buffers.
+-}
+pub struct TokenBuffer {
+    tokens: List<Token>,
+}
+
+impl TokenBuffer {
+    pub pure comptime fn empty() -> TokenBuffer {
+        TokenBuffer { tokens: [] }
+    }
+
+    pub pure comptime fn from_token(token: Token) -> TokenBuffer {
+        TokenBuffer { tokens: [token] }
+    }
+
+    pub pure comptime fn from_tokens(tokens: List<Token>) -> TokenBuffer {
+        TokenBuffer { tokens: tokens }
+    }
+
+    pub pure comptime fn from_str_literal(value: str) -> TokenBuffer {
+        TokenBuffer {
+            tokens: [Token.string_literal(value)],
+        }
+    }
+
+    pub pure comptime fn length(self) -> Integer {
+        self.tokens.length()
+    }
+
+    pub pure comptime fn is_empty(self) -> bool {
+        self.tokens.length() == 0
+    }
+
+    pub pure comptime fn get(self, index: Integer) -> ?Token {
+        self.tokens.get(index)
+    }
+
+    pub pure comptime fn first(self) -> ?Token {
+        self.tokens.first()
+    }
+
+    pub pure comptime fn last(self) -> ?Token {
+        self.tokens.last()
+    }
+
+    pub pure comptime fn to_list(self) -> List<Token> {
+        self.tokens
+    }
+
+    pub comptime fn push(self, token: Token) {
+        self.tokens.append(token);
+    }
+
+    pub comptime fn append(self, other: TokenBuffer) {
+        self.tokens.append_all(other.tokens);
+    }
+
+    pub pure comptime fn concat(self, other: TokenBuffer) -> TokenBuffer {
+        TokenBuffer {
+            tokens: self.tokens.concat(other.tokens),
+        }
+    }
+
+    pub pure comptime fn concat_all(parts: List<TokenBuffer>) -> TokenBuffer {
+        var out: List<Token> = [];
+        let count = parts.length();
+        var i: Integer = 0;
+        while i < count {
+            out = out.concat(parts[i].tokens);
+            i = i + 1;
+        }
+        TokenBuffer { tokens: out }
+    }
+
+    pub pure comptime fn with_trailing_spacing(self, spacing: Symbol) -> TokenBuffer {
+        let count = self.tokens.length();
+        if count == 0 {
+            return self;
+        }
+        var out: List<Token> = [];
+        var i: Integer = 0;
+        while i < count - 1 {
+            out = out.concat([self.tokens[i]]);
+            i = i + 1;
+        }
+        out = out.concat([self.tokens[count - 1].with_spacing(spacing)]);
+        TokenBuffer { tokens: out }
+    }
+
+    pub pure comptime fn join(
+        parts: List<TokenBuffer>,
+        separator: TokenBuffer,
+    ) -> TokenBuffer {
+        let count = parts.length();
+        if count == 0 {
+            return TokenBuffer.empty();
+        }
+        var out: List<Token> = [];
+        var i: Integer = 0;
+        while i < count {
+            if i > 0 {
+                out = out.concat(separator.tokens);
+            }
+            out = out.concat(parts[i].tokens);
+            i = i + 1;
+        }
+        TokenBuffer { tokens: out }
+    }
+
+    pub comptime fn foreach(
+        self,
+        visit: %c comptime fn(Token),
+    )
+    where
+        c: Type.vars.Closure,
+    {
+        self.tokens.foreach(visit);
+    }
+
+    pub comptime fn map(
+        self,
+        transform: %c comptime fn(Token) -> U,
+    ) -> List<U>
+    where
+        U,
+        c: Type.vars.Closure,
+    {
+        self.tokens.map(transform)
+    }
+
+    pub comptime fn filter(
+        self,
+        pred: %c comptime fn(Token) -> bool,
+    ) -> TokenBuffer
+    where
+        c: Type.vars.Closure,
+    {
+        TokenBuffer {
+            tokens: self.tokens.filter(pred),
+        }
+    }
+
+    pub comptime fn fold(
+        self,
+        initial: A,
+        combine: %c comptime fn(A, Token) -> A,
+    ) -> A
+    where
+        A,
+        c: Type.vars.Closure,
+    {
+        self.tokens.fold(initial, combine)
+    }
+}
+
+comptime impl ComptimeEq for TokenBuffer {
+    comptime fn eq(self, other: Self) -> bool {
+        self.tokens.as(ComptimeEq).eq(other.tokens)
+    }
+}
+
+{- Lowering entrypoints targeted by `{{ ... }}` HIR lowering. -}
+pub pure comptime fn empty_buffer() -> TokenBuffer {
+    TokenBuffer.empty()
+}
+
+pub pure comptime fn token_literal(
+    kind: Symbol,
+    text: str,
+    spacing: Symbol,
+    file: str,
+    start: Integer,
+    end: Integer,
+) -> Token {
+    Token.new(kind, text, spacing, SourceSpan.new(file, start, end, 0))
+}
+
+pub pure comptime fn buffer_from_tokens(tokens: List<Token>) -> TokenBuffer {
+    TokenBuffer.from_tokens(tokens)
+}
+
+pub pure comptime fn concat_buffers(parts: List<TokenBuffer>) -> TokenBuffer {
+    TokenBuffer.concat_all(parts)
+}

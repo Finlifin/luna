@@ -1,0 +1,247 @@
+use List;
+use ast_impl.span.SourceSpan;
+use builtin.{Integer, Symbol, bool, str, u64, u8}
+use data.text.ComptimeTextBytes;
+use numeric.equality.ComptimeEq;
+
+pure comptime fn hex_nibble(digit: u8) -> str {
+    digit match {
+        0 => "0",
+        1 => "1",
+        2 => "2",
+        3 => "3",
+        4 => "4",
+        5 => "5",
+        6 => "6",
+        7 => "7",
+        8 => "8",
+        9 => "9",
+        10 => "A",
+        11 => "B",
+        12 => "C",
+        13 => "D",
+        14 => "E",
+        _ => "F",
+    }
+}
+
+pure comptime fn escape_special_byte(b: u8) -> ?str {
+    b match {
+        92 => "\\\\",
+        34 => "\\\"",
+        10 => "\\n",
+        13 => "\\r",
+        9 => "\\t",
+        0 => "\\0",
+        36 => "\\$",
+        _ => if b < 32 or b == 127 {
+            let hi = b / 16;
+            let lo = b % 16;
+            "\\x{"
+                .as(ComptimeTextBytes)
+                .concat(hex_nibble(hi))
+                .as(ComptimeTextBytes)
+                .concat(hex_nibble(lo))
+                .as(ComptimeTextBytes)
+                .concat("}")
+        } else {
+            null
+        },
+    }
+}
+
+pure comptime fn escape_string_text(value: str) -> str {
+    let length = value.as(ComptimeTextBytes).byte_length();
+    var out: str = "\"";
+    var chunk_start: u64 = 0;
+    var index: u64 = 0;
+    while index < length {
+        let byte = value.as(ComptimeTextBytes).byte(index) match {
+            b? => b,
+            null => break,
+        }
+        escape_special_byte(byte) match {
+            seq? => {
+                if index > chunk_start {
+                    let chunk = value.as(ComptimeTextBytes).slice(chunk_start, index) match {
+                        s? => s,
+                        null => "",
+                    }
+                    out = out.as(ComptimeTextBytes).concat(chunk);
+                }
+                out = out.as(ComptimeTextBytes).concat(seq);
+                chunk_start = index + 1;
+            },
+            null => {},
+        }
+        index = index + 1;
+    }
+    if length > chunk_start {
+        let tail = value.as(ComptimeTextBytes).slice(chunk_start, length) match {
+            s? => s,
+            null => "",
+        }
+        out = out.as(ComptimeTextBytes).concat(tail);
+    }
+    out.as(ComptimeTextBytes).concat("\"")
+}
+
+pure comptime fn digit_str(digit: Integer) -> str {
+    if digit == 0 {
+        "0"
+    } else if digit == 1 {
+        "1"
+    } else if digit == 2 {
+        "2"
+    } else if digit == 3 {
+        "3"
+    } else if digit == 4 {
+        "4"
+    } else if digit == 5 {
+        "5"
+    } else if digit == 6 {
+        "6"
+    } else if digit == 7 {
+        "7"
+    } else if digit == 8 {
+        "8"
+    } else {
+        "9"
+    }
+}
+
+pub pure comptime fn nonneg_integer_decimal(value: Integer) -> str {
+    if value <= 0 {
+        return "0";
+    }
+    var n = value;
+    var digits: List<str> = [];
+    while n > 0 {
+        digits = digits.concat([digit_str(n.rem_trunc(10))]);
+        n = n.div_trunc(10);
+    }
+    var out: str = "";
+    var i = digits.length();
+    while i > 0 {
+        i = i - 1;
+        out = out.as(ComptimeTextBytes).concat(digits[i]);
+    }
+    out
+}
+
+{-
+    Single lexical token carrying kind tag, source text, trailing spacing (the
+    relationship between this token and its successor), and provenance span.
+-}
+pub struct Token {
+    kind: Symbol,
+    text: str,
+    spacing: Symbol,
+    span: SourceSpan,
+}
+
+impl Token {
+    pub pure comptime fn new(
+        kind: Symbol,
+        text: str,
+        spacing: Symbol,
+        span: SourceSpan,
+    ) -> Token {
+        Token {
+            kind: kind,
+            text: text,
+            spacing: spacing,
+            span: span,
+        }
+    }
+
+    pub pure comptime fn ident(name: str) -> Token {
+        Token {
+            kind: .id,
+            text: name,
+            spacing: .alone,
+            span: SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn string_literal(value: str) -> Token {
+        Token {
+            kind: .str,
+            text: escape_string_text(value),
+            spacing: .alone,
+            span: SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn int_literal(value: Integer) -> Token {
+        let abs_val = if value < 0 { -value } else { value }
+        Token {
+            kind: .int,
+            text: nonneg_integer_decimal(abs_val),
+            spacing: .alone,
+            span: SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn bool_literal(value: bool) -> Token {
+        if value {
+            Token {
+                kind: .kw_true,
+                text: "true",
+                spacing: .alone,
+                span: SourceSpan.synthetic(),
+            }
+        } else {
+            Token {
+                kind: .kw_false,
+                text: "false",
+                spacing: .alone,
+                span: SourceSpan.synthetic(),
+            }
+        }
+    }
+
+    pub pure comptime fn punct(kind: Symbol, text: str) -> Token {
+        Token {
+            kind: kind,
+            text: text,
+            spacing: .alone,
+            span: SourceSpan.synthetic(),
+        }
+    }
+
+    pub pure comptime fn with_spacing(self, spacing: Symbol) -> Token {
+        Token {
+            kind: self.kind,
+            text: self.text,
+            spacing: spacing,
+            span: self.span,
+        }
+    }
+
+    pub pure comptime fn is_ident(self) -> bool {
+        self.kind == .id
+    }
+
+    pub pure comptime fn is_literal(self) -> bool {
+        self.kind == .int
+            or self.kind == .int_bin
+            or self.kind == .int_oct
+            or self.kind == .int_hex
+            or self.kind == .real
+            or self.kind == .real_sci
+            or self.kind == .str
+            or self.kind == .char
+            or self.kind == .kw_true
+            or self.kind == .kw_false
+    }
+}
+
+comptime impl ComptimeEq for Token {
+    comptime fn eq(self, other: Self) -> bool {
+        self.kind == other.kind
+            and self.text == other.text
+            and self.spacing == other.spacing
+            and self.span.as(ComptimeEq).eq(other.span)
+    }
+}

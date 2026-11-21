@@ -1,14 +1,21 @@
 //! Flurry macro expansion engine (template macros, construction macros, provenance, and budgets).
+pub mod imports;
 pub mod materialize;
 pub mod provenance;
+pub mod raw_source;
+pub mod registry;
 pub mod template;
 
 use diagnostic::{DiagnosticBuilder, DiagnosticContext, FlurryError};
-use lex::{Symbol, Token, TokenKind};
+use lex::{LexError, Symbol, Token, TokenKind};
 pub use materialize::{ExpandedFile, materialize_expanded, tokens_to_macro_tokens};
 pub use provenance::{
     ExpansionId, ExpansionKind, ExpansionMap, ExpansionRecord, MacroToken, TokenSpacing,
     escape_sexp_str,
+};
+pub use registry::{
+    AstNodeKind, ExpansionContext, MacroDescriptor, MacroExecutor, MacroId, MacroInputMode,
+    MacroRegistry, MacroVisibility,
 };
 use rustc_span::{BytePos, SourceFile, SourceMap, Span};
 use std::collections::HashMap;
@@ -87,6 +94,7 @@ pub enum MacroErrorKind {
     HandlerExecutionError,
     InvalidMacroOutput,
     PreparationCycle,
+    UnterminatedMacroInput,
 }
 
 impl MacroErrorKind {
@@ -109,6 +117,7 @@ impl MacroErrorKind {
             Self::HandlerExecutionError => "handler-execution-error",
             Self::InvalidMacroOutput => "invalid-macro-output",
             Self::PreparationCycle => "preparation-cycle",
+            Self::UnterminatedMacroInput => "unterminated-macro-input",
         }
     }
 
@@ -131,6 +140,7 @@ impl MacroErrorKind {
             Self::HandlerExecutionError => 4015,
             Self::InvalidMacroOutput => 4016,
             Self::PreparationCycle => 4017,
+            Self::UnterminatedMacroInput => 4018,
         }
     }
 }
@@ -312,4 +322,88 @@ pub fn expand_source(
         &expanded_tokens,
         provenance,
     ))
+}
+
+/// Pre-lexing full macro expansion entrypoint for one source file using built-in macros only.
+pub fn expand_source_file(
+    source_map: &SourceMap,
+    source_file: &SourceFile,
+    budget: &mut MacroBudget,
+) -> Result<(ExpandedFile, Vec<LexError>), MacroError> {
+    let registry = MacroRegistry::with_builtins();
+    let mut ctx = ExpansionContext::with_registry(&registry);
+    expand_source_file_with_context(source_map, source_file, &mut ctx, budget)
+}
+
+/// Pre-lexing full macro expansion entrypoint for one source file.
+///
+/// Runs the Mode 4 / `@use` raw-source scanner before normal Flurry lexing so raw macro
+/// bodies never fail ordinary lexing, then runs file-local template macro expansion.
+pub fn expand_source_file_with_context(
+    source_map: &SourceMap,
+    source_file: &SourceFile,
+    ctx: &mut ExpansionContext<'_>,
+    budget: &mut MacroBudget,
+) -> Result<(ExpandedFile, Vec<LexError>), MacroError> {
+    let src = source_file.src.as_deref().map(String::as_str).unwrap_or("");
+    let mut provenance = ExpansionMap::new();
+
+    if src.contains('@') {
+        let raw_pass = raw_source::process_raw_source_and_imports(
+            src,
+            source_file.start_pos,
+            ctx,
+            &mut provenance,
+            budget,
+        )?;
+
+        if raw_pass.modified {
+            if !raw_pass.lex_errors.is_empty() {
+                return Ok((
+                    ExpandedFile {
+                        tokens: Vec::new(),
+                        symbols: HashMap::new(),
+                        start_pos: source_file.start_pos,
+                        expanded: false,
+                        provenance,
+                        source_text: None,
+                    },
+                    raw_pass.lex_errors,
+                ));
+            }
+            let has_template_syntax = raw_pass
+                .tokens
+                .iter()
+                .any(|tok| matches!(tok.kind, TokenKind::Define | TokenKind::Dollar));
+            let final_tokens = if has_template_syntax {
+                let (after_tmpl, _) =
+                    template::expand_template_macros(raw_pass.tokens, &mut provenance, budget)?;
+                after_tmpl
+            } else {
+                raw_pass.tokens
+            };
+            return Ok((
+                materialize_expanded(source_map, source_file, &final_tokens, provenance),
+                Vec::new(),
+            ));
+        }
+    }
+
+    let (tokens, symbols, lex_errors) = lex::lex(src, source_file.start_pos);
+    if !lex_errors.is_empty() {
+        return Ok((
+            ExpandedFile {
+                tokens,
+                symbols,
+                start_pos: source_file.start_pos,
+                expanded: false,
+                provenance,
+                source_text: None,
+            },
+            lex_errors,
+        ));
+    }
+
+    let expanded = expand_source(source_map, source_file, tokens, symbols, budget)?;
+    Ok((expanded, Vec::new()))
 }
