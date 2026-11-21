@@ -1534,44 +1534,54 @@ impl Checker<'_, '_> {
             } else {
                 self.nominal_context()
             };
-            let mut abstract_parameters = self
+            // A binder in the enclosing declaration is available to the
+            // invocation only if its code, captures or their domains need it.
+            // An unrelated open binder must not turn closed work abstract.
+            let mut available_types: BTreeSet<_> = self
                 .signature_owner
                 .and_then(|owner| self.type_parameters.get(&owner))
-                .cloned()
-                .unwrap_or_default();
-            abstract_parameters.retain(|id| {
-                // A completed contextual invocation may already have replaced
-                // the declaration binder. Authorize only remaining binders;
-                // opaque inputs forwarded by substitutions are collected below.
-                !self.alias_substitution.contains_key(id)
-                    && self
-                        .trait_input_domain(*id)
-                        .is_none_or(|domain| Sort::of_comptime_domain(&domain) == Sort::Type)
-            });
-            abstract_parameters.extend(
+                .into_iter()
+                .flatten()
+                .copied()
+                .filter(|id| {
+                    !self.alias_substitution.contains_key(id)
+                        && self
+                            .trait_input_domain(*id)
+                            .is_none_or(|domain| Sort::of_comptime_domain(&domain) == Sort::Type)
+                })
+                .collect();
+            available_types.extend(
                 scoped_parameters
                     .iter()
                     .filter(|p| p.sort == Sort::Type)
                     .map(|p| p.declaration),
             );
-            // Substitutions and frozen captures can introduce binders owned by
-            // the caller. Resolve those against declarations before selecting
-            // the dependent prefix for the VM.
+            // Substitution RHSs can introduce caller binders. They supply a
+            // lexical directory; only retained inputs are live roots.
             let mut forwarded = BTreeSet::new();
-            for term in self.alias_substitution.values().chain(
-                inputs
-                    .iter()
-                    .flat_map(|(_, domain, value)| std::iter::once(domain).chain(value)),
-            ) {
+            for (term, retained) in self
+                .alias_substitution
+                .values()
+                .map(|ty| (ty, false))
+                .chain(inputs.iter().flat_map(|(_, domain, value)| {
+                    std::iter::once((domain, true)).chain(value.iter().map(|v| (v, true)))
+                }))
+            {
                 let uses =
                     input_observation::term_inputs(term, &mut self.required_steps, expr.span)?;
                 for (id, sort) in uses.declarations {
                     match sort {
                         Sort::Type => {
-                            observed.types.insert(id);
+                            available_types.insert(id);
+                            if retained {
+                                observed.types.insert(id);
+                            }
                         }
                         Sort::ComptimeValue | Sort::Runtime => {
                             forwarded.insert(id);
+                            if retained {
+                                observed.values.insert(id);
+                            }
                         }
                     }
                 }
@@ -1596,8 +1606,9 @@ impl Checker<'_, '_> {
                     })?;
                     abstract_value_parameters.push((id, domain));
                 }
-                observed.values.extend(forwarded);
             }
+            abstract_value_parameters
+                .extend(available_types.into_iter().map(|id| (id, p(P::Type))));
             let (lexical_types, abstract_value_parameters) = scope::select_abstract_inputs(
                 &abstract_value_parameters,
                 &self.callable_type_inputs,
@@ -1608,8 +1619,7 @@ impl Checker<'_, '_> {
                 expr.span,
             )?;
             observed.types.extend(lexical_types);
-            let existing: BTreeSet<_> = abstract_parameters.iter().copied().collect();
-            abstract_parameters.extend(observed.types.difference(&existing).copied());
+            let abstract_parameters: Vec<_> = observed.types.into_iter().collect();
             let mut raw_assumptions = Vec::new();
             if let Some(implementation) = self.initializer_implementation() {
                 raw_assumptions.extend(implementation.capabilities.iter().cloned());

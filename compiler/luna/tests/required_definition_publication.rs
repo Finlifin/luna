@@ -215,3 +215,29 @@ fn required_default_publishes_the_enum_before_checking_the_next_input() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn a_closed_default_can_publish_with_unrelated_clause_binders_in_scope() {
+    let source = r#"
+        comptime fn Wrapper(subject: Type) -> Type {
+            meta.NewtypeBuilder.new(subject, .name = .ScopeWrapper).Build()
+        }
+        fn accepts() -> bool where T, .Flag: Type = Wrapper(bool), .answer: bool = true {
+            const answer_value = answer;
+            answer_value
+        }
+        fn forward(value: T) -> bool where T { accepts<T, .answer = true>() }
+        fn run() -> bool { forward(true) and accepts<bool, .Flag = bool>() }
+    "#;
+    let package = sysroot::compile(source).unwrap();
+    let wrappers: Vec<_> = package
+        .newtypes
+        .iter()
+        .filter(|item| item.name == "ScopeWrapper")
+        .collect();
+    assert_eq!(wrappers.len(), 1);
+    assert_eq!(
+        wrappers[0].representation,
+        nir::Term::Primitive(nir::Primitive::Bool)
+    );
+}
