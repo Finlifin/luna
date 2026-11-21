@@ -746,17 +746,27 @@ fn later_type_suppliers_contextualize_earlier_clauses_without_running_early() {
                 and (ordinary matches 103?)
         }
     "#;
+    check_struct_events(
+        source,
+        "Forward",
+        &["ForwardField", "ForwardStamp", "ForwardGuard"],
+    );
+    let invalid = source.replace("mark(.ForwardGuard, 1) == 1", "mark(.ForwardGuard, 1)");
+    assert!(sysroot::compile(&invalid).is_err());
+}
+
+fn check_struct_events(source: &str, prefix: &str, expected: &[&str]) {
     let package = sysroot::compile(source).unwrap();
     let mut events: Vec<_> = package
         .structs
         .iter()
-        .filter(|item| item.name.starts_with("Forward"))
+        .filter(|item| item.name.starts_with(prefix))
         .map(|item| (item.declaration, item.name.as_str()))
         .collect();
     events.sort_unstable();
     assert_eq!(
         events.into_iter().map(|(_, name)| name).collect::<Vec<_>>(),
-        ["ForwardField", "ForwardStamp", "ForwardGuard"]
+        expected
     );
     let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
     let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
@@ -764,6 +774,49 @@ fn later_type_suppliers_contextualize_earlier_clauses_without_running_early() {
         vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
         Value::Bool(true)
     );
-    let invalid = source.replace("mark(.ForwardGuard, 1) == 1", "mark(.ForwardGuard, 1)");
-    assert!(sysroot::compile(&invalid).is_err());
+}
+
+#[test]
+fn selected_type_defaults_contextualize_inputs_before_default_evaluation() {
+    let source = r#"
+        enum Packet { group.{byte(u8)} }
+
+        comptime fn mark(name: Symbol, value: u8) -> u8 {
+            let generated = meta.StructBuilder.new(.name = name).Build();
+            value
+        }
+        fn read() -> T
+        where .A: Type = Packet,
+            .T: Type = if mark(.DefaultGuard, 1) == 1 { A } else { A },
+            .items: meta.List<T> = [], .stamp: u8 = 0
+        {
+            const item = items[0];
+            item
+        }
+        fn chained() -> T where .A: Type = bool, .B: Type = A,
+            .T: Type = B, .items: meta.List<T> = []
+        {
+            const item = items[0];
+            item
+        }
+        fn run() -> bool {
+            let first = read<.items = [.group.byte(mark(.DefaultField, 7))],
+                .stamp = mark(.DefaultStamp, 0)>();
+            let ordinary = read<.items = [.group.byte(0)], .T = ?u8>();
+            let last = chained<.items = [.group.byte(9)], .A = Packet>();
+            (first matches .group.byte(7)) and (ordinary matches 103?)
+                and (last matches .group.byte(9))
+        }
+    "#;
+    check_struct_events(
+        source,
+        "Default",
+        &["DefaultField", "DefaultStamp", "DefaultGuard"],
+    );
+    let failing = source.replace(
+        "let generated =",
+        "assumes name != .DefaultGuard; let generated =",
+    );
+    let error = sysroot::compile(&failing).unwrap_err();
+    assert!(error.contains("ProgramContractRejected"), "{error}");
 }

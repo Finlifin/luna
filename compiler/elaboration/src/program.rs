@@ -5175,6 +5175,15 @@ impl Checker<'_, '_> {
         if is_never(actual) {
             return Ok(());
         }
+        self.require_type_identity(actual, expected, span)
+    }
+
+    fn require_type_identity(
+        &self,
+        actual: &Term,
+        expected: &Term,
+        span: Span,
+    ) -> Result<(), Error> {
         use crate::ptc::{Budget, Formula, Outcome};
         let (left, right) = self.scoped_equality_operands(actual, expected, span)?;
         let mut outcome = self.context.prove(

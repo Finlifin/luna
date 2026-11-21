@@ -8,6 +8,7 @@ pub(super) struct PendingClause<'hir> {
     pub binder: DeclarationId,
     pub dependencies: Vec<DeclarationId>,
     pub explicit: Option<trait_inputs::ExplicitClause<'hir>>,
+    pub observed_type: Option<Term>,
 }
 
 pub(super) type FunctionTypePlan<'hir> = (Vec<DeclarationId>, Vec<Term>, Vec<PendingClause<'hir>>);
@@ -512,6 +513,7 @@ impl<'h> Checker<'_, 'h> {
                 binder: binder.declaration,
                 dependencies,
                 explicit: None,
+                observed_type: None,
             });
         }
         inferred.push(binder.declaration);
@@ -707,6 +709,9 @@ impl<'h> Checker<'_, 'h> {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.type_clause_default(owner, slot - inherited, &inputs, None, span)?
             };
+            if let Some(expected) = &clause.observed_type {
+                self.require_type_identity(&value, expected, span)?;
+            }
             let index = parameters
                 .iter()
                 .position(|id| *id == clause.binder)

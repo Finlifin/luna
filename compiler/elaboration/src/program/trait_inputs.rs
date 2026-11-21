@@ -697,7 +697,6 @@ impl Checker<'_, '_> {
             return Err(error(span, "clause input prefix arity mismatch"));
         }
         let parameters = all_parameters[prefix.len()..].to_vec();
-        let domains = &domains[prefix.len()..];
         let mut supplied: Vec<Option<Term>> = vec![None; clauses.len()];
         for (id, ty) in evidence {
             let slot = parameters
@@ -708,7 +707,7 @@ impl Checker<'_, '_> {
         }
         let mut destinations = forward::ClauseDomains::new(
             owner,
-            &parameters,
+            &all_parameters,
             domains,
             &prefix,
             subject,
@@ -716,6 +715,7 @@ impl Checker<'_, '_> {
             args,
             span,
         );
+        let domains = &domains[prefix.len()..];
         let mut pending_explicit = vec![None; clauses.len()];
         let mut pending_runtime = vec![None; clauses.len()];
         let mut positional = 0;
@@ -922,6 +922,7 @@ impl Checker<'_, '_> {
                 supplied[slot] = Some(actual);
             }
         }
+        let mut observations = destinations.observed;
         struct CallerScope {
             owner: Option<OwnerId>,
             context: crate::ptc::Context,
@@ -1010,6 +1011,7 @@ impl Checker<'_, '_> {
                             binder: binder.declaration,
                             dependencies: waiting,
                             explicit: Some(explicit),
+                            observed_type: None,
                         });
                         plan.0.push(binder.declaration);
                         Term::Rigid {
@@ -1041,6 +1043,17 @@ impl Checker<'_, '_> {
                         )
                     })?;
                     let value = plan.1.last().expect("planned clause slot");
+                    if let Some(expected) = observations.remove(&slot) {
+                        if let Some(pending) =
+                            plan.2.last_mut().filter(|p| p.binder == binder.declaration)
+                        {
+                            pending.observed_type = Some(expected);
+                        } else {
+                            caller_scope.with_caller(self, |this| {
+                                this.require_type_identity(value, &expected, span)
+                            })?;
+                        }
+                    }
                     self.alias_substitution
                         .insert(parameters[slot], std::sync::Arc::new(value.clone()));
                     continue;
@@ -1082,6 +1095,11 @@ impl Checker<'_, '_> {
                     self.active_type_defaults.remove(&(owner, slot));
                     result?
                 };
+                if let Some(expected) = observations.remove(&slot) {
+                    caller_scope.with_caller(self, |this| {
+                        this.require_type_identity(&value, &expected, span)
+                    })?;
+                }
                 self.alias_substitution
                     .insert(parameters[slot], std::sync::Arc::new(value.clone()));
                 plan.1.push(value);
