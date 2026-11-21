@@ -841,6 +841,14 @@ impl<'a> Analysis<'a> {
         }
     }
 
+    fn text_provenance(&self) -> crate::memory::TextProvenance {
+        if self.finite {
+            crate::memory::TextProvenance::Unchecked
+        } else {
+            crate::memory::TextProvenance::VerifiedByRegionAnalysis
+        }
+    }
+
     // Definition-side inputs need not have concrete values yet. A computation
     // closed over declared staged parameters retains their availability. This
     // is dependency evidence only: expression/call analysis below must still
@@ -2692,6 +2700,7 @@ impl<'a> Analysis<'a> {
         // purity/cleanup; it is never published as an unconditional contract.
         let mut borrowed_parameters = Vec::new();
         let mut borrowed_fields = Vec::new();
+        let text_provenance = self.text_provenance();
         let Term::Function { parameters, .. } = function.signature.callable_signature() else {
             return false;
         };
@@ -2706,16 +2715,12 @@ impl<'a> Analysis<'a> {
                 Ok(None) => {}
                 Err(_) => return false,
             }
-            let layout = if self.finite {
-                crate::memory::pointer_input_layout(Some(self.package), ty, &mut self.fuel)
-            } else {
-                crate::memory::pointer_input_layout_for(
-                    Some(self.package),
-                    ty,
-                    crate::memory::TextProvenance::VerifiedByRegionAnalysis,
-                    &mut self.fuel,
-                )
-            };
+            let layout = crate::memory::pointer_input_layout_for(
+                Some(self.package),
+                ty,
+                text_provenance,
+                &mut self.fuel,
+            );
             match layout {
                 Ok(layout) => {
                     for leaf in layout {
@@ -2754,6 +2759,7 @@ impl<'a> Analysis<'a> {
                 &[],
                 vec![],
                 &borrowed_fields,
+                text_provenance,
             );
             let Ok(report) = report else {
                 return false;
@@ -2810,6 +2816,7 @@ impl<'a> Analysis<'a> {
             &[],
             vec![],
             &borrowed_fields,
+            text_provenance,
         );
         self.fuel = fuel;
         let Ok(report) = report else {
@@ -3925,14 +3932,21 @@ impl<'a> Analysis<'a> {
                 Some((input.clone(), values))
             })
             .collect::<Option<BTreeMap<_, _>>>()?;
+        let text_provenance = self.text_provenance();
         let code_fields = match source {
             ReturnedCodeSource::Named(id, types) => {
-                memory::infer_with_code_inputs(
+                memory::infer_with_effect_inputs_full_context(
                     self.package,
                     id,
                     types,
                     &BTreeMap::new(),
                     &prepared,
+                    &[],
+                    None,
+                    Some(&mut self.method_callees),
+                    Some(self.declarations.as_ref()),
+                    text_provenance,
+                    None,
                     &mut self.fuel,
                 )
                 .ok()?
@@ -3947,13 +3961,16 @@ impl<'a> Analysis<'a> {
                 else {
                     return None;
                 };
-                memory::infer_closure_with_prepared_captures(
+                memory::infer_closure_with_prepared_captures_in_context(
                     self.package,
                     &definition,
                     &captures,
                     &prepared_captures,
                     &BTreeMap::new(),
                     &prepared,
+                    Some(&mut self.method_callees),
+                    Some(self.declarations.as_ref()),
+                    text_provenance,
                     &mut self.fuel,
                 )
                 .ok()?
@@ -5338,5 +5355,354 @@ mod pointer_projection_p4_tests {
             .push(pure_fn(3, "escape_local", vec![], ptr_i32, body));
         let err = validate_runtime_promises(&package, &Protocols::default()).unwrap_err();
         assert!(err.message.contains("escape_local"), "{err}");
+    }
+
+    fn copy_drop_str_protocols(package: &mut n::Package) -> Protocols {
+        let copy_decl = DeclarationId {
+            package: 1,
+            local: 100,
+        };
+        let drop_decl = DeclarationId {
+            package: 1,
+            local: 102,
+        };
+        let drop_self = DeclarationId {
+            package: 1,
+            local: 103,
+        };
+        let drop_method_decl = DeclarationId {
+            package: 1,
+            local: 105,
+        };
+        package.traits.push(n::Trait {
+            declaration: copy_decl,
+            self_parameter: DeclarationId {
+                package: 1,
+                local: 101,
+            },
+            name: "Copy".into(),
+            comptime_only: false,
+            type_parameters: vec![],
+            parameter_types: vec![],
+            associated: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            parents: vec![],
+            methods: vec![],
+        });
+        package.traits.push(n::Trait {
+            declaration: drop_decl,
+            self_parameter: drop_self,
+            name: "Drop".into(),
+            comptime_only: false,
+            type_parameters: vec![],
+            parameter_types: vec![],
+            associated: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            parents: vec![],
+            methods: vec![n::MethodContract {
+                source: src(0, 1),
+                phase: n::TraitPhase::Runtime,
+                is_quote: false,
+                pure: false,
+                is_unsafe: false,
+                type_arguments: vec![],
+                type_parameters: vec![],
+                capabilities: vec![],
+                program: Default::default(),
+                parameter_bindings: vec![n::LocalId {
+                    owner: 105,
+                    index: 0,
+                }],
+                by_value_receiver: false,
+                by_reference_receiver: true,
+                declaration: drop_method_decl,
+                name: "drop".into(),
+                signature: Term::Function {
+                    parameters: vec![nir::Parameter {
+                        sort: Sort::Runtime,
+                        ty: Term::Pointer(Box::new(Term::Rigid {
+                            declaration: drop_self,
+                            sort: Sort::Type,
+                        })),
+                    }],
+                    result: Box::new(Term::Primitive(P::Void)),
+                }
+                .into(),
+                requirements: vec![],
+                default: None,
+            }],
+        });
+        package.implementations.push(n::Implementation {
+            declaration: DeclarationId {
+                package: 1,
+                local: 104,
+            },
+            phases: Default::default(),
+            interface: Some(copy_decl),
+            interface_arguments: vec![],
+            subject: Term::Primitive(P::Str),
+            type_parameters: vec![],
+            parameter_types: vec![],
+            requirements: vec![],
+            capabilities: vec![],
+            methods: vec![],
+            associated: vec![],
+            associated_initializers: vec![],
+        });
+        Protocols {
+            copy: Some(copy_decl),
+            drop: Some(drop_decl),
+        }
+    }
+
+    #[test]
+    fn p4_accepts_pure_function_calling_pure_str_helper() {
+        let str_ty = Term::Primitive(P::Str);
+        let bool_ty = Term::Primitive(P::Bool);
+        let helper_decl = DeclarationId {
+            package: 1,
+            local: 10,
+        };
+        let helper_sig = Term::Function {
+            parameters: vec![nir::Parameter {
+                sort: Sort::Runtime,
+                ty: str_ty.clone(),
+            }],
+            result: Box::new(bool_ty.clone()),
+        };
+        let s_helper = n::LocalId {
+            owner: 10,
+            index: 0,
+        };
+        let s_caller = n::LocalId {
+            owner: 11,
+            index: 0,
+        };
+        let mut package = n::Package::default();
+        let protocols = copy_drop_str_protocols(&mut package);
+        package.functions.push(pure_fn(
+            10,
+            "str_helper",
+            vec![(s_helper, str_ty.clone())],
+            bool_ty.clone(),
+            n::Expr {
+                source: src(1, 5),
+                ty: bool_ty.clone(),
+                kind: K::Literal(n::Literal::Bool(true)),
+            },
+        ));
+        package.functions.push(pure_fn(
+            11,
+            "str_caller",
+            vec![(s_caller, str_ty.clone())],
+            bool_ty.clone(),
+            n::Expr {
+                source: src(10, 25),
+                ty: bool_ty,
+                kind: K::Call {
+                    callee: Box::new(n::Expr {
+                        source: src(10, 20),
+                        ty: helper_sig,
+                        kind: K::Function(helper_decl),
+                    }),
+                    arguments: vec![n::CallArgument {
+                        passing: n::ArgumentPassing::Value,
+                        parameter: 0,
+                        value: n::Expr {
+                            source: src(21, 22),
+                            ty: str_ty,
+                            kind: K::Local(s_caller),
+                        },
+                        is_default: false,
+                    }],
+                    parameter_bindings: vec![],
+                    env_arguments: vec![],
+                },
+            },
+        ));
+        validate_runtime_promises(&package, &protocols).unwrap();
+    }
+
+    #[test]
+    fn p4_still_rejects_impure_str_helper_and_escaping_local_str_pointer() {
+        let str_ty = Term::Primitive(P::Str);
+        let bool_ty = Term::Primitive(P::Bool);
+        let ptr_bool = Term::Pointer(Box::new(bool_ty.clone()));
+        let bad_decl = DeclarationId {
+            package: 1,
+            local: 20,
+        };
+        let bad_sig = Term::Function {
+            parameters: vec![
+                nir::Parameter {
+                    sort: Sort::Runtime,
+                    ty: str_ty.clone(),
+                },
+                nir::Parameter {
+                    sort: Sort::Runtime,
+                    ty: ptr_bool.clone(),
+                },
+            ],
+            result: Box::new(bool_ty.clone()),
+        };
+        let s_bad = n::LocalId {
+            owner: 20,
+            index: 0,
+        };
+        let flag_bad = n::LocalId {
+            owner: 20,
+            index: 1,
+        };
+        let bad_write = n::Function {
+            interface: nir::program::FunctionDeclaration {
+                source: src(1, 20),
+                phase: n::FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                declaration: bad_decl,
+                name: "bad_write".into(),
+                signature: bad_sig.clone(),
+                parameters: vec![s_bad, flag_bad],
+                env_parameters: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                defaults: vec![],
+            },
+            body: n::Expr {
+                source: src(1, 20),
+                ty: bool_ty.clone(),
+                kind: K::Block {
+                    statements: vec![n::Expr {
+                        source: src(2, 14),
+                        ty: Term::Primitive(P::Void),
+                        kind: K::WritePointer {
+                            pointer: Box::new(n::Expr {
+                                source: src(2, 8),
+                                ty: ptr_bool.clone(),
+                                kind: K::Local(flag_bad),
+                            }),
+                            value: Box::new(n::Expr {
+                                source: src(11, 15),
+                                ty: bool_ty.clone(),
+                                kind: K::Literal(n::Literal::Bool(true)),
+                            }),
+                        },
+                    }],
+                    result: Some(Box::new(n::Expr {
+                        source: src(16, 20),
+                        ty: bool_ty.clone(),
+                        kind: K::Literal(n::Literal::Bool(true)),
+                    })),
+                },
+            },
+            runtime_deliveries: Default::default(),
+        };
+        let s_caller = n::LocalId {
+            owner: 21,
+            index: 0,
+        };
+        let flag_caller = n::LocalId {
+            owner: 21,
+            index: 1,
+        };
+        let mut impure_pkg = n::Package::default();
+        let impure_protocols = copy_drop_str_protocols(&mut impure_pkg);
+        impure_pkg.functions.push(bad_write);
+        impure_pkg.functions.push(pure_fn(
+            21,
+            "impure_str_caller",
+            vec![(s_caller, str_ty.clone()), (flag_caller, ptr_bool.clone())],
+            bool_ty,
+            n::Expr {
+                source: src(30, 50),
+                ty: Term::Primitive(P::Bool),
+                kind: K::Call {
+                    callee: Box::new(n::Expr {
+                        source: src(30, 39),
+                        ty: bad_sig,
+                        kind: K::Function(bad_decl),
+                    }),
+                    arguments: vec![
+                        n::CallArgument {
+                            passing: n::ArgumentPassing::Value,
+                            parameter: 0,
+                            value: n::Expr {
+                                source: src(40, 41),
+                                ty: str_ty.clone(),
+                                kind: K::Local(s_caller),
+                            },
+                            is_default: false,
+                        },
+                        n::CallArgument {
+                            passing: n::ArgumentPassing::Value,
+                            parameter: 1,
+                            value: n::Expr {
+                                source: src(43, 47),
+                                ty: ptr_bool,
+                                kind: K::Local(flag_caller),
+                            },
+                            is_default: false,
+                        },
+                    ],
+                    parameter_bindings: vec![],
+                    env_arguments: vec![],
+                },
+            },
+        ));
+        let err = validate_runtime_promises(&impure_pkg, &impure_protocols).unwrap_err();
+        assert!(err.message.contains("impure_str_caller"), "{err}");
+
+        let ptr_str = Term::Pointer(Box::new(str_ty.clone()));
+        let local_str = n::LocalId {
+            owner: 22,
+            index: 0,
+        };
+        let mut leak_pkg = n::Package::default();
+        let leak_protocols = copy_drop_str_protocols(&mut leak_pkg);
+        leak_pkg.functions.push(pure_fn(
+            22,
+            "leak_str",
+            vec![],
+            ptr_str.clone(),
+            n::Expr {
+                source: src(1, 30),
+                ty: ptr_str.clone(),
+                kind: K::Block {
+                    statements: vec![n::Expr {
+                        source: src(2, 15),
+                        ty: Term::Primitive(P::Void),
+                        kind: K::Let {
+                            binding: local_str,
+                            value: Box::new(n::Expr {
+                                source: src(11, 14),
+                                ty: str_ty.clone(),
+                                kind: K::Literal(n::Literal::String("x".into())),
+                            }),
+                        },
+                    }],
+                    result: Some(Box::new(n::Expr {
+                        source: src(16, 25),
+                        ty: ptr_str,
+                        kind: K::AddressOf(Box::new(n::Expr {
+                            source: src(16, 17),
+                            ty: str_ty,
+                            kind: K::Local(local_str),
+                        })),
+                    })),
+                },
+            },
+        ));
+        let err = validate_runtime_promises(&leak_pkg, &leak_protocols).unwrap_err();
+        assert!(err.message.contains("leak_str"), "{err}");
     }
 }

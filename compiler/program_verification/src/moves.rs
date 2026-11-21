@@ -15468,6 +15468,7 @@ pub(crate) fn analyze_with_declarations<'a>(
     enum_parameters: &[EnumParameter],
     effects: Vec<EffectResultInput>,
     borrowed_fields: &[BorrowedField],
+    text_provenance: super::memory::TextProvenance,
 ) -> Result<Report, Error> {
     let package = declarations.package().ok_or_else(|| {
         error(
@@ -15492,7 +15493,7 @@ pub(crate) fn analyze_with_declarations<'a>(
         &[],
         &Default::default(),
         Some(declarations),
-        super::memory::TextProvenance::Unchecked,
+        text_provenance,
         None,
         None,
         None,

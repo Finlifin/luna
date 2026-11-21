@@ -10027,6 +10027,40 @@ pub fn infer_closure_with_prepared_captures(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn infer_closure_with_prepared_captures_in_context<'a>(
+    package: &Package,
+    definition: &Expr,
+    callees: &BTreeMap<CallablePlace, CallableResult>,
+    prepared_captures: &PreparedCaptures,
+    inputs: &BTreeMap<CallableInput, CallableResult>,
+    code_inputs: &CodeInputs<'_>,
+    methods: Option<&'a mut MethodCallees>,
+    declarations: Option<&'a crate::declarations::Metadata<'a>>,
+    text_provenance: TextProvenance,
+    fuel: &mut usize,
+) -> Result<ArgumentSummary, String> {
+    let mut round = Round {
+        complete_calls: true,
+        declarations,
+        text_provenance,
+        methods: methods.map_or_else(Default::default, MethodCalleesStorage::Borrowed),
+        ..Default::default()
+    };
+    infer_closure_in_round(
+        package,
+        definition,
+        callees,
+        prepared_captures,
+        inputs,
+        code_inputs,
+        fuel,
+        &mut round,
+        (&[], &[]),
+        false,
+    )
+}
+
 fn infer_closure_with_prepared_effect_context(
     package: &Package,
     definition: &Expr,
