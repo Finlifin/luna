@@ -441,12 +441,12 @@ impl Checker<'_, '_> {
         span: Span,
         fuel: &mut usize,
     ) -> Result<nir::FunctionCallBinding, Error> {
-        nir::FunctionCallBinding::new_bounded(
+        nir::FunctionCallBinding::new_metered(
             signature,
             inputs,
             self.call_input_frames(),
             fuel,
-            |ty| self.callable_input_view(ty, span),
+            |ty, fuel| self.callable_input_view_with_fuel(ty, fuel, span),
         )
         .map_err(|e| match e {
             nir::CallError::Contract { error, .. } => error,
@@ -760,7 +760,7 @@ impl Checker<'_, '_> {
                     let ty = binding
                         .substitute_bounded(ty, fuel)
                         .map_err(|e| error(span, e.to_string()))?;
-                    self.callable_input_view(&ty, span)
+                    self.callable_input_view_with_fuel(&ty, fuel, span)
                 },
                 span,
                 0,

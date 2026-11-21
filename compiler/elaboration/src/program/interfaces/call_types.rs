@@ -20,6 +20,21 @@ impl Checker<'_, '_> {
             .map_err(|failure| error(span, failure))
     }
 
+    pub(in crate::program) fn callable_input_view_with_fuel(
+        &self,
+        signature: &Term,
+        fuel: &mut usize,
+        span: Span,
+    ) -> Result<Term, Error> {
+        let mut budget = Budget {
+            steps: *fuel,
+            ..Budget::default()
+        };
+        let result = self.callable_input_view_metered(signature, &mut budget);
+        *fuel = budget.steps;
+        result.map_err(|failure| error(span, failure))
+    }
+
     pub(in crate::program) fn callable_input_view_metered(
         &self,
         signature: &Term,

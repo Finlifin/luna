@@ -454,8 +454,8 @@ impl Frame {
             Task::Check(slot) => {
                 let expected = checker
                     .with_call_type_fuel(|checker, fuel| {
-                        call.prepare_bounded(slot, fuel, |ty| {
-                            checker.callable_input_view(ty, source.span)
+                        call.prepare_metered(slot, fuel, |ty, fuel| {
+                            checker.callable_input_view_with_fuel(ty, fuel, source.span)
                         })
                     })
                     .map_err(|failure| match failure {

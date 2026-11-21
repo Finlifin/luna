@@ -187,3 +187,9 @@ VM 在同一发布器中检查三种定义的形成条件及有限存储。对�
 对 `accept(Selected(flag), value)`，持有这次调用者绑定的驱动可以先提交已检查的 `Selected(flag)`，读取它在本次执行中交付的 Type，再按该类型检查并提交 `value`。每次提交执行一段字节码，调用者环境和已填槽位跨段保留。若第二段提前 return，驱动直接收到该返回值，callee 的函数体不会执行。
 
 这种接口允许驱动在后续代码成形之前取得实参，代价是按段准备字节码。它目前要求驱动已经持有某次执行的绑定并选定具名函数；开放函数定义的源码检查器还需要把待恢复的 HIR 区域关联到相应的动态调用。单独重跑 producer 会重复此前的副作用。[按段执行](../compiler/comptime_interpretor/src/invocation/source_prefix.rs) · [真实 sysroot 用例](../compiler/luna/tests/ordinary_input_identity.rs)
+
+### 观察实参的类型域也要扣本次预算
+
+普通调用原来只对签名替换扣费。读取替换后的关联类型时，每个形参都会重新取得一份默认查询预算，因而调用者给定的额度不能约束整次准备。现由替换与类型观察共用余额；观察失败保留已消耗的工作，待供给的槽仍可重新准备。[变量替换](../compiler/nir/src/types/input_binding.rs) · [源码域查询](../compiler/elaboration/src/program/interfaces/call_types.rs)
+
+对 `empty(Selected(flag)) match { null => true, _ => false }` 做了对照。把同一段匹配移进 `consume(comptime ty: Type) -> bool` 并调用 `consume(Selected(flag))` 后，两个 flag 分支都能执行。形参把 ty 绑定在消费它的代码内，检查外层可选形状已经足够。内联写法在检查 relay 的定义时提前索取了 ty 的身份。源码驱动应能表达这段绑定的作用域，并保留 producer 的求值位置；把元素存入有具体类型注解的变量仍需要证明身份相容。VM 单独执行一段前缀的测试不能验收这条源码路径。

@@ -482,7 +482,13 @@ impl<S: std::borrow::Borrow<Term>> FunctionCallPreparation<S> {
         index: usize,
         view: impl FnOnce(&Term) -> Result<Term, E>,
     ) -> Result<Term, CallError<E>> {
-        self.prepare_using(index, view, FunctionCallBinding::substitute)
+        self.prepare_using(index, |binding, ty| {
+            let ty = binding.substitute(ty).map_err(CallError::Shape)?;
+            view(&ty).map_err(|error| CallError::Contract {
+                parameter: index,
+                error,
+            })
+        })
     }
 
     pub fn prepare_bounded<E>(
@@ -491,16 +497,32 @@ impl<S: std::borrow::Borrow<Term>> FunctionCallPreparation<S> {
         fuel: &mut usize,
         view: impl FnOnce(&Term) -> Result<Term, E>,
     ) -> Result<Term, CallError<E>> {
-        self.prepare_using(index, view, |binding, ty| {
-            binding.substitute_bounded(ty, fuel)
+        self.prepare_metered(index, fuel, |ty, _| view(ty))
+    }
+
+    /// Substitution and the receiving world's type observation spend the same
+    /// allowance. A failed view leaves the slot available for a later attempt.
+    pub fn prepare_metered<E>(
+        &mut self,
+        index: usize,
+        fuel: &mut usize,
+        view: impl FnOnce(&Term, &mut usize) -> Result<Term, E>,
+    ) -> Result<Term, CallError<E>> {
+        self.prepare_using(index, |binding, ty| {
+            let ty = binding
+                .substitute_bounded(ty, fuel)
+                .map_err(CallError::Shape)?;
+            view(&ty, fuel).map_err(|error| CallError::Contract {
+                parameter: index,
+                error,
+            })
         })
     }
 
     fn prepare_using<E>(
         &mut self,
         index: usize,
-        view: impl FnOnce(&Term) -> Result<Term, E>,
-        substitute: impl FnOnce(&FunctionCallBinding, &Term) -> Result<Term, TypeError>,
+        domain: impl FnOnce(&FunctionCallBinding, &Term) -> Result<Term, CallError<E>>,
     ) -> Result<Term, CallError<E>> {
         let parameter = self
             .parameters()
@@ -510,11 +532,7 @@ impl<S: std::borrow::Borrow<Term>> FunctionCallPreparation<S> {
             return Err(CallError::Shape(TypeError::DuplicateCallInput(index)));
         }
         let caller = self.binding.caller_frames();
-        let domain = substitute(&self.binding, &parameter.ty).map_err(CallError::Shape)?;
-        let domain = view(&domain).map_err(|error| CallError::Contract {
-            parameter: index,
-            error,
-        })?;
+        let domain = domain(&self.binding, &parameter.ty)?;
         require_sort(&domain, Sort::Type).map_err(CallError::Shape)?;
         domain.check_scope(caller).map_err(CallError::Shape)?;
         self.pending.insert(index, input_sort(parameter, &domain));
@@ -572,10 +590,20 @@ impl FunctionCallBinding {
         fuel: &mut usize,
         mut view: impl FnMut(&Term) -> Result<Term, E>,
     ) -> Result<Self, CallError<E>> {
+        Self::new_metered(signature, inputs, caller_frames, fuel, |ty, _| view(ty))
+    }
+
+    pub fn new_metered<E>(
+        signature: &Term,
+        inputs: &[Option<Term>],
+        caller_frames: Vec<Vec<Sort>>,
+        fuel: &mut usize,
+        mut view: impl FnMut(&Term, &mut usize) -> Result<Term, E>,
+    ) -> Result<Self, CallError<E>> {
         crate::type_computations::charge_term(signature, fuel)
             .map_err(|_| CallError::Shape(TypeError::ConstructionBudget))?;
         Self::from_observations(signature, inputs, caller_frames, |call, index, input| {
-            call.prepare_bounded(index, fuel, &mut view)?;
+            call.prepare_metered(index, fuel, &mut view)?;
             let input = crate::copy_budget::clone_term(input, fuel)
                 .map_err(|_| CallError::Shape(TypeError::ConstructionBudget))?;
             call.supply(index, input).map_err(CallError::Shape)

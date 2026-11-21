@@ -2594,6 +2594,27 @@ fn sparse_call_expansion_charges_reached_payloads_before_publishing_slots() {
         call.supply(1, Term::Unit),
         Err(TypeError::UnpreparedCallInput(1))
     );
+    // Expansion succeeds, then the world exhausts what remains while
+    // observing the expanded type. The same slot must still be reusable.
+    let mut fuel = 200;
+    let mut view_steps = None;
+    assert_eq!(
+        call.prepare_metered(1, &mut fuel, |_, remaining| {
+            view_steps = Some(*remaining);
+            *remaining = 0;
+            Err::<Term, _>("view exhausted")
+        }),
+        Err(CallError::Contract {
+            parameter: 1,
+            error: "view exhausted"
+        })
+    );
+    assert!(view_steps.is_some_and(|remaining| remaining > 0 && remaining < 200));
+    assert_eq!(fuel, 0);
+    assert_eq!(
+        call.supply(1, Term::Unit),
+        Err(TypeError::UnpreparedCallInput(1))
+    );
     let expected = pair(payload(80), payload(80));
     assert_eq!(call.prepare_bounded(1, &mut 200, view).unwrap(), expected);
     let local = bound(0, 2, Sort::Type);
