@@ -175,3 +175,9 @@ VM 在同一发布器中检查三种定义的形成条件及有限存储。对�
 当 `accept(Selected(flag), .next = mark())` 的后续检查取决于第一个实参，VM 可以在它存入形参槽后交还控制。此时 `Selected` 已返回，`mark` 尚未执行。若后面的实参提前返回，先前的交付仍然有效，未填的槽也不会补发。递归可以让位于同一源码位置的两次调用同时等待不同实参；关联多个槽的检查器需要持有某一次动态调用的身份。当前只在接收者索取身份时为该调用分配令牌。
 
 宿主可以借用当前槽，并按 VM 的剩余预算将可导出的数据冻结在该次调用的作用域里。Any 保留描述字段，comptime 值引用继续由 VM 持有。当前接口适用于已有字节码的普通调用。开放正文若必须知道某个实参才能生成后续代码，仍需把源码检查续体和可执行前缀一起交给驱动；仅凭这条交付通道还无法启动那个前缀。[调用会话](../compiler/comptime_interpretor/src/invocation/host.rs) · [真实 sysroot 用例](../compiler/luna/tests/ordinary_input_identity.rs)
+
+### 源码检查区域持有原调用的实参请求
+
+`empty(Forward(do { mark(); let ty = char; ty }))` 需要先确定 `?ty` 的元素类型。源码区域现在随请求保留调用的 HIR 身份、形参槽和已检查的 producer。检查器能从这个封闭实参取得 char 并恢复待检查的槽，同时把整个 `do` 块交回调用计划。这样 `mark()` 在字节码和参考解释器中都只在原位置执行一次。将 `?char` 赋给 `?bool` 仍在检查期报错。
+
+当前关闭实参时保守地检查自由局部绑定。默认值和命名实参可能在另一个实参修改绑定之后才读取它，先前记录的局部值不能证明那次读取的结果。缺少静态证据时，区域可以带着具体槽位离开检查步骤；现有源码驱动还不能在开放正文中启动原调用的前缀。自举驱动要在持有该动态调用的上下文中恢复这个区域，并处理前缀提前退出。[源码实参请求](../compiler/elaboration/src/program/dependent_inputs/tasks.rs) · [返回值证据](../compiler/elaboration/src/program/input_observation/return_projection.rs)

@@ -1481,3 +1481,46 @@ fn source_operand_delivery_distinguishes_recursive_calls_at_the_same_site() {
         assert_eq!(slots[1].2, slots[2].2);
     });
 }
+
+#[test]
+fn source_projects_closed_operands_without_replaying_their_prefixes() {
+    let source = "
+        comptime fn mark() -> bool { true }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn Forward(value: Type) -> Type { value }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn check() -> bool {
+            let left: ?bool = empty(Selected(do { mark(); let x = false; not x }));
+            let right: ?char = empty(Forward(do { mark(); let ty = char; ty }));
+            (left matches null) and (right matches null)
+        }
+    ";
+    check_events(
+        source,
+        &[("mark", 2), ("Selected", 1), ("Forward", 1), ("empty", 2)],
+    );
+    let wrong = source.replace("right: ?char", "right: ?bool");
+    assert!(
+        sysroot::compile(&wrong)
+            .unwrap_err()
+            .contains("type mismatch")
+    );
+}
+
+#[test]
+fn source_operand_wait_keeps_the_named_slot_and_cannot_guess_a_free_selector() {
+    let failure = sysroot::compile(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn empty(.seed: bool = false, comptime .ty: Type = bool) -> ?ty { null }
+        comptime fn relay(flag: bool) -> bool {
+            empty(.ty = Selected(flag), .seed = true) matches null
+        }
+    ",
+    )
+    .unwrap_err();
+    assert!(
+        failure.contains("needs its original comptime invocation: slot 1, producer"),
+        "{failure}"
+    );
+}

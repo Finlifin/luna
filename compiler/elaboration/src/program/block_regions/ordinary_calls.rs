@@ -63,13 +63,13 @@ impl std::fmt::Display for Invocation<'_> {
 
 impl<'h> Root<'h> for Invocation<'h> {
     type Output = n::Expr;
-    type Invocation = required::Invocation;
+    type Invocation = tasks::InputWork;
 
     fn advance(
         &mut self,
         checker: &mut Checker<'_, '_>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Poll<Request<'h>, n::Expr, required::Invocation>, Error> {
+    ) -> Result<Poll<Request<'h>, n::Expr, tasks::InputWork>, Error> {
         match self {
             Self::Inputs(frame) => frame.advance(checker, returned),
             Self::AwaitCallee {
@@ -101,7 +101,7 @@ impl<'h> Root<'h> for Invocation<'h> {
     fn resume(
         &mut self,
         checker: &mut Checker<'_, '_>,
-        reply: required::CompletedInvocation,
+        reply: tasks::InputReply,
     ) -> Result<(), Error> {
         let Self::Inputs(frame) = self else {
             unreachable!("callee checks own their children")
@@ -142,17 +142,17 @@ pub(in crate::program) struct CallInputs<'h> {
 
 impl<'h> Root<'h> for CallInputs<'h> {
     type Output = n::Expr;
-    type Invocation = required::Invocation;
+    type Invocation = tasks::InputWork;
 
     fn resume(
         &mut self,
         checker: &mut Checker<'_, '_>,
-        reply: required::CompletedInvocation,
+        reply: tasks::InputReply,
     ) -> Result<(), Error> {
         let Phase::Observe(dependencies) = &mut self.phase else {
             unreachable!("only dependency observation requests invocation")
         };
-        dependencies.accept_required(checker, reply)
+        dependencies.accept_reply(checker, reply)
     }
 
     fn advance(

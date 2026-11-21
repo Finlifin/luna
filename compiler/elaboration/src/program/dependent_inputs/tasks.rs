@@ -170,6 +170,7 @@ struct Capture<'a> {
 /// Source borrows still belong to the enclosing checking region, not a VM task.
 #[must_use = "drive the input frame to completion or discard its uncommitted results"]
 pub(in crate::program) struct Frame {
+    site: hir::HirId,
     span: Span,
     prepared: InputProducers,
     call: Option<nir::FunctionCallPreparation<Term>>,
@@ -190,19 +191,97 @@ enum Phase {
         slot: usize,
         outputs: Option<DefaultOutputs>,
     },
+    AwaitOperand(usize),
     Failed,
     Complete,
 }
 
 enum Resolution {
     Known(n::Expr, Term),
+    Original(n::Expr, bool),
     Required(required::Invocation, Option<DefaultOutputs>),
+}
+
+/// Work leaves with the region that owns the pending slot. Only a required
+/// invocation may replace its producer with an executed value.
+pub(in crate::program) enum InputWork {
+    Required(required::Invocation),
+    Original {
+        slot: usize,
+        site: hir::HirId,
+        call: Span,
+        producer: n::Expr,
+        project_return: bool,
+    },
+}
+
+pub(in crate::program) enum InputReply {
+    Required(required::CompletedInvocation),
+    Original {
+        slot: usize,
+        producer: n::Expr,
+        identity: Term,
+    },
+}
+
+impl std::fmt::Display for InputWork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Required(work) => work.fmt(f),
+            Self::Original {
+                slot,
+                site,
+                call,
+                producer,
+                ..
+            } => write!(
+                f,
+                "(original-operand (call {site} {}) (slot {slot}) (producer {producer}))",
+                source(*call)
+            ),
+        }
+    }
+}
+
+impl InputWork {
+    pub(in crate::program) fn resolve(
+        self,
+        checker: &mut Checker<'_, '_>,
+    ) -> Result<InputReply, Error> {
+        match self {
+            Self::Required(work) => work.execute(checker).map(InputReply::Required),
+            Self::Original {
+                slot,
+                call,
+                producer,
+                project_return,
+                ..
+            } => {
+                if project_return
+                    && let Some(identity) = checker.projected_type_return(&producer, call)?
+                {
+                    return Ok(InputReply::Original {
+                        slot,
+                        producer,
+                        identity,
+                    });
+                }
+                Err(context_error(
+                    call,
+                    format!(
+                        "dependent call input needs its original comptime invocation: slot {slot}, producer {}; the source region has no executing prefix",
+                        producer.source
+                    ),
+                ))
+            }
+        }
+    }
 }
 
 pub(in crate::program) enum Poll<'b> {
     Continue,
     Child(Request<'b>),
-    Invoke(required::Invocation),
+    Invoke(InputWork),
     Complete(PreparedInputs),
 }
 
@@ -275,6 +354,7 @@ impl Frame {
             by_slot,
             default_slots: None,
             default_writes,
+            site: source.hir_id,
             span: source.span,
             prepared,
             progress: Progress {
@@ -296,7 +376,7 @@ impl Frame {
             Phase::Child { .. } => {
                 return Err(error(self.span, "dependent input frame awaits its child"));
             }
-            Phase::Invoking { .. } | Phase::Failed | Phase::Complete => {
+            Phase::AwaitOperand(_) | Phase::Invoking { .. } | Phase::Failed | Phase::Complete => {
                 return Err(error(
                     self.span,
                     "dependent input frame is no longer active",
@@ -608,9 +688,19 @@ impl Frame {
                 self.deliver(slot, value, identity)?;
                 Ok(Poll::Continue)
             }
+            Resolution::Original(producer, project_return) => {
+                self.phase = Phase::AwaitOperand(slot);
+                Ok(Poll::Invoke(InputWork::Original {
+                    slot,
+                    site: self.site,
+                    call: self.span,
+                    producer,
+                    project_return,
+                }))
+            }
             Resolution::Required(invocation, outputs) => {
                 self.phase = Phase::Invoking { slot, outputs };
-                Ok(Poll::Invoke(invocation))
+                Ok(Poll::Invoke(InputWork::Required(invocation)))
             }
         }
     }
@@ -628,7 +718,30 @@ impl Frame {
         Ok(())
     }
 
-    pub(in crate::program) fn accept_required(
+    pub(in crate::program) fn accept_reply(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        reply: InputReply,
+    ) -> Result<(), Error> {
+        match reply {
+            InputReply::Required(reply) => self.accept_required(checker, reply),
+            InputReply::Original {
+                slot,
+                producer,
+                identity,
+            } => {
+                if !matches!(self.phase, Phase::AwaitOperand(expected) if expected == slot) {
+                    return Err(error(
+                        self.span,
+                        "original operand has no matching pending slot",
+                    ));
+                }
+                self.deliver(slot, producer, identity)
+            }
+        }
+    }
+
+    fn accept_required(
         &mut self,
         checker: &mut Checker<'_, '_>,
         reply: required::CompletedInvocation,
@@ -691,6 +804,7 @@ impl std::fmt::Display for Frame {
                 }
                 f.write_str(")")?;
             }
+            Phase::AwaitOperand(slot) => write!(f, "(await-original-operand {slot})")?,
             Phase::Failed => f.write_str("failed")?,
             Phase::Complete => f.write_str("complete")?,
         }
@@ -821,44 +935,24 @@ impl Checker<'_, '_> {
         // At a concrete comptime call without entry constraints this fact can
         // specialize the remaining domains and result without proving an entry
         // obligation or changing the execution order of the explicit operand.
-        if has_source
+        let project_return = has_source
             && captures.is_empty()
             && callee.ty.is_comptime_callable()
             && owner.is_none_or(|id| {
                 self.type_parameters.get(&id).is_none_or(Vec::is_empty)
                     && self.requirements.get(&id).is_none_or(Vec::is_empty)
                     && self.capabilities.get(&id).is_none_or(Vec::is_empty)
-            })
-            && let Some(identity) = self.projected_type_return(&value, source.span)?
-        {
-            return Ok(Resolution::Known(value, identity));
+            });
+        if project_return {
+            return Ok(Resolution::Original(value, true));
         }
-        self.prepare_unobserved_call_input(callee, source, value, &captures)
-    }
-
-    fn prepare_unobserved_call_input(
-        &mut self,
-        callee: &n::Expr,
-        source: &Expr<'_>,
-        value: n::Expr,
-        captures: &BTreeMap<n::LocalId, Capture<'_>>,
-    ) -> Result<Resolution, Error> {
         let callable = self.structural_type(&callee.ty, source.span)?;
         let callable = self.callable_input_view(&callable, source.span)?;
         if callable.is_comptime_callable() || captures.values().any(|c| c.written) {
-            // The dependency walk is not the invocation's execution order.
-            // In particular, bindings above are identity evidence, not values
-            // delivered by an executed prefix. A separate required invocation
-            // would consume effects here and replace the original producer.
-            // Until source checking can wait on that invocation, report the
-            // missing continuation rather than silently changing its behavior.
-            return Err(context_error(
-                source.span,
-                "dependent call input needs its original comptime invocation; source execution continuation is not yet implemented",
-            ));
+            return Ok(Resolution::Original(value, false));
         }
         let mut bindings = Vec::new();
-        for (&binding, capture) in captures {
+        for (&binding, capture) in &captures {
             bindings.push((
                 binding,
                 copy_evidence(capture.domain, &mut self.required_steps, source.span)?,
@@ -924,6 +1018,7 @@ mod tests {
         call.prepare(1, |domain| Ok::<_, nir::TypeError>(domain.clone()))
             .unwrap();
         let mut frame = Frame {
+            site: source_expr.hir_id,
             call: Some(call),
             span,
             by_slot: BTreeMap::new(),

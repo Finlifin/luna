@@ -82,13 +82,13 @@ impl std::fmt::Display for Dependencies<'_, '_> {
 
 impl<'h> Root<'h> for Dependencies<'_, 'h> {
     type Output = dependent_inputs::PreparedInputs;
-    type Invocation = required::Invocation;
+    type Invocation = dependent_inputs::tasks::InputWork;
     fn resume(
         &mut self,
         checker: &mut Checker<'_, '_>,
-        reply: required::CompletedInvocation,
+        reply: dependent_inputs::tasks::InputReply,
     ) -> Result<(), Error> {
-        self.frame.accept_required(checker, reply)
+        self.frame.accept_reply(checker, reply)
     }
     fn advance(
         &mut self,
@@ -108,8 +108,10 @@ impl dependent_inputs::tasks::Frame {
         checker: &mut Checker<'_, '_>,
         site: &dependent_inputs::CallSite<'h>,
         returned: Option<CheckedBlock>,
-    ) -> Result<Poll<Request<'h>, dependent_inputs::PreparedInputs, required::Invocation>, Error>
-    {
+    ) -> Result<
+        Poll<Request<'h>, dependent_inputs::PreparedInputs, dependent_inputs::tasks::InputWork>,
+        Error,
+    > {
         let next = if let Some(returned) = returned {
             let (CheckedBlock::Ordinary(value) | CheckedBlock::SelectedExit(value)) = returned
             else {
@@ -129,9 +131,9 @@ impl dependent_inputs::tasks::Frame {
     }
 }
 
-impl driver::Execution for required::Invocation {
-    type Reply = required::CompletedInvocation;
+impl driver::Execution for dependent_inputs::tasks::InputWork {
+    type Reply = dependent_inputs::tasks::InputReply;
     fn execute(self, checker: &mut Checker<'_, '_>) -> Result<Self::Reply, Error> {
-        self.execute(checker)
+        self.resolve(checker)
     }
 }

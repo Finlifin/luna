@@ -123,12 +123,10 @@ impl<'h> Checker<'_, 'h> {
                             ..
                         }) => Some(*value),
                         H::ResolvedFnParam(_, id) => {
-                            projected_argument(sig, arguments, *id, &mut self.required_steps, span)?
-                                .and_then(|value| match &value.kind {
-                                    K::Literal(n::Literal::Bool(b))
-                                    | K::ComptimeValue(Term::Bool(b)) => Some(*b),
-                                    _ => None,
-                                })
+                            match self.projected_argument_identity(sig, arguments, *id, span)? {
+                                Some(Term::Bool(selector)) => Some(selector),
+                                _ => None,
+                            }
                         }
                         _ => return Ok(None),
                     };
@@ -144,15 +142,15 @@ impl<'h> Checker<'_, 'h> {
                     continue;
                 }
                 H::ResolvedFnParam(_, id) => {
-                    let Some(value) =
-                        projected_argument(sig, arguments, *id, &mut self.required_steps, span)?
+                    let Some(identity) =
+                        self.projected_argument_identity(sig, arguments, *id, span)?
                     else {
                         return Ok(None);
                     };
-                    let K::TypeValue(term) = &value.kind else {
+                    if identity.sort() != Sort::Type {
                         return Ok(None);
-                    };
-                    self.copy_alias_type(term, span)?
+                    }
+                    identity
                 }
                 _ => {
                     let Some(value) = self.closed_return_type(expr, span)? else {
@@ -169,6 +167,39 @@ impl<'h> Checker<'_, 'h> {
             }
         }
         Ok(result)
+    }
+
+    /// An ordinary operand is evaluated at its own source position. Only use
+    /// facts established inside that producer: free reads may have been
+    /// invalidated by an earlier argument, including a named argument.
+    fn projected_argument_identity(
+        &mut self,
+        signature: &hir::item::FnSig<'_>,
+        arguments: &[n::CallArgument],
+        binding: hir::HirId,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        let Some(input) = projected_argument(
+            signature,
+            arguments,
+            binding,
+            &mut self.required_steps,
+            span,
+        )?
+        else {
+            return Ok(None);
+        };
+        self.with_observation_budget(span, |checker, budget| {
+            if !nir::free_bindings::collect(input, &mut budget.steps)?.is_empty() {
+                return Ok(None);
+            }
+            observation::hint(checker.observe_preserved_input_in(
+                input,
+                BTreeMap::new(),
+                BTreeSet::new(),
+                budget,
+            ))
+        })
     }
 
     /// Follow transparent, parameterless alias references. A nominal without any
