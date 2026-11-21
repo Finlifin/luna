@@ -123,3 +123,9 @@ VM 在同一发布器中检查三种定义的形成条件及有限存储。对�
 `combine(prefix(), do { while ... { accept(probe(), Key<...>); }; result })` 同时有两次尚未完成的普通调用。Key 的输入执行 continue 或 break 时，prefix 的值仍属于 combine，已经求值的 probe 属于被中断的 accept。用寄存器作为未完成调用的键可以找到两者，却无法直接表达这次跳转结束了哪一个。现在字节码按求值嵌套保存调用，并在循环入口记录词法作用域深度与普通调用深度。直接跳转和声明实参子执行返回的跳转都恢复这两个深度。[字节码执行](../compiler/comptime_interpretor/src/bytecode.rs) · [源码用例](../compiler/luna/tests/type_input_execution_order.rs)
 
 两种解释器共用实参槽的开启、交付和完成规则。只有当前正在求值的槽能接收值；默认实参按声明序读取和改写自己的绑定环境，已交付给 callee 的普通值保留。没有默认实参的调用省去了为这个环境复制所有值的开销。自举时要保留的是求值前缀的所有权：`empty(Selected(flag))` 的两个正常出口若真能交付不同类型，仍须由活动 VM 把本次取得的值交给源码检查区域，后者才能继续检查依赖它的源码。当前工作落实了执行侧的槽与退出规则，这一双向交接仍待实现。[实参帧](../compiler/comptime_interpretor/src/call_operands.rs)
+
+## 2026-11-21 · 普通 comptime 参数可以接收 Type 描述数据
+
+`Forward(comptime value: Type) -> Type { value }` 可以转发 `Selected(flag)` 产生的 Any 或 char。VM 原先在参数绑定时无条件提取具体类型项，即使整个函数只读取这个局部值也会拒绝 Any。现在完整的描述值保存在本次调用的局部环境中；替换表为它保留尚未获得具体身份的槽。若同一次调用的后续参数是 `x: value`、结果为 `?value`，或正文需要 `?value` 的布局，就在关闭相应类型时报告身份未定。另一项独立的 Type 参数仍可以为后续参数供应精确身份。此规则也适用于域由先前实参确定为 Type 的普通 comptime 值槽。[源码与双引擎回归](../compiler/luna/tests/gradual_type_data.rs)
+
+自举时应分别保存实际值和进入类型项替换所需的证据。当前保留槽可以借已有 callable telescope 验证边界，但错误还指向该处的受检表达式或声明，未串联产生描述值的路径。不同出口产生不同具体身份时，VM 能在已检查的调用中区分它们；若外层源码本身尚待该身份才能检查，仍需要将活动调用交回源码检查区域。

@@ -2198,7 +2198,7 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::Arity, Some(source)));
         }
         let mut builder: Option<nir::FunctionInputBuilder<'_>> = None;
-        let mut supplied = false;
+        let mut needs_binding = false;
         for (index, ((binding, argument), parameter)) in
             parameters.iter().zip(arguments).zip(types).enumerate()
         {
@@ -2223,8 +2223,7 @@ impl<'a> Interpreter<'a> {
                     .query_admission(Some(source), |_, fuel| Ok(prefix.next_type_bounded(fuel)?))?,
                 None => &parameter.ty,
             };
-            raw.check_scope(&[])
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+            self.require_closed_input_domain(raw, source)?;
             let expected = self.selected_type_view(raw, Some(source))?;
             self.check_comptime_domain(&expected, source)?;
             if self.comptime_only
@@ -2280,19 +2279,25 @@ impl<'a> Interpreter<'a> {
                 || (parameter.sort == nir::Sort::ComptimeValue
                     && expected == Term::Primitive(Primitive::Type))
             {
-                let ty = match representation.as_ref() {
-                    Value::Type(ty) => ty.clone(),
+                match representation.as_ref() {
+                    Value::Type(ty) => Some(ty.clone()),
                     Value::TypeParameter(declaration)
                         if self.abstract_type_parameters.contains(declaration) =>
                     {
-                        Term::Rigid {
+                        Some(Term::Rigid {
                             declaration: *declaration,
                             sort: nir::Sort::Type,
-                        }
+                        })
+                    }
+                    Value::Description(_) => {
+                        // A checked Type datum can travel through the ordinary
+                        // local. Retain its telescope slot so that consuming
+                        // it in an exact domain still requires an identity.
+                        needs_binding = true;
+                        None
                     }
                     _ => return Err(self.failure(ErrorKind::Type, Some(source))),
-                };
-                Some(ty)
+                }
             } else if parameter.sort == nir::Sort::ComptimeValue
                 && matches!(representation, std::borrow::Cow::Borrowed(_))
                 && let Some((entry, deferred)) = defer.as_mut()
@@ -2301,7 +2306,7 @@ impl<'a> Interpreter<'a> {
                 // Direct owned arguments survive suspension in the activation.
                 // Storage and value-reference receivers use their entry snapshot.
                 deferred.push((index, *binding));
-                supplied = true;
+                needs_binding = true;
                 None
             } else if parameter.sort == nir::Sort::ComptimeValue
                 && self.normal_input_is_data(&representation, source)?
@@ -2318,7 +2323,7 @@ impl<'a> Interpreter<'a> {
             } else {
                 None
             };
-            supplied |= input.is_some();
+            needs_binding |= input.is_some();
             self.commit_input_domain(
                 builder.as_mut(),
                 observed.as_deref_mut(),
@@ -2328,7 +2333,7 @@ impl<'a> Interpreter<'a> {
             )?;
             environment.insert(*binding, argument);
         }
-        if supplied && let Some(builder) = builder {
+        if needs_binding && let Some(builder) = builder {
             self.query_admission(Some(source), |_, fuel| {
                 Ok(Some(builder.finish_bounded(fuel)?))
             })
@@ -2362,6 +2367,18 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
+    /// Invocation binding may retain an ordinary slot whose value exists but
+    /// supplies no exact term. A closed annotation is an identity consumer.
+    fn require_closed_input_domain(&self, ty: &Term, source: SourceRange) -> Result<(), Error> {
+        ty.check_scope(&[]).map_err(|error| {
+            let kind = match error {
+                nir::TypeError::InvalidBound { .. } => ErrorKind::TypeContractUnresolved,
+                _ => ErrorKind::Type,
+            };
+            self.failure(kind, Some(source))
+        })
+    }
+
     fn specialize_input_types(
         &mut self,
         expression: &mut Expr,
@@ -2372,8 +2389,7 @@ impl<'a> Interpreter<'a> {
             self.tick(Some(source))?;
             let ty =
                 self.query_admission(Some(source), |_, fuel| Ok(scope.rebind_bounded(ty, fuel)?))?;
-            ty.check_scope(&[])
-                .map_err(|_| self.failure(ErrorKind::Type, Some(source)))?;
+            self.require_closed_input_domain(&ty, source)?;
             Ok(ty)
         })
     }

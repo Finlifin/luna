@@ -802,3 +802,90 @@ fn a_computed_description_reaches_the_dependent_slots_identity_boundary() {
         "{error}"
     );
 }
+
+#[test]
+fn staged_ordinary_slots_carry_type_data_until_identity_is_consumed() {
+    let package = support::compile(
+        r#"
+        comptime fn Selected(flag: bool) -> Type { if flag { Any } else { char } }
+        comptime fn Forward(comptime value: Type) -> Type { value }
+        comptime fn Relay(flag: bool) -> Type {
+            var visits: Integer = 0;
+            let data = Forward(do { visits = visits + 1; Selected(flag) });
+            assumes visits == 1;
+            data
+        }
+        comptime fn Later(comptime domain: Type, comptime data: domain) -> domain {
+            data
+        }
+        comptime fn keep(comptime data: Type, comptime element: Type, x: element) -> element { x }
+        comptime fn empty(comptime element: Type) -> ?element { null }
+        comptime fn accepts(comptime element: Type, x: element) -> bool { true }
+        comptime fn uses_layout(comptime element: Type) -> bool {
+            let item: ?element = null;
+            item match { null => true, _ => false }
+        }
+    "#,
+    )
+    .unwrap();
+    let id = |name: &str| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    let any = Value::Description(DescriptionLiteral::Any);
+    let character = Value::Type(Term::Primitive(Primitive::Char));
+    let boolean = Value::Type(Term::Primitive(Primitive::Bool));
+    let type_domain = Value::Type(Term::Primitive(Primitive::Type));
+    for reference in [false, true] {
+        support::with_comptime(&package, support::COMPTIME_BUDGET, reference, |vm| {
+            for flag in [true, false, true] {
+                let before = vm.events().len();
+                let data = vm.invoke(id("Relay"), vec![Value::Bool(flag)]).unwrap();
+                assert_eq!(data, if flag { any.clone() } else { character.clone() });
+                for name in ["Forward", "Selected"] {
+                    assert_eq!(
+                        vm.events()[before..]
+                            .iter()
+                            .filter(|event| matches!(event,
+                        comptime_interpretor::Event::EnterFunction(callee) if *callee == id(name)))
+                            .count(),
+                        1
+                    );
+                }
+            }
+            assert_eq!(
+                vm.invoke(id("Later"), vec![type_domain.clone(), any.clone()])
+                    .unwrap(),
+                any
+            );
+            assert_eq!(
+                vm.invoke(
+                    id("keep"),
+                    vec![any.clone(), character.clone(), Value::Char('x')]
+                )
+                .unwrap(),
+                Value::Char('x')
+            );
+            for (name, args) in [
+                ("empty", vec![any.clone()]),
+                ("accepts", vec![any.clone(), Value::Bool(true)]),
+                ("uses_layout", vec![any.clone()]),
+            ] {
+                let failure = vm.invoke(id(name), args).expect_err(name);
+                assert_eq!(
+                    failure.kind,
+                    ErrorKind::TypeContractUnresolved,
+                    "{name}: {failure}"
+                );
+            }
+            assert_eq!(
+                vm.invoke(id("uses_layout"), vec![boolean.clone()]).unwrap(),
+                Value::Bool(true)
+            );
+        });
+    }
+}
