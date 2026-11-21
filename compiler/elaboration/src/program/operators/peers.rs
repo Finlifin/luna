@@ -24,6 +24,7 @@ pub(in crate::program) struct Progress<'b, 'h> {
 }
 
 pub(in crate::program) struct Request<'a, 'b, 'h> {
+    pub slot: usize,
     pub input: &'b Expr<'h>,
     pub expected: Option<&'a Term>,
     pub attempt: bool,
@@ -118,6 +119,7 @@ impl<'b, 'h> Progress<'b, 'h> {
             };
             self.waiting = Some(slot);
             return Ok(Some(Request {
+                slot,
                 input: self.inputs[slot],
                 expected,
                 attempt,

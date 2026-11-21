@@ -3,6 +3,7 @@
 //! Borrowed targets remain within the current checker call, not a frozen task.
 use super::*;
 use std::borrow::Cow;
+
 mod computed;
 
 /// The same source rule applies to a partial call context and a settled type.
@@ -163,6 +164,12 @@ mod tests {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum DeliveryCheck {
+    Probe,
+    Unadapted,
+}
+
 enum Step<'t> {
     Checked(n::Expr),
     Child { expected: Term, after: Delivery<'t> },
@@ -289,11 +296,33 @@ impl Checker<'_, '_> {
         target: &Term,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
+        self.check_delivery_with(expr, target, |checker, expected, check| match check {
+            DeliveryCheck::Probe => checker.expr_context(expr, expected, partial),
+            DeliveryCheck::Unadapted => checker.expr_context_unadapted(expr, expected, partial),
+        })
+    }
+
+    /// A definition-side producer can participate in the same whole-value
+    /// probes, payload contextualization and ordered injections as source NIR.
+    pub(super) fn check_delivery_with(
+        &mut self,
+        expr: &Expr<'_>,
+        target: &Term,
+        mut producer: impl FnMut(&mut Self, Option<&Term>, DeliveryCheck) -> Result<n::Expr, Error>,
+    ) -> Result<n::Expr, Error> {
         let mut expected = Cow::Borrowed(target);
         let mut pending = Vec::new();
         let mut value = loop {
             self.charge_expression_delivery(expr.span)?;
-            match self.prepare_delivery(expr, expected, partial)? {
+            let step = self.prepare_delivery_with(expr, expected, |checker, hint, defaults| {
+                checker.checking_attempt(
+                    expr.span,
+                    defaults,
+                    CheckingDisposition::Commit,
+                    |checker| producer(checker, hint, DeliveryCheck::Probe),
+                )
+            })?;
+            match step {
                 Step::Child {
                     expected: child,
                     after,
@@ -303,7 +332,7 @@ impl Checker<'_, '_> {
                 }
                 Step::Checked(value) => break value,
                 Step::Unadapted(target) => {
-                    break self.expr_context_unadapted(expr, Some(&target), partial)?;
+                    break producer(self, Some(&target), DeliveryCheck::Unadapted)?;
                 }
             }
         };
@@ -318,6 +347,17 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         target: Cow<'t, Term>,
         partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<Step<'t>, Error> {
+        self.prepare_delivery_with(expr, target, |checker, hint, defaults| {
+            checker.argument_attempt_with_defaults(expr, hint, partial, defaults)
+        })
+    }
+
+    fn prepare_delivery_with<'t>(
+        &mut self,
+        expr: &Expr<'_>,
+        target: Cow<'t, Term>,
+        mut probe: impl FnMut(&mut Self, Option<&Term>, bool) -> Result<Option<n::Expr>, Error>,
     ) -> Result<Step<'t>, Error> {
         if matches!(target.as_ref(), Term::Primitive(_)) {
             return Ok(Step::Unadapted(target));
@@ -338,10 +378,9 @@ impl Checker<'_, '_> {
             if !directed {
                 let input = self.tag_input(expr, PayloadTarget::Type(result))?;
                 if input != TagInput::Payload
-                    && let Some(value) = self.argument_attempt_with_defaults(
-                        expr,
+                    && let Some(value) = probe(
+                        self,
                         None,
-                        partial,
                         input == TagInput::Receiver && self.numeric_defaults,
                     )?
                 {
@@ -378,10 +417,9 @@ impl Checker<'_, '_> {
                 let input = self.tag_input(expr, PayloadTarget::Type(&payload))?;
                 if input != TagInput::Whole {
                     if matches!(input, TagInput::Probe | TagInput::Receiver)
-                        && let Some(value) = self.argument_attempt_with_defaults(
-                            expr,
+                        && let Some(value) = probe(
+                            self,
                             None,
-                            partial,
                             input == TagInput::Receiver && self.numeric_defaults,
                         )?
                     {
@@ -399,12 +437,7 @@ impl Checker<'_, '_> {
                         )
                     {
                         let saved = self.optional_target_probe.replace(expr.hir_id);
-                        let attempt = self.argument_attempt_with_defaults(
-                            expr,
-                            Some(&target),
-                            partial,
-                            false,
-                        );
+                        let attempt = probe(self, Some(&target), false);
                         self.optional_target_probe = saved;
                         if let Ok(Some(value)) = attempt {
                             return Ok(Step::Checked(value));

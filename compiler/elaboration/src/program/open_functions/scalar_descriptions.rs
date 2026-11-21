@@ -16,6 +16,9 @@ impl Checker<'_, '_> {
             H::Unary(UnOp::Not | UnOp::Neg, operand) if !is_numeric_literal(operand) => {
                 self.describe_open_unary(expr, locals, returns, expected, depth)?
             }
+            H::Binary(BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem, _, _) => {
+                self.describe_arithmetic(expr, locals, returns, expected, depth)?
+            }
             H::Binary(
                 op @ (BinOp::Eq
                 | BinOp::Ne
@@ -23,54 +26,17 @@ impl Checker<'_, '_> {
                 | BinOp::Le
                 | BinOp::Gt
                 | BinOp::Ge
-                | BinOp::Add
-                | BinOp::Sub
-                | BinOp::Mul
-                | BinOp::Div
-                | BinOp::Rem
                 | BinOp::Concat),
                 left,
                 right,
             ) if !self.open_condition_has_type_evidence(expr, 0)
                 && !(is_numeric_literal(left) && is_numeric_literal(right)) =>
             {
-                let arithmetic = match op {
-                    BinOp::Add => Some(crate::arithmetic::Operator::Add),
-                    BinOp::Sub => Some(crate::arithmetic::Operator::Subtract),
-                    BinOp::Mul => Some(crate::arithmetic::Operator::Multiply),
-                    BinOp::Div => Some(crate::arithmetic::Operator::Divide),
-                    BinOp::Rem => Some(crate::arithmetic::Operator::Remainder),
-                    _ => None,
-                };
-                let protocol = arithmetic.and_then(|op| self.protocols.arithmetic[op as usize]);
-                // A literal left operand has no independent protocol receiver
-                // domain yet. Use the ordinary arithmetic peer hint rather than
-                // defaulting an open right subtree before its destination arrives.
-                let peer_context = if arithmetic.is_some() && is_numeric_literal(left) {
-                    match expected {
-                        Some(D::Known(ty)) => self
-                            .arithmetic_operand_hint(Some(ty), expr.span)?
-                            .map(D::Known),
-                        _ => None,
-                    }
-                } else {
-                    None
-                };
-                let operand_context = if arithmetic.is_some() && protocol.is_none() {
-                    expected
-                } else {
-                    peer_context.as_ref()
-                };
                 // Keep numeric literals in the probe so peer inference, exact
                 // range checks and signed literal formation remain unchanged.
                 if is_numeric_literal(left) {
-                    let description = self.describe_open_expression(
-                        right,
-                        locals,
-                        returns,
-                        operand_context,
-                        depth + 1,
-                    )?;
+                    let description =
+                        self.describe_open_expression(right, locals, returns, None, depth + 1)?;
                     let D::Known(ty) = description else {
                         return Err(error(
                             right.span,
@@ -86,13 +52,8 @@ impl Checker<'_, '_> {
                         this.describe_known_region(&probe, expected)
                     })?
                 } else {
-                    let description = self.describe_open_expression(
-                        left,
-                        locals,
-                        returns,
-                        operand_context,
-                        depth + 1,
-                    )?;
+                    let description =
+                        self.describe_open_expression(left, locals, returns, None, depth + 1)?;
                     let D::Known(left_type) = description else {
                         return Err(error(
                             left.span,
@@ -112,9 +73,8 @@ impl Checker<'_, '_> {
                             this.describe_known_region(&probe, expected)
                         })?
                     } else {
-                        let context =
-                            (protocol.is_none() && *op != BinOp::Concat && !is_never(&left_type))
-                                .then(|| D::Known(left_type.clone()));
+                        let context = (*op != BinOp::Concat && !is_never(&left_type))
+                            .then(|| D::Known(left_type.clone()));
                         let description = self.with_open_reachability(
                             !is_never(&left_type),
                             right.span,
@@ -225,6 +185,115 @@ impl Checker<'_, '_> {
             _ => self.describe_known_region(expr, expected)?,
         };
         self.require_description(&result, expected, expr.span)?;
+        Ok(result)
+    }
+
+    // Keep the literal itself for exact formation and range checking. Other
+    // operands contribute their checked domain and control transfers. Their
+    // producers remain in source order for instance elaboration.
+    #[inline(never)]
+    fn describe_arithmetic(
+        &mut self,
+        expr: &Expr<'_>,
+        locals: &mut BTreeMap<n::LocalId, D>,
+        returns: Option<&D>,
+        expected: Option<&D>,
+        depth: usize,
+    ) -> Result<D, Error> {
+        let expected = match expected {
+            Some(D::Known(ty)) => Some(ty),
+            _ => None,
+        };
+        let mut produce = |checker: &mut Self, hint: Option<&Term>| {
+            checker.arithmetic_witness(expr, locals, returns, hint, depth)
+        };
+        let value = match expected {
+            Some(target) if !matches!(target, Term::Primitive(_)) => {
+                self.check_delivery_with(expr, target, |checker, hint, _| produce(checker, hint))?
+            }
+            _ => produce(self, expected)?,
+        };
+        Ok(D::Known(value.ty))
+    }
+
+    #[inline(never)]
+    fn arithmetic_witness(
+        &mut self,
+        expr: &Expr<'_>,
+        locals: &mut BTreeMap<n::LocalId, D>,
+        returns: Option<&D>,
+        expected: Option<&Term>,
+        depth: usize,
+    ) -> Result<n::Expr, Error> {
+        let mut staged = Vec::new();
+        let mut transfers = [None, None];
+        let mut left_diverges = false;
+        let value =
+            block_regions::arithmetic::describe(self, expr, expected, |this, input, hint, slot| {
+                let hint = hint
+                    .map(|ty| this.copy_alias_type(ty, input.span).map(D::Known))
+                    .transpose()?;
+                if is_numeric_literal(input) {
+                    return this.elaborate_known_region(input, hint.as_ref());
+                }
+                // Peers can be inspected out of order and contextual probes can
+                // fail. Publish only the selected operands' reachable transfers.
+                this.required_steps = this
+                    .required_steps
+                    .checked_sub(this.open_loop_transfers.len() as u64)
+                    .ok_or_else(|| {
+                        error(input.span, "arithmetic loop observation budget exhausted")
+                    })?;
+                let incoming = this.open_loop_transfers.clone();
+                let domain =
+                    this.describe_open_expression(input, locals, returns, hint.as_ref(), depth + 1);
+                let observed = std::mem::replace(&mut this.open_loop_transfers, incoming);
+                let D::Known(ty) = domain? else {
+                    return Err(error(
+                        input.span,
+                        "binary operation requires established operand types",
+                    ));
+                };
+                transfers[slot] = Some(observed);
+                if slot == 0 {
+                    left_diverges = is_never(&ty);
+                }
+                if ty == p(P::Type) {
+                    // A Type-valued operand can supply a dependent method input.
+                    return this.elaborate_known_region(input, hint.as_ref());
+                }
+                let binding = this.spread_binding(input.span)?;
+                if this.in_staged_input {
+                    this.locals.insert(binding, ty.clone());
+                    this.open_staged_locals.insert(binding);
+                    staged.push(binding);
+                }
+                Ok(n::Expr {
+                    source: source(input.span),
+                    ty,
+                    kind: K::Local(binding),
+                })
+            })
+            .and_then(|value| {
+                self.check_open_fragment(&value, expr.span, false)?;
+                Ok(value)
+            });
+        for binding in staged {
+            self.locals.remove(&binding);
+            self.open_staged_locals.remove(&binding);
+        }
+        let result = value?;
+        for observed in transfers
+            .into_iter()
+            .take(if left_diverges { 1 } else { 2 })
+            .flatten()
+        {
+            for (target, found) in observed {
+                if let Some(outer) = self.open_loop_transfers.get_mut(&target) {
+                    outer.include(found);
+                }
+            }
+        }
         Ok(result)
     }
 }

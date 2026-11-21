@@ -2,6 +2,7 @@
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
+
 use comptime_interpretor::{Budget, Event, Value};
 
 fn check_both(source: &str, calls: &[&str]) {
@@ -140,6 +141,60 @@ fn arithmetic_regions_preserve_operand_order_and_original_return_targets() {
     )
     .unwrap_err();
     assert!(!failure.contains("parsing failed"), "{failure}");
+}
+
+#[test]
+fn open_arithmetic_uses_peer_and_protocol_domains_before_numeric_defaults() {
+    let source = r#"
+        enum Direction { forward, backward }
+        struct Counter {}
+        impl Add<.Rhs = Direction> for Counter {
+            assoc Output: Type = bool;
+            fn add(self, rhs: Direction) -> bool { rhs matches Direction.forward }
+        }
+        fn sum(comptime active: bool, flag: bool, n: u32) -> u32 {
+            const selected = active;
+            assumes n < 100;
+            (if flag { 1 } else { 0 }) + n
+        }
+        fn route(comptime active: bool, flag: bool, counter: Counter) -> bool {
+            const selected = active;
+            counter + (if flag { .forward } else { .backward })
+        }
+        fn optional_sum(comptime active: bool, byte: u8) -> ?u8 {
+            const selected = active;
+            assumes byte < 10;
+            byte + 1
+        }
+        fn wrapped(comptime active: bool) -> !std.io.IoErr ?u8 {
+            const selected = active;
+            (if selected { 1 } else { 0 }) + 1
+        }
+        fn stop(comptime active: bool, flag: bool) -> bool {
+            inline if active {}
+            while true {
+                let ignored = do { return flag; } + do { if flag { break; } 0 };
+            }
+        }
+        fn run() -> bool {
+            let wrapped_ok = wrapped(true) match {
+                value! => value matches 2?,
+                error _ => false,
+            };
+            wrapped_ok and sum(true, true, 7) == 8 and sum(false, false, 7) == 7
+                and route(true, true, Counter {}) and not route(false, false, Counter {})
+                and stop(true, true) and (optional_sum(true, 3) matches 4?)
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    // Both branches still need to form in the selected operand domain.
+    let (definitions, _) = source.split_once("fn run()").unwrap();
+    let invalid = definitions.replace("else { .backward }", "else { .missing }");
+    let failure = sysroot::compile(&invalid).unwrap_err();
+    assert!(
+        failure.contains("unknown enum variant missing"),
+        "{failure}"
+    );
 }
 
 #[test]

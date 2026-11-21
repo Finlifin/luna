@@ -19,6 +19,51 @@ pub(in crate::program) fn operator(expr: &Expr<'_>) -> Option<crate::arithmetic:
     })
 }
 
+/// Definition checking supplies descriptions for operands whose source may
+/// still contain deferred domains. Drive the same protocol and peer search as
+/// an ordinary expression, including recovery only at an active probe.
+pub(in crate::program) fn describe<'h>(
+    checker: &mut Checker<'_, '_>,
+    expr: &Expr<'h>,
+    expected: Option<&Term>,
+    mut operand: impl FnMut(
+        &mut Checker<'_, '_>,
+        &Expr<'h>,
+        Option<&Term>,
+        usize,
+    ) -> Result<n::Expr, Error>,
+) -> Result<n::Expr, Error> {
+    let destination = Destination::ordinary(
+        checker,
+        OrdinaryTail {
+            expected,
+            partial: None,
+            input: None,
+        },
+        expr.span,
+    )?;
+    let mut frame = Box::new(Frame::new(checker, expr, destination, true)?);
+    let mut returned = None;
+    loop {
+        match frame.step(checker, returned.take())? {
+            Step::Continue => {}
+            Step::Child(Request::Expression(input, destination)) => {
+                let slot = match frame.pending.expect("requested operand") {
+                    Child::Left => 0,
+                    Child::Right | Child::NativeRight => 1,
+                    Child::Peer(slot) => slot,
+                };
+                match operand(checker, &input, destination.expected(), slot) {
+                    Ok(value) => returned = Some(CheckedBlock::Ordinary(value)),
+                    Err(failure) => frame.recover(checker, failure)?,
+                }
+            }
+            Step::Completed(result) => return result.ordinary(expr.span),
+            _ => unreachable!("arithmetic only requests expressions"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Phase {
     Start,
@@ -36,7 +81,7 @@ enum Child {
     Left,
     Right,
     NativeRight,
-    Peer,
+    Peer(usize),
 }
 
 pub(super) struct Frame<'h> {
@@ -129,7 +174,7 @@ impl<'h> Frame<'h> {
         {
             Child::Left => self.values[0] = value,
             Child::Right | Child::NativeRight => self.values[1] = value,
-            Child::Peer => self
+            Child::Peer(_) => self
                 .peers
                 .as_mut()
                 .expect("active peer search")
@@ -289,7 +334,7 @@ impl<'h> Frame<'h> {
                             CheckingDisposition::Commit,
                         )?);
                     }
-                    self.pending = Some(Child::Peer);
+                    self.pending = Some(Child::Peer(request.slot));
                     return Ok(Step::Child(Request::expression(request.input, destination)));
                 }
                 let (left, right) = self.peers.take().unwrap().finish()?;
@@ -370,7 +415,10 @@ impl std::fmt::Display for Frame<'_> {
             self.destination
         )?;
         if let Some(child) = self.pending {
-            write!(f, " {child:?}")?;
+            match child {
+                Child::Peer(slot) => write!(f, " (peer {slot})")?,
+                _ => write!(f, " {child:?}")?,
+            }
         }
         write!(
             f,
@@ -478,5 +526,7 @@ mod tests {
             "unsolicited result altered the frame"
         );
         assert!(frame.values[0].is_some());
+        frame.pending = Some(Child::Peer(1));
+        assert!(frame.to_string().contains("(pending (peer 1))"));
     }
 }
