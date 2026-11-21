@@ -846,3 +846,47 @@ fn attribute_suppliers_build_each_generated_declaration_once() {
         );
     }
 }
+
+#[test]
+fn nested_attribute_values_deliver_generated_layouts_to_reflection_and_builders() {
+    let source = r#"
+        comptime fn Generated(subject: Type) -> Type {
+            meta.attrs_of(subject).get<meta.Object>(.metadata) match {
+                data? => data.get<Type>(.generated) match { ty? => ty, null => bool },
+                null => bool,
+            }
+        }
+        comptime fn outer() -> meta.Object {
+            let choice = Generated(Inner);
+            let payload = choice.enum_variant_field_types()[0][0];
+            let flag = payload.struct_field_types()[0];
+            let record = meta.StructBuilder.new(.name = .Envelope);
+            record.add_field(.value, choice);
+            let data = {
+                generated: record.Build(),
+                correct: flag.NewtypeRepresentation() == bool and Generated(Inner) == choice,
+            };
+            data
+        }
+        ^attrs.metadata(outer())
+        struct Outer {}
+        comptime fn inner() -> meta.Object {
+            let flag = meta.NewtypeBuilder.new(bool, .name = .Flag).Build();
+            let record = meta.StructBuilder.new(.name = .Payload);
+            record.add_field(.flag, flag);
+            let choice = meta.EnumBuilder.new(.name = .Choice);
+            choice.add_tuple(.some, [record.Build()]);
+            let data = { generated: choice.Build() };
+            data
+        }
+        ^attrs.metadata(inner())
+        struct Inner {}
+        comptime fn run() -> bool {
+            let correct = meta.attrs_of(Outer).get<meta.Object>(.metadata) match {
+                data? => data.get<bool>(.correct) matches true?, null => false,
+            };
+            correct and Generated(Outer).struct_field_types()[0] == Generated(Inner)
+        }
+    "#;
+    assert_eq!(support::invoke(source, "run").unwrap(), Value::Bool(true));
+}

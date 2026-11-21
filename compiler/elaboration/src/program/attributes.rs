@@ -5,6 +5,7 @@ pub(super) use demands::{Demands, index_suppliers};
 mod derivation;
 mod effects;
 mod layout;
+mod layouts;
 mod merge;
 mod metadata;
 mod phases;

@@ -106,6 +106,9 @@ pub use objects::ObjectProperty;
 pub use value_reference::ValueReference;
 
 mod definition_installation;
+mod source_values;
+pub use source_values::{AttributeSource, NominalBatch, SourcedValue};
+
 mod generated_newtypes;
 
 pub use generated_newtypes::NewtypePublicationError;
@@ -877,7 +880,7 @@ pub struct Interpreter<'a> {
     type_solver: Option<TypeSolver<'a>>,
     method_resolver: Option<&'a MethodResolver<'a>>,
     associated_resolver: Option<&'a AssociatedResolver<'a>>,
-    attribute_resolver: Option<&'a AttributeResolver<'a>>,
+    attribute_resolver: Option<source_values::Resolver<'a>>,
     pointer_copy: Option<PointerCopyPermission<'a>>,
     declaration_parameter_domains: Arc<BTreeMap<DeclarationId, Term>>,
     method_parameters: Arc<HashMap<(DeclarationId, DeclarationId), Vec<LocalId>>>,
@@ -1729,7 +1732,12 @@ impl<'a> Interpreter<'a> {
     }
 
     pub fn with_attribute_resolver(mut self, resolver: &'a AttributeResolver<'a>) -> Self {
-        self.attribute_resolver = Some(resolver);
+        self.attribute_resolver = Some(source_values::Resolver::Value(resolver));
+        self
+    }
+
+    pub fn with_attribute_source(mut self, resolver: &'a AttributeSource<'a>) -> Self {
+        self.attribute_resolver = Some(source_values::Resolver::Source(resolver));
         self
     }
 

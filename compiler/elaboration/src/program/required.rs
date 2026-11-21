@@ -102,10 +102,20 @@ impl Invocation {
                 }
             })
         };
-        let attributes = |target, remaining: &mut u64| {
+        let attributes = |target, known: &dyn Fn(DeclarationId) -> bool, remaining: &mut u64| {
             let mut checker = checker.borrow_mut();
             std::mem::swap(remaining, &mut checker.required_steps);
-            let result = checker.demand_definition_attributes(target);
+            let result = checker
+                .demand_definition_attributes(target)
+                .and_then(|value| {
+                    let checker = &mut **checker;
+                    checker.attribute_demands.layouts.deliver(
+                        value,
+                        known,
+                        &mut checker.required_steps,
+                        span,
+                    )
+                });
             std::mem::swap(remaining, &mut checker.required_steps);
             result.map_err(|failure| {
                 let source = Some(failure.source);
@@ -160,6 +170,13 @@ impl CompletedInvocation {
     /// Publish generated definitions in the receiving source world before the
     /// returned value or type can refer to them.
     pub(super) fn publish(self, checker: &mut Checker<'_, '_>) -> Result<(Value, Term), Error> {
+        if checker.attribute_demands.tracks_publications() {
+            checker.attribute_demands.layouts.charge_registration(
+                &self.definitions,
+                &mut checker.required_steps,
+                self.span,
+            )?;
+        }
         publication::Receiver {
             context: &mut checker.context,
             declared_nominals: &mut checker.declared_theory,
@@ -169,6 +186,12 @@ impl CompletedInvocation {
             implementation_index: &mut checker.implementation_index,
         }
         .register(&self.definitions, &mut checker.required_steps, self.span)?;
+        if checker.attribute_demands.tracks_publications() {
+            checker
+                .attribute_demands
+                .layouts
+                .register(&self.definitions);
+        }
         Ok(self.result)
     }
 }

@@ -34,4 +34,8 @@ required invocation 的声明快照共享其创建时的不可变索引或冻结
 
 现在，属性求值期间的 required invocation 可以向创建同一索引的 checker 请求 B。外层 VM 保留调用栈和局部值，B 在自己的声明作用域内使用剩余预算。每个供应者在这次属性求值期间保留已物化的结果，多个读取方共享按既有覆盖次序合并的冻结对象。整个包仍须通过属性消费者检查才能发布。本地取舍是同步进入源检查器，保留外层 VM，并在宿主线程栈不足时为下一层另接一段栈。仅设八层上限曾在默认测试线程上先触发栈溢出，因此现在单独控制两种资源：按剩余栈空间决定何时扩栈，同时活动的供应者仍暂限八层。当前按需读取和最终发布还会分别执行合并与冻结。自举时若采用显式 continuation，可将深度交由资源预算控制，并让最终发布复用已经验证的冻结结果。验收包括真正的环、超深的无环链，以及读取前先用 builder 生成声明，读取后检查包中同名见证只出现一次。[供应者调度](../compiler/elaboration/src/program/attributes/demands.rs) · [端到端用例](../compiler/luna/tests/attrs_and_meta_reflection.rs)
 
-还有一个已复现的交付缺口。B 用 `meta.StructBuilder.new().Build()` 生成类型，把该 Type 作为 `metadata` 的条目；仅编译 B 可以成功。若正在计算属性的 A 此时调用 `meta.attrs_of(B)`，A 的 VM 捕获的声明世界早于 B 生成的类型，解码这个 Object 会报告 `Type`。把 B 的条目改为普通 bool 后，同一次嵌套读取可以完成。后续交付冻结对象时还需要携带它引用的新增声明及其布局证据，验证通过后导入等待中的 VM；跳过 Type 检查会让后续反射失去依据。
+在 `a01a21fd` 还复现了一个交付缺口。B 用 `meta.StructBuilder.new().Build()` 生成类型，把该 Type 作为 `metadata` 的条目；仅编译 B 可以成功。若正在计算属性的 A 此时调用 `meta.attrs_of(B)`，A 的 VM 捕获的声明世界早于 B 生成的类型，解码这个 Object 会报告 `Type`。把 B 的条目改为普通 bool 后，同一次嵌套读取可以完成。[属性按需求值](../compiler/elaboration/src/program/attributes/demands.rs)
+
+等待方现在从冻结值的类型和值载荷出发，沿字段类型、枚举载荷和 newtype 表示查找尚缺的生成声明。先交付依赖，再交付使用者。它们沿用供应者分配的身份。等待中的 VM 据此解码 Object，调用方的 builder 也把这些描述纳入自己的形成与有限存储检查，可以继续用收到的类型构造定义。最终包只从原生成方接收每个定义。跨种类验收用例让 B 返回枚举，其载荷为结构体，字段为 newtype；A 连读两次、反射到底层表示，并用枚举生成新的外层结构体。[声明依赖查找](../compiler/elaboration/src/program/attributes/layouts.rs) · [源码验收](../compiler/luna/tests/attrs_and_meta_reflection.rs)
+
+当前取舍是为已有生成声明的属性求值维护临时索引，每次读取按接收方实有的布局查找缺项。接收 VM 在解码前验证描述。只有实际调用 builder 才会为它建立检查目录，按依赖顺序补验导入的声明，并检查有限存储。纯反射避免了这部分开销；同时读取和构造的程序仍需支付两个检查器的验证成本。自举时若让两者共有不可变的布局证据，需要把证据绑定到精确的声明世界，并保留失败恢复：同一 VM 读到错误载荷、冲突身份或耗尽预算后，这次导入的描述都应撤回，原有描述可继续使用。[接收与失败恢复](../compiler/comptime_interpretor/src/source_values.rs)

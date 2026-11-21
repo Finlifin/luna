@@ -409,6 +409,18 @@ impl PreparedRequired {
             usize::MAX,
             &solver,
         );
+        let source = reader.and_then(|reader| reader.attributes);
+        let attributes = |id, known: &dyn Fn(DeclarationId) -> bool, remaining: &mut u64| {
+            let delivery = source.expect("configured attribute source")(id, known, remaining)?;
+            if let Some(delivery) = &delivery {
+                publisher.queue_imports(&delivery.definitions, super::source(span), remaining)?;
+            }
+            Ok(delivery)
+        };
+        let reader = reader.map(|reader| data::Reader {
+            attributes: source.map(|_| &attributes as &comptime_interpretor::AttributeSource<'_>),
+            ..reader
+        });
         let result = self.invoke_in_world(
             values
                 .into_iter()
@@ -555,7 +567,7 @@ impl PreparedRequired {
         let mut interpreter = prepared
             .map_err(|e| error(span, format!("required comptime preparation failed: {e}")))?;
         if let Some(form) = reader.and_then(|reader| reader.attributes) {
-            interpreter = interpreter.with_attribute_resolver(form);
+            interpreter = interpreter.with_attribute_source(form);
         }
         if builder.is_some() {
             interpreter = interpreter

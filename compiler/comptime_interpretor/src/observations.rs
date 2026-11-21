@@ -298,13 +298,38 @@ impl Interpreter<'_> {
             let payload = match table.lookup(id) {
                 Ok(frozen) => frozen,
                 Err(target) => {
-                    let resolver = self.attribute_resolver.ok_or_else(|| {
+                    match self.attribute_resolver.as_ref().ok_or_else(|| {
                         self.failure(ErrorKind::PendingDefinitionAttributes(target), Some(source))
-                    })?;
-                    supplied =
-                        host_budget::checked(&mut self.budget.steps, Some(source), |fuel| {
-                            resolver(target, fuel)
-                        })?;
+                    })? {
+                        source_values::Resolver::Value(resolver) => {
+                            supplied = host_budget::checked(
+                                &mut self.budget.steps,
+                                Some(source),
+                                |fuel| resolver(target, fuel),
+                            )?;
+                        }
+                        source_values::Resolver::Source(resolver) => {
+                            let known = |id| {
+                                self.structs.contains_key(&id)
+                                    || self.enums.contains_key(&id)
+                                    || self.newtypes.contains_key(&id)
+                            };
+                            let delivery = host_budget::checked(
+                                &mut self.budget.steps,
+                                Some(source),
+                                |fuel| resolver(target, &known, fuel),
+                            )?;
+                            let Some(delivery) = delivery else {
+                                return Ok(Value::Object(Object::from_entries(Vec::new())));
+                            };
+                            return delivery
+                                .decode(self, &Term::Primitive(Primitive::Object))
+                                .map_err(|mut e| {
+                                    e.source = Some(source);
+                                    e
+                                });
+                        }
+                    }
                     supplied.as_deref()
                 }
             };

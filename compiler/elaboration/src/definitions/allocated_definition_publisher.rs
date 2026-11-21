@@ -6,6 +6,7 @@ use comptime_interpretor::{
 };
 use nir::{DeclarationId, program as n};
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 /// Fresh local declaration IDs owned by one source elaboration. Nested source
@@ -37,6 +38,7 @@ pub struct AllocatedDefinitionPublisher<'a> {
     identities: DefinitionIdentities,
     fuel: Cell<usize>,
     diagnostic: RefCell<Option<String>>,
+    imports: RefCell<VecDeque<(comptime_interpretor::NominalBatch, n::SourceRange)>>,
 }
 impl<'a> AllocatedDefinitionPublisher<'a> {
     /// The frontier covers all source declarations, including those absent from
@@ -53,6 +55,7 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
             identities: identities.into(),
             fuel: Cell::new(fuel),
             diagnostic: RefCell::new(None),
+            imports: Default::default(),
         }
     }
     pub fn new_with_type_solver(
@@ -68,8 +71,42 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
             identities: identities.into(),
             fuel: Cell::new(fuel),
             diagnostic: RefCell::new(None),
+            imports: Default::default(),
         }
     }
+    /// A VM that only reflects on a received value needs no second admission
+    /// world. Retain the descriptor handles until it actually calls a builder.
+    pub(crate) fn queue_imports(
+        &self,
+        batches: &[comptime_interpretor::NominalBatch],
+        source: n::SourceRange,
+        steps: &mut u64,
+    ) -> Result<(), Error> {
+        *steps = steps.checked_sub(batches.len() as u64).ok_or(Error {
+            kind: ErrorKind::StepsExhausted,
+            source: Some(source),
+        })?;
+        self.imports
+            .borrow_mut()
+            .extend(batches.iter().cloned().map(|b| (b, source)));
+        Ok(())
+    }
+
+    fn admit_imports(&self, steps: &mut u64) -> Result<(), Error> {
+        let mut imports = self.imports.borrow_mut();
+        while let Some((batch, source)) = imports.front() {
+            let mut budget = comptime_interpretor::Budget {
+                steps: std::mem::take(steps),
+                depth: 128,
+            };
+            let result = self.checked.import(batch, *source, &mut budget);
+            *steps = budget.steps;
+            result?;
+            imports.pop_front();
+        }
+        Ok(())
+    }
+
     pub fn remaining_structural_fuel(&self) -> usize {
         self.fuel.get()
     }
@@ -87,6 +124,7 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
         request: &StructBuildRequest,
         steps: &mut u64,
     ) -> Result<PreparedStructBuild<'s>, Error> {
+        self.admit_imports(steps)?;
         let identity = self.reserve(request.source, |fuel| request.charge_assembly(fuel))?;
         self.checked
             .prepare_struct_request(identity, request, steps)
@@ -96,6 +134,7 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
         request: &NewtypeBuildRequest,
         steps: &mut u64,
     ) -> Result<PreparedNewtypeBuild<'s>, Error> {
+        self.admit_imports(steps)?;
         let identity = self.reserve(request.source, |fuel| request.charge_assembly(fuel))?;
         self.checked
             .prepare_newtype_request(identity, request, steps)
@@ -105,6 +144,7 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
         request: &EnumBuildRequest,
         steps: &mut u64,
     ) -> Result<PreparedEnumBuild<'s>, Error> {
+        self.admit_imports(steps)?;
         let identity = self.reserve(request.source, |fuel| request.charge_assembly(fuel))?;
         self.checked.prepare_enum_request(identity, request, steps)
     }
@@ -177,5 +217,69 @@ impl std::fmt::Display for AllocatedDefinitionPublisher<'_> {
             self.fuel.get(),
             self.checked
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use comptime_interpretor::NominalBatch;
+    use nir::{Primitive, Term};
+    use std::sync::Arc;
+
+    #[test]
+    fn sourced_layout_imports_are_lazy_and_retry_before_reserving_an_identity() {
+        let world = n::Package::default();
+        let identities = DefinitionIdentities::from(20);
+        let publisher = AllocatedDefinitionPublisher::new(&world, 1, identities.clone(), 1000);
+        let original = DeclarationId {
+            package: 1,
+            local: 19,
+        };
+        let source = n::SourceRange { start: 15, end: 20 };
+        let batch = NominalBatch::Structs(Arc::from([n::Struct {
+            declaration: original,
+            name: "Imported".into(),
+            packed: false,
+            fields: vec![("enabled".into(), Term::Primitive(Primitive::Bool))],
+            type_parameters: vec![],
+            parameter_types: vec![],
+            capabilities: vec![],
+            requirements: vec![],
+        }]));
+        // Enough to queue one shared handle, but not to validate a descriptor.
+        let mut steps = 1;
+        publisher
+            .queue_imports(&[batch], source, &mut steps)
+            .unwrap();
+        let request = NewtypeBuildRequest {
+            name: "Wrapper".into(),
+            representation: Term::Nominal {
+                declaration: original,
+                arguments: vec![],
+            },
+            source,
+        };
+        assert_eq!(
+            publisher
+                .prepare_newtype(&request, &mut steps)
+                .err()
+                .unwrap()
+                .kind,
+            ErrorKind::StepsExhausted
+        );
+        assert_eq!(identities.next(), 20);
+        (publisher
+            .prepare_newtype(&request, &mut 100_000)
+            .unwrap()
+            .commit)()
+        .unwrap();
+        let (published, next) = publisher.finish();
+        assert_eq!(next, 21);
+        assert!(published.structs.is_empty());
+        assert_eq!(
+            published.newtypes[0][0].representation,
+            request.representation
+        );
     }
 }

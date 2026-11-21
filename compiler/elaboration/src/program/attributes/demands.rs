@@ -6,6 +6,7 @@ use std::sync::Arc;
 #[derive(Default)]
 pub(in crate::program) struct Demands {
     suppliers: BTreeMap<DeclarationId, Arc<[usize]>>,
+    pub(in crate::program) layouts: super::layouts::Generated,
     pub(super) values: Vec<Option<EvaluatedAttribute>>,
     merged: BTreeMap<DeclarationId, Option<Arc<Term>>>,
     active: Vec<usize>,
@@ -13,6 +14,10 @@ pub(in crate::program) struct Demands {
 }
 
 impl Demands {
+    pub(in crate::program) fn tracks_publications(&self) -> bool {
+        !self.suppliers.is_empty()
+    }
+
     pub(in crate::program) fn owns(
         &self,
         current: &n::DefinitionAttributes,
