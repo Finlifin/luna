@@ -40,6 +40,9 @@ pub use predicate_shape::{PredicateShapeError, checkable_predicate, predicate_ca
 
 mod volatile_storage;
 
+pub use crate::match_plan::{
+    ListObservationMode, ListViewOps, MatchPlan, MatchPlanKey, MatchPlans,
+};
 pub use volatile_storage::{VolatileNominal, VolatileStorage};
 
 /// Relative selections of a writable bit view, in source order.
@@ -156,7 +159,7 @@ pub struct LocalId {
     pub index: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SourceRange {
     pub start: u32,
     pub end: u32,
@@ -2286,6 +2289,7 @@ pub struct Package {
     pub enums: Vec<Enum>,
     pub definition_attributes: DefinitionAttributes,
     pub volatile_storage: VolatileStorage,
+    pub match_plans: MatchPlans,
     pub runtime_domains: std::collections::BTreeMap<crate::RuntimeId, Term>,
     pub global_runtime_deliveries: std::collections::BTreeMap<crate::RuntimeId, Expr>,
 }
@@ -4018,6 +4022,9 @@ impl fmt::Display for Package {
         }
         if !self.volatile_storage.is_empty() {
             write!(f, "\n {}", self.volatile_storage)?;
+        }
+        if !self.match_plans.is_empty() {
+            write!(f, "\n {}", self.match_plans)?;
         }
         if !self.runtime_domains.is_empty() {
             f.write_str("\n (runtime-domains")?;

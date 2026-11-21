@@ -38,9 +38,12 @@ impl Checker<'_, '_> {
             let interface = interface
                 .as_ref()
                 .ok_or_else(|| error(item.span, "test template interface was not linked"))?;
-            let (value, contract) = self
-                .check_test_template(target, Some((interface, ports, *body, owner, arguments)))?;
             let id = declaration(package, &self.package_identities, owner);
+            let saved_body_declaration = self.active_body_declaration.replace(id);
+            let checked =
+                self.check_test_template(target, Some((interface, ports, *body, owner, arguments)));
+            self.active_body_declaration = saved_body_declaration;
+            let (value, contract) = checked?;
             output.tests.push(id);
             output.functions.push(n::Function {
                 interface: nir::program::FunctionDeclaration {

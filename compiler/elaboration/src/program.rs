@@ -328,6 +328,7 @@ impl Protocols {
 pub struct CachedUpstreamFunction {
     pub function: n::Function,
     pub is_template_behavior: bool,
+    pub match_plans: Vec<(n::MatchPlanKey, n::MatchPlan)>,
 }
 
 /// Side-effect-free elaborated upstream function bodies reusable across compiles.
@@ -726,6 +727,11 @@ fn elaborate_in_mode(
         member_phases: BTreeMap::new(),
         packed_structs: BTreeSet::new(),
         volatile_storage: n::VolatileStorage::default(),
+        match_plans: n::MatchPlans::default(),
+        active_body_declaration: None,
+        list_pattern_infos: BTreeMap::new(),
+        range_pattern_infos: BTreeMap::new(),
+        bitvec_pattern_infos: BTreeMap::new(),
         direct_passing_effects: BTreeMap::new(),
         definition_attributes,
         attribute_demands,
@@ -1802,6 +1808,9 @@ fn elaborate_candidate<'a, 'h>(
             } else {
                 output.functions.push(cached_fn.function.clone());
             }
+            for (key, plan) in &cached_fn.match_plans {
+                checker.match_plans.insert(*key, plan.clone());
+            }
             continue;
         }
         let should_record = recorded_bodies.is_some()
@@ -1820,11 +1829,19 @@ fn elaborate_candidate<'a, 'h>(
             && checker_body_side_state(checker) == expected_state
             && let Some(cache) = recorded_bodies.as_mut()
         {
+            let body_match_plans = checker
+                .match_plans
+                .plans
+                .iter()
+                .filter(|(key, _)| key.function == Some(decl_id))
+                .map(|(key, plan)| (*key, plan.clone()))
+                .collect();
             cache.functions.insert(
                 decl_id,
                 CachedUpstreamFunction {
                     function: function.clone(),
                     is_template_behavior: template_behavior,
+                    match_plans: body_match_plans,
                 },
             );
         }
@@ -1896,6 +1913,7 @@ fn elaborate_candidate<'a, 'h>(
     output.expansion_sources = std::mem::take(&mut checker.expansion_sources);
     output.definition_attributes = checker.definition_attributes.clone();
     output.volatile_storage = checker.volatile_storage.clone();
+    output.match_plans = checker.match_plans.clone();
     let mut verified_upstream = crate::verification::flow::VerifiedUpstream::default();
     if !incremental.verified_upstream_packages.is_empty() {
         for function in output
@@ -2759,6 +2777,11 @@ struct Checker<'a, 'h> {
     member_phases: BTreeMap<OwnerId, n::TraitPhase>,
     packed_structs: BTreeSet<OwnerId>,
     volatile_storage: n::VolatileStorage,
+    match_plans: n::MatchPlans,
+    active_body_declaration: Option<DeclarationId>,
+    list_pattern_infos: BTreeMap<n::LocalId, crate::automata::ListPatternInfo>,
+    range_pattern_infos: BTreeMap<n::LocalId, crate::automata::RangePatternInfo>,
+    bitvec_pattern_infos: BTreeMap<n::LocalId, crate::automata::BitVecPatternInfo>,
     direct_passing_effects: BTreeMap<OwnerId, bool>,
     definition_attributes: n::DefinitionAttributes,
     attribute_demands: attributes::Demands,
@@ -4301,7 +4324,7 @@ impl Checker<'_, '_> {
         patterns: &[&n::Pattern],
         ty: &Term,
     ) -> crate::coverage::Coverage {
-        crate::coverage::check_metered_with_collections_in(
+        let legacy = crate::coverage::check_metered_with_collections_in(
             &self.structs,
             &self.enums,
             ty,
@@ -4312,7 +4335,20 @@ impl Checker<'_, '_> {
             &|domain, fuel| self.collection_domain_budgeted(domain, fuel),
             self.target,
         )
-        .0
+        .0;
+        if legacy == crate::coverage::Coverage::Exhaustive {
+            return legacy;
+        }
+        if let Some(outcome) = crate::automata::compile_match_plan(
+            self,
+            patterns,
+            ty,
+            n::SourceRange { start: 0, end: 0 },
+        ) && outcome.plan.is_exhaustive
+        {
+            return crate::coverage::Coverage::Exhaustive;
+        }
+        legacy
     }
 
     fn pattern_exhaustive(&self, pattern: &n::Pattern, ty: &Term) -> bool {

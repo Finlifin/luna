@@ -67,6 +67,15 @@ impl Checker<'_, '_> {
         let saved_behavior = std::mem::replace(&mut self.checking_open_behavior, false);
         let saved_call = std::mem::replace(&mut self.describing_open_call, false);
         let saved_spread = std::mem::replace(&mut self.describing_open_spread, false);
+        let body_declaration = instance
+            .as_ref()
+            .and_then(|key| self.generated_functions.instance(key))
+            .or_else(|| Some(declaration(self.package, &self.package_identities, owner)));
+        let saved_body_declaration =
+            std::mem::replace(&mut self.active_body_declaration, body_declaration);
+        let saved_list_infos = std::mem::take(&mut self.list_pattern_infos);
+        let saved_range_infos = std::mem::take(&mut self.range_pattern_infos);
+        let saved_bitvec_infos = std::mem::take(&mut self.bitvec_pattern_infos);
         let saved_owner = self.signature_owner.replace(owner);
         let saved_instance = std::mem::replace(&mut self.open_instance, instance);
         let saved_instance_capabilities = self.open_instance_capabilities.take();
@@ -120,6 +129,10 @@ impl Checker<'_, '_> {
         self.checking_open_behavior = saved_behavior;
         self.describing_open_call = saved_call;
         self.describing_open_spread = saved_spread;
+        self.active_body_declaration = saved_body_declaration;
+        self.list_pattern_infos = saved_list_infos;
+        self.range_pattern_infos = saved_range_infos;
+        self.bitvec_pattern_infos = saved_bitvec_infos;
         self.signature_owner = saved_owner;
         self.open_instance = saved_instance;
         self.open_instance_capabilities = saved_instance_capabilities;

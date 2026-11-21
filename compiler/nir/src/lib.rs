@@ -7,6 +7,7 @@
 pub mod target;
 mod type_children;
 pub mod types;
+
 pub use types::*;
 
 pub mod enum_encoding;
@@ -16,6 +17,7 @@ mod nominal_parameters;
 pub mod pattern_structure;
 pub mod program;
 mod trait_parameters;
+
 pub use trait_parameters::{
     validate_record_index_with, validate_record_index_with_admission,
     validate_record_index_with_admission_in,
@@ -29,6 +31,7 @@ pub mod function_parameters;
 pub mod normal_forms;
 
 mod display;
+
 pub use display::QuotedDisplay;
 
 pub mod callable_source;
@@ -88,6 +91,7 @@ pub mod call_safety;
 pub mod intrinsics;
 
 pub mod layout;
+
 pub use layout::{
     LayoutError, LayoutWorld, NominalLayout, TypeLayout, TypeLayoutQuery, compute_layout,
 };
@@ -97,7 +101,9 @@ pub mod type_budget;
 pub mod freshening;
 
 mod method_identity;
+
 pub use method_identity::{CallableValueRef, TraitMethodIdentity};
 
 pub mod declaration_fields;
+pub mod match_plan;
 pub mod runtime_fields;

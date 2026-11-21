@@ -241,6 +241,7 @@ dependencies = [
  "iir",
  "materialization",
  "nir",
+ "pattern_automata",
  "program_verification",
  "ptc",
  "rustc_span",
@@ -367,6 +368,7 @@ version = "0.1.0"
 dependencies = [
  "comptime_runtime",
  "nir",
+ "pattern_automata",
 ]
 
 [[package]]
@@ -563,6 +565,7 @@ name = "nir"
 version = "0.1.0"
 dependencies = [
  "comptime_runtime",
+ "pattern_automata",
 ]
 
 [[package]]

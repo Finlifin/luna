@@ -104,6 +104,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         enums,
         definition_attributes,
         volatile_storage,
+        match_plans,
         runtime_domains,
         global_runtime_deliveries,
     } = package;
@@ -226,6 +227,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         meter.node(Node::Expr(expr))?;
     }
     meter.width(volatile_storage.entry_count())?;
+    meter.width(match_plans.entry_count())?;
     // No clone above this point. Failure leaves the caller's source untouched
     // and cannot expose a partially captured declaration world.
     Ok(n::Package {
@@ -257,6 +259,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         enums: enums.clone(),
         definition_attributes: definition_attributes.clone(),
         volatile_storage: volatile_storage.clone(),
+        match_plans: match_plans.clone(),
         runtime_domains: runtime_domains.clone(),
         global_runtime_deliveries: global_runtime_deliveries.clone(),
     })

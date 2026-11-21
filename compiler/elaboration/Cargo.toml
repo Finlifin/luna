@@ -16,3 +16,4 @@ stacker = "0.1.25"
 comptime_runtime = { path = "../comptime_runtime" }
 comptime_interpretor = { path = "../comptime_interpretor" }
 iir = { path = "../iir" }
+pattern_automata = { path = "../pattern_automata" }

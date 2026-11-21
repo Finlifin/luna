@@ -80,10 +80,12 @@ pub(super) fn charge_world_tables(
         alias_contracts,
         enums,
         volatile_storage,
+        match_plans,
         global_runtime_deliveries,
     } = package;
     let cost = [
         volatile_storage.entry_count(),
+        match_plans.entry_count(),
         runtime_domains.len(),
         builtin_implementation_packages.len(),
         tests.len(),

@@ -234,6 +234,8 @@ pub struct Package {
     pub global_runtime_deliveries: std::collections::BTreeMap<RuntimeId, nir::program::Expr>,
     /// Checked `__flurry_volatile` declarations and struct fields.
     pub volatile_storage: nir::program::VolatileStorage,
+    /// Compiled pattern-matching decision DAGs and list-view metadata keyed by `(function, source)`.
+    pub match_plans: nir::match_plan::MatchPlans,
 }
 
 impl Package {
@@ -893,6 +895,9 @@ impl fmt::Display for Package {
         }
         if !self.volatile_storage.is_empty() {
             write!(f, " {}", self.volatile_storage)?;
+        }
+        if !self.match_plans.is_empty() {
+            write!(f, " {}", self.match_plans)?;
         }
         if let Some(target) = self.target {
             write!(f, " {target}")?;

@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 nir = { path = "../nir" }
 comptime_runtime = { path = "../comptime_runtime" }
+pattern_automata = { path = "../pattern_automata" }

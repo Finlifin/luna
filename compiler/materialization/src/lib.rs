@@ -592,13 +592,17 @@ impl<'a> InstantiationSession<'a> {
             .ok_or("IIR root copy budget exhausted")?;
         let normal_forms =
             publication::copy_normal_forms(&package.normal_forms, &mut publication_fuel)?;
-        let source_volatile = &published_source
+        let source_pkg = published_source
             .as_ref()
-            .map_or(package, |snapshot| snapshot.package().as_ref())
-            .volatile_storage;
+            .map_or(package, |snapshot| snapshot.package().as_ref());
+        let source_volatile = &source_pkg.volatile_storage;
         publication_fuel = publication_fuel
             .checked_sub(source_volatile.entry_count())
             .ok_or("IIR volatile storage copy budget exhausted")?;
+        let source_match_plans = &source_pkg.match_plans;
+        publication_fuel = publication_fuel
+            .checked_sub(source_match_plans.entry_count())
+            .ok_or("IIR match plans copy budget exhausted")?;
         let output = iir::Package {
             target: package.target,
             expansion_sources,
@@ -610,6 +614,7 @@ impl<'a> InstantiationSession<'a> {
             runtime_bindings,
             global_runtime_deliveries,
             volatile_storage: source_volatile.clone(),
+            match_plans: source_match_plans.clone(),
             nominals,
             interfaces,
             normal_forms,
@@ -813,15 +818,18 @@ impl<'a> InstantiationSession<'a> {
             .ok_or("IIR root copy budget exhausted")?;
         let normal_forms =
             publication::copy_normal_forms(&package.normal_forms, &mut publication_fuel)?;
-        let source_volatile = &builder
-            .world
-            .scope()
+        let source_world = builder.world.scope();
+        let source_pkg = source_world
             .published_snapshot()
-            .map_or(package, |snapshot| snapshot.package().as_ref())
-            .volatile_storage;
+            .map_or(package, |snapshot| snapshot.package().as_ref());
+        let source_volatile = &source_pkg.volatile_storage;
         publication_fuel = publication_fuel
             .checked_sub(source_volatile.entry_count())
             .ok_or("IIR volatile storage copy budget exhausted")?;
+        let source_match_plans = &source_pkg.match_plans;
+        publication_fuel = publication_fuel
+            .checked_sub(source_match_plans.entry_count())
+            .ok_or("IIR match plans copy budget exhausted")?;
         let output = iir::Package {
             target: package.target,
             expansion_sources: builder.quote_sources.clone(),
@@ -833,6 +841,7 @@ impl<'a> InstantiationSession<'a> {
             runtime_bindings: builder.runtime_bindings.clone(),
             global_runtime_deliveries: builder.global_runtime_deliveries.clone(),
             volatile_storage: source_volatile.clone(),
+            match_plans: source_match_plans.clone(),
             nominals: builder.nominals.clone(),
             interfaces: builder.interface_contracts.clone(),
             normal_forms,

@@ -200,6 +200,13 @@ impl Checker<'_, '_> {
                 let mut statements = Vec::new();
                 let mut checks = Vec::new();
                 let mut diverges = false;
+                let mut lower_const = None;
+                let mut upper_const = None;
+                let mut const_endpoints_ok = ordering_protocol.is_none()
+                    && !matches!(
+                        &shape,
+                        Term::Primitive(P::Float | P::F16 | P::Bf16 | P::F32 | P::F64 | P::Never)
+                    );
                 for (endpoint, binding, upper_end) in [
                     (*lower, lower_binding, false),
                     (*upper, upper_binding, true),
@@ -208,6 +215,18 @@ impl Checker<'_, '_> {
                         continue;
                     };
                     let endpoint = self.expr(endpoint_hir, Some(ty))?;
+                    if const_endpoints_ok {
+                        match const_range_endpoint(&endpoint) {
+                            Some(lit) => {
+                                if upper_end {
+                                    upper_const = Some(lit);
+                                } else {
+                                    lower_const = Some(lit);
+                                }
+                            }
+                            None => const_endpoints_ok = false,
+                        }
+                    }
                     diverges |= is_never(&endpoint.ty);
                     statements.push(n::Expr {
                         ty: if is_never(&endpoint.ty) {
@@ -291,6 +310,73 @@ impl Checker<'_, '_> {
                 } else {
                     first
                 };
+                if const_endpoints_ok {
+                    if shape == p(P::Char) {
+                        let start = match lower_const {
+                            None => pattern_automata::RangeBound::Unbounded,
+                            Some(RangeEndpointLit::Char(c)) => {
+                                pattern_automata::RangeBound::Inclusive(c)
+                            }
+                            _ => {
+                                const_endpoints_ok = false;
+                                pattern_automata::RangeBound::Unbounded
+                            }
+                        };
+                        let end = match upper_const {
+                            None => pattern_automata::RangeBound::Unbounded,
+                            Some(RangeEndpointLit::Char(c)) => match bound {
+                                hir::pattern::BoundType::Inclusive => {
+                                    pattern_automata::RangeBound::Inclusive(c)
+                                }
+                                hir::pattern::BoundType::Exclusive => {
+                                    pattern_automata::RangeBound::Exclusive(c)
+                                }
+                            },
+                            _ => {
+                                const_endpoints_ok = false;
+                                pattern_automata::RangeBound::Unbounded
+                            }
+                        };
+                        if const_endpoints_ok {
+                            self.range_pattern_infos.insert(
+                                observed,
+                                crate::automata::RangePatternInfo::Char { start, end },
+                            );
+                        }
+                    } else {
+                        let start = match lower_const {
+                            None => pattern_automata::RangeBound::Unbounded,
+                            Some(RangeEndpointLit::Int(i)) => {
+                                pattern_automata::RangeBound::Inclusive(i)
+                            }
+                            _ => {
+                                const_endpoints_ok = false;
+                                pattern_automata::RangeBound::Unbounded
+                            }
+                        };
+                        let end = match upper_const {
+                            None => pattern_automata::RangeBound::Unbounded,
+                            Some(RangeEndpointLit::Int(i)) => match bound {
+                                hir::pattern::BoundType::Inclusive => {
+                                    pattern_automata::RangeBound::Inclusive(i)
+                                }
+                                hir::pattern::BoundType::Exclusive => {
+                                    pattern_automata::RangeBound::Exclusive(i)
+                                }
+                            },
+                            _ => {
+                                const_endpoints_ok = false;
+                                pattern_automata::RangeBound::Unbounded
+                            }
+                        };
+                        if const_endpoints_ok {
+                            self.range_pattern_infos.insert(
+                                observed,
+                                crate::automata::RangePatternInfo::Int { start, end },
+                            );
+                        }
+                    }
+                }
                 Ok(n::Pattern::Observe {
                     binding: observed,
                     inner: Box::new(n::Pattern::Guard {
@@ -318,6 +404,8 @@ impl Checker<'_, '_> {
                 let mut remaining = width;
                 let mut values = Vec::new();
                 let mut patterns = Vec::new();
+                let mut auto_segments = Vec::with_capacity(segments.len());
+                let mut auto_ok = u32::try_from(width).is_ok();
                 for segment in segments {
                     let (segment_width, segment_ty, checked) = match segment {
                         hir::pattern::BitSegment::Literal { spelling, span } => {
@@ -347,6 +435,13 @@ impl Checker<'_, '_> {
                             let bits = integer
                                 .to_bitvec(segment_width, &mut budget)
                                 .map_err(|e| error(*span, e.to_string()))?;
+                            if auto_ok {
+                                match bitvec_from_u32_words(segment_width, bits.words()) {
+                                    Some(bv) => auto_segments
+                                        .push(crate::automata::BitSegmentInfo::Fixed(bv)),
+                                    None => auto_ok = false,
+                                }
+                            }
                             (
                                 segment_width,
                                 p(P::BitVec(segment_width)),
@@ -366,6 +461,20 @@ impl Checker<'_, '_> {
                                 _=>return Err(error(inner.span,"bit-vector segment type has no supported representation")),
                             };
                             let checked = self.pattern(inner, &ty)?;
+                            if auto_ok {
+                                match u32::try_from(width) {
+                                    Ok(seg_w) => {
+                                        auto_segments.push(
+                                            crate::automata::BitSegmentInfo::Typed {
+                                                width: seg_w,
+                                                ty: ty.clone(),
+                                                pattern: checked.clone(),
+                                            },
+                                        );
+                                    }
+                                    Err(_) => auto_ok = false,
+                                }
+                            }
                             (width, ty, checked)
                         }
                         hir::pattern::BitSegment::Computed(expr) => {
@@ -377,6 +486,13 @@ impl Checker<'_, '_> {
                                 ));
                             };
                             let width = bits.width();
+                            if auto_ok {
+                                match bitvec_from_u32_words(width, bits.words()) {
+                                    Some(bv) => auto_segments
+                                        .push(crate::automata::BitSegmentInfo::Fixed(bv)),
+                                    None => auto_ok = false,
+                                }
+                            }
                             (
                                 width,
                                 p(P::BitVec(width)),
@@ -424,6 +540,15 @@ impl Checker<'_, '_> {
                         pattern.span,
                         "bit-vector pattern width differs from its subject",
                     ));
+                }
+                if auto_ok && let Ok(total_width) = u32::try_from(width) {
+                    self.bitvec_pattern_infos.insert(
+                        binding,
+                        crate::automata::BitVecPatternInfo {
+                            total_width,
+                            segments: auto_segments,
+                        },
+                    );
                 }
                 let mut checked = n::Pattern::Wild;
                 for (value, next) in values.into_iter().zip(patterns) {
@@ -1295,4 +1420,65 @@ impl Checker<'_, '_> {
                 .map_err(|message| error(span, message)),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum RangeEndpointLit {
+    Int(pattern_automata::IntLit),
+    Char(char),
+}
+
+fn const_range_endpoint(expr: &n::Expr) -> Option<RangeEndpointLit> {
+    match &expr.kind {
+        K::Literal(n::Literal::Char(c)) => Some(RangeEndpointLit::Char(*c)),
+        K::Literal(n::Literal::SignedInteger(v)) => {
+            Some(RangeEndpointLit::Int(pattern_automata::IntLit::Signed(*v)))
+        }
+        K::Literal(n::Literal::UnsignedInteger(v)) => Some(RangeEndpointLit::Int(
+            pattern_automata::IntLit::Unsigned(*v),
+        )),
+        K::Literal(n::Literal::Integer(s)) => {
+            if let Ok(v) = s.parse::<i128>() {
+                Some(RangeEndpointLit::Int(pattern_automata::IntLit::Signed(v)))
+            } else if let Ok(u) = s.parse::<u128>() {
+                Some(RangeEndpointLit::Int(pattern_automata::IntLit::Unsigned(u)))
+            } else {
+                None
+            }
+        }
+        K::IntegerNegate(inner) => match const_range_endpoint(inner) {
+            Some(RangeEndpointLit::Int(pattern_automata::IntLit::Signed(v))) => v
+                .checked_neg()
+                .map(|neg| RangeEndpointLit::Int(pattern_automata::IntLit::Signed(neg))),
+            Some(RangeEndpointLit::Int(pattern_automata::IntLit::Unsigned(u))) => {
+                if u <= i128::MAX as u128 {
+                    Some(RangeEndpointLit::Int(pattern_automata::IntLit::Signed(
+                        -(u as i128),
+                    )))
+                } else if u == (i128::MAX as u128) + 1 {
+                    Some(RangeEndpointLit::Int(pattern_automata::IntLit::Signed(
+                        i128::MIN,
+                    )))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn bitvec_from_u32_words(
+    width: usize,
+    words: &[u32],
+) -> Option<pattern_automata::bitvec::BitValue> {
+    let w = u32::try_from(width).ok()?;
+    let mut u64_words = Vec::with_capacity(words.len().div_ceil(2));
+    for pair in words.chunks(2) {
+        let lo = u64::from(pair[0]);
+        let hi = pair.get(1).copied().map(u64::from).unwrap_or(0);
+        u64_words.push(lo | (hi << 32));
+    }
+    pattern_automata::bitvec::BitValue::from_words(w, u64_words).ok()
 }

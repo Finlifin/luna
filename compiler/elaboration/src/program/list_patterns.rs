@@ -36,7 +36,7 @@ impl Checker<'_, '_> {
                 },
             ));
         }
-        let size = contract.size;
+        let size = contract.size.clone();
         let binding = n::LocalId {
             owner: u32::MAX,
             index: self.next_temporary_binding,
@@ -127,64 +127,107 @@ impl Checker<'_, '_> {
             next: Box::new(next),
         };
         let mut steps = vec![length_check];
+        let mut prefix_patterns = Vec::with_capacity(elements.len());
+        let mut first_element_ty = None;
         for (index, element) in elements.iter().enumerate() {
             let value = call(self, element, contract.element, Some(index))?;
+            if first_element_ty.is_none() {
+                first_element_ty = Some(value.ty.clone());
+            }
             let next = self.pattern(element, &value.ty)?;
+            prefix_patterns.push(next.clone());
             steps.push(n::Pattern::Then {
                 first: Box::new(n::Pattern::Wild),
                 value: Box::new(value),
                 next: Box::new(next),
             });
         }
-        if let Some(rest_pat) = rest
-            && !matches!(rest_pat.kind, hir::pattern::PatternKind::Wild)
-        {
-            let rest_name = contract.rest.ok_or_else(|| {
-                error(
-                    rest_pat.span,
-                    "list rest patterns require a slicing protocol",
-                )
-            })?;
-            if let Some(default_body) = contract.rest_default {
-                let resolution = self
-                    .resolve_trait_capability(
-                        &n::InterfaceInstance {
-                            declaration: protocol,
-                            arguments: vec![],
-                        },
-                        ty,
-                        crate::ptc::Budget::default(),
-                    )
-                    .map_err(|e| error(rest_pat.span, format!("trait resolution failed: {e:?}")))?;
-                let overridden = matches!(
-                    resolution.selection,
-                    crate::implementation::Selection::Selected(selected_id)
-                        if self
-                            .implementation_positions
-                            .get(&selected_id)
-                            .and_then(|pos| self.checked_implementations.get(*pos))
-                            .is_some_and(|implementation| {
-                                implementation
-                                    .methods
-                                    .iter()
-                                    .any(|(method, body)| method == rest_name && *body != default_body)
-                            })
-                );
-                if !overridden {
-                    return Err(error(
+        let mut rest_pattern = None;
+        let mut rest_type = None;
+        let mut named_rest_used = false;
+        if let Some(rest_pat) = rest {
+            if matches!(rest_pat.kind, hir::pattern::PatternKind::Wild) {
+                rest_pattern = Some(n::Pattern::Wild);
+            } else {
+                named_rest_used = true;
+                let rest_name = contract.rest.ok_or_else(|| {
+                    error(
                         rest_pat.span,
                         "list rest patterns require a slicing protocol",
-                    ));
+                    )
+                })?;
+                if let Some(default_body) = contract.rest_default {
+                    let resolution = self
+                        .resolve_trait_capability(
+                            &n::InterfaceInstance {
+                                declaration: protocol,
+                                arguments: vec![],
+                            },
+                            ty,
+                            crate::ptc::Budget::default(),
+                        )
+                        .map_err(|e| {
+                            error(rest_pat.span, format!("trait resolution failed: {e:?}"))
+                        })?;
+                    let overridden = matches!(
+                        resolution.selection,
+                        crate::implementation::Selection::Selected(selected_id)
+                            if self
+                                .implementation_positions
+                                .get(&selected_id)
+                                .and_then(|pos| self.checked_implementations.get(*pos))
+                                .is_some_and(|implementation| {
+                                    implementation
+                                        .methods
+                                        .iter()
+                                        .any(|(method, body)| {
+                                            method == rest_name && *body != default_body
+                                        })
+                                })
+                    );
+                    if !overridden {
+                        return Err(error(
+                            rest_pat.span,
+                            "list rest patterns require a slicing protocol",
+                        ));
+                    }
                 }
+                let rest_value = call(self, rest_pat, rest_name, Some(elements.len()))?;
+                rest_type = Some(rest_value.ty.clone());
+                let rest_next = self.pattern(rest_pat, &rest_value.ty)?;
+                rest_pattern = Some(rest_next.clone());
+                steps.push(n::Pattern::Then {
+                    first: Box::new(n::Pattern::Wild),
+                    value: Box::new(rest_value),
+                    next: Box::new(rest_next),
+                });
             }
-            let rest_value = call(self, rest_pat, rest_name, Some(elements.len()))?;
-            let rest_next = self.pattern(rest_pat, &rest_value.ty)?;
-            steps.push(n::Pattern::Then {
-                first: Box::new(n::Pattern::Wild),
-                value: Box::new(rest_value),
-                next: Box::new(rest_next),
-            });
         }
+        let element_type = self.resolve_list_element_type(
+            ty,
+            protocol,
+            contract.element,
+            first_element_ty,
+            pattern.span,
+        );
+        let (mode, length_method, element_method, rest_method) =
+            self.classify_list_observation(ty, protocol, &contract, comptime, named_rest_used);
+        self.list_pattern_infos.insert(
+            binding,
+            crate::automata::ListPatternInfo {
+                protocol,
+                mode,
+                by_value: contract.by_value,
+                size_type: size,
+                element_type,
+                rest_type,
+                length_method,
+                element_method,
+                rest_method,
+                prefix_patterns,
+                rest_pattern,
+            },
+        );
         // Each generated step observes the alias, not its incoming subject.
         // A unit bridge can therefore balance the sequence without copying the
         // subject or changing the left-to-right short-circuiting evaluation.
@@ -213,5 +256,186 @@ impl Checker<'_, '_> {
             binding,
             inner: Box::new(result),
         })
+    }
+
+    fn resolve_list_element_type(
+        &self,
+        ty: &Term,
+        protocol: DeclarationId,
+        element_method_name: &str,
+        first_element_ty: Option<Term>,
+        span: Span,
+    ) -> Term {
+        if let Some(elem) = first_element_ty {
+            return elem;
+        }
+        if let Some(elem) = self.list_element_type(ty) {
+            return elem.clone();
+        }
+        let assoc_name = if element_method_name.ends_with("_comptime") {
+            "ElementComptime"
+        } else {
+            "Element"
+        };
+        if let Some(interface) = self.checked_traits.by_id(protocol)
+            && let Some(member) = interface
+                .associated
+                .iter()
+                .find(|item| item.name == assoc_name)
+        {
+            let projected = Term::AssociatedType {
+                origin: Box::new(nir::AssociatedTypeOrigin {
+                    interface: protocol,
+                    member: member.declaration,
+                }),
+                arguments: vec![],
+                subject: Box::new(ty.clone()),
+            };
+            let assumptions = self.capability_assumptions();
+            let resolved = crate::capabilities::World {
+                index: &self.implementation_index,
+                implementations: &self.checked_implementations,
+                traits: &self.checked_traits,
+                assumptions: &assumptions,
+                context: &self.context,
+            }
+            .associated_type_view_metered(&projected, &mut crate::ptc::Budget::default())
+            .map(|value| value.value)
+            .unwrap_or(projected);
+            return self.structural_type(&resolved, span).unwrap_or(resolved);
+        }
+        Term::Primitive(P::Void)
+    }
+
+    fn classify_list_observation(
+        &self,
+        ty: &Term,
+        protocol: DeclarationId,
+        contract: &crate::list_patterns::Protocol,
+        comptime: bool,
+        named_rest_used: bool,
+    ) -> (
+        Option<n::ListObservationMode>,
+        Option<DeclarationId>,
+        Option<DeclarationId>,
+        Option<DeclarationId>,
+    ) {
+        let assumptions = self.capability_assumptions();
+        let world = crate::capabilities::World {
+            index: &self.implementation_index,
+            implementations: &self.checked_implementations,
+            traits: &self.checked_traits,
+            assumptions: &assumptions,
+            context: &self.context,
+        };
+        let list_iface = n::InterfaceInstance {
+            declaration: protocol,
+            arguments: vec![],
+        };
+        let selected_impl = world
+            .resolve_instance_metered(&list_iface, ty, &mut crate::ptc::Budget::default())
+            .ok()
+            .and_then(|res| {
+                let crate::implementation::Selection::Selected(impl_id) = res.types.selection
+                else {
+                    return None;
+                };
+                if !matches!(
+                    res.qualifications.get(&impl_id),
+                    Some(crate::capabilities::Qualification::Proved(_))
+                ) {
+                    return None;
+                }
+                let pos = *self.implementation_positions.get(&impl_id)?;
+                self.checked_implementations.get(pos)
+            });
+
+        let method_decl = |name: &str| -> Option<DeclarationId> {
+            selected_impl.and_then(|imp| {
+                imp.methods
+                    .iter()
+                    .find(|(method, _)| method == name)
+                    .map(|(_, body)| *body)
+            })
+        };
+        let length_method = method_decl(contract.length);
+        let element_method = method_decl(contract.element);
+        let rest_method = contract.rest.and_then(|name| {
+            let decl = method_decl(name)?;
+            if contract.rest_default == Some(decl) {
+                None
+            } else {
+                Some(decl)
+            }
+        });
+
+        if comptime {
+            return (
+                Some(n::ListObservationMode::Comptime),
+                length_method,
+                element_method,
+                rest_method,
+            );
+        }
+
+        let stable = if let Some(stable_id) = self.protocols.stable_list_pattern {
+            let stable_iface = n::InterfaceInstance {
+                declaration: stable_id,
+                arguments: vec![],
+            };
+            self.symbolic_interface_evidence(ty, &stable_iface).ok() == Some(true)
+                || world
+                    .resolve_instance_metered(&stable_iface, ty, &mut crate::ptc::Budget::default())
+                    .ok()
+                    .is_some_and(|res| {
+                        matches!(
+                            res.types.selection,
+                            crate::implementation::Selection::Selected(impl_id)
+                                if matches!(
+                                    res.qualifications.get(&impl_id),
+                                    Some(crate::capabilities::Qualification::Proved(_))
+                                )
+                        )
+                    })
+        } else {
+            false
+        };
+        if stable {
+            return (
+                Some(n::ListObservationMode::StableProtocol),
+                length_method,
+                element_method,
+                rest_method,
+            );
+        }
+
+        let trait_contract = self.checked_traits.by_id(protocol);
+        let method_pure = |name: &str, impl_decl: Option<DeclarationId>| -> bool {
+            if trait_contract.is_some_and(|t| t.methods.iter().any(|m| m.name == name && m.pure)) {
+                return true;
+            }
+            let Some(body_id) = impl_decl else {
+                return false;
+            };
+            self.source_declarations
+                .owner(body_id)
+                .and_then(|owner| self.package.item(owner))
+                .is_some_and(
+                    |item| matches!(&item.kind, ItemKind::Fn(sig, _) if sig.modifiers.is_pure),
+                )
+        };
+        let rest_pure = if named_rest_used {
+            contract
+                .rest
+                .is_some_and(|rest_name| method_pure(rest_name, rest_method))
+        } else {
+            true
+        };
+        let mode = (method_pure(contract.length, length_method)
+            && method_pure(contract.element, element_method)
+            && rest_pure)
+            .then_some(n::ListObservationMode::PureMethods);
+
+        (mode, length_method, element_method, rest_method)
     }
 }
