@@ -17,6 +17,7 @@ mod inputs;
 mod methods;
 
 pub struct DeclarationWorld<'a> {
+    local_type_observations: n::ObservedAssociatedTypes,
     normalized_types: HashMap<Term, Term>,
     scope: DeclarationScope<'a>,
 }
@@ -96,6 +97,7 @@ impl<'a> DeclarationWorld<'a> {
         };
         let metadata = source.metadata(budget)?;
         Ok(Self {
+            local_type_observations: Default::default(),
             normalized_types: HashMap::new(),
             scope: DeclarationScope {
                 source,
@@ -423,15 +425,55 @@ impl<'a> DeclarationWorld<'a> {
         budget: &mut Budget,
         cache: &mut HashMap<Term, Term>,
     ) -> Result<crate::associated::AssociatedTypeNormalization, AdmissionError> {
-        let (view, completed) = self.scope.delivered_type_view(ty, budget, cache, true)?;
-        cache.extend(completed);
-        Ok(view)
+        let result = self.scope.delivered_type_view(
+            ty,
+            budget,
+            cache,
+            true,
+            &self.local_type_observations,
+            None,
+        )?;
+        cache.extend(result.completed);
+        Ok(result.view)
+    }
+    /// Execute missing closed initializers on demand. New identities become
+    /// available to subsequent views only after the entire traversal succeeds.
+    pub fn scoped_type_with_host<'h>(
+        &mut self,
+        ty: &Term,
+        budget: &mut Budget,
+        cache: &mut HashMap<Term, Term>,
+        host: &'h mut crate::associated::TypeInitializerHost<'h>,
+    ) -> Result<crate::associated::AssociatedTypeNormalization, AdmissionError> {
+        let result = self.scope.delivered_type_view(
+            ty,
+            budget,
+            cache,
+            true,
+            &self.local_type_observations,
+            Some(host),
+        )?;
+        self.local_type_observations
+            .publish(result.observations, &mut budget.steps)?;
+        cache.extend(result.completed);
+        Ok(result.view)
     }
     pub fn normalized_type(
         &mut self,
         ty: &Term,
         budget: Budget,
         fuel: &mut usize,
+    ) -> Result<Term, AdmissionError> {
+        self.normalized_type_with_host(ty, budget, fuel, None)
+    }
+    /// Require a closed identity, optionally asking the source VM for missing
+    /// initializers. Passive readers can consume completed facts in this world.
+    pub fn normalized_type_with_host<'h>(
+        &mut self,
+        ty: &Term,
+        budget: Budget,
+        fuel: &mut usize,
+        host: Option<&'h mut crate::associated::TypeInitializerHost<'h>>,
     ) -> Result<Term, AdmissionError> {
         crate::associated::charge_projection_copy(ty, fuel)?;
         if let Some(value) = self.normalized_types.get(ty) {
@@ -442,15 +484,23 @@ impl<'a> DeclarationWorld<'a> {
             steps: *fuel,
             ..budget
         };
-        let prepared =
-            self.scope
-                .delivered_type_view(ty, &mut query_budget, &self.normalized_types, false);
+        let prepared = self.scope.delivered_type_view(
+            ty,
+            &mut query_budget,
+            &self.normalized_types,
+            false,
+            &self.local_type_observations,
+            host,
+        );
         *fuel = query_budget.steps;
-        let (normalized, completed) = prepared?;
+        let result = prepared?;
+        let normalized = result.view;
         // Retaining the root is part of this transaction. Failed retention
         // cannot expose its successfully normalized children to later queries.
         crate::associated::charge_projection_copy(&normalized.value, fuel)?;
-        self.normalized_types.extend(completed);
+        self.local_type_observations
+            .publish(result.observations, fuel)?;
+        self.normalized_types.extend(result.completed);
         self.normalized_types
             .insert(ty.clone(), normalized.value.clone());
         Ok(normalized.value)

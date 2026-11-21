@@ -10,12 +10,133 @@ pub(super) struct Snapshot {
 }
 
 impl Snapshot {
-    fn capture(source: DeclarationSource<'_>, fuel: &mut usize) -> Result<Self, String> {
-        let source = source
-            .retain_for_invocation(fuel)
-            .map_err(|error| format!("staged source retention budget exhausted: {error:?}"))?;
+    fn capture(
+        source: DeclarationSource<'_>,
+        fuel: &mut usize,
+    ) -> Result<Self, nir::copy_budget::CopyBudgetExhausted> {
+        let source = source.retain_for_invocation(fuel)?;
         let code = CodeSession::new(source.package().clone());
         Ok(Self { source, code })
+    }
+}
+
+struct InvocationFailure(&'static str, comptime_interpretor::Error);
+
+impl std::fmt::Display for InvocationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "staged comptime {}: {}", self.0, self.1)
+    }
+}
+
+impl Snapshot {
+    fn execute(
+        &mut self,
+        expression: &n::Expr,
+        world: crate::capabilities::World<'_>,
+        limits: Budget,
+        fuel: &mut usize,
+    ) -> Result<Value, InvocationFailure> {
+        let snapshot = self.source.package();
+        // The checked expression is source code, not a concrete IIR closure.
+        // Resolve each demanded member in the same immutable declaration world;
+        // rebuilding every concrete implementation here duplicates outer work.
+        let source_queries = SourceInvocationQueries::in_source(
+            DeclarationSource::Snapshot(&self.source),
+            world.context,
+            world.assumptions,
+        );
+        let solver = |predicate: &n::TypePredicate, remaining: &mut u64| {
+            source_queries.check(
+                predicate,
+                Budget {
+                    steps: usize::MAX,
+                    ..limits
+                },
+                remaining,
+            )
+        };
+        let associated_resolver =
+            |access: &n::Expr, remaining: &mut u64| source_queries.associated(access, remaining);
+        let method_resolver =
+            |callee: &n::Expr, remaining: &mut u64| source_queries.resolve(callee, remaining);
+        let mut invocation_budget = comptime_interpretor::Budget {
+            steps: std::mem::take(fuel) as u64,
+            depth: 128,
+        };
+        let prepared = Interpreter::for_comptime_resolving_in_scope_in_session(
+            snapshot,
+            &mut self.code,
+            world.assumptions,
+            &[],
+            &[],
+            comptime_interpretor::SourceResolvers {
+                types: &solver,
+                methods: &method_resolver,
+                associated: &associated_resolver,
+            },
+            &mut invocation_budget,
+        );
+        *fuel = usize::try_from(invocation_budget.steps).unwrap_or(usize::MAX);
+        let mut interpreter = prepared.map_err(|error| InvocationFailure("preparation", error))?;
+        let value = interpreter.with_code_session(&mut self.code, |vm| {
+            vm.invoke_comptime_expression(expression)
+        });
+        *fuel = usize::try_from(interpreter.remaining_steps()).unwrap_or(usize::MAX);
+        value.map_err(|error| InvocationFailure("invocation", error))
+    }
+}
+
+pub(super) fn type_initializer_host<'a>(
+    source: DeclarationSource<'a>,
+    retained: &'a mut Option<Snapshot>,
+) -> impl FnMut(
+    &type_resolution::dispatch::DeclarationScope<'_>,
+    &Term,
+    n::SourceRange,
+    &mut Budget,
+) -> Result<Term, nir::NominalAdmissionError>
++ 'a {
+    move |scope, key, site, budget| {
+        let Term::AssociatedType {
+            origin,
+            arguments,
+            subject,
+        } = key
+        else {
+            return Err("expected an associated Type projection".into());
+        };
+        crate::associated::charge_projection_copy(key, &mut budget.steps)?;
+        let read = n::Expr {
+            source: site,
+            ty: Term::Primitive(nir::Primitive::Type),
+            kind: K::AssociatedValue {
+                interface: n::InterfaceInstance {
+                    declaration: origin.interface,
+                    arguments: arguments.clone(),
+                },
+                subject: subject.as_ref().clone(),
+                member: origin.member,
+            },
+        };
+        if retained.is_none() {
+            *retained = Some(
+                Snapshot::capture(source, &mut budget.steps)
+                    .map_err(|_| nir::NominalAdmissionError::Budget)?,
+            );
+        }
+        let snapshot = retained.as_mut().expect("captured source snapshot");
+        match snapshot.execute(&read, scope.capabilities(), *budget, &mut budget.steps) {
+            Ok(Value::Type(ty)) => Ok(ty),
+            Ok(_) => Err("associated Type initializer did not return a type identity".into()),
+            Err(InvocationFailure(
+                _,
+                comptime_interpretor::Error {
+                    kind: comptime_interpretor::ErrorKind::StepsExhausted,
+                    ..
+                },
+            )) => Err(nir::NominalAdmissionError::Budget),
+            Err(failure) => Err(failure.to_string().into()),
+        }
     }
 }
 
@@ -80,7 +201,8 @@ impl Builder<'_, '_> {
         self.tick(0)?;
         let mut snapshot = match self.invocation_snapshot.take() {
             Some(snapshot) => snapshot,
-            None => Snapshot::capture(self.source, &mut self.fuel)?,
+            None => Snapshot::capture(self.source, &mut self.fuel)
+                .map_err(|error| format!("staged source retention budget exhausted: {error:?}"))?,
         };
         let result = self.invoke_with_snapshot(expression, &mut snapshot);
         self.invocation_snapshot = Some(snapshot);
@@ -95,56 +217,14 @@ impl Builder<'_, '_> {
         iir::visit::expression(expression, &mut self.fuel, |_, _| Ok(()))?;
         crate::associated::charge_projection_copy(&expression.ty, &mut self.fuel)
             .map_err(|_| "staged result type budget exhausted")?;
-        let snapshot = retained.source.package();
-        // The checked expression is source code, not a concrete IIR closure.
-        // Resolve each demanded member in the same immutable declaration world;
-        // rebuilding every concrete implementation here duplicates outer work.
-        let source_queries = SourceInvocationQueries::in_source(
-            DeclarationSource::Snapshot(&retained.source),
-            self.world.context(),
-            self.world.assumptions(),
-        );
-        let solver = |predicate: &n::TypePredicate, remaining: &mut u64| {
-            source_queries.check(
-                predicate,
-                Budget {
-                    steps: usize::MAX,
-                    ..self.budget
-                },
-                remaining,
+        let value = retained
+            .execute(
+                expression,
+                self.world.capabilities(),
+                self.budget,
+                &mut self.fuel,
             )
-        };
-        let associated_resolver =
-            |access: &n::Expr, remaining: &mut u64| source_queries.associated(access, remaining);
-        let method_resolver =
-            |callee: &n::Expr, remaining: &mut u64| source_queries.resolve(callee, remaining);
-        let mut invocation_budget = comptime_interpretor::Budget {
-            steps: std::mem::take(&mut self.fuel) as u64,
-            depth: 128,
-        };
-        let prepared = Interpreter::for_comptime_resolving_in_scope_in_session(
-            snapshot,
-            &mut retained.code,
-            self.world.assumptions(),
-            &[],
-            &[],
-            comptime_interpretor::SourceResolvers {
-                types: &solver,
-                methods: &method_resolver,
-                associated: &associated_resolver,
-            },
-            &mut invocation_budget,
-        );
-        self.fuel = usize::try_from(invocation_budget.steps).unwrap_or(usize::MAX);
-        let mut interpreter =
-            prepared.map_err(|error| format!("staged comptime preparation: {error}"))?;
-        let value = interpreter.with_code_session(&mut retained.code, |vm| {
-            vm.invoke_comptime_expression(expression)
-        });
-        self.fuel = usize::try_from(interpreter.remaining_steps()).unwrap_or(usize::MAX);
-        let value = value.map_err(|error| format!("staged comptime invocation: {error}"))?;
-        drop(interpreter);
-        drop(source_queries);
+            .map_err(|failure| failure.to_string())?;
         self.freeze_staged_value(value, &expression.ty, expression.source, 0)
     }
 

@@ -126,10 +126,7 @@ fn borrowed_capture_meters_unrelated_declarations_without_penalizing_shared_owne
     let failure = Snapshot::capture(DeclarationSource::Borrowed(&package), &mut 100)
         .err()
         .expect("the copy includes unused declaration metadata");
-    assert!(
-        failure.contains("staged source retention budget exhausted: Steps"),
-        "{failure}"
-    );
+    assert_eq!(failure, nir::copy_budget::CopyBudgetExhausted::Steps);
     assert_eq!(package, before);
     let copied = Snapshot::capture(DeclarationSource::Borrowed(&package), &mut 10_000).unwrap();
     assert_eq!(copied.source.package().as_ref(), &package);

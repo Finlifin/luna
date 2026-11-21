@@ -569,6 +569,7 @@ impl<'a, 'world> SelectedAssociatedMember<'a, 'world> {
                 }
                 return Ok(TypeProjection::Initializer(SelectedTypeInitializer {
                     program: program.identity(),
+                    source: program.expression().source,
                     open_inputs: nir::type_computations::has_rigid_parameters_bounded(
                         projection,
                         &mut budget.steps,

@@ -3333,9 +3333,16 @@ impl Builder<'_, '_> {
     }
 
     fn normalized_type(&mut self, ty: &Term) -> Result<Term, String> {
+        if self.instances.is_none() {
+            return self
+                .world
+                .normalized_type(ty, self.budget, &mut self.fuel)
+                .map_err(Into::into);
+        }
+        let mut host = staged::type_initializer_host(self.source, &mut self.invocation_snapshot);
         self.world
-            .normalized_type(ty, self.budget, &mut self.fuel)
-            .map_err(String::from)
+            .normalized_type_with_host(ty, self.budget, &mut self.fuel, Some(&mut host))
+            .map_err(Into::into)
     }
 
     fn dispatch_type_view(&mut self, term: &Term) -> Result<Term, String> {
@@ -3358,8 +3365,10 @@ impl Builder<'_, '_> {
         };
         let world = self.world.capabilities();
         let view = if self.instances.is_some() {
+            let mut host =
+                staged::type_initializer_host(self.source, &mut self.invocation_snapshot);
             self.world
-                .delivered_scoped_type_view(term, &mut budget, &mut self.staging_views)
+                .scoped_type_with_host(term, &mut budget, &mut self.staging_views, &mut host)
         } else {
             world.staged_dispatch_type_view_cached_metered(
                 term,

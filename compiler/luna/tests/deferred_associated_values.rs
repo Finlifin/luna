@@ -622,3 +622,156 @@ fn a_concrete_annotation_delivers_its_result_without_a_concrete_call_signature()
     );
     assert_eq!(support::run_iir(&source, "run", vec![]), Value::Bool(true));
 }
+
+const LATE_CALLBACK: &str = r#"
+    fn leaf() -> ?Holder<flag>.as(Source<flag>).Item
+    where flag: bool
+    { null }
+    fn relay() -> bool
+    where flag: bool
+    {
+        let callback = leaf<flag>;
+        callback() match { null => true, _ => false }
+    }
+    fn yes() -> bool { relay<true>() }
+    fn no() -> bool { relay<false>() }
+"#;
+
+#[test]
+fn a_runtime_indirect_call_can_be_the_first_demand_for_an_associated_type() {
+    let package = support::compile(&format!("{COMPUTED_ITEM}{LATE_CALLBACK}"));
+    assert!(package.observed_associated_types.is_empty());
+    for (entry, payload) in [("yes", nir::Primitive::Bool), ("no", nir::Primitive::Char)] {
+        let graph = luna::instantiation::instantiate(&package, entry, 100_000).unwrap();
+        let leaf = graph
+            .functions
+            .iter()
+            .find(|instance| instance.function.name == "leaf")
+            .unwrap();
+        let nir::Term::Function { result, .. } = &leaf.function.signature else {
+            panic!(
+                "expected a specialized function: {}",
+                leaf.function.signature
+            );
+        };
+        assert_eq!(
+            result.as_ref(),
+            &nir::Term::Optional(Box::new(nir::Term::Primitive(payload)))
+        );
+        let mut vm =
+            comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+        assert_eq!(
+            vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+            Value::Bool(true)
+        );
+    }
+}
+
+#[test]
+fn a_late_type_initializer_enforces_its_source_contract() {
+    let declarations = r#"
+        typealias Type = .Type'builtin;
+        comptime fn Checked(flag: bool) -> Type
+        where requires flag
+        { bool }
+        trait Source where flag: bool { assoc Item: Type = do { assumes flag; Checked(flag) }; }
+        struct Holder where flag: bool {}
+        impl Source<flag> for Holder<flag> where flag: bool {}
+    "#;
+    let package = support::compile(&format!("{declarations}{LATE_CALLBACK}"));
+    assert!(package.observed_associated_types.is_empty());
+    let error = luna::instantiation::instantiate(&package, "no", 100_000).unwrap_err();
+    assert!(
+        error.contains("ProgramContractRejected") && error.contains("(source "),
+        "{error}"
+    );
+    let graph = luna::instantiation::instantiate(&package, "yes", 100_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn a_failed_type_traversal_keeps_spent_fuel_and_discards_new_observations() {
+    use nir::{Primitive, Term};
+    use type_resolution::{dispatch::DeclarationWorld, ptc::Budget};
+    let package = support::compile(COMPUTED_ITEM);
+    let interface = package
+        .traits
+        .iter()
+        .find(|item| item.name == "Source")
+        .unwrap();
+    let holder = package
+        .structs
+        .iter()
+        .find(|item| item.name == "Holder")
+        .unwrap();
+    let projection = |flag| Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: interface.declaration,
+            member: interface.associated[0].declaration,
+        }),
+        arguments: vec![Term::Bool(flag)],
+        subject: Box::new(Term::Nominal {
+            declaration: holder.declaration,
+            arguments: vec![Term::Bool(flag)],
+        }),
+    };
+    let yes = projection(true);
+    let no = projection(false);
+    let both = Term::Tuple(vec![yes.clone(), no.clone()]);
+    let budget = Budget::default();
+    let (mut world, _) = DeclarationWorld::new(&package, budget, None).unwrap();
+    let mut fuel = budget.steps;
+    let mut seen = Vec::new();
+    let failed = world
+        .normalized_type_with_host(
+            &both,
+            budget,
+            &mut fuel,
+            Some(&mut |_, key, _, _| {
+                seen.push(key.clone());
+                if key == &no {
+                    return Err("test initializer failed".into());
+                }
+                Ok(Term::Primitive(Primitive::Bool))
+            }),
+        )
+        .unwrap_err();
+    assert!(
+        failed.to_string().contains("test initializer failed"),
+        "{failed}"
+    );
+    assert_eq!(seen, [yes.clone(), no.clone()]);
+    assert!(fuel > 0 && fuel < budget.steps);
+    assert!(world.normalized_type(&yes, budget, &mut fuel).is_err());
+    seen.clear();
+    let expected = Term::Tuple(vec![
+        Term::Primitive(Primitive::Bool),
+        Term::Primitive(Primitive::Char),
+    ]);
+    let result = world
+        .normalized_type_with_host(
+            &both,
+            budget,
+            &mut fuel,
+            Some(&mut |_, key, _, _| {
+                seen.push(key.clone());
+                Ok(Term::Primitive(if key == &yes {
+                    Primitive::Bool
+                } else {
+                    Primitive::Char
+                }))
+            }),
+        )
+        .unwrap();
+    assert_eq!(result, expected);
+    assert_eq!(seen, [yes, no]);
+    let scoped = world
+        .delivered_scoped_type_view(&both, &mut Budget::default(), &mut Default::default())
+        .unwrap();
+    assert_eq!(scoped.value, expected);
+    assert!(package.observed_associated_types.is_empty());
+}

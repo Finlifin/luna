@@ -64,6 +64,7 @@ impl ClosedDeclarations {
     /// Start a query cache over the already prepared source and closed premises.
     pub fn world(&self) -> DeclarationWorld<'_> {
         DeclarationWorld {
+            local_type_observations: Default::default(),
             normalized_types: HashMap::new(),
             scope: DeclarationScope {
                 source: DeclarationSource::Snapshot(&self.source),

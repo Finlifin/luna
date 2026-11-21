@@ -26,6 +26,7 @@ pub enum TypeProjection {
 }
 
 pub struct SelectedTypeInitializer {
+    source: nir::program::SourceRange,
     program: nir::associated_initializers::ProgramIdentity,
     open_inputs: bool,
     evidence: TypeEvidence,
@@ -544,13 +545,24 @@ impl TypeProjectionEnvironment for PassiveProjectionWorld<'_, '_> {
     }
 }
 
-/// Passive normalization may use an identity delivered by elaboration only
-/// after this world independently proves the same concrete selection.
-struct DeliveredTypeWorld<'a, 's> {
+/// Complete an admitted, closed associated Type initializer in its declaration
+/// scope. The caller supplies execution authority and the remaining query fuel.
+pub type TypeInitializerHost<'a> = dyn FnMut(
+        &crate::dispatch::DeclarationScope<'_>,
+        &Term,
+        nir::program::SourceRange,
+        &mut Budget,
+    ) -> Result<Term, QueryError>
+    + 'a;
+
+struct DeliveredTypeWorld<'a, 's, 'h> {
     scope: &'a crate::dispatch::DeclarationScope<'s>,
+    previous: &'a nir::program::ObservedAssociatedTypes,
+    host: Option<&'h mut TypeInitializerHost<'h>>,
+    observations: Vec<(Term, nir::program::ObservedAssociatedType)>,
 }
 
-impl TypeProjectionEnvironment for DeliveredTypeWorld<'_, '_> {
+impl TypeProjectionEnvironment for DeliveredTypeWorld<'_, '_, '_> {
     fn world(&self) -> World<'_> {
         self.scope.capabilities()
     }
@@ -572,40 +584,59 @@ impl TypeProjectionEnvironment for DeliveredTypeWorld<'_, '_> {
         let TypeProjection::Initializer(pending) = selection else {
             return Ok(selection);
         };
-        if !pending.needs_inputs()
-            && let Some(value) = self.scope.observed_associated_types().lookup(
+        if pending.needs_inputs() {
+            return Ok(TypeProjection::Initializer(pending));
+        }
+        for facts in [self.scope.observed_associated_types(), self.previous] {
+            if let Some(value) = facts.lookup(
                 key,
                 pending.evidence.implementation,
                 &pending.evidence.type_arguments,
                 &pending.program,
                 &mut budget.steps,
-            )?
-        {
-            charge_projection_copy(value, &mut budget.steps)?;
-            return pending
-                .complete(value.clone(), &mut budget.steps)
-                .map(TypeProjection::Ready);
+            )? {
+                charge_projection_copy(value, &mut budget.steps)?;
+                return pending
+                    .complete(value.clone(), &mut budget.steps)
+                    .map(TypeProjection::Ready);
+            }
         }
-        Ok(TypeProjection::Initializer(pending))
+        let Some(evaluate) = self.host.as_mut() else {
+            return Ok(TypeProjection::Initializer(pending));
+        };
+        let source = pending.source;
+        let value = evaluate(self.scope, key, source, budget)?;
+        let (result, observation) = pending.observed(value, source, &mut budget.steps)?;
+        charge_projection_copy(key, &mut budget.steps)?;
+        self.observations.push((key.clone(), observation));
+        Ok(TypeProjection::Ready(result))
     }
 }
 
+pub(crate) struct DeliveredTypeView {
+    pub view: AssociatedTypeNormalization,
+    pub completed: std::collections::HashMap<Term, Term>,
+    pub observations: Vec<(Term, nir::program::ObservedAssociatedType)>,
+}
+
 impl crate::dispatch::DeclarationScope<'_> {
-    pub(crate) fn delivered_type_view(
+    pub(crate) fn delivered_type_view<'h>(
         &self,
         ty: &Term,
         budget: &mut Budget,
         cache: &std::collections::HashMap<Term, Term>,
         scoped: bool,
-    ) -> Result<
-        (
-            AssociatedTypeNormalization,
-            std::collections::HashMap<Term, Term>,
-        ),
-        QueryError,
-    > {
-        normalize_type_in(
-            &mut DeliveredTypeWorld { scope: self },
+        previous: &nir::program::ObservedAssociatedTypes,
+        host: Option<&'h mut TypeInitializerHost<'h>>,
+    ) -> Result<DeliveredTypeView, QueryError> {
+        let mut world = DeliveredTypeWorld {
+            scope: self,
+            previous,
+            host,
+            observations: Vec::new(),
+        };
+        let (view, _, completed) = normalize_type_in(
+            &mut world,
             ty,
             budget,
             if scoped {
@@ -614,8 +645,12 @@ impl crate::dispatch::DeclarationScope<'_> {
                 ProjectionView::ConcreteType
             },
             Some(cache),
-        )
-        .map(|(view, _, completed)| (view, completed))
+        )?;
+        Ok(DeliveredTypeView {
+            view,
+            completed,
+            observations: world.observations,
+        })
     }
 }
 
