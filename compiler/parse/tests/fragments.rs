@@ -120,3 +120,40 @@ fn parse_fragment_rolls_back_on_failure_and_sequences_statements() {
     assert_eq!(ast.get_node_kind(m3.root), Some(NodeKind::LetDecl));
     ast.validate_structure().unwrap();
 }
+
+#[test]
+fn parse_fragment_at_probes_arbitrary_offsets_and_restores_cursor() {
+    let src = "inc alpha ; set beta = 1 + 2 ;";
+    let map = SourceMap::new(FilePathMapping::empty());
+    let file = map.new_source_file(FileName::Custom("fragments_at.fl".into()), src.into());
+    let (tokens, symbols, errs) = lex::lex(src, file.start_pos);
+    assert!(errs.is_empty());
+    let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+
+    let m_ident = parser
+        .parse_fragment_at(1, FragmentKind::Ident)
+        .unwrap()
+        .unwrap();
+    assert_eq!((m_ident.start_cursor, m_ident.end_cursor), (1, 2));
+    assert_eq!(parser.peek_next_token().kind, TokenKind::Id);
+
+    // Probing an invalid offset rolls back AST allocations and leaves cursor untouched.
+    assert!(
+        parser
+            .parse_fragment_at(3, FragmentKind::Block)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(parser.peek_next_token().kind, TokenKind::Id);
+
+    let m_expr = parser
+        .parse_fragment_at(6, FragmentKind::Expr)
+        .unwrap()
+        .unwrap();
+    assert_eq!((m_expr.start_cursor, m_expr.end_cursor), (6, 9));
+
+    let ast = parser.finalize();
+    assert_eq!(ast.get_node_kind(m_ident.root), Some(NodeKind::Id));
+    assert_eq!(ast.get_node_kind(m_expr.root), Some(NodeKind::Add));
+    ast.validate_structure().unwrap();
+}

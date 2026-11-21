@@ -164,6 +164,16 @@ fn at_use_import_forms_shadowing_diamond_dedup_ambiguity_and_visibility() {
         ) -> Result<Vec<MacroToken>, MacroError> {
             unreachable!()
         }
+
+        fn execute_peg(
+            &mut self,
+            _descriptor: &MacroDescriptor,
+            _arg: &macro_expander::PegArgValue,
+            _call_site: Span,
+            _budget: &mut MacroBudget,
+        ) -> Result<Vec<MacroToken>, MacroError> {
+            unreachable!()
+        }
     }
 
     // 1. Diamond dedup + nested multi-group + optional semicolon after brace + alias
@@ -428,6 +438,23 @@ fn mode3_token_macros_compose_and_enforce_delimiters_depth_and_budgets() {
                 MacroErrorKind::HandlerExecutionError,
                 format!(
                     "unexpected AST macro call `@{}` in MockMode3Executor",
+                    descriptor.full_path()
+                ),
+                call_site,
+            ))
+        }
+
+        fn execute_peg(
+            &mut self,
+            descriptor: &MacroDescriptor,
+            _arg: &macro_expander::PegArgValue,
+            call_site: Span,
+            _budget: &mut MacroBudget,
+        ) -> Result<Vec<MacroToken>, MacroError> {
+            Err(MacroError::new(
+                MacroErrorKind::HandlerExecutionError,
+                format!(
+                    "unexpected PEG macro call `@{}` in MockMode3Executor",
                     descriptor.full_path()
                 ),
                 call_site,

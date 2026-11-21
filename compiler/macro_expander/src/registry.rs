@@ -1,5 +1,6 @@
 //! Macro registry, visibility descriptors, and execution host trait.
 use crate::ast_input::{AstArgValue, AstParamShape};
+use crate::peg::{PegArgValue, PegGrammar, PegParamShape};
 use crate::provenance::{MacroToken, escape_sexp_str};
 use crate::{MacroBudget, MacroError};
 use rustc_span::Span;
@@ -24,6 +25,12 @@ impl MacroId {
     pub const BUILTIN_DEFINE_MACRO1: Self = Self {
         package: u32::MAX,
         local: 2,
+    };
+
+    /// Synthetic identity reserved for built-in `@meta.macros.define_macro2`.
+    pub const BUILTIN_DEFINE_MACRO2: Self = Self {
+        package: u32::MAX,
+        local: 3,
     };
 }
 
@@ -122,8 +129,15 @@ pub enum MacroInputMode {
     BuiltinRawStr,
     /// Built-in `@meta.macros.define_macro1 { mapping_definition }`.
     BuiltinDefineMacro1,
+    /// Built-in `@meta.macros.define_macro2 { peg_rule* mapping_definition }`.
+    BuiltinDefineMacro2,
     /// Mode 1 AST construction macro defined via `@define_macro1`.
     Ast { params: Vec<AstParamShape> },
+    /// Mode 2 PEG construction macro defined via `@define_macro2`.
+    Peg {
+        grammar: PegGrammar,
+        param_shape: PegParamShape,
+    },
     /// User Mode 4 construction macro (`^macro4`) receiving raw UTF-8 `str` inside `{ ... }`.
     RawSource,
     /// User Mode 3 construction macro (`^macro3`) receiving `meta.ast.TokenBuffer` inside `{ ... }`.
@@ -135,7 +149,9 @@ impl MacroInputMode {
         match self {
             Self::BuiltinRawStr => "builtin-raw-str",
             Self::BuiltinDefineMacro1 => "builtin-define-macro1",
+            Self::BuiltinDefineMacro2 => "builtin-define-macro2",
             Self::Ast { .. } => "ast",
+            Self::Peg { .. } => "peg",
             Self::RawSource => "raw-source",
             Self::Tokens => "tokens",
         }
@@ -152,6 +168,10 @@ impl fmt::Display for MacroInputMode {
                 }
                 f.write_str(")")
             }
+            Self::Peg {
+                grammar,
+                param_shape,
+            } => write!(f, "(peg {param_shape} {grammar})"),
             other => f.write_str(other.as_str()),
         }
     }
@@ -233,6 +253,15 @@ impl MacroRegistry {
             vis: MacroVisibility::Public,
             def_site: None,
             mode: MacroInputMode::BuiltinDefineMacro1,
+        });
+        reg.register(MacroDescriptor {
+            id: MacroId::BUILTIN_DEFINE_MACRO2,
+            canonical_path: vec!["meta".into(), "macros".into(), "define_macro2".into()],
+            package: u32::MAX,
+            module_path: vec!["meta".into(), "macros".into()],
+            vis: MacroVisibility::Public,
+            def_site: None,
+            mode: MacroInputMode::BuiltinDefineMacro2,
         });
         reg
     }
@@ -338,6 +367,14 @@ pub trait MacroExecutor {
         &mut self,
         descriptor: &MacroDescriptor,
         args: &[AstArgValue],
+        call_site: Span,
+        budget: &mut MacroBudget,
+    ) -> Result<Vec<MacroToken>, MacroError>;
+
+    fn execute_peg(
+        &mut self,
+        descriptor: &MacroDescriptor,
+        arg: &PegArgValue,
         call_site: Span,
         budget: &mut MacroBudget,
     ) -> Result<Vec<MacroToken>, MacroError>;

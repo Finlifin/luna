@@ -1,15 +1,17 @@
-//! Host compiler bridge for executing Flurry comptime construction macros (`^macro1`/`^macro3`/`^macro4`).
+//! Host compiler bridge for executing Flurry comptime construction macros (`^macro1`–`^macro4`).
 use crate::invocation::MacroPackageSession;
 use crate::packages::{CompilationInputs, SourcePackage};
 use comptime_interpretor::{ListValues, Value};
 use comptime_runtime::integer::Integer;
 use diagnostic::{DiagnosticContext, FlurryError};
 use lex::TokenKind;
+use macro_expander::peg::parse_and_validate_peg_grammar_str;
 use macro_expander::provenance::{MacroToken, TokenSpacing, is_separated_kind};
 use macro_expander::{
     AstArgValue, AstNodeKind, AstParamShape, ExpansionContext, MacroBudget, MacroDescriptor,
     MacroError, MacroErrorKind, MacroExecutor, MacroId, MacroInputMode, MacroRegistry,
-    MacroVisibility, ParsedSyntaxNode, ParsedSyntaxTree, scan_referenced_macro_roots,
+    MacroVisibility, ParsedPegNode, ParsedPegTree, ParsedSyntaxNode, ParsedSyntaxTree, PegArgValue,
+    PegParamShape, scan_referenced_macro_roots,
 };
 use nir::objects::entry_parts;
 use nir::program::{FunctionPhase, Package};
@@ -117,8 +119,11 @@ struct MacroAstTypes {
     token_list_ty: Term,
     syntax_node: StructLayout,
     syntax_tree: StructLayout,
+    peg_tree_node: StructLayout,
+    peg_node: StructLayout,
     int_list_ty: Term,
     syntax_node_list_ty: Term,
+    peg_tree_node_list_ty: Term,
     meta_list_head: DeclarationId,
     wrapper_by_kind: HashMap<AstNodeKind, StructLayout>,
     kind_by_decl: HashMap<DeclarationId, AstNodeKind>,
@@ -159,6 +164,8 @@ impl MacroAstTypes {
         let tb_decl = lookup_decl("TokenBuffer")?;
         let syntax_node_decl = lookup_decl("SyntaxNode")?;
         let syntax_tree_decl = lookup_decl("SyntaxTree")?;
+        let peg_tree_node_decl = lookup_decl("PegTreeNode")?;
+        let peg_node_decl = lookup_decl("PegNode")?;
 
         let source_span =
             StructLayout::from_nir(nir, span_decl, &["file", "start", "end", "expansion_id"])?;
@@ -185,6 +192,13 @@ impl MacroAstTypes {
         let syntax_tree =
             StructLayout::from_nir(nir, syntax_tree_decl, &["nodes", "root", "tokens"])?;
         let syntax_node_list_ty = syntax_tree.field_types[0].clone();
+        let peg_tree_node = StructLayout::from_nir(
+            nir,
+            peg_tree_node_decl,
+            &["rule", "span", "text", "tokens", "child_indices"],
+        )?;
+        let peg_node = StructLayout::from_nir(nir, peg_node_decl, &["tree", "root"])?;
+        let peg_tree_node_list_ty = peg_node.field_types[0].clone();
 
         const ALL_AST_KINDS: [AstNodeKind; 10] = [
             AstNodeKind::FlurryPattern,
@@ -214,8 +228,11 @@ impl MacroAstTypes {
             token_list_ty,
             syntax_node,
             syntax_tree,
+            peg_tree_node,
+            peg_node,
             int_list_ty,
             syntax_node_list_ty,
+            peg_tree_node_list_ty,
             meta_list_head,
             wrapper_by_kind,
             kind_by_decl,
@@ -1084,6 +1101,70 @@ impl MacroExecutor for MacroHost {
         }
         self.execute_provider_macro(descriptor, arg_values, call_site, budget)
     }
+
+    fn execute_peg(
+        &mut self,
+        descriptor: &MacroDescriptor,
+        arg: &PegArgValue,
+        call_site: Span,
+        budget: &mut MacroBudget,
+    ) -> Result<Vec<MacroToken>, MacroError> {
+        let Some(entry) = self.compiled_macros.get(&descriptor.id).cloned() else {
+            return Err(MacroError::new(
+                MacroErrorKind::HandlerExecutionError,
+                format!("missing prepared handler for `@{}`", descriptor.full_path()),
+                call_site,
+            ));
+        };
+        let ast_types = self
+            .providers
+            .get(&entry.provider)
+            .ok_or_else(|| {
+                MacroError::new(
+                    MacroErrorKind::HandlerExecutionError,
+                    format!(
+                        "missing prepared provider for `@{}`",
+                        descriptor.full_path()
+                    ),
+                    call_site,
+                )
+            })?
+            .ast_types
+            .clone();
+        let MacroInputMode::Peg { param_shape, .. } = &descriptor.mode else {
+            return Err(MacroError::new(
+                MacroErrorKind::HandlerExecutionError,
+                format!(
+                    "internal error: `execute_peg` called for non-PEG macro `@{}`",
+                    descriptor.full_path()
+                ),
+                call_site,
+            ));
+        };
+        if entry.param_tys.len() != 1 {
+            return Err(MacroError::new(
+                MacroErrorKind::HandlerExecutionError,
+                format!(
+                    "PEG macro `@{}` handler must have 1 parameter, found {}",
+                    descriptor.full_path(),
+                    entry.param_tys.len()
+                ),
+                call_site,
+            ));
+        }
+        let encoded = encode_peg_arg_value(arg, *param_shape, &entry.param_tys[0], &ast_types)
+            .map_err(|reason| {
+                MacroError::new(
+                    MacroErrorKind::HandlerExecutionError,
+                    format!(
+                        "failed to marshal PEG input for `@{}`: {reason}",
+                        descriptor.full_path()
+                    ),
+                    call_site,
+                )
+            })?;
+        self.execute_provider_macro(descriptor, vec![encoded], call_site, budget)
+    }
 }
 
 fn module_path_for_file(pkg_name: &str, rel_path: &Path) -> Vec<String> {
@@ -1241,11 +1322,12 @@ fn collect_scope_exports_inner(
     result
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum DecodedMacroKind {
     Tokens,
     RawSource,
     Ast { variadic: bool },
+    Peg { grammar_source: String },
 }
 
 fn decode_macro_kind_attribute(
@@ -1283,6 +1365,7 @@ fn decode_macro_kind_attribute(
         };
         let mut kind_term: Option<&Term> = None;
         let mut variadic: Option<bool> = None;
+        let mut grammar_source: Option<String> = None;
         for meta_entry in meta_fields {
             let Some((mkey, _, mval)) = entry_parts(meta_entry) else {
                 continue;
@@ -1301,6 +1384,16 @@ fn decode_macro_kind_attribute(
                         ));
                     }
                 },
+                Some("flurry_macro_grammar") => match mval {
+                    Term::String(s) => {
+                        grammar_source = Some(s.as_ref().to_string());
+                    }
+                    other => {
+                        return Err(format!(
+                            "invalid `flurry_macro_grammar` metadata value {other}; expected str"
+                        ));
+                    }
+                },
                 _ => {}
             }
         }
@@ -1316,6 +1409,13 @@ fn decode_macro_kind_attribute(
                     return Ok(Some(DecodedMacroKind::Ast {
                         variadic: variadic.unwrap_or(false),
                     }));
+                }
+                Term::Symbol(s) if s.as_ref() == "peg" => {
+                    let grammar_source = grammar_source.ok_or_else(|| {
+                        "missing `flurry_macro_grammar` string metadata for `.peg` macro"
+                            .to_string()
+                    })?;
+                    return Ok(Some(DecodedMacroKind::Peg { grammar_source }));
                 }
                 other => {
                     return Err(format!(
@@ -1496,6 +1596,50 @@ fn validate_macro_handler_signature(
             }
 
             Ok((MacroInputMode::Ast { params }, param_tys, def_site))
+        }
+        DecodedMacroKind::Peg { grammar_source } => {
+            let grammar = parse_and_validate_peg_grammar_str(&grammar_source)
+                .map_err(|e| format!("invalid PEG grammar on macro `{macro_name}`: {e}"))?;
+            if parameters.len() != 1 {
+                return Err(format!(
+                    "PEG macro handler `{macro_name}` must take exactly 1 parameter, found {}",
+                    parameters.len()
+                ));
+            }
+            let param_ty = &parameters[0].ty;
+            let param_shape = if let Term::Nominal {
+                declaration,
+                arguments,
+            } = param_ty
+                && arguments.is_empty()
+                && *declaration == ast_types.peg_node.declaration
+            {
+                PegParamShape::PegNode
+            } else {
+                match decode_ast_param_shape(param_ty, ast_types) {
+                    Some(AstParamShape::Single(kind)) => PegParamShape::Single(kind),
+                    Some(AstParamShape::Optional(kind)) => PegParamShape::Optional(kind),
+                    Some(AstParamShape::Repetition(kind)) => PegParamShape::Repetition(kind),
+                    None => {
+                        return Err(format!(
+                            "PEG macro handler `{macro_name}` parameter must have type `meta.ast.PegNode`, `Flurry*`, `Optional<Flurry*>`, or `Repetition<Flurry*>`, found {param_ty}"
+                        ));
+                    }
+                }
+            };
+            if !grammar.supports_param_shape(param_shape) {
+                return Err(format!(
+                    "PEG macro `{macro_name}` `Entry` grammar does not match handler parameter shape {param_shape}"
+                ));
+            }
+            Ok((
+                MacroInputMode::Peg {
+                    grammar,
+                    param_shape,
+                },
+                param_tys,
+                def_site,
+            ))
         }
     }
 }
@@ -1751,6 +1895,86 @@ fn encode_ast_arg_value(
         }
         _ => Err(format!(
             "mismatched AST argument representation ({arg}) for parameter shape {shape}"
+        )),
+    }
+}
+
+fn encode_peg_tree_node_value(node: &ParsedPegNode, types: &MacroAstTypes) -> Value {
+    let children: Vec<Value> = node
+        .children
+        .iter()
+        .map(|&idx| Value::Integer(Integer::from_u128(idx as u128)))
+        .collect();
+    Value::Record {
+        arguments: vec![],
+        declaration: types.peg_tree_node.declaration,
+        fields: vec![
+            Value::Symbol(Arc::from(node.rule.as_str())),
+            encode_source_span_value(node.span, &types.source_span),
+            Value::String(Arc::from(node.text.as_str())),
+            encode_token_buffer_value(&node.tokens, types),
+            Value::List {
+                ty: types.int_list_ty.clone(),
+                values: ListValues::from(children),
+            },
+        ],
+    }
+}
+
+fn encode_peg_node_value(tree: &ParsedPegTree, types: &MacroAstTypes) -> Value {
+    let encoded_nodes: Vec<Value> = tree
+        .nodes
+        .iter()
+        .map(|node| encode_peg_tree_node_value(node, types))
+        .collect();
+    Value::Record {
+        arguments: vec![],
+        declaration: types.peg_node.declaration,
+        fields: vec![
+            Value::List {
+                ty: types.peg_tree_node_list_ty.clone(),
+                values: ListValues::from(encoded_nodes),
+            },
+            Value::Integer(Integer::from_u128(tree.root as u128)),
+        ],
+    }
+}
+
+fn encode_peg_arg_value(
+    arg: &PegArgValue,
+    shape: PegParamShape,
+    param_ty: &Term,
+    types: &MacroAstTypes,
+) -> Result<Value, String> {
+    match (arg, shape) {
+        (PegArgValue::PegNode(tree), PegParamShape::PegNode) => {
+            Ok(encode_peg_node_value(tree, types))
+        }
+        (PegArgValue::Single(tree), PegParamShape::Single(kind)) => {
+            encode_flurry_wrapper_value(kind, tree, types)
+        }
+        (PegArgValue::Optional(opt), PegParamShape::Optional(kind)) => {
+            let encoded = opt
+                .as_ref()
+                .map(|tree| encode_flurry_wrapper_value(kind, tree, types).map(Box::new))
+                .transpose()?;
+            Ok(Value::Optional {
+                ty: param_ty.clone(),
+                value: encoded,
+            })
+        }
+        (PegArgValue::Repetition(trees), PegParamShape::Repetition(kind)) => {
+            let mut items = Vec::with_capacity(trees.len());
+            for tree in trees {
+                items.push(encode_flurry_wrapper_value(kind, tree, types)?);
+            }
+            Ok(Value::List {
+                ty: param_ty.clone(),
+                values: ListValues::from(items),
+            })
+        }
+        _ => Err(format!(
+            "mismatched PEG argument representation ({arg}) for parameter shape {shape}"
         )),
     }
 }

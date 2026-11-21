@@ -153,6 +153,20 @@ impl MacroExecutor for RecordingAstExecutor {
             None,
         )])
     }
+
+    fn execute_peg(
+        &mut self,
+        descriptor: &MacroDescriptor,
+        _arg: &macro_expander::PegArgValue,
+        call_site: Span,
+        _budget: &mut MacroBudget,
+    ) -> Result<Vec<MacroToken>, MacroError> {
+        Err(MacroError::new(
+            MacroErrorKind::HandlerExecutionError,
+            format!("unexpected PEG macro `{}`", descriptor.full_path()),
+            call_site,
+        ))
+    }
 }
 
 fn register_ast_macro(reg: &mut MacroRegistry, local: u32, name: &str, params: Vec<AstParamShape>) {

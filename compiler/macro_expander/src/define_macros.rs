@@ -1,4 +1,4 @@
-//! Built-in `@define_macro1` definition-macro recognizer and lowering to metadata-attributed `comptime fn`.
+//! Built-in `@define_macro1` and `@define_macro2` definition-macro recognizers and lowering.
 use crate::construction::ConstructionHost;
 use crate::provenance::{ExpansionId, ExpansionKind, ExpansionMap, MacroToken, TokenSpacing};
 use crate::registry::MacroInputMode;
@@ -145,6 +145,8 @@ fn is_meta_ast_exported_type(name: &str) -> bool {
         "Repetition"
             | "Optional"
             | "TokenBuffer"
+            | "PegNode"
+            | "PegTreeNode"
             | "FlurryPattern"
             | "FlurryExpr"
             | "FlurryStatement"
@@ -174,11 +176,44 @@ fn qualify_meta_ast_type(tokens: &[MacroToken]) -> Vec<MacroToken> {
     out
 }
 
-/// Attempt to expand `[pub | private] const name = @define_macro1 { fn(...) -> TokenBuffer { ... } };?`.
+fn find_define_macro2_handler_start(inner: &[MacroToken]) -> Option<usize> {
+    let mut paren = 0usize;
+    let mut bracket = 0usize;
+    let mut brace = 0usize;
+    let mut i = 0usize;
+    while i < inner.len() {
+        if paren == 0 && bracket == 0 && brace == 0 {
+            let mut k = i;
+            while inner
+                .get(k)
+                .is_some_and(|t| matches!(t.kind, TokenKind::Pure | TokenKind::Comptime))
+            {
+                k += 1;
+            }
+            if inner.get(k).is_some_and(|t| t.kind == TokenKind::Fn) {
+                return Some(i);
+            }
+        }
+        match inner[i].kind {
+            TokenKind::LParen => paren += 1,
+            TokenKind::RParen => paren = paren.saturating_sub(1),
+            TokenKind::LBracket => bracket += 1,
+            TokenKind::RBracket => bracket = bracket.saturating_sub(1),
+            TokenKind::LBrace => brace += 1,
+            TokenKind::RBrace => brace = brace.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Attempt to expand `[pub | private] const name = @define_macro{1,2} { ... };?`.
 ///
-/// Returns `Ok(None)` immediately when `tokens[cursor..]` is not a `const` binding targeting a
-/// `MacroInputMode::BuiltinDefineMacro1` descriptor, leaving normal `const` and `@call` handling intact.
-pub(crate) fn try_expand_define_macro1(
+/// Returns `Ok(None)` immediately when `tokens[cursor..]` is not a `const` binding targeting
+/// `MacroInputMode::BuiltinDefineMacro1` or `MacroInputMode::BuiltinDefineMacro2`, leaving
+/// normal `const` and `@call` handling intact.
+pub(crate) fn try_expand_define_macro(
     tokens: &[MacroToken],
     cursor: usize,
     host: &mut ConstructionHost<'_, '_>,
@@ -249,9 +284,26 @@ pub(crate) fn try_expand_define_macro1(
     let Ok(desc) = host.scope.resolve_call_path(&segments, path_span, host.ctx) else {
         return Ok(None);
     };
-    if !matches!(desc.mode, MacroInputMode::BuiltinDefineMacro1) {
-        return Ok(None);
-    }
+    let is_macro2 = match desc.mode {
+        MacroInputMode::BuiltinDefineMacro1 => false,
+        MacroInputMode::BuiltinDefineMacro2 => true,
+        _ => return Ok(None),
+    };
+    let define_label = if is_macro2 {
+        "@define_macro2"
+    } else {
+        "@define_macro1"
+    };
+    let def_err_kind = if is_macro2 {
+        MacroErrorKind::PegGrammarError
+    } else {
+        MacroErrorKind::AstInputParseError
+    };
+    let exp_kind = if is_macro2 {
+        ExpansionKind::ConstructionPeg
+    } else {
+        ExpansionKind::ConstructionAst
+    };
     let macro_def_name = desc.full_path();
     let macro_def_site = desc.def_site;
 
@@ -302,35 +354,55 @@ pub(crate) fn try_expand_define_macro1(
         .map_err(|e| e.with_chain_if_empty(provenance, parent_exp, call_span))?;
 
     let exp_id = provenance.record(
-        ExpansionKind::ConstructionAst,
+        exp_kind,
         macro_def_name,
         call_span,
         macro_def_site,
         parent_exp,
     );
 
-    let inner = &tokens[open_idx + 1..close_idx];
+    let full_inner = &tokens[open_idx + 1..close_idx];
+    let (peg_grammar, handler_tokens) = if is_macro2 {
+        let Some(handler_start) = find_define_macro2_handler_start(full_inner) else {
+            return Err(MacroError::new(
+                MacroErrorKind::PegGrammarError,
+                "expected `fn(param: ...) -> TokenBuffer { ... }` handler after PEG rules inside `@define_macro2`",
+                open_tok.span,
+            )
+            .with_chain(provenance, Some(exp_id)));
+        };
+        let rule_tokens = &full_inner[..handler_start];
+        let grammar = crate::peg::parse_peg_rules_from_tokens(rule_tokens, open_tok.span)
+            .map_err(|e| e.with_chain(provenance, Some(exp_id)))?;
+        grammar
+            .validate(open_tok.span)
+            .map_err(|e| e.with_chain(provenance, Some(exp_id)))?;
+        (Some(grammar), &full_inner[handler_start..])
+    } else {
+        (None, full_inner)
+    };
+
     let mut k = 0usize;
-    while inner
+    while handler_tokens
         .get(k)
         .is_some_and(|t| matches!(t.kind, TokenKind::Pure | TokenKind::Comptime))
     {
         k += 1;
     }
 
-    let Some(fn_tok) = inner.get(k) else {
+    let Some(fn_tok) = handler_tokens.get(k) else {
         return Err(MacroError::new(
-            MacroErrorKind::AstInputParseError,
-            "expected `fn(...) -> TokenBuffer { ... }` inside `@define_macro1`",
+            def_err_kind,
+            format!("expected `fn(...) -> TokenBuffer {{ ... }}` inside `{define_label}`"),
             open_tok.span,
         )
         .with_chain(provenance, Some(exp_id)));
     };
     if fn_tok.kind != TokenKind::Fn {
         return Err(MacroError::new(
-            MacroErrorKind::AstInputParseError,
+            def_err_kind,
             format!(
-                "expected `fn` handler definition inside `@define_macro1`, found `{}`",
+                "expected `fn` handler definition inside `{define_label}`, found `{}`",
                 fn_tok.text
             ),
             fn_tok.span,
@@ -339,19 +411,19 @@ pub(crate) fn try_expand_define_macro1(
     }
     k += 1;
 
-    let Some(lparen_tok) = inner.get(k) else {
+    let Some(lparen_tok) = handler_tokens.get(k) else {
         return Err(MacroError::new(
-            MacroErrorKind::AstInputParseError,
-            "expected `(` parameter list after `fn` inside `@define_macro1`",
+            def_err_kind,
+            format!("expected `(` parameter list after `fn` inside `{define_label}`"),
             fn_tok.span,
         )
         .with_chain(provenance, Some(exp_id)));
     };
     if lparen_tok.kind != TokenKind::LParen {
         return Err(MacroError::new(
-            MacroErrorKind::AstInputParseError,
+            def_err_kind,
             format!(
-                "expected `(` after `fn` inside `@define_macro1` (handlers are unnamed), found `{}`",
+                "expected `(` after `fn` inside `{define_label}` (handlers are unnamed), found `{}`",
                 lparen_tok.text
             ),
             lparen_tok.span,
@@ -359,17 +431,35 @@ pub(crate) fn try_expand_define_macro1(
         .with_chain(provenance, Some(exp_id)));
     }
     let params_open = k;
-    let Some(params_close) = find_matching_paren(inner, params_open) else {
+    let Some(params_close) = find_matching_paren(handler_tokens, params_open) else {
         return Err(MacroError::new(
-            MacroErrorKind::AstInputParseError,
-            "unclosed `(` parameter list inside `@define_macro1`",
+            def_err_kind,
+            format!("unclosed `(` parameter list inside `{define_label}`"),
             lparen_tok.span,
         )
         .with_chain(provenance, Some(exp_id)));
     };
 
-    let raw_params = split_top_level_commas(&inner[params_open + 1..params_close], lparen_tok.span)
-        .map_err(|e| e.with_chain(provenance, Some(exp_id)))?;
+    let raw_params = split_top_level_commas(
+        &handler_tokens[params_open + 1..params_close],
+        lparen_tok.span,
+    )
+    .map_err(|mut e| {
+        e.kind = def_err_kind;
+        e.with_chain(provenance, Some(exp_id))
+    })?;
+    if is_macro2 && raw_params.len() != 1 {
+        return Err(MacroError::new(
+            MacroErrorKind::PegGrammarError,
+            format!(
+                "`@define_macro2` handler must take exactly 1 parameter, found {}",
+                raw_params.len()
+            ),
+            lparen_tok.span,
+        )
+        .with_chain(provenance, Some(exp_id)));
+    }
+
     let mut is_variadic = false;
     let mut lowered_param_tokens = Vec::new();
 
@@ -381,6 +471,14 @@ pub(crate) fn try_expand_define_macro1(
             && param_slice[1].kind == TokenKind::Dot
             && param_slice[2].kind == TokenKind::Dot
         {
+            if is_macro2 {
+                return Err(MacroError::new(
+                    MacroErrorKind::PegGrammarError,
+                    "variadic `...` parameter syntax is not supported in `@define_macro2`; use `Repetition<...>` when `Entry` ends in `*` or `+`",
+                    param_slice[0].span,
+                )
+                .with_chain(provenance, Some(exp_id)));
+            }
             if !is_last {
                 return Err(MacroError::new(
                     MacroErrorKind::AstInputParseError,
@@ -395,17 +493,17 @@ pub(crate) fn try_expand_define_macro1(
 
         let Some(name_tok) = param_slice.get(start_idx) else {
             return Err(MacroError::new(
-                MacroErrorKind::AstInputParseError,
-                "expected parameter name inside `@define_macro1`",
+                def_err_kind,
+                format!("expected parameter name inside `{define_label}`"),
                 param_slice[0].span,
             )
             .with_chain(provenance, Some(exp_id)));
         };
         if !matches!(name_tok.kind, TokenKind::Id | TokenKind::Underscore) {
             return Err(MacroError::new(
-                MacroErrorKind::AstInputParseError,
+                def_err_kind,
                 format!(
-                    "expected parameter identifier in `@define_macro1`, found `{}`",
+                    "expected parameter identifier in `{define_label}`, found `{}`",
                     name_tok.text
                 ),
                 name_tok.span,
@@ -415,9 +513,9 @@ pub(crate) fn try_expand_define_macro1(
 
         let Some(colon_tok) = param_slice.get(start_idx + 1) else {
             return Err(MacroError::new(
-                MacroErrorKind::AstInputParseError,
+                def_err_kind,
                 format!(
-                    "expected `:` and AST node type after parameter `{}` in `@define_macro1`",
+                    "expected `:` and parameter type after `{}` in `{define_label}`",
                     name_tok.text
                 ),
                 name_tok.span,
@@ -426,7 +524,7 @@ pub(crate) fn try_expand_define_macro1(
         };
         if colon_tok.kind != TokenKind::Colon {
             return Err(MacroError::new(
-                MacroErrorKind::AstInputParseError,
+                def_err_kind,
                 format!(
                     "expected `:` after parameter `{}`, found `{}`",
                     name_tok.text, colon_tok.text
@@ -439,9 +537,9 @@ pub(crate) fn try_expand_define_macro1(
         let ty_tokens = &param_slice[start_idx + 2..];
         if ty_tokens.is_empty() {
             return Err(MacroError::new(
-                MacroErrorKind::AstInputParseError,
+                def_err_kind,
                 format!(
-                    "expected type after `{}:` in `@define_macro1`",
+                    "expected type after `{}:` in `{define_label}`",
                     name_tok.text
                 ),
                 colon_tok.span,
@@ -462,64 +560,59 @@ pub(crate) fn try_expand_define_macro1(
         lowered_param_tokens.extend(qualify_meta_ast_type(ty_tokens));
     }
 
-    let Some((arrow_idx, body_open)) = find_top_level_arrow_and_brace(inner, params_close + 1)
+    let Some((arrow_idx, body_open)) =
+        find_top_level_arrow_and_brace(handler_tokens, params_close + 1)
     else {
         return Err(MacroError::new(
-            MacroErrorKind::AstInputParseError,
-            "expected `-> TokenBuffer { ... }` return type and body in `@define_macro1`",
-            inner[params_close].span,
+            def_err_kind,
+            format!("expected `-> TokenBuffer {{ ... }}` return type and body in `{define_label}`"),
+            handler_tokens[params_close].span,
         )
         .with_chain(provenance, Some(exp_id)));
     };
 
     if arrow_idx != params_close + 1 {
         return Err(MacroError::new(
-            MacroErrorKind::AstInputParseError,
-            "unexpected tokens before `->` in `@define_macro1` signature",
-            inner[params_close + 1].span,
+            def_err_kind,
+            format!("unexpected tokens before `->` in `{define_label}` signature"),
+            handler_tokens[params_close + 1].span,
         )
         .with_chain(provenance, Some(exp_id)));
     }
 
-    let ret_tokens = &inner[arrow_idx + 1..body_open];
+    let ret_tokens = &handler_tokens[arrow_idx + 1..body_open];
     if ret_tokens.is_empty() {
         return Err(MacroError::new(
-            MacroErrorKind::AstInputParseError,
-            "expected return type after `->` in `@define_macro1`",
-            inner[arrow_idx].span,
+            def_err_kind,
+            format!("expected return type after `->` in `{define_label}`"),
+            handler_tokens[arrow_idx].span,
         )
         .with_chain(provenance, Some(exp_id)));
     }
     let qualified_ret = qualify_meta_ast_type(ret_tokens);
 
-    let Some(body_close) = find_matching_brace(inner, body_open) else {
+    let Some(body_close) = find_matching_brace(handler_tokens, body_open) else {
         return Err(MacroError::new(
-            MacroErrorKind::AstInputParseError,
-            "unclosed function body `{ ... }` inside `@define_macro1`",
-            inner[body_open].span,
+            def_err_kind,
+            format!("unclosed function body `{{ ... }}` inside `{define_label}`"),
+            handler_tokens[body_open].span,
         )
         .with_chain(provenance, Some(exp_id)));
     };
 
-    if body_close + 1 < inner.len() {
+    if body_close + 1 < handler_tokens.len() {
         return Err(MacroError::new(
-            MacroErrorKind::AstInputParseError,
+            def_err_kind,
             format!(
-                "unexpected trailing token `{}` after body in `@define_macro1`",
-                inner[body_close + 1].text
+                "unexpected trailing token `{}` after body in `{define_label}`",
+                handler_tokens[body_close + 1].text
             ),
-            inner[body_close + 1].span,
+            handler_tokens[body_close + 1].span,
         )
         .with_chain(provenance, Some(exp_id)));
     }
 
     let head_span = macro_name_tok.span;
-    let variadic_tok = if is_variadic {
-        make_syn(TokenKind::True, "true", head_span, TokenSpacing::Alone)
-    } else {
-        make_syn(TokenKind::False, "false", head_span, TokenSpacing::Alone)
-    };
-
     let mut out = vec![
         make_syn(TokenKind::Caret, "^", head_span, TokenSpacing::Joint),
         make_syn(TokenKind::LBrace, "{", head_span, TokenSpacing::Alone),
@@ -534,19 +627,49 @@ pub(crate) fn try_expand_define_macro1(
         ),
         make_syn(TokenKind::Colon, ":", head_span, TokenSpacing::Alone),
         make_syn(TokenKind::Dot, ".", head_span, TokenSpacing::Joint),
-        make_syn(TokenKind::Id, "ast", head_span, TokenSpacing::Joint),
-        make_syn(TokenKind::Comma, ",", head_span, TokenSpacing::Alone),
         make_syn(
             TokenKind::Id,
-            "flurry_macro_variadic",
+            if is_macro2 { "peg" } else { "ast" },
             head_span,
             TokenSpacing::Joint,
         ),
-        make_syn(TokenKind::Colon, ":", head_span, TokenSpacing::Alone),
-        variadic_tok,
+        make_syn(TokenKind::Comma, ",", head_span, TokenSpacing::Alone),
+    ];
+
+    if let Some(grammar) = peg_grammar {
+        let grammar_lit = crate::raw_source::encode_flurry_string_literal(&grammar.to_source());
+        out.extend([
+            make_syn(
+                TokenKind::Id,
+                "flurry_macro_grammar",
+                head_span,
+                TokenSpacing::Joint,
+            ),
+            make_syn(TokenKind::Colon, ":", head_span, TokenSpacing::Alone),
+            make_syn(TokenKind::Str, grammar_lit, head_span, TokenSpacing::Alone),
+        ]);
+    } else {
+        let variadic_tok = if is_variadic {
+            make_syn(TokenKind::True, "true", head_span, TokenSpacing::Alone)
+        } else {
+            make_syn(TokenKind::False, "false", head_span, TokenSpacing::Alone)
+        };
+        out.extend([
+            make_syn(
+                TokenKind::Id,
+                "flurry_macro_variadic",
+                head_span,
+                TokenSpacing::Joint,
+            ),
+            make_syn(TokenKind::Colon, ":", head_span, TokenSpacing::Alone),
+            variadic_tok,
+        ]);
+    }
+
+    out.extend([
         make_syn(TokenKind::RBrace, "}", head_span, TokenSpacing::Alone),
         make_syn(TokenKind::RBrace, "}", head_span, TokenSpacing::Newline),
-    ];
+    ]);
 
     if let Some(vis) = vis_tok {
         let mut vis = vis;
@@ -579,20 +702,20 @@ pub(crate) fn try_expand_define_macro1(
     out.push(make_syn(
         TokenKind::RParen,
         ")",
-        inner[params_close].span,
+        handler_tokens[params_close].span,
         TokenSpacing::Alone,
     ));
     out.push(make_syn(
         TokenKind::Arrow,
         "->",
-        inner[arrow_idx].span,
+        handler_tokens[arrow_idx].span,
         TokenSpacing::Alone,
     ));
     out.extend(qualified_ret);
     if let Some(last) = out.last_mut() {
         last.spacing = TokenSpacing::Alone;
     }
-    out.extend_from_slice(&inner[body_open..=body_close]);
+    out.extend_from_slice(&handler_tokens[body_open..=body_close]);
 
     for tok in &mut out {
         if tok.expansion_id.is_none() {

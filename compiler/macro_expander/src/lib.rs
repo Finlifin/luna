@@ -4,12 +4,16 @@ pub mod construction;
 pub mod define_macros;
 pub mod imports;
 pub mod materialize;
+pub mod peg;
 pub mod provenance;
 pub mod raw_source;
 pub mod registry;
 pub mod template;
 
 pub use ast_input::{AstArgValue, AstParamShape, ParsedSyntaxNode, ParsedSyntaxTree};
+pub use peg::{
+    ParsedPegNode, ParsedPegTree, PegArgValue, PegExpr, PegGrammar, PegParamShape, PegRule,
+};
 
 use diagnostic::{DiagnosticBuilder, DiagnosticContext, FlurryError};
 use lex::{LexError, Symbol, Token, TokenKind};

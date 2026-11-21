@@ -25,7 +25,7 @@ pub struct ReferencedMacros {
     pub import_roots: BTreeSet<String>,
 }
 
-fn encode_flurry_string_literal(raw: &str) -> String {
+pub(crate) fn encode_flurry_string_literal(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len() + 2);
     out.push('"');
     for ch in raw.chars() {
@@ -1071,18 +1071,7 @@ pub fn process_raw_source_and_imports(
             continue;
         }
 
-        if first_seg == "define_macro2" {
-            cursor.jump(after_first, false, false, None);
-            continue;
-        }
-
         let (path_segments, path_end) = scan_call_path(src, first_seg, after_first, base_pos)?;
-        if path_segments.iter().map(String::as_str).collect::<Vec<_>>()
-            == ["meta", "macros", "define_macro2"]
-        {
-            cursor.jump(path_end, true, false, None);
-            continue;
-        }
         let path_span = Span::new(
             base_pos + BytePos(pos as u32),
             base_pos + BytePos(path_end as u32),
@@ -1168,7 +1157,9 @@ pub fn process_raw_source_and_imports(
                     }
                     MacroInputMode::Tokens
                     | MacroInputMode::BuiltinDefineMacro1
-                    | MacroInputMode::Ast { .. } => unreachable!(),
+                    | MacroInputMode::BuiltinDefineMacro2
+                    | MacroInputMode::Ast { .. }
+                    | MacroInputMode::Peg { .. } => unreachable!(),
                 };
 
                 builder.flush_slice(slice_start, pos, Some(pos), false);
@@ -1179,7 +1170,9 @@ pub fn process_raw_source_and_imports(
             }
             MacroInputMode::Tokens
             | MacroInputMode::BuiltinDefineMacro1
-            | MacroInputMode::Ast { .. } => {
+            | MacroInputMode::BuiltinDefineMacro2
+            | MacroInputMode::Ast { .. }
+            | MacroInputMode::Peg { .. } => {
                 cursor.jump(path_end, true, false, None);
             }
         }

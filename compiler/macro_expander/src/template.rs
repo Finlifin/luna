@@ -164,7 +164,7 @@ fn expand_slice_with_construction(
         {
             if let Some(host) = construction.as_deref_mut() {
                 if let Some((produced, exp_id, trailing_spacing, next_cursor)) =
-                    crate::define_macros::try_expand_define_macro1(
+                    crate::define_macros::try_expand_define_macro(
                         tokens, cursor, host, provenance, budget, parent_exp,
                     )?
                 {

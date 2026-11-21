@@ -201,6 +201,21 @@ impl Parser<'_> {
         }
     }
 
+    /// Probe a single Flurry fragment at 0-based token offset `token_offset`
+    /// (into the significant tokens after `Sof`) without mutating `self.cursor`.
+    pub fn parse_fragment_at(
+        &mut self,
+        token_offset: usize,
+        kind: FragmentKind,
+    ) -> Result<Option<FragmentMatch>, ParseError> {
+        let saved_cursor = self.cursor;
+        let max_cursor = self.tokens.len().saturating_sub(1);
+        self.cursor = token_offset.min(max_cursor);
+        let res = self.parse_fragment(kind);
+        self.cursor = saved_cursor;
+        res
+    }
+
     /// Parse a single Flurry fragment and verify it consumes the entire token stream
     /// up to `TokenKind::Eof`.
     pub fn parse_single_fragment(
