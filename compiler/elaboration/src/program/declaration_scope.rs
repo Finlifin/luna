@@ -84,6 +84,7 @@ impl Checker<'_, '_> {
         let saved_patterns = std::mem::take(&mut self.pattern_codes);
         let saved_staged_locals = std::mem::take(&mut self.open_staged_locals);
         let saved_staged_locals_members = std::mem::take(&mut self.open_member_locals);
+        let pending_initializer = self.pending_initializer.take();
         let saved_captures = std::mem::take(&mut self.captures);
         let saved_control = std::mem::take(&mut self.control);
         let saved_loop_transfers = std::mem::take(&mut self.open_loop_transfers);
@@ -134,6 +135,7 @@ impl Checker<'_, '_> {
         self.in_code_body = saved_code;
         self.open_staged_locals = saved_staged_locals;
         self.open_member_locals = saved_staged_locals_members;
+        self.pending_initializer = pending_initializer;
         self.captures = saved_captures;
         self.control = saved_control;
         self.open_loop_transfers = saved_loop_transfers;

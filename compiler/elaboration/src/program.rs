@@ -622,6 +622,7 @@ fn elaborate_in_mode(
         callable_type_inputs: BTreeMap::new(),
         open_staged_locals: BTreeSet::new(),
         open_member_locals: BTreeSet::new(),
+        pending_initializer: None,
         signature_domains: BTreeMap::new(),
         default_input_scope: None,
         default_input_owner: None,
@@ -2395,6 +2396,8 @@ struct Checker<'a, 'h> {
     open_staged_locals: BTreeSet<n::LocalId>,
     // Pending member results, not Type identities or permission evidence.
     open_member_locals: BTreeSet<n::LocalId>,
+    // Active initializer observation. A checked domain can precede value formation.
+    pending_initializer: Option<(OwnerId, bool)>,
     signature_domains: BTreeMap<OwnerId, Vec<(Sort, Option<Term>)>>,
     default_input_scope: Option<lexical_domains::RetainedDomains>,
     default_input_owner: Option<OwnerId>,

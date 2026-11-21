@@ -978,9 +978,20 @@ impl Checker<'_, '_> {
                 H::ResolvedFnParam(_, id) | H::ResolvedLocal(_, id)
                 if self.input_facts.is_staged(&local(id))
                     || self.open_staged_locals.contains(&local(id)));
+        let owner = init.hir_id.owner;
+        let outer = self.pending_initializer.replace((owner, false));
         let actual = self.with_staged_input(self.in_staged_input || binding.comptime, |this| {
             this.describe_open_expression(init, locals, returns, annotation.as_ref(), depth + 1)
-        })?;
+        });
+        let (_, pending_formation) =
+            std::mem::replace(&mut self.pending_initializer, outer).expect("active initializer");
+        if pending_formation
+            && let Some((scope, pending)) = &mut self.pending_initializer
+            && *scope == owner
+        {
+            *pending = true;
+        }
+        let actual = actual?;
         let plain = matches!(
             binding.pattern.kind,
             hir::pattern::PatternKind::Binding(hir::common::BindingMode::ByValue, _, None)
@@ -1053,6 +1064,7 @@ impl Checker<'_, '_> {
         };
         if binding.comptime
             && !pending_input
+            && !pending_formation
             && plain
             && let D::Known(domain) = &ty
             && (*domain == p(P::Type)

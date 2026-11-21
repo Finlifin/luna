@@ -158,6 +158,13 @@ impl Checker<'_, '_> {
         }
         let result = D::Known(p(P::Type));
         self.require_description(&result, expected, expr.span)?;
+        // The telescope established Type, but the application cannot yet
+        // supply a checked value. Keep the initializer for the instance.
+        if let Some((owner, pending)) = &mut self.pending_initializer
+            && *owner == expr.hir_id.owner
+        {
+            *pending = true;
+        }
         Ok(result)
     }
 }

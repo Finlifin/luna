@@ -1096,3 +1096,27 @@ fn projected_type_inputs_use_the_public_normal_form_interface() {
     let invalid = declarations.replace("Container.Payload", "Container.Missing");
     assert!(sysroot::compile(&format!("{invalid}{entry}")).is_err());
 }
+
+#[test]
+fn const_opaque_heads_keep_projected_member_inputs_until_instantiation() {
+    let source = r#"
+        struct Holder where T { pub typealias Payload = T; }
+        comptime fn Make(T: Type) -> Type { Holder<T> }
+        pure comptime fn Mark<T, flag: bool> -> Type { T }
+        fn check(comptime T: Type) -> bool {
+            const C = Make(T);
+            const actual = do {
+                const inner = Mark<C.Payload, true>;
+                inner
+            };
+            const expected = Mark<T, true>;
+            const same = actual == expected;
+            same
+        }
+        fn run() -> bool { check(bool) and check(u32) }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let invalid = source.replace("const same =", "let wrong: actual = true; const same =");
+    let diagnostic = sysroot::compile(&invalid).unwrap_err();
+    assert!(diagnostic.contains("normal-form"), "{diagnostic}");
+}
