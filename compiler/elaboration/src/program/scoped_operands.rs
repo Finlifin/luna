@@ -1,11 +1,14 @@
 //! Bind a computed Type in the consumer that can check its result parametrically.
 //! The producer is an ordinary argument of the generated comptime function.
 use super::*;
+use std::sync::Arc;
 
-#[derive(Clone, Copy)]
+type Inputs = BTreeMap<usize, nir::DeclarationParameter>;
+
+#[derive(Clone)]
 pub(super) struct Scope {
     site: hir::HirId,
-    input: Option<(usize, nir::DeclarationParameter)>,
+    inputs: Option<Arc<Inputs>>,
 }
 
 /// The checking region owns the temporary Type identity until it has either
@@ -18,22 +21,21 @@ pub(super) enum Boundary {
         enclosing: Option<Scope>,
     },
     Consumer {
-        slot: usize,
-        binder: nir::DeclarationParameter,
+        inputs: Arc<Inputs>,
     },
 }
 
 impl Boundary {
     pub(super) fn enter(&mut self, checker: &mut Checker<'_, '_>, site: hir::HirId) {
-        let enclosing = checker.operand_scope.replace(Scope { site, input: None });
+        let enclosing = checker.operand_scope.replace(Scope { site, inputs: None });
         *self = Self::Selector { enclosing };
     }
 
     pub(super) fn leave(&mut self, checker: &mut Checker<'_, '_>) {
         if let Self::Selector { enclosing } = self {
             let selected = std::mem::replace(&mut checker.operand_scope, enclosing.take());
-            *self = match selected.and_then(|scope| scope.input) {
-                Some((slot, binder)) => Self::Consumer { slot, binder },
+            *self = match selected.and_then(|scope| scope.inputs) {
+                Some(inputs) => Self::Consumer { inputs },
                 None => Self::Idle,
             };
         }
@@ -46,9 +48,7 @@ impl Boundary {
         span: Span,
     ) -> Result<n::Expr, Error> {
         match std::mem::take(self) {
-            Self::Consumer { slot, binder } => {
-                checker.close_operand_consumer(value, slot, binder, span)
-            }
+            Self::Consumer { inputs } => checker.close_operand_consumer(value, &inputs, span),
             Self::Idle => Ok(value),
             Self::Selector { .. } => unreachable!("selector must complete before its consumer"),
         }
@@ -60,11 +60,13 @@ impl std::fmt::Display for Boundary {
         match self {
             Self::Idle => f.write_str("(operand-scope idle)"),
             Self::Selector { .. } => f.write_str("(operand-scope selector)"),
-            Self::Consumer { slot, binder } => write!(
-                f,
-                "(operand-scope (slot {slot}) (binder {} {}))",
-                binder.declaration, binder.sort
-            ),
+            Self::Consumer { inputs } => {
+                f.write_str("(operand-scope")?;
+                for (slot, binder) in inputs.iter() {
+                    write!(f, " (input (slot {slot}) {binder})")?;
+                }
+                f.write_str(")")
+            }
         }
     }
 }
@@ -96,12 +98,12 @@ impl Checker<'_, '_> {
         else {
             return Ok(None);
         };
-        let binder = match scope.input {
-            Some((existing, binder)) if existing == slot => binder,
-            Some(_) => return Ok(None),
+        let binder = match scope.inputs.as_ref().and_then(|inputs| inputs.get(&slot)) {
+            Some(binder) => *binder,
             None => {
                 let binder = self.fresh_type_binder(site.owner, span)?;
-                self.operand_scope.as_mut().unwrap().input = Some((slot, binder));
+                let scope = self.operand_scope.as_mut().unwrap();
+                Arc::make_mut(scope.inputs.get_or_insert_with(Arc::default)).insert(slot, binder);
                 binder
             }
         };
@@ -114,26 +116,26 @@ impl Checker<'_, '_> {
     fn close_operand_consumer(
         &mut self,
         mut body: n::Expr,
-        slot: usize,
-        binder: nir::DeclarationParameter,
+        inputs: &Inputs,
         span: Span,
     ) -> Result<n::Expr, Error> {
         let K::Match { value, arms } = &mut body.kind else {
             return Err(needs_frame(span, "expected the original match"));
         };
-        let prefix = self.take_operand_prefix(value, slot, binder, span)?;
+        let identities: BTreeSet<_> = inputs.values().map(|binder| binder.declaration).collect();
+        let prefix = self.take_operand_prefix(value, inputs, &identities, span)?;
         let outer_result =
             declaration_inputs::copy_input_domain(&body.ty, &mut self.required_steps, span)?;
-        if self
+        if !self
             .term_declaration_inputs(&outer_result, span)?
-            .contains(&binder.declaration)
+            .is_disjoint(&identities)
         {
             return Err(context_error(
                 span,
                 "dependent match result would escape its operand scope",
             ));
         }
-        let caller_arms = self.detach_match_arms(arms, binder, span)?;
+        let caller_arms = self.detach_match_arms(arms, &identities, span)?;
         if caller_arms.is_some() {
             body.ty = p(P::Integer);
         }
@@ -152,10 +154,9 @@ impl Checker<'_, '_> {
                 "match consumer reads an enclosing parameter scope",
             ));
         }
-        if self
+        if !self
             .checked_declaration_inputs(&body, span)?
-            .iter()
-            .any(|id| *id != binder.declaration)
+            .is_subset(&identities)
         {
             return Err(needs_frame(
                 span,
@@ -178,8 +179,12 @@ impl Checker<'_, '_> {
             declaration_inputs::copy_input_domain(&body.ty, &mut self.required_steps, span)?;
         nir::copy_budget::charge_type_rewrite(&body, &mut self.required_steps)
             .map_err(|limit| input_observation::structural_limit(limit, span))?;
-        body.rewrite_types(&mut |ty| ty.abstract_parameters(&[binder]))
-            .map_err(|reason| error(span, reason.to_string()))?;
+        self.with_call_type_fuel(|_, fuel| {
+            let frame =
+                nir::function_parameters::DeclarationFrame::new(inputs.values().copied(), fuel)?;
+            body.rewrite_types(&mut |ty| frame.abstract_term(ty, fuel))
+        })
+        .map_err(|reason| error(span, reason.to_string()))?;
 
         let call = self.publish_operand_consumer(body, prefix, result, span)?;
         let origin = call.source;
@@ -199,8 +204,8 @@ impl Checker<'_, '_> {
     fn take_operand_prefix(
         &mut self,
         selector: &mut n::Expr,
-        slot: usize,
-        binder: nir::DeclarationParameter,
+        inputs: &Inputs,
+        identities: &BTreeSet<DeclarationId>,
         span: Span,
     ) -> Result<CallPrefix, Error> {
         let K::Call {
@@ -218,7 +223,19 @@ impl Checker<'_, '_> {
                 "selector requires its original callee environment",
             ));
         }
-        let witness = self.spread_binding(span)?;
+        // The helper signature binds identities in formal-slot order. Its call
+        // below supplies their producers in source order, including named calls.
+        let mut positions = BTreeMap::new();
+        let mut bindings = Vec::new();
+        let mut domains = Vec::new();
+        for (&slot, binder) in inputs {
+            positions.insert(slot, bindings.len());
+            bindings.push(self.spread_binding(span)?);
+            domains.push(Parameter {
+                sort: binder.sort,
+                ty: p(P::Type),
+            });
+        }
         // Forming a function instance or a closure is itself an evaluation.
         // Receive that value before the explicit arguments, in the caller.
         let target = self.spread_binding(span)?;
@@ -234,46 +251,42 @@ impl Checker<'_, '_> {
             kind: K::Local(target),
         };
         let mut suppliers = vec![n::CallArgument {
-            parameter: 1,
+            parameter: bindings.len(),
             value: std::mem::replace(callee.as_mut(), read),
             passing: n::ArgumentPassing::Value,
             is_default: false,
         }];
-        let Some(signature) = dependent_inputs::CallSignature::of(&callee.ty) else {
-            return Err(needs_frame(span, "missing selector signature"));
-        };
-        // Slot zero binds the hidden Type in annotations. Delivery order is
-        // independent of slot order, including for named arguments.
-        let mut bindings = vec![witness, target];
-        let mut domains = vec![
-            Parameter {
-                sort: Sort::Type,
-                ty: p(P::Type),
-            },
-            Parameter {
-                sort: Sort::Runtime,
-                ty: target_type,
-            },
-        ];
-        let mut received_witness = false;
+        bindings.push(target);
+        domains.push(Parameter {
+            sort: Sort::Runtime,
+            ty: target_type,
+        });
         for argument in arguments {
             dependent_inputs::tasks::spend(&mut self.required_steps, 1, span)?;
             if argument.is_default || argument.passing != n::ArgumentPassing::Value {
                 break;
             }
-            let (position, binding) = if argument.parameter == slot {
-                received_witness = true;
-                (0, witness)
+            let (position, binding) = if let Some(position) = positions.remove(&argument.parameter)
+            {
+                if !self
+                    .checked_declaration_inputs(&argument.value, span)?
+                    .is_disjoint(identities)
+                {
+                    return Err(needs_frame(
+                        span,
+                        "type operand uses another pending identity",
+                    ));
+                }
+                (position, bindings[position])
             } else {
                 // Computations with dependent annotations need the inner
                 // telescope. Leave them and all following expressions there.
                 let domain = &argument.value.ty;
-                if signature.parameters[argument.parameter].sort != Sort::Runtime
-                    || !self.term_declaration_inputs(domain, span)?.is_empty()
+                if !self.term_declaration_inputs(domain, span)?.is_empty()
                     || !self.term_substitution_inputs(domain, span)?.is_empty()
-                    || self
+                    || !self
                         .checked_declaration_inputs(&argument.value, span)?
-                        .contains(&binder.declaration)
+                        .is_disjoint(identities)
                 {
                     break;
                 }
@@ -306,7 +319,7 @@ impl Checker<'_, '_> {
                 is_default: false,
             });
         }
-        if !received_witness {
+        if !positions.is_empty() {
             return Err(needs_frame(
                 span,
                 "operand depends on a preceding evaluation in the caller",
@@ -391,13 +404,13 @@ impl Checker<'_, '_> {
     fn detach_match_arms(
         &mut self,
         arms: &mut [n::MatchArm],
-        binder: nir::DeclarationParameter,
+        identities: &BTreeSet<DeclarationId>,
         span: Span,
     ) -> Result<Option<Vec<n::MatchArm>>, Error> {
         for arm in arms.iter() {
-            if self
+            if !self
                 .checked_declaration_inputs(&arm.body, span)?
-                .contains(&binder.declaration)
+                .is_disjoint(identities)
             {
                 return Ok(None);
             }

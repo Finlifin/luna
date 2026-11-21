@@ -1529,6 +1529,55 @@ fn scoped_match_consumes_the_original_type_operand_once() {
 }
 
 #[test]
+fn scoped_match_routes_distinct_type_inputs_in_written_order() {
+    check_events(
+        "
+        comptime fn Left(flag: bool, ready: bool) -> Type {
+            assumes ready;
+            if flag { bool } else { char }
+        }
+        comptime fn Right(flag: bool) -> Type { if flag { char } else { bool } }
+        comptime fn classify(comptime .A: Type = bool, comptime .B: Type = char, comptime .fixed: Type = u8)
+            -> ??Tuple<A, B> {
+            if A == bool and B == char and fixed == u16 {
+                let inner: ?Tuple<A, B> = null;
+                return inner;
+            };
+            null
+        }
+        comptime fn relay(flag: bool) -> bool {
+            var ready = false;
+            classify(.B = do { ready = true; Right(flag) }, .fixed = u16, .A = Left(flag, ready)) match {
+                value? => value matches null,
+                null => false,
+            }
+        }
+        const selected = relay(true);
+        const other = relay(false);
+        comptime fn check() -> bool { selected and not other and relay(true) and not relay(false) }
+        ",
+        &[("Left", 2), ("Right", 2), ("classify", 2)],
+    );
+}
+
+#[test]
+fn scoped_match_does_not_identify_independent_payload_types() {
+    let source = "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn pair(comptime a: Type, comptime b: Type) -> Tuple<?a, ?b> { (null, null) }
+        comptime fn relay(flag: bool) -> bool {
+            pair(Selected(flag), Selected(not flag)) match {
+                (left, right) => do { var item = left; item = right; item matches null },
+            }
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }";
+    let control = source.replace("item = right;", "item = left;");
+    check_events(&control, &[("Selected", 4), ("pair", 2)]);
+    let failure = sysroot::compile(source).expect_err("distinct operand types were equated");
+    assert!(failure.contains("type mismatch"), "{failure}");
+}
+
+#[test]
 fn scoped_match_keeps_named_routing_and_arm_control_in_the_caller() {
     check_events(
         "

@@ -200,7 +200,7 @@ struct RetainedCheckpoint {
 impl RetainedCheckpoint {
     fn capture(checker: &Checker<'_, '_>) -> Self {
         Self {
-            operand_scope: checker.operand_scope,
+            operand_scope: checker.operand_scope.clone(),
             abstract_code_dependencies: checker.abstract_code_dependencies.clone(),
             local_runtime_origins: checker.local_runtime_origins.clone(),
             local_runtime_deliveries: checker.local_runtime_deliveries.clone(),
