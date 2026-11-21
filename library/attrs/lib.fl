@@ -1,6 +1,7 @@
 {- Attribute values are ordinary comptime data checked by their consumers. -}
 pub use calling_convention.constructors.abi;
 pub use metadata_impl.constructors.metadata;
+pub use stability_impl.constructors.stable_since;
 pub use staging.phase.comptime_phase;
 
 pub mod layout {
@@ -15,4 +16,5 @@ pub mod prelude {
     pub use .abi;
     pub use .comptime_phase;
     pub use .metadata;
+    pub use .stable_since;
 }

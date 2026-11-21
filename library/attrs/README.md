@@ -6,7 +6,9 @@
 属性的 Object，并保留 Symbol 值及其类型。`comptime_phase` 是包含
 `comptime_phase: true` 的 Object 常量，条目保留 Bool 类型。
 `metadata(data: Object) -> Object` 将用户自定义元数据包装为 `{ metadata: data }`。
-`attrs.prelude` 导出 `abi`、`comptime_phase` 和 `metadata`。
+`stable_since(version: str) -> Object`（不稳定）将版本锚点包装为
+`{ __flurry_stable_since: version }`，用于后续 ABI `type_id` 的规范版本固定。
+`attrs.prelude` 导出 `abi`、`comptime_phase`、`metadata` 和 `stable_since`。
 
 命名子模块另提供：
 - `attrs.layout.{packed, packed_layout}`：产生 `{ packed: bool }`，供结构体布局检查与紧致降码消费。
@@ -74,4 +76,4 @@ comptime fn run() -> bool {
 单个 comptime 实现、泛型主体及该相可用的默认方法已有源码调用路径。
 同一关系的普通与 comptime 源码实现支持方法和关联项的合并，包括泛型参数改名。
 关联项按成员 phase 检查；共享值必须一致，泛型初始化程序目前要求替换参数后的
-结构一致。`derivation_default`、`packed`、`direct_passing` 与 `metadata` 已接通对应编译器消费者；`abi` 降码仍未接通，普通 NIR 编译会明确拒绝 `abi` 及其他未消费属性。
+结构一致。`derivation_default`、`packed`、`direct_passing` 与 `metadata` 已接通对应编译器消费者；`abi` 降码与 `stable_since`（`__flurry_stable_since`）消费者仍未接通，普通 NIR 编译会明确拒绝 `abi`、`stable_since` 及其他未消费属性。

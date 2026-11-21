@@ -11,17 +11,17 @@
 
 ## 语法
 
-`type_id` 本身不新增表面类型运算符。控制版本锚定使用常规属性或配置语法（见[属性系统](../comptime/attribute.md)）附着 `__flurry_stable_since: str`：
+`type_id` 本身不新增表面类型运算符。控制版本锚定通过标准库属性包装函数 `attrs.stable_since("...")`（由 `attrs` 与 `attrs.prelude` 导出，构造 `{ __flurry_stable_since: version }` 元数据对象，见[属性系统](../comptime/attribute.md)）附着在类型定义或构造定义前：
 
 ```text
 attribute -> ^expr
 configuration -> .id expr
 ```
 
-常见写法是在类型声明或构造定义前附着属性，例如：
+推荐在声明前使用属性包装器，例如：
 
 ```flurry
-^{ __flurry_stable_since: "1.0.0" }
+^attrs.stable_since("1.0.0")
 pub struct Example { ... }
 ```
 
@@ -59,42 +59,45 @@ std@"1.0.0".collections.Vec<u32, .A = DefaultAllocator, .allocator = DefaultAllo
 - **运行时依赖参数**：全局可命名的提升（lift）来源（例如 `DefaultAllocator.GLOBAL.ref`）具有规范模块路径，可形成跨包、跨会话稳定的 `type_id`；局限于某次调用栈帧、堆对象或局部引用的运行时依赖对象仅在当前作用范围依对象身份区分（见[运行时依赖类型](runtime-dependent-type.md)），不自动授予跨编译会话的静态路径身份。
 - **递归类型的确定性终止**：对于指针自引用或相互递归的名义类型（例如 `struct Node { value: u32, next: ?*Node }`），按固定先序访问栈将环回边编码为规范环回深度/回指索引（遵循“指针不沿 pointee 无限展开本体”的原则，同时保留环拓扑结构），保证任意合法递归类型都在有限步内得到确定性哈希。
 
-### `__flurry_stable_since: str` 属性（不稳定）
+### `attrs.stable_since` 与 `__flurry_stable_since: str` 属性（不稳定）
 
-`__flurry_stable_since: str` 用于宣告某类型声明自指定版本起进入跨版本稳定锚定（具体键名、参数类型及合法版本格式检查仍在演进中）：
+`attrs.stable_since(version: str) -> Object` 将底层键 `__flurry_stable_since: str` 封装为标准属性入口（`__flurry_stable_since` 仍是属性 Object 的内部键名；具体参数校验与合法版本格式检查仍在演进中）：
 
-- 若 `Vec` 带有 `__flurry_stable_since: "1.0.0"`，即便随后在 `std` 的 `"1.2.0"` 版本中编译，其进入 `type_id` 计算的规范路径前缀仍固定为 `std@"1.0.0".collections.Vec`，而不再取 `"1.2.0"`。
-- **四元联合稳定契约（安全兜底）**：固定 `__flurry_stable_since` **并不意味着**强制冻结错误旧值。新旧两版包中的同一类型取得相同 `type_id`，**当且仅当**以下四项同时成立：
+- 若 `Vec` 标注了 `^attrs.stable_since("1.0.0")`，即便随后在 `std` 的 `"1.2.0"` 版本中编译，其进入 `type_id` 计算的规范路径前缀仍固定为 `std@"1.0.0".collections.Vec`，而不再取 `"1.2.0"`。
+- **四元联合稳定契约（安全兜底）**：固定 `attrs.stable_since` **并不意味着**强制冻结错误旧值。新旧两版包中的同一类型取得相同 `type_id`，**当且仅当**以下四项同时成立：
   1. `__flurry_stable_since` 指定的有效版本字符串未改变；
   2. 规范包名、模块路径与类型声明名未改变（重导出别名不改变原声明的规范路径）；
   3. 该具体实例在目标平台下的 ABI 布局（大小、对齐、偏移、标签/载荷编码）未改变；
   4. 该类型全部符号依赖（包括所有字段、变体载荷及类型实参的 `type_id`）未改变。
-- 若 `"1.2.0"` 中即便保留了 `__flurry_stable_since: "1.0.0"`，但意外增删了字段、调整了对齐或修改了内部依赖类型导致 `Layout` 或依赖子树变化，Merkle 树会立即产出全新的 `type_id`，从而在 ABI 边界拒绝误把不兼容表示当作同一类型解释。
+- 若 `"1.2.0"` 中即便保留了 `^attrs.stable_since("1.0.0")`，但意外增删了字段、调整了对齐或修改了内部依赖类型导致 `Layout` 或依赖子树变化，Merkle 树会立即产出全新的 `type_id`，从而在 ABI 边界拒绝误把不兼容表示当作同一类型解释。
 
 ### Normal-Form 定义到类型实例的属性自动传递（不稳定）
 
-附着在 **normal-form 定义**（例如参数化 `struct`/`enum`/`newtype`，或带 `pure comptime fn<...> -> Type` 签名的 normal-form 类型构造器）上的 `__flurry_stable_since` 属性，**会自动传递到由它构造出的具体类型实例上**。
+附着在 **normal-form 定义**（例如参数化 `struct`/`enum`/`newtype`，或带 `pure comptime fn<...> -> Type` 签名的 normal-form 类型构造器）上的 `attrs.stable_since`（即 `__flurry_stable_since`）属性，**会自动传递到由它构造出的具体类型实例上**。
 
-例如当 `^{ __flurry_stable_since: "1.0.0" }` 标在 `Vec` 定义上时，`Vec<u32, ...>` 等所有构造实例都会自动继承该稳定版本锚点，而无需在每处实例化时重复标注。
+例如当 `^attrs.stable_since("1.0.0")` 标在 `Vec` 定义上时，`Vec<u32, ...>` 等所有构造实例都会自动继承该稳定版本锚点，而无需在每处实例化时重复标注。
 
 需要特别说明的是：**并不只有 `__flurry_stable_since` 需要这种特性，标准库与编译器中还有相当多的属性（如布局提示、ABI 策略、诊断/导出元数据等）都需要“从 normal-form 定义自动传递到其构造实例”的行为**。因此编译器不能把 `__flurry_stable_since` 写成孤立特判，而应当在通用属性系统中提供规范的定义-到-实例传播机制，并与[属性系统](../comptime/attribute.md)既有的由内向外合并优先级兼容（实例局部覆写优先于定义级继承属性）。
 
 ### 与错误限定类型 `!E T` ABI 的关系（不稳定）
 
-在错误限定类型 `!E T`（见[错误限定类型](qualified-types/error-type.md)与[错误处理](../algebraic-effect-and-delimited-continuation/error-handling.md)）的 ABI 设计中，错误分支的识别标签将统一采用相关错误类型 `E_i` 对应的 **128 位 `type_id`**（同时为成功分支保留约定的哨兵标签值（如 `0`），保证即使 `![T] T` 同型返回也不会混淆成功值与错误载荷；具体保留标签与冲突规避规则标为不稳定直至实现冻结）。
+在错误限定类型 `!E T`（见[错误限定类型](qualified-types/error-type.md)与[错误处理](../algebraic-effect-and-delimited-continuation/error-handling.md)）的 ABI 设计中：
 
-采用 128 位全局自描述 `type_id` 作为 `!E T` 标签后，跨错误行嵌入、多态错误透传与跨包版本 ABI 调用无需依赖集中式或按位置重映射的局部 tag 表，错误值本身即可在机器表示中无歧义地保留分支类型身份。
+- **`0` 保留给成功分支（`Ok`）**：判别值 `0`（128 位 `0`）专用于标识 `!E T` 的正常成功结果；
+- **非零 128 位 `type_id` 标识错误分支**：所有合法具体类型的 128 位 `type_id` 必须**非零（`!= 0`）**，从而确保任何错误类型 `E_i` 的标签都不会与 `Ok` 分支冲突（即便同型返回 `![T] T` 也可无歧义区分成功与错误）。具体哈希原语与零哈希避让映射规则标为不稳定直至实现冻结。
+
+采用 128 位全局自描述 `type_id` 作为 `!E T` 标签（配合 `0 = Ok` 保留规则）后，跨错误行嵌入、多态错误透传与跨包版本 ABI 调用无需依赖集中式或按位置重映射的局部 tag 表，错误值本身即可在机器表示中无歧义地保留成功/失败状态与错误类型身份。
 
 ## 常见示例
 
-> 示例仅展示设计意图；当前编译器尚未接通 `__flurry_stable_since` 与通用 normal-form 属性传递执行，请勿当作当前可运行特性。
+> 示例仅展示设计意图；目前 `attrs.stable_since("...")` 仅可构造并检查 `__flurry_stable_since` 属性对象，编译器尚未接通 `__flurry_stable_since` 消费者与通用 normal-form 属性传递执行，请勿当作当前可运行特性。
 
 ### 跨版本锚定与布局安全兜底
 
 ```flurry
 -- 假定所在包 std 当前版本为 "1.2.0"
--- 因标注了 __flurry_stable_since: "1.0.0"，规范路径部分仍锚定为 std@"1.0.0".collections.Vec
-^{ __flurry_stable_since: "1.0.0" }
+-- 因标注了 ^attrs.stable_since("1.0.0")，规范路径部分仍锚定为 std@"1.0.0".collections.Vec
+^attrs.stable_since("1.0.0")
 pub struct Vec
 where
     T: Type,
@@ -106,12 +109,12 @@ where
 ```
 
 - 在 `std@"1.0.0"` 与 `std@"1.2.0"` 之间，若 `Vec<u32, .A = DefaultAllocator, .allocator = DefaultAllocator.GLOBAL.ref>` 的字段布局与依赖（如 `u32`、`DefaultAllocator` 布局）保持完全一致，则两者产出的 128 位 Merkle `type_id` 相同。
-- 若后续某次改动导致 `Vec` 新增了一个字段或改变了内存对齐，即便源代码中仍留有 `^{ __flurry_stable_since: "1.0.0" }`，由于布局输入与符号依赖发生变化，`type_id` 依然改变，防止错误兼容。
+- 若后续某次改动导致 `Vec` 新增了一个字段或改变了内存对齐，即便源代码中仍留有 `^attrs.stable_since("1.0.0")`，由于布局输入与符号依赖发生变化，`type_id` 依然改变，防止错误兼容。
 
 ### Normal-Form 定义属性向实例自动传递
 
 ```flurry
-^{ __flurry_stable_since: "1.0.0" }
+^attrs.stable_since("1.0.0")
 pub pure comptime fn TaggedBuffer<T: Type> -> Type {
     struct Impl {
         len: usize,
@@ -140,10 +143,10 @@ typealias U32Buf = TaggedBuffer<u32>;
 在具体设计稳定前，运行时实现应遵守以下隔离原则：
 
 1. **只消费确定摘要，不反向解析哈希**：运行时可比较 128 位 `type_id` 是否相等（如 `!E T` 错误分支匹配或未来动态边界分派），但不得假设能够从 128 位整数逆推出字段表、构造器或执行编译期检查。
-2. **保留碰撞兜底空间**：128 位哈希为 ABI 快速判别提供高强度身份，同时设计保留字面哨兵（例如成功分支标签 `0`）与零碰撞重映射预留机制。
+2. **保留 `0` 作为 `Ok` 成功判别标识，确保错误标签非零**：`0` 固定保留给 `!E T` 的成功（`Ok`）分支，所有具体类型的 `type_id` 均不得取 `0`（例如遇到零摘要时按规范策略映射到非零值），使运行时无需额外状态位即可区分 `Ok` 与任何错误 `type_id`。
 3. **当前未冻结的运行时/接口边界**：
    - exact 128 位哈希算法与域分隔常量（Domain Separation Tag）；
-   - `!E T` 成功哨兵值（暂定为 `0` 及与偶然零哈希的避让约定）；
+   - 偶然全零哈希映射到非零值的确定性避让规则；
    - 是否向用户暴露 `Type.id_of(T)` 等反射读取入口及其阶段（comptime 确定值 vs 允许传入 runtime 常量）；
    - 跨包动态加载或版本化 ABI 描述表的具体二进制格式。
 
@@ -158,8 +161,8 @@ typealias U32Buf = TaggedBuffer<u32>;
   2. 请求目标平台确定后的 `LayoutPlan`（含大小、对齐、表示策略、字段偏移、枚举判别值与对齐细节）；
   3. 沿字段、变体载荷、基元依赖与符号依赖递归求取子 `type_id`，并在访问栈中检测并确定性编码递归回边；
   4. 使用领域分隔的规范字节流生成 128 位哈希，严禁在相同概念路径下因 AST/HIR 顺序或非规范展示格式产生抖动。
-- **ABI 下游消费者（Host / LLVM）**：在以上前提就绪后，将错误限定类型 `!E T`（及其传播、捕获、行嵌入与重映射逻辑）从局部位置索引切换为 128 位 `type_id` 标签表示。
+- **ABI 下游消费者（Host / LLVM）**：在以上前提就绪后，将错误限定类型 `!E T`（及其传播、捕获、行嵌入与重映射逻辑）从局部位置索引切换为 `0`（`Ok`）+ 非零 128 位 `type_id`（`Error`）标签表示。
 
 ---
 
-**当前总体状态总结**：本规范处于**不稳定**状态；尚未确定哈希原语与序列化字节编码、尚未实现通用 normal-form 属性传递机制，也尚未将包版本元数据与 `!E T` 128 位 `type_id` 标签迁入 NIR 与 LLVM 后端。
+**当前总体状态总结**：本规范处于**不稳定**状态；`library/attrs` 已提供 `attrs.stable_since("...")` 包装构造器（生成 `{ __flurry_stable_since: ... }`），但尚未确定哈希原语与序列化字节编码、尚未实现通用 normal-form 属性传递机制，也尚未将包版本元数据与 `!E T` 128 位 `type_id` 标签迁入 NIR 与 LLVM 后端。

@@ -1,0 +1,11 @@
+use bindings.{Object, str}
+
+{-
+    Unstable ABI-stability anchor for type_id canonical version pinning.
+    Consumers check the target, version format, and normal-form instance
+    propagation rules before relying on this metadata.
+-}
+pub pure comptime fn stable_since(version: str) -> Object {
+    let metadata = { __flurry_stable_since: version }
+    metadata
+}

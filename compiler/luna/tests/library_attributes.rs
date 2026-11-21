@@ -2,6 +2,7 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
@@ -263,4 +264,112 @@ fn sysroot_attribute_constructor_returns_the_public_meta_domain() {
     assert_eq!(entry.key(), Some("abi"));
     assert_eq!(entry.value().ty, Term::Primitive(Primitive::Symbol));
     assert_eq!(entry.value().value, Value::Symbol("c".into()));
+}
+
+#[test]
+fn stable_since_constructor_preserves_str_and_object_entry_type() {
+    let package = support::compile(&format!(
+        "mod attrs {{ {ATTRS} }}
+        use attrs.prelude.*;
+        comptime fn metadata_sample() -> attrs.bindings.Object {{ stable_since(\"1.0.0\") }}"
+    ));
+    let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let value = vm
+        .invoke(support::id(&package, "metadata_sample"), vec![])
+        .unwrap();
+    let Value::Object(object) = value else {
+        panic!("expected attribute object")
+    };
+    assert_eq!(object.entries().len(), 1);
+    let entry = &object.entries()[0];
+    assert_eq!(entry.key(), Some("__flurry_stable_since"));
+    assert_eq!(entry.value().ty, Term::Primitive(Primitive::Str));
+    assert_eq!(entry.value().value, Value::String("1.0.0".into()));
+}
+
+#[test]
+fn stable_since_constructor_rejects_wrong_domain_and_runtime_transport() {
+    for body in [
+        "comptime fn wrong() -> attrs.bindings.Object { attrs.stable_since(true) }",
+        "fn wrong() -> attrs.bindings.Object { attrs.stable_since(\"1.0.0\") }",
+        "fn wrong(version: attrs.bindings.str) { const value = attrs.stable_since(version); }",
+    ] {
+        let source = format!("mod attrs {{ {ATTRS} }} {body}");
+        assert!(support::compile_with_protocols(&source, &Default::default()).is_err());
+    }
+}
+
+#[test]
+fn repository_attribute_package_inspects_stable_since_without_claiming_abi_stability() {
+    let directory =
+        std::env::temp_dir().join(format!("luna-library-stable-since-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("input.fl"),
+        "use attrs.stable_since as stable; ^stable(\"1.0.0\") struct Sample {} ",
+    )
+    .unwrap();
+    let run = |arguments: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+            .current_dir(&directory)
+            .args(arguments)
+            .output()
+            .unwrap()
+    };
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let arguments = [
+        "dump",
+        "input.fl",
+        "--sysroot",
+        library.to_str().unwrap(),
+        "--build-target",
+        "x86_64",
+        "linux",
+        "64",
+        "--emit",
+        "attributes",
+    ];
+    let output = run(&arguments);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dump = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(dump.matches("(evaluated-attribute ").count(), 1, "{dump}");
+    assert!(
+        dump.contains("(property \"__flurry_stable_since\")"),
+        "{dump}"
+    );
+    assert!(dump.contains("(string \"1.0.0\")"), "{dump}");
+
+    let mut merged = arguments;
+    *merged.last_mut().unwrap() = "merged-attributes";
+    let selected = run(&merged);
+    assert!(
+        selected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    let selected = String::from_utf8_lossy(&selected.stdout);
+    assert!(
+        selected.contains("(attribute-inspection (evaluated"),
+        "{selected}"
+    );
+    assert_eq!(
+        selected.matches("(merged-attributes ").count(),
+        1,
+        "{selected}"
+    );
+    assert!(
+        selected.contains("(key \"__flurry_stable_since\") (entry 0)"),
+        "{selected}"
+    );
+
+    let mut ordinary = arguments;
+    *ordinary.last_mut().unwrap() = "nir";
+    let rejected = run(&ordinary);
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("attribute"));
+    std::fs::remove_dir_all(directory).unwrap();
 }
