@@ -414,7 +414,8 @@ fn prepare_source_impl(
     // Rebuilding for new destructor roots consumes the same graph allowance;
     // it must not receive a fresh budget on each pass through the loop.
     let mut construction_budget = budget;
-    let mut verified_text_shape: Option<(usize, usize)> = None;
+    let mut verified_text_roots = std::collections::HashSet::new();
+    let mut retained_summaries = elaboration::verification::memory::SummaryCache::default();
     let mut owned_layouts: Option<Package> = None;
     let mut copy_cache = std::collections::HashMap::new();
 
@@ -459,6 +460,8 @@ fn prepare_source_impl(
             // Recompute schedules against this graph's identities and sources.
             schedule = Schedule::default();
             copy_cache.clear();
+            retained_summaries = Default::default();
+            verified_text_roots.clear();
             if owned_layouts.is_none() {
                 for function in package.functions.iter().chain(&package.quote_templates) {
                     nir::visit::expressions(function, fuel, |expr, fuel| {
@@ -501,6 +504,7 @@ fn prepare_source_impl(
             }
         }
         let mut cleanup_changed = false;
+        let mut changed_cleanup_keys = std::collections::HashSet::new();
         let view = owned_layouts.get_or_insert_with(|| package.clone());
         view.runtime_instances = graph
             .functions
@@ -523,18 +527,18 @@ fn prepare_source_impl(
         let mut verification_session = elaboration::verification::PackageSession::new(package)
             .with_source(dispatch_source)
             .with_dispatch(&graph.dispatch)
-            .with_global_runtime_deliveries(&graph.global_runtime_deliveries);
+            .with_global_runtime_deliveries(&graph.global_runtime_deliveries)
+            .with_summaries(std::mem::take(&mut retained_summaries));
         let text_provenance = if graph_uses_text(&graph, fuel)? {
-            let shape = (graph.functions.len(), roots.len());
-            if verified_text_shape != Some(shape) {
-                for root in &roots {
+            for root in &roots {
+                if !verified_text_roots.contains(root) {
                     verification_session.infer_text_regions(
                         root.declaration,
                         &root.arguments,
                         fuel,
                     )?;
+                    verified_text_roots.insert(root.clone());
                 }
-                verified_text_shape = Some(shape);
             }
             elaboration::verification::memory::TextProvenance::VerifiedByRegionAnalysis
         } else {
@@ -798,6 +802,7 @@ fn prepare_source_impl(
                             .ok_or("cleanup footprint publication budget exhausted")?;
                         if !effects.contains(&access) {
                             effects.push(access);
+                            changed_cleanup_keys.insert(cleanup_accesses[position].0.clone());
                             cleanup_changed = true;
                         }
                     }
@@ -1701,10 +1706,16 @@ fn prepare_source_impl(
         if cleanup_changed || deferred_nested {
             // Every caller must be rechecked against the grown transitive footprint.
             // No schedule from a provisional body-only round is published.
+            drop(cleanup_session);
+            retained_summaries = verification_session.into_summaries();
+            retained_summaries.retain_unaffected(&changed_cleanup_keys);
             schedule = Schedule::default();
             continue;
         }
         if deferred {
+            drop(cleanup_session);
+            retained_summaries = verification_session.into_summaries();
+            retained_summaries.retain_unaffected(&changed_cleanup_keys);
             continue;
         }
         if previous == (roots.len(), types.len()) {
@@ -1737,5 +1748,8 @@ fn prepare_source_impl(
                 schedule,
             });
         }
+        drop(cleanup_session);
+        retained_summaries = verification_session.into_summaries();
+        retained_summaries.retain_unaffected(&changed_cleanup_keys);
     }
 }

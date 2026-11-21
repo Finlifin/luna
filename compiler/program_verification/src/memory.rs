@@ -7836,11 +7836,16 @@ struct MemoryInstance {
     borrowed: BorrowedCallableInputs,
 }
 
+struct CachedSummary {
+    summary: std::sync::Arc<Summary>,
+    dependencies: std::sync::Arc<HashSet<iir::InstanceKey>>,
+}
+
 /// Package-local completed context-free memory summaries. Failed or incomplete
 /// inference attempts never enter this cache.
 #[derive(Default)]
 pub struct SummaryCache {
-    summaries: HashMap<(TextProvenance, iir::InstanceKey), std::sync::Arc<Summary>>,
+    summaries: HashMap<(TextProvenance, iir::InstanceKey), CachedSummary>,
 }
 
 impl SummaryCache {
@@ -7849,7 +7854,22 @@ impl SummaryCache {
         provenance: TextProvenance,
         key: &iir::InstanceKey,
     ) -> Option<&std::sync::Arc<Summary>> {
-        self.summaries.get(&(provenance, key.clone()))
+        self.summaries
+            .get(&(provenance, key.clone()))
+            .map(|entry| &entry.summary)
+    }
+
+    fn get_entry(
+        &self,
+        provenance: TextProvenance,
+        key: &iir::InstanceKey,
+    ) -> Option<(
+        &std::sync::Arc<Summary>,
+        &std::sync::Arc<HashSet<iir::InstanceKey>>,
+    )> {
+        self.summaries
+            .get(&(provenance, key.clone()))
+            .map(|entry| (&entry.summary, &entry.dependencies))
     }
 
     pub fn insert(
@@ -7858,7 +7878,34 @@ impl SummaryCache {
         key: iir::InstanceKey,
         summary: std::sync::Arc<Summary>,
     ) {
-        self.summaries.insert((provenance, key), summary);
+        let dependencies = std::sync::Arc::new(HashSet::from([key.clone()]));
+        self.insert_with_dependencies(provenance, key, summary, dependencies);
+    }
+
+    pub(crate) fn insert_with_dependencies(
+        &mut self,
+        provenance: TextProvenance,
+        key: iir::InstanceKey,
+        summary: std::sync::Arc<Summary>,
+        dependencies: std::sync::Arc<HashSet<iir::InstanceKey>>,
+    ) {
+        self.summaries.insert(
+            (provenance, key),
+            CachedSummary {
+                summary,
+                dependencies,
+            },
+        );
+    }
+
+    /// Retain cached summaries unaffected by updates to `changed` runtime instances.
+    pub fn retain_unaffected(&mut self, changed: &HashSet<iir::InstanceKey>) {
+        if changed.is_empty() {
+            return;
+        }
+        self.summaries.retain(|(_, key), entry| {
+            !changed.contains(key) && entry.dependencies.is_disjoint(changed)
+        });
     }
 
     pub fn len(&self) -> usize {
@@ -7987,6 +8034,7 @@ struct Round<'cleanup> {
     declarations: Option<&'cleanup crate::declarations::Metadata<'cleanup>>,
     text_provenance: TextProvenance,
     summary_cache: Option<&'cleanup mut SummaryCache>,
+    touched_instances: HashSet<iir::InstanceKey>,
     memory_inert_cleanup_types: HashSet<Term>,
     cleanup_reads: HashMap<Term, Vec<Access>>,
     non_readonly_cleanup_types: HashSet<Term>,
@@ -8938,6 +8986,9 @@ pub(crate) fn infer_borrowed_context_with_full_context<'a>(
     if round.cleanup.is_none()
         && let Some(cache) = round.summary_cache.as_deref_mut()
     {
+        let mut dependencies = std::mem::take(&mut round.touched_instances);
+        dependencies.extend(round.queue.iter().map(|item| item.instance.clone()));
+        let dependencies = std::sync::Arc::new(dependencies);
         let context_free = |instance: &MemoryInstance| {
             instance.inputs.is_empty()
                 && instance.prepared.is_empty()
@@ -8946,18 +8997,20 @@ pub(crate) fn infer_borrowed_context_with_full_context<'a>(
         };
         for (key, converged) in &round.previous {
             if context_free(key) {
-                cache.insert(
+                cache.insert_with_dependencies(
                     round.text_provenance,
                     key.instance.clone(),
                     std::sync::Arc::new(converged.clone()),
+                    std::sync::Arc::clone(&dependencies),
                 );
             }
         }
         if context_free(&round.queue[0]) {
-            cache.insert(
+            cache.insert_with_dependencies(
                 round.text_provenance,
                 round.queue[0].instance.clone(),
                 std::sync::Arc::new(summary.clone()),
+                dependencies,
             );
         }
     }
@@ -9113,9 +9166,12 @@ fn derive_with_borrowed(
             arguments: arguments.to_vec().into(),
         };
         if let Some(cache) = round.summary_cache.as_deref()
-            && let Some(cached) = cache.get(round.text_provenance, &instance)
+            && let Some((cached, dependencies)) = cache.get_entry(round.text_provenance, &instance)
         {
             let cached = std::sync::Arc::clone(cached);
+            let dependencies = std::sync::Arc::clone(dependencies);
+            round.touched_instances.insert(instance);
+            round.touched_instances.extend(dependencies.iter().cloned());
             charge_cached_summary(&cached, fuel)?;
             return Ok((*cached).clone());
         }
@@ -12121,5 +12177,87 @@ mod effect_cache_tests {
         )
         .unwrap();
         assert_eq!(cached_caller2.effect_inputs, vec![effect_input]);
+    }
+
+    #[test]
+    fn summary_cache_retain_unaffected_keeps_disjoint_and_evicts_transitive_dependents() {
+        let key = |local| iir::InstanceKey {
+            declaration: DeclarationId { package: 1, local },
+            arguments: vec![].into(),
+        };
+        let leaf_changed = key(1);
+        let direct_caller = key(2);
+        let transitive_caller = key(3);
+        let independent = key(4);
+        let dummy = Summary {
+            declaration: DeclarationId {
+                package: 1,
+                local: 1,
+            },
+            arguments: vec![],
+            signature: Term::Function {
+                parameters: vec![],
+                result: Box::new(Term::Primitive(Primitive::Void)),
+            },
+            callable_inputs: BTreeMap::new(),
+            prepared_inputs: BTreeMap::new(),
+            borrowed_inputs: BTreeMap::new(),
+            effect_inputs: vec![],
+            accesses: vec![],
+            may_reject: false,
+            may_run_cleanup: false,
+            result_targets: None,
+            pointer_fields: BTreeMap::new(),
+            callable_result: CallableResult::NoReturn,
+            callable_fields: BTreeMap::new(),
+            code_fields: BTreeMap::new(),
+        };
+        let mut cache = SummaryCache::default();
+        cache.insert(
+            TextProvenance::Unchecked,
+            leaf_changed.clone(),
+            std::sync::Arc::new(dummy.clone()),
+        );
+        cache.insert_with_dependencies(
+            TextProvenance::Unchecked,
+            direct_caller.clone(),
+            std::sync::Arc::new(dummy.clone()),
+            std::sync::Arc::new(HashSet::from([direct_caller.clone(), leaf_changed.clone()])),
+        );
+        cache.insert_with_dependencies(
+            TextProvenance::Unchecked,
+            transitive_caller.clone(),
+            std::sync::Arc::new(dummy.clone()),
+            std::sync::Arc::new(HashSet::from([
+                transitive_caller.clone(),
+                direct_caller.clone(),
+                leaf_changed.clone(),
+            ])),
+        );
+        cache.insert_with_dependencies(
+            TextProvenance::Unchecked,
+            independent.clone(),
+            std::sync::Arc::new(dummy),
+            std::sync::Arc::new(HashSet::from([independent.clone()])),
+        );
+
+        let changed = HashSet::from([leaf_changed.clone()]);
+        cache.retain_unaffected(&changed);
+        assert!(
+            cache
+                .get(TextProvenance::Unchecked, &leaf_changed)
+                .is_none()
+        );
+        assert!(
+            cache
+                .get(TextProvenance::Unchecked, &direct_caller)
+                .is_none()
+        );
+        assert!(
+            cache
+                .get(TextProvenance::Unchecked, &transitive_caller)
+                .is_none()
+        );
+        assert!(cache.get(TextProvenance::Unchecked, &independent).is_some());
     }
 }

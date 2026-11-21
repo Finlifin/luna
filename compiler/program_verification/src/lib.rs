@@ -101,6 +101,15 @@ impl<'a> PackageSession<'a> {
         self
     }
 
+    pub fn with_summaries(mut self, summaries: memory::SummaryCache) -> Self {
+        self.summaries = summaries;
+        self
+    }
+
+    pub fn into_summaries(self) -> memory::SummaryCache {
+        self.summaries
+    }
+
     pub fn cleanup_session<'w>(
         &self,
         world: &'a capabilities::World<'w>,
