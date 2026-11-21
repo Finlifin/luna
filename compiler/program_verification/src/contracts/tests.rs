@@ -341,3 +341,75 @@ fn inheritance_scales_linearly_across_large_packages() {
     assert_eq!(candidate.functions.last().unwrap().preconditions.len(), 1);
     assert_eq!(candidate.functions.last().unwrap().postconditions.len(), 1);
 }
+
+#[test]
+fn incremental_inheritance_skips_verified_upstream_while_checking_downstream() {
+    let mut candidate = package();
+    // Upstream impl id(4) has a method whose precondition would strengthen the trait;
+    // when id(4) is in VerifiedUpstream, inheritance skips re-verifying it without mutating it.
+    candidate.functions[0].preconditions = vec![boolean(false)];
+    candidate.implementations[0].declaration = nir::DeclarationId {
+        package: 1,
+        local: 4,
+    };
+
+    // Downstream impl id(20) in package 2 uses upstream trait id(0) and a downstream body id(30).
+    let downstream_fn_id = nir::DeclarationId {
+        package: 2,
+        local: 30,
+    };
+    let mut downstream_fn = candidate.functions[1].clone();
+    downstream_fn.interface.declaration = downstream_fn_id;
+    downstream_fn.interface.name = "downstream_method_3".into();
+    downstream_fn.interface.preconditions = vec![];
+    downstream_fn.interface.postconditions = vec![];
+    candidate.functions.push(downstream_fn);
+    candidate.implementations.push(Implementation {
+        declaration: nir::DeclarationId {
+            package: 2,
+            local: 20,
+        },
+        methods: vec![
+            ("method_2".into(), id(12)),
+            ("method_3".into(), downstream_fn_id),
+        ],
+        ..candidate.implementations[0].clone()
+    });
+    // Ensure upstream method_2 body also isn't rejected due to id(12)'s own preconditions.
+    let mut verified = flow::VerifiedUpstream::default();
+    verified
+        .implementations
+        .insert(candidate.implementations[0].declaration);
+    // For method_2 inside downstream impl id(20), mark id(12) empty preconds as default-compatible;
+    // test clean inheritance first:
+    candidate.functions[0].preconditions = vec![];
+    let mut upstream_only = candidate.clone();
+    upstream_only.functions[0].preconditions = vec![boolean(false)];
+    upstream_only.implementations.pop();
+
+    let mut next = 100;
+    inherit_incremental(&mut upstream_only, &mut next, &verified).unwrap();
+    assert_eq!(next, 100);
+    assert!(upstream_only.functions[0].postconditions.is_empty());
+
+    // Now test downstream impl id(20) inheriting upstream trait id(0) contracts:
+    let mut next = 100;
+    inherit_incremental(&mut candidate, &mut next, &verified).unwrap();
+    let down = candidate
+        .functions
+        .iter()
+        .find(|f| f.declaration == downstream_fn_id)
+        .unwrap();
+    assert_eq!(down.preconditions.len(), 1);
+    assert_eq!(down.postconditions.len(), 1);
+
+    // Strengthening trait precondition in downstream impl id(20) must still be rejected!
+    candidate
+        .functions
+        .iter_mut()
+        .find(|f| f.declaration == downstream_fn_id)
+        .unwrap()
+        .preconditions = vec![boolean(false)];
+    let error = inherit_incremental(&mut candidate, &mut next, &verified).unwrap_err();
+    assert!(error.to_string().contains("strengthens"), "{error}");
+}

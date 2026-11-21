@@ -104,6 +104,17 @@ pub fn inherit(package: &mut Package, next: &mut u32) -> Result<(), flow::Error>
     inherit_with_limits(package, next, &mut Limits::default())
 }
 
+/// Incremental version of [`inherit`] that skips already-verified upstream
+/// implementations while keeping upstream traits and methods available for
+/// downstream implementations.
+pub fn inherit_incremental(
+    package: &mut Package,
+    next: &mut u32,
+    verified: &flow::VerifiedUpstream,
+) -> Result<(), flow::Error> {
+    inherit_incremental_with_limits(package, next, verified, &mut Limits::default())
+}
+
 /// Failure preserves both the caller's package and its binding cursor. Copy
 /// preparation and proof checks consume the same caller-owned work budget.
 pub fn inherit_with_limits(
@@ -111,8 +122,28 @@ pub fn inherit_with_limits(
     next: &mut u32,
     limits: &mut Limits,
 ) -> Result<(), flow::Error> {
+    inherit_inner(package, next, None, limits)
+}
+
+/// Budgeted incremental version of [`inherit_with_limits`].
+pub fn inherit_incremental_with_limits(
+    package: &mut Package,
+    next: &mut u32,
+    verified: &flow::VerifiedUpstream,
+    limits: &mut Limits,
+) -> Result<(), flow::Error> {
+    let filter = (!verified.implementations.is_empty()).then_some(verified);
+    inherit_inner(package, next, filter, limits)
+}
+
+fn inherit_inner(
+    package: &mut Package,
+    next: &mut u32,
+    verified: Option<&flow::VerifiedUpstream>,
+    limits: &mut Limits,
+) -> Result<(), flow::Error> {
     let mut prepared_next = *next;
-    let (drafts, obligations) = prepare(package, &mut prepared_next, limits)?;
+    let (drafts, obligations) = prepare(package, &mut prepared_next, verified, limits)?;
     let mut overlay = Overlay {
         package,
         originals: Vec::with_capacity(drafts.len()),
@@ -139,6 +170,7 @@ pub fn inherit_with_limits(
 fn prepare(
     package: &Package,
     next: &mut u32,
+    verified: Option<&flow::VerifiedUpstream>,
     limits: &mut Limits,
 ) -> Result<
     (
@@ -208,6 +240,9 @@ fn prepare(
     let mut obligations = Vec::new();
     for implementation in &package.implementations {
         limits.step(1).map_err(|_| budget(source))?;
+        if verified.is_some_and(|v| v.implementations.contains(&implementation.declaration)) {
+            continue;
+        }
         let Some(interface) = implementation.interface else {
             continue;
         };

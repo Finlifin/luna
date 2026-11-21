@@ -6162,14 +6162,61 @@ fn compare_values(
     })
 }
 
+/// Declarations already verified when an upstream package base (such as sysroot)
+/// was frozen. Downstream verification skips re-walking their bodies/initializers
+/// while keeping their signatures and postconditions visible to downstream callers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VerifiedUpstream {
+    pub functions: BTreeSet<nir::DeclarationId>,
+    pub implementations: BTreeSet<nir::DeclarationId>,
+}
+
+impl VerifiedUpstream {
+    pub fn is_empty(&self) -> bool {
+        self.functions.is_empty() && self.implementations.is_empty()
+    }
+}
+
+fn default_verification_jobs() -> usize {
+    if let Ok(value) = std::env::var("LUNA_JOBS") {
+        if let Ok(parsed) = value.trim().parse::<usize>() {
+            return parsed.clamp(1, 64);
+        }
+    }
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .clamp(1, 8)
+}
+
 /// Mandatory source gate before interpreting or delivering machine arithmetic.
 /// Reuses phase traversal so nested/default operations cannot escape detection.
 pub fn validate_machine_operations(package: &nir::program::Package) -> Result<(), Error> {
+    validate_machine_operations_incremental(package, &VerifiedUpstream::default())
+}
+
+/// Incremental version of [`validate_machine_operations`] that skips re-walking
+/// already-verified upstream functions and implementation initializers while keeping
+/// the full declaration catalog visible to downstream callers.
+pub fn validate_machine_operations_incremental(
+    package: &nir::program::Package,
+    verified: &VerifiedUpstream,
+) -> Result<(), Error> {
+    validate_machine_operations_with_jobs(package, verified, default_verification_jobs())
+}
+
+/// Deterministic worker-count control for [`validate_machine_operations_incremental`].
+pub fn validate_machine_operations_with_jobs(
+    package: &nir::program::Package,
+    verified: &VerifiedUpstream,
+    jobs: usize,
+) -> Result<(), Error> {
     let owners = nir::phases::machine_arithmetic_obligations(package).map_err(|e| Error {
         source: e.source,
         reason: Reason::Phase(e.message),
     })?;
-    validate_machine_owners(package, &owners, None)
+    let filter = (!verified.is_empty()).then_some(verified);
+    validate_machine_owners(package, &owners, None, filter, jobs.max(1))
 }
 
 /// Check a projected definition expression without installing it as a callable.
@@ -6192,7 +6239,13 @@ pub fn validate_definition_region_with_declarations(
         source: e.source,
         reason: Reason::Phase(e.message),
     })?;
-    validate_machine_owners(package, &owners, Some(imports))?;
+    validate_machine_owners(
+        package,
+        &owners,
+        Some(imports),
+        None,
+        default_verification_jobs(),
+    )?;
     if arithmetic {
         validate_machine_instances(
             package,
@@ -6212,7 +6265,22 @@ pub fn validate_definition_region_with_declarations(
 pub fn validate_machine_operations_checked(
     phase: &nir::phases::PhaseCheckedPackage<'_>,
 ) -> Result<(), Error> {
-    validate_machine_owners(phase.package(), phase.arithmetic_obligations(), None)
+    validate_machine_operations_checked_incremental(phase, &VerifiedUpstream::default())
+}
+
+/// Incremental version of [`validate_machine_operations_checked`].
+pub fn validate_machine_operations_checked_incremental(
+    phase: &nir::phases::PhaseCheckedPackage<'_>,
+    verified: &VerifiedUpstream,
+) -> Result<(), Error> {
+    let filter = (!verified.is_empty()).then_some(verified);
+    validate_machine_owners(
+        phase.package(),
+        phase.arithmetic_obligations(),
+        None,
+        filter,
+        default_verification_jobs(),
+    )
 }
 
 #[cfg(test)]
@@ -6221,49 +6289,134 @@ mod phase_evidence_tests;
 #[cfg(test)]
 mod scalar_observation_tests;
 
-fn validate_machine_owners(
-    package: &nir::program::Package,
+enum MachineWorkItem<'a> {
+    Function(&'a Function),
+    Initializer(
+        &'a nir::program::Implementation,
+        &'a nir::associated_initializers::AssociatedInitializer,
+    ),
+}
+
+fn run_machine_work_item<'a>(
+    package: &'a nir::program::Package,
     owners: &nir::phases::ArithmeticObligations,
-    imports: Option<&RegionDeclarations>,
+    imports: Option<&'a RegionDeclarations>,
+    item: &MachineWorkItem<'a>,
+    cache: &mut MachineOwnerCache<'a>,
 ) -> Result<(), Error> {
-    let catalog = type_resolution::dispatch::BorrowedCatalog::new(package);
-    let mut cache = MachineOwnerCache::new(
-        package,
-        type_resolution::dispatch::DeclarationSource::Prepared(&catalog),
-    );
-    for function in package.functions.iter().chain(&package.quote_templates) {
-        if !owners.functions().contains(&function.declaration) {
-            continue;
-        }
-        validate_machine_instances(
+    match *item {
+        MachineWorkItem::Function(function) => validate_machine_instances(
             package,
             function,
             owners.parameter_domains(),
             imports,
-            Some(&mut cache),
+            Some(cache),
             &mut Limits::default(),
-        )?;
+        ),
+        MachineWorkItem::Initializer(row, initializer) => {
+            let mut limits = Limits::default();
+            let body =
+                finite_domains::Initializer::new(row, initializer.expression(), &mut limits)?;
+            validate_machine_instances(
+                package,
+                &body,
+                owners.parameter_domains(),
+                imports,
+                Some(cache),
+                &mut limits,
+            )
+        }
+    }
+}
+
+fn validate_machine_owners(
+    package: &nir::program::Package,
+    owners: &nir::phases::ArithmeticObligations,
+    imports: Option<&RegionDeclarations>,
+    verified: Option<&VerifiedUpstream>,
+    jobs: usize,
+) -> Result<(), Error> {
+    let mut work = Vec::new();
+    for function in package.functions.iter().chain(&package.quote_templates) {
+        if !owners.functions().contains(&function.declaration) {
+            continue;
+        }
+        if verified.is_some_and(|v| v.functions.contains(&function.declaration)) {
+            continue;
+        }
+        work.push(MachineWorkItem::Function(function));
     }
     if !owners.initializers().is_empty() {
         for row in &package.implementations {
+            if verified.is_some_and(|v| v.implementations.contains(&row.declaration)) {
+                continue;
+            }
             for (member, initializer) in owners.programs_for(row) {
                 if owners.initializers().contains(&(row.declaration, *member)) {
-                    let mut limits = Limits::default();
-                    let body = finite_domains::Initializer::new(
-                        row,
-                        initializer.expression(),
-                        &mut limits,
-                    )?;
-                    validate_machine_instances(
-                        package,
-                        &body,
-                        owners.parameter_domains(),
-                        imports,
-                        Some(&mut cache),
-                        &mut limits,
-                    )?;
+                    work.push(MachineWorkItem::Initializer(row, initializer));
                 }
             }
+        }
+    }
+    if work.is_empty() {
+        return Ok(());
+    }
+
+    let catalog = type_resolution::dispatch::BorrowedCatalog::new(package);
+    if jobs <= 1 || work.len() < 4 {
+        let mut cache = MachineOwnerCache::new(
+            package,
+            type_resolution::dispatch::DeclarationSource::Prepared(&catalog),
+        );
+        for item in &work {
+            run_machine_work_item(package, owners, imports, item, &mut cache)?;
+        }
+        return Ok(());
+    }
+
+    let worker_count = jobs.min(work.len()).max(1);
+    let next_index = std::sync::atomic::AtomicUsize::new(0);
+    let earliest_error = std::sync::atomic::AtomicUsize::new(usize::MAX);
+    let errors: Vec<std::sync::Mutex<Option<Error>>> = (0..work.len())
+        .map(|_| std::sync::Mutex::new(None))
+        .collect();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let builder = std::thread::Builder::new().stack_size(8 * 1024 * 1024);
+            let handle = builder
+                .spawn_scoped(scope, || {
+                    let mut cache = MachineOwnerCache::new(
+                        package,
+                        type_resolution::dispatch::DeclarationSource::Prepared(&catalog),
+                    );
+                    loop {
+                        let idx = next_index.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if idx >= work.len() {
+                            break;
+                        }
+                        if idx > earliest_error.load(std::sync::atomic::Ordering::Acquire) {
+                            break;
+                        }
+                        if let Err(err) =
+                            run_machine_work_item(package, owners, imports, &work[idx], &mut cache)
+                        {
+                            *errors[idx].lock().expect("verification slot lock poisoned") =
+                                Some(err);
+                            earliest_error.fetch_min(idx, std::sync::atomic::Ordering::Release);
+                        }
+                    }
+                })
+                .expect("failed to spawn verification worker thread");
+            handles.push(handle);
+        }
+        for handle in handles {
+            handle.join().expect("verification worker thread panicked");
+        }
+    });
+    for slot in errors {
+        if let Some(err) = slot.into_inner().expect("verification slot lock poisoned") {
+            return Err(err);
         }
     }
     Ok(())
@@ -8751,6 +8904,253 @@ mod single_pass_loop_tests {
         assert!(report.exit.value(place(out)).is_some());
         assert!(report.exit.value(place(outer)).is_some());
         assert!(report.exit.value(place(inner)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod incremental_and_parallel_tests {
+    use super::*;
+    use nir::{DeclarationId, Primitive as P, program::*};
+    use type_resolution::dispatch::{DeclarationSnapshot, DeclarationSource};
+
+    fn u8_expr(source: SourceRange, kind: K) -> Expr {
+        Expr {
+            source,
+            ty: Term::Primitive(P::U8),
+            kind,
+        }
+    }
+
+    fn u8_add_fn(package: u64, local: u32, left: u128, source_start: u32) -> Function {
+        let range = SourceRange {
+            start: source_start,
+            end: source_start + 5,
+        };
+        let body = u8_expr(
+            range,
+            K::IntegerBinary {
+                op: IntegerOp::Add,
+                left: Box::new(u8_expr(range, K::Literal(Literal::UnsignedInteger(left)))),
+                right: Box::new(u8_expr(range, K::Literal(Literal::UnsignedInteger(1)))),
+            },
+        );
+        Function {
+            interface: nir::program::FunctionDeclaration {
+                source: range,
+                declaration: DeclarationId { package, local },
+                name: format!("fn_{package}_{local}"),
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: true,
+                is_unsafe: false,
+                signature: Term::Function {
+                    parameters: vec![],
+                    result: Box::new(Term::Primitive(P::U8)),
+                },
+                parameters: vec![],
+                env_parameters: vec![],
+                type_parameters: vec![],
+                defaults: vec![],
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+            },
+            body,
+            runtime_deliveries: Default::default(),
+        }
+    }
+
+    #[test]
+    fn verified_upstream_skips_upstream_bodies_while_keeping_signatures_and_postconditions() {
+        let up_id = DeclarationId {
+            package: 1,
+            local: 1,
+        };
+        let mut upstream = u8_add_fn(1, 1, 255, 10);
+        // Attach a postcondition on the upstream signature and ensure downstream can rely on it
+        // even when upstream's body is skipped via VerifiedUpstream.
+        let res_local = LocalId {
+            owner: 1,
+            index: 99,
+        };
+        upstream.interface.result_binding = Some(res_local);
+        upstream.interface.postconditions = vec![Expr {
+            source: SourceRange { start: 10, end: 15 },
+            ty: Term::Primitive(P::Bool),
+            kind: K::ScalarEqual(
+                Box::new(u8_expr(
+                    SourceRange { start: 10, end: 15 },
+                    K::Local(res_local),
+                )),
+                Box::new(u8_expr(
+                    SourceRange { start: 10, end: 15 },
+                    K::Literal(Literal::UnsignedInteger(10)),
+                )),
+            ),
+        }];
+
+        // Downstream calls upstream() and adds 1; this only proves < 256 if upstream's
+        // postcondition (result == 10) is still visible from the full package catalog!
+        let mut downstream_ok = u8_add_fn(2, 2, 0, 200);
+        let call_up = u8_expr(
+            SourceRange {
+                start: 200,
+                end: 205,
+            },
+            K::Call {
+                callee: Box::new(Expr {
+                    source: SourceRange {
+                        start: 200,
+                        end: 205,
+                    },
+                    ty: upstream.signature.clone(),
+                    kind: K::Function(up_id),
+                }),
+                arguments: vec![],
+                env_arguments: vec![],
+                parameter_bindings: vec![],
+            },
+        );
+        downstream_ok.body = u8_expr(
+            SourceRange {
+                start: 200,
+                end: 205,
+            },
+            K::IntegerBinary {
+                op: IntegerOp::Add,
+                left: Box::new(call_up),
+                right: Box::new(u8_expr(
+                    SourceRange {
+                        start: 200,
+                        end: 205,
+                    },
+                    K::Literal(Literal::UnsignedInteger(1)),
+                )),
+            },
+        );
+
+        let pkg = Package {
+            functions: vec![upstream, downstream_ok],
+            ..Default::default()
+        };
+        // Full check fails inside upstream (source 10..15).
+        assert_eq!(
+            validate_machine_operations(&pkg).unwrap_err().source,
+            SourceRange { start: 10, end: 15 }
+        );
+
+        // With up_id marked verified, downstream passes using upstream's postcondition!
+        let mut verified = VerifiedUpstream::default();
+        verified.functions.insert(up_id);
+        validate_machine_operations_incremental(&pkg, &verified).unwrap();
+
+        // Downstream unproved overflow MUST still fail even when upstream is verified!
+        let mut bad_pkg = pkg.clone();
+        bad_pkg.functions.push(u8_add_fn(2, 3, 255, 300));
+        let err = validate_machine_operations_incremental(&bad_pkg, &verified).unwrap_err();
+        assert_eq!(err.reason, Reason::MissingMachineProof);
+        assert_eq!(
+            err.source,
+            SourceRange {
+                start: 300,
+                end: 305
+            }
+        );
+    }
+
+    #[test]
+    fn verified_upstream_skips_upstream_implementation_initializers() {
+        let id = |pkg, local| DeclarationId {
+            package: pkg,
+            local,
+        };
+        let bad_init = nir::associated_initializers::AssociatedInitializer::new(
+            u8_add_fn(1, 1, 255, 50).body,
+            &mut 1000,
+        )
+        .unwrap();
+        let good_init = nir::associated_initializers::AssociatedInitializer::new(
+            u8_add_fn(2, 1, 254, 90).body,
+            &mut 1000,
+        )
+        .unwrap();
+        let source = Package {
+            implementations: vec![
+                Implementation {
+                    declaration: id(1, 1),
+                    phases: Default::default(),
+                    interface: None,
+                    interface_arguments: vec![],
+                    subject: Term::Primitive(P::U8),
+                    type_parameters: vec![],
+                    parameter_types: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    associated: vec![],
+                    associated_initializers: vec![(id(1, 2), bad_init)],
+                    methods: vec![],
+                },
+                Implementation {
+                    declaration: id(2, 1),
+                    phases: Default::default(),
+                    interface: None,
+                    interface_arguments: vec![],
+                    subject: Term::Primitive(P::Bool),
+                    type_parameters: vec![],
+                    parameter_types: vec![],
+                    requirements: vec![],
+                    capabilities: vec![],
+                    associated: vec![],
+                    associated_initializers: vec![(id(2, 2), good_init)],
+                    methods: vec![],
+                },
+            ],
+            ..Default::default()
+        };
+        let snapshot = DeclarationSnapshot::capture_member_programs(source, &mut 1000).unwrap();
+        let phase = DeclarationSource::Snapshot(&snapshot)
+            .phase_inspection()
+            .check_package_with_evidence(&mut 1000)
+            .unwrap();
+        assert_eq!(
+            validate_machine_operations_checked(&phase)
+                .unwrap_err()
+                .source,
+            SourceRange { start: 50, end: 55 }
+        );
+        let mut verified = VerifiedUpstream::default();
+        verified.implementations.insert(id(1, 1));
+        validate_machine_operations_checked_incremental(&phase, &verified).unwrap();
+    }
+
+    #[test]
+    fn parallel_machine_validation_matches_sequential_and_returns_first_error() {
+        let valid = Package {
+            functions: (0..12)
+                .map(|i| u8_add_fn(1, i + 1, 254, (i + 1) * 10))
+                .collect(),
+            ..Default::default()
+        };
+        validate_machine_operations_with_jobs(&valid, &VerifiedUpstream::default(), 1).unwrap();
+        validate_machine_operations_with_jobs(&valid, &VerifiedUpstream::default(), 4).unwrap();
+
+        let mut with_errors = valid;
+        with_errors.functions[3] = u8_add_fn(1, 4, 255, 40);
+        with_errors.functions[9] = u8_add_fn(1, 10, 255, 100);
+        let seq_err =
+            validate_machine_operations_with_jobs(&with_errors, &VerifiedUpstream::default(), 1)
+                .unwrap_err();
+        let par_err =
+            validate_machine_operations_with_jobs(&with_errors, &VerifiedUpstream::default(), 4)
+                .unwrap_err();
+        assert_eq!(seq_err.reason, Reason::MissingMachineProof);
+        assert_eq!(seq_err.source, SourceRange { start: 40, end: 45 });
+        assert_eq!(par_err, seq_err);
     }
 }
 
