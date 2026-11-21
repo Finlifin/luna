@@ -281,6 +281,81 @@ fn delivery_constant<'layout>(
     Ok(())
 }
 
+// Snapshot the declaration-frame locals this default can actually reference.
+pub(super) fn captured_slots(
+    input: &Expr,
+    prepared: &BTreeMap<LocalId, Expr>,
+    fuel: &mut usize,
+) -> Result<Vec<(LocalId, Expr)>, String> {
+    if prepared.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut bindings = Vec::new();
+    for id in nir::free_bindings::collect(input, fuel)? {
+        if let Some(value) = prepared.get(&id) {
+            bindings.push((id, copy_expression(value, fuel)?));
+        }
+    }
+    Ok(bindings)
+}
+
+pub(super) fn evaluate_default(
+    heads: Layouts<'_>,
+    mut input: Expr,
+    prepared: &mut BTreeMap<LocalId, Expr>,
+    fuel: &mut usize,
+    mut evaluate: impl FnMut(&Expr, &mut usize) -> Result<Expr, String>,
+) -> Result<Expr, String> {
+    let access = nir::free_bindings::access(&input, |id| prepared.contains_key(&id), fuel)?;
+    if access.writable.is_empty() {
+        if !access.readonly.is_empty() {
+            prepare_local_input_in_place(heads, &mut input, prepared, fuel, 0)?;
+        }
+        let value = evaluate(&input, fuel)?;
+        if value.ty != input.ty {
+            return Err("staged evaluator result type mismatch".into());
+        }
+        return Ok(value);
+    }
+    // Bind mutable storage around both the producer and its trailing reads.
+    // Each default runs once. Only its result becomes a body argument.
+    let source = input.source;
+    let mut fields = vec![input];
+    fields.extend(access.writable.iter().map(|id| Expr {
+        source,
+        ty: prepared[id].ty.clone(),
+        kind: K::Local(*id),
+    }));
+    let types: Vec<_> = fields.iter().map(|v| v.ty.clone()).collect();
+    let mut packet = Expr {
+        source,
+        ty: Term::Tuple(types),
+        kind: K::Tuple(fields),
+    };
+    let mut bindings = Vec::new();
+    for id in access.readonly.union(&access.writable) {
+        bindings.push((*id, copy_expression(&prepared[id], fuel)?));
+    }
+    wrap(heads, &mut packet, &bindings, fuel)?;
+    let completed = evaluate(&packet, fuel)?;
+    if completed.ty != packet.ty {
+        return Err("staged default frame result type mismatch".into());
+    }
+    let (K::Tuple(fields), Term::Tuple(types)) = (completed.kind, packet.ty) else {
+        return Err("staged default frame requires completed slot values".into());
+    };
+    if fields.len() != types.len() || fields.iter().zip(types).any(|(value, ty)| value.ty != ty) {
+        return Err("invalid staged default frame outputs".into());
+    }
+    let mut fields = fields.into_iter();
+    let result = fields.next().unwrap();
+    for (id, value) in access.writable.into_iter().zip(fields) {
+        constant(heads, &value, fuel, 0)?;
+        prepared.insert(id, value);
+    }
+    Ok(result)
+}
+
 #[cfg(test)]
 mod delivery_tests {
     use super::*;

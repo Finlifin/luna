@@ -760,3 +760,43 @@ fn selected_defaults_publish_only_the_executed_branch() {
         }";
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn closed_staged_default_writes_survive_required_invocation_and_argument_erasure() {
+    let source = "
+        comptime fn Select() -> Type { bool }
+        fn deliver(comptime .T: Type = bool,
+            comptime .U: Type = do { T = char; Select() },
+            comptime .V: Type = T, x: U, y: V) -> V { y }
+        fn run() -> bool {
+            deliver(true, 'z') == 'z' and deliver(false, true, .U = bool)
+        }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let error = sysroot::compile(&source.replace("deliver(true, 'z')", "deliver(true, false)"))
+        .unwrap_err();
+    assert!(
+        error.contains("expected (primitive char), found (primitive bool)"),
+        "{error}"
+    );
+}
+
+#[test]
+fn runtime_defaults_read_staged_slots_at_their_own_position() {
+    let source = "
+        fn selected(comptime .seed: bool = false,
+            .before: bool = seed,
+            comptime .update: bool = do { seed = not seed; seed },
+            .after: bool = seed) -> bool {
+            before == seed and after != seed and after == update
+        }
+        fn forward(comptime first: bool) -> bool { selected(.seed = first) }
+        fn run() -> bool {
+            selected() and not selected(.update = true) and forward(true) and forward(false)
+        }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let specialized = source.replace(
+        "before == seed",
+        "const original = seed; before == original",
+    );
+    assert_eq!(sysroot::run(&specialized), Value::Bool(true));
+}

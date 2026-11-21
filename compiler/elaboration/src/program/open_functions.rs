@@ -7924,36 +7924,39 @@ impl Checker<'_, '_> {
                 is_default: false,
             });
         }
+        let mut pending_defaults = Vec::new();
         for (slot, assigned) in assigned.iter().enumerate() {
             if *assigned {
                 continue;
             }
-            let (value, is_default) = if let Some(value) = values[slot].take() {
-                // This default has already run. Its delivered graph belongs to
-                // the caller's materialization scope, not a fresh default frame.
-                (value, false)
+            if let Some(value) = values[slot].take() {
+                // This default already executed. Deliver its caller-owned value
+                // before entering the frame for the remaining runtime defaults.
+                arguments.push(n::CallArgument {
+                    passing: Default::default(),
+                    parameter: slot,
+                    value,
+                    is_default: false,
+                });
             } else {
-                (
-                    self.prepare_open_default(
-                        owner,
-                        slot,
-                        &parameters,
-                        &symbols,
-                        &mut default_writes,
-                        false,
-                        expr.span,
-                    )?
-                    .0,
-                    true,
-                )
-            };
-            arguments.push(n::CallArgument {
-                passing: Default::default(),
-                parameter: slot,
-                value,
-                is_default,
-            });
+                let (value, _) = self.prepare_open_default(
+                    owner,
+                    slot,
+                    &parameters,
+                    &symbols,
+                    &mut default_writes,
+                    false,
+                    expr.span,
+                )?;
+                pending_defaults.push(n::CallArgument {
+                    passing: Default::default(),
+                    parameter: slot,
+                    value,
+                    is_default: true,
+                });
+            }
         }
+        arguments.extend(pending_defaults);
         let result = if arguments
             .iter()
             .any(|argument| is_never(&argument.value.ty))

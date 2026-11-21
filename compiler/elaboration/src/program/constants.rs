@@ -2068,45 +2068,99 @@ impl Checker<'_, '_> {
             staged_bindings.extend(self.open_staged_locals.iter().copied());
         }
         let declaration_inputs = self.visible_comptime_parameters(source.span)?;
-        let mut inputs = Vec::new();
-        let mut prepared: BTreeMap<n::LocalId, n::Expr> = BTreeMap::new();
+        // Later defaults observe the mutable preparation frame. The argument
+        // retained on the call still delivers the value selected for that slot.
+        let mut prepared: BTreeMap<n::LocalId, (n::Expr, Term)> = BTreeMap::new();
         let mut deferred_bindings = BTreeSet::new();
         for argument in arguments {
             if parameters[argument.parameter].sort == Sort::Runtime {
                 continue;
             }
-            if argument.is_default {
+            let mut writable = BTreeSet::new();
+            if argument.is_default && !(prepared.is_empty() && deferred_bindings.is_empty()) {
                 let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
                 let before = fuel;
-                let replaced = iir::staging::prepare_input_with_layouts(
-                    iir::staging::Layouts::from_index(&self.normal_form_metadata(), &self.newtypes)
+                let replacement = (|| -> Result<_, String> {
+                    let access = nir::free_bindings::access(
+                        &argument.value,
+                        |id| prepared.contains_key(&id) || deferred_bindings.contains(&id),
+                        &mut fuel,
+                    )?;
+                    writable = access.writable;
+                    let mut locals = BTreeMap::new();
+                    for id in access.readonly {
+                        if let Some((value, _)) = prepared.get(&id) {
+                            let mut remaining = fuel as u64;
+                            let result = nir::copy_budget::charge_expression(value, &mut remaining);
+                            fuel = remaining as usize;
+                            result.map_err(|e| {
+                                format!("staged default capture copy budget exhausted: {e:?}")
+                            })?;
+                            locals.insert(id, value.clone());
+                        }
+                    }
+                    iir::staging::prepare_input_with_layouts(
+                        iir::staging::Layouts::from_index(
+                            &self.normal_form_metadata(),
+                            &self.newtypes,
+                        )
                         .with_target(self.target),
-                    &argument.value,
-                    &prepared,
-                    &mut fuel,
-                );
+                        &argument.value,
+                        &locals,
+                        &mut fuel,
+                    )
+                })();
                 self.required_steps -= (before - fuel) as u64;
-                argument.value = replaced.map_err(|e| error(source.span, e))?;
+                argument.value = replacement.map_err(|e| error(source.span, e))?;
             }
-            let deferred = self.staged_input_can_defer(
+            let deferred = self.staged_input_can_defer_in(
                 &argument.value,
                 argument.is_default,
                 &deferred_bindings,
                 &staged_bindings,
                 &declaration_inputs,
+                writable.clone(),
                 source.span,
             )?;
             if deferred {
+                for id in &writable {
+                    prepared.remove(id);
+                    deferred_bindings.insert(*id);
+                }
                 if let Some(binding) = parameter_bindings.get(argument.parameter) {
                     deferred_bindings.insert(*binding);
                 }
                 continue;
             }
             let bindings = if argument.is_default {
-                inputs.clone()
+                prepared
+                    .iter()
+                    .map(|(&id, (value, symbol))| (id, value.ty.clone(), symbol.clone()))
+                    .collect()
             } else {
                 vec![]
             };
+            if !writable.is_empty() {
+                let (packet, outputs) = dependent_inputs::DefaultOutputs::pack(
+                    self,
+                    argument.value.clone(),
+                    writable,
+                    |id| prepared.get(&id).map(|(v, _)| &v.ty),
+                    source.span,
+                )?;
+                let (value, _) = self.required_normal_input(source, packet, bindings)?;
+                let mut writes = Vec::new();
+                let (result, symbol) =
+                    outputs.finish(self, value, source.span, |id, value, symbol| {
+                        prepared.insert(id, (value.clone(), symbol));
+                        writes.push((id, value));
+                    })?;
+                if let Some(&id) = parameter_bindings.get(argument.parameter) {
+                    prepared.insert(id, (result.clone(), symbol));
+                }
+                argument.value = dependent_inputs::DefaultOutputs::replay(result, writes);
+                continue;
+            }
             let (value, ty) =
                 self.required_normal_input(source, argument.value.clone(), bindings)?;
             let mut budget = comptime_runtime::Budget {
@@ -2136,8 +2190,7 @@ impl Checker<'_, '_> {
                 ));
             }
             if let Some(binding) = parameter_bindings.get(argument.parameter) {
-                inputs.push((*binding, ty, symbolic));
-                prepared.insert(*binding, argument.value.clone());
+                prepared.insert(*binding, (argument.value.clone(), symbolic));
             }
         }
         Ok(call)
@@ -2152,9 +2205,29 @@ impl Checker<'_, '_> {
         declaration_inputs: &[nir::DeclarationId],
         span: Span,
     ) -> Result<bool, Error> {
-        let mut deferred = false;
+        self.staged_input_can_defer_in(
+            value,
+            is_default,
+            deferred_bindings,
+            staged_bindings,
+            declaration_inputs,
+            BTreeSet::new(),
+            span,
+        )
+    }
+
+    fn staged_input_can_defer_in(
+        &mut self,
+        value: &n::Expr,
+        is_default: bool,
+        deferred_bindings: &BTreeSet<n::LocalId>,
+        staged_bindings: &BTreeSet<n::LocalId>,
+        declaration_inputs: &[nir::DeclarationId],
+        mut block_bindings: BTreeSet<n::LocalId>,
+        span: Span,
+    ) -> Result<bool, Error> {
+        let mut deferred = !block_bindings.is_disjoint(deferred_bindings);
         let mut structural = true;
-        let mut block_bindings = BTreeSet::new();
         let mut local_loops = BTreeSet::new();
         let mut pending = vec![value];
         while let Some(value) = pending.pop() {

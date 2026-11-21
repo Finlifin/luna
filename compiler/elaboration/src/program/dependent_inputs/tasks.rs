@@ -182,15 +182,21 @@ pub(in crate::program) struct Frame {
 
 enum Phase {
     Ready,
-    Child { slot: usize, caller_staged: bool },
-    Invoking { slot: usize },
+    Child {
+        slot: usize,
+        caller_staged: bool,
+    },
+    Invoking {
+        slot: usize,
+        outputs: Option<DefaultOutputs>,
+    },
     Failed,
     Complete,
 }
 
 enum Resolution {
     Known(n::Expr, Term),
-    Required(required::Invocation),
+    Required(required::Invocation, Option<DefaultOutputs>),
 }
 
 pub(in crate::program) enum Poll<'b> {
@@ -599,8 +605,8 @@ impl Frame {
                 self.deliver(slot, value, identity)?;
                 Ok(Poll::Continue)
             }
-            Resolution::Required(invocation) => {
-                self.phase = Phase::Invoking { slot };
+            Resolution::Required(invocation, outputs) => {
+                self.phase = Phase::Invoking { slot, outputs };
                 Ok(Poll::Invoke(invocation))
             }
         }
@@ -624,14 +630,26 @@ impl Frame {
         checker: &mut Checker<'_, '_>,
         reply: required::CompletedInvocation,
     ) -> Result<(), Error> {
-        let Phase::Invoking { slot } = std::mem::replace(&mut self.phase, Phase::Failed) else {
+        let Phase::Invoking { slot, outputs } = std::mem::replace(&mut self.phase, Phase::Failed)
+        else {
             return Err(error(
                 self.span,
                 "dependent input has no pending invocation",
             ));
         };
         let (value, ty) = reply.publish(checker)?;
-        let (value, identity) = checker.freeze_completed_dependency(value, ty, self.span)?;
+        let (value, identity) = if let Some(outputs) = outputs {
+            // The required producer already ran. Replay its completed stores
+            // into the default frame without evaluating user code a second time.
+            let mut writes = Vec::new();
+            let (result, identity) =
+                outputs.finish(checker, value, self.span, |id, value, _| {
+                    writes.push((id, value));
+                })?;
+            (DefaultOutputs::replay(result, writes), identity)
+        } else {
+            checker.freeze_completed_dependency(value, ty, self.span)?
+        };
         self.deliver(slot, value, identity)
     }
 
@@ -657,13 +675,19 @@ impl std::fmt::Display for Frame {
             "(dependent-input-frame (source {}) (phase ",
             source(self.span)
         )?;
-        match self.phase {
+        match &self.phase {
             Phase::Ready => f.write_str("ready")?,
             Phase::Child {
                 slot,
                 caller_staged,
             } => write!(f, "(child {slot} (caller-staged {caller_staged}))")?,
-            Phase::Invoking { slot } => write!(f, "(invoking {slot})")?,
+            Phase::Invoking { slot, outputs } => {
+                write!(f, "(invoking {slot}")?;
+                if let Some(outputs) = outputs {
+                    write!(f, " {outputs}")?;
+                }
+                f.write_str(")")?;
+            }
             Phase::Failed => f.write_str("failed")?,
             Phase::Complete => f.write_str("complete")?,
         }
@@ -811,14 +835,22 @@ impl Checker<'_, '_> {
                 copy_evidence(capture.symbol, &mut self.required_steps, source.span)?,
             ));
         }
+        let (value, outputs) = if captures.is_empty() {
+            (value, None)
+        } else {
+            DefaultOutputs::prepare(
+                self,
+                value,
+                |id| captures.get(&id).map(|c| c.domain),
+                source.span,
+            )?
+        };
         let prepared =
             self.prepare_required_expression(source, None, Some(value), bindings, false)?;
-        Ok(Resolution::Required(self.required_invocation(
-            prepared,
-            Vec::new(),
-            source.hir_id.owner,
-            source.span,
-        )))
+        Ok(Resolution::Required(
+            self.required_invocation(prepared, Vec::new(), source.hir_id.owner, source.span),
+            outputs,
+        ))
     }
 }
 

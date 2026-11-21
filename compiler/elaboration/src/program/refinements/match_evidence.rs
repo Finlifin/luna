@@ -53,7 +53,7 @@ pub(super) fn arm_bindings<'a, 'e>(
     for observation in accepted_only {
         observation.invalidate(&mut bindings, fuel)?;
     }
-    Checker::remove_pattern_bindings(&arm.pattern, &mut bindings, fuel)?;
+    nir::free_bindings::remove_pattern_bindings(&arm.pattern, &mut bindings, fuel)?;
     Ok(bindings)
 }
 

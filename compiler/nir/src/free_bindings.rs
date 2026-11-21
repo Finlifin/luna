@@ -3,6 +3,8 @@
 use crate::program::{Expr, LocalId, Pattern as P};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod effects;
+pub use effects::{Access, access, remove_pattern_bindings, retain_unmodified};
 mod lexical;
 mod walk;
 pub use crate::visit::Error;

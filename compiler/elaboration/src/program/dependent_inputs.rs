@@ -2,7 +2,9 @@
 //! Checking order does not change the source-ordered runtime argument plan.
 use super::*;
 
+mod default_outputs;
 mod default_writes;
+pub(super) use default_outputs::DefaultOutputs;
 pub(super) mod tasks;
 
 /// Borrow the selected function telescope, including its result under the

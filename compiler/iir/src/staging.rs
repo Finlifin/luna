@@ -1560,7 +1560,8 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
     let mut symbols = vec![None; parameters.len()];
     let mut defaults_started = false;
     let mut last_default = None;
-    let mut prepared = std::collections::BTreeMap::new();
+    let mut prepared = BTreeMap::new();
+    let mut runtime_defaults = BTreeMap::new();
     for argument in arguments {
         charge(fuel, 1)?;
         let slot = seen
@@ -1599,53 +1600,49 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
     // Validate the complete routing plan before executing any user input.
     for argument in arguments {
         charge(fuel, 1)?;
-        if parameters[argument.parameter].sort != Sort::Runtime {
-            let input = if argument.is_default {
-                crate::visit::expression(&argument.value, fuel, |_, _| Ok(()))?;
-                let mut input = argument.value.clone();
-                let scope = prepare_binding_with_type_view(
-                    &template.signature,
-                    &symbols,
-                    fuel,
-                    &mut |ty, fuel| type_view(context, ty, fuel),
-                )?;
-                input.rewrite_types(&mut |ty| {
-                    charge(fuel, 1)?;
-                    let ty = scope.rebind(ty).map_err(|e| e.to_string())?;
-                    binding_type_view(&ty, scope.signature(), fuel, &mut |ty, fuel| {
-                        type_view(context, ty, fuel)
-                    })
-                })?;
-                prepare_local_input(heads, &input, &prepared, fuel, 0)?
-            } else {
-                crate::visit::expression(&argument.value, fuel, |_, _| Ok(()))?;
-                argument.value.clone()
-            };
+        if parameters[argument.parameter].sort == Sort::Runtime {
+            if argument.is_default {
+                let bindings = preparation::captured_slots(&argument.value, &prepared, fuel)?;
+                runtime_defaults.insert(argument.parameter, bindings);
+            }
+            continue;
+        }
+        crate::visit::expression(&argument.value, fuel, |_, _| Ok(()))?;
+        let mut input = argument.value.clone();
+        let value = if argument.is_default {
+            let scope = prepare_binding_with_type_view(
+                &template.signature,
+                &symbols,
+                fuel,
+                &mut |ty, fuel| type_view(context, ty, fuel),
+            )?;
+            input.rewrite_types(&mut |ty| {
+                charge(fuel, 1)?;
+                let ty = scope.rebind(ty).map_err(|e| e.to_string())?;
+                binding_type_view(&ty, scope.signature(), fuel, &mut |ty, fuel| {
+                    type_view(context, ty, fuel)
+                })
+            })?;
+            preparation::evaluate_default(heads, input, &mut prepared, fuel, |input, fuel| {
+                evaluate(context, input, fuel)
+            })?
+        } else {
             let value = evaluate(context, &input, fuel)?;
-            let symbol = constant(heads, &value, fuel, 0)?;
             if value.ty != input.ty {
                 return Err("staged evaluator result type mismatch".into());
             }
-            let binding = template
-                .parameters
-                .get(argument.parameter)
-                .ok_or("staged template parameter binding is missing")?;
-            prepared.insert(*binding, value.clone());
-            symbols[argument.parameter] = Some(symbol);
-            inputs[argument.parameter] = Some(value);
-        }
+            value
+        };
+        let symbol = constant(heads, &value, fuel, 0)?;
+        prepared.insert(template.parameters[argument.parameter], value.clone());
+        symbols[argument.parameter] = Some(symbol);
+        inputs[argument.parameter] = Some(value);
     }
     let function = bind_inputs_with_type_view(heads, template, &inputs, fuel, |ty, fuel| {
         type_view(context, ty, fuel)
     })?;
     let mut key_arguments = declaration_arguments.to_vec();
-    let mut bindings = Vec::new();
-    for (index, input) in inputs.iter().enumerate() {
-        if let Some(value) = input {
-            key_arguments.push(symbols[index].as_ref().unwrap().clone());
-            bindings.push((template.parameters[index], value.clone()));
-        }
-    }
+    key_arguments.extend(symbols.iter().flatten().cloned());
     let key = crate::InstanceKey {
         declaration: template.declaration,
         arguments: (key_arguments).into(),
@@ -1696,17 +1693,15 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
         }
     }
     let mut runtime_arguments = Vec::new();
-    charge(fuel, bindings.len())?;
-    let staged_values = bindings
-        .iter()
-        .map(|(binding, value)| (*binding, value))
-        .collect();
     for argument in arguments {
         if let Some(slot) = slots[argument.parameter] {
             crate::visit::expression(&argument.value, fuel, |_, _| Ok(()))?;
             let mut argument = argument.clone();
-            argument.parameter = slot;
             if argument.is_default {
+                let bindings = runtime_defaults
+                    .remove(&argument.parameter)
+                    .ok_or("missing staged bindings for runtime default")?;
+                let staged_values = bindings.iter().map(|(id, value)| (*id, value)).collect();
                 argument.value.rewrite_types(&mut |ty| {
                     charge(fuel, 1)?;
                     scope.rebind(ty).map_err(|e| e.to_string())
@@ -1726,6 +1721,7 @@ pub fn bind_call_with_layouts_and_type_views<'layout, C>(
                 )?;
                 wrap(heads, &mut argument.value, &bindings, fuel)?;
             }
+            argument.parameter = slot;
             runtime_arguments.push(argument);
         }
     }
