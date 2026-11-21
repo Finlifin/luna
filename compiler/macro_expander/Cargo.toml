@@ -1,0 +1,12 @@
+[package]
+name = "macro_expander"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ast = { path = "../ast" }
+diagnostic = { path = "../diagnostic" }
+lex = { path = "../lex" }
+parse = { path = "../parse" }
+rustc_span = { workspace = true }
+symbol = { workspace = true }

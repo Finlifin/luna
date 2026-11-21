@@ -5,16 +5,13 @@ use std::collections::HashMap;
 
 /// Check if a character can be the start of an identifier
 fn is_identifier_start(c: char) -> bool {
-    c.is_alphabetic() || c == '_' ||
-    // Support Unicode identifiers, including some common symbols
-    matches!(c,
-        // Unicode symbols and emoji
-        '\u{1F000}'..='\u{1F9FF}' |  // Various symbol blocks
-        '\u{2600}'..='\u{26FF}' |    // Miscellaneous symbols
-        '\u{2700}'..='\u{27BF}' |    // Decorative symbols
-        // Other common non-alphabetic identifier characters
-        '$' | '@'
-    )
+    c.is_alphabetic()
+        || c == '_'
+        || matches!(
+            c,
+            // Unicode symbols and emoji
+            '\u{1F000}'..='\u{1F9FF}' | '\u{2600}'..='\u{26FF}' | '\u{2700}'..='\u{27BF}'
+        )
 }
 
 /// Check if a character can be a continuation of an identifier

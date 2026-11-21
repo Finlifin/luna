@@ -6,6 +6,7 @@ members = [
     "compiler/diagnostic",
     "compiler/lex",
     "compiler/parse",
+    "compiler/macro_expander",
     "compiler/vfs",
     "compiler/resolve",
     "compiler/hir",

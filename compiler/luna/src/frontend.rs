@@ -12,6 +12,7 @@ pub enum Artifact {
     Nir(nir::program::Package),
     Attributes(Vec<elaboration::program::attributes::EvaluatedAttribute>),
 }
+
 impl std::fmt::Display for Artifact {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -27,6 +28,7 @@ impl std::fmt::Display for Artifact {
         }
     }
 }
+
 /// Produce a diagnostic report only; selection does not authorize a consumer.
 pub(crate) fn attribute_artifact(
     package: &hir::Package<'_>,
@@ -353,7 +355,27 @@ fn compile_bound_for_target_with_invocation(
         return Err(instance.diag_ctx.failure_summary("lexing"));
     }
 
-    let mut parser = Parser::new(&sess.source_map, tokens, symbols, source_file.start_pos);
+    let mut macro_budget = macro_expander::MacroBudget::default();
+    let expanded = match macro_expander::expand_source(
+        &sess.source_map,
+        &source_file,
+        tokens,
+        symbols,
+        &mut macro_budget,
+    ) {
+        Ok(expanded) => expanded,
+        Err(error) => {
+            error.emit(&instance.diag_ctx, source_file.start_pos);
+            return Err(instance.diag_ctx.failure_summary("macro expansion"));
+        }
+    };
+
+    let mut parser = Parser::new(
+        &sess.source_map,
+        expanded.tokens,
+        expanded.symbols,
+        expanded.start_pos,
+    );
     parser.parse(&instance.diag_ctx);
     if instance.diag_ctx.has_errors() {
         return Err(instance.diag_ctx.failure_summary("parsing"));

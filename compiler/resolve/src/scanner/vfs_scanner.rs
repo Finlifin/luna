@@ -273,21 +273,42 @@ impl<'a> VfsScanner<'a> {
             err.emit(self.diag_ctx, source_file.start_pos);
         }
 
-        let mut parser = Parser::new(self.source_map, tokens, symbols, source_file.start_pos);
+        let (tokens, symbols, parse_start_pos) = if lex_failed {
+            (tokens, symbols, source_file.start_pos)
+        } else {
+            let mut budget = macro_expander::MacroBudget::default();
+            match macro_expander::expand_source(
+                self.source_map,
+                source_file,
+                tokens,
+                symbols,
+                &mut budget,
+            ) {
+                Ok(expanded) => (expanded.tokens, expanded.symbols, expanded.start_pos),
+                Err(err) => {
+                    err.emit(self.diag_ctx, source_file.start_pos);
+                    return Err(ResolveError::FileParsingFailed {
+                        message: err.message,
+                        span: err.span,
+                    });
+                }
+            }
+        };
+
+        let mut parser = Parser::new(self.source_map, tokens, symbols, parse_start_pos);
         let parsed = parser.parse(self.diag_ctx);
         if lex_failed || !parsed {
             return Err(ResolveError::FileParsingFailed {
                 message: "source file contains lexical or syntax errors".into(),
-                span: rustc_span::Span::new(source_file.start_pos, source_file.start_pos),
+                span: rustc_span::Span::new(parse_start_pos, parse_start_pos),
             });
         }
         let ast = parser.finalize();
         ast.validate_structure()
             .map_err(|error| ResolveError::InvalidNodeType {
-                span: ast.get_span(error.node()).unwrap_or(rustc_span::Span::new(
-                    source_file.start_pos,
-                    source_file.start_pos,
-                )),
+                span: ast
+                    .get_span(error.node())
+                    .unwrap_or(rustc_span::Span::new(parse_start_pos, parse_start_pos)),
                 message: error.to_string(),
             })?;
         self.vfs.set_ast(file_id, ast);

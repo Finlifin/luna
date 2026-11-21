@@ -473,6 +473,7 @@ dependencies = [
  "interface",
  "intrinsic",
  "lex",
+ "macro_expander",
  "middle",
  "nir",
  "parse",
@@ -480,6 +481,18 @@ dependencies = [
  "rustc_span",
  "type_resolution",
  "vfs",
+]
+
+[[package]]
+name = "macro_expander"
+version = "0.1.0"
+dependencies = [
+ "ast",
+ "diagnostic",
+ "lex",
+ "parse",
+ "rustc_span",
+ "symbol",
 ]
 
 [[package]]
@@ -655,6 +668,7 @@ dependencies = [
  "ast",
  "diagnostic",
  "lex",
+ "macro_expander",
  "parse",
  "rustc_data_structures",
  "rustc_span",

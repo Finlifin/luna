@@ -13,6 +13,7 @@ interface = { path = "../interface" }
 intrinsic = { path = "../intrinsic" }
 middle = { path = "../middle" }
 lex = { path = "../lex" }
+macro_expander = { path = "../macro_expander" }
 parse = { path = "../parse" }
 resolve = { path = "../resolve" }
 hir = { path = "../hir" }

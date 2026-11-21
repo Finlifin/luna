@@ -481,3 +481,24 @@ fn extern_is_an_ordinary_identifier() {
     assert_eq!(tokens("extern"), [(TokenKind::Id, "extern")]);
     assert_eq!(tokens("extern_name"), [(TokenKind::Id, "extern_name")]);
 }
+
+#[test]
+fn dollar_and_at_do_not_continue_identifiers() {
+    assert_eq!(
+        tokens("foo$ THIRD 3$ bar@baz $0 @use"),
+        [
+            (TokenKind::Id, "foo"),
+            (TokenKind::Dollar, "$"),
+            (TokenKind::Id, "THIRD"),
+            (TokenKind::Int, "3"),
+            (TokenKind::Dollar, "$"),
+            (TokenKind::Id, "bar"),
+            (TokenKind::At, "@"),
+            (TokenKind::Id, "baz"),
+            (TokenKind::Dollar, "$"),
+            (TokenKind::Int, "0"),
+            (TokenKind::At, "@"),
+            (TokenKind::Use, "use"),
+        ]
+    );
+}
