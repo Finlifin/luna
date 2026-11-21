@@ -2816,6 +2816,15 @@ impl Checker<'_, '_> {
                     }
                     Err(e) => return Err(error(span, e.to_string())),
                 }
+                // A lexical premise can discharge formation during a required
+                // invocation even before implementation indexing finishes.
+                // Concrete dispatch must wait for the complete candidate set.
+                if self.in_required_comptime && !self.interfaces_ready {
+                    return Err(error(
+                        span,
+                        "required comptime evaluation is waiting for the trait implementation world",
+                    ));
+                }
                 let resolution = self
                     .resolve_trait_capability(&instance, &requirement.subject, Budget::default())
                     .map_err(|e| error(span, format!("trait bound query failed: {e}")))?;

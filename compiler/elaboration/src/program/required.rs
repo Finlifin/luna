@@ -1447,6 +1447,7 @@ impl Checker<'_, '_> {
                     queue.extend(self.signature_type_uses[signature_cursor..].iter().cloned());
                     signature_cursor = self.signature_type_uses.len();
                     if !self.interfaces_ready
+                        && premise_owner.is_none()
                         && self.capabilities.get(&owner).is_some_and(|c| !c.is_empty())
                     {
                         return Err(error(

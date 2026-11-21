@@ -154,6 +154,39 @@ fn early_inherent_builder_cannot_ignore_a_competing_later_candidate() {
 }
 
 #[test]
+fn early_inherent_selection_respects_receiver_and_trait_requirements() {
+    let source = format!(
+        "{PREFIX}
+        trait Allowed {{}}
+        struct Factory where T {{}}
+        struct Conditional where T {{}}
+        typealias Alias<T> = Conditional<T>;
+        impl Factory<T> where T {{ comptime fn Make() -> Type {{ Original }} }}
+        impl Alias<T> where T :- Allowed {{ comptime fn Make() -> Type {{ Original }} }}
+        typealias Chosen = Factory<bool>.Make();
+        trait Read {{ fn read(self) -> bool; }}
+        impl Read for Chosen {{ fn read(self) -> bool {{ self.flag }} }}
+        comptime fn ready() -> bool {{ true }}"
+    );
+    assert_eq!(
+        Fixture::new(&source)
+            .invoke("ready", &mut 100_000, 100_000)
+            .unwrap()
+            .1,
+        Value::Bool(true)
+    );
+    let conditional = source.replace("= Factory<bool>.Make()", "= Conditional<bool>.Make()");
+    let error = Fixture::new(&conditional)
+        .invoke("ready", &mut 100_000, 100_000)
+        .err()
+        .expect("selected a conditional impl without Allowed evidence");
+    assert!(
+        error.contains("trait") || error.contains("applicab"),
+        "{error}"
+    );
+}
+
+#[test]
 fn early_inherent_builder_retains_receiver_type_arguments() {
     let fixture = Fixture::new(&format!(
         "{PREFIX}

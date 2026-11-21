@@ -41,6 +41,22 @@ impl Checker<'_, '_> {
         result
     }
 
+    fn declared_nominal_receiver(&self, receiver: &Expr<'_>) -> Option<OwnerId> {
+        let head = match receiver.kind {
+            H::NFApplication(head, _) => head,
+            _ => receiver,
+        };
+        let H::ResolvedDef { def_id, .. } = head.kind else {
+            return None;
+        };
+        let owner = self.package.definition_owner(def_id)?;
+        matches!(
+            self.package.item(owner)?.kind,
+            ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(..)
+        )
+        .then_some(owner)
+    }
+
     fn prepare_early_inherent_method(
         &mut self,
         subject: Term,
@@ -57,6 +73,7 @@ impl Checker<'_, '_> {
                 .copied(),
         );
         let mut members = BTreeMap::new();
+        let mut needs_trait_world = BTreeSet::new();
         // Enumerate all source declarations for this name. An incomplete world
         // must never silently choose the first currently available candidate.
         for (owner, info) in self.package.owners() {
@@ -91,21 +108,27 @@ impl Checker<'_, '_> {
             if named.len() != 1 {
                 return Err(error(item.span, "duplicate implementation member"));
             }
+            if let Term::Nominal {
+                declaration: requested,
+                ..
+            } = &subject
+            {
+                // Distinct declared nominal constructors stay disjoint for
+                // every choice of inputs. Do not demand a different receiver's
+                // defaults or trait prerequisites just to discover its head.
+                let nominal_owner = match &item.kind {
+                    ItemKind::Impl(def) => self.declared_nominal_receiver(def.self_ty),
+                    _ => Some(owner),
+                };
+                if nominal_owner.is_some_and(|candidate| {
+                    declaration(self.package, &self.package_identities, candidate) != *requested
+                }) {
+                    continue;
+                }
+            }
             self.signature_owner = Some(owner);
             self.context = self.binder_context(owner);
             self.ensure_contract(owner, item.span)?;
-            // Trait applicability needs the complete implementation world. Do
-            // not treat missing trait evidence as proof that a head is absent.
-            if self
-                .capabilities
-                .get(&owner)
-                .is_some_and(|items| !items.is_empty())
-            {
-                return Err(error(
-                    span,
-                    "required comptime evaluation is waiting for the trait implementation world",
-                ));
-            }
             let receiver = match &item.kind {
                 ItemKind::Impl(def) => self.type_expr(def.self_ty)?,
                 _ => self.nominal_self_type(owner),
@@ -145,6 +168,13 @@ impl Checker<'_, '_> {
                         format!("inherent implementation admission failed: {e:?}"),
                     )
                 })?;
+            if self
+                .capabilities
+                .get(&owner)
+                .is_some_and(|items| !items.is_empty())
+            {
+                needs_trait_world.insert(identity);
+            }
             members.insert(identity, named[0]);
         }
         for (id, domain) in self.implementation_index.parameter_domains() {
@@ -170,6 +200,18 @@ impl Checker<'_, '_> {
         let resolution = index
             .resolve_types(name, &subject, &context, Budget::default())
             .map_err(|e| error(span, format!("inherent method query failed: {e:?}")))?;
+        // Assess every possible receiver first. Trait evidence can only
+        // restrict a head that already matches; it cannot revive a head
+        // excluded by receiver matching. Pending heads must still wait.
+        if resolution.assessments.iter().any(|(id, assessment)| {
+            needs_trait_world.contains(id)
+                && assessment.applicability() != crate::implementation::Applicability::Excluded
+        }) {
+            return Err(error(
+                span,
+                "required comptime evaluation is waiting for the trait implementation world",
+            ));
+        }
         let selected = match resolution.selection {
             crate::implementation::Selection::NoApplicableCandidate => return Ok(None),
             crate::implementation::Selection::Selected(id) => id,
