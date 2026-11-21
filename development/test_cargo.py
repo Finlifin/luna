@@ -512,5 +512,130 @@ class CargoAutoFmtTests(unittest.TestCase):
             self.assertEqual(runner.run(["fmt", "--check"]), 0)
 
 
+class CargoSourceRootTests(unittest.TestCase):
+    def _write_workspace(self, root: Path, members: dict[str, str]) -> None:
+        member_list = ", ".join(f'"{rel}"' for rel in members)
+        (root / "Cargo.toml").write_text(
+            f"[workspace]\nmembers = [{member_list}]\n",
+            encoding="utf-8",
+        )
+        for rel, pkg_name in members.items():
+            pkg_dir = root / rel
+            pkg_dir.mkdir(parents=True, exist_ok=True)
+            (pkg_dir / "Cargo.toml").write_text(
+                f'[package]\nname = "{pkg_name}"\nversion = "0.1.0"\n',
+                encoding="utf-8",
+            )
+
+    def test_manifest_root_parsing_ignores_arguments_after_double_dash(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary).resolve()
+            self.assertEqual(cargo.manifest_root(base, ["check", "-p", "luna"]), base)
+            self.assertEqual(
+                cargo.manifest_root(base, ["run", "-p", "luna", "--", "--manifest-path", "/other/Cargo.toml"]),
+                base,
+            )
+            snap_dir = base / "snap"
+            snap_dir.mkdir()
+            self.assertEqual(
+                cargo.manifest_root(base, ["test", "--manifest-path", "snap/Cargo.toml"]),
+                snap_dir.resolve(),
+            )
+            self.assertEqual(
+                cargo.manifest_root(base, ["--no-fmt", "build", f"--manifest-path={snap_dir / 'Cargo.toml'}"]),
+                snap_dir.resolve(),
+            )
+
+    def test_same_root_reuses_cache_and_cross_root_cleans_workspace_packages(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temp = Path(temporary).resolve()
+            primary = temp / "primary"
+            snapshot = temp / "snapshot"
+            target = temp / "target"
+            primary.mkdir()
+            snapshot.mkdir()
+            (target / "debug").mkdir(parents=True)
+            self._write_workspace(primary, {"compiler/elab": "elaboration", "compiler/luna": "luna"})
+            self._write_workspace(
+                snapshot,
+                {"compiler/elab": "elaboration", "compiler/luna": "luna", "compiler/extra": "snap_only"},
+            )
+
+            runner = cargo.Runner(primary, target)
+            runner.reclaim = Mock()
+            runner.execute = Mock(return_value=(0, False))
+            clean_calls = []
+
+            def fake_clean(*, full=False, packages=cargo.REBUILDABLE_PACKAGES, manifest_root=None):
+                clean_calls.append((full, packages, manifest_root))
+
+            runner.clean = fake_clean
+
+            # Pre-populated target without a stamp cleans once for primary and records stamp.
+            stderr_buf = io.StringIO()
+            with patch.object(cargo.sys, "stderr", stderr_buf):
+                self.assertEqual(runner.run(["--no-fmt", "test", "-p", "luna"]), 0)
+            self.assertEqual(clean_calls, [(False, ("elaboration", "luna"), None)])
+            self.assertEqual(runner.source_root_state_path().read_text(encoding="utf-8").strip(), str(primary))
+
+            # Subsequent run in the same root reuses the cache with zero cleans.
+            clean_calls.clear()
+            self.assertEqual(runner.run(["--no-fmt", "check", "-p", "luna"]), 0)
+            self.assertEqual(clean_calls, [])
+
+            # Switching to snapshot via --manifest-path cleans snapshot workspace packages without full wipe.
+            with patch.object(cargo.sys, "stderr", stderr_buf):
+                self.assertEqual(
+                    runner.run(["--no-fmt", "test", "--manifest-path", str(snapshot / "Cargo.toml")]),
+                    0,
+                )
+            self.assertEqual(
+                clean_calls,
+                [(False, ("elaboration", "luna", "snap_only"), snapshot)],
+            )
+            self.assertEqual(runner.source_root_state_path().read_text(encoding="utf-8").strip(), str(snapshot))
+
+            # Switching back to primary cleans primary packages plus extra snapshot-only package.
+            clean_calls.clear()
+            with patch.object(cargo.sys, "stderr", stderr_buf):
+                self.assertEqual(runner.run(["--no-fmt", "check", "-p", "luna"]), 0)
+            self.assertEqual(
+                clean_calls,
+                [
+                    (False, ("elaboration", "luna"), None),
+                    (False, ("snap_only",), snapshot),
+                ],
+            )
+            self.assertEqual(runner.source_root_state_path().read_text(encoding="utf-8").strip(), str(primary))
+
+            # Full `clean` removes the source-root stamp, whereas `-p` clean retains it.
+            self.assertEqual(runner.run(["clean", "-p", "luna"]), 0)
+            self.assertTrue(runner.source_root_state_path().exists())
+            self.assertEqual(runner.run(["clean"]), 0)
+            self.assertFalse(runner.source_root_state_path().exists())
+
+    def test_auto_fmt_skipped_when_manifest_path_points_to_external_root(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            temp = Path(temporary).resolve()
+            primary = temp / "primary"
+            snapshot = temp / "snapshot"
+            primary.mkdir()
+            snapshot.mkdir()
+            CargoAutoFmtTests()._init_git_repo(primary)
+            self._write_workspace(snapshot, {"compiler/luna": "luna"})
+            dirty = primary / "src/dirty.rs"
+            raw = "fn a() {}\nfn b() {}\n"
+            dirty.write_text(raw, encoding="utf-8")
+
+            runner = cargo.Runner(primary, temp / "target")
+            runner.reclaim = Mock()
+            runner.execute = Mock(return_value=(0, False))
+            self.assertEqual(
+                runner.run(["test", f"--manifest-path={snapshot / 'Cargo.toml'}"]),
+                0,
+            )
+            self.assertEqual(dirty.read_text(encoding="utf-8"), raw)
+
+
 if __name__ == "__main__":
     unittest.main()

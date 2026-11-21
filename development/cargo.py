@@ -34,6 +34,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = Path("/tmp/luna-dev-002/target")
@@ -114,6 +115,92 @@ def default_build_jobs() -> int:
     return max(1, min(os.cpu_count() or 1, 12))
 
 
+def manifest_root(default_root: Path, arguments: list[str]) -> Path:
+    _, remaining = split_runner_flags(arguments)
+    split = remaining.index("--") if "--" in remaining else len(remaining)
+    options = remaining[:split]
+    manifest_arg: str | None = None
+    index = 0
+    while index < len(options):
+        arg = options[index]
+        if arg == "--manifest-path":
+            if index + 1 < len(options):
+                manifest_arg = options[index + 1]
+                index += 2
+                continue
+            break
+        if arg.startswith("--manifest-path="):
+            manifest_arg = arg.split("=", 1)[1]
+        index += 1
+    if manifest_arg is None:
+        return default_root.resolve()
+    candidate = Path(manifest_arg)
+    if not candidate.is_absolute():
+        candidate = default_root / candidate
+    if candidate.is_dir():
+        return candidate.resolve()
+    return candidate.parent.resolve()
+
+
+def _manifest_package_name(manifest: Path) -> str | None:
+    try:
+        data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return None
+    package = data.get("package")
+    if isinstance(package, dict):
+        name = package.get("name")
+        if isinstance(name, str) and name:
+            return name
+    return None
+
+
+def workspace_member_packages(root: Path) -> tuple[str, ...]:
+    manifest = root / "Cargo.toml"
+    try:
+        data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError):
+        return ()
+    seen: set[str] = set()
+    packages: list[str] = []
+
+    def add_name(name: str | None) -> None:
+        if name and name not in seen:
+            seen.add(name)
+            packages.append(name)
+
+    package = data.get("package")
+    if isinstance(package, dict):
+        name = package.get("name")
+        if isinstance(name, str):
+            add_name(name)
+    workspace = data.get("workspace")
+    if isinstance(workspace, dict) and isinstance(workspace.get("members"), list):
+        for member in workspace["members"]:
+            if not isinstance(member, str) or not member:
+                continue
+            member_dirs = (
+                sorted(root.glob(member))
+                if any(ch in member for ch in "*?[")
+                else [root / member]
+            )
+            for member_dir in member_dirs:
+                member_manifest = member_dir / "Cargo.toml"
+                if member_manifest.is_file():
+                    add_name(_manifest_package_name(member_manifest))
+    return tuple(packages)
+
+
+def _has_package_filter(arguments: list[str]) -> bool:
+    _, remaining = split_runner_flags(arguments)
+    split = remaining.index("--") if "--" in remaining else len(remaining)
+    options = remaining[:split]
+    return any(
+        arg in {"-p", "--package"} or arg.startswith("--package=") or (arg.startswith("-p") and len(arg) > 2)
+        for arg in options
+    )
+
+
 class Runner:
     def __init__(self, root: Path, target: Path):
         if target.resolve() != target.absolute():
@@ -164,8 +251,18 @@ class Runner:
             return
         diagnostic(f'cargo-cache: learned soft cache limit {limit} bytes')
 
-    def clean(self, *, full: bool = False, packages: tuple[str, ...] = REBUILDABLE_PACKAGES) -> None:
+    def clean(
+        self,
+        *,
+        full: bool = False,
+        packages: tuple[str, ...] = REBUILDABLE_PACKAGES,
+        manifest_root: Path | None = None,
+    ) -> None:
         command = ["cargo", "clean", "--target-dir", str(self.target)]
+        if manifest_root is not None and manifest_root.resolve() != self.root.resolve():
+            manifest = manifest_root / "Cargo.toml"
+            if manifest.is_file():
+                command += ["--manifest-path", str(manifest)]
         if not full:
             for package in packages:
                 command += ["-p", package]
@@ -176,6 +273,51 @@ class Runner:
             # managed cache also serves release builds; remove those package
             # outputs before considering a full dependency-cache purge.
             subprocess.run([*command, "--release"], cwd=self.root, env=self.env, check=True)
+
+    def source_root_state_path(self) -> Path:
+        return self.target.with_name(self.target.name + "-source-root")
+
+    def record_source_root(self, source_root: Path) -> None:
+        state = self.source_root_state_path()
+        temporary = state.with_suffix(".tmp")
+        try:
+            temporary.write_text(f"{source_root}\n", encoding="utf-8")
+            temporary.replace(state)
+        except OSError as error:
+            diagnostic(f"cargo-cache: could not retain source root: {error}")
+
+    def ensure_source_root(self, source_root: Path) -> None:
+        state = self.source_root_state_path()
+        try:
+            recorded = state.read_text(encoding="utf-8").strip() or None
+        except OSError:
+            recorded = None
+        if recorded == str(source_root):
+            return
+        has_outputs = any((self.target / profile).exists() for profile in ("debug", "release"))
+        if recorded is None and not has_outputs:
+            self.record_source_root(source_root)
+            return
+        previous_label = recorded if recorded is not None else "<unrecorded>"
+        diagnostic(
+            f"cargo-cache: source root changed ({previous_label} -> {source_root}), cleaning workspace outputs"
+        )
+        resolved_self = self.root.resolve()
+        current_packages = workspace_member_packages(source_root) or REBUILDABLE_PACKAGES
+        current_manifest = source_root if source_root != resolved_self else None
+        try:
+            self.clean(packages=current_packages, manifest_root=current_manifest)
+            if recorded is not None:
+                prev_root = Path(recorded)
+                if prev_root != source_root and (prev_root / "Cargo.toml").is_file():
+                    prev_packages = workspace_member_packages(prev_root)
+                    extra = tuple(pkg for pkg in prev_packages if pkg not in current_packages)
+                    if extra:
+                        prev_manifest = prev_root if prev_root != resolved_self else None
+                        self.clean(packages=extra, manifest_root=prev_manifest)
+        except subprocess.CalledProcessError:
+            self.clean(full=True)
+        self.record_source_root(source_root)
 
     def reclaim(self, *, force: bool = False) -> None:
         if force:
@@ -413,11 +555,14 @@ class Runner:
                 fcntl.flock(lock, fcntl.LOCK_EX)
                 return self.run_fmt(remaining[1:])
         command = cargo_arguments(remaining, self.target)
+        source_root = manifest_root(self.root, remaining)
         self.target.parent.mkdir(parents=True, exist_ok=True)
         with (self.target.parent / "cargo-maintenance.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             if remaining[0] != "clean":
-                self.format_modified_rust(skip_flag=skip_fmt)
+                if source_root == self.root.resolve():
+                    self.format_modified_rust(skip_flag=skip_fmt)
+                self.ensure_source_root(source_root)
             self.reclaim()
             try:
                 status, quota_failure = self.execute(command)
@@ -427,6 +572,8 @@ class Runner:
                     self.reclaim(force=True)
                     diagnostic("cargo-cache: retrying once after a storage failure")
                     status, quota_failure = self.execute(command)
+                if status == 0 and remaining[0] == "clean" and not _has_package_filter(remaining):
+                    self.source_root_state_path().unlink(missing_ok=True)
                 if status and quota_failure:
                     self.reclaim(force=True)
                 if status == 0 and on_success is not None:
