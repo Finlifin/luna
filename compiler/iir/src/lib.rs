@@ -249,21 +249,23 @@ impl Package {
     pub fn validate(&self, fuel: &mut usize) -> Result<(), String> {
         let callables = self.checked_callables(fuel)?;
         let links = TypeLinks::new(self, fuel)?;
+        let mut validated_types = HashSet::<Term>::new();
+        let mut validated_closed_storage = HashSet::<Term>::new();
         for identity in &self.callable_identities {
             let signature = identity.closed_signature()?;
             if !matches!(signature.callable_signature(), Term::Function { .. }) {
                 return Err("IIR callable identity has a non-callable signature".into());
             }
-            self.validate_type(&links, signature, fuel)?;
+            self.validate_type_cached(&links, &mut validated_types, signature, fuel)?;
             for argument in identity.key.arguments.iter() {
-                self.validate_type(&links, argument, fuel)?;
+                self.validate_type_cached(&links, &mut validated_types, argument, fuel)?;
             }
         }
         for table in &self.templates {
-            self.validate_type(&links, table.logical_type(), fuel)?;
+            self.validate_type_cached(&links, &mut validated_types, table.logical_type(), fuel)?;
             for target in table.targets() {
                 for argument in target.arguments.iter() {
-                    self.validate_type(&links, argument, fuel)?;
+                    self.validate_type_cached(&links, &mut validated_types, argument, fuel)?;
                 }
             }
         }
@@ -275,20 +277,23 @@ impl Package {
             return Err("IIR requires associated initializers to be invoked".into());
         }
         for nominal in &self.nominals {
-            self.validate_type(&links, &nominal.ty, fuel)?;
+            self.validate_type_cached(&links, &mut validated_types, &nominal.ty, fuel)?;
             match &nominal.definition {
-                NominalDefinition::Newtype(n) => {
-                    self.validate_type(&links, &n.representation, fuel)?
-                }
+                NominalDefinition::Newtype(n) => self.validate_type_cached(
+                    &links,
+                    &mut validated_types,
+                    &n.representation,
+                    fuel,
+                )?,
                 NominalDefinition::Struct(s) => {
                     for (_, ty) in &s.fields {
-                        self.validate_type(&links, ty, fuel)?;
+                        self.validate_type_cached(&links, &mut validated_types, ty, fuel)?;
                     }
                 }
                 NominalDefinition::Enum(e) => {
                     for variant in &e.variants {
                         for ty in &variant.fields {
-                            self.validate_type(&links, ty, fuel)?;
+                            self.validate_type_cached(&links, &mut validated_types, ty, fuel)?;
                         }
                     }
                 }
@@ -296,17 +301,18 @@ impl Package {
         }
         for interface in &self.interfaces {
             for argument in &interface.interface.arguments {
-                self.validate_type(&links, argument, fuel)?;
+                self.validate_type_cached(&links, &mut validated_types, argument, fuel)?;
             }
-            self.validate_type(&links, &interface.subject, fuel)?;
+            self.validate_type_cached(&links, &mut validated_types, &interface.subject, fuel)?;
             for method in &interface.methods {
-                self.validate_type(
+                self.validate_type_cached(
                     &links,
+                    &mut validated_types,
                     method.signature.ordinary().map_err(|e| e.to_string())?,
                     fuel,
                 )?;
                 for argument in &method.type_arguments {
-                    self.validate_type(&links, argument, fuel)?;
+                    self.validate_type_cached(&links, &mut validated_types, argument, fuel)?;
                 }
                 let program = nir::contracts::CallableProgram::method(method)
                     .map_err(|error| error.to_string())?;
@@ -323,7 +329,7 @@ impl Package {
                         is_direct_callee,
                         fuel,
                     )?;
-                    self.validate_expression_types_in(&links, expr, fuel)
+                    self.validate_expression_types_in(&links, &mut validated_types, expr, fuel)
                 })?;
             }
         }
@@ -367,6 +373,7 @@ impl Package {
         let validate_expr_node = |expr: &nir::program::Expr,
                                   phase: nir::program::FunctionPhase,
                                   direct_callees: &mut HashSet<usize>,
+                                  validated_types: &mut HashSet<Term>,
                                   fuel: &mut usize|
          -> Result<(), String> {
             if matches!(
@@ -379,7 +386,7 @@ impl Package {
                 return Err("IIR contains an unformed float or integer literal".into());
             }
 
-            self.validate_expression_types_in(&links, expr, fuel)?;
+            self.validate_expression_types_in(&links, validated_types, expr, fuel)?;
             if let K::TemplateEqual(left, right) = &expr.kind {
                 let identity_operand = |value: &nir::program::Expr| {
                     matches!(
@@ -462,47 +469,61 @@ impl Package {
             if !nir::free_bindings::collect(expr, fuel)?.is_empty() {
                 return Err("IIR global runtime delivery retains free local bindings".into());
             }
-            self.validate_type(&links, &expr.ty, fuel)?;
+            self.validate_type_cached(&links, &mut validated_types, &expr.ty, fuel)?;
             let mut direct_callees = HashSet::new();
             visit::expression(expr, fuel, |node, fuel| {
                 validate_expr_node(
                     node,
                     nir::program::FunctionPhase::Runtime,
                     &mut direct_callees,
+                    &mut validated_types,
                     fuel,
                 )
             })?;
         }
         for instance in &self.functions {
-            self.validate_type(&links, &instance.function.signature, fuel)?;
+            self.validate_type_cached(
+                &links,
+                &mut validated_types,
+                &instance.function.signature,
+                fuel,
+            )?;
             for env in &instance.function.env_parameters {
-                self.validate_type(&links, &env.ty, fuel)?;
+                self.validate_type_cached(&links, &mut validated_types, &env.ty, fuel)?;
             }
             nir::call_safety::validate(&instance.function, fuel)?;
             if instance.function.is_unsafe && self.roots.contains(&instance.key) {
                 return Err("unsafe entry requires an explicit safe wrapper".into());
             }
             if instance.function.phase == nir::program::FunctionPhase::Runtime {
-                nir::phases::validate_runtime_storage_with_nominals(
-                    &instance.function.signature,
-                    &storage_metadata,
-                    &[],
-                    &resolve_storage,
-                    fuel,
-                )
-                .map_err(|message| {
-                    format!("IIR runtime signature for {}: {message}", instance.key)
-                })?;
+                if validated_closed_storage.contains(&instance.function.signature) {
+                    *fuel = fuel
+                        .checked_sub(1)
+                        .ok_or("storage inspection budget exhausted")?;
+                } else {
+                    nir::phases::validate_runtime_storage_with_nominals(
+                        &instance.function.signature,
+                        &storage_metadata,
+                        &[],
+                        &resolve_storage,
+                        fuel,
+                    )
+                    .map_err(|message| {
+                        format!("IIR runtime signature for {}: {message}", instance.key)
+                    })?;
+                    validated_closed_storage.insert(instance.function.signature.clone());
+                }
             }
 
             storage::validate(
                 &instance.function,
                 &storage_metadata,
                 &resolve_storage,
+                &mut validated_closed_storage,
                 fuel,
             )?;
             for argument in instance.key.arguments.iter() {
-                self.validate_type(&links, argument, fuel)?;
+                self.validate_type_cached(&links, &mut validated_types, argument, fuel)?;
             }
             for (id, expr) in &instance.function.runtime_deliveries {
                 if !self.runtime_bindings.contains(id) {
@@ -511,20 +532,27 @@ impl Package {
                         instance.key
                     ));
                 }
-                self.validate_type(&links, &expr.ty, fuel)?;
+                self.validate_type_cached(&links, &mut validated_types, &expr.ty, fuel)?;
                 let mut direct_callees = HashSet::new();
                 visit::expression(expr, fuel, |node, fuel| {
                     validate_expr_node(
                         node,
                         nir::program::FunctionPhase::Runtime,
                         &mut direct_callees,
+                        &mut validated_types,
                         fuel,
                     )
                 })?;
             }
             let mut direct_callees = HashSet::new();
             visit::expressions(&instance.function, fuel, |expr, fuel| {
-                validate_expr_node(expr, instance.function.phase, &mut direct_callees, fuel)
+                validate_expr_node(
+                    expr,
+                    instance.function.phase,
+                    &mut direct_callees,
+                    &mut validated_types,
+                    fuel,
+                )
             })?;
             effects::validate(self, &links, &instance.function, fuel)?;
         }
@@ -597,11 +625,12 @@ impl Package {
     fn validate_expression_types_in(
         &self,
         links: &TypeLinks<'_>,
+        validated: &mut HashSet<Term>,
         expr: &nir::program::Expr,
         fuel: &mut usize,
     ) -> Result<(), String> {
         use nir::program::ExprKind as K;
-        self.validate_type(&links, &expr.ty, fuel)?;
+        self.validate_type_cached(&links, validated, &expr.ty, fuel)?;
         lists::validate(links, expr, fuel)?;
         if let K::BuildMetadata {
             selector, entries, ..
@@ -621,7 +650,7 @@ impl Package {
                 if let Some(value) = value {
                     // Only the selected payload is admitted against the output
                     // domain at invocation; all retained references must link.
-                    self.validate_type(links, value, fuel)?;
+                    self.validate_type_cached(links, validated, value, fuel)?;
                 }
             }
         }
@@ -674,7 +703,7 @@ impl Package {
                 if ty.sort() != nir::Sort::Type {
                     return Err("IIR pattern label is not a type".into());
                 }
-                self.validate_type(&links, ty, fuel)
+                self.validate_type_cached(&links, validated, ty, fuel)
             })
         };
         match &expr.kind {
@@ -729,21 +758,40 @@ impl Package {
                 {
                     return Err("IIR Type value requires a Type domain and type identity".into());
                 }
-                self.validate_type(&links, ty, fuel)?;
+                self.validate_type_cached(&links, validated, ty, fuel)?;
             }
             K::BitAssign {
                 storage_type: ty, ..
             }
             | K::BitUpdate {
                 storage_type: ty, ..
-            } => self.validate_type(&links, ty, fuel)?,
+            } => self.validate_type_cached(&links, validated, ty, fuel)?,
             K::Closure { captures, .. } => {
                 for capture in captures {
-                    self.validate_type(&links, &capture.ty, fuel)?;
+                    self.validate_type_cached(&links, validated, &capture.ty, fuel)?;
                 }
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    fn validate_type_cached(
+        &self,
+        links: &TypeLinks<'_>,
+        validated: &mut HashSet<Term>,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        if validated.contains(ty) {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("IIR type validation budget exhausted")?;
+            return Ok(());
+        }
+        completed_type(ty, &self.runtime_bindings, fuel)?;
+        links.validate(ty, fuel)?;
+        validated.insert(ty.clone());
         Ok(())
     }
 
@@ -769,7 +817,7 @@ impl Package {
         fuel: &mut usize,
     ) -> Result<(), String> {
         let links = TypeLinks::new(self, fuel)?;
-        self.validate_expression_types_in(&links, expr, fuel)
+        self.validate_expression_types_in(&links, &mut HashSet::new(), expr, fuel)
     }
 }
 
@@ -1019,5 +1067,156 @@ mod optional_construction_tests {
                     .is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod validate_memo_tests {
+    use super::*;
+    use nir::program::{
+        Expr, ExprKind as K, Function, FunctionDeclaration, FunctionPhase, SourceRange,
+    };
+
+    fn make_runtime_fn(decl_local: u32, body: Expr) -> FunctionInstance {
+        let sig = Term::Function {
+            parameters: vec![],
+            result: Box::new(Term::Primitive(nir::Primitive::Void)),
+        };
+        let key = InstanceKey {
+            declaration: DeclarationId {
+                package: 1,
+                local: decl_local,
+            },
+            arguments: vec![].into(),
+        };
+        FunctionInstance {
+            key: key.clone(),
+            function: Function {
+                interface: FunctionDeclaration {
+                    source: SourceRange { start: 1, end: 2 },
+                    phase: FunctionPhase::Runtime,
+                    inline: false,
+                    pure: false,
+                    is_unsafe: false,
+                    preconditions: vec![],
+                    postconditions: vec![],
+                    result_binding: None,
+                    result_type_binder: None,
+                    result_guarantees: vec![],
+                    entry_snapshots: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    declaration: key.declaration,
+                    name: format!("fn_{decl_local}"),
+                    signature: sig,
+                    parameters: vec![],
+                    env_parameters: vec![],
+                    defaults: vec![],
+                },
+                body,
+                runtime_deliveries: Default::default(),
+            },
+        }
+    }
+
+    #[test]
+    fn repeated_closed_nominals_memoize_across_expressions_and_functions_while_rejecting_invalid_storage()
+     {
+        let source = SourceRange { start: 1, end: 2 };
+        let struct_decl = DeclarationId {
+            package: 1,
+            local: 100,
+        };
+        let nominal_ty = Term::Nominal {
+            declaration: struct_decl,
+            arguments: vec![],
+        };
+        let fields: Vec<_> = (0..16)
+            .map(|i| (format!("f{i}"), Term::Primitive(nir::Primitive::U64)))
+            .collect();
+        let repeated_ty = Term::Optional(Box::new(nominal_ty.clone()));
+        let make_block = |count: usize| {
+            let statements = (0..count)
+                .map(|_| Expr {
+                    source,
+                    ty: Term::Primitive(nir::Primitive::Void),
+                    kind: K::Discard(Box::new(Expr {
+                        source,
+                        ty: repeated_ty.clone(),
+                        kind: K::OptionalAbsent,
+                    })),
+                })
+                .collect();
+            Expr {
+                source,
+                ty: Term::Primitive(nir::Primitive::Void),
+                kind: K::Block {
+                    statements,
+                    result: None,
+                },
+            }
+        };
+
+        let make_pkg = |fn_count: u32, stmts_per_fn: usize| Package {
+            nominals: vec![NominalInstance {
+                ty: nominal_ty.clone(),
+                definition: NominalDefinition::Struct(nir::program::Struct {
+                    parameter_types: vec![],
+                    capabilities: vec![],
+                    requirements: vec![],
+                    type_parameters: vec![],
+                    declaration: struct_decl,
+                    name: "WidePod".into(),
+                    fields: fields.clone(),
+                    packed: false,
+                }),
+            }],
+            functions: (1..=fn_count)
+                .map(|id| make_runtime_fn(id, make_block(stmts_per_fn)))
+                .collect(),
+            ..Package::default()
+        };
+
+        let base_pkg = make_pkg(1, 1);
+        let mut base_fuel = 100_000;
+        base_pkg.validate(&mut base_fuel).unwrap();
+        let base_cost = 100_000 - base_fuel;
+
+        // 10 functions x 10 copies = 100 copies of a 16-field Optional<Nominal>.
+        // Without memoization, each copy re-traverses WidePod's 16 fields for both
+        // type links and runtime storage (> 60 extra steps/copy, > 6,000 steps).
+        // With memoization, incremental per-copy validation stays well below 20 steps.
+        let mut package = make_pkg(10, 10);
+        let max_expected_fuel = base_cost + 2_500;
+        let mut tight_fuel = max_expected_fuel;
+        package.validate(&mut tight_fuel).unwrap();
+        let memo_cost = max_expected_fuel - tight_fuel;
+        assert!(
+            memo_cost - base_cost < 2_500,
+            "expected memoized incremental cost < 2500, got {} (base={})",
+            memo_cost - base_cost,
+            base_cost
+        );
+
+        // Memoization must still reject comptime-only Type values in runtime storage.
+        let K::Block { statements, .. } = &mut package.functions[9].function.body.kind else {
+            unreachable!()
+        };
+        statements[9] = Expr {
+            source,
+            ty: Term::Primitive(nir::Primitive::Void),
+            kind: K::Discard(Box::new(Expr {
+                source,
+                ty: Term::Primitive(nir::Primitive::Type),
+                kind: K::TypeValue(Term::Primitive(nir::Primitive::U8)),
+            })),
+        };
+        let mut reject_fuel = 100_000;
+        let error = package.validate(&mut reject_fuel).unwrap_err();
+        assert!(
+            error.contains("IIR runtime storage"),
+            "unexpected error: {error}"
+        );
     }
 }

@@ -1,11 +1,13 @@
 //! Storage-phase validation in concrete runtime bodies, retaining staged inputs.
 use nir::program::{ExprKind as K, Function, FunctionPhase, Package};
 use nir::{Sort, Term};
+use std::collections::HashSet;
 
 pub(super) fn validate(
     function: &Function,
     metadata: &Package,
     resolve: &dyn Fn(&Term, &mut usize) -> Result<Vec<Term>, nir::phases::StorageError>,
+    validated_closed: &mut HashSet<Term>,
     fuel: &mut usize,
 ) -> Result<(), String> {
     if function.phase != FunctionPhase::Runtime {
@@ -15,11 +17,26 @@ pub(super) fn validate(
         return Err("IIR runtime function has no callable signature".into());
     };
     let frames = vec![parameters.iter().map(|p| p.sort).collect()];
+    let mut validated_in_fn = HashSet::<Term>::new();
+    let mut check_storage = |ty: &Term,
+                             fuel: &mut usize|
+     -> Result<(), nir::phases::StorageError> {
+        if validated_closed.contains(ty) || validated_in_fn.contains(ty) {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or(nir::phases::StorageError::Budget)?;
+            return Ok(());
+        }
+        nir::phases::validate_runtime_storage_with_nominals(ty, metadata, &frames, resolve, fuel)?;
+        if ty.check_scope(&[]).is_ok() {
+            validated_closed.insert(ty.clone());
+        } else {
+            validated_in_fn.insert(ty.clone());
+        }
+        Ok(())
+    };
     for env in &function.env_parameters {
-        nir::phases::validate_runtime_storage_with_nominals(
-            &env.ty, metadata, &frames, resolve, fuel,
-        )
-        .map_err(|message| {
+        check_storage(&env.ty, fuel).map_err(|message| {
             format!(
                 "IIR runtime environment storage in {} at {}: {message}",
                 function.name, function.source
@@ -40,14 +57,7 @@ pub(super) fn validate(
     }
     while let Some(root) = roots.pop() {
         nir::visit::expression_pruned(root, fuel, |expression, fuel| {
-            nir::phases::validate_runtime_storage_with_nominals(
-                &expression.ty,
-                metadata,
-                &frames,
-                resolve,
-                fuel,
-            )
-            .map_err(|message| {
+            check_storage(&expression.ty, fuel).map_err(|message| {
                 format!(
                     "IIR runtime storage in {} at {}: {message}",
                     function.name, expression.source
