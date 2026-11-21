@@ -96,16 +96,55 @@ pub fn retain_unmodified<T>(
     if bindings.is_empty() {
         return Ok(());
     }
-    crate::visit::expression_checked(expr, fuel, |node, fuel| {
-        if bindings.is_empty() {
-            return Ok(());
+    crate::visit::expression_checked(expr, fuel, |node, fuel| invalidate(node, bindings, fuel))
+}
+
+pub fn retain_unmodified_argument<T>(
+    arg: &n::NormalFormArgument,
+    bindings: &mut BTreeMap<n::LocalId, T>,
+    fuel: &mut usize,
+) -> Result<(), crate::visit::Error> {
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    crate::visit::argument_checked(arg, fuel, |node, fuel| invalidate(node, bindings, fuel))
+}
+
+fn invalidate<T>(
+    node: &n::Expr,
+    bindings: &mut BTreeMap<n::LocalId, T>,
+    fuel: &mut usize,
+) -> Result<(), crate::visit::Error> {
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    match &node.kind {
+        K::Assign { place, .. } | K::BitUpdate { place, .. } | K::BitAssign { place, .. } => {
+            bindings.remove(&place.root);
         }
-        match &node.kind {
-            K::Assign { place, .. } | K::BitUpdate { place, .. } | K::BitAssign { place, .. } => {
-                bindings.remove(&place.root);
+        K::AddressOf(place_expr) => {
+            let mut root = place_expr.as_ref();
+            while let K::Field { value, .. } | K::AnonymousField { value, .. } = &root.kind {
+                *fuel = fuel.checked_sub(1).ok_or(crate::visit::Error::Budget(
+                    "binding invalidation budget exhausted",
+                ))?;
+                root = value;
             }
-            K::AddressOf(place_expr) => {
-                let mut root = place_expr.as_ref();
+            if let K::Local(id) = root.kind {
+                bindings.remove(&id);
+            } else {
+                bindings.clear();
+            }
+        }
+        K::WritePointer { .. } | K::BitWritePointer { .. } => {
+            bindings.clear();
+        }
+        K::Call { arguments, .. } => {
+            for arg in arguments {
+                if arg.passing == n::ArgumentPassing::Value {
+                    continue;
+                }
+                let mut root = &arg.value;
                 while let K::Field { value, .. } | K::AnonymousField { value, .. } = &root.kind {
                     *fuel = fuel.checked_sub(1).ok_or(crate::visit::Error::Budget(
                         "binding invalidation budget exhausted",
@@ -116,47 +155,24 @@ pub fn retain_unmodified<T>(
                     bindings.remove(&id);
                 } else {
                     bindings.clear();
+                    break;
                 }
             }
-            K::WritePointer { .. } | K::BitWritePointer { .. } => {
-                bindings.clear();
-            }
-            K::Call { arguments, .. } => {
-                for arg in arguments {
-                    if arg.passing == n::ArgumentPassing::Value {
-                        continue;
-                    }
-                    let mut root = &arg.value;
-                    while let K::Field { value, .. } | K::AnonymousField { value, .. } = &root.kind
-                    {
-                        *fuel = fuel.checked_sub(1).ok_or(crate::visit::Error::Budget(
-                            "binding invalidation budget exhausted",
-                        ))?;
-                        root = value;
-                    }
-                    if let K::Local(id) = root.kind {
-                        bindings.remove(&id);
-                    } else {
-                        bindings.clear();
-                        break;
-                    }
-                }
-            }
-            K::Let { binding, .. } => {
-                bindings.remove(binding);
-            }
-            K::LetPattern { pattern, .. } => {
-                remove_pattern_bindings(pattern, bindings, fuel)?;
-            }
-            K::Closure { captures, .. } => {
-                for capture in captures {
-                    if capture.value.is_none() {
-                        bindings.remove(&capture.binding);
-                    }
-                }
-            }
-            _ => {}
         }
-        Ok(())
-    })
+        K::Let { binding, .. } => {
+            bindings.remove(binding);
+        }
+        K::LetPattern { pattern, .. } => {
+            remove_pattern_bindings(pattern, bindings, fuel)?;
+        }
+        K::Closure { captures, .. } => {
+            for capture in captures {
+                if capture.value.is_none() {
+                    bindings.remove(&capture.binding);
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }

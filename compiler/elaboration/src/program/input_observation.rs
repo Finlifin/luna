@@ -2,6 +2,7 @@
 //! establish stage availability, scope admission, or permission to invoke code.
 use super::*;
 mod exits;
+mod return_projection;
 use normal::observation::{self, Failure};
 
 pub(super) fn structural_limit(limit: nir::copy_budget::CopyBudgetExhausted, span: Span) -> Error {

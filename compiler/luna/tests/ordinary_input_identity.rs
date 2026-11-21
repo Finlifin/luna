@@ -74,6 +74,74 @@ fn unobserved_dependencies_do_not_start_an_isolated_invocation() {
 }
 
 #[test]
+fn direct_type_results_keep_argument_effects_and_the_selected_binding() {
+    let source = "
+        struct Left {}
+        typealias First = Left;
+        comptime fn mark() -> bool { true }
+        comptime fn Selected(flag: bool, tick: bool) -> Type {
+            if flag { First } else { char }
+        }
+        comptime fn Forward(ty: Type) -> Type { ty }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn indirect(target: comptime fn(comptime ty: Type) -> ?ty) -> bool {
+            let value: ?char = target(Selected(false, mark()));
+            value matches null
+        }
+        comptime fn check() -> bool {
+            let left: ?Left = empty(Selected(true, mark()));
+            let right: ?char = empty(Selected(false, mark()));
+            let again: ?Left = empty(Forward(Left));
+            (left matches null) and (right matches null) and (again matches null) and indirect(empty)
+        }
+    ";
+    check_events(
+        source,
+        &[
+            ("mark", 3),
+            ("Selected", 3),
+            ("Forward", 1),
+            ("empty", 4),
+            ("indirect", 1),
+        ],
+    );
+    let wrong = source.replace("let right: ?char", "let right: ?Left");
+    let failure = sysroot::compile(&wrong).unwrap_err();
+    assert!(
+        failure.contains("type mismatch") && failure.contains("(primitive char)"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn type_return_evidence_joins_only_agreeing_possible_exits() {
+    let source = "
+        typealias First = char;
+        comptime fn Selected(flag: bool) -> Type { if flag { First } else { char } }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn relay(flag: bool) -> bool {
+            let value: ?char = empty(Selected(flag));
+            value matches null
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }
+    ";
+    check_events(source, &[("Selected", 2), ("empty", 2)]);
+    for divergent in [
+        source.replace("else { char }", "else { bool }"),
+        source.replace(
+            "if flag { First }",
+            "if do { if flag { return bool; }; true } { First }",
+        ),
+    ] {
+        let failure = sysroot::compile(&divergent).unwrap_err();
+        assert!(
+            failure.contains("needs its original comptime invocation"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
 fn an_explicit_type_consumer_uses_each_original_invocation_once() {
     check_events(
         "

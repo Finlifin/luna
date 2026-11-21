@@ -114,6 +114,23 @@ impl Checker<'_, '_> {
         }
     }
 
+    /// A literal type binding has no input acquisition or execution effects.
+    pub(super) fn atomic_type_data(
+        &mut self,
+        expr: &Expr<'_>,
+    ) -> Result<Option<CompletedType>, Error> {
+        match &expr.kind {
+            H::Builtin(name) if name.as_str() == "Any" => {
+                Ok(Some(CompletedType::Description(n::DescriptionLiteral::Any)))
+            }
+            H::Builtin(_) | H::TyType | H::TyNoReturn => self
+                .form_type_identity(expr)
+                .map(CompletedType::Identity)
+                .map(Some),
+            _ => Ok(None),
+        }
+    }
+
     pub(super) fn complete_type_data(
         &mut self,
         expr: &Expr<'_>,
@@ -250,10 +267,10 @@ impl Checker<'_, '_> {
                 })?;
                 self.declared_type_data(expr, owner)
             }
-            H::Builtin(name) if name.as_str() == "Any" => {
-                Ok(CompletedType::Description(n::DescriptionLiteral::Any))
-            }
-            _ => self.form_type_identity(expr).map(CompletedType::Identity),
+            _ => match self.atomic_type_data(expr)? {
+                Some(data) => Ok(data),
+                None => self.form_type_identity(expr).map(CompletedType::Identity),
+            },
         }
     }
 

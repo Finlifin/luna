@@ -378,6 +378,53 @@ fn computed_type_contracts_are_checked_before_unused_callable_values_escape() {
 }
 
 #[test]
+fn projecting_a_callable_signature_preserves_guarded_formation_at_its_source() {
+    let package = sysroot::compile(
+        "
+        comptime fn Selected() -> Type { u16 }
+        comptime fn guarded(value: T) -> T
+        where T, flag: bool, requires T == u8
+        {
+            value
+        }
+        comptime fn reach(flag: bool) -> bool {
+            if flag { let rejected: comptime fn(u16) -> u16 = guarded<Selected(), true>; };
+            true
+        }
+        ",
+    )
+    .unwrap();
+    let id = |name| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration
+    };
+    for tree in [false, true] {
+        sysroot::with_comptime(&package, Budget::default(), tree, |vm| {
+            let skipped = vm.invoke(id("reach"), vec![Value::Bool(false)]).unwrap();
+            assert_eq!(skipped, Value::Bool(true));
+            let entered = comptime_interpretor::Event::EnterFunction(id("Selected"));
+            let calls = |vm: &comptime_interpretor::Interpreter<'_>| {
+                vm.events()
+                    .iter()
+                    .filter(|event| **event == entered)
+                    .count()
+            };
+            assert_eq!(calls(vm), 0);
+            let err = vm.invoke(id("reach"), vec![Value::Bool(true)]).unwrap_err();
+            assert_eq!(
+                err.kind,
+                comptime_interpretor::ErrorKind::TypeContractRejected
+            );
+            assert_eq!(calls(vm), 1);
+        });
+    }
+}
+
+#[test]
 fn computed_types_keep_opaque_normal_form_identity() {
     assert_eq!(
         sysroot::run(
@@ -409,7 +456,6 @@ fn runtime_callable_input_preparation_executes_only_the_clause_packet() {
 }
 
 #[test]
-#[ignore = "a callable signature depending on an invocation-time Type still needs contextual checking"]
 fn computed_type_inputs_can_complete_a_dependent_callable_signature() {
     assert_eq!(
         sysroot::run(
@@ -424,7 +470,7 @@ fn computed_type_inputs_can_complete_a_dependent_callable_signature() {
 }
 
 #[test]
-fn an_unfinished_signature_cannot_be_published_as_an_unrelated_callable_type() {
+fn a_projected_u8_signature_cannot_be_published_as_a_bool_callable() {
     let failure = sysroot::compile(
         "
         comptime fn Byte() -> Type { u8 }
@@ -438,7 +484,9 @@ fn an_unfinished_signature_cannot_be_published_as_an_unrelated_callable_type() {
     )
     .unwrap_err();
     assert!(
-        failure.contains("signature still depends on an invocation-time clause input"),
+        failure.contains("type mismatch")
+            && failure.contains("(primitive bool)")
+            && failure.contains("(primitive u8)"),
         "{failure}"
     );
 }

@@ -139,7 +139,7 @@ impl std::fmt::Display for Progress {
         f.write_str("))")
     }
 }
-pub(super) fn spend(fuel: &mut u64, steps: usize, span: Span) -> Result<(), Error> {
+pub(in crate::program) fn spend(fuel: &mut u64, steps: usize, span: Span) -> Result<(), Error> {
     *fuel = fuel
         .checked_sub(steps as u64)
         .ok_or_else(|| error(span, "dependent input preparation budget exhausted"))?;
@@ -815,6 +815,21 @@ impl Checker<'_, '_> {
             && self.describing_input_of(lexical_owner)
             && let Some(identity) =
                 self.deferred_definition_input(lexical_owner, &value, source.span)?
+        {
+            return Ok(Resolution::Known(value, identity));
+        }
+        // At a concrete comptime call without entry constraints this fact can
+        // specialize the remaining domains and result without proving an entry
+        // obligation or changing the execution order of the explicit operand.
+        if has_source
+            && captures.is_empty()
+            && callee.ty.is_comptime_callable()
+            && owner.is_none_or(|id| {
+                self.type_parameters.get(&id).is_none_or(Vec::is_empty)
+                    && self.requirements.get(&id).is_none_or(Vec::is_empty)
+                    && self.capabilities.get(&id).is_none_or(Vec::is_empty)
+            })
+            && let Some(identity) = self.projected_type_return(&value, source.span)?
         {
             return Ok(Resolution::Known(value, identity));
         }

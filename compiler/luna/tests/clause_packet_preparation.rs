@@ -437,13 +437,30 @@ fn clause_defaults_follow_explicit_producers_and_explicit_supply_skips_them() {
 
 #[test]
 fn default_identity_does_not_erase_failure_or_publish_unavailable_types() {
-    for body in [
-        "Unknown()",
-        "do { var selected: Type = u8; selected = bool; selected }",
+    check(
+        "
+        comptime fn Byte() -> Type { u8 }
+        comptime fn identity(value: T) -> T where .T: Type = Byte() { value }
+        comptime fn check() -> bool {
+            let selected: comptime fn(u8) -> u8 = identity<>;
+            selected(7) == 7
+        }
+        ",
+        &["check", "Byte", "identity"],
+    );
+    for (body, diagnostic) in [
+        (
+            "Unknown()",
+            "signature still depends on an invocation-time clause input",
+        ),
+        (
+            "do { var selected: Type = u8; selected = bool; selected }",
+            "type mismatch",
+        ),
     ] {
         let failure = sysroot::compile(&format!(
             "
-            comptime fn Unknown() -> Type {{ u8 }}
+            comptime fn Unknown() -> Type {{ let choices: meta.List<Type> = [u8]; choices[0] }}
             comptime fn identity(value: T) -> T where .T: Type = {body} {{ value }}
             comptime fn check() -> bool {{
                 let selected: comptime fn(u8) -> u8 = identity<>;
@@ -452,10 +469,7 @@ fn default_identity_does_not_erase_failure_or_publish_unavailable_types() {
         "
         ))
         .unwrap_err();
-        assert!(
-            failure.contains("signature still depends on an invocation-time clause input"),
-            "{failure}"
-        );
+        assert!(failure.contains(diagnostic), "{failure}");
     }
     let failure = sysroot::compile(
         "

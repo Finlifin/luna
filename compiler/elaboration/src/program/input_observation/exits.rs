@@ -47,7 +47,7 @@ fn path_observation<T>(
     }
 }
 
-fn merge_identity(
+pub(super) fn merge_identity(
     result: &mut Option<Term>,
     value: Term,
     budget: &mut comptime_runtime::Budget,

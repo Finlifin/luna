@@ -766,3 +766,35 @@ fn clause_operands_read_preparation_locals_without_exporting_them() {
     });
     assert_eq!(result(&caller), vec![id(1), id(2), id(3)]);
 }
+
+#[test]
+fn a_contextual_pattern_guard_invalidates_only_the_input_it_writes() {
+    use nir::program::{NormalFormArgument, NormalMatchArm, Place};
+    use std::collections::BTreeMap;
+
+    let guard = expr(K::Block {
+        statements: vec![expr(K::Assign {
+            place: Place {
+                root: id(1),
+                fields: vec![],
+            },
+            value: Box::new(local(2)),
+        })],
+        result: Some(Box::new(local(2))),
+    });
+    let arg = NormalFormArgument::Match {
+        source: guard.source,
+        value: local(2),
+        arms: vec![NormalMatchArm {
+            pattern: P::Guard {
+                pattern: Box::new(P::Wild),
+                condition: Box::new(guard),
+            },
+            guard: None,
+            body: NormalFormArgument::Value(local(2)),
+        }],
+    };
+    let mut live = BTreeMap::from([(id(1), ()), (id(2), ())]);
+    nir::free_bindings::retain_unmodified_argument(&arg, &mut live, &mut 128).unwrap();
+    assert_eq!(live, BTreeMap::from([(id(2), ())]));
+}

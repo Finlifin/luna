@@ -167,12 +167,17 @@ impl declaration_inputs::Completion for InstanceCompletion<'_> {
         span: Span,
     ) -> Result<n::Expr, Error> {
         let owner = self.packet.owner;
+        let returns =
+            checker.signature_return_inputs(&self.signature, &telescope, &inputs, span)?;
         let value = if inputs
             .arguments
             .iter()
             .all(|arg| matches!(arg, n::NormalFormArgument::Value(_)))
         {
-            let packet = self.packet.finish(checker, telescope, inputs, span)?;
+            let mut packet = self.packet.finish(checker, telescope, inputs, span)?;
+            for (id, ty) in returns {
+                packet.admitted.entry(id).or_insert(ty);
+            }
             checker.finish_comptime_function_instance(
                 &self.expr,
                 owner,
@@ -208,7 +213,10 @@ impl declaration_inputs::Completion for InstanceCompletion<'_> {
                 checker, &bindings, &formation, &arguments, &mut steps, span,
             );
             checker.required_steps = steps;
-            let admitted = checked?;
+            let mut admitted = checked?;
+            for (id, ty) in returns {
+                admitted.entry(id).or_insert(ty);
+            }
             contract.check_formation(checker, formation, span)?;
             let signature = bindings.admitted_signature(
                 checker,

@@ -137,3 +137,9 @@ VM 在同一发布器中检查三种定义的形成条件及有限存储。对�
 一个已求出的 Type 实参可以在后续参数域、默认表达式、结果或约束中出现多次。例如签名中的两个位置都引用 T，而 T 的实参本身是一棵很大的类型树。检查器只求一次实参，但按当前 NIR 表示，每处替换都要构造一份结果。普通调用的源码检查现在从同一份 elaboration 预算支付这些构造，先按绑定深度找到实际引用，再计算对应实参的节点和载荷。嵌套函数的同号参数属于自己的作用域。预算不足时，已经交付的槽仍然有效，尚未检查完的参数域不会进入等待交付状态。当前实现为保留原有的 sort 与作用域检查，先遍历再构造，自举时可以比较这种双遍成本和边构造边计费的实现。[调用替换](../compiler/nir/src/types/input_binding.rs) · [源码调用检查](../compiler/elaboration/src/program/block_regions/ordinary_calls.rs)
 
 同一段 `Selected(flag)` 分别返回 bool 或 char 时，写成 `consume(Selected(flag), flag)`，可以在 `consume(comptime ty: Type, flag: bool)` 中检查 `empty(ty)` 并匹配结果。显式形参把类型身份的作用域和实际值的取得时刻都定下来了。在调用者中直接写 `empty(Selected(flag))`，或先用普通 `let ty = Selected(flag)`，源码检查仍缺这层交接。未来的隐式实现需要保持原作用域中的 return、可变捕获以及同一调用中先前实参的效果；单纯把后续源码搬进普通闭包会改变这些行为。[实参执行次数与身份用例](../compiler/luna/tests/ordinary_input_identity.rs)
+
+## 2026-11-21 · 调用的返回类型与实际交付的值
+
+`identity<Byte(), true>(9)` 的签名依赖第一个子句实参。若 `Byte() -> Type` 返回 `u8`，检查器可以据此检查字面量 9。调用本身仍留在实参所在的位置。另一个例子是 `guarded<Selected(), true>`，其中 `Selected()` 返回 `u16`，而 `guarded` 要求 `T == u8`。即使可以写出实例成功形成时的函数类型，跳过这一行的分支仍须正常执行；真正执行到它时才会在形成实例的地方失败。把返回类型写进全局实参观察表，会令未执行的分支提前报错，在递归调用中还会混淆内外两次调用的约束主体。[形成与递归回归](../compiler/luna/tests/ordinary_callable_types.rs)
+
+目前检查器沿已解析的声明查看直接调用的返回表达式，识别闭合类型、按值转交的 Type 形参，以及分支可确定或各分支返回同一身份的条件表达式。分析和比较都支付 elaboration 预算。子句实参的执行计划按源码顺序淘汰后续写入可能改变的证据，留下的身份仅供实例签名替换。普通调用先覆盖无入口类型约束的具体 comptime 接口。这个实现重复读取 HIR，因为任意源码位置还无法统一取得可复用的已检查函数体。自举时应比较从受检正文发布返回证据的成本，并保留原始 invocation 对控制转移、引用写回和契约失败的所有权。若结果确实取决于本次运行，例如未知条件的两支分别返回 char 和 bool，源码检查仍需要与原调用交接的续体。[返回分析](../compiler/elaboration/src/program/input_observation/return_projection.rs) · [普通实参回归](../compiler/luna/tests/ordinary_input_identity.rs)
