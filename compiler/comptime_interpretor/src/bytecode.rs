@@ -61,9 +61,7 @@ struct LocalScope {
 }
 
 impl Frame {
-    // Production sessions own and drop cancelled code frames. Only the test
-    // driver lends a root frame back to its caller after cancellation.
-    #[cfg(test)]
+    // A cancelled lexical fragment may still need to restore its caller bindings.
     pub(super) fn cancel(&mut self) {
         self.terminal = true;
         self.waiting = None;
@@ -965,7 +963,10 @@ impl<'a> Interpreter<'a> {
         self.bytecode_contextual_inputs
     }
 
-    fn lexical_expression_code(&mut self, body: &Expr) -> Result<Option<Arc<Program>>, Error> {
+    pub(super) fn lexical_expression_code(
+        &mut self,
+        body: &Expr,
+    ) -> Result<Option<Arc<Program>>, Error> {
         if !self.bytecode_invocation_available() {
             return Ok(None);
         }

@@ -3,6 +3,8 @@
 use super::*;
 
 mod admitted;
+mod source_prefix;
+pub use source_prefix::{SourceCallPrefix, SourceOperandScope, SourceOperandStep};
 
 pub use admitted::AdmittedCall;
 
@@ -210,7 +212,6 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn run_fragment(&mut self, frame: &mut bytecode::Frame) -> Result<Flow, Error> {
         Session::fragment(self, frame)
             .run()?

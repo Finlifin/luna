@@ -63,7 +63,6 @@ mod input_dependencies;
 mod input_domains;
 mod invocation;
 
-pub use invocation::AdmittedCall;
 pub use invocation::definition_host::{
     DefinitionHostRequest, DefinitionHostResponse, RejectedDefinitionResponse,
 };
@@ -72,6 +71,7 @@ pub use invocation::host::{
     InvocationResult, InvocationSession, OperandCall, OperandProgress, RejectedHostResponse,
 };
 pub use invocation::method_host::{MethodHostRequest, MethodHostResponse, RejectedMethodResponse};
+pub use invocation::{AdmittedCall, SourceCallPrefix, SourceOperandScope, SourceOperandStep};
 
 mod declaration_inputs;
 mod declaration_plan;
@@ -4662,56 +4662,17 @@ impl<'a> Interpreter<'a> {
             expr.source,
         )?;
         for argument in arguments {
-            operands.begin(
+            if let std::ops::ControlFlow::Break(flow) = operands.evaluate(
                 this,
-                argument.parameter,
-                argument.is_default,
-                argument.passing,
-                argument.value.source,
                 expr.source,
-            )?;
-            let value = if argument.is_default {
-                operands.import_default(this, &argument.value)?;
-                if let Some(inputs) = &trait_default_inputs {
-                    prepared_value!(this.evaluate_bound_default(
-                        expr.source,
-                        argument,
-                        inputs,
-                        &mut operands.defaults,
-                        environment
-                    ))
-                } else if dynamic_defaults {
-                    prepared_value!(this.evaluate_instance_default(
-                        expr.source,
-                        argument,
-                        &callee,
-                        &mut operands.defaults,
-                        environment
-                    ))
-                } else {
-                    prepared_value!(this.evaluate_default(
-                        expr.source,
-                        argument,
-                        &mut operands.defaults,
-                        environment
-                    ))
-                }
-            } else if argument.passing != nir::program::ArgumentPassing::Value {
-                let value =
-                    prepared_value!(this.prepare_value_reference(&argument.value, environment));
-                if argument.passing == nir::program::ArgumentPassing::ComptimeReferenceNoRebind {
-                    let Value::ComptimeReference(mut reference) = value else {
-                        unreachable!()
-                    };
-                    reference.prohibit_rebind();
-                    Value::ComptimeReference(reference)
-                } else {
-                    value
-                }
-            } else {
-                prepared_value!(this.eval(&argument.value, environment))
-            };
-            operands.supply(this, argument.parameter, value, argument.value.source)?;
+                argument,
+                environment,
+                trait_default_inputs.as_ref(),
+                dynamic_defaults.then_some(&callee),
+                |vm, expr, env| vm.eval(expr, env),
+            )? {
+                return Ok(PreparedCall::Control(flow));
+            }
         }
         let (arguments, mut default_scope) = operands.finish(this, expr.source)?;
         // The public interface domain is checked even when the chosen

@@ -1524,3 +1524,124 @@ fn source_operand_wait_keeps_the_named_slot_and_cannot_guess_a_free_selector() {
         "{failure}"
     );
 }
+
+#[test]
+fn source_checks_a_later_operand_after_the_original_prefix_runs() {
+    use comptime_interpretor::{InvocationValue, SourceOperandStep};
+    use nir::program::{ArgumentPassing, CallArgument, Expr, ExprKind, Literal};
+    use nir::{Primitive, Term};
+
+    let package = sysroot::compile(
+        "
+        comptime fn mark() -> bool { true }
+        comptime fn Selected(flag: bool) -> Type {
+            mark();
+            if flag { bool } else { char }
+        }
+        comptime fn produce(flag: bool) -> Type { Selected(flag) }
+        comptime fn accept(comptime ty: Type, value: ty) -> ?ty { null }
+        comptime fn escape() -> bool { return false; }
+    ",
+    )
+    .unwrap();
+    let id = |name| sysroot::source_function(&package, name);
+    let function = |name| {
+        package
+            .functions
+            .iter()
+            .find(|f| f.declaration == id(name))
+            .unwrap()
+    };
+    let producer = function("produce");
+    let source = producer.source;
+    let argument = |parameter, value| CallArgument {
+        parameter,
+        value,
+        is_default: false,
+        passing: ArgumentPassing::Value,
+    };
+    let first = argument(0, producer.body.clone());
+    let escaping = argument(1, function("escape").body.clone());
+    let boolean = Term::Primitive(Primitive::Bool);
+    let character = Term::Primitive(Primitive::Char);
+    sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, false, |vm| {
+        for flag in [false, true] {
+            let mut scope = vm
+                .source_operand_scope(vec![(
+                    producer.parameters[0],
+                    boolean.clone(),
+                    InvocationValue::Live(Value::Bool(flag)),
+                )])
+                .unwrap();
+            let mut prefix = scope.begin_call(id("accept"), vec![], source).unwrap();
+            assert!(prefix.data(0).unwrap().is_none());
+            assert!(matches!(
+                prefix.supply(&first).unwrap(),
+                SourceOperandStep::Supplied
+            ));
+            let domain = prefix.data(0).unwrap().unwrap().into_concrete().unwrap();
+            assert_eq!(
+                domain,
+                if flag {
+                    boolean.clone()
+                } else {
+                    character.clone()
+                }
+            );
+            assert!(prefix.data(1).unwrap().is_none());
+            // The second checked operand is formed only after the selector ran.
+            let literal = if domain == boolean {
+                Literal::Bool(true)
+            } else {
+                Literal::Char('x')
+            };
+            let second = argument(
+                1,
+                Expr {
+                    source,
+                    ty: domain.clone(),
+                    kind: ExprKind::Literal(literal),
+                },
+            );
+            assert!(matches!(
+                prefix.supply(&second).unwrap(),
+                SourceOperandStep::Supplied
+            ));
+            let returned = prefix.finish().unwrap().run_with_result_type().unwrap();
+            assert_eq!(returned.result_type, Term::Optional(Box::new(domain)));
+            assert!(matches!(
+                returned.value,
+                Value::Optional { value: None, .. }
+            ));
+        }
+        {
+            let mut scope = vm
+                .source_operand_scope(vec![(
+                    producer.parameters[0],
+                    boolean,
+                    InvocationValue::Live(Value::Bool(true)),
+                )])
+                .unwrap();
+            let mut prefix = scope.begin_call(id("accept"), vec![], source).unwrap();
+            assert!(matches!(
+                prefix.supply(&first).unwrap(),
+                SourceOperandStep::Supplied
+            ));
+            assert!(matches!(
+                prefix.supply(&escaping).unwrap(),
+                SourceOperandStep::Return(Value::Bool(false))
+            ));
+            assert!(prefix.finish().is_err());
+        }
+        for (name, count) in [("produce", 0), ("Selected", 3), ("mark", 3), ("accept", 2)] {
+            assert_eq!(
+                vm.events()
+                    .iter()
+                    .filter(|event| matches!(event, Event::EnterFunction(d) if *d == id(name)))
+                    .count(),
+                count,
+                "{name}"
+            );
+        }
+    });
+}

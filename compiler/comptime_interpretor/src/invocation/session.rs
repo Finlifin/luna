@@ -9,7 +9,6 @@ use std::task::Poll;
 enum Root<'r> {
     Invocation,
     Associated,
-    #[cfg(test)]
     Fragment(&'r mut bytecode::Frame),
     Plan(&'r mut dyn input_collection::InputPlan, &'r mut Environment),
 }
@@ -22,7 +21,6 @@ enum SessionExit {
 impl Root<'_> {
     fn code(&mut self) -> Option<&mut bytecode::Frame> {
         match self {
-            #[cfg(test)]
             Self::Fragment(frame) => Some(frame),
             _ => None,
         }
@@ -38,7 +36,6 @@ impl Root<'_> {
     fn cancel(&mut self) {
         match self {
             Self::Invocation | Self::Associated => {}
-            #[cfg(test)]
             Self::Fragment(frame) => frame.cancel(),
             Self::Plan(frame, environment) => frame.cancel(environment),
         }
@@ -137,7 +134,6 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         session
     }
 
-    #[cfg(test)]
     pub(super) fn fragment(vm: &'vm mut Interpreter<'a>, frame: &'r mut bytecode::Frame) -> Self {
         Self::new(vm, Root::Fragment(frame))
     }
@@ -680,7 +676,6 @@ impl fmt::Display for Session<'_, '_, '_> {
         match &self.root {
             Root::Invocation => f.write_str("invocation")?,
             Root::Associated => f.write_str("associated")?,
-            #[cfg(test)]
             Root::Fragment(code) => write!(f, "(fragment {code})")?,
             Root::Plan(plan, _) => write!(f, "(plan {plan})")?,
         }

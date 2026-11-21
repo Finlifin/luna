@@ -181,3 +181,9 @@ VM 在同一发布器中检查三种定义的形成条件及有限存储。对�
 `empty(Forward(do { mark(); let ty = char; ty }))` 需要先确定 `?ty` 的元素类型。源码区域现在随请求保留调用的 HIR 身份、形参槽和已检查的 producer。检查器能从这个封闭实参取得 char 并恢复待检查的槽，同时把整个 `do` 块交回调用计划。这样 `mark()` 在字节码和参考解释器中都只在原位置执行一次。将 `?char` 赋给 `?bool` 仍在检查期报错。
 
 当前关闭实参时保守地检查自由局部绑定。默认值和命名实参可能在另一个实参修改绑定之后才读取它，先前记录的局部值不能证明那次读取的结果。缺少静态证据时，区域可以带着具体槽位离开检查步骤；现有源码驱动还不能在开放正文中启动原调用的前缀。自举驱动要在持有该动态调用的上下文中恢复这个区域，并处理前缀提前退出。[源码实参请求](../compiler/elaboration/src/program/dependent_inputs/tasks.rs) · [返回值证据](../compiler/elaboration/src/program/input_observation/return_projection.rs)
+
+### 后续实参依赖前一个实参的执行结果
+
+对 `accept(Selected(flag), value)`，持有这次调用者绑定的驱动可以先提交已检查的 `Selected(flag)`，读取它在本次执行中交付的 Type，再按该类型检查并提交 `value`。每次提交执行一段字节码，调用者环境和已填槽位跨段保留。若第二段提前 return，驱动直接收到该返回值，callee 的函数体不会执行。
+
+这种接口允许驱动在后续代码成形之前取得实参，代价是按段准备字节码。它目前要求驱动已经持有某次执行的绑定并选定具名函数；开放函数定义的源码检查器还需要把待恢复的 HIR 区域关联到相应的动态调用。单独重跑 producer 会重复此前的副作用。[按段执行](../compiler/comptime_interpretor/src/invocation/source_prefix.rs) · [真实 sysroot 用例](../compiler/luna/tests/ordinary_input_identity.rs)

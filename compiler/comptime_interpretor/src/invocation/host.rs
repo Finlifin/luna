@@ -44,7 +44,7 @@ impl<'a> HostLease<'a> {
 
 /// A source comptime invocation. Dropping it cancels and restores its caller.
 pub struct InvocationSession<'vm, 'world> {
-    session: Session<'vm, 'world, 'static>,
+    pub(super) session: Session<'vm, 'world, 'static>,
 }
 
 /// A normal return after the callee's exit checks. The result type is the

@@ -39,7 +39,11 @@ impl CallOperands {
         if !valid {
             return Err(vm.failure(ErrorKind::InvalidCallPlan, Some(source)));
         }
-        Ok(Self {
+        Ok(Self::for_slots(count, bindings, needs_defaults))
+    }
+
+    pub(super) fn for_slots(count: usize, bindings: &[LocalId], needs_defaults: bool) -> Self {
+        Self {
             slots: vec![None; count],
             active: None,
             last_default: None,
@@ -50,7 +54,7 @@ impl CallOperands {
             },
             unimported: BTreeMap::new(),
             defaults: Environment::new(),
-        })
+        }
     }
 
     pub(super) fn begin(
@@ -82,6 +86,53 @@ impl CallOperands {
         }
         self.active = Some(slot);
         Ok(())
+    }
+
+    /// Evaluate the routed operand in its original lexical or default scope.
+    /// The prefix driver can run explicit value code as a lexical fragment.
+    pub(super) fn evaluate(
+        &mut self,
+        vm: &mut Interpreter<'_>,
+        call: SourceRange,
+        argument: &nir::program::CallArgument,
+        caller: &mut Environment,
+        trait_defaults: Option<&method_catalog::Inputs<Term>>,
+        dynamic_callee: Option<&Value>,
+        explicit: impl FnOnce(&mut Interpreter<'_>, &Expr, &mut Environment) -> Result<Flow, Error>,
+    ) -> Result<std::ops::ControlFlow<Flow>, Error> {
+        self.begin(
+            vm,
+            argument.parameter,
+            argument.is_default,
+            argument.passing,
+            argument.value.source,
+            call,
+        )?;
+        let flow = if argument.is_default {
+            self.import_default(vm, &argument.value)?;
+            if let Some(inputs) = trait_defaults {
+                vm.evaluate_bound_default(call, argument, inputs, &mut self.defaults, caller)?
+            } else if let Some(callee) = dynamic_callee {
+                vm.evaluate_instance_default(call, argument, callee, &mut self.defaults, caller)?
+            } else {
+                vm.evaluate_default(call, argument, &mut self.defaults, caller)?
+            }
+        } else if argument.passing != nir::program::ArgumentPassing::Value {
+            let mut flow = vm.prepare_value_reference(&argument.value, caller)?;
+            if argument.passing == nir::program::ArgumentPassing::ComptimeReferenceNoRebind
+                && let Flow::Value(Value::ComptimeReference(reference)) = &mut flow
+            {
+                reference.prohibit_rebind();
+            }
+            flow
+        } else {
+            explicit(vm, &argument.value, caller)?
+        };
+        let Flow::Value(value) = flow else {
+            return Ok(std::ops::ControlFlow::Break(flow));
+        };
+        self.supply(vm, argument.parameter, value, argument.value.source)?;
+        Ok(std::ops::ControlFlow::Continue(()))
     }
 
     pub(super) fn supply(
