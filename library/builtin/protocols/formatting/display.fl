@@ -1,5 +1,6 @@
 use bindings.{symbol_byte, symbol_byte_length}
-use primitives.{Symbol, u64}
+use primitives.{Symbol, bf16, f16, f32, f64, u64}
+use protocols.formatting.float;
 use protocols.formatting.writer.ByteWriter;
 
 pub trait Display {
@@ -201,5 +202,29 @@ impl Display for Symbol {
             output.write_byte(byte)!;
             index = index + 1;
         }
+    }
+}
+
+impl Display for f16 {
+    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        float.write_f16(self, false, output)
+    }
+}
+
+impl Display for bf16 {
+    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        float.write_bf16(self, false, output)
+    }
+}
+
+impl Display for f32 {
+    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        float.write_f32(self, false, output)
+    }
+}
+
+impl Display for f64 {
+    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        float.write_f64(self, false, output)
     }
 }

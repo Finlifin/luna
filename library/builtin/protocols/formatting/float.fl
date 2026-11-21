@@ -1,0 +1,743 @@
+use numeric.math_intrinsics;
+use primitives.*;
+use protocols.formatting.writer.ByteWriter;
+use protocols.resources.{Clone, Copy}
+
+{-
+    Zero-allocation IEEE-754 binary-float-to-decimal formatter for f16, bf16,
+    f32, and f64. Uses normalized 128-bit binary scaling with inward-shrunk
+    midpoint intervals so shortest-representation decimal output is guaranteed
+    to round-trip without heap allocation or large power-of-ten tables.
+-}
+struct Scaled128 {
+    mant: u128,
+    exp: i32,
+}
+
+impl Clone for Scaled128 {
+    fn clone(*self) -> Self {
+        Scaled128 {
+            mant: self.mant.*,
+            exp: self.exp.*,
+        }
+    }
+}
+
+impl Copy for Scaled128 {}
+
+struct DecimalDigits {
+    digits: u64,
+    count: u8,
+    dec_exp: i32,
+}
+
+impl Clone for DecimalDigits {
+    fn clone(*self) -> Self {
+        DecimalDigits {
+            digits: self.digits.*,
+            count: self.count.*,
+            dec_exp: self.dec_exp.*,
+        }
+    }
+}
+
+impl Copy for DecimalDigits {}
+
+{- Exact top 128 bits of (a * b) rounded to nearest, using 64-bit limb products. -}
+fn mul_hi128(a: u128, b: u128) -> u128 {
+    let a_hi = a'bitvec[64..128].as(u128);
+    let a_lo = a'bitvec[0..64].as(u128);
+    let b_hi = b'bitvec[64..128].as(u128);
+    let b_lo = b'bitvec[0..64].as(u128);
+
+    let p0_hi = (a_lo * b_lo)'bitvec[64..128].as(u128);
+    let p1 = a_lo * b_hi;
+    let p2 = a_hi * b_lo;
+    let p3 = a_hi * b_hi;
+
+    let mid = p0_hi + p1'bitvec[0..64].as(u128) + p2'bitvec[0..64].as(u128);
+    let carry = mid'bitvec[64..66].as(u128);
+    let round_bit = mid'bitvec[63..64].as(u128);
+
+    let p1_hi = p1'bitvec[64..128].as(u128);
+    let p2_hi = p2'bitvec[64..128].as(u128);
+    -- Each 64-bit limb <= 2^64 - 1: (2^64 - 1)^2 = (2^64 - 2)*2^64 + 1 and mid < 3 * 2^64.
+    assumes p3 <= 340282366920938463426481119284349108225;
+    assumes p1_hi <= 18446744073709551614;
+    assumes p2_hi <= 18446744073709551614;
+    assumes carry <= 2;
+
+    let hi = p3 + p1_hi + p2_hi + carry;
+    if hi < 340282366920938463463374607431768211455 {
+        hi + round_bit
+    } else {
+        hi
+    }
+}
+
+fn normalize_u128(mant: u128, exp: i32) -> Scaled128 {
+    if mant == 0 or exp < -100000 or exp > 100000 {
+        return Scaled128 {
+            mant: 0,
+            exp: 0,
+        };
+    }
+    let lz = math_intrinsics.leading_zeros(mant);
+    if lz >= 128 {
+        return Scaled128 {
+            mant: 0,
+            exp: 0,
+        };
+    }
+    let shifted = math_intrinsics.funnel_shift_left(mant, 0, lz);
+    let lz_u8 = lz'bitvec[0..7].as(u8);
+    let lz_i32 = lz_u8'bitvec.as(u32)'bitvec.as(i32);
+    if lz_i32 < 0 or lz_i32 > 127 {
+        return Scaled128 {
+            mant: 0,
+            exp: 0,
+        };
+    }
+    Scaled128 {
+        mant: shifted,
+        exp: exp - lz_i32,
+    }
+}
+
+fn s128_mul(a: Scaled128, b: Scaled128) -> Scaled128 {
+    if a.mant == 0 or b.mant == 0 {
+        return Scaled128 {
+            mant: 0,
+            exp: 0,
+        };
+    }
+    if a.exp < -100000 or a.exp > 100000 or b.exp < -100000 or b.exp > 100000 {
+        return Scaled128 {
+            mant: 0,
+            exp: 0,
+        };
+    }
+    let hi = mul_hi128(a.mant, b.mant);
+    if hi'bitvec[127..128].as(u8) == 0 {
+        Scaled128 {
+            mant: math_intrinsics.funnel_shift_left(hi, 0, 1),
+            exp: a.exp + b.exp + 127,
+        }
+    } else {
+        Scaled128 {
+            mant: hi,
+            exp: a.exp + b.exp + 128,
+        }
+    }
+}
+
+fn pow5_scaled(p: i32) -> Scaled128 {
+    -- Normalized 2^127 * 2^-127 == 1.
+    let one = Scaled128 {
+        mant: 170141183460469231731687303715884105728,
+        exp: -127,
+    };
+    if p == 0 or p < -1000 or p > 1000 {
+        return one;
+    }
+    var base = if p > 0 {
+        normalize_u128(5, 0)
+    } else {
+        -- Normalized rounding of 1/5 == 0xcccccccccccccccccccccccccccccccd * 2^-130.
+        Scaled128 {
+            mant: 272225893536750770770699685945414569165,
+            exp: -130,
+        }
+    }
+    let abs_p: i32 = if p > 0 { p } else { -p }
+    var exponent: u32 = abs_p'bitvec.as(u32);
+    if exponent > 1000 {
+        return one;
+    }
+    var acc = one;
+    while exponent > 0 {
+        if exponent % 2 == 1 {
+            acc = s128_mul(acc, base);
+        }
+        exponent = exponent / 2;
+        if exponent > 0 {
+            base = s128_mul(base, base);
+        }
+    }
+    acc
+}
+
+fn to_fixed120(mant: u128, exp: i32, scale: Scaled128) -> u128 {
+    let prod = s128_mul(normalize_u128(mant, exp), scale);
+    if prod.mant == 0 {
+        return 0;
+    }
+    if prod.exp < -100000 or prod.exp > 100000 {
+        return 0;
+    }
+    let pe120 = prod.exp + 120;
+    let u128_max: u128 = 340282366920938463463374607431768211455;
+    if pe120 >= 0 {
+        return u128_max;
+    }
+    let shift = -pe120;
+    if shift >= 128 {
+        return 0;
+    }
+    let shift_u128 = shift'bitvec[0..7].as(u128);
+    if shift_u128 == 0 or shift_u128 >= 128 {
+        return 0;
+    }
+    let q = math_intrinsics.funnel_shift_right(0, prod.mant, shift_u128);
+    let round_bit = math_intrinsics.funnel_shift_right(0, prod.mant, shift_u128 - 1) % 2;
+    if q < u128_max { q + round_bit } else { q }
+}
+
+struct FixedInterval {
+    slo: u128,
+    smid: u128,
+    shi: u128,
+    dec_exp: i32,
+    exact_ten: bool,
+}
+
+impl Clone for FixedInterval {
+    fn clone(*self) -> Self {
+        FixedInterval {
+            slo: self.slo.*,
+            smid: self.smid.*,
+            shi: self.shi.*,
+            dec_exp: self.dec_exp.*,
+            exact_ten: self.exact_ten.*,
+        }
+    }
+}
+
+impl Copy for FixedInterval {}
+
+fn estimate_dec_exp(mant: u64, exp2: i32) -> i32 {
+    if exp2 < -1200 or exp2 > 1200 {
+        return 0;
+    }
+    let lz64 = math_intrinsics.leading_zeros(mant);
+    let lz64_u8 = lz64'bitvec[0..7].as(u8);
+    let lz64_i32 = lz64_u8'bitvec.as(u32)'bitvec.as(i32);
+    let bit_len = if lz64_i32 >= 0 and lz64_i32 < 64 {
+        64 - lz64_i32
+    } else {
+        1
+    }
+    let n = exp2 + bit_len - 1;
+    let abs_n_i32: i32 = if n >= 0 { n } else { -n }
+    let abs_n: u32 = abs_n_i32'bitvec.as(u32);
+    if abs_n > 2000 {
+        return 0;
+    }
+    let k_mag: u32 = if n >= 0 {
+        (abs_n * 78913) / 262144
+    } else {
+        (abs_n * 78913 + 262143) / 262144
+    }
+    let k_i32 = k_mag'bitvec.as(i32);
+    if k_i32 < 0 or k_i32 > 1000 {
+        return 0;
+    }
+    if n >= 0 { k_i32 } else { -k_i32 }
+}
+
+fn compute_scaled_triplet(
+    mant_u128: u128,
+    b_exp: i32,
+    asymmetric: bool,
+    k: i32,
+) -> FixedInterval {
+    if mant_u128 == 0 or mant_u128 > 9007199254740991 or k < -1000 or k > 1000 {
+        return FixedInterval {
+            slo: 0,
+            smid: 0,
+            shi: 0,
+            dec_exp: k,
+            exact_ten: false,
+        };
+    }
+    let mid_m = 4 * mant_u128;
+    let hi_m = mid_m + 2;
+    let lo_m = if asymmetric { mid_m - 1 } else { mid_m - 2 }
+    let p5 = pow5_scaled(-k);
+    if p5.exp < -100000 or p5.exp > 100000 {
+        return FixedInterval {
+            slo: 0,
+            smid: 0,
+            shi: 0,
+            dec_exp: k,
+            exact_ten: false,
+        };
+    }
+    let scale = Scaled128 {
+        mant: p5.mant,
+        exp: p5.exp - k,
+    };
+    let slo_raw = to_fixed120(lo_m, b_exp, scale);
+    let smid = to_fixed120(mid_m, b_exp, scale);
+    let shi_raw = to_fixed120(hi_m, b_exp, scale);
+
+    let u128_max: u128 = 340282366920938463463374607431768211455;
+    let err_margin: u128 = 256;
+    let slo = if slo_raw <= u128_max - err_margin {
+        slo_raw + err_margin
+    } else {
+        u128_max
+    };
+    let shi = if shi_raw >= err_margin {
+        shi_raw - err_margin
+    } else {
+        0
+    };
+    FixedInterval {
+        slo: slo,
+        smid: smid,
+        shi: shi,
+        dec_exp: k,
+        exact_ten: false,
+    }
+}
+
+fn scale_finite_interval(
+    mant_u128: u128,
+    b_exp: i32,
+    asymmetric: bool,
+    init_k: i32,
+) -> FixedInterval {
+    let one120: u128 = 1329227995784915872903807060280344576;
+    let ten120: u128 = 13292279957849158729038070602803445760;
+    var k: i32 = init_k;
+    var tries: u8 = 0;
+    var iv = FixedInterval {
+        slo: 0,
+        smid: 0,
+        shi: 0,
+        dec_exp: k,
+        exact_ten: false,
+    };
+    while tries < 6 {
+        if k < -1000 or k > 1000 {
+            break;
+        }
+        iv = compute_scaled_triplet(mant_u128, b_exp, asymmetric, k);
+        if iv.shi < one120 {
+            k = k - 1;
+            tries = tries + 1;
+        } else if iv.slo >= ten120 {
+            k = k + 1;
+            tries = tries + 1;
+        } else if iv.shi >= ten120 {
+            return FixedInterval {
+                slo: iv.slo,
+                smid: iv.smid,
+                shi: iv.shi,
+                dec_exp: k + 1,
+                exact_ten: true,
+            };
+        } else {
+            break;
+        }
+    }
+    iv
+}
+
+fn choose_terminal_digit(d_lo: u8, f_lo: u128, d_mid: u8, f_mid: u128, d_hi: u8) -> u8 {
+    let low_ceil: u8 = if f_lo == 0 {
+        d_lo
+    } else if d_lo < 255 {
+        d_lo + 1
+    } else {
+        255
+    }
+    if low_ceil > d_hi {
+        return 255;
+    }
+    let half120: u128 = 664613997892457936451903530140172288;
+    if d_mid < low_ceil {
+        low_ceil
+    } else if d_mid > d_hi {
+        d_hi
+    } else if d_mid < d_hi and (f_mid > half120 or (f_mid == half120 and d_mid % 2 == 1)) {
+        d_mid + 1
+    } else {
+        d_mid
+    }
+}
+
+fn trim_trailing_zeros(digits_in: u64, count_in: u8, dec_exp: i32) -> DecimalDigits {
+    var digits = digits_in;
+    var count = count_in;
+    while count > 1 and digits % 10 == 0 {
+        digits = digits / 10;
+        count = count - 1;
+    }
+    DecimalDigits {
+        digits: digits,
+        count: count,
+        dec_exp: dec_exp,
+    }
+}
+
+fn append_decimal_digit(digits: u64, digit: u8) -> u64 {
+    let d64 = digit'bitvec.as(u64);
+    if d64 <= 9 and digits <= 1844674407370955160 {
+        digits * 10 + d64
+    } else {
+        digits
+    }
+}
+
+fn extract_finite_digits(iv_in: FixedInterval, max_digits: u8) -> DecimalDigits {
+    let ten120: u128 = 13292279957849158729038070602803445760;
+    var slo = iv_in.slo;
+    var smid = iv_in.smid;
+    var shi = iv_in.shi;
+    if slo > smid {
+        slo = smid;
+    }
+    if shi < smid {
+        shi = smid;
+    }
+    if shi >= ten120 {
+        shi = ten120 - 1;
+        if smid > shi {
+            smid = shi;
+        }
+        if slo > smid {
+            slo = smid;
+        }
+    }
+
+    var digits: u64 = 0;
+    var count: u8 = 0;
+    var i: u8 = 0;
+    while i < max_digits {
+        let d_lo = slo'bitvec[120..128].as(u8);
+        let f_lo = slo'bitvec[0..120].as(u128);
+        let d_mid = smid'bitvec[120..128].as(u8);
+        let f_mid = smid'bitvec[0..120].as(u128);
+        let d_hi = shi'bitvec[120..128].as(u8);
+        let f_hi = shi'bitvec[0..120].as(u128);
+
+        let term = choose_terminal_digit(d_lo, f_lo, d_mid, f_mid, d_hi);
+        if term <= 9 {
+            if count < 17 {
+                digits = append_decimal_digit(digits, term);
+                count = count + 1;
+            }
+            break;
+        } else if i + 1 >= max_digits {
+            if count < 17 {
+                digits = append_decimal_digit(digits, d_mid);
+                count = count + 1;
+            }
+            break;
+        } else {
+            if count < 17 {
+                digits = append_decimal_digit(digits, d_lo);
+                count = count + 1;
+            }
+            slo = f_lo * 10;
+            smid = f_mid * 10;
+            shi = f_hi * 10;
+            if smid < slo {
+                smid = slo;
+            }
+            if shi < smid {
+                shi = smid;
+            }
+            i = i + 1;
+        }
+    }
+    trim_trailing_zeros(digits, count, iv_in.dec_exp)
+}
+
+fn format_finite_digits(mant: u64, exp2: i32, asymmetric: bool, max_digits: u8) -> DecimalDigits {
+    if mant == 0
+        or mant > 9007199254740991
+        or exp2 < -1200
+        or exp2 > 1200
+        or max_digits == 0
+        or max_digits > 17
+    {
+        return DecimalDigits {
+            digits: 0,
+            count: 1,
+            dec_exp: 0,
+        };
+    }
+
+    let mant_u128 = mant'bitvec.as(u128);
+    let init_k = estimate_dec_exp(mant, exp2);
+    let iv = scale_finite_interval(mant_u128, exp2 - 2, asymmetric, init_k);
+    if iv.exact_ten {
+        return DecimalDigits {
+            digits: 1,
+            count: 1,
+            dec_exp: iv.dec_exp,
+        };
+    }
+    extract_finite_digits(iv, max_digits)
+}
+
+fn write_digits_slice(
+    digits: u64,
+    count: u8,
+    start: u8,
+    end: u8,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if count == 0 or count > 17 or start >= end or end > count {
+        return;
+    }
+    var divisor: u64 = 1;
+    var step: u8 = 1;
+    while step < count {
+        if divisor > 1844674407370955161 {
+            return;
+        }
+        divisor = divisor * 10;
+        step = step + 1;
+    }
+
+    var remaining = digits;
+    var pos: u8 = 0;
+    while pos < end {
+        if divisor == 0 or pos >= 17 {
+            return;
+        }
+        let q = remaining / divisor;
+        remaining = remaining % divisor;
+        if pos >= start {
+            let d = (q % 10)'bitvec[0..8].as(u8);
+            assumes d <= 9;
+            output.write_byte(48 + d)!;
+        }
+        if divisor >= 10 {
+            divisor = divisor / 10;
+        }
+        pos = pos + 1;
+    }
+}
+
+fn write_zero_bytes(count: i32, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if count <= 0 or count > 100 {
+        return;
+    }
+    var i: i32 = 0;
+    while i < count {
+        output.write_byte(48)!;
+        i = i + 1;
+    }
+}
+
+fn write_exp_uint(value: u32, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if value >= 10 {
+        write_exp_uint(value / 10, output)!;
+    }
+    let digit = (value % 10)'bitvec[0..8].as(u8);
+    assumes digit <= 9;
+    output.write_byte(48 + digit)
+}
+
+fn write_decimal_digits(
+    sign: bool,
+    dec: DecimalDigits,
+    require_decimal: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if sign {
+        output.write_byte(45)!;
+    }
+    let digits = dec.digits;
+    let count = dec.count;
+    let dec_exp = dec.dec_exp;
+    if count == 0 or count > 17 {
+        output.write_byte(48)!;
+        if require_decimal {
+            output.write_str(".0")!;
+        }
+        return;
+    }
+    let count_i32 = count'bitvec.as(u32)'bitvec.as(i32);
+    if count_i32 < 1 or count_i32 > 17 {
+        return;
+    }
+    if dec_exp >= -4 and dec_exp <= 15 {
+        if dec_exp >= count_i32 - 1 {
+            write_digits_slice(digits, count, 0, count, output)!;
+            let trailing_zeros = dec_exp - (count_i32 - 1);
+            write_zero_bytes(trailing_zeros, output)!;
+            if require_decimal {
+                output.write_str(".0")!;
+            }
+        } else if dec_exp >= 0 {
+            let split = (dec_exp + 1)'bitvec[0..5].as(u8);
+            write_digits_slice(digits, count, 0, split, output)!;
+            output.write_byte(46)!;
+            write_digits_slice(digits, count, split, count, output)!;
+        } else {
+            output.write_str("0.")!;
+            write_zero_bytes(-dec_exp - 1, output)!;
+            write_digits_slice(digits, count, 0, count, output)!;
+        }
+    } else {
+        write_digits_slice(digits, count, 0, 1, output)!;
+        if count > 1 {
+            output.write_byte(46)!;
+            write_digits_slice(digits, count, 1, count, output)!;
+        } else if require_decimal {
+            output.write_str(".0")!;
+        }
+        output.write_byte(101)!;
+        if dec_exp < 0 {
+            output.write_byte(45)!;
+            if dec_exp > -100000 {
+                write_exp_uint((-dec_exp)'bitvec.as(u32), output)!;
+            }
+        } else if dec_exp < 100000 {
+            write_exp_uint(dec_exp'bitvec.as(u32), output)!;
+        }
+    }
+}
+
+fn write_unpacked_float(
+    sign: bool,
+    is_special: bool,
+    mant: u64,
+    exp2: i32,
+    asymmetric: bool,
+    max_digits: u8,
+    require_decimal: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if is_special {
+        if mant != 0 {
+            return output.write_str("NaN");
+        } else if sign {
+            return output.write_str("-inf");
+        } else {
+            return output.write_str("inf");
+        }
+    }
+    if mant == 0 {
+        if sign {
+            output.write_byte(45)!;
+        }
+        output.write_byte(48)!;
+        if require_decimal {
+            output.write_str(".0")!;
+        }
+        return;
+    }
+    let dec = format_finite_digits(mant, exp2, asymmetric, max_digits);
+    write_decimal_digits(sign, dec, require_decimal, output)
+}
+
+pub fn write_f64(
+    value: f64,
+    require_decimal: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    let bits = value'bitvec.as(u64);
+    let sign = bits'bitvec[63..64].as(u8) != 0;
+    let raw_exp = bits'bitvec[52..63].as(u16);
+    let frac = bits'bitvec[0..52].as(u64);
+    if raw_exp == 2047 {
+        write_unpacked_float(sign, true, frac, 0, false, 17, require_decimal, output)
+    } else if raw_exp == 0 {
+        write_unpacked_float(sign, false, frac, -1074, false, 17, require_decimal, output)
+    } else {
+        let mant = 4503599627370496 + frac;
+        let raw_i32 = raw_exp'bitvec.as(u32)'bitvec.as(i32);
+        let exp2 = if raw_i32 >= 1 and raw_i32 <= 2046 {
+            raw_i32 - 1075
+        } else {
+            0
+        }
+        let asym = frac == 0 and raw_exp > 1;
+        write_unpacked_float(sign, false, mant, exp2, asym, 17, require_decimal, output)
+    }
+}
+
+pub fn write_f32(
+    value: f32,
+    require_decimal: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    let bits = value'bitvec.as(u32);
+    let sign = bits'bitvec[31..32].as(u8) != 0;
+    let raw_exp = bits'bitvec[23..31].as(u8);
+    let frac = bits'bitvec[0..23].as(u64);
+    if raw_exp == 255 {
+        write_unpacked_float(sign, true, frac, 0, false, 9, require_decimal, output)
+    } else if raw_exp == 0 {
+        write_unpacked_float(sign, false, frac, -149, false, 9, require_decimal, output)
+    } else {
+        let mant = 8388608 + frac;
+        let raw_i32 = raw_exp'bitvec.as(u32)'bitvec.as(i32);
+        let exp2 = if raw_i32 >= 1 and raw_i32 <= 254 {
+            raw_i32 - 150
+        } else {
+            0
+        }
+        let asym = frac == 0 and raw_exp > 1;
+        write_unpacked_float(sign, false, mant, exp2, asym, 9, require_decimal, output)
+    }
+}
+
+pub fn write_f16(
+    value: f16,
+    require_decimal: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    let bits = value'bitvec.as(u16);
+    let sign = bits'bitvec[15..16].as(u8) != 0;
+    let raw_exp = bits'bitvec[10..15].as(u8);
+    let frac = bits'bitvec[0..10].as(u64);
+    if raw_exp == 31 {
+        write_unpacked_float(sign, true, frac, 0, false, 5, require_decimal, output)
+    } else if raw_exp == 0 {
+        write_unpacked_float(sign, false, frac, -24, false, 5, require_decimal, output)
+    } else {
+        let mant = 1024 + frac;
+        let raw_i32 = raw_exp'bitvec.as(u32)'bitvec.as(i32);
+        let exp2 = if raw_i32 >= 1 and raw_i32 <= 30 {
+            raw_i32 - 25
+        } else {
+            0
+        }
+        let asym = frac == 0 and raw_exp > 1;
+        write_unpacked_float(sign, false, mant, exp2, asym, 5, require_decimal, output)
+    }
+}
+
+pub fn write_bf16(
+    value: bf16,
+    require_decimal: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    let bits = value'bitvec.as(u16);
+    let sign = bits'bitvec[15..16].as(u8) != 0;
+    let raw_exp = bits'bitvec[7..15].as(u8);
+    let frac = bits'bitvec[0..7].as(u64);
+    if raw_exp == 255 {
+        write_unpacked_float(sign, true, frac, 0, false, 4, require_decimal, output)
+    } else if raw_exp == 0 {
+        write_unpacked_float(sign, false, frac, -133, false, 4, require_decimal, output)
+    } else {
+        let mant = 128 + frac;
+        let raw_i32 = raw_exp'bitvec.as(u32)'bitvec.as(i32);
+        let exp2 = if raw_i32 >= 1 and raw_i32 <= 254 {
+            raw_i32 - 134
+        } else {
+            0
+        }
+        let asym = frac == 0 and raw_exp > 1;
+        write_unpacked_float(sign, false, mant, exp2, asym, 4, require_decimal, output)
+    }
+}

@@ -1,0 +1,351 @@
+use primitives.*;
+use protocols.formatting.writer.ByteWriter;
+
+{-
+    Zero-allocation integer radix formatting traits. Receivers are borrowed so
+    formatting follows the same protocol ownership convention as Debug. Signed
+    types format their two's-complement bit representation within their width.
+-}
+pub trait LowerHex {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter;
+}
+
+pub trait UpperHex {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter;
+}
+
+pub trait Binary {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter;
+}
+
+pub trait Octal {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter;
+}
+
+fn hex_byte(nibble: u8, uppercase: bool) -> u8 {
+    if nibble <= 9 {
+        48 + nibble
+    } else if nibble <= 15 {
+        if uppercase { 55 + nibble } else { 87 + nibble }
+    } else {
+        48
+    }
+}
+
+fn write_unsigned_hex(
+    value: u128,
+    uppercase: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if value >= 16 {
+        write_unsigned_hex(value / 16, uppercase, output)!;
+    }
+    let nibble = (value % 16)'bitvec[0..8].as(u8);
+    output.write_byte(hex_byte(nibble, uppercase))
+}
+
+fn write_unsigned_binary(value: u128, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if value >= 2 {
+        write_unsigned_binary(value / 2, output)!;
+    }
+    let bit = (value % 2)'bitvec[0..8].as(u8);
+    assumes bit <= 1;
+    output.write_byte(48 + bit)
+}
+
+fn write_unsigned_octal(value: u128, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if value >= 8 {
+        write_unsigned_octal(value / 8, output)!;
+    }
+    let digit = (value % 8)'bitvec[0..8].as(u8);
+    assumes digit <= 7;
+    output.write_byte(48 + digit)
+}
+
+impl LowerHex for u8 {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
+    }
+}
+
+impl UpperHex for u8 {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
+    }
+}
+
+impl Binary for u8 {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_binary(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl Octal for u8 {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_octal(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl LowerHex for u16 {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
+    }
+}
+
+impl UpperHex for u16 {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
+    }
+}
+
+impl Binary for u16 {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_binary(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl Octal for u16 {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_octal(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl LowerHex for u32 {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
+    }
+}
+
+impl UpperHex for u32 {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
+    }
+}
+
+impl Binary for u32 {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_binary(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl Octal for u32 {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_octal(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl LowerHex for u64 {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
+    }
+}
+
+impl UpperHex for u64 {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
+    }
+}
+
+impl Binary for u64 {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_binary(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl Octal for u64 {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_octal(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl LowerHex for u128 {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
+    }
+}
+
+impl UpperHex for u128 {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
+    }
+}
+
+impl Binary for u128 {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_binary(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl Octal for u128 {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_octal(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl LowerHex for usize {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(builtin.compiler.usize_representation(self.*), false, output)
+    }
+}
+
+impl UpperHex for usize {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(builtin.compiler.usize_representation(self.*), true, output)
+    }
+}
+
+impl Binary for usize {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_binary(builtin.compiler.usize_representation(self.*), output)
+    }
+}
+
+impl Octal for usize {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_octal(builtin.compiler.usize_representation(self.*), output)
+    }
+}
+
+impl LowerHex for i8 {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
+    }
+}
+
+impl UpperHex for i8 {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
+    }
+}
+
+impl Binary for i8 {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_binary(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl Octal for i8 {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_octal(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl LowerHex for i16 {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
+    }
+}
+
+impl UpperHex for i16 {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
+    }
+}
+
+impl Binary for i16 {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_binary(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl Octal for i16 {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_octal(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl LowerHex for i32 {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
+    }
+}
+
+impl UpperHex for i32 {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
+    }
+}
+
+impl Binary for i32 {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_binary(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl Octal for i32 {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_octal(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl LowerHex for i64 {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
+    }
+}
+
+impl UpperHex for i64 {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
+    }
+}
+
+impl Binary for i64 {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_binary(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl Octal for i64 {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_octal(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl LowerHex for i128 {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
+    }
+}
+
+impl UpperHex for i128 {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
+    }
+}
+
+impl Binary for i128 {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_binary(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl Octal for i128 {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_octal(self.*'bitvec.as(u128), output)
+    }
+}
+
+impl LowerHex for isize {
+    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(builtin.compiler.isize_representation(self.*), false, output)
+    }
+}
+
+impl UpperHex for isize {
+    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_hex(builtin.compiler.isize_representation(self.*), true, output)
+    }
+}
+
+impl Binary for isize {
+    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_binary(builtin.compiler.isize_representation(self.*), output)
+    }
+}
+
+impl Octal for isize {
+    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        write_unsigned_octal(builtin.compiler.isize_representation(self.*), output)
+    }
+}

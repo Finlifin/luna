@@ -108,7 +108,7 @@ fn comptime_format_plan_debug_spec_and_comptime_text_bytes() {
                 and (FormatPlan.parse("x{:") matches error FormatErr.UnclosedField(1))
                 and (FormatPlan.parse("x{:?") matches error FormatErr.UnclosedField(1))
                 and (FormatPlan.parse("{:?x}") matches error FormatErr.UnsupportedField(0))
-                and (FormatPlan.parse("{:x}") matches error FormatErr.UnsupportedField(0))
+                and (FormatPlan.parse("{:q}") matches error FormatErr.UnsupportedField(0))
                 and (FormatPlan.parse("{:}") matches error FormatErr.UnsupportedField(0))
         }
 

@@ -1,6 +1,6 @@
-use builtin.fmt.{ByteWriter, Debug, Display}
+use builtin.fmt.{Binary, ByteWriter, Debug, Display, LowerHex, Octal, UpperHex}
 use collections_impl.vec.Vec;
-use fmt_impl.parse.{FormatPlan, Parse}
+use fmt_impl.parse.{FormatKind, FormatPlan, Parse}
 use io_impl.errors.IoErr;
 use io_impl.writer.{stderr, stdout, write_all}
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
@@ -27,7 +27,7 @@ fn write_segment(
     }
 }
 
-{- Dispatch one argument via Display (`{}`) or borrowed Debug (`{:?}`). -}
+{- Dispatch one argument via Display (`{}`), Debug (`{:?}`), or radix traits. -}
 fn write_arg(
     output: *W,
     index: usize,
@@ -36,22 +36,71 @@ fn write_arg(
 where
     W :- ByteWriter,
     T,
-    is_debug: meta.List<bool>,
+    kinds: meta.List<FormatKind>,
 {
-    inline for i in 0..is_debug.length() {
+    inline for i in 0..kinds.length() {
         const arg_index: usize = i.to_usize();
         if index == arg_index {
-            const want_debug: bool = is_debug.get(i) match {
-                flag? => flag,
-                null => false,
+            const kind: FormatKind = kinds.get(i) match {
+                found? => found,
+                null => FormatKind.display,
             }
-            inline if want_debug {
+            const is_debug: bool = kind matches FormatKind.debug;
+            const is_lower_hex: bool = (kind matches FormatKind.lower_hex)
+                or (kind matches FormatKind.lower_hex_alt);
+            const is_upper_hex: bool = (kind matches FormatKind.upper_hex)
+                or (kind matches FormatKind.upper_hex_alt);
+            const is_binary: bool = (kind matches FormatKind.binary)
+                or (kind matches FormatKind.binary_alt);
+            const is_octal: bool = (kind matches FormatKind.octal)
+                or (kind matches FormatKind.octal_alt);
+            const is_alt: bool = (kind matches FormatKind.lower_hex_alt)
+                or (kind matches FormatKind.upper_hex_alt)
+                or (kind matches FormatKind.binary_alt)
+                or (kind matches FormatKind.octal_alt);
+            inline if is_debug {
                 inline if T :- Debug {
                     return value.ref.as(Debug).write_debug(output);
                 }
             } else {
-                inline if T :- Display {
-                    return value.write(output);
+                inline if is_lower_hex {
+                    inline if is_alt {
+                        output.write_str("0x")!;
+                    }
+                    inline if T :- LowerHex {
+                        return value.ref.as(LowerHex).write_lower_hex(output);
+                    }
+                } else {
+                    inline if is_upper_hex {
+                        inline if is_alt {
+                            output.write_str("0X")!;
+                        }
+                        inline if T :- UpperHex {
+                            return value.ref.as(UpperHex).write_upper_hex(output);
+                        }
+                    } else {
+                        inline if is_binary {
+                            inline if is_alt {
+                                output.write_str("0b")!;
+                            }
+                            inline if T :- Binary {
+                                return value.ref.as(Binary).write_binary(output);
+                            }
+                        } else {
+                            inline if is_octal {
+                                inline if is_alt {
+                                    output.write_str("0o")!;
+                                }
+                                inline if T :- Octal {
+                                    return value.ref.as(Octal).write_octal(output);
+                                }
+                            } else {
+                                inline if T :- Display {
+                                    return value.write(output);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             return;
@@ -65,13 +114,13 @@ fn write_fmt_tuple(
     values: defer Parse(format),
 ) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
     const segments = FormatPlan.literal_segments_for(format);
-    const is_debug = FormatPlan.argument_is_debug_for(format);
+    const kinds = FormatPlan.argument_kinds_for(format);
     const segment_count: usize = segments.length().to_usize();
     var index: usize = 0;
     inline for value in values'tuple_enumerate {
         write_segment<W, segments>(output, index)!;
         const T = value'type;
-        write_arg<W, T, is_debug>(output, index, value)!;
+        write_arg<W, T, kinds>(output, index, value)!;
         if index < segment_count {
             index = index + 1;
         }

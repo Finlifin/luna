@@ -75,7 +75,7 @@ fn format_plan_rejects_malformed_fields_at_utf8_byte_offsets() {
                 (FormatPlan.parse("}") matches error FormatErr.UnmatchedClose(0)) and
                 (FormatPlan.parse("{{}") matches error FormatErr.UnmatchedClose(2)) and
                 (FormatPlan.parse("{0}") matches error FormatErr.UnsupportedField(0)) and
-                (FormatPlan.parse("{:x}") matches error FormatErr.UnsupportedField(0)) and
+                (FormatPlan.parse("{:q}") matches error FormatErr.UnsupportedField(0)) and
                 (FormatPlan.parse("{name}") matches error FormatErr.UnsupportedField(0)) and
                 (FormatPlan.parse("{}}") matches error FormatErr.UnmatchedClose(2))
             }

@@ -73,8 +73,8 @@ pub mod fmt {
         println_value,
         write_fmt,
     }
-    pub use builtin.fmt.{Debug, Display}
-    pub use parse.{FormatErr, FormatPiece, FormatPlan, Parse}
+    pub use builtin.fmt.{Binary, Debug, Display, LowerHex, Octal, UpperHex}
+    pub use parse.{FormatErr, FormatKind, FormatPiece, FormatPlan, Parse}
 }
 
 pub mod prelude {

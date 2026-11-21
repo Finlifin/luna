@@ -1,6 +1,7 @@
 use bindings.{str_byte, str_byte_length}
 use primitives.*;
 use protocols.formatting.display.Display;
+use protocols.formatting.float;
 use protocols.formatting.writer.ByteWriter;
 
 {-
@@ -174,5 +175,29 @@ impl Debug for Symbol {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
         output.write_byte(46)!;
         self.*.as(Display).write(output)
+    }
+}
+
+impl Debug for f16 {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        float.write_f16(self.*, true, output)
+    }
+}
+
+impl Debug for bf16 {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        float.write_bf16(self.*, true, output)
+    }
+}
+
+impl Debug for f32 {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        float.write_f32(self.*, true, output)
+    }
+}
+
+impl Debug for f64 {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        float.write_f64(self.*, true, output)
     }
 }
