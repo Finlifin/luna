@@ -231,28 +231,23 @@ fn term_contains_str(ty: &nir::Term, fuel: &mut usize) -> Result<bool, String> {
     Ok(false)
 }
 
-fn graph_uses_text(graph: &iir::Package, fuel: &mut usize) -> Result<bool, String> {
-    for instance in &graph.functions {
-        if term_contains_str(&instance.function.signature, fuel)? {
-            return Ok(true);
-        }
-        for argument in instance.key.arguments.iter() {
-            if term_contains_str(argument, fuel)? {
-                return Ok(true);
-            }
-        }
-        let mut found = false;
-        nir::visit::expressions(&instance.function, fuel, |expr, fuel| {
-            if !found && term_contains_str(&expr.ty, fuel)? {
-                found = true;
-            }
-            Ok(())
-        })?;
-        if found {
+fn instance_uses_text(instance: &iir::FunctionInstance, fuel: &mut usize) -> Result<bool, String> {
+    if term_contains_str(&instance.function.signature, fuel)? {
+        return Ok(true);
+    }
+    for argument in instance.key.arguments.iter() {
+        if term_contains_str(argument, fuel)? {
             return Ok(true);
         }
     }
-    Ok(false)
+    let mut found = false;
+    nir::visit::expressions(&instance.function, fuel, |expr, fuel| {
+        if !found && term_contains_str(&expr.ty, fuel)? {
+            found = true;
+        }
+        Ok(())
+    })?;
+    Ok(found)
 }
 
 /// Publish schedules for every reachable concrete function, including captured
@@ -415,6 +410,8 @@ fn prepare_source_impl(
     // it must not receive a fresh budget on each pass through the loop.
     let mut construction_budget = budget;
     let mut verified_text_roots = std::collections::HashSet::new();
+    let mut validated_instances = std::collections::HashSet::new();
+    let mut graph_has_text = false;
     let mut retained_summaries = elaboration::verification::memory::SummaryCache::default();
     let mut owned_layouts: Option<Package> = None;
     let mut copy_cache = std::collections::HashMap::new();
@@ -437,7 +434,6 @@ fn prepare_source_impl(
             Default::default(),
             &mut construction_budget,
         )?;
-        graph.validate_cleanup_control(fuel)?;
         let active_enums = owned_layouts
             .as_ref()
             .map_or(&package.enums, |view| &view.enums);
@@ -462,6 +458,8 @@ fn prepare_source_impl(
             copy_cache.clear();
             retained_summaries = Default::default();
             verified_text_roots.clear();
+            validated_instances.clear();
+            graph_has_text = false;
             if owned_layouts.is_none() {
                 for function in package.functions.iter().chain(&package.quote_templates) {
                     nir::visit::expressions(function, fuel, |expr, fuel| {
@@ -478,6 +476,10 @@ fn prepare_source_impl(
             }
         }
         for instance in &graph.functions {
+            if !validated_instances.insert(instance.key.clone()) {
+                continue;
+            }
+            graph.validate_cleanup_control_instance(instance, fuel)?;
             nir::type_computations::charge_term(&instance.function.signature, fuel)
                 .map_err(|e| e.to_string())?;
             for argument in instance.key.arguments.iter() {
@@ -486,6 +488,9 @@ fn prepare_source_impl(
             nir::visit::expressions(&instance.function, fuel, |expr, fuel| {
                 nir::type_computations::charge_term(&expr.ty, fuel).map_err(|e| e.to_string())
             })?;
+            if !graph_has_text && instance_uses_text(instance, fuel)? {
+                graph_has_text = true;
+            }
         }
         for (_, accesses) in &cleanup_accesses {
             for access in accesses {
@@ -529,7 +534,7 @@ fn prepare_source_impl(
             .with_dispatch(&graph.dispatch)
             .with_global_runtime_deliveries(&graph.global_runtime_deliveries)
             .with_summaries(std::mem::take(&mut retained_summaries));
-        let text_provenance = if graph_uses_text(&graph, fuel)? {
+        let text_provenance = if graph_has_text {
             for root in &roots {
                 if !verified_text_roots.contains(root) {
                     verification_session.infer_text_regions(

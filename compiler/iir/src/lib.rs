@@ -5,11 +5,14 @@ pub mod effects;
 mod index;
 mod lists;
 mod type_links;
+
 use type_links::TypeLinks;
+
 pub mod staging;
 mod storage;
 pub mod template_storage;
 pub mod visit;
+
 use nir::program::{DispatchInstance, Function};
 use nir::{DeclarationId, RuntimeId, Term};
 use std::{
@@ -24,6 +27,7 @@ pub struct InstanceKey {
     /// hashing remain structural; pointer identity is not semantic evidence.
     pub arguments: std::sync::Arc<[Term]>,
 }
+
 impl InstanceKey {
     fn parts(&self) -> (DeclarationId, &[Term]) {
         (self.declaration, &self.arguments)
@@ -58,6 +62,7 @@ impl fmt::Display for InstanceKey {
         f.write_str("))")
     }
 }
+
 /// Declaration evidence for a callable carried as comptime data.
 /// This records its completed signature, not an executable instance or a tag.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +70,7 @@ pub struct CallableIdentity {
     pub key: InstanceKey,
     pub signature: nir::TypeRef,
 }
+
 impl CallableIdentity {
     /// Retain completed, environment-free signature evidence in a shared core.
     /// Declaration identity remains in `key`; sharing a core proves no callable
@@ -93,6 +99,7 @@ impl CallableIdentity {
         Ok(self.signature.core().body())
     }
 }
+
 impl fmt::Display for CallableIdentity {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -102,6 +109,7 @@ impl fmt::Display for CallableIdentity {
         )
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FunctionInstance {
     pub key: InstanceKey,
@@ -109,17 +117,20 @@ pub struct FunctionInstance {
     /// capture types and default expressions. Local IDs retain source identity.
     pub function: Function,
 }
+
 impl fmt::Display for FunctionInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(function-instance {} {})", self.key, self.function)
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum NominalDefinition {
     Struct(nir::program::Struct),
     Enum(nir::program::Enum),
     Newtype(nir::newtypes::Newtype),
 }
+
 impl fmt::Display for NominalDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -129,11 +140,13 @@ impl fmt::Display for NominalDefinition {
         }
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NominalInstance {
     pub ty: Term,
     pub definition: NominalDefinition,
 }
+
 impl fmt::Display for NominalInstance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -143,12 +156,14 @@ impl fmt::Display for NominalInstance {
         )
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct InterfaceContract {
     pub interface: nir::program::InterfaceInstance,
     pub subject: Term,
     pub methods: Vec<nir::program::MethodContract>,
 }
+
 impl fmt::Display for InterfaceContract {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -162,6 +177,7 @@ impl fmt::Display for InterfaceContract {
         f.write_str("))")
     }
 }
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
     pub target: Option<nir::target::TargetData>,
@@ -186,6 +202,7 @@ pub struct Package {
     /// addresses keyed by their `RuntimeId`).
     pub global_runtime_deliveries: std::collections::BTreeMap<RuntimeId, nir::program::Expr>,
 }
+
 impl Package {
     pub fn template_method_type(
         &self,
@@ -215,15 +232,18 @@ impl Package {
             })
             .map(|table| table.logical_type())
     }
+
     pub fn template_type(&self, key: &InstanceKey) -> Option<&Term> {
         self.templates
             .iter()
             .find(|table| table.targets().contains(key))
             .map(|table| table.logical_type())
     }
+
     pub fn function(&self, key: &InstanceKey) -> Option<&FunctionInstance> {
         self.functions.iter().find(|function| &function.key == key)
     }
+
     /// Validate completed annotations and closure of every named callable
     /// reference, including references embedded in defaults and patterns.
     pub fn validate(&self, fuel: &mut usize) -> Result<(), String> {
@@ -511,51 +531,56 @@ impl Package {
         effects::validate_contracts(self, &links, fuel)?;
         Ok(())
     }
+
     /// Effect control exits need acquired cleanup schedules before this graph
     /// may participate in resource-checked execution or destructor invocation.
     pub fn validate_cleanup_control(&self, fuel: &mut usize) -> Result<(), String> {
         for instance in &self.functions {
-            visit::expressions(&instance.function, fuel, |expr, fuel| {
-                use nir::program::ExprKind as K;
-                match &expr.kind {
-                    K::EffectHandle { handlers, .. } => {
-                        for handler in handlers {
-                            if handler.abi != nir::effects::Abi::Direct
-                                && !(handler.abi == nir::effects::Abi::DirectPassing
-                                    && effects::data_passing_signature(
-                                        self,
-                                        &handler.signature,
-                                        fuel,
-                                    )?)
-                            {
-                                return Err("IIR effect installation requires slot/capture cleanup protocol lowering".into());
-                            }
-                            // Capture ownership/initialization is discharged by
-                            // resource schedule publication, not type-only IIR
-                            // validation. Traverse here to retain bounded lexical
-                            // well-formedness checks before execution.
-                            for arm in &handler.arms {
-                                nir::free_bindings::collect_arm(arm, fuel)?;
-                            }
-                        }
-                    }
-                    K::EffectRequest { abi, signature, .. }
-                        if *abi != nir::effects::Abi::Direct
-                            && !(*abi == nir::effects::Abi::DirectPassing
-                                && effects::data_passing_signature(self, signature, fuel)?) =>
-                    {
-                        return Err(
-                            "IIR effect request requires slot/capture cleanup protocol lowering"
-                                .into(),
-                        );
-                    }
-                    _ => {}
-                }
-                Ok(())
-            })?;
+            self.validate_cleanup_control_instance(instance, fuel)?;
         }
         Ok(())
     }
+
+    pub fn validate_cleanup_control_instance(
+        &self,
+        instance: &FunctionInstance,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        visit::expressions(&instance.function, fuel, |expr, fuel| {
+            use nir::program::ExprKind as K;
+            match &expr.kind {
+                K::EffectHandle { handlers, .. } => {
+                    for handler in handlers {
+                        if handler.abi != nir::effects::Abi::Direct
+                            && !(handler.abi == nir::effects::Abi::DirectPassing
+                                && effects::data_passing_signature(self, &handler.signature, fuel)?)
+                        {
+                            return Err("IIR effect installation requires slot/capture cleanup protocol lowering".into());
+                        }
+                        // Capture ownership/initialization is discharged by
+                        // resource schedule publication, not type-only IIR
+                        // validation. Traverse here to retain bounded lexical
+                        // well-formedness checks before execution.
+                        for arm in &handler.arms {
+                            nir::free_bindings::collect_arm(arm, fuel)?;
+                        }
+                    }
+                }
+                K::EffectRequest { abi, signature, .. }
+                    if *abi != nir::effects::Abi::Direct
+                        && !(*abi == nir::effects::Abi::DirectPassing
+                            && effects::data_passing_signature(self, signature, fuel)?) =>
+                {
+                    return Err(
+                        "IIR effect request requires slot/capture cleanup protocol lowering".into(),
+                    );
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+    }
+
     // Contracts and executable bodies must inspect the same embedded types.
     // Validating only Expr::ty misses constants and capture/storage annotations.
     fn validate_expression_types_in(
@@ -710,6 +735,7 @@ impl Package {
         }
         Ok(())
     }
+
     fn validate_type(
         &self,
         links: &TypeLinks<'_>,
@@ -719,6 +745,7 @@ impl Package {
         completed_type(ty, &self.runtime_bindings, fuel)?;
         links.validate(ty, fuel)
     }
+
     #[cfg(test)]
     fn type_links(&self, ty: &Term, fuel: &mut usize) -> Result<(), String> {
         TypeLinks::new(self, fuel)?.validate(ty, fuel)
@@ -806,6 +833,7 @@ impl fmt::Display for Package {
         f.write_str("))\n")
     }
 }
+
 /// Check a completed type/semantic argument. Runtime identities are preserved;
 /// missing environments and unsubstituted definition rigids are rejected.
 pub fn completed_type(
@@ -821,6 +849,7 @@ pub fn completed_type(
         .map_err(|e| format!("IIR type scope: {e}"))?;
     completed_dependencies(ty, available, fuel)
 }
+
 /// Check dependencies within a term whose outer binder scope was already
 /// validated. Nested function parameters/results retain their binder context.
 pub fn completed_dependencies(
