@@ -61,6 +61,29 @@ pub fn inspect(
     .map(|(_, attributes)| attributes)
 }
 
+/// Index target identity before any signature, supplier or reflection can run.
+pub(super) fn pending_definitions(
+    package: &hir::Package<'_>,
+    identities: &BTreeMap<u32, u64>,
+    steps: &mut u64,
+) -> Result<n::DefinitionAttributes, Error> {
+    let mut pending = BTreeSet::new();
+    for attribute in &package.definition_attributes {
+        let work = u64::from(usize::BITS - pending.len().leading_zeros()) + 1;
+        *steps = steps
+            .checked_sub(work)
+            .ok_or_else(|| error(attribute.span, "attribute target indexing budget exhausted"))?;
+        if let hir::AttributeTarget::Definition(owner) = attribute.target {
+            pending.insert(declaration(package, identities, owner));
+        }
+    }
+    Ok(if pending.is_empty() {
+        Default::default()
+    } else {
+        n::DefinitionAttributes::Pending(pending.into())
+    })
+}
+
 impl Checker<'_, '_> {
     pub(super) fn prepare_phase_attributes(
         &mut self,
@@ -71,7 +94,6 @@ impl Checker<'_, '_> {
                 matches!(&info.node.expect_item().kind, ItemKind::Trait(def) if def.comptime_only)
             })
         {
-            self.attributes_prepared = true;
             return Ok(Vec::new());
         }
         let attributes = self.evaluate_attributes()?;
@@ -105,9 +127,9 @@ impl Checker<'_, '_> {
                 }
             }
             let frozen = if inspect_only {
-                BTreeMap::new()
+                None
             } else {
-                self.freeze_merged_attributes(&selected, &mut budget)?
+                Some(self.freeze_merged_attributes(&selected, &mut budget)?)
             };
             Ok((phases, packed, direct_passing, frozen))
         })();
@@ -149,8 +171,13 @@ impl Checker<'_, '_> {
             .into_iter()
             .map(|entry| (entry.owner, entry.enabled))
             .collect();
-        self.definition_attributes = frozen;
-        self.attributes_prepared = true;
+        if let Some(frozen) = frozen {
+            self.definition_attributes = if frozen.is_empty() {
+                Default::default()
+            } else {
+                n::DefinitionAttributes::Frozen(frozen.into())
+            };
+        }
         Ok(attributes)
     }
 
@@ -207,75 +234,66 @@ impl Checker<'_, '_> {
         &mut self,
         mut filter: impl FnMut(&hir::DeferredDefinitionAttribute<'_>) -> bool,
     ) -> Result<Vec<EvaluatedAttribute>, Error> {
-        let was_evaluating = self.evaluating_attributes;
-        self.evaluating_attributes = true;
-        let result = (|| {
-            let mut output = Vec::new();
-            for attribute in &self.package.definition_attributes {
-                if !filter(attribute) {
-                    continue;
-                }
-                self.required_steps = self
-                    .required_steps
-                    .checked_sub(
-                        1u64.saturating_add(
-                            attribute
-                                .configuration_key
-                                .as_ref()
-                                .map_or(0, |key| key.len() as u64),
-                        ),
-                    )
-                    .ok_or_else(|| {
-                        error(attribute.span, "attribute inspection budget exhausted")
-                    })?;
-                let owner = match attribute.target {
-                    hir::AttributeTarget::Definition(owner) => owner,
-                    hir::AttributeTarget::Member(id) => id.owner,
-                };
-                if self.package.item(owner).is_none()
-                    || self.package.item(attribute.lexical_owner).is_none()
-                    || attribute.value.hir_id.owner != attribute.lexical_owner
-                {
-                    return Err(error(
-                        attribute.span,
-                        "invalid attribute target or lexical owner",
-                    ));
-                }
-                if let hir::AttributeTarget::Member(id) = attribute.target {
-                    if id.local_id.raw() == 0 || self.package.node(id).is_none() {
-                        return Err(error(attribute.span, "missing attribute member target"));
-                    }
-                }
-                // Module scope supplies lexical name resolution, not a callable or
-                // type telescope. Required-call preparation must not ask a module
-                // for a definition formation contract.
-                self.signature_owner = (!matches!(
-                    self.package
-                        .item(attribute.lexical_owner)
-                        .map(|item| &item.kind),
-                    Some(ItemKind::Mod(_))
-                ))
-                .then_some(attribute.lexical_owner);
-                self.context = self.definition_context(attribute.lexical_owner);
-                self.locals.clear();
-                self.control.result = None;
-                let expected = attribute.configuration_key.is_none().then(|| p(P::Object));
-                let (value, ty) =
-                    self.required_typed_expression(attribute.value, expected.as_ref())?;
-                let value = self.materialize_local_constant(value, ty, attribute.span)?;
-                output.push(EvaluatedAttribute {
-                    target: attribute.target,
-                    lexical_owner: attribute.lexical_owner,
-                    source: source(attribute.span),
-                    configuration_key: attribute.configuration_key.clone(),
-                    value,
-                });
+        let mut output = Vec::new();
+        for attribute in &self.package.definition_attributes {
+            if !filter(attribute) {
+                continue;
             }
-            self.signature_owner = None;
-            self.context = self.nominal_context();
-            Ok(output)
-        })();
-        self.evaluating_attributes = was_evaluating;
-        result
+            self.required_steps = self
+                .required_steps
+                .checked_sub(
+                    1u64.saturating_add(
+                        attribute
+                            .configuration_key
+                            .as_ref()
+                            .map_or(0, |key| key.len() as u64),
+                    ),
+                )
+                .ok_or_else(|| error(attribute.span, "attribute inspection budget exhausted"))?;
+            let owner = match attribute.target {
+                hir::AttributeTarget::Definition(owner) => owner,
+                hir::AttributeTarget::Member(id) => id.owner,
+            };
+            if self.package.item(owner).is_none()
+                || self.package.item(attribute.lexical_owner).is_none()
+                || attribute.value.hir_id.owner != attribute.lexical_owner
+            {
+                return Err(error(
+                    attribute.span,
+                    "invalid attribute target or lexical owner",
+                ));
+            }
+            if let hir::AttributeTarget::Member(id) = attribute.target {
+                if id.local_id.raw() == 0 || self.package.node(id).is_none() {
+                    return Err(error(attribute.span, "missing attribute member target"));
+                }
+            }
+            // Module scope supplies lexical name resolution, not a callable or
+            // type telescope. Required-call preparation must not ask a module
+            // for a definition formation contract.
+            self.signature_owner = (!matches!(
+                self.package
+                    .item(attribute.lexical_owner)
+                    .map(|item| &item.kind),
+                Some(ItemKind::Mod(_))
+            ))
+            .then_some(attribute.lexical_owner);
+            self.context = self.definition_context(attribute.lexical_owner);
+            self.locals.clear();
+            self.control.result = None;
+            let expected = attribute.configuration_key.is_none().then(|| p(P::Object));
+            let (value, ty) = self.required_typed_expression(attribute.value, expected.as_ref())?;
+            let value = self.materialize_local_constant(value, ty, attribute.span)?;
+            output.push(EvaluatedAttribute {
+                target: attribute.target,
+                lexical_owner: attribute.lexical_owner,
+                source: source(attribute.span),
+                configuration_key: attribute.configuration_key.clone(),
+                value,
+            });
+        }
+        self.signature_owner = None;
+        self.context = self.nominal_context();
+        Ok(output)
     }
 }

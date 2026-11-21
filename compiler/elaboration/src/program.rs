@@ -579,9 +579,11 @@ fn elaborate_in_mode(
         member_phases: BTreeMap::new(),
         packed_structs: BTreeSet::new(),
         direct_passing_effects: BTreeMap::new(),
-        definition_attributes: BTreeMap::new(),
-        evaluating_attributes: false,
-        attributes_prepared: false,
+        definition_attributes: attributes::pending_definitions(
+            package,
+            package_identities,
+            invocation_steps,
+        )?,
         allow_packed_pointer_projection: false,
         active_early_inherent: BTreeSet::new(),
         checking_method_contract: false,
@@ -1600,7 +1602,7 @@ fn elaborate_candidate<'a, 'h>(
     output.alias_contracts = checker.alias_contracts.values().cloned().collect();
     output.refinements = std::mem::take(&mut checker.refinements);
     output.expansion_sources = std::mem::take(&mut checker.expansion_sources);
-    output.definition_attributes = std::mem::take(&mut checker.definition_attributes);
+    output.definition_attributes = checker.definition_attributes.clone();
     crate::verification::contracts::inherit(&mut output, &mut checker.next_temporary_binding)
         .map_err(|mut failure| {
             failure.source = failure
@@ -2385,9 +2387,7 @@ struct Checker<'a, 'h> {
     member_phases: BTreeMap<OwnerId, n::TraitPhase>,
     packed_structs: BTreeSet<OwnerId>,
     direct_passing_effects: BTreeMap<OwnerId, bool>,
-    definition_attributes: BTreeMap<DeclarationId, Term>,
-    evaluating_attributes: bool,
-    attributes_prepared: bool,
+    definition_attributes: n::DefinitionAttributes,
     allow_packed_pointer_projection: bool,
     active_early_inherent: BTreeSet<String>,
     checking_method_contract: bool,

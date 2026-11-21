@@ -1541,9 +1541,6 @@ impl Checker<'_, '_> {
                 alias_contracts: self.alias_contracts.values().cloned().collect(),
                 enums: self.enums.values().cloned().collect(),
                 definition_attributes: self.definition_attributes.clone(),
-                attributes_evaluating: self.evaluating_attributes
-                    || (!self.attributes_prepared
-                        && !self.package.definition_attributes.is_empty()),
                 runtime_domains: self.runtime_domains.clone(),
                 ..Default::default()
             };

@@ -102,7 +102,6 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         alias_contracts,
         enums,
         definition_attributes,
-        attributes_evaluating,
         runtime_domains,
         global_runtime_deliveries,
     } = package;
@@ -215,10 +214,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     for definition in enums {
         meter.enumeration(definition)?;
     }
-    meter.width(definition_attributes.len())?;
-    for term in definition_attributes.values() {
-        meter.node(Node::Type(term))?;
-    }
+    // The declaration snapshot retains the immutable attribute table by owner.
     meter.width(runtime_domains.len())?;
     for term in runtime_domains.values() {
         meter.node(Node::Type(term))?;
@@ -256,7 +252,6 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         alias_contracts: alias_contracts.clone(),
         enums: enums.clone(),
         definition_attributes: definition_attributes.clone(),
-        attributes_evaluating: *attributes_evaluating,
         runtime_domains: runtime_domains.clone(),
         global_runtime_deliveries: global_runtime_deliveries.clone(),
     })

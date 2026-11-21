@@ -1397,7 +1397,11 @@ fn decode_macro_kind_attribute(
     nir: &Package,
     decl_id: DeclarationId,
 ) -> Result<Option<DecodedMacroKind>, String> {
-    let Some(attr_term) = nir.definition_attributes.get(&decl_id) else {
+    let Some(attr_term) = nir
+        .definition_attributes
+        .lookup(decl_id)
+        .map_err(|id| format!("macro attributes for {id} are still pending"))?
+    else {
         return Ok(None);
     };
     let Term::NominalValue {

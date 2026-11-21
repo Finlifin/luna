@@ -606,6 +606,7 @@ pub enum ErrorKind {
     TypeContractUnresolved,
     InvalidTypeContract(String),
     AbstractValueUnresolved,
+    PendingDefinitionAttributes(DeclarationId),
     StepsExhausted,
     RepresentationSizeLimit,
     DepthExhausted,
@@ -666,6 +667,10 @@ impl fmt::Display for Error {
             ErrorKind::MissingAssociatedSource(demand) => {
                 write!(f, "missing declaration source: {demand}")?
             }
+            ErrorKind::PendingDefinitionAttributes(target) => write!(
+                f,
+                "definition attributes for {target} are pending publication"
+            )?,
             ErrorKind::CyclicAssociatedInitializer(member) => {
                 write!(f, "cyclic associated initializer for member {member}")?
             }

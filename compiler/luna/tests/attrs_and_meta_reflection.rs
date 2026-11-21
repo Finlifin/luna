@@ -727,3 +727,32 @@ fn meta_object_and_symbol_helpers() {
     "#;
     assert_eq!(support::invoke(source, "run").unwrap(), Value::Bool(true));
 }
+
+#[test]
+fn attribute_suppliers_can_inspect_independent_unannotated_declarations() {
+    let source = r#"
+        ^attrs.metadata({
+            plain_type: meta.attrs_of(Plain).is_empty(),
+            plain_fn: meta.attrs_of(plain_fn).is_empty(),
+        })
+        struct Decorated {}
+        struct Plain {}
+        fn plain_fn() -> bool { true }
+        comptime fn run() -> bool {
+            Decorated.attrs().get<meta.Object>(.metadata) match {
+                data? => (data.get<bool>(.plain_type) matches true?)
+                    and (data.get<bool>(.plain_fn) matches true?),
+                null => false,
+            }
+        }
+    "#;
+    assert_eq!(support::invoke(source, "run").unwrap(), Value::Bool(true));
+    for source in [
+        "^attrs.metadata(meta.attrs_of(A)) struct A {}",
+        "^attrs.metadata(meta.attrs_of(B)) struct A {}
+         ^attrs.metadata(meta.attrs_of(A)) struct B {}",
+    ] {
+        let failure = support::compile(source).unwrap_err();
+        assert!(failure.contains("pending publication"), "{failure}");
+    }
+}

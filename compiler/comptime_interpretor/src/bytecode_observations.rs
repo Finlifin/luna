@@ -78,3 +78,87 @@ fn observation_admission_precedes_operand_effects() {
         }
     }
 }
+
+#[test]
+fn attribute_queries_keep_target_identity_and_the_invocations_publication_state() {
+    use nir::program::DefinitionAttributes;
+    let id = |local| DeclarationId { package: 81, local };
+    let target = id(1);
+    let plain = id(2);
+    let source = SourceRange { start: 25, end: 31 };
+    let proj = Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: id(3),
+            member: id(4),
+        }),
+        arguments: vec![],
+        subject: Box::new(Term::Primitive(Primitive::Bool)),
+    };
+    let selected = Expr {
+        source,
+        ty: Term::Primitive(Primitive::Type),
+        kind: K::TypeValue(Term::Nominal {
+            declaration: target,
+            arguments: vec![],
+        }),
+    };
+    let nominal = |declaration| Term::Nominal {
+        declaration,
+        arguments: vec![],
+    };
+    let definition = |declaration| nir::program::Struct {
+        parameter_types: vec![],
+        capabilities: vec![],
+        requirements: vec![],
+        type_parameters: vec![],
+        declaration,
+        name: format!("D{}", declaration.local),
+        fields: vec![],
+        packed: false,
+    };
+    let package = Package {
+        definition_attributes: DefinitionAttributes::Pending(BTreeSet::from([target]).into()),
+        structs: vec![definition(target), definition(plain)],
+        ..Default::default()
+    };
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        vm.associated_values.insert(
+            (
+                InterfaceInstance {
+                    declaration: id(3),
+                    arguments: vec![],
+                },
+                Term::Primitive(Primitive::Bool),
+                id(4),
+            ),
+            &selected,
+        );
+        let mut read = |ty| {
+            let expr = Expr {
+                source,
+                ty: Term::Primitive(Primitive::Object),
+                kind: K::DefinitionAttributes(Box::new(Expr {
+                    source,
+                    ty: Term::Primitive(Primitive::Type),
+                    kind: K::TypeValue(ty),
+                })),
+            };
+            let mut env = Environment::new();
+            if compiled {
+                let code = Arc::new(comptime_compiler::compile(&expr, &mut 1000).unwrap());
+                vm.execute_code(&code, &mut env)
+            } else {
+                vm.eval(&expr, &mut env)
+            }
+        };
+        for ty in [proj.clone(), nominal(target)] {
+            let error = read(ty).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::PendingDefinitionAttributes(target));
+            assert_eq!(error.source, Some(source));
+            assert!(
+                matches!(read(nominal(plain)).unwrap(), Flow::Value(Value::Object(o)) if o.entries().is_empty())
+            );
+        }
+    }
+}

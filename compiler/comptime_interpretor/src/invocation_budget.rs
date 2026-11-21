@@ -53,7 +53,6 @@ pub(super) fn charge_world_tables(
         refinements: _, // Borrowed immutable registry; no VM index is constructed.
         formed_nullary_nominals: _, // Shared with PTC; the VM builds no model domain.
         definition_attributes: _,
-        attributes_evaluating: _,
         runtime_domains,
         builtin_implementation_packages,
         target: _,

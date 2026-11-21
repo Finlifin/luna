@@ -621,3 +621,45 @@ fn capturing_an_initializer_shares_its_program_but_comparing_rows_observes_it() 
     );
     charge_implementation_metadata(retained, &mut 100_000).unwrap();
 }
+
+#[test]
+fn capturing_attribute_worlds_retains_the_exact_publication_state() {
+    use n::DefinitionAttributes;
+    use std::collections::{BTreeMap, BTreeSet};
+    let target = id(3);
+    let plain = id(8);
+    let mut package = n::Package {
+        definition_attributes: DefinitionAttributes::Pending(BTreeSet::from([target]).into()),
+        ..Default::default()
+    };
+    let before = clone_declaration_source(&package, &mut 1).unwrap();
+    let payload = crate::objects::value(vec![crate::objects::entry(
+        Some("data"),
+        Term::Primitive(Primitive::Str),
+        Term::String("x".repeat(100_000).into()),
+    )]);
+    package.definition_attributes =
+        DefinitionAttributes::Frozen(BTreeMap::from([(target, payload)]).into());
+    let after = clone_declaration_source(&package, &mut 1).unwrap();
+    assert_eq!(before.definition_attributes.lookup(target), Err(target));
+    assert_eq!(before.definition_attributes.lookup(plain), Ok(None));
+    assert_eq!(after.definition_attributes.lookup(plain), Ok(None));
+    assert!(std::ptr::eq(
+        after.definition_attributes.lookup(target).unwrap().unwrap(),
+        package
+            .definition_attributes
+            .lookup(target)
+            .unwrap()
+            .unwrap(),
+    ));
+    assert!(
+        before
+            .definition_attributes
+            .to_string()
+            .contains(&target.to_string())
+    );
+    assert_eq!(
+        clone_declaration_source(&package, &mut 0),
+        Err(Error::Steps)
+    );
+}

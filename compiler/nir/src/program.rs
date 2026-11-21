@@ -7,6 +7,9 @@ use crate::{DeclarationId, Term};
 use std::fmt;
 use std::sync::Arc;
 
+mod definition_attributes;
+pub use definition_attributes::DefinitionAttributes;
+
 mod formed_nominals;
 pub use formed_nominals::FormedNullaryNominals;
 
@@ -2238,8 +2241,7 @@ pub struct Package {
     pub newtypes: Vec<crate::newtypes::Newtype>,
     pub alias_contracts: Vec<crate::type_aliases::Contract>,
     pub enums: Vec<Enum>,
-    pub definition_attributes: std::collections::BTreeMap<DeclarationId, Term>,
-    pub attributes_evaluating: bool,
+    pub definition_attributes: DefinitionAttributes,
     pub runtime_domains: std::collections::BTreeMap<crate::RuntimeId, Term>,
     pub global_runtime_deliveries: std::collections::BTreeMap<crate::RuntimeId, Expr>,
 }
@@ -3940,15 +3942,8 @@ impl fmt::Display for Package {
         for instance in &self.dispatch_instances {
             write!(f, "\n {instance}")?;
         }
-        if self.attributes_evaluating {
-            f.write_str(" (attributes-evaluating true)")?;
-        }
         if !self.definition_attributes.is_empty() {
-            f.write_str("\n (definition-attributes")?;
-            for (declaration, object) in &self.definition_attributes {
-                write!(f, " (entry {declaration} {object})")?;
-            }
-            f.write_str(")")?;
+            write!(f, "\n {}", self.definition_attributes)?;
         }
         if !self.runtime_domains.is_empty() {
             f.write_str("\n (runtime-domains")?;

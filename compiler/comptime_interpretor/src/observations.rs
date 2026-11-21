@@ -245,6 +245,69 @@ impl Interpreter<'_> {
         }
         Ok(())
     }
+    fn observe_definition_attributes(
+        &mut self,
+        value: Value,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        // A supplied nominal or normal form already identifies its declaration.
+        // Only a projection at the root needs to ask for a selected Type.
+        let declaration = match value {
+            Value::Type(ty) => {
+                let ty = if matches!(ty, Term::AssociatedType { .. }) {
+                    self.selected_type_view(&ty, Some(source))?
+                } else {
+                    ty
+                };
+                match ty {
+                    Term::Nominal { declaration, .. } => Some(declaration),
+                    Term::NormalForm {
+                        head,
+                        sort: nir::Sort::Type,
+                        ..
+                    } => Some(head),
+                    Term::Rigid { .. } | Term::Hole { .. } | Term::Bound { .. } => {
+                        return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
+                    }
+                    _ if ty.sort() == nir::Sort::Type => None,
+                    _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+                }
+            }
+            Value::TypeParameter(_) | Value::AbstractValue { .. } | Value::Description(_) => {
+                return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
+            }
+            Value::Function(id)
+            | Value::FunctionInstance {
+                declaration: id, ..
+            } => Some(id),
+            Value::IirCallable(handle) => Some(handle.key.declaration),
+            _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+        };
+        if let Some(id) = declaration {
+            let world = self
+                .declaration_world
+                .ok_or_else(|| self.failure(ErrorKind::TypeContractUnresolved, Some(source)))?;
+            let table = &world.definition_attributes;
+            let cost = u64::from(usize::BITS - table.len().leading_zeros()) + 1;
+            self.budget.steps = self
+                .budget
+                .steps
+                .checked_sub(cost)
+                .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
+            if let Some(frozen) = table.lookup(id).map_err(|target| {
+                self.failure(ErrorKind::PendingDefinitionAttributes(target), Some(source))
+            })? {
+                return self
+                    .decode_immutable_input(frozen, &Term::Primitive(Primitive::Object))
+                    .map_err(|mut error| {
+                        error.source = Some(source);
+                        error
+                    });
+            }
+        }
+        Ok(Value::Object(Object::from_entries(vec![])))
+    }
+
     pub(super) fn observe_value(
         &mut self,
         observation: &comptime_compiler::observations::Observation<impl std::borrow::Borrow<Term>>,
@@ -266,44 +329,7 @@ impl Interpreter<'_> {
                         error
                     })
             }
-            O::DefinitionAttributes => {
-                if self
-                    .declaration_world
-                    .is_some_and(|pkg| pkg.attributes_evaluating)
-                {
-                    return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
-                }
-                let declaration = match value {
-                    Value::TypeParameter(_)
-                    | Value::Type(Term::Rigid { .. })
-                    | Value::AbstractValue { .. }
-                    | Value::Description(_) => {
-                        return Err(self.failure(ErrorKind::TypeContractUnresolved, Some(source)));
-                    }
-                    Value::Type(Term::Nominal { declaration, .. }) => Some(declaration),
-                    Value::Type(Term::NormalForm { head, .. }) => Some(head),
-                    Value::Type(_) => None,
-                    Value::Function(declaration) | Value::FunctionInstance { declaration, .. } => {
-                        Some(declaration)
-                    }
-                    Value::IirCallable(handle) => Some(handle.key.declaration),
-                    _ => return Err(self.failure(ErrorKind::Type, Some(source))),
-                };
-                if let Some(frozen) = declaration.and_then(|id| {
-                    self.declaration_world
-                        .and_then(|pkg| pkg.definition_attributes.get(&id))
-                }) {
-                    self.decode_immutable_input(frozen, &Term::Primitive(Primitive::Object))
-                        .map_err(|mut error| {
-                            error.source = Some(source);
-                            error
-                        })
-                } else {
-                    Ok(Value::Object(
-                        comptime_runtime::object::Object::from_entries(vec![]),
-                    ))
-                }
-            }
+            O::DefinitionAttributes => self.observe_definition_attributes(value, source),
             O::StructFields { names } => self.observe_struct_fields(value, output, names, source),
             O::EnumStructure(query) => self.observe_enum_structure(value, output, query, source),
             O::EnumName => {
