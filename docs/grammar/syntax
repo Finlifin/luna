@@ -331,6 +331,7 @@ definition -> function
     | effect_enum
     | case_def
     | const_def
+    | static_def
     | newtype_def
     | typealias_def
     | trait_def
@@ -367,6 +368,7 @@ effect_variant -> attribute* async? inline? id(parameter*) (-> result)?
 -- effect 签名以分号结束，省略结果为 void；组内各项是独立操作。
 case_def -> case id (parameter*) -> result clauses? block
 const_def -> const id (: expr)? = expr
+static_def -> static id : expr (= expr)?
 newtype_def -> newtype id(<parameter*>)? = expr
 typealias_def -> typealias id(<parameter*>)? = expr
 -- 无主体的签名声明以分号结束；函数类别与所在上下文决定其合法性。
@@ -618,6 +620,7 @@ ast_macro_definition -> @define_macro1 { mapping_definition }
 peg_macro_definition -> @define_macro2 { peg_rule* mapping_definition }
 -- mapping_definition、peg_rule、macro_input 按相应构造宏的输入契约读取。
 raw_str -> @builtin.str.raw { raw_source }
+    | @builtin.str.raw_aligned { raw_source }
 
 
 -- others

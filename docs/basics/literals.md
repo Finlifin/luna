@@ -36,6 +36,7 @@ symbol -> . id
 literal_suffix -> (integer | float | char | str) id
 
 raw_str -> @builtin.str.raw { raw_source }
+    | @builtin.str.raw_aligned { raw_source }
 ```
 
 转义见正式定义。更细的全局产生式见 [grammar/syntax](../grammar/syntax)。
@@ -101,7 +102,7 @@ raw_str -> @builtin.str.raw { raw_source }
 
 - 相邻的字符串字面量（中间只有空白）合并为一个字符串。
 - **插值**（仅 comptime）：`$name` 或 `${expr}`，只能嵌入 comptime 值。只有 `$` 引入插值；单独的 `{` / `}` 就是普通字符。含插值的字符串等价于一次 `std.fmt.comptime_format` 调用。
-- **原始字符串**：`@builtin.str.raw { … }`，括号内内容按原样保留。说明见 [构造宏](../macro/construction-macro.md)。
+- **原始字符串**：`@builtin.str.raw { … }`，括号内内容按原样保留；`@builtin.str.raw_aligned { … }` 会跳过首行空白行，剔除所有非空行共有的前导水平缩进（使文本整体左对齐），并在闭合 `}` 所在行仅含缩进空白时去掉该行缩进同时保留上一行的换行符。说明见 [构造宏](../macro/construction-macro.md)。
 
 ### 布尔
 
@@ -189,6 +190,11 @@ const RINGS = @builtin.str.raw {
     Three rings for the Elven-kings under the sky
 }
 
+const ALIGNED_RINGS = @builtin.str.raw_aligned {
+    Three rings for the Elven-kings under the sky
+      Seven for the Dwarf-lords in their halls of stone
+};
+
 true;
 false;
 
@@ -223,7 +229,7 @@ false;
 ## 编译器实现引导
 
 1. **词法**：按本章规则识别整数（含进制与 `_`）、浮点（含科学计数法）、字符/字符串（含转义与 `$` 插值分段）、布尔关键字、符号的 `.` 与 `id`。
-2. **语法与协议**：`literal_suffix` 保留字面量及后缀身份，为 LiteralInto 建立结果推断变量；候选试探相互隔离，唯一选定后生成对应转换调用。相邻字符串字面量做合并展开；含插值者改写为 `std.fmt.comptime_format`。`@builtin.str.raw` 按构造宏规则扩展。
+2. **语法与协议**：`literal_suffix` 保留字面量及后缀身份，为 LiteralInto 建立结果推断变量；候选试探相互隔离，唯一选定后生成对应转换调用。相邻字符串字面量做合并展开；含插值者改写为 `std.fmt.comptime_format`。`@builtin.str.raw` 与 `@builtin.str.raw_aligned` 按构造宏规则扩展。
 3. **类型与 splice**：字面量带上表类型；进入运行时上下文时按该类型适用的通用 splice 规则处理（推导失败时无后缀数值按 `i32` / `f64`）。
 4. **不变式**：字面量后缀语法不可叠两次；符号同名同值。
 
@@ -251,4 +257,5 @@ literal_suffix -> (integer | float | char | str) id
 escape -> \\ | \' | \" | \n | \r | \t | \0 | \$ | \x{ hexdigit+ }
 
 raw_str -> @builtin.str.raw { raw_source }
+    | @builtin.str.raw_aligned { raw_source }
 ```

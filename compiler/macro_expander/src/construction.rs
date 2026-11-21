@@ -165,7 +165,9 @@ pub(crate) fn expand_at_call(
         .clone();
 
     match desc.mode {
-        MacroInputMode::RawSource | MacroInputMode::BuiltinRawStr => Err(MacroError::new(
+        MacroInputMode::RawSource
+        | MacroInputMode::BuiltinRawStr
+        | MacroInputMode::BuiltinRawStrAligned => Err(MacroError::new(
             MacroErrorKind::HandlerExecutionError,
             format!(
                 "raw-source macro `@{}` requires raw pre-lexing source text and cannot be invoked from generated token streams",

@@ -329,3 +329,110 @@ fn macro_imports_and_use_at_pkg_coexist_and_reject_bad_delimiters() {
         "{bad_undef}"
     );
 }
+
+#[test]
+fn builtin_str_raw_aligned_works_in_comptime_and_native_executable() {
+    let source = r#"
+        @use builtin.str.raw_aligned as aligned;
+        @use builtin.str.*;
+
+        const EMPTY = @builtin.str.raw_aligned {};
+        const WS_ONLY = @builtin.str.raw_aligned {   };
+        const STD = @builtin.str.raw_aligned {
+            a
+            b
+        };
+        const DEDENTED = @aligned {
+                first
+                  -- not comment $ @ ^ { ok } " \
+
+                    你好 🦀
+            };
+        const INLINE_FIRST = @raw_aligned {  alpha
+            beta
+        };
+        const SAME_LINE_CLOSE = @raw_aligned {
+            top
+            bottom};
+
+        comptime fn check_comptime() -> bool {
+            EMPTY == ""
+                and WS_ONLY == ""
+                and STD == "a\nb\n"
+                and DEDENTED == "first\n  -- not comment \$ @ ^ { ok } \" \\\n\n    你好 🦀\n"
+                and INLINE_FIRST == "alpha\n          beta\n"
+                and SAME_LINE_CLOSE == "top\nbottom"
+        }
+    "#;
+    assert_eq!(
+        invoke_sysroot_comptime(source, "check_comptime").unwrap(),
+        Value::Bool(true)
+    );
+
+    let dir = unique_temp_path("luna-macro-raw-aligned-native", "");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir(&dir).unwrap();
+    let main_fl = dir.join("main.fl");
+
+    let runtime_src = r#"
+        use std.prelude.*;
+        @use builtin.str.raw_aligned as aligned;
+
+        fn print_aligned() -> !std.io.IoErr bool {
+            let block = @builtin.str.raw_aligned {
+                line one: $ @ ^
+                  line two: " \ {ok}
+            };
+            let custom = @aligned {
+                foo
+                  bar};
+            println("{}|{}", block, custom)!;
+            block == "line one: \$ @ ^\n  line two: \" \\ {ok}\n"
+                and custom == "foo\n  bar"
+        }
+
+        fn run() -> bool {
+            print_aligned() match {
+                ok! => ok,
+                error _ => false,
+            }
+        }
+    "#;
+    std::fs::write(&main_fl, runtime_src).unwrap();
+
+    let library = library_dir();
+    let build = ProcessCommand::new(env!("CARGO_BIN_EXE_luna"))
+        .current_dir(&dir)
+        .args([
+            "build",
+            "main.fl",
+            "--entry",
+            "run",
+            "--output",
+            "program",
+            "--opt-level",
+            "0",
+            "--sysroot",
+        ])
+        .arg(&library)
+        .output()
+        .unwrap();
+    assert!(
+        build.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr)
+    );
+
+    let run = ProcessCommand::new(dir.join("program"))
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(run.status.success(), "{run:?}");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert_eq!(
+        stdout,
+        "line one: $ @ ^\n  line two: \" \\ {ok}\n|foo\n  bar\n(bool true)\n"
+    );
+}

@@ -32,6 +32,12 @@ impl MacroId {
         package: u32::MAX,
         local: 3,
     };
+
+    /// Synthetic identity reserved for built-in `@builtin.str.raw_aligned`.
+    pub const BUILTIN_RAW_STR_ALIGNED: Self = Self {
+        package: u32::MAX,
+        local: 4,
+    };
 }
 
 impl fmt::Display for MacroId {
@@ -127,6 +133,8 @@ impl fmt::Display for AstNodeKind {
 pub enum MacroInputMode {
     /// Built-in `@builtin.str.raw { raw_source }` encoded into a `str` literal token.
     BuiltinRawStr,
+    /// Built-in `@builtin.str.raw_aligned { raw_source }` dedented and encoded into a `str` literal token.
+    BuiltinRawStrAligned,
     /// Built-in `@meta.macros.define_macro1 { mapping_definition }`.
     BuiltinDefineMacro1,
     /// Built-in `@meta.macros.define_macro2 { peg_rule* mapping_definition }`.
@@ -148,6 +156,7 @@ impl MacroInputMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::BuiltinRawStr => "builtin-raw-str",
+            Self::BuiltinRawStrAligned => "builtin-raw-str-aligned",
             Self::BuiltinDefineMacro1 => "builtin-define-macro1",
             Self::BuiltinDefineMacro2 => "builtin-define-macro2",
             Self::Ast { .. } => "ast",
@@ -244,6 +253,15 @@ impl MacroRegistry {
             vis: MacroVisibility::Public,
             def_site: None,
             mode: MacroInputMode::BuiltinRawStr,
+        });
+        reg.register(MacroDescriptor {
+            id: MacroId::BUILTIN_RAW_STR_ALIGNED,
+            canonical_path: vec!["builtin".into(), "str".into(), "raw_aligned".into()],
+            package: u32::MAX,
+            module_path: vec!["builtin".into(), "str".into()],
+            vis: MacroVisibility::Public,
+            def_site: None,
+            mode: MacroInputMode::BuiltinRawStrAligned,
         });
         reg.register(MacroDescriptor {
             id: MacroId::BUILTIN_DEFINE_MACRO1,

@@ -584,3 +584,163 @@ fn scan_referenced_macro_roots_filters_builtins_comments_strings_and_buffers() {
     assert!(real_macros.import_roots.contains("helper"));
     assert!(real_macros.roots.contains("other"));
 }
+
+#[test]
+fn builtin_str_raw_aligned_skips_first_blank_line_dedents_and_keeps_closing_newline() {
+    use macro_expander::raw_source::align_raw_string;
+
+    // Direct algorithm edge cases:
+    assert_eq!(align_raw_string(""), "");
+    assert_eq!(align_raw_string("   \t  "), "");
+    assert_eq!(align_raw_string("\n"), "");
+    assert_eq!(align_raw_string("  \t\n    "), "");
+    assert_eq!(align_raw_string("\n\n"), "\n");
+    assert_eq!(align_raw_string("\n    a\n    b\n"), "a\nb\n");
+    assert_eq!(align_raw_string("\n    a\n    b\n    "), "a\nb\n");
+    assert_eq!(
+        align_raw_string("  \t\n      hello\n        world\n    "),
+        "hello\n  world\n"
+    );
+    assert_eq!(align_raw_string("  hello\n    world\n"), "hello\n  world\n");
+    assert_eq!(align_raw_string("hello\n    world\n"), "hello\n    world\n");
+    assert_eq!(align_raw_string("\n    a\n    b"), "a\nb");
+    assert_eq!(
+        align_raw_string("\n    a\n\n  \n    \n      \n    b\n  "),
+        "a\n\n\n\n  \nb\n"
+    );
+    assert_eq!(align_raw_string("\t\ta\n\t\t\tb\n\t"), "a\n\tb\n");
+    assert_eq!(align_raw_string("\t  a\n    b\n"), "\t  a\n    b\n");
+    assert_eq!(align_raw_string("\r\n    a\r\n    b\r\n    "), "a\r\nb\r\n");
+
+    // Pre-lexing expansion + import forms (`qualified`, `@use`, `as`, `.*`):
+    let src = concat!(
+        "@use builtin.str.raw_aligned as aligned;\n",
+        "@use builtin.str.*;\n",
+        "const EMPTY = @builtin.str.raw_aligned {};\n",
+        "const STD = @builtin.str.raw_aligned {\n",
+        "    a\n",
+        "    b\n",
+        "};\n",
+        "const DEEP = @aligned {\t \n",
+        "    first\n",
+        "      -- not comment $ @ ^ { ok } \" \\\n",
+        "\n",
+        "        你好 🦀\n",
+        "  };\n",
+        "const GLOB = @raw_aligned {\n",
+        "    x\n",
+        "      y};\n",
+    );
+    let refs = scan_referenced_macro_roots(src);
+    assert!(!refs.has_non_builtin_macros, "{refs:?}");
+    assert!(refs.roots.is_empty(), "{refs:?}");
+
+    let expanded = run_expand_builtins(src).unwrap();
+    assert!(expanded.expanded);
+    let out = expanded.source_text.as_deref().unwrap();
+    assert!(out.contains("const EMPTY = \"\";"), "{out}");
+    assert!(out.contains("const STD = \"a\\nb\\n\";"), "{out}");
+    assert!(
+        out.contains("const DEEP = \"first\\n  -- not comment \\$ @ ^ { ok } \\\" \\\\\\n\\n    你好 🦀\\n\";"),
+        "{out}"
+    );
+    assert!(out.contains("const GLOB = \"x\\n  y\";"), "{out}");
+
+    // Delimiters, unterminated input, and generated token stream rejection:
+    let err_delim = run_expand_builtins("const X = @builtin.str.raw_aligned(hi);").unwrap_err();
+    assert_eq!(err_delim.kind, MacroErrorKind::DelimiterMismatch);
+
+    let err_unclosed =
+        run_expand_builtins("const X = @builtin.str.raw_aligned {\n    { unclosed\n").unwrap_err();
+    assert_eq!(err_unclosed.kind, MacroErrorKind::UnterminatedMacroInput);
+
+    // Generated token stream invoking `@builtin.str.raw_aligned` must fail with `[4015]`.
+    struct MockGenAligned;
+    impl MacroExecutor for MockGenAligned {
+        fn execute_raw_source(
+            &mut self,
+            _: &MacroDescriptor,
+            _: &str,
+            _: Span,
+            _: &mut MacroBudget,
+        ) -> Result<Vec<MacroToken>, MacroError> {
+            unreachable!()
+        }
+
+        fn execute_tokens(
+            &mut self,
+            _: &MacroDescriptor,
+            _: &[MacroToken],
+            call_site: Span,
+            _: &mut MacroBudget,
+        ) -> Result<Vec<MacroToken>, MacroError> {
+            Ok(vec![
+                MacroToken::new(TokenKind::At, "@", call_site, TokenSpacing::Joint, None),
+                MacroToken::new(
+                    TokenKind::Id,
+                    "builtin",
+                    call_site,
+                    TokenSpacing::Joint,
+                    None,
+                ),
+                MacroToken::new(TokenKind::Dot, ".", call_site, TokenSpacing::Joint, None),
+                MacroToken::new(TokenKind::Id, "str", call_site, TokenSpacing::Joint, None),
+                MacroToken::new(TokenKind::Dot, ".", call_site, TokenSpacing::Joint, None),
+                MacroToken::new(
+                    TokenKind::Id,
+                    "raw_aligned",
+                    call_site,
+                    TokenSpacing::Alone,
+                    None,
+                ),
+                MacroToken::new(TokenKind::LBrace, "{", call_site, TokenSpacing::Alone, None),
+                MacroToken::new(TokenKind::Id, "x", call_site, TokenSpacing::Alone, None),
+                MacroToken::new(TokenKind::RBrace, "}", call_site, TokenSpacing::Alone, None),
+            ])
+        }
+
+        fn execute_ast(
+            &mut self,
+            _: &MacroDescriptor,
+            _: &[macro_expander::AstArgValue],
+            _: Span,
+            _: &mut MacroBudget,
+        ) -> Result<Vec<MacroToken>, MacroError> {
+            unreachable!()
+        }
+
+        fn execute_peg(
+            &mut self,
+            _: &MacroDescriptor,
+            _: &macro_expander::PegArgValue,
+            _: Span,
+            _: &mut MacroBudget,
+        ) -> Result<Vec<MacroToken>, MacroError> {
+            unreachable!()
+        }
+    }
+
+    let mut reg = MacroRegistry::with_builtins();
+    reg.register(MacroDescriptor {
+        id: MacroId {
+            package: 1,
+            local: 99,
+        },
+        canonical_path: vec!["scripts".into(), "emit_aligned".into()],
+        package: 1,
+        module_path: vec!["scripts".into()],
+        vis: MacroVisibility::Public,
+        def_site: None,
+        mode: MacroInputMode::Tokens,
+    });
+    let mut exec = MockGenAligned;
+    let mut ctx = ExpansionContext {
+        current_package: 0,
+        current_module_path: vec![],
+        registry: &reg,
+        executor: Some(&mut exec),
+    };
+    let err_gen = run_expand_with_context("@scripts.emit_aligned {}", &mut ctx).unwrap_err();
+    assert_eq!(err_gen.kind, MacroErrorKind::HandlerExecutionError);
+    assert_eq!(err_gen.kind.error_code(), 4015);
+}

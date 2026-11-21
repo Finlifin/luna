@@ -47,6 +47,87 @@ pub(crate) fn encode_flurry_string_literal(raw: &str) -> String {
     out
 }
 
+fn horizontal_indent(line: &str) -> &str {
+    let end = line
+        .bytes()
+        .position(|b| !matches!(b, b' ' | b'\t'))
+        .unwrap_or(line.len());
+    &line[..end]
+}
+
+fn is_horizontal_ws_only(line: &str) -> bool {
+    line.bytes().all(|b| matches!(b, b' ' | b'\t'))
+}
+
+fn common_ws_prefix<'a>(a: &'a str, b: &str) -> &'a str {
+    let common = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+    &a[..common]
+}
+
+/// Dedent a `@builtin.str.raw_aligned { ... }` body: skip a blank leading line,
+/// strip common horizontal indentation across all non-blank lines, and omit
+/// horizontal-only indentation on the closing `}` line while keeping the
+/// preceding line ending.
+pub fn align_raw_string(raw: &str) -> String {
+    let mut lines: Vec<(&str, &str)> = Vec::new();
+    let bytes = raw.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && bytes.get(i + 1) == Some(&b'\n') {
+            lines.push((&raw[start..i], "\r\n"));
+            i += 2;
+            start = i;
+        } else if bytes[i] == b'\n' {
+            lines.push((&raw[start..i], "\n"));
+            i += 1;
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    lines.push((&raw[start..], ""));
+
+    let mut slice = lines.as_slice();
+    if let Some(&(first_content, first_ending)) = slice.first()
+        && !first_ending.is_empty()
+        && is_horizontal_ws_only(first_content)
+    {
+        slice = &slice[1..];
+    }
+
+    if let Some(&(last_content, last_ending)) = slice.last()
+        && last_ending.is_empty()
+        && is_horizontal_ws_only(last_content)
+    {
+        slice = &slice[..slice.len() - 1];
+    }
+
+    let mut common_indent: Option<&str> = None;
+    for &(content, _) in slice {
+        if is_horizontal_ws_only(content) {
+            continue;
+        }
+        let indent = horizontal_indent(content);
+        common_indent = Some(match common_indent {
+            None => indent,
+            Some(prev) => common_ws_prefix(prev, indent),
+        });
+    }
+    let common_indent = common_indent.unwrap_or("");
+
+    let mut out = String::with_capacity(raw.len());
+    for &(content, ending) in slice {
+        if let Some(rest) = content.strip_prefix(common_indent) {
+            out.push_str(rest);
+        } else if !is_horizontal_ws_only(content) {
+            out.push_str(content);
+        }
+        out.push_str(ending);
+    }
+    out
+}
+
 fn scan_raw_balanced_braces(
     src: &str,
     open_brace: usize,
@@ -1007,7 +1088,7 @@ pub fn scan_referenced_macro_roots(src: &str) -> ReferencedMacros {
         let is_builtin_imported_leaf = seg_count == 1
             && (builtin_leaves.contains(seg0)
                 || (has_builtin_glob
-                    && seg0 == "raw"
+                    && matches!(seg0, "raw" | "raw_aligned")
                     && !non_builtin_leaves.contains(seg0)
                     && !has_non_builtin_glob)
                 || (has_meta_macros_glob
@@ -1079,7 +1160,9 @@ pub fn process_raw_source_and_imports(
         let desc = scope.resolve_call_path(&path_segments, path_span, ctx)?;
 
         match desc.mode {
-            MacroInputMode::BuiltinRawStr | MacroInputMode::RawSource => {
+            MacroInputMode::BuiltinRawStr
+            | MacroInputMode::BuiltinRawStrAligned
+            | MacroInputMode::RawSource => {
                 let delim_pos = skip_ws_and_comments(src, path_end, base_pos)?;
                 if bytes.get(delim_pos) != Some(&b'{') {
                     let found_end = (delim_pos + 1).min(len);
@@ -1115,11 +1198,19 @@ pub fn process_raw_source_and_imports(
                 );
                 let raw_body = &src[content_start..close_brace];
                 let replacement = match desc.mode {
-                    MacroInputMode::BuiltinRawStr => {
+                    MacroInputMode::BuiltinRawStr | MacroInputMode::BuiltinRawStrAligned => {
                         budget
                             .consume_tokens(1)
                             .map_err(|e| e.with_span(call_span))?;
-                        let encoded = encode_flurry_string_literal(raw_body);
+                        let aligned;
+                        let effective = if matches!(desc.mode, MacroInputMode::BuiltinRawStrAligned)
+                        {
+                            aligned = align_raw_string(raw_body);
+                            aligned.as_str()
+                        } else {
+                            raw_body
+                        };
+                        let encoded = encode_flurry_string_literal(effective);
                         vec![MacroToken::new(
                             TokenKind::Str,
                             encoded,

@@ -152,9 +152,14 @@ const SAMPLE = @builtin.str.raw {
     name = sample
     description = punctuation: $ @ ^
 }
+
+const ALIGNED = @builtin.str.raw_aligned {
+    line 1: $ @ ^
+      line 2 (indented)
+};
 ```
 
-内容按原始文本处理。该宏的输出接入字符串表达式位置；它的文本输入方式不改变周围代码的语法。
+`@builtin.str.raw` 按原始文本原样保留内容；`@builtin.str.raw_aligned` 则会在进入词法前跳过第一行空白行、去掉各行共有的水平缩进（` ` / `\t`）以整体左对齐，并在闭合 `}` 单独占一行时去掉该行缩进同时保留上一行末尾的换行符（例如上面得到 `"line 1: $ @ ^\n  line 2 (indented)\n"`）。两个宏的输出都接入字符串表达式位置；它们的文本输入方式不改变周围代码的语法。
 
 ## 与 Rust / Zig / C / C++ 的关键差异
 
