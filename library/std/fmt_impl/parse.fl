@@ -1,96 +1,26 @@
-use builtin.fmt.{Binary, Debug, Display, LowerHex, Octal, UpperHex}
+use builtin.fmt.{Debug, Display}
+use builtin.fmt.options.{scan_braced_field, validate_property_list}
 
 {-
     Formatting is a comptime library operation. A plan retains byte ranges in
     the original text and ordered argument positions, without copying text or
-    constructing runtime storage. `{}` selects Display, `{:?}` selects Debug,
-    `{:x}`/`{:#x}`/`{:X}`/`{:#X}`/`{:b}`/`{:#b}`/`{:o}`/`{:#o}` select radix
-    formatting (with optional `#` alternate prefix), and doubled braces produce
-    one literal brace. Other field syntax is rejected explicitly.
+    constructing runtime storage. `{}` selects Display with empty options,
+    `{key: value, ...}` passes raw property options to `Display` (or selects
+    `Debug` when `format: .debug` is present), and `{{` / `}}` escape to literal
+    braces. Other field syntax is rejected explicitly.
 
     This scanner is the lexical input to Parse's parameter-domain computation.
     It does not replace the Type description or admit runtime arguments.
 -}
 pub enum FormatPiece {
     text(u64, u64),
-    argument(Integer),
-    debug_argument(Integer),
-    lower_hex_argument(Integer, bool),
-    upper_hex_argument(Integer, bool),
-    binary_argument(Integer, bool),
-    octal_argument(Integer, bool),
+    argument(Integer, u64, u64),
+    debug_argument(Integer, u64, u64),
 }
 
 pub enum FormatKind {
     display,
     debug,
-    lower_hex,
-    lower_hex_alt,
-    upper_hex,
-    upper_hex_alt,
-    binary,
-    binary_alt,
-    octal,
-    octal_alt,
-}
-
-struct ParsedColonField {
-    piece: FormatPiece,
-    next_cursor: u64,
-}
-
-pure comptime fn parse_radix_spec(spec_byte: u8, index: Integer, alt: bool) -> ?FormatPiece {
-    if spec_byte == 120 {
-        FormatPiece.lower_hex_argument(index, alt)
-    } else if spec_byte == 88 {
-        FormatPiece.upper_hex_argument(index, alt)
-    } else if spec_byte == 98 {
-        FormatPiece.binary_argument(index, alt)
-    } else if spec_byte == 111 {
-        FormatPiece.octal_argument(index, alt)
-    } else {
-        null
-    }
-}
-
-pure comptime fn parse_colon_field(
-    format: str,
-    cursor: u64,
-    spec_pos: u64,
-    arguments: Integer,
-    alt: bool,
-) -> !FormatErr ParsedColonField {
-    let spec_byte = format.byte(spec_pos) match {
-        value? => value,
-        null => return error FormatErr.UnclosedField(cursor),
-    }
-    let piece_opt: ?FormatPiece = if (not alt) and (spec_byte == 63) {
-        FormatPiece.debug_argument(arguments)
-    } else {
-        parse_radix_spec(spec_byte, arguments, alt)
-    }
-    let piece = piece_opt match {
-        value? => value,
-        null => return error FormatErr.UnsupportedField(cursor),
-    }
-    if spec_pos == 18446744073709551615 {
-        return error FormatErr.UnclosedField(cursor);
-    }
-    let close_pos = spec_pos + 1;
-    let close = format.byte(close_pos) match {
-        value? => value,
-        null => return error FormatErr.UnclosedField(cursor),
-    }
-    if close != 125 {
-        return error FormatErr.UnsupportedField(cursor);
-    }
-    if close_pos == 18446744073709551615 {
-        return error FormatErr.UnclosedField(cursor);
-    }
-    ParsedColonField {
-        piece: piece,
-        next_cursor: close_pos + 1,
-    }
 }
 
 pub enum FormatErr {
@@ -122,64 +52,50 @@ impl FormatPlan {
                 }
                 let next = cursor + 1;
                 let following = format.byte(next);
-                var advanced = false;
                 if byte == 123 {
                     following match {
                         123? => {
                             pieces = pieces.concat([FormatPiece.text(cursor, next)]);
-                        },
-                        125? => {
-                            pieces = pieces.concat([FormatPiece.argument(arguments)]);
-                            arguments = arguments + 1;
-                        },
-                        58? => {
-                            if next > 18446744073709551613 {
-                                return error FormatErr.UnclosedField(cursor);
-                            }
-                            let first_pos = next + 1;
-                            let first_byte = format.byte(first_pos) match {
-                                value? => value,
-                                null => return error FormatErr.UnclosedField(cursor),
-                            }
-                            let has_alt = first_byte == 35;
-                            let spec_pos = if has_alt {
-                                if first_pos > 18446744073709551613 {
-                                    return error FormatErr.UnclosedField(cursor);
-                                }
-                                first_pos + 1
-                            } else {
-                                first_pos
-                            }
-                            let field = parse_colon_field(
-                                format,
-                                cursor,
-                                spec_pos,
-                                arguments,
-                                has_alt,
-                            )!;
-                            pieces = pieces.concat([field.piece]);
-                            arguments = arguments + 1;
-                            cursor = field.next_cursor;
+                            assumes next < length;
+                            cursor = next + 1;
                             start = cursor;
-                            advanced = true;
                         },
                         null => return error FormatErr.UnclosedField(cursor),
-                        _? => return error FormatErr.UnsupportedField(cursor),
+                        _? => {
+                            let close_pos = scan_braced_field(format, cursor) match {
+                                found? => found,
+                                null => return error FormatErr.UnclosedField(cursor),
+                            }
+                            let body = format.slice(next, close_pos) match {
+                                slice_text? => slice_text,
+                                null => return error FormatErr.UnsupportedField(cursor),
+                            }
+                            let is_debug = validate_property_list(body) match {
+                                flag? => flag,
+                                null => return error FormatErr.UnsupportedField(cursor),
+                            }
+                            let piece = if is_debug {
+                                FormatPiece.debug_argument(arguments, next, close_pos)
+                            } else {
+                                FormatPiece.argument(arguments, next, close_pos)
+                            };
+                            pieces = pieces.concat([piece]);
+                            arguments = arguments + 1;
+                            assumes close_pos < length;
+                            cursor = close_pos + 1;
+                            start = cursor;
+                        },
                     };
                 } else {
                     following match {
                         125? => {
                             pieces = pieces.concat([FormatPiece.text(cursor, next)]);
+                            assumes next < length;
+                            cursor = next + 1;
+                            start = cursor;
                         },
                         _ => return error FormatErr.UnmatchedClose(cursor),
                     };
-                }
-
-                if not advanced {
-                    {- Every two-byte brace token consumed a second byte. -}
-                    assumes next < length;
-                    cursor = next + 1;
-                    start = cursor;
                 }
             } else {
                 cursor = cursor + 1;
@@ -198,10 +114,6 @@ impl FormatPlan {
     pub pure comptime fn argument_domains(self) -> meta.List<Type> {
         let display_field = refines { Itself :- Display } Any;
         let debug_field = refines { Itself :- Debug } Any;
-        let lower_hex_field = refines { Itself :- LowerHex } Any;
-        let upper_hex_field = refines { Itself :- UpperHex } Any;
-        let binary_field = refines { Itself :- Binary } Any;
-        let octal_field = refines { Itself :- Octal } Any;
         var domains: meta.List<Type> = [];
         var index: Integer = 0;
         let piece_count = self.pieces.length();
@@ -215,23 +127,11 @@ impl FormatPlan {
             }
             piece match {
                 FormatPiece.text(_, _) => {},
-                FormatPiece.argument(_) => {
+                FormatPiece.argument(_, _, _) => {
                     domains = domains.concat([display_field]);
                 },
-                FormatPiece.debug_argument(_) => {
+                FormatPiece.debug_argument(_, _, _) => {
                     domains = domains.concat([debug_field]);
-                },
-                FormatPiece.lower_hex_argument(_, _) => {
-                    domains = domains.concat([lower_hex_field]);
-                },
-                FormatPiece.upper_hex_argument(_, _) => {
-                    domains = domains.concat([upper_hex_field]);
-                },
-                FormatPiece.binary_argument(_, _) => {
-                    domains = domains.concat([binary_field]);
-                },
-                FormatPiece.octal_argument(_, _) => {
-                    domains = domains.concat([octal_field]);
                 },
             }
             index = index + 1;
@@ -253,31 +153,11 @@ impl FormatPlan {
             }
             piece match {
                 FormatPiece.text(_, _) => {},
-                FormatPiece.argument(_) => {
+                FormatPiece.argument(_, _, _) => {
                     kinds = kinds.concat([FormatKind.display]);
                 },
-                FormatPiece.debug_argument(_) => {
+                FormatPiece.debug_argument(_, _, _) => {
                     kinds = kinds.concat([FormatKind.debug]);
-                },
-                FormatPiece.lower_hex_argument(_, alt) => {
-                    kinds = kinds.concat([
-                        if alt { FormatKind.lower_hex_alt } else { FormatKind.lower_hex },
-                    ]);
-                },
-                FormatPiece.upper_hex_argument(_, alt) => {
-                    kinds = kinds.concat([
-                        if alt { FormatKind.upper_hex_alt } else { FormatKind.upper_hex },
-                    ]);
-                },
-                FormatPiece.binary_argument(_, alt) => {
-                    kinds = kinds.concat([
-                        if alt { FormatKind.binary_alt } else { FormatKind.binary },
-                    ]);
-                },
-                FormatPiece.octal_argument(_, alt) => {
-                    kinds = kinds.concat([
-                        if alt { FormatKind.octal_alt } else { FormatKind.octal },
-                    ]);
                 },
             }
             index = index + 1;
@@ -309,10 +189,10 @@ impl FormatPlan {
             }
             piece match {
                 FormatPiece.text(_, _) => {},
-                FormatPiece.debug_argument(_) => {
+                FormatPiece.debug_argument(_, _, _) => {
                     flags = flags.concat([true]);
                 },
-                _ => {
+                FormatPiece.argument(_, _, _) => {
                     flags = flags.concat([false]);
                 },
             }
@@ -324,6 +204,44 @@ impl FormatPlan {
     pub pure comptime fn argument_is_debug_for(format: str) -> meta.List<bool> {
         FormatPlan.parse(format) match {
             plan! => plan.argument_is_debug(),
+            error _ => {
+                assumes false;
+                []
+            },
+        }
+    }
+
+    pub pure comptime fn argument_specs(self, format: str) -> meta.List<str> {
+        var specs: meta.List<str> = [];
+        var index: Integer = 0;
+        let piece_count = self.pieces.length();
+        while index < piece_count {
+            let piece = self.pieces.get(index) match {
+                value? => value,
+                null => {
+                    assumes false;
+                    return specs;
+                },
+            }
+            piece match {
+                FormatPiece.text(_, _) => {},
+                FormatPiece.argument(_, spec_start, spec_end)
+                    or FormatPiece.debug_argument(_, spec_start, spec_end) => {
+                    let item_spec = format.slice(spec_start, spec_end) match {
+                        value? => value,
+                        null => "",
+                    }
+                    specs = specs.concat([item_spec]);
+                },
+            }
+            index = index + 1;
+        }
+        specs
+    }
+
+    pub pure comptime fn argument_specs_for(format: str) -> meta.List<str> {
+        FormatPlan.parse(format) match {
+            plan! => plan.argument_specs(format),
             error _ => {
                 assumes false;
                 []
@@ -352,12 +270,7 @@ impl FormatPlan {
                     }
                     current = current.concat(chunk);
                 },
-                FormatPiece.argument(_)
-                    or FormatPiece.debug_argument(_)
-                    or FormatPiece.lower_hex_argument(_, _)
-                    or FormatPiece.upper_hex_argument(_, _)
-                    or FormatPiece.binary_argument(_, _)
-                    or FormatPiece.octal_argument(_, _) => {
+                FormatPiece.argument(_, _, _) or FormatPiece.debug_argument(_, _, _) => {
                     segments = segments.concat([current]);
                     current = "";
                 },

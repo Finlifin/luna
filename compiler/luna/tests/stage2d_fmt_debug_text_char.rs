@@ -75,7 +75,7 @@ fn comptime_format_plan_debug_spec_and_comptime_text_bytes() {
         use std.fmt.{FormatErr, FormatPiece, FormatPlan};
 
         comptime fn check_plan() -> bool {
-            let plan = FormatPlan.parse("a={} b={:?} {{}}") match {
+            let plan = FormatPlan.parse("a={} b={format: .debug} {{}}") match {
                 p! => p,
                 error _ => return false,
             };
@@ -83,12 +83,12 @@ fn comptime_format_plan_debug_spec_and_comptime_text_bytes() {
                 return false;
             }
             let pieces_ok = (plan.pieces[0] matches FormatPiece.text(0, 2))
-                and (plan.pieces[1] matches FormatPiece.argument(0))
+                and (plan.pieces[1] matches FormatPiece.argument(0, 3, 3))
                 and (plan.pieces[2] matches FormatPiece.text(4, 7))
-                and (plan.pieces[3] matches FormatPiece.debug_argument(1))
-                and (plan.pieces[4] matches FormatPiece.text(11, 12))
-                and (plan.pieces[5] matches FormatPiece.text(12, 13))
-                and (plan.pieces[6] matches FormatPiece.text(14, 15));
+                and (plan.pieces[3] matches FormatPiece.debug_argument(1, 8, 22))
+                and (plan.pieces[4] matches FormatPiece.text(23, 24))
+                and (plan.pieces[5] matches FormatPiece.text(24, 25))
+                and (plan.pieces[6] matches FormatPiece.text(26, 27));
             if not pieces_ok {
                 return false;
             }
@@ -98,16 +98,16 @@ fn comptime_format_plan_debug_spec_and_comptime_text_bytes() {
                 return false;
             }
 
-            let segs = plan.literal_segments("a={} b={:?} {{}}");
+            let segs = plan.literal_segments("a={} b={format: .debug} {{}}");
             if segs.length() != 3 or segs[0] != "a=" or segs[1] != " b=" or segs[2] != " {}" {
                 return false;
             }
 
             (FormatPlan.parse("{:") matches error FormatErr.UnclosedField(0))
-                and (FormatPlan.parse("{:?") matches error FormatErr.UnclosedField(0))
+                and (FormatPlan.parse("{format: .debug") matches error FormatErr.UnclosedField(0))
                 and (FormatPlan.parse("x{:") matches error FormatErr.UnclosedField(1))
-                and (FormatPlan.parse("x{:?") matches error FormatErr.UnclosedField(1))
-                and (FormatPlan.parse("{:?x}") matches error FormatErr.UnsupportedField(0))
+                and (FormatPlan.parse("x{format: .debug") matches error FormatErr.UnclosedField(1))
+                and (FormatPlan.parse("{:?}") matches error FormatErr.UnsupportedField(0))
                 and (FormatPlan.parse("{:q}") matches error FormatErr.UnsupportedField(0))
                 and (FormatPlan.parse("{:}") matches error FormatErr.UnsupportedField(0))
         }
@@ -146,7 +146,7 @@ fn comptime_format_plan_debug_spec_and_comptime_text_bytes() {
         r#"
         struct NoDebug {}
         fn run() -> !std.mem.AllocErr std.string.String {
-            std.fmt.format("{:?}", NoDebug {})
+            std.fmt.format("{format: .debug}", NoDebug {})
         }
         "#,
     )
@@ -185,9 +185,12 @@ fn std_fmt_debug_specifier_supports_mixed_heterogeneous_once_and_custom_allocato
         }
 
         impl Display for Plain {
-            fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+            fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+            where
+                W :- ByteWriter
+            {
                 output.write_str("Plain(")!;
-                self.v.write(output)!;
+                self.v.as(Display).fmt(output, .format = format)!;
                 output.write_byte(41)
             }
         }
@@ -202,7 +205,7 @@ fn std_fmt_debug_specifier_supports_mixed_heterogeneous_once_and_custom_allocato
         fn exercise(fba: *FixedBufferAllocator) -> !AllocErr u32 {
             -- 1. DefaultAllocator `format` mixing Display-only, Debug-only Duration, char, str, Symbol.
             let msg = format(
-                "p={} d={:?} c={} cd={:?} s={} sd={:?} sym={} symd={:?}",
+                "p={} d={format: .debug} c={} cd={format: .debug} s={} sd={format: .debug} sym={} symd={format: .debug}",
                 Plain { v: 9 },
                 Duration.from_millis(1250),
                 'x',
@@ -227,7 +230,7 @@ fn std_fmt_debug_specifier_supports_mixed_heterogeneous_once_and_custom_allocato
             dq_nums.ref.push_back(1)!;
             dq_nums.ref.push_back(2)!;
             let fba_msg = format<.A = FixedBufferAllocator, .allocator = fba>(
-                "b={} n={} s={:?} sd={} v={:?} dq={:?} ec={:?}",
+                "b={} n={} s={format: .debug} sd={} v={format: .debug} dq={format: .debug} ec={format: .debug}",
                 true,
                 -5,
                 owned,
@@ -251,7 +254,7 @@ fn std_fmt_debug_specifier_supports_mixed_heterogeneous_once_and_custom_allocato
             >.new(make_fba_str<fba>("bx")!)!;
             format_into(
                 target.ref,
-                " {:?} + {} = {:?}",
+                " {format: .debug} + {} = {format: .debug}",
                 boxed,
                 Plain { v: 3 },
                 make_fba_str<fba>("rhs\n")!,
@@ -262,7 +265,7 @@ fn std_fmt_debug_specifier_supports_mixed_heterogeneous_once_and_custom_allocato
 
             -- 4. `write_fmt` into Vec<u8> ByteWriter.
             var raw = Vec<u8, .A = FixedBufferAllocator, .allocator = fba>.new();
-            write_fmt(raw.ref, "{:?}:{}", "k", 99)!;
+            write_fmt(raw.ref, "{format: .debug}:{}", "k", 99)!;
             let raw_str = String<.A = FixedBufferAllocator, .allocator = fba>.from_utf8_lossy(raw)!;
             if not raw_str.ref.equals_str("\"k\":99") {
                 return 4;

@@ -1,4 +1,5 @@
-use builtin.fmt.{ByteWriter, Debug, Display}
+use builtin.fmt.{ByteWriter, Debug, Display, FormatOptions}
+use builtin.fmt.options.{compute_pad_counts, parse_text_options, write_char_repeat}
 use collections_impl.vec.Vec;
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
 
@@ -35,7 +36,7 @@ impl Utf8Err {
 impl Debug for Utf8Err {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
         output.write_str("Utf8Err { valid_up_to: ")!;
-        self.valid_up_to_offset.*.as(Display).write(output)!;
+        self.valid_up_to_offset.as(Display).fmt(output)!;
         output.write_str(" }")
     }
 }
@@ -773,6 +774,46 @@ where
         }
         unsafe { output.as(ByteWriter).write_raw_bytes(self.as_bytes_addr(), len) }
     }
+
+    pub fn write_formatted(
+        *self,
+        opts: FormatOptions,
+        output: *W,
+    ) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        if not opts.has_len and not opts.has_precision {
+            return self.write_to(output);
+        }
+        let byte_len = self.len();
+        var index: usize = 0;
+        var chars: u32 = 0;
+        var end_bytes: usize = byte_len;
+        while index < byte_len {
+            let byte = self.byte(index) match {
+                b? => b,
+                null => break,
+            }
+            if byte < 128 or byte >= 192 {
+                if opts.has_precision and chars >= opts.precision {
+                    end_bytes = index;
+                    break;
+                }
+                if chars < 10000000 {
+                    chars = chars + 1;
+                }
+            }
+            index = index + 1;
+        }
+        let pads = compute_pad_counts(opts, chars, false, false);
+        if pads.left > 0 {
+            write_char_repeat(opts.placeholder, pads.left, output)!;
+        }
+        if end_bytes > 0 {
+            unsafe { output.as(ByteWriter).write_raw_bytes(self.as_bytes_addr(), end_bytes)!; }
+        }
+        if pads.right > 0 {
+            write_char_repeat(opts.placeholder, pads.right, output)!;
+        }
+    }
 }
 
 impl Display for String<.A = A, .allocator = a>
@@ -781,9 +822,12 @@ where
     requires A :- Allocator,
     quote a: lift *A,
 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        var this = self;
-        this.ref.write_to(output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_text_options(format);
+        self.write_formatted(opts, output)
     }
 }
 

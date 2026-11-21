@@ -48,7 +48,7 @@ impl Debug for IoErr {
         self.* match {
             .Os(code) => {
                 output.write_str("IoErr.Os(")!;
-                code.as(Display).write(output)!;
+                code.ref.as(Display).fmt(output)!;
                 output.write_byte(41)
             },
             .WriteZero => output.write_str("IoErr.WriteZero"),

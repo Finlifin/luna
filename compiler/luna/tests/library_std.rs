@@ -76,8 +76,9 @@ fn println_and_display_preserve_bytes_and_external_effects() {
         use std.prelude.*;
         struct Label { value: u32 }
         impl Display for Label {
-            fn write(self, output: *W) -> !W.as(std.io.ByteWriter).Err void
-            where W :- std.io.ByteWriter
+            fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(std.io.ByteWriter).Err void
+            where
+                W :- std.io.ByteWriter
             {
                 output.write_byte(99)!;
                 output.write_byte(117)!;
@@ -86,7 +87,7 @@ fn println_and_display_preserve_bytes_and_external_effects() {
                 output.write_byte(111)!;
                 output.write_byte(109)!;
                 output.write_byte(61)!;
-                self.value.write(output)
+                self.value.as(Display).fmt(output, .format = format)
             }
         }
         fn mark(counter: *u8) -> u8 {
@@ -357,7 +358,7 @@ fn builtin_display_borrows_stateful_writers_and_preserves_their_errors() {
         fn render(value: T, sink: *W) -> !W.as(ByteWriter).Err void
         where T :- Display, W :- ByteWriter
         {
-            value.write(sink)
+            value.ref.as(Display).fmt(sink)
         }
         fn run() -> bool {
             var sink = Sink { count: 0, limit: 2, bytes: 0, attempts: 0 };
@@ -396,8 +397,9 @@ fn display_writes_through_a_borrowed_file_without_transferring_ownership() {
         fn exercise() -> !std.io.IoErr bool {
             var file = File.create<"formatted.txt">()!;
             let value: u32 = 42;
-            value.write(file.ref)!;
-            true.write(file.ref)!;
+            let flag = true;
+            value.ref.as(Display).fmt(file.ref)!;
+            flag.ref.as(Display).fmt(file.ref)!;
             file.close()!;
             var reader = File.open<"formatted.txt">()!;
             let a = reader.read_byte()!;

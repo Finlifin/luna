@@ -18,11 +18,11 @@ fn format_plan_preserves_utf8_ranges_escapes_and_argument_order() {
                 };
                 if plan.argument_count != 2 or plan.pieces.length() != 6 { return false; }
                 (plan.pieces[0] matches FormatPiece.text(0, 3)) and
-                (plan.pieces[1] matches FormatPiece.argument(0)) and
+                (plan.pieces[1] matches FormatPiece.argument(0, 4, 4)) and
                 (plan.pieces[2] matches FormatPiece.text(5, 6)) and
                 (plan.pieces[3] matches FormatPiece.text(7, 8)) and
                 (plan.pieces[4] matches FormatPiece.text(9, 10)) and
-                (plan.pieces[5] matches FormatPiece.argument(1))
+                (plan.pieces[5] matches FormatPiece.argument(1, 11, 11))
             }
             fn run() -> bool { inspect() }
             "#,
@@ -54,7 +54,7 @@ fn format_plan_handles_empty_plain_and_adjacent_fields() {
                 text.argument_count == 0 and text.pieces.length() == 1 and
                 (text.pieces[0] matches FormatPiece.text(0, 12)) and
                 fields.argument_count == 3 and fields.pieces.length() == 3 and
-                (fields.pieces[2] matches FormatPiece.argument(2)) and
+                (fields.pieces[2] matches FormatPiece.argument(2, 5, 5)) and
                 escaped.argument_count == 1 and escaped.pieces.length() == 3
             }
             fn run() -> bool { inspect() }

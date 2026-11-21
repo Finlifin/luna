@@ -55,7 +55,7 @@ impl Eq for ExitCode {
 impl Debug for ExitCode {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
         output.write_str("ExitCode(")!;
-        self.raw_code.*.as(Display).write(output)!;
+        self.raw_code.as(Display).fmt(output)!;
         output.write_byte(41)
     }
 }

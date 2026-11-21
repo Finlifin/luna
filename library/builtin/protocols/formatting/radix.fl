@@ -1,26 +1,17 @@
+use meta.ComptimeTextBytes;
 use primitives.*;
+use protocols.formatting.options.{
+    FormatOptions,
+    compute_pad_counts,
+    pad_comptime_str,
+    write_char_repeat,
+}
 use protocols.formatting.writer.ByteWriter;
 
 {-
-    Zero-allocation integer radix formatting traits. Receivers are borrowed so
-    formatting follows the same protocol ownership convention as Debug. Signed
-    types format their two's-complement bit representation within their width.
+    Internal integer formatting helpers shared by builtin runtime and comptime
+    `Display` implementations across decimal, hex, octal, and binary modes.
 -}
-pub trait LowerHex {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter;
-}
-
-pub trait UpperHex {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter;
-}
-
-pub trait Binary {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter;
-}
-
-pub trait Octal {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter;
-}
 
 fn hex_byte(nibble: u8, uppercase: bool) -> u8 {
     if nibble <= 9 {
@@ -32,320 +23,329 @@ fn hex_byte(nibble: u8, uppercase: bool) -> u8 {
     }
 }
 
-fn write_unsigned_hex(
+fn write_unsigned_decimal_digits(
+    value: u128,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if value >= 10 {
+        write_unsigned_decimal_digits(value / 10, output)!;
+    }
+    let digit = (value % 10)'bitvec[0..8].as(u8);
+    assumes digit <= 9;
+    output.write_byte(48 + digit)
+}
+
+fn write_unsigned_hex_digits(
     value: u128,
     uppercase: bool,
     output: *W,
 ) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
     if value >= 16 {
-        write_unsigned_hex(value / 16, uppercase, output)!;
+        write_unsigned_hex_digits(value / 16, uppercase, output)!;
     }
     let nibble = (value % 16)'bitvec[0..8].as(u8);
     output.write_byte(hex_byte(nibble, uppercase))
 }
 
-fn write_unsigned_binary(value: u128, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-    if value >= 2 {
-        write_unsigned_binary(value / 2, output)!;
-    }
-    let bit = (value % 2)'bitvec[0..8].as(u8);
-    assumes bit <= 1;
-    output.write_byte(48 + bit)
-}
-
-fn write_unsigned_octal(value: u128, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+fn write_unsigned_octal_digits(
+    value: u128,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
     if value >= 8 {
-        write_unsigned_octal(value / 8, output)!;
+        write_unsigned_octal_digits(value / 8, output)!;
     }
     let digit = (value % 8)'bitvec[0..8].as(u8);
     assumes digit <= 7;
     output.write_byte(48 + digit)
 }
 
-impl LowerHex for u8 {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
+fn write_unsigned_binary_digits(
+    value: u128,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if value >= 2 {
+        write_unsigned_binary_digits(value / 2, output)!;
+    }
+    let bit = (value % 2)'bitvec[0..8].as(u8);
+    assumes bit <= 1;
+    output.write_byte(48 + bit)
+}
+
+pure fn count_digits_in_base(value: u128, base: u128) -> u32 {
+    if base < 2 {
+        return 1;
+    }
+    var v = value;
+    var count: u32 = 1;
+    while v >= base {
+        v = v / base;
+        if count < 128 {
+            count = count + 1;
+        }
+    }
+    count
+}
+
+pure fn radix_base_u128(radix: u8) -> u128 {
+    if radix == 1 or radix == 2 {
+        16
+    } else if radix == 3 {
+        8
+    } else if radix == 4 {
+        2
+    } else {
+        10
     }
 }
 
-impl UpperHex for u8 {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
+fn write_radix_prefix(
+    radix: u8,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if radix == 1 {
+        output.write_str("0x")
+    } else if radix == 2 {
+        output.write_str("0X")
+    } else if radix == 3 {
+        output.write_str("0o")
+    } else if radix == 4 {
+        output.write_str("0b")
+    } else {
+        return;
     }
 }
 
-impl Binary for u8 {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_binary(self.*'bitvec.as(u128), output)
+fn write_digits_in_radix(
+    digits: u128,
+    radix: u8,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if radix == 1 {
+        write_unsigned_hex_digits(digits, false, output)
+    } else if radix == 2 {
+        write_unsigned_hex_digits(digits, true, output)
+    } else if radix == 3 {
+        write_unsigned_octal_digits(digits, output)
+    } else if radix == 4 {
+        write_unsigned_binary_digits(digits, output)
+    } else {
+        write_unsigned_decimal_digits(digits, output)
     }
 }
 
-impl Octal for u8 {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_octal(self.*'bitvec.as(u128), output)
+pub fn write_unsigned_formatted(
+    value: u128,
+    opts: FormatOptions,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    write_signed_formatted(false, value, value, opts, output)
+}
+
+pub fn write_signed_formatted(
+    is_neg: bool,
+    abs_magnitude: u128,
+    twos_comp: u128,
+    opts: FormatOptions,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    let digits = if opts.radix == 0 { abs_magnitude } else { twos_comp };
+    let sign_char: u8 = if opts.radix == 0 {
+        if is_neg {
+            45
+        } else if opts.sign == 1 {
+            43
+        } else if opts.sign == 2 {
+            32
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    let has_alt_prefix = opts.radix != 0 and opts.alt;
+
+    if not opts.has_len {
+        if sign_char != 0 {
+            output.write_byte(sign_char)!;
+        }
+        if has_alt_prefix {
+            write_radix_prefix(opts.radix, output)!;
+        }
+        return write_digits_in_radix(digits, opts.radix, output);
+    }
+
+    let sign_len: u32 = if sign_char != 0 { 1 } else { 0 };
+    let alt_len: u32 = if has_alt_prefix { 2 } else { 0 };
+    let digit_count = count_digits_in_base(digits, radix_base_u128(opts.radix));
+    if digit_count > 128 {
+        return;
+    }
+    let content_chars: u32 = sign_len + alt_len + digit_count;
+    let pads = compute_pad_counts(opts, content_chars, true, true);
+    if pads.left > 0 {
+        write_char_repeat(opts.placeholder, pads.left, output)!;
+    }
+    if sign_char != 0 {
+        output.write_byte(sign_char)!;
+    }
+    if has_alt_prefix {
+        write_radix_prefix(opts.radix, output)!;
+    }
+    if pads.zero_pad > 0 {
+        write_char_repeat('0', pads.zero_pad, output)!;
+    }
+    write_digits_in_radix(digits, opts.radix, output)!;
+    if pads.right > 0 {
+        write_char_repeat(opts.placeholder, pads.right, output)!;
     }
 }
 
-impl LowerHex for u16 {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
+{- ── Comptime integer formatting helpers ──────────────────────────────────── -}
+
+pure comptime fn comptime_digit_str(d: u64, uppercase: bool) -> str {
+    let table = if uppercase { "0123456789ABCDEF" } else { "0123456789abcdef" };
+    if d >= 16 {
+        return "0";
+    }
+    table.slice(d, d + 1) match {
+        s? => s,
+        null => "0",
     }
 }
 
-impl UpperHex for u16 {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
+pure comptime fn format_u128_digits_comptime(value: u128, radix: u8) -> str {
+    if value == 0 {
+        return "0";
+    }
+    let base: u128 = if radix == 1 or radix == 2 {
+        16
+    } else if radix == 3 {
+        8
+    } else if radix == 4 {
+        2
+    } else {
+        10
+    };
+    if base < 2 or base > 16 {
+        return "0";
+    }
+    let uppercase = radix == 2;
+    var v = value;
+    var out = "";
+    while v > 0 {
+        if base < 2 {
+            break;
+        }
+        let d = (v % base)'bitvec[0..8].as(u64);
+        out = comptime_digit_str(d, uppercase).concat(out);
+        v = v / base;
+    }
+    out
+}
+
+pure comptime fn radix_prefix_str(radix: u8) -> str {
+    if radix == 1 {
+        "0x"
+    } else if radix == 2 {
+        "0X"
+    } else if radix == 3 {
+        "0o"
+    } else if radix == 4 {
+        "0b"
+    } else {
+        ""
     }
 }
 
-impl Binary for u16 {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_binary(self.*'bitvec.as(u128), output)
+pub pure comptime fn format_unsigned_comptime(value: u128, opts: FormatOptions) -> str {
+    format_signed_comptime(false, value, value, opts)
+}
+
+pub pure comptime fn format_signed_comptime(
+    is_neg: bool,
+    abs_magnitude: u128,
+    twos_comp: u128,
+    opts: FormatOptions,
+) -> str {
+    let digits_value = if opts.radix == 0 { abs_magnitude } else { twos_comp };
+    let prefix = if opts.radix == 0 {
+        if is_neg {
+            "-"
+        } else if opts.sign == 1 {
+            "+"
+        } else if opts.sign == 2 {
+            " "
+        } else {
+            ""
+        }
+    } else if opts.alt {
+        radix_prefix_str(opts.radix)
+    } else {
+        ""
+    };
+    let body = format_u128_digits_comptime(digits_value, opts.radix);
+    pad_comptime_str(prefix, body, opts, true, true)
+}
+
+pure comptime fn integer_digit_str(d: Integer, uppercase: bool) -> str {
+    d match {
+        0 => "0",
+        1 => "1",
+        2 => "2",
+        3 => "3",
+        4 => "4",
+        5 => "5",
+        6 => "6",
+        7 => "7",
+        8 => "8",
+        9 => "9",
+        10 => if uppercase { "A" } else { "a" },
+        11 => if uppercase { "B" } else { "b" },
+        12 => if uppercase { "C" } else { "c" },
+        13 => if uppercase { "D" } else { "d" },
+        14 => if uppercase { "E" } else { "e" },
+        15 => if uppercase { "F" } else { "f" },
+        _ => "0",
     }
 }
 
-impl Octal for u16 {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_octal(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl LowerHex for u32 {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
-    }
-}
-
-impl UpperHex for u32 {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
-    }
-}
-
-impl Binary for u32 {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_binary(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl Octal for u32 {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_octal(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl LowerHex for u64 {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
-    }
-}
-
-impl UpperHex for u64 {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
-    }
-}
-
-impl Binary for u64 {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_binary(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl Octal for u64 {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_octal(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl LowerHex for u128 {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
-    }
-}
-
-impl UpperHex for u128 {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
-    }
-}
-
-impl Binary for u128 {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_binary(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl Octal for u128 {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_octal(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl LowerHex for usize {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(builtin.compiler.usize_representation(self.*), false, output)
-    }
-}
-
-impl UpperHex for usize {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(builtin.compiler.usize_representation(self.*), true, output)
-    }
-}
-
-impl Binary for usize {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_binary(builtin.compiler.usize_representation(self.*), output)
-    }
-}
-
-impl Octal for usize {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_octal(builtin.compiler.usize_representation(self.*), output)
-    }
-}
-
-impl LowerHex for i8 {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
-    }
-}
-
-impl UpperHex for i8 {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
-    }
-}
-
-impl Binary for i8 {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_binary(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl Octal for i8 {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_octal(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl LowerHex for i16 {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
-    }
-}
-
-impl UpperHex for i16 {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
-    }
-}
-
-impl Binary for i16 {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_binary(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl Octal for i16 {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_octal(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl LowerHex for i32 {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
-    }
-}
-
-impl UpperHex for i32 {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
-    }
-}
-
-impl Binary for i32 {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_binary(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl Octal for i32 {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_octal(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl LowerHex for i64 {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
-    }
-}
-
-impl UpperHex for i64 {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
-    }
-}
-
-impl Binary for i64 {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_binary(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl Octal for i64 {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_octal(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl LowerHex for i128 {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), false, output)
-    }
-}
-
-impl UpperHex for i128 {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(self.*'bitvec.as(u128), true, output)
-    }
-}
-
-impl Binary for i128 {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_binary(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl Octal for i128 {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_octal(self.*'bitvec.as(u128), output)
-    }
-}
-
-impl LowerHex for isize {
-    fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(builtin.compiler.isize_representation(self.*), false, output)
-    }
-}
-
-impl UpperHex for isize {
-    fn write_upper_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_hex(builtin.compiler.isize_representation(self.*), true, output)
-    }
-}
-
-impl Binary for isize {
-    fn write_binary(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_binary(builtin.compiler.isize_representation(self.*), output)
-    }
-}
-
-impl Octal for isize {
-    fn write_octal(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        write_unsigned_octal(builtin.compiler.isize_representation(self.*), output)
-    }
+pub pure comptime fn format_integer_comptime(value: Integer, opts: FormatOptions) -> str {
+    let sign_prefix = if value < 0 {
+        "-"
+    } else if opts.sign == 1 {
+        "+"
+    } else if opts.sign == 2 {
+        " "
+    } else {
+        ""
+    };
+    let alt_prefix = if opts.radix != 0 and opts.alt {
+        radix_prefix_str(opts.radix)
+    } else {
+        ""
+    };
+    let prefix = sign_prefix.concat(alt_prefix);
+    let base: Integer = if opts.radix == 1 or opts.radix == 2 {
+        16
+    } else if opts.radix == 3 {
+        8
+    } else if opts.radix == 4 {
+        2
+    } else {
+        10
+    };
+    let uppercase = opts.radix == 2;
+    var mag = if value < 0 { -value } else { value };
+    let body = if mag == 0 {
+        "0"
+    } else {
+        var digits = "";
+        while mag > 0 {
+            let rem = mag.rem_trunc(base);
+            digits = integer_digit_str(rem, uppercase).concat(digits);
+            mag = mag.div_trunc(base);
+        }
+        digits
+    };
+    pad_comptime_str(prefix, body, opts, true, true)
 }

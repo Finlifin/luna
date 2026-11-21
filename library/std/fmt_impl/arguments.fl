@@ -1,6 +1,13 @@
-use builtin.fmt.{Binary, ByteWriter, Debug, Display, LowerHex, Octal, UpperHex}
+use builtin.fmt.{ByteWriter, Debug, Display}
+use builtin.fmt.options.{
+    FormatOptions,
+    ProbeWriter,
+    compute_pad_counts,
+    parse_debug_options,
+    write_char_repeat,
+}
 use collections_impl.vec.Vec;
-use fmt_impl.parse.{FormatKind, FormatPlan, Parse}
+use fmt_impl.parse.{FormatPlan, Parse}
 use io_impl.errors.IoErr;
 use io_impl.writer.{stderr, stdout, write_all}
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator}
@@ -10,101 +17,45 @@ pub fn print(comptime text: str) -> !IoErr void {
     write_all<text>(1)
 }
 
-{- Emit one unescaped literal segment selected by field position. -}
-fn write_segment(
-    output: *W,
-    index: usize,
-) -> !W.as(ByteWriter).Err void where W :- ByteWriter, segments: meta.List<str> {
-    inline for i in 0..segments.length() {
-        const segment_index: usize = i.to_usize();
-        if index == segment_index {
-            const segment = segments.get(i) match {
-                value? => value,
-                null => "",
-            }
-            return output.write_str(segment);
-        }
+pure comptime fn str_at(values: meta.List<str>, index: Integer) -> str {
+    values.get(index) match {
+        value? => value,
+        null => "",
     }
 }
 
-{- Dispatch one argument via Display (`{}`), Debug (`{:?}`), or radix traits. -}
-fn write_arg(
+pure comptime fn bool_at(values: meta.List<bool>, index: Integer) -> bool {
+    values.get(index) match {
+        value? => value,
+        null => false,
+    }
+}
+
+fn write_debug_with_format(
+    value: *T,
     output: *W,
-    index: usize,
-    value: T,
+    comptime field_fmt: str,
 ) -> !W.as(ByteWriter).Err void
 where
+    T :- Debug,
     W :- ByteWriter,
-    T,
-    kinds: meta.List<FormatKind>,
 {
-    inline for i in 0..kinds.length() {
-        const arg_index: usize = i.to_usize();
-        if index == arg_index {
-            const kind: FormatKind = kinds.get(i) match {
-                found? => found,
-                null => FormatKind.display,
-            }
-            const is_debug: bool = kind matches FormatKind.debug;
-            const is_lower_hex: bool = (kind matches FormatKind.lower_hex)
-                or (kind matches FormatKind.lower_hex_alt);
-            const is_upper_hex: bool = (kind matches FormatKind.upper_hex)
-                or (kind matches FormatKind.upper_hex_alt);
-            const is_binary: bool = (kind matches FormatKind.binary)
-                or (kind matches FormatKind.binary_alt);
-            const is_octal: bool = (kind matches FormatKind.octal)
-                or (kind matches FormatKind.octal_alt);
-            const is_alt: bool = (kind matches FormatKind.lower_hex_alt)
-                or (kind matches FormatKind.upper_hex_alt)
-                or (kind matches FormatKind.binary_alt)
-                or (kind matches FormatKind.octal_alt);
-            inline if is_debug {
-                inline if T :- Debug {
-                    return value.ref.as(Debug).write_debug(output);
-                }
-            } else {
-                inline if is_lower_hex {
-                    inline if is_alt {
-                        output.write_str("0x")!;
-                    }
-                    inline if T :- LowerHex {
-                        return value.ref.as(LowerHex).write_lower_hex(output);
-                    }
-                } else {
-                    inline if is_upper_hex {
-                        inline if is_alt {
-                            output.write_str("0X")!;
-                        }
-                        inline if T :- UpperHex {
-                            return value.ref.as(UpperHex).write_upper_hex(output);
-                        }
-                    } else {
-                        inline if is_binary {
-                            inline if is_alt {
-                                output.write_str("0b")!;
-                            }
-                            inline if T :- Binary {
-                                return value.ref.as(Binary).write_binary(output);
-                            }
-                        } else {
-                            inline if is_octal {
-                                inline if is_alt {
-                                    output.write_str("0o")!;
-                                }
-                                inline if T :- Octal {
-                                    return value.ref.as(Octal).write_octal(output);
-                                }
-                            } else {
-                                inline if T :- Display {
-                                    return value.write(output);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            return;
-        }
+    let opts: FormatOptions = parse_debug_options(field_fmt);
+    if not opts.has_len {
+        return value.as(Debug).write_debug(output);
+    }
+    var probe = ProbeWriter.new();
+    value.as(Debug).write_debug(probe.ref) match {
+        _! => {},
+        error _ => return,
+    }
+    let pads = compute_pad_counts(opts, probe.chars, false, false);
+    if pads.left > 0 {
+        write_char_repeat(opts.placeholder, pads.left, output)!;
+    }
+    value.as(Debug).write_debug(output)!;
+    if pads.right > 0 {
+        write_char_repeat(opts.placeholder, pads.right, output)!;
     }
 }
 
@@ -113,19 +64,27 @@ fn write_fmt_tuple(
     comptime format: str,
     values: defer Parse(format),
 ) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-    const segments = FormatPlan.literal_segments_for(format);
-    const kinds = FormatPlan.argument_kinds_for(format);
-    const segment_count: usize = segments.length().to_usize();
-    var index: usize = 0;
-    inline for value in values'tuple_enumerate {
-        write_segment<W, segments>(output, index)!;
+    const segments: meta.List<str> = FormatPlan.literal_segments_for(format);
+    const specs: meta.List<str> = FormatPlan.argument_specs_for(format);
+    const debug_flags: meta.List<bool> = FormatPlan.argument_is_debug_for(format);
+    inline for (i, value) in values'tuple_indexed {
+        const segment: str = str_at(segments, i);
+        output.write_str(segment)!;
+        const field_fmt: str = str_at(specs, i);
+        const is_debug: bool = bool_at(debug_flags, i);
         const T = value'type;
-        write_arg<W, T, kinds>(output, index, value)!;
-        if index < segment_count {
-            index = index + 1;
+        inline if is_debug {
+            inline if T :- Debug {
+                write_debug_with_format(value.ref, output, field_fmt)!;
+            }
+        } else {
+            inline if T :- Display {
+                value.ref.as(Display).fmt(output, .format = field_fmt)!;
+            }
         }
     }
-    write_segment<W, segments>(output, index)
+    const tail: str = str_at(segments, specs.length());
+    output.write_str(tail)
 }
 
 pub fn write_fmt(
@@ -134,6 +93,32 @@ pub fn write_fmt(
     ...varargs: defer Parse(format),
 ) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
     write_fmt_tuple(output, format, varargs)
+}
+
+pub comptime fn comptime_format(
+    comptime format: str,
+    ...varargs: defer Parse(format),
+) -> str {
+    let segments = FormatPlan.literal_segments_for(format);
+    let specs = FormatPlan.argument_specs_for(format);
+    let debug_flags = FormatPlan.argument_is_debug_for(format);
+    var out = "";
+    inline for (i, value) in varargs'tuple_indexed {
+        let segment = str_at(segments, i);
+        out = out.concat(segment);
+        let field_fmt = str_at(specs, i);
+        let is_debug = bool_at(debug_flags, i);
+        const T = value'type;
+        if is_debug {
+            assumes false;
+        } else {
+            inline if T :- Display {
+                out = out.concat(value.as(Display).comptime_fmt(.format = field_fmt));
+            }
+        }
+    }
+    let tail = str_at(segments, specs.length());
+    out.concat(tail)
 }
 
 pub fn format(
@@ -184,12 +169,12 @@ pub fn eprintln(comptime format: str, ...varargs: defer Parse(format)) -> !IoErr
 
 pub fn print_value(value: T) -> !IoErr void where T :- Display {
     var output = stdout();
-    value.write(output.ref)
+    value.ref.as(Display).fmt(output.ref)
 }
 
 pub fn println_value(value: T) -> !IoErr void where T :- Display {
     var output = stdout();
-    value.write(output.ref)!;
+    value.ref.as(Display).fmt(output.ref)!;
     output.write_byte(10)
 }
 

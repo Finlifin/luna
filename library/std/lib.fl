@@ -62,6 +62,7 @@ pub mod string {
 
 pub mod fmt {
     pub use arguments.{
+        comptime_format,
         eprint,
         eprintln,
         format,
@@ -73,12 +74,13 @@ pub mod fmt {
         println_value,
         write_fmt,
     }
-    pub use builtin.fmt.{Binary, Debug, Display, LowerHex, Octal, UpperHex}
+    pub use builtin.fmt.{Debug, Display, FormatOptions, options}
     pub use parse.{FormatErr, FormatKind, FormatPiece, FormatPlan, Parse}
 }
 
 pub mod prelude {
     pub use arguments.{
+        comptime_format,
         eprint,
         eprintln,
         format,

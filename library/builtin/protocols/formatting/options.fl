@@ -1,0 +1,1468 @@
+use bindings.{str_byte, str_byte_length}
+use meta.{ComptimeTextBytes, ComptimeTryFrom, List, str_from_char}
+use primitives.*;
+use protocols.formatting.writer.ByteWriter;
+use protocols.resources.{Clone, Copy}
+use protocols.staging.Splice;
+
+{-
+    Property-based formatting options (`{format: .hex, align_to: .right, ...}`)
+    and shared comptime/runtime formatting helpers. Option structures are parsed
+    and validated at compile time and transferred across stages via `Splice`.
+-}
+pub struct FormatOptions {
+    -- 0 = dec, 1 = hex, 2 = HEX, 3 = oct, 4 = bin
+    radix: u8,
+    alt: bool,
+    -- 0 = minus (default), 1 = plus, 2 = space
+    sign: u8,
+    -- 0 = default/none, 1 = left, 2 = center, 3 = right
+    align: u8,
+    has_len: bool,
+    len: u32,
+    placeholder: char,
+    has_precision: bool,
+    precision: u32,
+}
+
+impl Clone for FormatOptions {
+    fn clone(*self) -> Self {
+        FormatOptions {
+            radix: self.radix.*,
+            alt: self.alt.*,
+            sign: self.sign.*,
+            align: self.align.*,
+            has_len: self.has_len.*,
+            len: self.len.*,
+            placeholder: self.placeholder.*,
+            has_precision: self.has_precision.*,
+            precision: self.precision.*,
+        }
+    }
+}
+
+impl Copy for FormatOptions {}
+
+impl Splice for FormatOptions {
+    assoc RuntimeTarget: Type = FormatOptions;
+
+    fn splice(comptime data: FormatOptions) -> FormatOptions {
+        FormatOptions {
+            radix: data.radix,
+            alt: data.alt,
+            sign: data.sign,
+            align: data.align,
+            has_len: data.has_len,
+            len: data.len,
+            placeholder: data.placeholder,
+            has_precision: data.has_precision,
+            precision: data.precision,
+        }
+    }
+}
+
+pub pure comptime fn default_format_options() -> FormatOptions {
+    FormatOptions {
+        radix: 0,
+        alt: false,
+        sign: 0,
+        align: 0,
+        has_len: false,
+        len: 0,
+        placeholder: ' ',
+        has_precision: false,
+        precision: 0,
+    }
+}
+
+pub struct PadCounts {
+    left: u32,
+    zero_pad: u32,
+    right: u32,
+}
+
+impl Clone for PadCounts {
+    fn clone(*self) -> Self {
+        PadCounts {
+            left: self.left.*,
+            zero_pad: self.zero_pad.*,
+            right: self.right.*,
+        }
+    }
+}
+
+impl Copy for PadCounts {}
+
+pub pure fn compute_pad_counts(
+    opts: FormatOptions,
+    content_chars: u32,
+    is_numeric: bool,
+    allow_zero_pad: bool,
+) -> PadCounts {
+    let target_len = opts.len;
+    if not opts.has_len or target_len <= content_chars {
+        return PadCounts {
+            left: 0,
+            zero_pad: 0,
+            right: 0,
+        };
+    }
+    let pad = target_len - content_chars;
+    if opts.align == 1 {
+        PadCounts {
+            left: 0,
+            zero_pad: 0,
+            right: pad,
+        }
+    } else if opts.align == 2 {
+        let left = pad / 2;
+        PadCounts {
+            left: left,
+            zero_pad: 0,
+            right: pad - left,
+        }
+    } else if opts.align == 3 {
+        PadCounts {
+            left: pad,
+            zero_pad: 0,
+            right: 0,
+        }
+    } else if is_numeric and allow_zero_pad and opts.placeholder == '0' {
+        PadCounts {
+            left: 0,
+            zero_pad: pad,
+            right: 0,
+        }
+    } else if is_numeric {
+        PadCounts {
+            left: pad,
+            zero_pad: 0,
+            right: 0,
+        }
+    } else {
+        PadCounts {
+            left: 0,
+            zero_pad: 0,
+            right: pad,
+        }
+    }
+}
+
+pub pure comptime fn compute_comptime_pad_counts(
+    opts: FormatOptions,
+    content_chars: u32,
+    is_numeric: bool,
+    allow_zero_pad: bool,
+) -> PadCounts {
+    let target_len = opts.len;
+    if not opts.has_len or target_len <= content_chars {
+        return PadCounts {
+            left: 0,
+            zero_pad: 0,
+            right: 0,
+        };
+    }
+    let pad = target_len - content_chars;
+    if opts.align == 1 {
+        PadCounts {
+            left: 0,
+            zero_pad: 0,
+            right: pad,
+        }
+    } else if opts.align == 2 {
+        let left = pad / 2;
+        PadCounts {
+            left: left,
+            zero_pad: 0,
+            right: pad - left,
+        }
+    } else if opts.align == 3 {
+        PadCounts {
+            left: pad,
+            zero_pad: 0,
+            right: 0,
+        }
+    } else if is_numeric and allow_zero_pad and opts.placeholder == '0' {
+        PadCounts {
+            left: 0,
+            zero_pad: pad,
+            right: 0,
+        }
+    } else if is_numeric {
+        PadCounts {
+            left: pad,
+            zero_pad: 0,
+            right: 0,
+        }
+    } else {
+        PadCounts {
+            left: 0,
+            zero_pad: 0,
+            right: pad,
+        }
+    }
+}
+
+{- ── Comptime property scanner & parser ────────────────────────────────────── -}
+
+pub pure comptime fn is_ascii_ws(byte: u8) -> bool {
+    byte == 32 or byte == 9 or byte == 10 or byte == 13
+}
+
+pure comptime fn is_ident_start(byte: u8) -> bool {
+    (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122) or byte == 95
+}
+
+pure comptime fn is_ident_cont(byte: u8) -> bool {
+    is_ident_start(byte) or (byte >= 48 and byte <= 57)
+}
+
+pure comptime fn hex_digit_value(byte: u8) -> ?u32 {
+    if byte >= 48 and byte <= 57 {
+        (byte - 48)'bitvec.as(u32)
+    } else if byte >= 65 and byte <= 70 {
+        (byte - 55)'bitvec.as(u32)
+    } else if byte >= 97 and byte <= 102 {
+        (byte - 87)'bitvec.as(u32)
+    } else {
+        null
+    }
+}
+
+struct ParsedEscape {
+    ch: char,
+    next_pos: u64,
+}
+
+pure comptime fn parse_escape_seq(src: str, backslash_pos: u64, length: u64) -> ?ParsedEscape {
+    if backslash_pos >= length or length - backslash_pos < 2 {
+        return null;
+    }
+    let p = backslash_pos + 1;
+    let esc = src.byte(p) match {
+        b? => b,
+        null => return null,
+    }
+    if esc == 92 {
+        return ParsedEscape { ch: '\\', next_pos: p + 1 };
+    }
+    if esc == 39 {
+        return ParsedEscape { ch: '\'', next_pos: p + 1 };
+    }
+    if esc == 34 {
+        return ParsedEscape { ch: '"', next_pos: p + 1 };
+    }
+    if esc == 110 {
+        return ParsedEscape { ch: '\n', next_pos: p + 1 };
+    }
+    if esc == 114 {
+        return ParsedEscape { ch: '\r', next_pos: p + 1 };
+    }
+    if esc == 116 {
+        return ParsedEscape { ch: '\t', next_pos: p + 1 };
+    }
+    if esc == 48 {
+        return ParsedEscape { ch: '\0', next_pos: p + 1 };
+    }
+    if esc == 36 {
+        return ParsedEscape { ch: '$', next_pos: p + 1 };
+    }
+    if esc == 120 {
+        if p >= length or length - p < 2 {
+            return null;
+        }
+        let brace_pos = p + 1;
+        let brace = src.byte(brace_pos) match {
+            b? => b,
+            null => return null,
+        }
+        if brace != 123 {
+            return null;
+        }
+        var cur = brace_pos + 1;
+        var count: u8 = 0;
+        var code: u32 = 0;
+        while cur < length {
+            let b = src.byte(cur) match {
+                v? => v,
+                null => return null,
+            }
+            if b == 125 {
+                if count == 0 {
+                    return null;
+                }
+                let scalar = char.as(ComptimeTryFrom<u32>).try_from(code) match {
+                    c? => c,
+                    null => return null,
+                }
+                return ParsedEscape {
+                    ch: scalar,
+                    next_pos: cur + 1,
+                };
+            }
+            let nibble = hex_digit_value(b) match {
+                n? => n,
+                null => return null,
+            }
+            if count >= 6 or code > 1048575 or nibble > 15 {
+                return null;
+            }
+            let scaled = code * 16;
+            code = scaled + nibble;
+            count = count + 1;
+            cur = cur + 1;
+        }
+        return null;
+    }
+    null
+}
+
+struct ParsedScalar {
+    ch: char,
+    next_pos: u64,
+}
+
+pure comptime fn decode_utf8_scalar(src: str, pos: u64, length: u64) -> ?ParsedScalar {
+    if pos >= length {
+        return null;
+    }
+    let b0 = src.byte(pos) match {
+        b? => b,
+        null => return null,
+    }
+    if b0 <= 127 {
+        let scalar = char.as(ComptimeTryFrom<u32>).try_from(b0'bitvec.as(u32)) match {
+            c? => c,
+            null => return null,
+        }
+        return ParsedScalar {
+            ch: scalar,
+            next_pos: pos + 1,
+        };
+    }
+    if b0 >= 194 and b0 <= 223 {
+        if length - pos < 2 {
+            return null;
+        }
+        let b1 = src.byte(pos + 1) match {
+            b? => b,
+            null => return null,
+        }
+        if b1 < 128 or b1 > 191 {
+            return null;
+        }
+        let hi = (b0 - 192)'bitvec.as(u32);
+        let lo = (b1 - 128)'bitvec.as(u32);
+        if hi > 31 or lo > 63 {
+            return null;
+        }
+        let code = hi * 64 + lo;
+        let scalar = char.as(ComptimeTryFrom<u32>).try_from(code) match {
+            c? => c,
+            null => return null,
+        }
+        return ParsedScalar {
+            ch: scalar,
+            next_pos: pos + 2,
+        };
+    }
+    if b0 >= 224 and b0 <= 239 {
+        if length - pos < 3 {
+            return null;
+        }
+        let b1 = src.byte(pos + 1) match {
+            b? => b,
+            null => return null,
+        }
+        let b2 = src.byte(pos + 2) match {
+            b? => b,
+            null => return null,
+        }
+        if b1 < 128 or b1 > 191 or b2 < 128 or b2 > 191 {
+            return null;
+        }
+        let p0 = (b0 - 224)'bitvec.as(u32);
+        let p1 = (b1 - 128)'bitvec.as(u32);
+        let p2 = (b2 - 128)'bitvec.as(u32);
+        if p0 > 15 or p1 > 63 or p2 > 63 {
+            return null;
+        }
+        let code = p0 * 4096 + p1 * 64 + p2;
+        if code < 2048 {
+            return null;
+        }
+        let scalar = char.as(ComptimeTryFrom<u32>).try_from(code) match {
+            c? => c,
+            null => return null,
+        }
+        return ParsedScalar {
+            ch: scalar,
+            next_pos: pos + 3,
+        };
+    }
+    if b0 >= 240 and b0 <= 244 {
+        if length - pos < 4 {
+            return null;
+        }
+        let b1 = src.byte(pos + 1) match {
+            b? => b,
+            null => return null,
+        }
+        let b2 = src.byte(pos + 2) match {
+            b? => b,
+            null => return null,
+        }
+        let b3 = src.byte(pos + 3) match {
+            b? => b,
+            null => return null,
+        }
+        if b1 < 128 or b1 > 191 or b2 < 128 or b2 > 191 or b3 < 128 or b3 > 191 {
+            return null;
+        }
+        let p0 = (b0 - 240)'bitvec.as(u32);
+        let p1 = (b1 - 128)'bitvec.as(u32);
+        let p2 = (b2 - 128)'bitvec.as(u32);
+        let p3 = (b3 - 128)'bitvec.as(u32);
+        if p0 > 4 or p1 > 63 or p2 > 63 or p3 > 63 {
+            return null;
+        }
+        let code = p0 * 262144 + p1 * 4096 + p2 * 64 + p3;
+        if code < 65536 or code > 1114111 {
+            return null;
+        }
+        let scalar = char.as(ComptimeTryFrom<u32>).try_from(code) match {
+            c? => c,
+            null => return null,
+        }
+        return ParsedScalar {
+            ch: scalar,
+            next_pos: pos + 4,
+        };
+    }
+    null
+}
+
+pure comptime fn parse_char_literal(src: str, start: u64, length: u64) -> ?ParsedScalar {
+    if start >= length or length - start < 3 {
+        return null;
+    }
+    let open = src.byte(start) match {
+        b? => b,
+        null => return null,
+    }
+    if open != 39 {
+        return null;
+    }
+    let p = start + 1;
+    let first = src.byte(p) match {
+        b? => b,
+        null => return null,
+    }
+    if first == 39 {
+        return null;
+    }
+    let decoded = if first == 92 {
+        let esc = parse_escape_seq(src, p, length) match {
+            v? => v,
+            null => return null,
+        }
+        ParsedScalar {
+            ch: esc.ch,
+            next_pos: esc.next_pos,
+        }
+    } else {
+        decode_utf8_scalar(src, p, length) match {
+            v? => v,
+            null => return null,
+        }
+    }
+    let close_pos = decoded.next_pos;
+    if close_pos >= length {
+        return null;
+    }
+    let close = src.byte(close_pos) match {
+        b? => b,
+        null => return null,
+    }
+    if close != 39 {
+        return null;
+    }
+    ParsedScalar {
+        ch: decoded.ch,
+        next_pos: close_pos + 1,
+    }
+}
+
+pure comptime fn validate_string_literal(src: str, start: u64, length: u64) -> ?u64 {
+    if start >= length or length - start < 2 {
+        return null;
+    }
+    let open = src.byte(start) match {
+        b? => b,
+        null => return null,
+    }
+    if open != 34 {
+        return null;
+    }
+    var cur = start + 1;
+    while cur < length {
+        let b = src.byte(cur) match {
+            v? => v,
+            null => return null,
+        }
+        if b == 34 {
+            return cur + 1;
+        }
+        if b == 92 {
+            let esc = parse_escape_seq(src, cur, length) match {
+                v? => v,
+                null => return null,
+            }
+            cur = esc.next_pos;
+        } else {
+            cur = cur + 1;
+        }
+    }
+    null
+}
+
+{-
+    Scan from `{` at `open_pos` to its matching unquoted `}`. Quotes (`'...'` and
+    `"..."`) skip backslash escapes so `placeholder: '}'` and `placeholder: '\''`
+    do not terminate or corrupt the placeholder scan. Returns null if unclosed.
+-}
+pub pure comptime fn scan_braced_field(format: str, open_pos: u64) -> ?u64 {
+    let length = format.byte_length();
+    if open_pos >= length {
+        return null;
+    }
+    var cur = open_pos + 1;
+    -- 0 = outside quotes, 1 = inside '...', 2 = inside "..."
+    var quote_kind: u8 = 0;
+    while cur < length {
+        let b = format.byte(cur) match {
+            v? => v,
+            null => return null,
+        }
+        if quote_kind != 0 {
+            if b == 92 {
+                if length - cur < 2 {
+                    return null;
+                }
+                cur = cur + 2;
+            } else if (quote_kind == 1 and b == 39) or (quote_kind == 2 and b == 34) {
+                quote_kind = 0;
+                cur = cur + 1;
+            } else {
+                cur = cur + 1;
+            }
+        } else if b == 125 {
+            return cur;
+        } else if b == 39 {
+            quote_kind = 1;
+            cur = cur + 1;
+        } else if b == 34 {
+            quote_kind = 2;
+            cur = cur + 1;
+        } else {
+            cur = cur + 1;
+        }
+    }
+    null
+}
+
+pure comptime fn skip_ws(src: str, pos_in: u64, length: u64) -> u64 {
+    var pos = pos_in;
+    while pos < length {
+        let b = src.byte(pos) match {
+            v? => v,
+            null => break,
+        }
+        if not is_ascii_ws(b) {
+            break;
+        }
+        pos = pos + 1;
+    }
+    pos
+}
+
+pure comptime fn has_key(keys: List<str>, needle: str) -> bool {
+    var index: Integer = 0;
+    let count = keys.length();
+    while index < count {
+        let existing = keys.get(index) match {
+            k? => k,
+            null => return false,
+        }
+        if existing == needle {
+            return true;
+        }
+        index = index + 1;
+    }
+    false
+}
+
+{-
+    Validate `{}` (empty) or comma-separated `key: value` Flurry property list.
+    Returns:
+      - `false?` for `{}` or a valid property list without `format: .debug`,
+      - `true?` for a valid property list with `format: .debug`,
+      - `null` on invalid syntax, duplicate keys, or invalid escapes/literals.
+-}
+pub pure comptime fn validate_property_list(raw_spec: str) -> ?bool {
+    let length = raw_spec.byte_length();
+    if length == 0 {
+        return false;
+    }
+    var cur = skip_ws(raw_spec, 0, length);
+    if cur >= length {
+        return null;
+    }
+    var seen_keys: List<str> = [];
+    var is_debug = false;
+    while cur < length {
+        let k_byte = raw_spec.byte(cur) match {
+            b? => b,
+            null => return null,
+        }
+        if not is_ident_start(k_byte) {
+            return null;
+        }
+        let key_start = cur;
+        cur = cur + 1;
+        while cur < length {
+            let b = raw_spec.byte(cur) match {
+                v? => v,
+                null => break,
+            }
+            if not is_ident_cont(b) {
+                break;
+            }
+            cur = cur + 1;
+        }
+        let key = raw_spec.slice(key_start, cur) match {
+            s? => s,
+            null => return null,
+        }
+        if has_key(seen_keys, key) {
+            return null;
+        }
+        seen_keys = seen_keys.concat([key]);
+
+        cur = skip_ws(raw_spec, cur, length);
+        if cur >= length {
+            return null;
+        }
+        let colon = raw_spec.byte(cur) match {
+            b? => b,
+            null => return null,
+        }
+        if colon != 58 {
+            return null;
+        }
+        cur = skip_ws(raw_spec, cur + 1, length);
+        if cur >= length {
+            return null;
+        }
+
+        let v_byte = raw_spec.byte(cur) match {
+            b? => b,
+            null => return null,
+        }
+        if v_byte == 46 {
+            -- Symbol literal `.ident`
+            cur = cur + 1;
+            if cur >= length {
+                return null;
+            }
+            let sym_first = raw_spec.byte(cur) match {
+                b? => b,
+                null => return null,
+            }
+            if not is_ident_start(sym_first) {
+                return null;
+            }
+            let sym_start = cur;
+            cur = cur + 1;
+            while cur < length {
+                let b = raw_spec.byte(cur) match {
+                    v? => v,
+                    null => break,
+                }
+                if not is_ident_cont(b) {
+                    break;
+                }
+                cur = cur + 1;
+            }
+            let sym_name = raw_spec.slice(sym_start, cur) match {
+                s? => s,
+                null => return null,
+            }
+            if key == "format" and sym_name == "debug" {
+                is_debug = true;
+            }
+        } else if v_byte == 39 {
+            let ch_res = parse_char_literal(raw_spec, cur, length) match {
+                v? => v,
+                null => return null,
+            }
+            cur = ch_res.next_pos;
+        } else if v_byte == 34 {
+            let str_end = validate_string_literal(raw_spec, cur, length) match {
+                v? => v,
+                null => return null,
+            }
+            cur = str_end;
+        } else if v_byte == 45 or (v_byte >= 48 and v_byte <= 57) {
+            if v_byte == 45 {
+                cur = cur + 1;
+                if cur >= length {
+                    return null;
+                }
+                let first_digit = raw_spec.byte(cur) match {
+                    b? => b,
+                    null => return null,
+                }
+                if first_digit < 48 or first_digit > 57 {
+                    return null;
+                }
+            }
+            cur = cur + 1;
+            while cur < length {
+                let b = raw_spec.byte(cur) match {
+                    v? => v,
+                    null => break,
+                }
+                if (b >= 48 and b <= 57) or b == 95 {
+                    cur = cur + 1;
+                } else {
+                    break;
+                }
+            }
+        } else if is_ident_start(v_byte) {
+            let word_start = cur;
+            cur = cur + 1;
+            while cur < length {
+                let b = raw_spec.byte(cur) match {
+                    v? => v,
+                    null => break,
+                }
+                if is_ident_cont(b) {
+                    cur = cur + 1;
+                } else {
+                    break;
+                }
+            }
+            let word = raw_spec.slice(word_start, cur) match {
+                s? => s,
+                null => return null,
+            }
+            if word != "true" and word != "false" {
+                return null;
+            }
+        } else {
+            return null;
+        }
+
+        cur = skip_ws(raw_spec, cur, length);
+        if cur >= length {
+            break;
+        }
+        let comma = raw_spec.byte(cur) match {
+            b? => b,
+            null => return null,
+        }
+        if comma != 44 {
+            return null;
+        }
+        cur = skip_ws(raw_spec, cur + 1, length);
+    }
+    is_debug
+}
+
+pure comptime fn parse_u32_prop(src: str, pos_in: u64, length: u64) -> ?u32 {
+    if pos_in >= length {
+        return null;
+    }
+    let first = src.byte(pos_in) match {
+        b? => b,
+        null => return null,
+    }
+    if first < 48 or first > 57 {
+        return null;
+    }
+    var cur = pos_in;
+    var value: u32 = 0;
+    while cur < length {
+        let b = src.byte(cur) match {
+            v? => v,
+            null => break,
+        }
+        if b == 95 {
+            cur = cur + 1;
+        } else if b >= 48 and b <= 57 {
+            let digit = (b - 48)'bitvec.as(u32);
+            if value > 6553 or digit > 9 {
+                return null;
+            }
+            let next = value * 10 + digit;
+            if next > 65535 {
+                return null;
+            }
+            value = next;
+            cur = cur + 1;
+        } else {
+            break;
+        }
+    }
+    value
+}
+
+pure comptime fn advance_int_prop(src: str, pos_in: u64, length: u64) -> u64 {
+    var cur = pos_in;
+    while cur < length {
+        let b = src.byte(cur) match {
+            v? => v,
+            null => break,
+        }
+        if (b >= 48 and b <= 57) or b == 95 {
+            cur = cur + 1;
+        } else {
+            break;
+        }
+    }
+    cur
+}
+
+const CLASS_TEXT: u8 = 0;
+const CLASS_PLAIN: u8 = 1;
+const CLASS_INT: u8 = 2;
+const CLASS_COMPTIME_INT: u8 = 3;
+const CLASS_FLOAT: u8 = 4;
+const CLASS_DEBUG: u8 = 5;
+
+pure comptime fn parse_standard_options_impl(format: str, class: u8) -> ?FormatOptions {
+    let length = format.byte_length();
+    if length == 0 {
+        return default_format_options();
+    }
+    var cur = skip_ws(format, 0, length);
+    if cur >= length {
+        return null;
+    }
+    var seen_keys: List<str> = [];
+    var radix: u8 = 0;
+    var has_alt = false;
+    var alt = false;
+    var has_sign = false;
+    var sign: u8 = 0;
+    var align: u8 = 0;
+    var has_len = false;
+    var len: u32 = 0;
+    var placeholder: char = ' ';
+    var has_precision = false;
+    var precision: u32 = 0;
+    var has_format_debug = false;
+
+    while cur < length {
+        let k_byte = format.byte(cur) match {
+            b? => b,
+            null => return null,
+        }
+        if not is_ident_start(k_byte) {
+            return null;
+        }
+        let key_start = cur;
+        cur = cur + 1;
+        while cur < length {
+            let b = format.byte(cur) match {
+                v? => v,
+                null => break,
+            }
+            if not is_ident_cont(b) {
+                break;
+            }
+            cur = cur + 1;
+        }
+        let key = format.slice(key_start, cur) match {
+            s? => s,
+            null => return null,
+        }
+        if has_key(seen_keys, key) {
+            return null;
+        }
+        seen_keys = seen_keys.concat([key]);
+
+        cur = skip_ws(format, cur, length);
+        if cur >= length {
+            return null;
+        }
+        let colon = format.byte(cur) match {
+            b? => b,
+            null => return null,
+        }
+        if colon != 58 {
+            return null;
+        }
+        cur = skip_ws(format, cur + 1, length);
+        if cur >= length {
+            return null;
+        }
+
+        let v_byte = format.byte(cur) match {
+            b? => b,
+            null => return null,
+        }
+        if key == "format" {
+            if v_byte != 46 {
+                return null;
+            }
+            cur = cur + 1;
+            if cur >= length {
+                return null;
+            }
+            let s_start = cur;
+            let s_first = format.byte(cur) match {
+                b? => b,
+                null => return null,
+            }
+            if not is_ident_start(s_first) {
+                return null;
+            }
+            cur = cur + 1;
+            while cur < length {
+                let b = format.byte(cur) match {
+                    v? => v,
+                    null => break,
+                }
+                if not is_ident_cont(b) {
+                    break;
+                }
+                cur = cur + 1;
+            }
+            let sym = format.slice(s_start, cur) match {
+                s? => s,
+                null => return null,
+            }
+            if class == CLASS_DEBUG {
+                if sym != "debug" {
+                    return null;
+                }
+                has_format_debug = true;
+            } else if sym == "dec" {
+                if class != CLASS_INT and class != CLASS_COMPTIME_INT and class != CLASS_FLOAT {
+                    return null;
+                }
+                radix = 0;
+            } else if sym == "hex" {
+                if class != CLASS_INT and class != CLASS_COMPTIME_INT {
+                    return null;
+                }
+                radix = 1;
+            } else if sym == "HEX" {
+                if class != CLASS_INT and class != CLASS_COMPTIME_INT {
+                    return null;
+                }
+                radix = 2;
+            } else if sym == "oct" {
+                if class != CLASS_INT and class != CLASS_COMPTIME_INT {
+                    return null;
+                }
+                radix = 3;
+            } else if sym == "bin" {
+                if class != CLASS_INT and class != CLASS_COMPTIME_INT {
+                    return null;
+                }
+                radix = 4;
+            } else {
+                return null;
+            }
+        } else if key == "alt" {
+            if class != CLASS_INT and class != CLASS_COMPTIME_INT {
+                return null;
+            }
+            if not is_ident_start(v_byte) {
+                return null;
+            }
+            let w_start = cur;
+            cur = cur + 1;
+            while cur < length {
+                let b = format.byte(cur) match {
+                    v? => v,
+                    null => break,
+                }
+                if not is_ident_cont(b) {
+                    break;
+                }
+                cur = cur + 1;
+            }
+            let word = format.slice(w_start, cur) match {
+                s? => s,
+                null => return null,
+            }
+            has_alt = true;
+            if word == "true" {
+                alt = true;
+            } else if word == "false" {
+                alt = false;
+            } else {
+                return null;
+            }
+        } else if key == "sign" {
+            if class != CLASS_INT and class != CLASS_COMPTIME_INT and class != CLASS_FLOAT {
+                return null;
+            }
+            if v_byte != 46 {
+                return null;
+            }
+            cur = cur + 1;
+            if cur >= length {
+                return null;
+            }
+            let s_first = format.byte(cur) match {
+                b? => b,
+                null => return null,
+            }
+            if not is_ident_start(s_first) {
+                return null;
+            }
+            let s_start = cur;
+            cur = cur + 1;
+            while cur < length {
+                let b = format.byte(cur) match {
+                    v? => v,
+                    null => break,
+                }
+                if not is_ident_cont(b) {
+                    break;
+                }
+                cur = cur + 1;
+            }
+            let sym = format.slice(s_start, cur) match {
+                s? => s,
+                null => return null,
+            }
+            has_sign = true;
+            if sym == "minus" {
+                sign = 0;
+            } else if sym == "plus" {
+                sign = 1;
+            } else if sym == "space" {
+                sign = 2;
+            } else {
+                return null;
+            }
+        } else if key == "align_to" {
+            if v_byte != 46 {
+                return null;
+            }
+            cur = cur + 1;
+            if cur >= length {
+                return null;
+            }
+            let s_first = format.byte(cur) match {
+                b? => b,
+                null => return null,
+            }
+            if not is_ident_start(s_first) {
+                return null;
+            }
+            let s_start = cur;
+            cur = cur + 1;
+            while cur < length {
+                let b = format.byte(cur) match {
+                    v? => v,
+                    null => break,
+                }
+                if not is_ident_cont(b) {
+                    break;
+                }
+                cur = cur + 1;
+            }
+            let sym = format.slice(s_start, cur) match {
+                s? => s,
+                null => return null,
+            }
+            if sym == "left" {
+                align = 1;
+            } else if sym == "center" {
+                align = 2;
+            } else if sym == "right" {
+                align = 3;
+            } else {
+                return null;
+            }
+        } else if key == "len" {
+            let parsed_len = parse_u32_prop(format, cur, length) match {
+                v? => v,
+                null => return null,
+            }
+            has_len = true;
+            len = parsed_len;
+            cur = advance_int_prop(format, cur, length);
+        } else if key == "placeholder" {
+            let parsed_ch = parse_char_literal(format, cur, length) match {
+                v? => v,
+                null => return null,
+            }
+            placeholder = parsed_ch.ch;
+            cur = parsed_ch.next_pos;
+        } else if key == "precision" {
+            if class != CLASS_TEXT and class != CLASS_FLOAT {
+                return null;
+            }
+            let parsed_prec = parse_u32_prop(format, cur, length) match {
+                v? => v,
+                null => return null,
+            }
+            has_precision = true;
+            precision = parsed_prec;
+            cur = advance_int_prop(format, cur, length);
+        } else {
+            return null;
+        }
+
+        cur = skip_ws(format, cur, length);
+        if cur >= length {
+            break;
+        }
+        let comma = format.byte(cur) match {
+            b? => b,
+            null => return null,
+        }
+        if comma != 44 {
+            return null;
+        }
+        cur = skip_ws(format, cur + 1, length);
+    }
+
+    if class == CLASS_DEBUG and not has_format_debug {
+        return null;
+    }
+    if has_alt and alt and radix == 0 {
+        return null;
+    }
+    if class == CLASS_INT and radix != 0 and has_sign {
+        return null;
+    }
+
+    FormatOptions {
+        radix: radix,
+        alt: alt,
+        sign: sign,
+        align: align,
+        has_len: has_len,
+        len: len,
+        placeholder: placeholder,
+        has_precision: has_precision,
+        precision: precision,
+    }
+}
+
+pure comptime fn parse_options_checked(format: str, class: u8) -> FormatOptions {
+    parse_standard_options_impl(format, class) match {
+        opts? => opts,
+        null => {
+            assumes false;
+            default_format_options()
+        },
+    }
+}
+
+pub pure comptime fn parse_text_options(format: str) -> FormatOptions {
+    parse_options_checked(format, CLASS_TEXT)
+}
+
+pub pure comptime fn parse_plain_options(format: str) -> FormatOptions {
+    parse_options_checked(format, CLASS_PLAIN)
+}
+
+pub pure comptime fn parse_int_options(format: str) -> FormatOptions {
+    parse_options_checked(format, CLASS_INT)
+}
+
+pub pure comptime fn parse_comptime_int_options(format: str) -> FormatOptions {
+    parse_options_checked(format, CLASS_COMPTIME_INT)
+}
+
+pub pure comptime fn parse_float_options(format: str) -> FormatOptions {
+    parse_options_checked(format, CLASS_FLOAT)
+}
+
+pub pure comptime fn parse_debug_options(format: str) -> FormatOptions {
+    parse_options_checked(format, CLASS_DEBUG)
+}
+
+{- ── Runtime UTF-8, padding, and probe helpers ────────────────────────────── -}
+
+pub fn write_char_utf8(ch: char, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    let code = ch'bitvec.as(u32);
+    if code <= 127 {
+        output.write_byte(code'bitvec[0..8].as(u8))
+    } else if code <= 2047 {
+        let first = (code / 64) + 192;
+        let second = (code % 64) + 128;
+        output.write_byte(first'bitvec[0..8].as(u8))!;
+        output.write_byte(second'bitvec[0..8].as(u8))
+    } else if code <= 65535 {
+        let first = (code / 4096) + 224;
+        let second = (code / 64 % 64) + 128;
+        let third = (code % 64) + 128;
+        output.write_byte(first'bitvec[0..8].as(u8))!;
+        output.write_byte(second'bitvec[0..8].as(u8))!;
+        output.write_byte(third'bitvec[0..8].as(u8))
+    } else {
+        let first = (code / 262144) + 240;
+        let second = (code / 4096 % 64) + 128;
+        let third = (code / 64 % 64) + 128;
+        let fourth = (code % 64) + 128;
+        output.write_byte(first'bitvec[0..8].as(u8))!;
+        output.write_byte(second'bitvec[0..8].as(u8))!;
+        output.write_byte(third'bitvec[0..8].as(u8))!;
+        output.write_byte(fourth'bitvec[0..8].as(u8))
+    }
+}
+
+pub fn write_char_repeat(
+    ch: char,
+    count: u32,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    var rem = count;
+    if ch == ' ' {
+        while rem >= 8 {
+            output.write_str("        ")!;
+            rem = rem - 8;
+        }
+        while rem > 0 {
+            output.write_byte(32)!;
+            rem = rem - 1;
+        }
+    } else if ch == '0' {
+        while rem >= 8 {
+            output.write_str("00000000")!;
+            rem = rem - 8;
+        }
+        while rem > 0 {
+            output.write_byte(48)!;
+            rem = rem - 1;
+        }
+    } else {
+        while rem > 0 {
+            write_char_utf8(ch, output)!;
+            rem = rem - 1;
+        }
+    }
+}
+
+pub fn count_str_chars(text: str) -> u32 {
+    let length = str_byte_length(text);
+    var index: u64 = 0;
+    var chars: u32 = 0;
+    while index < length {
+        let byte = str_byte(text, index) match {
+            b? => b,
+            null => break,
+        }
+        if byte < 128 or byte >= 192 {
+            if chars < 10000000 {
+                chars = chars + 1;
+            }
+        }
+        index = index + 1;
+    }
+    chars
+}
+
+pub fn write_padded_str(
+    text: str,
+    opts: FormatOptions,
+    is_numeric: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if not opts.has_len {
+        return output.write_str(text);
+    }
+    let content_chars = count_str_chars(text);
+    let pads = compute_pad_counts(opts, content_chars, is_numeric, false);
+    if pads.left > 0 {
+        write_char_repeat(opts.placeholder, pads.left, output)!;
+    }
+    output.write_str(text)!;
+    if pads.right > 0 {
+        write_char_repeat(opts.placeholder, pads.right, output)!;
+    }
+}
+
+pub fn write_padded_str_truncated(
+    text: str,
+    opts: FormatOptions,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if not opts.has_len and not opts.has_precision {
+        return output.write_str(text);
+    }
+    let length = str_byte_length(text);
+    var index: u64 = 0;
+    var chars: u32 = 0;
+    var end_bytes = length;
+    while index < length {
+        let byte = str_byte(text, index) match {
+            b? => b,
+            null => break,
+        }
+        if byte < 128 or byte >= 192 {
+            if opts.has_precision and chars >= opts.precision {
+                end_bytes = index;
+                break;
+            }
+            if chars < 10000000 {
+                chars = chars + 1;
+            }
+        }
+        index = index + 1;
+    }
+    let pads = compute_pad_counts(opts, chars, false, false);
+    if pads.left > 0 {
+        write_char_repeat(opts.placeholder, pads.left, output)!;
+    }
+    if end_bytes == length {
+        output.write_str(text)!;
+    } else {
+        var pos: u64 = 0;
+        while pos < end_bytes {
+            let byte = str_byte(text, pos) match {
+                b? => b,
+                null => break,
+            }
+            output.write_byte(byte)!;
+            pos = pos + 1;
+        }
+    }
+    if pads.right > 0 {
+        write_char_repeat(opts.placeholder, pads.right, output)!;
+    }
+}
+
+pub enum ProbeErr {
+    None,
+}
+
+pub struct ProbeWriter {
+    chars: u32,
+}
+
+impl ProbeWriter {
+    pub fn new() -> Self {
+        ProbeWriter { chars: 0 }
+    }
+}
+
+impl ByteWriter for ProbeWriter {
+    assoc Err: Type = ProbeErr;
+
+    fn write_byte(*self, byte: u8) -> !ProbeErr void {
+        if byte < 128 or byte >= 192 {
+            let c = self.chars.*;
+            if c < 10000000 {
+                self.chars.* = c + 1;
+            }
+        }
+    }
+}
+
+{- ── Comptime UTF-8 and padding helpers ───────────────────────────────────── -}
+
+pub pure comptime fn count_comptime_str_chars(text: str) -> u32 {
+    let length = text.byte_length();
+    var index: u64 = 0;
+    var chars: u32 = 0;
+    while index < length {
+        let byte = text.byte(index) match {
+            b? => b,
+            null => break,
+        }
+        if byte < 128 or byte >= 192 {
+            if chars < 10000000 {
+                chars = chars + 1;
+            }
+        }
+        index = index + 1;
+    }
+    chars
+}
+
+pub pure comptime fn truncate_comptime_str(text: str, opts: FormatOptions) -> str {
+    if not opts.has_precision {
+        return text;
+    }
+    let length = text.byte_length();
+    var index: u64 = 0;
+    var chars: u32 = 0;
+    while index < length {
+        let byte = text.byte(index) match {
+            b? => b,
+            null => break,
+        }
+        if byte < 128 or byte >= 192 {
+            if chars >= opts.precision {
+                return text.slice(0, index) match {
+                    s? => s,
+                    null => "",
+                };
+            }
+            if chars < 10000000 {
+                chars = chars + 1;
+            }
+        }
+        index = index + 1;
+    }
+    text
+}
+
+pub pure comptime fn repeat_comptime_char(ch: char, count: u32) -> str {
+    var rem = count;
+    var chunk = str_from_char(ch);
+    var out = "";
+    while rem > 0 {
+        if rem % 2 == 1 {
+            out = out.concat(chunk);
+        }
+        rem = rem / 2;
+        if rem > 0 {
+            chunk = chunk.concat(chunk);
+        }
+    }
+    out
+}
+
+pub pure comptime fn pad_comptime_str(
+    prefix: str,
+    body: str,
+    opts: FormatOptions,
+    is_numeric: bool,
+    allow_zero_pad: bool,
+) -> str {
+    let content = prefix.concat(body);
+    if not opts.has_len {
+        return content;
+    }
+    let p_chars = count_comptime_str_chars(prefix);
+    let b_chars = count_comptime_str_chars(body);
+    if p_chars > 10000000 or b_chars > 10000000 {
+        return content;
+    }
+    let content_chars = p_chars + b_chars;
+    let pads = compute_comptime_pad_counts(opts, content_chars, is_numeric, allow_zero_pad);
+    if pads.zero_pad > 0 {
+        return prefix.concat(repeat_comptime_char('0', pads.zero_pad)).concat(body);
+    }
+    var result = content;
+    if pads.left > 0 {
+        result = repeat_comptime_char(opts.placeholder, pads.left).concat(result);
+    }
+    if pads.right > 0 {
+        result = result.concat(repeat_comptime_char(opts.placeholder, pads.right));
+    }
+    result
+}

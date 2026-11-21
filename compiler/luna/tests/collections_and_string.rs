@@ -793,7 +793,7 @@ fn std_fmt_format_and_generic_write_fmt_work_across_vec_string_writer_and_file()
 
         fn probe_bool_display(buf: *Vec<u8>, comptime T: Type, v: T) -> !AllocErr bool {
             inline if T :- Display {
-                v.write(buf)!;
+                v.ref.as(Display).fmt(buf)!;
                 true
             } else {
                 false
@@ -811,7 +811,8 @@ fn std_fmt_format_and_generic_write_fmt_work_across_vec_string_writer_and_file()
             write_fmt(output, "[{}:{}={}]", prefix, label, ch)!;
             var scratch = Vec<u8>.new();
             inline if bool :- Display {
-                let _w = true.write(scratch.ref) match {
+                let flag = true;
+                let _w = flag.ref.as(Display).fmt(scratch.ref) match {
                     _! => true,
                     error _ => false,
                 };

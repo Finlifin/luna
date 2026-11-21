@@ -1,6 +1,6 @@
 //! End-to-end tests for Stage 2E-1: IEEE-754 float `Display`/`Debug`
-//! (`f16`, `bf16`, `f32`, `f64`) and integer radix formatting traits +
-//! `{:x}` / `{:#x}` / `{:X}` / `{:#X}` / `{:b}` / `{:#b}` / `{:o}` / `{:#o}`.
+//! (`f16`, `bf16`, `f32`, `f64`) and integer radix property formatting
+//! (`format: .hex/.HEX/.bin/.oct` and `alt: true`).
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod support;
@@ -74,21 +74,27 @@ fn comptime_radix_format_plan_and_trait_refinement_rejection() {
         use std.fmt.{FormatErr, FormatKind, FormatPiece, FormatPlan};
 
         comptime fn check_radix_plan() -> bool {
-            let plan = FormatPlan.parse("{:x} {:#x} {:X} {:#X} {:b} {:#b} {:o} {:#o}") match {
+            let fmt = "{format: .hex} {format: .hex, alt: true} {format: .HEX} {format: .HEX, alt: true} {format: .bin} {format: .bin, alt: true} {format: .oct} {format: .oct, alt: true}";
+            let plan = FormatPlan.parse(fmt) match {
                 p! => p,
                 error _ => return false,
             };
             if plan.argument_count != 8 or plan.pieces.length() != 15 {
                 return false;
             }
-            let pieces_ok = (plan.pieces[0] matches FormatPiece.lower_hex_argument(0, false))
-                and (plan.pieces[2] matches FormatPiece.lower_hex_argument(1, true))
-                and (plan.pieces[4] matches FormatPiece.upper_hex_argument(2, false))
-                and (plan.pieces[6] matches FormatPiece.upper_hex_argument(3, true))
-                and (plan.pieces[8] matches FormatPiece.binary_argument(4, false))
-                and (plan.pieces[10] matches FormatPiece.binary_argument(5, true))
-                and (plan.pieces[12] matches FormatPiece.octal_argument(6, false))
-                and (plan.pieces[14] matches FormatPiece.octal_argument(7, true));
+            let specs = plan.argument_specs(fmt);
+            if specs.length() != 8 {
+                return false;
+            }
+            let pieces_ok = (plan.pieces[0] matches FormatPiece.argument(0, 1, 13))
+                and specs[0] == "format: .hex"
+                and specs[1] == "format: .hex, alt: true"
+                and specs[2] == "format: .HEX"
+                and specs[3] == "format: .HEX, alt: true"
+                and specs[4] == "format: .bin"
+                and specs[5] == "format: .bin, alt: true"
+                and specs[6] == "format: .oct"
+                and specs[7] == "format: .oct, alt: true";
             if not pieces_ok {
                 return false;
             }
@@ -97,43 +103,50 @@ fn comptime_radix_format_plan_and_trait_refinement_rejection() {
             if kinds.length() != 8 {
                 return false;
             }
-            let kinds_ok = (kinds[0] matches FormatKind.lower_hex)
-                and (kinds[1] matches FormatKind.lower_hex_alt)
-                and (kinds[2] matches FormatKind.upper_hex)
-                and (kinds[3] matches FormatKind.upper_hex_alt)
-                and (kinds[4] matches FormatKind.binary)
-                and (kinds[5] matches FormatKind.binary_alt)
-                and (kinds[6] matches FormatKind.octal)
-                and (kinds[7] matches FormatKind.octal_alt);
+            let kinds_ok = (kinds[0] matches FormatKind.display)
+                and (kinds[1] matches FormatKind.display)
+                and (kinds[2] matches FormatKind.display)
+                and (kinds[3] matches FormatKind.display)
+                and (kinds[4] matches FormatKind.display)
+                and (kinds[5] matches FormatKind.display)
+                and (kinds[6] matches FormatKind.display)
+                and (kinds[7] matches FormatKind.display);
             if not kinds_ok {
                 return false;
             }
 
-            let mixed = FormatPlan.parse("{} {:?} {:#x} {:b} {:o}") match {
+            let mixed_fmt = "{} {format: .debug} {format: .hex, alt: true} {format: .bin} {format: .oct}";
+            let mixed = FormatPlan.parse(mixed_fmt) match {
                 p! => p,
                 error _ => return false,
             };
             let mixed_kinds = mixed.argument_kinds();
             let mixed_domains = mixed.argument_domains();
+            let mixed_specs = mixed.argument_specs(mixed_fmt);
             let mixed_ok = mixed_kinds.length() == 5
                 and mixed_domains.length() == 5
                 and (mixed_kinds[0] matches FormatKind.display)
                 and (mixed_kinds[1] matches FormatKind.debug)
-                and (mixed_kinds[2] matches FormatKind.lower_hex_alt)
-                and (mixed_kinds[3] matches FormatKind.binary)
-                and (mixed_kinds[4] matches FormatKind.octal);
+                and (mixed_kinds[2] matches FormatKind.display)
+                and (mixed_kinds[3] matches FormatKind.display)
+                and (mixed_kinds[4] matches FormatKind.display)
+                and mixed_specs[0] == ""
+                and mixed_specs[1] == "format: .debug"
+                and mixed_specs[2] == "format: .hex, alt: true"
+                and mixed_specs[3] == "format: .bin"
+                and mixed_specs[4] == "format: .oct";
             if not mixed_ok {
                 return false;
             }
 
-            (FormatPlan.parse("{:q}") matches error FormatErr.UnsupportedField(0))
-                and (FormatPlan.parse("{:#}") matches error FormatErr.UnsupportedField(0))
-                and (FormatPlan.parse("{:#?}") matches error FormatErr.UnsupportedField(0))
-                and (FormatPlan.parse("{:xx}") matches error FormatErr.UnsupportedField(0))
-                and (FormatPlan.parse("{:#") matches error FormatErr.UnclosedField(0))
-                and (FormatPlan.parse("{:#x") matches error FormatErr.UnclosedField(0))
-                and (FormatPlan.parse("{:x") matches error FormatErr.UnclosedField(0))
-                and (FormatPlan.parse("a{:?") matches error FormatErr.UnclosedField(1))
+            (FormatPlan.parse("{:x}") matches error FormatErr.UnsupportedField(0))
+                and (FormatPlan.parse("{:#x}") matches error FormatErr.UnsupportedField(0))
+                and (FormatPlan.parse("{:?}") matches error FormatErr.UnsupportedField(0))
+                and (FormatPlan.parse("{:q}") matches error FormatErr.UnsupportedField(0))
+                and (FormatPlan.parse("{ }") matches error FormatErr.UnsupportedField(0))
+                and (FormatPlan.parse("{len: 4, len: 8}") matches error FormatErr.UnsupportedField(0))
+                and (FormatPlan.parse("{format: .hex") matches error FormatErr.UnclosedField(0))
+                and (FormatPlan.parse("a{format: .debug") matches error FormatErr.UnclosedField(1))
         }
 
         fn run() -> bool {
@@ -145,52 +158,54 @@ fn comptime_radix_format_plan_and_trait_refinement_rejection() {
     let bool_hex_error = support::compile(
         r#"
         fn run() -> !std.mem.AllocErr std.string.String {
-            std.fmt.format("{:x}", true)
+            std.fmt.format("{format: .hex}", true)
+        }
+        "#,
+    )
+    .and_then(|pkg| luna::instantiation::instantiate(&pkg, "run", 1_000_000).map(|_| ()));
+    assert!(
+        bool_hex_error.is_err(),
+        "unsupported format: .hex on bool must fail compile-time instantiation"
+    );
+
+    let custom_display_ok = support::compile(
+        r#"
+        use std.fmt.{Display, format};
+        use builtin.fmt.ByteWriter;
+        use builtin.fmt.options.{FormatOptions, parse_int_options};
+        struct HexOnly { tag: u8 }
+        impl Display for HexOnly {
+            fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+            where
+                W :- ByteWriter
+            {
+                let opts: FormatOptions = parse_int_options(format);
+                if opts.alt {
+                    output.write_str("0x")!;
+                }
+                output.write_str("hex")
+            }
+        }
+        fn run() -> !std.mem.AllocErr std.string.String {
+            format("{format: .hex, alt: true}", HexOnly { tag: 1 })
+        }
+        "#,
+    );
+    assert!(custom_display_ok.is_ok(), "{custom_display_ok:?}");
+
+    let no_display_err = support::compile(
+        r#"
+        use std.fmt.format;
+        struct PlainOnly { tag: u8 }
+        fn run() -> !std.mem.AllocErr std.string.String {
+            format("{}", PlainOnly { tag: 1 })
         }
         "#,
     )
     .unwrap_err();
     assert!(
-        bool_hex_error.contains("refinement requirement is not established"),
-        "{bool_hex_error}"
-    );
-
-    let custom_hex_ok = support::compile(
-        r#"
-        use std.fmt.{LowerHex, format};
-        use builtin.fmt.ByteWriter;
-        struct HexOnly { tag: u8 }
-        impl LowerHex for HexOnly {
-            fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-                output.write_str("hex")
-            }
-        }
-        fn run() -> !std.mem.AllocErr std.string.String {
-            format("{:#x}", HexOnly { tag: 1 })
-        }
-        "#,
-    );
-    assert!(custom_hex_ok.is_ok(), "{custom_hex_ok:?}");
-
-    let custom_hex_no_display = support::compile(
-        r#"
-        use std.fmt.{LowerHex, format};
-        use builtin.fmt.ByteWriter;
-        struct HexOnly { tag: u8 }
-        impl LowerHex for HexOnly {
-            fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-                output.write_str("hex")
-            }
-        }
-        fn run() -> !std.mem.AllocErr std.string.String {
-            format("{}", HexOnly { tag: 1 })
-        }
-        "#,
-    )
-    .unwrap_err();
-    assert!(
-        custom_hex_no_display.contains("refinement requirement is not established"),
-        "{custom_hex_no_display}"
+        no_display_err.contains("refinement requirement is not established"),
+        "{no_display_err}"
     );
 }
 
@@ -198,14 +213,21 @@ fn comptime_radix_format_plan_and_trait_refinement_rejection() {
 fn native_radix_formatting_across_machine_ints_and_custom_allocators() {
     let source = r#"
         use std.prelude.*;
-        use std.fmt.LowerHex;
         use builtin.fmt.ByteWriter;
+        use builtin.fmt.options.{FormatOptions, parse_int_options};
         use std.mem.{AllocErr, Allocator, FixedBufferAllocator, Layout, SystemAllocator};
 
         struct HexTag {}
 
-        impl LowerHex for HexTag {
-            fn write_lower_hex(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        impl Display for HexTag {
+            fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+            where
+                W :- ByteWriter
+            {
+                let opts: FormatOptions = parse_int_options(format);
+                if opts.alt {
+                    output.write_str("0x")!;
+                }
                 output.write_str("custom")
             }
         }
@@ -216,7 +238,7 @@ fn native_radix_formatting_across_machine_ints_and_custom_allocators() {
             let v_i128_zero: i128 = 0;
 
             let zeros = format(
-                "{:x}|{:#x}|{:X}|{:#X}|{:b}|{:#b}|{:o}|{:#o}",
+                "{format: .hex}|{format: .hex, alt: true}|{format: .HEX}|{format: .HEX, alt: true}|{format: .bin}|{format: .bin, alt: true}|{format: .oct}|{format: .oct, alt: true}",
                 v_u8,
                 v_u8,
                 v_u8,
@@ -231,7 +253,7 @@ fn native_radix_formatting_across_machine_ints_and_custom_allocators() {
             }
 
             let signed_neg = format(
-                "{:x}|{:#x}|{:X}|{:#X}|{:b}|{:#b}|{:o}|{:#o}",
+                "{format: .hex}|{format: .hex, alt: true}|{format: .HEX}|{format: .HEX, alt: true}|{format: .bin}|{format: .bin, alt: true}|{format: .oct}|{format: .oct, alt: true}",
                 v_i8_neg,
                 v_i8_neg,
                 v_i8_neg,
@@ -257,7 +279,7 @@ fn native_radix_formatting_across_machine_ints_and_custom_allocators() {
             let v_isize_neg: isize = -1;
 
             let wide_signed = format(
-                "{:x}|{:x}|{:x}|{:x}",
+                "{format: .hex}|{format: .hex}|{format: .hex}|{format: .hex}",
                 v_i16_neg,
                 v_i32_neg,
                 v_i64_neg,
@@ -270,7 +292,7 @@ fn native_radix_formatting_across_machine_ints_and_custom_allocators() {
             }
 
             let wide_unsigned = format(
-                "{:x}|{:X}|{:#x}|{:b}|{:o}|{:x}",
+                "{format: .hex}|{format: .HEX}|{format: .hex, alt: true}|{format: .bin}|{format: .oct}|{format: .hex}",
                 v_u16,
                 v_u32,
                 v_u64,
@@ -288,7 +310,7 @@ fn native_radix_formatting_across_machine_ints_and_custom_allocators() {
             let v_u16: u16 = 0x1a2b;
             let v_u64: u64 = 255;
             let custom = format<.A = FixedBufferAllocator, .allocator = fba>(
-                "{} {:?} {:#x} {:X} {:b} {:o}",
+                "{} {format: .debug} {format: .hex, alt: true} {format: .HEX} {format: .bin} {format: .oct}",
                 v_u64,
                 "hi",
                 HexTag {},
@@ -371,7 +393,7 @@ fn native_float_display_and_debug_for_f64_f32_f16_and_bf16() {
         }
 
         fn check_f64_basic() -> !AllocErr u32 {
-            if not check_pair("0", "0.0", format("{}", 0.0)!, format("{:?}", 0.0)!) {
+            if not check_pair("0", "0.0", format("{}", 0.0)!, format("{format: .debug}", 0.0)!) {
                 return 1;
             }
             let neg_zero_64 = bits_f64(0x8000000000000000);
@@ -379,34 +401,34 @@ fn native_float_display_and_debug_for_f64_f32_f16_and_bf16() {
                 "-0",
                 "-0.0",
                 format("{}", neg_zero_64)!,
-                format("{:?}", neg_zero_64)!,
+                format("{format: .debug}", neg_zero_64)!,
             ) {
                 return 2;
             }
-            if not check_pair("1", "1.0", format("{}", 1.0)!, format("{:?}", 1.0)!) {
+            if not check_pair("1", "1.0", format("{}", 1.0)!, format("{format: .debug}", 1.0)!) {
                 return 3;
             }
-            if not check_pair("-42", "-42.0", format("{}", -42.0)!, format("{:?}", -42.0)!) {
+            if not check_pair("-42", "-42.0", format("{}", -42.0)!, format("{format: .debug}", -42.0)!) {
                 return 4;
             }
-            if not check_pair("0.1", "0.1", format("{}", 0.1)!, format("{:?}", 0.1)!) {
+            if not check_pair("0.1", "0.1", format("{}", 0.1)!, format("{format: .debug}", 0.1)!) {
                 return 5;
             }
-            if not check_pair("0.3", "0.3", format("{}", 0.3)!, format("{:?}", 0.3)!) {
+            if not check_pair("0.3", "0.3", format("{}", 0.3)!, format("{format: .debug}", 0.3)!) {
                 return 6;
             }
-            if not check_pair("1.5", "1.5", format("{}", 1.5)!, format("{:?}", 1.5)!) {
+            if not check_pair("1.5", "1.5", format("{}", 1.5)!, format("{format: .debug}", 1.5)!) {
                 return 7;
             }
             if not check_pair(
                 "3.141592653589793",
                 "3.141592653589793",
                 format("{}", 3.141592653589793)!,
-                format("{:?}", 3.141592653589793)!,
+                format("{format: .debug}", 3.141592653589793)!,
             ) {
                 return 8;
             }
-            if not check_pair("0.0001", "0.0001", format("{}", 0.0001)!, format("{:?}", 0.0001)!) {
+            if not check_pair("0.0001", "0.0001", format("{}", 0.0001)!, format("{format: .debug}", 0.0001)!) {
                 return 9;
             }
             0
@@ -418,7 +440,7 @@ fn native_float_display_and_debug_for_f64_f32_f16_and_bf16() {
                 "1e-5",
                 "1.0e-5",
                 format("{}", one_e_neg5)!,
-                format("{:?}", one_e_neg5)!,
+                format("{format: .debug}", one_e_neg5)!,
             ) {
                 return 10;
             }
@@ -427,7 +449,7 @@ fn native_float_display_and_debug_for_f64_f32_f16_and_bf16() {
                 "1e20",
                 "1.0e20",
                 format("{}", one_e20)!,
-                format("{:?}", one_e20)!,
+                format("{format: .debug}", one_e20)!,
             ) {
                 return 11;
             }
@@ -436,7 +458,7 @@ fn native_float_display_and_debug_for_f64_f32_f16_and_bf16() {
                 "5e-324",
                 "5.0e-324",
                 format("{}", min_sub_64)!,
-                format("{:?}", min_sub_64)!,
+                format("{format: .debug}", min_sub_64)!,
             ) {
                 return 12;
             }
@@ -445,7 +467,7 @@ fn native_float_display_and_debug_for_f64_f32_f16_and_bf16() {
                 "2.2250738585072014e-308",
                 "2.2250738585072014e-308",
                 format("{}", min_norm_64)!,
-                format("{:?}", min_norm_64)!,
+                format("{format: .debug}", min_norm_64)!,
             ) {
                 return 13;
             }
@@ -454,7 +476,7 @@ fn native_float_display_and_debug_for_f64_f32_f16_and_bf16() {
                 "1.7976931348623157e308",
                 "1.7976931348623157e308",
                 format("{}", max_64)!,
-                format("{:?}", max_64)!,
+                format("{format: .debug}", max_64)!,
             ) {
                 return 14;
             }
@@ -463,21 +485,21 @@ fn native_float_display_and_debug_for_f64_f32_f16_and_bf16() {
                 "-2.8559849684847268e16",
                 "-2.8559849684847268e16",
                 format("{}", exact_edge_64)!,
-                format("{:?}", exact_edge_64)!,
+                format("{format: .debug}", exact_edge_64)!,
             ) {
                 return 15;
             }
             let pos_inf_64 = bits_f64(0x7ff0000000000000);
             let neg_inf_64 = bits_f64(0xfff0000000000000);
             let nan_64 = bits_f64(0x7ff8000000000000);
-            if not check_pair("inf", "inf", format("{}", pos_inf_64)!, format("{:?}", pos_inf_64)!)
+            if not check_pair("inf", "inf", format("{}", pos_inf_64)!, format("{format: .debug}", pos_inf_64)!)
                 or not check_pair(
                     "-inf",
                     "-inf",
                     format("{}", neg_inf_64)!,
-                    format("{:?}", neg_inf_64)!,
+                    format("{format: .debug}", neg_inf_64)!,
                 )
-                or not check_pair("NaN", "NaN", format("{}", nan_64)!, format("{:?}", nan_64)!)
+                or not check_pair("NaN", "NaN", format("{}", nan_64)!, format("{format: .debug}", nan_64)!)
             {
                 return 16;
             }
@@ -496,39 +518,39 @@ fn native_float_display_and_debug_for_f64_f32_f16_and_bf16() {
                 "0.1",
                 "0.1",
                 format("{}", point_one_32)!,
-                format("{:?}", point_one_32)!,
+                format("{format: .debug}", point_one_32)!,
             )
                 or not check_pair(
                     "-0",
                     "-0.0",
                     format("{}", neg_zero_32)!,
-                    format("{:?}", neg_zero_32)!,
+                    format("{format: .debug}", neg_zero_32)!,
                 )
                 or not check_pair(
                     "42",
                     "42.0",
                     format("{}", forty_two_32)!,
-                    format("{:?}", forty_two_32)!,
+                    format("{format: .debug}", forty_two_32)!,
                 )
                 or not check_pair(
                     "1.5",
                     "1.5",
                     format("{}", one_five_32)!,
-                    format("{:?}", one_five_32)!,
+                    format("{format: .debug}", one_five_32)!,
                 )
                 or not check_pair(
                     "inf",
                     "inf",
                     format("{}", pos_inf_32)!,
-                    format("{:?}", pos_inf_32)!,
+                    format("{format: .debug}", pos_inf_32)!,
                 )
                 or not check_pair(
                     "-inf",
                     "-inf",
                     format("{}", neg_inf_32)!,
-                    format("{:?}", neg_inf_32)!,
+                    format("{format: .debug}", neg_inf_32)!,
                 )
-                or not check_pair("NaN", "NaN", format("{}", nan_32)!, format("{:?}", nan_32)!)
+                or not check_pair("NaN", "NaN", format("{}", nan_32)!, format("{format: .debug}", nan_32)!)
             {
                 return 17;
             }
@@ -543,32 +565,32 @@ fn native_float_display_and_debug_for_f64_f32_f16_and_bf16() {
                 "1.5",
                 "1.5",
                 format("{}", one_five_16)!,
-                format("{:?}", one_five_16)!,
+                format("{format: .debug}", one_five_16)!,
             )
                 or not check_pair(
                     "-0",
                     "-0.0",
                     format("{}", neg_zero_16)!,
-                    format("{:?}", neg_zero_16)!,
+                    format("{format: .debug}", neg_zero_16)!,
                 )
                 or not check_pair(
                     "inf",
                     "inf",
                     format("{}", pos_inf_16)!,
-                    format("{:?}", pos_inf_16)!,
+                    format("{format: .debug}", pos_inf_16)!,
                 )
                 or not check_pair(
                     "-inf",
                     "-inf",
                     format("{}", neg_inf_16)!,
-                    format("{:?}", neg_inf_16)!,
+                    format("{format: .debug}", neg_inf_16)!,
                 )
-                or not check_pair("NaN", "NaN", format("{}", nan_16)!, format("{:?}", nan_16)!)
+                or not check_pair("NaN", "NaN", format("{}", nan_16)!, format("{format: .debug}", nan_16)!)
                 or not check_pair(
                     "6e-8",
                     "6.0e-8",
                     format("{}", min_sub_16)!,
-                    format("{:?}", min_sub_16)!,
+                    format("{format: .debug}", min_sub_16)!,
                 )
             {
                 return 18;
@@ -586,27 +608,27 @@ fn native_float_display_and_debug_for_f64_f32_f16_and_bf16() {
                 "1.5",
                 "1.5",
                 format("{}", one_five_bf16)!,
-                format("{:?}", one_five_bf16)!,
+                format("{format: .debug}", one_five_bf16)!,
             )
                 or not check_pair(
                     "-0",
                     "-0.0",
                     format("{}", neg_zero_bf16)!,
-                    format("{:?}", neg_zero_bf16)!,
+                    format("{format: .debug}", neg_zero_bf16)!,
                 )
                 or not check_pair(
                     "inf",
                     "inf",
                     format("{}", pos_inf_bf16)!,
-                    format("{:?}", pos_inf_bf16)!,
+                    format("{format: .debug}", pos_inf_bf16)!,
                 )
                 or not check_pair(
                     "-inf",
                     "-inf",
                     format("{}", neg_inf_bf16)!,
-                    format("{:?}", neg_inf_bf16)!,
+                    format("{format: .debug}", neg_inf_bf16)!,
                 )
-                or not check_pair("NaN", "NaN", format("{}", nan_bf16)!, format("{:?}", nan_bf16)!)
+                or not check_pair("NaN", "NaN", format("{}", nan_bf16)!, format("{format: .debug}", nan_bf16)!)
             {
                 return 19;
             }

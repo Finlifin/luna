@@ -190,7 +190,7 @@ fn native_batched_byte_writer_bulk_writes_and_buffered_io() {
             let unit_val: void = ();
             write_fmt(
                 counting.ref,
-                "|{}:{:?}:{:?}:{:?}|{}",
+                "|{}:{format: .debug}:{format: .debug}:{format: .debug}|{}",
                 true,
                 false,
                 unit_val,

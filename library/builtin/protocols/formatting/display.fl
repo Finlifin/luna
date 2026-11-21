@@ -1,223 +1,466 @@
-use bindings.{symbol_byte, symbol_byte_length}
-use primitives.{Symbol, bf16, f16, f32, f64, u64}
+use meta.{
+    isize_representation as comptime_isize_representation,
+    str_from_char,
+    usize_representation as comptime_usize_representation,
+}
+use primitives.*;
 use protocols.formatting.float;
+use protocols.formatting.options.{
+    FormatOptions,
+    compute_pad_counts,
+    pad_comptime_str,
+    parse_comptime_int_options,
+    parse_float_options,
+    parse_int_options,
+    parse_plain_options,
+    parse_text_options,
+    truncate_comptime_str,
+    write_char_repeat,
+    write_char_utf8,
+    write_padded_str,
+    write_padded_str_truncated,
+}
+use protocols.formatting.radix.{
+    format_integer_comptime,
+    format_signed_comptime,
+    format_unsigned_comptime,
+    write_signed_formatted,
+    write_unsigned_formatted,
+}
 use protocols.formatting.writer.ByteWriter;
 
+{-
+    Two-phase human-facing formatting protocol. Runtime implementations borrow
+    `*self` and write into a `ByteWriter` according to `comptime .format: str`
+    property options without consuming affine `Once` values; comptime phase
+    implementations produce a compile-time `str`.
+-}
 pub trait Display {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter;
-}
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter;
 
-fn unsigned_decimal(value: u128, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-    if value >= 10 {
-        unsigned_decimal(value / 10, output)!;
-    }
-    let digit = (value % 10)'bitvec[0..8].as(u8);
-    assumes digit <= 9;
-    output.write_byte(48 + digit)
-}
-
-fn signed_decimal(value: i128, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-    if value < 0 {
-        output.write_byte(45)!;
-
-        -- -(MIN + 1) fits; add the final unit in the unsigned domain.
-        let magnitude = (-(value + 1))'bitvec.as(u128);
-        assumes magnitude < 340282366920938463463374607431768211455;
-        unsigned_decimal(magnitude + 1, output)
-    } else {
-        unsigned_decimal(value'bitvec.as(u128), output)
-    }
+    ^attrs.comptime_phase
+    comptime fn comptime_fmt(self, .format: str = "") -> str;
 }
 
 impl Display for bool {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        if self {
-            output.write_str("true")
-        } else {
-            output.write_str("false")
-        }
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_plain_options(format);
+        let text = if self.* { "true" } else { "false" };
+        write_padded_str(text, opts, false, output)
+    }
+}
+
+comptime impl Display for bool {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_plain_options(format);
+        let text = if self { "true" } else { "false" };
+        pad_comptime_str("", text, opts, false, false)
     }
 }
 
 impl Display for u8 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        unsigned_decimal(self'bitvec.as(u128), output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_int_options(format);
+        write_unsigned_formatted(self.*'bitvec.as(u128), opts, output)
+    }
+}
+
+comptime impl Display for u8 {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_int_options(format);
+        format_unsigned_comptime(self'bitvec.as(u128), opts)
     }
 }
 
 impl Display for u16 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        unsigned_decimal(self'bitvec.as(u128), output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_int_options(format);
+        write_unsigned_formatted(self.*'bitvec.as(u128), opts, output)
+    }
+}
+
+comptime impl Display for u16 {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_int_options(format);
+        format_unsigned_comptime(self'bitvec.as(u128), opts)
     }
 }
 
 impl Display for u32 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        unsigned_decimal(self'bitvec.as(u128), output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_int_options(format);
+        write_unsigned_formatted(self.*'bitvec.as(u128), opts, output)
+    }
+}
+
+comptime impl Display for u32 {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_int_options(format);
+        format_unsigned_comptime(self'bitvec.as(u128), opts)
     }
 }
 
 impl Display for u64 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        unsigned_decimal(self'bitvec.as(u128), output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_int_options(format);
+        write_unsigned_formatted(self.*'bitvec.as(u128), opts, output)
+    }
+}
+
+comptime impl Display for u64 {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_int_options(format);
+        format_unsigned_comptime(self'bitvec.as(u128), opts)
     }
 }
 
 impl Display for u128 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        unsigned_decimal(self'bitvec.as(u128), output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_int_options(format);
+        write_unsigned_formatted(self.*'bitvec.as(u128), opts, output)
+    }
+}
+
+comptime impl Display for u128 {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_int_options(format);
+        format_unsigned_comptime(self'bitvec.as(u128), opts)
     }
 }
 
 impl Display for usize {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        unsigned_decimal(builtin.compiler.usize_representation(self), output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_int_options(format);
+        write_unsigned_formatted(builtin.compiler.usize_representation(self.*), opts, output)
+    }
+}
+
+comptime impl Display for usize {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_int_options(format);
+        format_unsigned_comptime(comptime_usize_representation(self), opts)
     }
 }
 
 impl Display for i8 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        if self < 0 {
-            output.write_byte(45)!;
-            let magnitude = (-(self + 1))'bitvec.as(u128);
-            assumes magnitude < 340282366920938463463374607431768211455;
-            unsigned_decimal(magnitude + 1, output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_int_options(format);
+        let v = self.*;
+        let twos = v'bitvec.as(u128);
+        if v < 0 {
+            let inv = (-(v + 1))'bitvec.as(u128);
+            assumes inv < 340282366920938463463374607431768211455;
+            write_signed_formatted(true, inv + 1, twos, opts, output)
         } else {
-            unsigned_decimal(self'bitvec.as(u128), output)
+            write_signed_formatted(false, twos, twos, opts, output)
+        }
+    }
+}
+
+comptime impl Display for i8 {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_int_options(format);
+        let twos = self'bitvec.as(u128);
+        if self < 0 {
+            let inv = (-(self + 1))'bitvec.as(u128);
+            assumes inv < 340282366920938463463374607431768211455;
+            format_signed_comptime(true, inv + 1, twos, opts)
+        } else {
+            format_signed_comptime(false, twos, twos, opts)
         }
     }
 }
 
 impl Display for i16 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        if self < 0 {
-            output.write_byte(45)!;
-            let magnitude = (-(self + 1))'bitvec.as(u128);
-            assumes magnitude < 340282366920938463463374607431768211455;
-            unsigned_decimal(magnitude + 1, output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_int_options(format);
+        let v = self.*;
+        let twos = v'bitvec.as(u128);
+        if v < 0 {
+            let inv = (-(v + 1))'bitvec.as(u128);
+            assumes inv < 340282366920938463463374607431768211455;
+            write_signed_formatted(true, inv + 1, twos, opts, output)
         } else {
-            unsigned_decimal(self'bitvec.as(u128), output)
+            write_signed_formatted(false, twos, twos, opts, output)
+        }
+    }
+}
+
+comptime impl Display for i16 {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_int_options(format);
+        let twos = self'bitvec.as(u128);
+        if self < 0 {
+            let inv = (-(self + 1))'bitvec.as(u128);
+            assumes inv < 340282366920938463463374607431768211455;
+            format_signed_comptime(true, inv + 1, twos, opts)
+        } else {
+            format_signed_comptime(false, twos, twos, opts)
         }
     }
 }
 
 impl Display for i32 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        if self < 0 {
-            output.write_byte(45)!;
-            let magnitude = (-(self + 1))'bitvec.as(u128);
-            assumes magnitude < 340282366920938463463374607431768211455;
-            unsigned_decimal(magnitude + 1, output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_int_options(format);
+        let v = self.*;
+        let twos = v'bitvec.as(u128);
+        if v < 0 {
+            let inv = (-(v + 1))'bitvec.as(u128);
+            assumes inv < 340282366920938463463374607431768211455;
+            write_signed_formatted(true, inv + 1, twos, opts, output)
         } else {
-            unsigned_decimal(self'bitvec.as(u128), output)
+            write_signed_formatted(false, twos, twos, opts, output)
+        }
+    }
+}
+
+comptime impl Display for i32 {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_int_options(format);
+        let twos = self'bitvec.as(u128);
+        if self < 0 {
+            let inv = (-(self + 1))'bitvec.as(u128);
+            assumes inv < 340282366920938463463374607431768211455;
+            format_signed_comptime(true, inv + 1, twos, opts)
+        } else {
+            format_signed_comptime(false, twos, twos, opts)
         }
     }
 }
 
 impl Display for i64 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        if self < 0 {
-            output.write_byte(45)!;
-            let magnitude = (-(self + 1))'bitvec.as(u128);
-            assumes magnitude < 340282366920938463463374607431768211455;
-            unsigned_decimal(magnitude + 1, output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_int_options(format);
+        let v = self.*;
+        let twos = v'bitvec.as(u128);
+        if v < 0 {
+            let inv = (-(v + 1))'bitvec.as(u128);
+            assumes inv < 340282366920938463463374607431768211455;
+            write_signed_formatted(true, inv + 1, twos, opts, output)
         } else {
-            unsigned_decimal(self'bitvec.as(u128), output)
+            write_signed_formatted(false, twos, twos, opts, output)
+        }
+    }
+}
+
+comptime impl Display for i64 {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_int_options(format);
+        let twos = self'bitvec.as(u128);
+        if self < 0 {
+            let inv = (-(self + 1))'bitvec.as(u128);
+            assumes inv < 340282366920938463463374607431768211455;
+            format_signed_comptime(true, inv + 1, twos, opts)
+        } else {
+            format_signed_comptime(false, twos, twos, opts)
         }
     }
 }
 
 impl Display for i128 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        signed_decimal(self'bitvec.as(i128), output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_int_options(format);
+        let v = self.*'bitvec.as(i128);
+        let twos = self.*'bitvec.as(u128);
+        if v < 0 {
+            let inv = (-(v + 1))'bitvec.as(u128);
+            assumes inv < 340282366920938463463374607431768211455;
+            write_signed_formatted(true, inv + 1, twos, opts, output)
+        } else {
+            write_signed_formatted(false, twos, twos, opts, output)
+        }
+    }
+}
+
+comptime impl Display for i128 {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_int_options(format);
+        let twos = self'bitvec.as(u128);
+        if self < 0 {
+            let inv = (-(self + 1))'bitvec.as(u128);
+            assumes inv < 340282366920938463463374607431768211455;
+            format_signed_comptime(true, inv + 1, twos, opts)
+        } else {
+            format_signed_comptime(false, twos, twos, opts)
+        }
     }
 }
 
 impl Display for isize {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        if self < 0 {
-            output.write_byte(45)!;
-            let magnitude = builtin.compiler.isize_representation(-(self + 1));
-            assumes magnitude < 340282366920938463463374607431768211455;
-            unsigned_decimal(magnitude + 1, output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_int_options(format);
+        let v = self.*;
+        let twos = builtin.compiler.isize_representation(v);
+        if v < 0 {
+            let inv = builtin.compiler.isize_representation(-(v + 1));
+            assumes inv < 340282366920938463463374607431768211455;
+            write_signed_formatted(true, inv + 1, twos, opts, output)
         } else {
-            unsigned_decimal(builtin.compiler.isize_representation(self), output)
+            write_signed_formatted(false, twos, twos, opts, output)
         }
+    }
+}
+
+comptime impl Display for isize {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_int_options(format);
+        let twos = comptime_isize_representation(self);
+        if self < 0 {
+            let inv = comptime_isize_representation(-(self + 1));
+            assumes inv < 340282366920938463463374607431768211455;
+            format_signed_comptime(true, inv + 1, twos, opts)
+        } else {
+            format_signed_comptime(false, twos, twos, opts)
+        }
+    }
+}
+
+comptime impl Display for Integer {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_comptime_int_options(format);
+        format_integer_comptime(self, opts)
     }
 }
 
 impl Display for char {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        let code = self'bitvec.as(u32);
-        if code <= 127 {
-            output.write_byte(code'bitvec[0..8].as(u8))
-        } else if code <= 2047 {
-            let first = (code / 64) + 192;
-            let second = (code % 64) + 128;
-            output.write_byte(first'bitvec[0..8].as(u8))!;
-            output.write_byte(second'bitvec[0..8].as(u8))
-        } else if code <= 65535 {
-            let first = (code / 4096) + 224;
-            let second = (code / 64 % 64) + 128;
-            let third = (code % 64) + 128;
-            output.write_byte(first'bitvec[0..8].as(u8))!;
-            output.write_byte(second'bitvec[0..8].as(u8))!;
-            output.write_byte(third'bitvec[0..8].as(u8))
-        } else {
-            let first = (code / 262144) + 240;
-            let second = (code / 4096 % 64) + 128;
-            let third = (code / 64 % 64) + 128;
-            let fourth = (code % 64) + 128;
-            output.write_byte(first'bitvec[0..8].as(u8))!;
-            output.write_byte(second'bitvec[0..8].as(u8))!;
-            output.write_byte(third'bitvec[0..8].as(u8))!;
-            output.write_byte(fourth'bitvec[0..8].as(u8))
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_plain_options(format);
+        if not opts.has_len {
+            return write_char_utf8(self.*, output);
         }
+        let pads = compute_pad_counts(opts, 1, false, false);
+        if pads.left > 0 {
+            write_char_repeat(opts.placeholder, pads.left, output)!;
+        }
+        write_char_utf8(self.*, output)!;
+        if pads.right > 0 {
+            write_char_repeat(opts.placeholder, pads.right, output)!;
+        }
+    }
+}
+
+comptime impl Display for char {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_plain_options(format);
+        pad_comptime_str("", str_from_char(self), opts, false, false)
     }
 }
 
 impl Display for str {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        output.write_str(self)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_text_options(format);
+        write_padded_str_truncated(self.*, opts, output)
+    }
+}
+
+comptime impl Display for str {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_text_options(format);
+        pad_comptime_str("", truncate_comptime_str(self, opts), opts, false, false)
     }
 }
 
 impl Display for Symbol {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        let name = self;
-        let length = symbol_byte_length(name);
-        var index: u64 = 0;
-        while index < length {
-            let byte = symbol_byte(name, index) match {
-                value? => value,
-                null => break,
-            }
-            output.write_byte(byte)!;
-            index = index + 1;
-        }
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_plain_options(format);
+        write_padded_str(self.*'tag_name, opts, false, output)
+    }
+}
+
+comptime impl Display for Symbol {
+    comptime fn comptime_fmt(self, .format: str = "") -> str {
+        let opts: FormatOptions = parse_plain_options(format);
+        pad_comptime_str("", self'tag_name, opts, false, false)
     }
 }
 
 impl Display for f16 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        float.write_f16(self, false, output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_float_options(format);
+        float.write_f16_formatted(self.*, opts, output)
     }
 }
 
 impl Display for bf16 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        float.write_bf16(self, false, output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_float_options(format);
+        float.write_bf16_formatted(self.*, opts, output)
     }
 }
 
 impl Display for f32 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        float.write_f32(self, false, output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_float_options(format);
+        float.write_f32_formatted(self.*, opts, output)
     }
 }
 
 impl Display for f64 {
-    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        float.write_f64(self, false, output)
+    fn fmt(*self, output: *W, comptime .format: str = "") -> !W.as(ByteWriter).Err void
+    where
+        W :- ByteWriter
+    {
+        let opts: FormatOptions = parse_float_options(format);
+        float.write_f64_formatted(self.*, opts, output)
     }
 }

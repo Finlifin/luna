@@ -333,9 +333,9 @@ impl Hash for Duration {
 impl Debug for Duration {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
         output.write_str("Duration { secs: ")!;
-        self.raw_secs.*.as(Display).write(output)!;
+        self.raw_secs.as(Display).fmt(output)!;
         output.write_str(", nanos: ")!;
-        self.raw_nanos.*.as(Display).write(output)!;
+        self.raw_nanos.as(Display).fmt(output)!;
         output.write_str(" }")
     }
 }

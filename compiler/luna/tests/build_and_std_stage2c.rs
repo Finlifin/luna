@@ -583,7 +583,7 @@ fn std_collections_debug_impls_preserve_once_elements_and_custom_allocators() {
         impl Debug for KeyTag {
             fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
                 output.write_str("K(")!;
-                self.id.*.as(Display).write(output)!;
+                self.id.as(Display).fmt(output)!;
                 output.write_byte(41)
             }
         }

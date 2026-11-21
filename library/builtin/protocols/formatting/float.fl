@@ -1,5 +1,6 @@
 use numeric.math_intrinsics;
 use primitives.*;
+use protocols.formatting.options.{FormatOptions, ProbeWriter, compute_pad_counts, write_char_repeat}
 use protocols.formatting.writer.ByteWriter;
 use protocols.resources.{Clone, Copy}
 
@@ -605,52 +606,53 @@ fn write_decimal_digits(
     }
 }
 
-fn write_unpacked_float(
+struct UnpackedFloat {
     sign: bool,
     is_special: bool,
     mant: u64,
     exp2: i32,
     asymmetric: bool,
     max_digits: u8,
-    require_decimal: bool,
-    output: *W,
-) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-    if is_special {
-        if mant != 0 {
-            return output.write_str("NaN");
-        } else if sign {
-            return output.write_str("-inf");
-        } else {
-            return output.write_str("inf");
-        }
-    }
-    if mant == 0 {
-        if sign {
-            output.write_byte(45)!;
-        }
-        output.write_byte(48)!;
-        if require_decimal {
-            output.write_str(".0")!;
-        }
-        return;
-    }
-    let dec = format_finite_digits(mant, exp2, asymmetric, max_digits);
-    write_decimal_digits(sign, dec, require_decimal, output)
 }
 
-pub fn write_f64(
-    value: f64,
-    require_decimal: bool,
-    output: *W,
-) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+impl Clone for UnpackedFloat {
+    fn clone(*self) -> Self {
+        UnpackedFloat {
+            sign: self.sign.*,
+            is_special: self.is_special.*,
+            mant: self.mant.*,
+            exp2: self.exp2.*,
+            asymmetric: self.asymmetric.*,
+            max_digits: self.max_digits.*,
+        }
+    }
+}
+
+impl Copy for UnpackedFloat {}
+
+fn unpack_f64(value: f64) -> UnpackedFloat {
     let bits = value'bitvec.as(u64);
     let sign = bits'bitvec[63..64].as(u8) != 0;
     let raw_exp = bits'bitvec[52..63].as(u16);
     let frac = bits'bitvec[0..52].as(u64);
     if raw_exp == 2047 {
-        write_unpacked_float(sign, true, frac, 0, false, 17, require_decimal, output)
+        UnpackedFloat {
+            sign: sign,
+            is_special: true,
+            mant: frac,
+            exp2: 0,
+            asymmetric: false,
+            max_digits: 17,
+        }
     } else if raw_exp == 0 {
-        write_unpacked_float(sign, false, frac, -1074, false, 17, require_decimal, output)
+        UnpackedFloat {
+            sign: sign,
+            is_special: false,
+            mant: frac,
+            exp2: -1074,
+            asymmetric: false,
+            max_digits: 17,
+        }
     } else {
         let mant = 4503599627370496 + frac;
         let raw_i32 = raw_exp'bitvec.as(u32)'bitvec.as(i32);
@@ -660,23 +662,40 @@ pub fn write_f64(
             0
         }
         let asym = frac == 0 and raw_exp > 1;
-        write_unpacked_float(sign, false, mant, exp2, asym, 17, require_decimal, output)
+        UnpackedFloat {
+            sign: sign,
+            is_special: false,
+            mant: mant,
+            exp2: exp2,
+            asymmetric: asym,
+            max_digits: 17,
+        }
     }
 }
 
-pub fn write_f32(
-    value: f32,
-    require_decimal: bool,
-    output: *W,
-) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+fn unpack_f32(value: f32) -> UnpackedFloat {
     let bits = value'bitvec.as(u32);
     let sign = bits'bitvec[31..32].as(u8) != 0;
     let raw_exp = bits'bitvec[23..31].as(u8);
     let frac = bits'bitvec[0..23].as(u64);
     if raw_exp == 255 {
-        write_unpacked_float(sign, true, frac, 0, false, 9, require_decimal, output)
+        UnpackedFloat {
+            sign: sign,
+            is_special: true,
+            mant: frac,
+            exp2: 0,
+            asymmetric: false,
+            max_digits: 9,
+        }
     } else if raw_exp == 0 {
-        write_unpacked_float(sign, false, frac, -149, false, 9, require_decimal, output)
+        UnpackedFloat {
+            sign: sign,
+            is_special: false,
+            mant: frac,
+            exp2: -149,
+            asymmetric: false,
+            max_digits: 9,
+        }
     } else {
         let mant = 8388608 + frac;
         let raw_i32 = raw_exp'bitvec.as(u32)'bitvec.as(i32);
@@ -686,23 +705,40 @@ pub fn write_f32(
             0
         }
         let asym = frac == 0 and raw_exp > 1;
-        write_unpacked_float(sign, false, mant, exp2, asym, 9, require_decimal, output)
+        UnpackedFloat {
+            sign: sign,
+            is_special: false,
+            mant: mant,
+            exp2: exp2,
+            asymmetric: asym,
+            max_digits: 9,
+        }
     }
 }
 
-pub fn write_f16(
-    value: f16,
-    require_decimal: bool,
-    output: *W,
-) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+fn unpack_f16(value: f16) -> UnpackedFloat {
     let bits = value'bitvec.as(u16);
     let sign = bits'bitvec[15..16].as(u8) != 0;
     let raw_exp = bits'bitvec[10..15].as(u8);
     let frac = bits'bitvec[0..10].as(u64);
     if raw_exp == 31 {
-        write_unpacked_float(sign, true, frac, 0, false, 5, require_decimal, output)
+        UnpackedFloat {
+            sign: sign,
+            is_special: true,
+            mant: frac,
+            exp2: 0,
+            asymmetric: false,
+            max_digits: 5,
+        }
     } else if raw_exp == 0 {
-        write_unpacked_float(sign, false, frac, -24, false, 5, require_decimal, output)
+        UnpackedFloat {
+            sign: sign,
+            is_special: false,
+            mant: frac,
+            exp2: -24,
+            asymmetric: false,
+            max_digits: 5,
+        }
     } else {
         let mant = 1024 + frac;
         let raw_i32 = raw_exp'bitvec.as(u32)'bitvec.as(i32);
@@ -712,23 +748,40 @@ pub fn write_f16(
             0
         }
         let asym = frac == 0 and raw_exp > 1;
-        write_unpacked_float(sign, false, mant, exp2, asym, 5, require_decimal, output)
+        UnpackedFloat {
+            sign: sign,
+            is_special: false,
+            mant: mant,
+            exp2: exp2,
+            asymmetric: asym,
+            max_digits: 5,
+        }
     }
 }
 
-pub fn write_bf16(
-    value: bf16,
-    require_decimal: bool,
-    output: *W,
-) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+fn unpack_bf16(value: bf16) -> UnpackedFloat {
     let bits = value'bitvec.as(u16);
     let sign = bits'bitvec[15..16].as(u8) != 0;
     let raw_exp = bits'bitvec[7..15].as(u8);
     let frac = bits'bitvec[0..7].as(u64);
     if raw_exp == 255 {
-        write_unpacked_float(sign, true, frac, 0, false, 4, require_decimal, output)
+        UnpackedFloat {
+            sign: sign,
+            is_special: true,
+            mant: frac,
+            exp2: 0,
+            asymmetric: false,
+            max_digits: 4,
+        }
     } else if raw_exp == 0 {
-        write_unpacked_float(sign, false, frac, -133, false, 4, require_decimal, output)
+        UnpackedFloat {
+            sign: sign,
+            is_special: false,
+            mant: frac,
+            exp2: -133,
+            asymmetric: false,
+            max_digits: 4,
+        }
     } else {
         let mant = 128 + frac;
         let raw_i32 = raw_exp'bitvec.as(u32)'bitvec.as(i32);
@@ -738,6 +791,737 @@ pub fn write_bf16(
             0
         }
         let asym = frac == 0 and raw_exp > 1;
-        write_unpacked_float(sign, false, mant, exp2, asym, 4, require_decimal, output)
+        UnpackedFloat {
+            sign: sign,
+            is_special: false,
+            mant: mant,
+            exp2: exp2,
+            asymmetric: asym,
+            max_digits: 4,
+        }
     }
+}
+
+fn write_unpacked_float(
+    u: UnpackedFloat,
+    require_decimal: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if u.is_special {
+        if u.mant != 0 {
+            return output.write_str("NaN");
+        } else if u.sign {
+            return output.write_str("-inf");
+        } else {
+            return output.write_str("inf");
+        }
+    }
+    if u.mant == 0 {
+        if u.sign {
+            output.write_byte(45)!;
+        }
+        output.write_byte(48)!;
+        if require_decimal {
+            output.write_str(".0")!;
+        }
+        return;
+    }
+    let dec = format_finite_digits(u.mant, u.exp2, u.asymmetric, u.max_digits);
+    write_decimal_digits(u.sign, dec, require_decimal, output)
+}
+
+pub fn write_f64(
+    value: f64,
+    require_decimal: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    write_unpacked_float(unpack_f64(value), require_decimal, output)
+}
+
+pub fn write_f32(
+    value: f32,
+    require_decimal: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    write_unpacked_float(unpack_f32(value), require_decimal, output)
+}
+
+pub fn write_f16(
+    value: f16,
+    require_decimal: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    write_unpacked_float(unpack_f16(value), require_decimal, output)
+}
+
+pub fn write_bf16(
+    value: bf16,
+    require_decimal: bool,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    write_unpacked_float(unpack_bf16(value), require_decimal, output)
+}
+
+{- ── Zero-allocation fixed-precision & option-aware float formatting ──────── -}
+
+fn write_zero_bytes_u32(count: u32, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    var rem = count;
+    while rem >= 8 {
+        output.write_str("00000000")!;
+        rem = rem - 8;
+    }
+    while rem > 0 {
+        output.write_byte(48)!;
+        rem = rem - 1;
+    }
+}
+
+fn pow5_u128(p: u32) -> u128 {
+    if p > 32 {
+        return 1;
+    }
+    var acc: u128 = 1;
+    var i: u32 = 0;
+    while i < p {
+        if acc > 50000000000000000000000 {
+            return acc;
+        }
+        acc = acc * 5;
+        i = i + 1;
+    }
+    acc
+}
+
+fn pow10_u128(p: u32) -> u128 {
+    if p > 38 {
+        return 1;
+    }
+    var acc: u128 = 1;
+    var i: u32 = 0;
+    while i < p {
+        if acc > 34028236692093846346337460743176821145 {
+            return acc;
+        }
+        acc = acc * 10;
+        i = i + 1;
+    }
+    acc
+}
+
+fn pow10_u64(n: u8) -> u64 {
+    if n > 19 {
+        return 1;
+    }
+    var acc: u64 = 1;
+    var i: u8 = 0;
+    while i < n {
+        if acc > 1844674407370955161 {
+            return acc;
+        }
+        acc = acc * 10;
+        i = i + 1;
+    }
+    acc
+}
+
+fn count_u128_digits(value: u128) -> u32 {
+    var v = value;
+    var count: u32 = 1;
+    while v >= 10 {
+        v = v / 10;
+        if count < 100 {
+            count = count + 1;
+        }
+    }
+    count
+}
+
+fn write_u128_decimal(value: u128, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    let digits_count = count_u128_digits(value);
+    if digits_count == 0 or digits_count > 39 {
+        return;
+    }
+    let raw_scale = pow10_u128(digits_count - 1);
+    var scale: u128 = if raw_scale > 0 { raw_scale } else { 1 };
+    var rem = value;
+    var pos: u32 = 0;
+    while pos < digits_count {
+        if scale == 0 or pos >= 39 {
+            return;
+        }
+        let q = rem / scale;
+        rem = rem % scale;
+        let d = (q % 10)'bitvec[0..8].as(u8);
+        assumes d <= 9;
+        output.write_byte(48 + d)!;
+        scale = if scale >= 10 { scale / 10 } else { 1 };
+        pos = pos + 1;
+    }
+}
+
+fn write_u128_fixed(
+    sign: bool,
+    q: u128,
+    p: u32,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if sign {
+        output.write_byte(45)!;
+    }
+    if p == 0 {
+        return write_u128_decimal(q, output);
+    }
+    let div = pow10_u128(p);
+    if div == 0 {
+        return write_u128_decimal(q, output);
+    }
+    write_u128_decimal(q / div, output)!;
+    output.write_byte(46)!;
+    let frac = q % div;
+    let frac_digits = count_u128_digits(frac);
+    if p > frac_digits {
+        write_zero_bytes_u32(p - frac_digits, output)!;
+    }
+    write_u128_decimal(frac, output)
+}
+
+fn round_decimal_to_keep(dec: DecimalDigits, keep: i32) -> DecimalDigits {
+    let count_i32 = dec.count'bitvec.as(u32)'bitvec.as(i32);
+    if dec.count == 0 or dec.count > 17 {
+        return dec;
+    }
+    if count_i32 < 1 or count_i32 > 17 {
+        return dec;
+    }
+    if keep <= 0 or keep >= count_i32 {
+        return dec;
+    }
+    let base_exp = dec.dec_exp;
+    if base_exp < -10000 or base_exp > 10000 {
+        return dec;
+    }
+    let drop_i32 = count_i32 - keep;
+    if drop_i32 < 1 or drop_i32 > 16 {
+        return dec;
+    }
+    let drop_u8 = drop_i32'bitvec[0..5].as(u8);
+    let div = pow10_u64(drop_u8);
+    if div == 0 {
+        return dec;
+    }
+    let head = dec.digits / div;
+    let rem = dec.digits % div;
+    let half = div / 2;
+    let round_up = rem > half or (rem == half and head % 2 == 1);
+    let next_head = if round_up and head < 18446744073709551615 {
+        head + 1
+    } else {
+        head
+    };
+    let keep_u8 = keep'bitvec[0..5].as(u8);
+    let overflow_limit = pow10_u64(keep_u8);
+    if next_head == overflow_limit {
+        DecimalDigits {
+            digits: 1,
+            count: 1,
+            dec_exp: base_exp + 1,
+        }
+    } else {
+        DecimalDigits {
+            digits: next_head,
+            count: keep_u8,
+            dec_exp: base_exp,
+        }
+    }
+}
+
+fn write_fixed_zero(
+    precision: u32,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    output.write_byte(48)!;
+    if precision == 0 {
+        return;
+    }
+    output.write_byte(46)!;
+    write_zero_bytes_u32(precision, output)
+}
+
+struct FixedDecimalPlan {
+    kind: u8,
+    digits: u64,
+    count: u8,
+    split: u8,
+    frac_end: u8,
+    pad_zeros_1: u32,
+    pad_zeros_2: u32,
+}
+
+impl Clone for FixedDecimalPlan {
+    fn clone(*self) -> Self {
+        FixedDecimalPlan {
+            kind: self.kind.*,
+            digits: self.digits.*,
+            count: self.count.*,
+            split: self.split.*,
+            frac_end: self.frac_end.*,
+            pad_zeros_1: self.pad_zeros_1.*,
+            pad_zeros_2: self.pad_zeros_2.*,
+        }
+    }
+}
+
+impl Copy for FixedDecimalPlan {}
+
+fn empty_fixed_plan(kind: u8) -> FixedDecimalPlan {
+    FixedDecimalPlan {
+        kind: kind,
+        digits: 0,
+        count: 0,
+        split: 0,
+        frac_end: 0,
+        pad_zeros_1: 0,
+        pad_zeros_2: 0,
+    }
+}
+
+fn plan_decimal_keep_zero(digits: u64, count: u8) -> FixedDecimalPlan {
+    if count == 0 or count > 17 {
+        return empty_fixed_plan(255);
+    }
+    let scale = pow10_u64(count - 1);
+    if scale == 0 {
+        return empty_fixed_plan(255);
+    }
+    let lead = digits / scale;
+    let tail = digits % scale;
+    if lead > 5 or (lead == 5 and tail > 0) {
+        return empty_fixed_plan(1);
+    }
+    empty_fixed_plan(0)
+}
+
+fn plan_decimal_sub_one(
+    r_digits: u64,
+    r_count: u8,
+    eff_exp: i32,
+    precision: u32,
+    p_i32: i32,
+) -> FixedDecimalPlan {
+    if r_count == 0 or r_count > 17 or eff_exp >= 0 or eff_exp < -10001 {
+        return empty_fixed_plan(255);
+    }
+    if p_i32 < 0 or p_i32 > 65535 {
+        return empty_fixed_plan(255);
+    }
+    if precision == 0 {
+        return empty_fixed_plan(0);
+    }
+    let lead_zeros_i32 = -eff_exp - 1;
+    let lz_u32: u32 = if lead_zeros_i32 > 0 {
+        if lead_zeros_i32 <= p_i32 {
+            lead_zeros_i32'bitvec.as(u32)
+        } else {
+            precision
+        }
+    } else {
+        0
+    };
+    let rem_p = if precision > lz_u32 { precision - lz_u32 } else { 0 };
+    let rc_u32 = r_count'bitvec.as(u32);
+    if rem_p >= rc_u32 {
+        return FixedDecimalPlan {
+            kind: 2,
+            digits: r_digits,
+            count: r_count,
+            split: 0,
+            frac_end: r_count,
+            pad_zeros_1: lz_u32,
+            pad_zeros_2: rem_p - rc_u32,
+        };
+    }
+    if rem_p == 0 or rem_p > 17 {
+        return FixedDecimalPlan {
+            kind: 2,
+            digits: r_digits,
+            count: r_count,
+            split: 0,
+            frac_end: 0,
+            pad_zeros_1: lz_u32,
+            pad_zeros_2: 0,
+        };
+    }
+    FixedDecimalPlan {
+        kind: 2,
+        digits: r_digits,
+        count: r_count,
+        split: 0,
+        frac_end: rem_p'bitvec[0..5].as(u8),
+        pad_zeros_1: lz_u32,
+        pad_zeros_2: 0,
+    }
+}
+
+fn plan_decimal_ge_one(
+    r_digits: u64,
+    r_count: u8,
+    eff_exp: i32,
+    precision: u32,
+) -> FixedDecimalPlan {
+    if r_count == 0 or r_count > 17 or eff_exp < 0 or eff_exp > 10001 {
+        return empty_fixed_plan(255);
+    }
+    let rc_i32 = r_count'bitvec.as(u32)'bitvec.as(i32);
+    if rc_i32 < 1 or rc_i32 > 17 {
+        return empty_fixed_plan(255);
+    }
+    if eff_exp >= rc_i32 - 1 {
+        let trailing_i32 = eff_exp - (rc_i32 - 1);
+        let trailing_u32: u32 = if trailing_i32 > 0 { trailing_i32'bitvec.as(u32) } else { 0 };
+        return FixedDecimalPlan {
+            kind: 3,
+            digits: r_digits,
+            count: r_count,
+            split: 0,
+            frac_end: 0,
+            pad_zeros_1: trailing_u32,
+            pad_zeros_2: 0,
+        };
+    }
+    let split_u8 = (eff_exp + 1)'bitvec[0..5].as(u8);
+    if split_u8 > r_count or split_u8 > 17 {
+        return empty_fixed_plan(255);
+    }
+    let avail_frac = r_count - split_u8;
+    let avail_u32 = avail_frac'bitvec.as(u32);
+    if precision >= avail_u32 {
+        return FixedDecimalPlan {
+            kind: 4,
+            digits: r_digits,
+            count: r_count,
+            split: split_u8,
+            frac_end: r_count,
+            pad_zeros_1: 0,
+            pad_zeros_2: precision - avail_u32,
+        };
+    }
+    let frac_end: u8 = if precision <= 17 {
+        let frac_take = precision'bitvec[0..5].as(u8);
+        if frac_take <= 17 and split_u8 + frac_take <= 17 {
+            split_u8 + frac_take
+        } else {
+            split_u8
+        }
+    } else {
+        split_u8
+    };
+    FixedDecimalPlan {
+        kind: 4,
+        digits: r_digits,
+        count: r_count,
+        split: split_u8,
+        frac_end: frac_end,
+        pad_zeros_1: 0,
+        pad_zeros_2: 0,
+    }
+}
+
+fn plan_decimal_fixed(dec: DecimalDigits, precision: u32) -> FixedDecimalPlan {
+    let digits = dec.digits;
+    let count = dec.count;
+    let dec_exp = dec.dec_exp;
+    if count == 0 or count > 17 or dec_exp < -10000 or dec_exp > 10000 {
+        return empty_fixed_plan(0);
+    }
+    let p_i32: i32 = if precision <= 65535 { precision'bitvec.as(i32) } else { 65535 };
+    if p_i32 < 0 or p_i32 > 65535 {
+        return empty_fixed_plan(255);
+    }
+    let keep: i32 = dec_exp + 1 + p_i32;
+    if keep < 0 {
+        return empty_fixed_plan(0);
+    }
+    if keep == 0 {
+        return plan_decimal_keep_zero(digits, count);
+    }
+    let count_i32 = count'bitvec.as(u32)'bitvec.as(i32);
+    if count_i32 < 1 or count_i32 > 17 {
+        return empty_fixed_plan(255);
+    }
+    let rounded = if keep < count_i32 {
+        round_decimal_to_keep(dec, keep)
+    } else {
+        dec
+    };
+    let r_digits = rounded.digits;
+    let r_count = rounded.count;
+    let eff_exp = rounded.dec_exp;
+    if r_count == 0 or r_count > 17 or eff_exp < -10001 or eff_exp > 10001 {
+        return empty_fixed_plan(255);
+    }
+    if eff_exp < 0 {
+        return plan_decimal_sub_one(r_digits, r_count, eff_exp, precision, p_i32);
+    }
+    plan_decimal_ge_one(r_digits, r_count, eff_exp, precision)
+}
+
+fn write_fixed_plan(
+    sign: bool,
+    plan: FixedDecimalPlan,
+    precision: u32,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if sign {
+        output.write_byte(45)!;
+    }
+    if plan.kind == 0 {
+        return write_fixed_zero(precision, output);
+    }
+    if plan.kind == 1 {
+        if precision == 0 {
+            return output.write_byte(49);
+        }
+        output.write_str("0.")!;
+        write_zero_bytes_u32(precision - 1, output)!;
+        return output.write_byte(49);
+    }
+    if plan.kind == 2 {
+        output.write_byte(48)!;
+        if precision == 0 {
+            return;
+        }
+        output.write_byte(46)!;
+        if plan.pad_zeros_1 > 0 {
+            write_zero_bytes_u32(plan.pad_zeros_1, output)!;
+        }
+        if plan.frac_end > 0 {
+            write_digits_slice(plan.digits, plan.count, 0, plan.frac_end, output)!;
+        }
+        if plan.pad_zeros_2 > 0 {
+            write_zero_bytes_u32(plan.pad_zeros_2, output)!;
+        }
+        return;
+    }
+    if plan.kind == 3 {
+        write_digits_slice(plan.digits, plan.count, 0, plan.count, output)!;
+        if plan.pad_zeros_1 > 0 {
+            write_zero_bytes_u32(plan.pad_zeros_1, output)!;
+        }
+        if precision == 0 {
+            return;
+        }
+        output.write_byte(46)!;
+        return write_zero_bytes_u32(precision, output);
+    }
+    if plan.kind == 4 {
+        write_digits_slice(plan.digits, plan.count, 0, plan.split, output)!;
+        if precision == 0 {
+            return;
+        }
+        output.write_byte(46)!;
+        if plan.frac_end > plan.split {
+            write_digits_slice(plan.digits, plan.count, plan.split, plan.frac_end, output)!;
+        }
+        if plan.pad_zeros_2 > 0 {
+            write_zero_bytes_u32(plan.pad_zeros_2, output)!;
+        }
+        return;
+    }
+}
+
+fn round_shift_right_u128(prod: u128, shift: i32) -> u128 {
+    if shift <= 0 {
+        return prod;
+    }
+    if shift == 128 {
+        if prod > 170141183460469231731687303715884105728 {
+            return 1;
+        }
+        return 0;
+    }
+    if shift > 128 {
+        return 0;
+    }
+    let shift_u128 = shift'bitvec[0..7].as(u128);
+    if shift_u128 < 1 or shift_u128 > 127 {
+        return 0;
+    }
+    var q = math_intrinsics.funnel_shift_right(0, prod, shift_u128);
+    let lo_prod = math_intrinsics.funnel_shift_left(q, 0, shift_u128);
+    let rem = if prod >= lo_prod { prod - lo_prod } else { 0 };
+    let half = math_intrinsics.funnel_shift_left(1, 0, shift_u128 - 1);
+    if rem > half or (rem == half and q % 2 == 1) {
+        if q < 340282366920938463463374607431768211455 {
+            q = q + 1;
+        }
+    }
+    q
+}
+
+fn compute_u128_fixed_fast(mant: u64, exp2: i32, precision: u32) -> ?u128 {
+    if precision > 32 or mant > 9007199254740991 or exp2 < -1200 or exp2 > 1200 {
+        return null;
+    }
+    let p5 = pow5_u128(precision);
+    let mant_u128 = mant'bitvec.as(u128);
+    assumes mant_u128 <= 9007199254740991;
+    assumes p5 <= 23283064365386962890625;
+    let prod = mant_u128 * p5;
+    let p_i32 = precision'bitvec.as(i32);
+    assumes p_i32 >= 0;
+    assumes p_i32 <= 32;
+    let s: i32 = exp2 + p_i32;
+    if s <= 0 {
+        return round_shift_right_u128(prod, -s);
+    }
+    if s > 127 {
+        return null;
+    }
+    let lz = math_intrinsics.leading_zeros(prod);
+    if lz > 128 {
+        return null;
+    }
+    let lz_u8 = lz'bitvec[0..8].as(u8);
+    let lz_i32 = lz_u8'bitvec.as(u32)'bitvec.as(i32);
+    if s > lz_i32 {
+        return null;
+    }
+    let s_u128 = s'bitvec[0..7].as(u128);
+    math_intrinsics.funnel_shift_left(prod, 0, s_u128)
+}
+
+fn write_unpacked_float_fixed(
+    u: UnpackedFloat,
+    precision: u32,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if u.is_special {
+        if u.mant != 0 {
+            return output.write_str("NaN");
+        } else if u.sign {
+            return output.write_str("-inf");
+        } else {
+            return output.write_str("inf");
+        }
+    }
+    if u.mant == 0 {
+        if u.sign {
+            output.write_byte(45)!;
+        }
+        return write_fixed_zero(precision, output);
+    }
+    compute_u128_fixed_fast(u.mant, u.exp2, precision) match {
+        q? => return write_u128_fixed(u.sign, q, precision, output),
+        null => {},
+    }
+    let dec = format_finite_digits(u.mant, u.exp2, u.asymmetric, u.max_digits);
+    let plan = plan_decimal_fixed(dec, precision);
+    write_fixed_plan(u.sign, plan, precision, output)
+}
+
+fn write_float_abs_body(
+    u_abs: UnpackedFloat,
+    opts: FormatOptions,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if opts.has_precision {
+        write_unpacked_float_fixed(u_abs, opts.precision, output)
+    } else {
+        write_unpacked_float(u_abs, false, output)
+    }
+}
+
+fn write_unpacked_float_formatted(
+    u: UnpackedFloat,
+    opts: FormatOptions,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    if opts.sign == 0 and not opts.has_len and not opts.has_precision {
+        return write_unpacked_float(u, false, output);
+    }
+    let is_nan = u.is_special and u.mant != 0;
+    let sign_byte: u8 = if is_nan {
+        0
+    } else if u.sign {
+        45
+    } else if opts.sign == 1 {
+        43
+    } else if opts.sign == 2 {
+        32
+    } else {
+        0
+    };
+    let u_abs = UnpackedFloat {
+        sign: false,
+        is_special: u.is_special,
+        mant: u.mant,
+        exp2: u.exp2,
+        asymmetric: u.asymmetric,
+        max_digits: u.max_digits,
+    };
+
+    if not opts.has_len {
+        if sign_byte != 0 {
+            output.write_byte(sign_byte)!;
+        }
+        return write_float_abs_body(u_abs, opts, output);
+    }
+
+    var probe = ProbeWriter.new();
+    write_float_abs_body(u_abs, opts, probe.ref) match {
+        _! => {},
+        error _ => return,
+    }
+    let sign_len: u32 = if sign_byte != 0 { 1 } else { 0 };
+    let probed_chars = probe.chars;
+    if probed_chars > 10000000 {
+        return;
+    }
+    let content_chars = sign_len + probed_chars;
+    let pads = compute_pad_counts(opts, content_chars, true, not u.is_special);
+    if pads.left > 0 {
+        write_char_repeat(opts.placeholder, pads.left, output)!;
+    }
+    if sign_byte != 0 {
+        output.write_byte(sign_byte)!;
+    }
+    if pads.zero_pad > 0 {
+        write_char_repeat('0', pads.zero_pad, output)!;
+    }
+    write_float_abs_body(u_abs, opts, output)!;
+    if pads.right > 0 {
+        write_char_repeat(opts.placeholder, pads.right, output)!;
+    }
+}
+
+pub fn write_f64_formatted(
+    value: f64,
+    opts: FormatOptions,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    write_unpacked_float_formatted(unpack_f64(value), opts, output)
+}
+
+pub fn write_f32_formatted(
+    value: f32,
+    opts: FormatOptions,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    write_unpacked_float_formatted(unpack_f32(value), opts, output)
+}
+
+pub fn write_f16_formatted(
+    value: f16,
+    opts: FormatOptions,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    write_unpacked_float_formatted(unpack_f16(value), opts, output)
+}
+
+pub fn write_bf16_formatted(
+    value: bf16,
+    opts: FormatOptions,
+    output: *W,
+) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+    write_unpacked_float_formatted(unpack_bf16(value), opts, output)
 }

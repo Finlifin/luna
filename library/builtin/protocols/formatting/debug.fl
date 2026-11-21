@@ -55,7 +55,7 @@ fn write_escaped_byte(
 
 impl Debug for bool {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
@@ -67,73 +67,73 @@ impl Debug for void {
 
 impl Debug for u8 {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
 impl Debug for u16 {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
 impl Debug for u32 {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
 impl Debug for u64 {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
 impl Debug for u128 {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
 impl Debug for usize {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
 impl Debug for i8 {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
 impl Debug for i16 {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
 impl Debug for i32 {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
 impl Debug for i64 {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
 impl Debug for i128 {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
 impl Debug for isize {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
@@ -144,7 +144,7 @@ impl Debug for char {
         if code <= 127 {
             write_escaped_byte(code'bitvec[0..8].as(u8), 39, output)!;
         } else {
-            self.*.as(Display).write(output)!;
+            self.as(Display).fmt(output)!;
         }
         output.write_byte(39)
     }
@@ -171,7 +171,7 @@ impl Debug for str {
 impl Debug for Symbol {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
         output.write_byte(46)!;
-        self.*.as(Display).write(output)
+        self.as(Display).fmt(output)
     }
 }
 
