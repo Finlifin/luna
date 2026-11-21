@@ -20,10 +20,17 @@ fn unique_temp_path(prefix: &str, suffix: &str) -> PathBuf {
     ))
 }
 
+fn library_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("LUNA_TEST_SYSROOT") {
+        return PathBuf::from(path);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library")
+}
+
 fn invoke_sysroot_comptime(source: &str, entry: &str) -> Result<Value, String> {
     let path = unique_temp_path("luna-macro-tb-ct", ".fl");
     std::fs::write(&path, source).unwrap();
-    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let library = library_dir();
     let Command::Check(options) = cli::parse([
         "check".into(),
         path.clone().into_os_string(),
@@ -221,7 +228,7 @@ line2: " {ok}};
     "#;
     std::fs::write(&main_fl, runtime_src).unwrap();
 
-    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let library = library_dir();
     let build = ProcessCommand::new(env!("CARGO_BIN_EXE_luna"))
         .current_dir(&dir)
         .args([

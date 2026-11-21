@@ -164,6 +164,7 @@ pub struct MacroError {
     pub secondary_labels: Vec<(Span, String)>,
     pub expansion_chain: Vec<ExpansionRecord>,
     pub notes: Vec<String>,
+    pub unresolved_root: Option<String>,
 }
 
 impl MacroError {
@@ -175,6 +176,7 @@ impl MacroError {
             secondary_labels: Vec::new(),
             expansion_chain: Vec::new(),
             notes: Vec::new(),
+            unresolved_root: None,
         }
     }
 

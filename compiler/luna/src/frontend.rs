@@ -310,7 +310,11 @@ fn compile_bound_for_target_with_invocation(
                 path.display()
             ));
         }
-        if options.emit != Emit::Ast {
+        let use_sysroot_for_ast = options.emit == Emit::Ast
+            && std::fs::read_to_string(&options.input)
+                .map(|src| macro_expander::scan_referenced_macro_roots(&src).has_non_builtin_macros)
+                .unwrap_or(false);
+        if options.emit != Emit::Ast || use_sysroot_for_ast {
             return compile_sysroot(
                 options,
                 package_identity,
@@ -625,21 +629,25 @@ fn compile_sysroot(
             }
         }
     }
-    let defaults = if matches!(
+    selectors.validate_stage(options.emit)?;
+    let needs_sysroot_bindings = matches!(
         options.emit,
         Emit::Nir | Emit::Attributes | Emit::MergedAttributes
-    ) {
-        crate::packages::protect_source_output(
-            &root.join("language-items.conf"),
-            options.output.as_deref(),
-        )?;
+    );
+    let defaults = if needs_sysroot_bindings || root.join("language-items.conf").is_file() {
+        if needs_sysroot_bindings {
+            crate::packages::protect_source_output(
+                &root.join("language-items.conf"),
+                options.output.as_deref(),
+            )?;
+        }
         crate::protocols::type_constructors::SysrootBindings::load(root)?
     } else {
         Default::default()
     };
     let host_intrinsics = defaults.merged_host_intrinsics(selectors, protocols);
     let comptime_intrinsics = defaults.merged_comptime_intrinsics(selectors, protocols);
-    let selectors = defaults.apply(
+    let full_selectors = defaults.apply(
         crate::protocols::type_constructors::Selectors {
             host_intrinsics: &host_intrinsics,
             comptime_intrinsics: &comptime_intrinsics,
@@ -647,13 +655,18 @@ fn compile_sysroot(
         },
         protocols,
     );
+    let stage_selectors = if needs_sysroot_bindings {
+        full_selectors
+    } else {
+        selectors
+    };
     let preludes: Vec<_> = packages
         .iter()
         .skip(1)
         .filter(|package| package.name != "std")
         .map(|package| package.resolution_id)
         .collect();
-    crate::packages::compile_observed_with_preludes(
+    crate::packages::compile_observed_with_preludes_and_macro_selectors(
         &packages,
         &dependencies,
         0,
@@ -661,7 +674,8 @@ fn compile_sysroot(
         options.emit,
         options.output.as_deref(),
         protocols,
-        selectors,
+        stage_selectors,
+        Some(full_selectors),
         None,
         target,
         &preludes,

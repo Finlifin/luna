@@ -25,10 +25,17 @@ fn unique_temp_path(prefix: &str, suffix: &str) -> PathBuf {
     ))
 }
 
+fn library_dir() -> PathBuf {
+    if let Ok(path) = std::env::var("LUNA_TEST_SYSROOT") {
+        return PathBuf::from(path);
+    }
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library")
+}
+
 fn run_sysroot_interpret(source: &str, entry: &str) -> Result<Value, String> {
     let path = unique_temp_path("luna-macro-template", ".fl");
     std::fs::write(&path, source).unwrap();
-    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let library = library_dir();
     let Command::Check(options) = cli::parse([
         "check".into(),
         path.clone().into_os_string(),
@@ -53,7 +60,7 @@ fn run_sysroot_interpret(source: &str, entry: &str) -> Result<Value, String> {
 fn invoke_sysroot_comptime(source: &str, entry: &str) -> Result<Value, String> {
     let path = unique_temp_path("luna-macro-template-ct", ".fl");
     std::fs::write(&path, source).unwrap();
-    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let library = library_dir();
     let Command::Check(options) = cli::parse([
         "check".into(),
         path.clone().into_os_string(),
@@ -141,7 +148,7 @@ fn doc_example_named_parameter_print_value_builds_and_runs_native() {
     "#;
     std::fs::write(&main_fl, source).unwrap();
 
-    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let library = library_dir();
     let build = ProcessCommand::new(env!("CARGO_BIN_EXE_luna"))
         .current_dir(&dir)
         .args([
@@ -232,7 +239,7 @@ fn template_macros_are_file_local_in_multi_file_packages() {
     )
     .unwrap();
 
-    let library = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let library = library_dir();
     let check_ok = ProcessCommand::new(env!("CARGO_BIN_EXE_luna"))
         .arg(dir.join("lib.fl"))
         .args(["--sysroot"])

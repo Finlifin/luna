@@ -192,11 +192,13 @@ pub(crate) fn needs_safety_space(prev: &MacroToken, curr: &MacroToken) -> bool {
     {
         return true;
     }
-    // Avoid forming `{{` or `}}` from two unrelated substitution boundaries.
+    // Avoid forming `{{`, `}}`, or `$$` across two unrelated substitution boundaries.
     if prev.expansion_id != curr.expansion_id
         && matches!(
             (prev.kind, curr.kind),
-            (TokenKind::LBrace, TokenKind::LBrace) | (TokenKind::RBrace, TokenKind::RBrace)
+            (TokenKind::LBrace, TokenKind::LBrace)
+                | (TokenKind::RBrace, TokenKind::RBrace)
+                | (TokenKind::Dollar, TokenKind::Dollar)
         )
     {
         return true;
@@ -224,7 +226,6 @@ pub(crate) fn needs_safety_space(prev: &MacroToken, curr: &MacroToken) -> bool {
                 TokenKind::Colon | TokenKind::Tilde | TokenKind::Minus
             )
             | (TokenKind::Tilde | TokenKind::Pipe, TokenKind::Gt)
-            | (TokenKind::Dollar, TokenKind::Dollar)
     )
 }
 

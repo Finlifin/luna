@@ -254,8 +254,8 @@ impl MacroScope {
             }
         }
 
-        if let Some(aliased) = resolved_full {
-            if let Some(desc) = ctx.registry.lookup_path(&aliased) {
+        if let Some(ref aliased) = resolved_full {
+            if let Some(desc) = ctx.registry.lookup_path(aliased) {
                 if !desc.is_accessible_from(ctx.current_package, &ctx.current_module_path) {
                     return Err(MacroError::new(
                         MacroErrorKind::MacroVisibilityError,
@@ -284,11 +284,17 @@ impl MacroScope {
             return Ok(desc);
         }
 
-        Err(MacroError::new(
+        let missing_root = resolved_full
+            .as_ref()
+            .and_then(|v| v.first().cloned())
+            .unwrap_or_else(|| first.clone());
+        let mut err = MacroError::new(
             MacroErrorKind::UndefinedMacro,
             format!("undefined macro `@{joined}`"),
             span,
-        ))
+        );
+        err.unresolved_root = Some(missing_root);
+        Err(err)
     }
 }
 

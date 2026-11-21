@@ -389,7 +389,7 @@ impl MacroHost {
             builtin,
             protocols: protocols.clone(),
             selectors: OwnedSelectors::from_borrowed(selectors),
-            target,
+            target: target.or_else(|| nir::target::TargetData::new(usize::BITS).ok()),
             preludes: preludes.to_vec(),
             providers: HashMap::new(),
             active_stack: Vec::new(),
@@ -510,7 +510,9 @@ impl MacroHost {
                         diag_ctx,
                         observed.as_deref_mut(),
                     )?;
-                    provider_aliases.push((alias, key));
+                    if !provider_aliases.iter().any(|(a, _)| a == &alias) {
+                        provider_aliases.push((alias, key));
+                    }
                 } else if root == "scripts" && scripts_dir.is_some() {
                     let key = ProviderKey::Scripts(pkg_res_id);
                     self.ensure_provider_prepared(
@@ -519,12 +521,27 @@ impl MacroHost {
                         diag_ctx,
                         observed.as_deref_mut(),
                     )?;
-                    provider_aliases.push(("scripts".into(), key));
+                    if !provider_aliases.iter().any(|(a, _)| a == "scripts") {
+                        provider_aliases.push(("scripts".into(), key));
+                    }
+                }
+            }
+
+            // Include any already-prepared direct dependency macro providers so generated
+            // tokens can invoke them even when unreferenced before expansion.
+            for edge in active_dependencies {
+                if edge.requester == pkg_res_id
+                    && !provider_aliases.iter().any(|(a, _)| a == &edge.alias)
+                {
+                    let key = ProviderKey::Package(edge.provider);
+                    if self.providers.contains_key(&key) {
+                        provider_aliases.push((edge.alias.clone(), key));
+                    }
                 }
             }
 
             // Register prepared providers and let `macro_expander` diagnose unresolved/ambiguous roots.
-            let registry = self.build_registry_for_consumer(&provider_aliases);
+            let mut registry = self.build_registry_for_consumer(&provider_aliases);
 
             let file_count = inputs[idx].1.file_count();
             for raw_id in 0..file_count {
@@ -537,23 +554,69 @@ impl MacroHost {
                 let source_file = entry.source_file.clone();
                 let current_module_path = module_path_for_file(&pkg_name, &rel_path);
 
-                let mut ctx = ExpansionContext {
-                    current_package: pkg_res_id,
-                    current_module_path,
-                    registry: &registry,
-                    executor: Some(self),
-                };
-                let mut budget = MacroBudget::default();
-                let (expanded, lex_errors) = match macro_expander::expand_source_file_with_context(
-                    source_map,
-                    &source_file,
-                    &mut ctx,
-                    &mut budget,
-                ) {
-                    Ok(res) => res,
-                    Err(err) => {
-                        err.emit(diag_ctx, source_file.start_pos);
-                        return Err(diag_ctx.failure_summary("macro expansion"));
+                let (expanded, lex_errors) = loop {
+                    let expand_result = {
+                        let mut ctx = ExpansionContext {
+                            current_package: pkg_res_id,
+                            current_module_path: current_module_path.clone(),
+                            registry: &registry,
+                            executor: Some(self),
+                        };
+                        let mut budget = MacroBudget::default();
+                        macro_expander::expand_source_file_with_context(
+                            source_map,
+                            &source_file,
+                            &mut ctx,
+                            &mut budget,
+                        )
+                    };
+                    match expand_result {
+                        Ok(res) => break res,
+                        Err(err) => {
+                            if err.kind == MacroErrorKind::UndefinedMacro
+                                && let Some(missing_root) = err.unresolved_root.as_deref()
+                                && !provider_aliases.iter().any(|(a, _)| a == missing_root)
+                            {
+                                let dep_edge = active_dependencies
+                                    .iter()
+                                    .find(|e| e.requester == pkg_res_id && e.alias == missing_root)
+                                    .map(|e| (e.alias.clone(), e.provider));
+                                if let Some((alias, provider_id)) = dep_edge {
+                                    let key = ProviderKey::Package(provider_id);
+                                    self.ensure_provider_prepared(
+                                        key,
+                                        err_start_pos,
+                                        diag_ctx,
+                                        observed.as_deref_mut(),
+                                    )?;
+                                    provider_aliases.push((alias, key));
+                                    registry = self.build_registry_for_consumer(&provider_aliases);
+                                    continue;
+                                } else if missing_root == "scripts" && scripts_dir.is_some() {
+                                    if in_scripts {
+                                        let cyc = MacroError::new(
+                                            MacroErrorKind::PreparationCycle,
+                                            "macro preparation cycle: `scripts` cannot invoke macros from `scripts`",
+                                            err.span,
+                                        );
+                                        cyc.emit(diag_ctx, source_file.start_pos);
+                                        return Err(diag_ctx.failure_summary("macro expansion"));
+                                    }
+                                    let key = ProviderKey::Scripts(pkg_res_id);
+                                    self.ensure_provider_prepared(
+                                        key,
+                                        err_start_pos,
+                                        diag_ctx,
+                                        observed.as_deref_mut(),
+                                    )?;
+                                    provider_aliases.push(("scripts".into(), key));
+                                    registry = self.build_registry_for_consumer(&provider_aliases);
+                                    continue;
+                                }
+                            }
+                            err.emit(diag_ctx, source_file.start_pos);
+                            return Err(diag_ctx.failure_summary("macro expansion"));
+                        }
                     }
                 };
                 let lex_failed = !lex_errors.is_empty();
@@ -2012,12 +2075,7 @@ fn decode_source_span_value(
         .to_i128()
         .map_err(|e| format!("invalid `SourceSpan.end`: {e:?}"))?;
 
-    if file.is_empty()
-        || file.as_ref() == "<synthetic>"
-        || (start == 0 && end == 0)
-        || start < 0
-        || end < start
-    {
+    if file.as_ref() != "<source>" || (start == 0 && end == 0) || start < 0 || end < start {
         return Ok(fallback);
     }
     let (Ok(lo), Ok(hi)) = (u32::try_from(start), u32::try_from(end)) else {

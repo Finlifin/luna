@@ -2,6 +2,7 @@
 //! identities belong to the build tool; this API does not infer them from paths.
 use crate::cli::Emit;
 use crate::frontend::{Artifact, discover_sources_excluding};
+use diagnostic::FlurryError;
 use interface::{CompilerConfig, CompilerInstance, Session};
 use std::{
     collections::{BTreeMap, HashSet},
@@ -439,6 +440,39 @@ pub(crate) fn compile_observed_with_preludes(
     preludes: &[u32],
     invocation: Option<&mut BuilderInvocation<'_>>,
 ) -> Result<(Artifact, elaboration::program::Protocols), String> {
+    compile_observed_with_preludes_and_macro_selectors(
+        packages,
+        dependencies,
+        primary,
+        builtin,
+        emit,
+        output,
+        protocols,
+        selectors,
+        None,
+        observed,
+        target,
+        preludes,
+        invocation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compile_observed_with_preludes_and_macro_selectors(
+    packages: &[SourcePackage],
+    dependencies: &[resolve::DependencyEdge],
+    primary: u32,
+    builtin: Option<u32>,
+    emit: Emit,
+    output: Option<&std::path::Path>,
+    protocols: &elaboration::program::Protocols,
+    selectors: crate::protocols::type_constructors::Selectors<'_>,
+    macro_selectors: Option<crate::protocols::type_constructors::Selectors<'_>>,
+    observed: Option<&mut CompilationInputs>,
+    target: Option<nir::target::TargetData>,
+    preludes: &[u32],
+    invocation: Option<&mut BuilderInvocation<'_>>,
+) -> Result<(Artifact, elaboration::program::Protocols), String> {
     compile_with_expansion(
         packages,
         dependencies,
@@ -448,6 +482,7 @@ pub(crate) fn compile_observed_with_preludes(
         output,
         protocols,
         selectors,
+        macro_selectors,
         observed,
         target,
         preludes,
@@ -518,6 +553,7 @@ pub fn compile_with_definitions_and_preludes(
         protocols,
         selectors,
         None,
+        None,
         target,
         preludes,
         Some((fuel, expand)),
@@ -563,6 +599,7 @@ pub fn compile_and_invoke_with_struct_builders(
         None,
         protocols,
         selectors,
+        None,
         None,
         target,
         preludes,
@@ -673,6 +710,7 @@ pub(crate) fn compile_for_macro_provider(
         None,
         None,
         Some(macro_host),
+        None,
         virtual_sources,
         force_directory_discovery_for_primary,
         true,
@@ -693,6 +731,7 @@ fn compile_with_expansion(
     output: Option<&std::path::Path>,
     protocols: &elaboration::program::Protocols,
     selectors: crate::protocols::type_constructors::Selectors<'_>,
+    macro_selectors: Option<crate::protocols::type_constructors::Selectors<'_>>,
     observed: Option<&mut CompilationInputs>,
     target: Option<nir::target::TargetData>,
     preludes: &[u32],
@@ -715,6 +754,7 @@ fn compile_with_expansion(
         expansion,
         builder_invocation,
         None,
+        macro_selectors,
         &empty_virtual,
         false,
         false,
@@ -741,13 +781,11 @@ fn compile_packages_core(
     expansion: Option<(&mut usize, &mut DefinitionExpander<'_>)>,
     builder_invocation: Option<&mut BuilderInvocation<'_>>,
     macro_host: Option<&mut crate::macro_host::MacroHost>,
+    macro_selectors: Option<crate::protocols::type_constructors::Selectors<'_>>,
     virtual_sources: &BTreeMap<PathBuf, Arc<str>>,
     force_directory_discovery_for_primary: bool,
     return_provider_output: bool,
 ) -> Result<(CoreArtifact, elaboration::program::Protocols), String> {
-    if emit == Emit::Ast {
-        return Err("package sets support HIR or NIR, not AST output".into());
-    }
     selectors.validate_stage(emit)?;
     if packages.is_empty() {
         return Err("at least one source package is required".into());
@@ -958,7 +996,7 @@ fn compile_packages_core(
                 dependencies,
                 builtin,
                 protocols,
-                selectors,
+                macro_selectors.unwrap_or(selectors),
                 target.clone(),
                 preludes,
             );
@@ -973,6 +1011,53 @@ fn compile_packages_core(
         &mut inputs,
         observed,
     )?;
+
+    if emit == Emit::Ast {
+        let (_, selected) = inputs.iter().find(|(id, _)| *id == primary).unwrap();
+        let selected_file = selected.selected_root.unwrap();
+        let ast = match selected.get_ast(selected_file) {
+            Some(ast) => ast.clone(),
+            None => {
+                let source_file = selected.file(selected_file).source_file.clone();
+                let mut macro_budget = macro_expander::MacroBudget::default();
+                let (expanded, lex_errors) = match macro_expander::expand_source_file(
+                    &session.source_map,
+                    &source_file,
+                    &mut macro_budget,
+                ) {
+                    Ok(res) => res,
+                    Err(err) => {
+                        err.emit(&instance.diag_ctx, source_file.start_pos);
+                        return Err(instance.diag_ctx.failure_summary("macro expansion"));
+                    }
+                };
+                for err in lex_errors {
+                    err.emit(&instance.diag_ctx, source_file.start_pos);
+                }
+                if instance.diag_ctx.has_errors() {
+                    return Err(instance.diag_ctx.failure_summary("lexing"));
+                }
+                let mut parser = parse::parser::Parser::new(
+                    &session.source_map,
+                    expanded.tokens,
+                    expanded.symbols,
+                    expanded.start_pos,
+                );
+                if !parser.parse(&instance.diag_ctx) {
+                    return Err(instance.diag_ctx.failure_summary("parsing"));
+                }
+                let ast = parser.finalize();
+                ast.validate_structure().map_err(|e| e.to_string())?;
+                ast
+            }
+        };
+        return Ok((
+            CoreArtifact::Driver(Artifact::Ast(
+                ast.dump_to_s_expression(ast.root, &session.source_map),
+            )),
+            protocols.clone(),
+        ));
+    }
 
     let mut references: Vec<_> = inputs.iter_mut().map(|(id, vfs)| (*id, vfs)).collect();
     let resolved = resolve::build_package_set_with_preludes(
