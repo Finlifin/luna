@@ -88,10 +88,14 @@ impl Emitter<'_> {
         }
         let mut ty = root.ty.clone();
         let mut packed = root.align == Some(1) || matches!(ty, Ty::PackedRecord(_));
+        let mut volatile = root.volatile;
         let mut path = String::from("i32 0");
         for (owner, index) in &place.fields {
             if *owner != FieldOwner::Anonymous && !self.checked {
                 return Err("host nominal field assignment requires resource verification".into());
+            }
+            if let FieldOwner::Nominal(decl) = owner {
+                volatile |= self.graph.volatile_storage.is_field_volatile(*decl, *index);
             }
             let (Ty::Record(fields) | Ty::PackedRecord(fields)) = &ty else {
                 return Err("host assignment path is not an anonymous record".into());
@@ -113,6 +117,7 @@ impl Emitter<'_> {
             ty,
             pointer: format!("%{name}"),
             align: if packed { Some(1) } else { root.align },
+            volatile,
         })
     }
 }

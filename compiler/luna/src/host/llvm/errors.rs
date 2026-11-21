@@ -53,11 +53,11 @@ impl Emitter<'_> {
                 slot.pointer
             ),
         );
-        let payload_slot = Slot {
-            align: matches!(branch_ty, Ty::PackedRecord(_)).then_some(1),
-            ty: branch_ty,
-            pointer: payload_ptr.text,
-        };
+        let payload_slot = Slot::new(
+            branch_ty.clone(),
+            payload_ptr.text,
+            matches!(branch_ty, Ty::PackedRecord(_)).then_some(1),
+        );
         Ok(self.load(&payload_slot))
     }
 
@@ -103,11 +103,11 @@ impl Emitter<'_> {
                 slot.pointer
             ),
         );
-        let payload_slot = Slot {
-            align: matches!(payload.ty, Ty::PackedRecord(_)).then_some(1),
-            ty: payload.ty.clone(),
-            pointer: payload_ptr.text,
-        };
+        let payload_slot = Slot::new(
+            payload.ty.clone(),
+            payload_ptr.text,
+            matches!(payload.ty, Ty::PackedRecord(_)).then_some(1),
+        );
         self.store(&payload_slot, &payload)?;
         Ok(self.load(&slot))
     }

@@ -103,6 +103,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         alias_contracts,
         enums,
         definition_attributes,
+        volatile_storage,
         runtime_domains,
         global_runtime_deliveries,
     } = package;
@@ -224,6 +225,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
     for expr in global_runtime_deliveries.values() {
         meter.node(Node::Expr(expr))?;
     }
+    meter.width(volatile_storage.entry_count())?;
     // No clone above this point. Failure leaves the caller's source untouched
     // and cannot expose a partially captured declaration world.
     Ok(n::Package {
@@ -254,6 +256,7 @@ pub fn clone_declaration_source(package: &n::Package, fuel: &mut usize) -> Resul
         alias_contracts: alias_contracts.clone(),
         enums: enums.clone(),
         definition_attributes: definition_attributes.clone(),
+        volatile_storage: volatile_storage.clone(),
         runtime_domains: runtime_domains.clone(),
         global_runtime_deliveries: global_runtime_deliveries.clone(),
     })
@@ -263,17 +266,20 @@ struct Meter<'a> {
     fuel: &'a mut usize,
     follow_shared: bool,
 }
+
 impl Meter<'_> {
     fn width(&mut self, count: usize) -> Result {
         *self.fuel = self.fuel.checked_sub(count).ok_or(Error::Steps)?;
         Ok(())
     }
+
     fn node(&mut self, node: Node<'_>) -> Result {
         let mut steps = *self.fuel as u64;
         let result = charge_node(node, &mut steps, self.follow_shared, None);
         *self.fuel = steps as usize;
         result
     }
+
     fn terms(&mut self, terms: &[Term]) -> Result {
         self.width(terms.len())?;
         for term in terms {
@@ -281,6 +287,7 @@ impl Meter<'_> {
         }
         Ok(())
     }
+
     fn contracts(
         &mut self,
         predicates: &[n::TypePredicate],
@@ -296,6 +303,7 @@ impl Meter<'_> {
         }
         Ok(())
     }
+
     fn head(&mut self, head: &crate::normal_forms::Head) -> Result {
         let crate::normal_forms::Head {
             declaration: _,
@@ -318,6 +326,7 @@ impl Meter<'_> {
             &[],
         )
     }
+
     fn normal_form_payload<'a>(
         &mut self,
         domains: impl IntoIterator<Item = &'a Term>,
@@ -333,6 +342,7 @@ impl Meter<'_> {
         self.width(capabilities.len())?;
         self.contracts(predicates, capabilities)
     }
+
     fn structure(&mut self, definition: &n::Struct) -> Result {
         let n::Struct {
             parameter_types,
@@ -355,6 +365,7 @@ impl Meter<'_> {
         }
         Ok(())
     }
+
     fn newtype(&mut self, definition: &crate::newtypes::Newtype) -> Result {
         let crate::newtypes::Newtype {
             declaration: _,
@@ -373,6 +384,7 @@ impl Meter<'_> {
         self.node(Node::Type(representation))?;
         Ok(())
     }
+
     fn implementation(&mut self, implementation: &n::Implementation) -> Result {
         let n::Implementation {
             phases: _,
@@ -409,6 +421,7 @@ impl Meter<'_> {
         }
         Ok(())
     }
+
     fn program(&mut self, program: &crate::contracts::ProgramContract) -> Result {
         let crate::contracts::ProgramContract {
             preconditions,
@@ -424,6 +437,7 @@ impl Meter<'_> {
         }
         Ok(())
     }
+
     fn cleanup(&mut self, access: &n::RuntimeCleanupAccess) -> Result {
         let n::RuntimeCleanupAccess {
             parameter: _,
@@ -451,6 +465,7 @@ impl Meter<'_> {
         }
         Ok(())
     }
+
     fn interface(&mut self, interface: &n::Trait) -> Result {
         let n::Trait {
             comptime_only: _,
@@ -533,6 +548,7 @@ impl Meter<'_> {
         }
         Ok(())
     }
+
     fn code_inputs<O>(&mut self, signature: &code::CodeFunctionSignature<O>) -> Result {
         let code::CodeFunctionSignature {
             clause_domains,
@@ -552,6 +568,7 @@ impl Meter<'_> {
         }
         Ok(())
     }
+
     fn expression_code(&mut self, code: &code::ExpressionCodeInterface) -> Result {
         let code::ExpressionCodeInterface {
             infer_context: _,
@@ -571,6 +588,7 @@ impl Meter<'_> {
         self.width(defaults.len())?;
         self.node(Node::Type(result))
     }
+
     fn pattern_code(&mut self, code: &code::PatternCodeInterface) -> Result {
         let code::PatternCodeInterface { subject, outputs } = code;
         self.node(Node::Type(subject))?;
@@ -581,6 +599,7 @@ impl Meter<'_> {
         }
         Ok(())
     }
+
     fn enumeration(&mut self, definition: &n::Enum) -> Result {
         let n::Enum {
             is_intrinsic: _,

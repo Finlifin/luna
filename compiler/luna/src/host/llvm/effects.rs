@@ -768,14 +768,7 @@ impl Emitter<'_> {
                     env.pointer
                 ),
             );
-            self.store(
-                &Slot {
-                    ty: value.ty.clone(),
-                    pointer: address.text,
-                    align: None,
-                },
-                value,
-            )?;
+            self.store(&Slot::new(value.ty.clone(), address.text, None), value)?;
         }
         // Reserve a module-unique symbol before recursively emitting calls.
         let symbol = format!("flurry_handler_{}", self.declarations.len());
@@ -835,6 +828,7 @@ impl Emitter<'_> {
                     ty: slot.ty.clone(),
                     pointer: pointer.text,
                     align: slot.align,
+                    volatile: slot.volatile,
                 },
             );
         }
@@ -848,11 +842,7 @@ impl Emitter<'_> {
                         env_ty.llvm()
                     ),
                 );
-                child.load(&Slot {
-                    ty,
-                    pointer: address.text,
-                    align: None,
-                })
+                child.load(&Slot::new(ty, address.text, None))
             };
             let first = load(offset);
             let (provided, machine) = if machine {
@@ -896,6 +886,7 @@ impl Emitter<'_> {
                     ty: storage.value.ty.clone(),
                     pointer,
                     align: storage.value.align,
+                    volatile: storage.value.volatile,
                 },
             });
         }

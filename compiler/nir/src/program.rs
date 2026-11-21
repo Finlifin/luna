@@ -8,11 +8,13 @@ use std::fmt;
 use std::sync::Arc;
 
 mod definition_attributes;
+
 pub use definition_attributes::DefinitionAttributes;
 
 mod formed_nominals;
 mod observed_types;
 mod published_definitions;
+
 pub use formed_nominals::FormedNullaryNominals;
 pub use observed_types::{ObservedAssociatedType, ObservedAssociatedTypes};
 pub use published_definitions::PublishedDefinitions;
@@ -32,6 +34,10 @@ pub use function::{
 mod predicate_shape;
 
 pub use predicate_shape::{PredicateShapeError, checkable_predicate, predicate_call_candidate};
+
+mod volatile_storage;
+
+pub use volatile_storage::{VolatileNominal, VolatileStorage};
 
 /// Relative selections of a writable bit view, in source order.
 #[derive(Clone, Debug, PartialEq)]
@@ -2247,6 +2253,7 @@ pub struct Package {
     pub alias_contracts: Vec<crate::type_aliases::Contract>,
     pub enums: Vec<Enum>,
     pub definition_attributes: DefinitionAttributes,
+    pub volatile_storage: VolatileStorage,
     pub runtime_domains: std::collections::BTreeMap<crate::RuntimeId, Term>,
     pub global_runtime_deliveries: std::collections::BTreeMap<crate::RuntimeId, Expr>,
 }
@@ -3952,6 +3959,9 @@ impl fmt::Display for Package {
         }
         if !self.definition_attributes.is_empty() {
             write!(f, "\n {}", self.definition_attributes)?;
+        }
+        if !self.volatile_storage.is_empty() {
+            write!(f, "\n {}", self.volatile_storage)?;
         }
         if !self.runtime_domains.is_empty() {
             f.write_str("\n (runtime-domains")?;

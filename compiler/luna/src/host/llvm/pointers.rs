@@ -21,6 +21,7 @@ impl Emitter<'_> {
             ty,
             pointer: pointer.text.clone(),
             align,
+            volatile: false,
         })
     }
 
@@ -962,11 +963,7 @@ mod tests {
         );
 
         let enum_llvm = repr(&graph, &const_text_enum.ty, true).unwrap();
-        let loaded_enum = emitter.load(&Slot {
-            ty: enum_llvm.clone(),
-            pointer: p_enum.text,
-            align: None,
-        });
+        let loaded_enum = emitter.load(&Slot::new(enum_llvm.clone(), p_enum.text, None));
         let cond_enum = emitter.variant_condition(&loaded_enum, 1).unwrap();
         emitter.guard(&cond_enum).unwrap();
         let f_num = emitter.variant_field(&loaded_enum, 1, 1).unwrap();
@@ -974,11 +971,7 @@ mod tests {
         emitter.guard(&eq_enum).unwrap();
 
         let wrap_llvm = repr(&graph, &const_wrap.ty, true).unwrap();
-        let loaded_wrap = emitter.load(&Slot {
-            ty: wrap_llvm,
-            pointer: p_wrap.text,
-            align: None,
-        });
+        let loaded_wrap = emitter.load(&Slot::new(wrap_llvm, p_wrap.text, None));
         let wrap_lead = emitter.record_field(&loaded_wrap, 0).unwrap();
         let eq_lead = emitter.instruction(Ty::Bool, format!("icmp eq i8 {}, 11", wrap_lead.text));
         emitter.guard(&eq_lead).unwrap();
@@ -999,11 +992,7 @@ mod tests {
         emitter.guard(&eq_tail).unwrap();
 
         let opt_llvm = repr(&graph, &const_opt.ty, true).unwrap();
-        let loaded_opt = emitter.load(&Slot {
-            ty: opt_llvm,
-            pointer: p_opt.text,
-            align: None,
-        });
+        let loaded_opt = emitter.load(&Slot::new(opt_llvm, p_opt.text, None));
         let opt_tag = emitter.optional_tag(&loaded_opt).unwrap();
         emitter.guard(&opt_tag).unwrap();
         let opt_val = emitter.optional_payload(&loaded_opt).unwrap();

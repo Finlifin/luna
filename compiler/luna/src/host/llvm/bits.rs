@@ -1,4 +1,5 @@
 use super::*;
+
 // Host compilation resource limit, not a source-language width restriction.
 pub(super) const MAX_BIT_WIDTH: u32 = 65_536;
 
@@ -33,6 +34,7 @@ pub(super) fn bit_width(ty: &Ty) -> Option<u32> {
         _ => None,
     }
 }
+
 impl Emitter<'_> {
     pub(super) fn to_bits(&mut self, value: Value) -> Result<Value, String> {
         let width = bit_width(&value.ty)
@@ -49,6 +51,7 @@ impl Emitter<'_> {
             })
         }
     }
+
     pub(super) fn from_bits(&mut self, value: Value, target: Ty) -> Result<Value, String> {
         let width = bit_width(&value.ty).ok_or("host bit conversion source has no width")?;
         let target_width = bit_width(&target).ok_or("host bit conversion target has no width")?;
@@ -67,6 +70,7 @@ impl Emitter<'_> {
             })
         }
     }
+
     pub(super) fn bit_convert(&mut self, value: Value, target: Ty) -> Result<Value, String> {
         let value = self.to_bits(value)?;
         let source = bit_width(&value.ty).unwrap();
@@ -108,6 +112,7 @@ impl Emitter<'_> {
         };
         Ok(self.instruction(ty, format!("{op} {} {}, {}", a.ty.llvm(), a.text, b.text)))
     }
+
     pub(super) fn bit_concat(&mut self, a: Value, b: Value) -> Result<Value, String> {
         let m = bit_width(&a.ty).ok_or("host bit concat input has no width")?;
         let n = bit_width(&b.ty).ok_or("host bit concat input has no width")?;
@@ -127,6 +132,7 @@ impl Emitter<'_> {
         let a = self.instruction(ty.clone(), format!("shl i{width} {}, {n}", a.text));
         self.bit_binary("or", a, b)
     }
+
     pub(super) fn bit_slice(
         &mut self,
         value: Value,
@@ -158,6 +164,7 @@ impl Emitter<'_> {
             ))
         }
     }
+
     fn bit_position(&mut self, value: Value) -> Result<Value, String> {
         let Ty::Int(width, signed) = value.ty else {
             return Err("host bit position needs a machine integer".into());
@@ -171,6 +178,7 @@ impl Emitter<'_> {
             format!("{op} i{width} {} to i128", value.text),
         ))
     }
+
     pub(super) fn bit_window(
         &mut self,
         value: Value,
@@ -234,6 +242,9 @@ impl Emitter<'_> {
         depth: usize,
     ) -> Result<Value, String> {
         use nir::program::BitSelection as S;
+        if slot.volatile {
+            return Err("volatile bit-vector write is unsupported".into());
+        }
         let width =
             bit_width(&slot.ty).ok_or("host bit write storage has no bit representation")?;
         let mut size = width;

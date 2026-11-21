@@ -551,6 +551,18 @@ struct Slot {
     ty: Ty,
     pointer: String,
     align: Option<u64>,
+    pub(super) volatile: bool,
+}
+
+impl Slot {
+    pub(super) fn new(ty: Ty, pointer: String, align: Option<u64>) -> Self {
+        Self {
+            ty,
+            pointer,
+            align,
+            volatile: false,
+        }
+    }
 }
 
 struct Emitter<'a> {
@@ -653,6 +665,7 @@ impl Emitter<'_> {
             ty,
             pointer: format!("%{name}"),
             align,
+            volatile: false,
         }
     }
 
@@ -665,8 +678,13 @@ impl Emitter<'_> {
                 .align
                 .or_else(|| matches!(value.ty, Ty::PackedRecord(_)).then_some(1));
             let align_suffix = align.map_or(String::new(), |a| format!(", align {a}"));
+            let op = if slot.volatile {
+                "store volatile"
+            } else {
+                "store"
+            };
             self.line(format!(
-                "store {} {}, ptr {}{align_suffix}",
+                "{op} {} {}, ptr {}{align_suffix}",
                 value.ty.llvm(),
                 value.text,
                 slot.pointer
@@ -683,15 +701,63 @@ impl Emitter<'_> {
                 .align
                 .or_else(|| matches!(slot.ty, Ty::PackedRecord(_)).then_some(1));
             let align_suffix = align.map_or(String::new(), |a| format!(", align {a}"));
+            let op = if slot.volatile {
+                "load volatile"
+            } else {
+                "load"
+            };
             self.instruction(
                 slot.ty.clone(),
                 format!(
-                    "load {}, ptr {}{align_suffix}",
+                    "{op} {}, ptr {}{align_suffix}",
                     slot.ty.llvm(),
                     slot.pointer
                 ),
             )
         }
+    }
+
+    pub(super) fn is_volatile_type(&mut self, ty: &Term) -> bool {
+        self.graph.type_is_volatile(ty, self.fuel)
+    }
+
+    pub(super) fn is_volatile_pointer_field(&mut self, expr: &Expr, pointee_ty: &Term) -> bool {
+        if self.is_volatile_type(pointee_ty) {
+            return true;
+        }
+        let mut cursor = expr;
+        let mut remaining = 64usize;
+        while remaining > 0 {
+            remaining -= 1;
+            match &cursor.kind {
+                K::PointerField {
+                    pointer,
+                    declaration,
+                    index,
+                } => {
+                    if self
+                        .graph
+                        .volatile_storage
+                        .is_field_volatile(*declaration, *index)
+                    {
+                        return true;
+                    }
+                    cursor = pointer;
+                }
+                K::PointerAnonymousField { pointer, .. } => cursor = pointer,
+                _ => break,
+            }
+        }
+        false
+    }
+
+    fn is_packed_type(&self, ty: &Term) -> bool {
+        matches!(ty, Term::Nominal { declaration, .. } if self.graph.nominals.iter().any(|instance| {
+            matches!(
+                &instance.definition,
+                iir::NominalDefinition::Struct(def) if def.declaration == *declaration && def.packed
+            )
+        }))
     }
 
     fn is_packed_pointer_field(&self, expr: &Expr) -> bool {
@@ -1846,15 +1912,17 @@ impl Emitter<'_> {
                 self.literal(literal, ty)
             }
             K::Local(id) => {
-                let slot = self
+                let mut slot = self
                     .locals
                     .get(id)
                     .cloned()
                     .ok_or("host local binding is unavailable")?;
+                slot.volatile |= self.is_volatile_type(&expr.ty);
                 Ok(self.load(&slot))
             }
             K::ReadPointer(pointer) => {
                 let unaligned = self.is_packed_pointer_field(pointer);
+                let volatile = self.is_volatile_pointer_field(pointer, &expr.ty);
                 let pointer = self.expr(pointer, depth)?;
                 if self.terminated {
                     Ok(Value::unit())
@@ -1863,6 +1931,7 @@ impl Emitter<'_> {
                     if unaligned {
                         slot.align = Some(1);
                     }
+                    slot.volatile = volatile;
                     Ok(self.load(&slot))
                 }
             }
@@ -1879,18 +1948,50 @@ impl Emitter<'_> {
             K::WritePointer { pointer, value } => {
                 let unaligned = self.is_packed_pointer_field(pointer);
                 let pointer_type = &pointer.ty;
+                let pointee_ty = pointers::pointee(pointer_type)?;
+                let volatile = self.is_volatile_pointer_field(pointer, pointee_ty);
                 let pointer = self.expr(pointer, depth)?;
                 let value = self.expr(value, depth)?;
                 if !self.terminated {
-                    let mut slot = self.pointer_slot(&pointer, pointers::pointee(pointer_type)?)?;
+                    let mut slot = self.pointer_slot(&pointer, pointee_ty)?;
                     if unaligned {
                         slot.align = Some(1);
                     }
+                    slot.volatile = volatile;
                     self.store(&slot, &value)?;
                 }
                 Ok(Value::unit())
             }
             K::AnonymousField { value, index, .. } | K::Field { value, index, .. } => {
+                let declaration = match &expr.kind {
+                    K::Field { declaration, .. } => Some(*declaration),
+                    _ => None,
+                };
+                let volatile_field = declaration.is_some_and(|decl| {
+                    self.graph.volatile_storage.is_field_volatile(decl, *index)
+                }) || self.is_volatile_type(&expr.ty);
+                if (volatile_field || self.is_volatile_type(&value.ty))
+                    && self.checked
+                    && matches!(
+                        &value.kind,
+                        K::Local(_)
+                            | K::ReadPointer(_)
+                            | K::Field { .. }
+                            | K::AnonymousField { .. }
+                    )
+                {
+                    let base = self.address(value, depth)?;
+                    if self.terminated {
+                        return Ok(Value::unit());
+                    }
+                    let field_ptr = self.project_pointer(base, *index, &value.ty)?;
+                    let mut slot = self.pointer_slot(&field_ptr, &expr.ty)?;
+                    if self.is_packed_pointer_field(value) || self.is_packed_type(&value.ty) {
+                        slot.align = Some(1);
+                    }
+                    slot.volatile = volatile_field;
+                    return Ok(self.load(&slot));
+                }
                 let value = self.expr(value, depth)?;
                 if self.terminated {
                     Ok(Value::unit())
@@ -1899,10 +2000,12 @@ impl Emitter<'_> {
                 }
             }
             K::Assign { place, value } => {
+                let assigned_ty = &value.ty;
                 let value = self.expr(value, depth)?;
                 if !self.terminated {
                     self.cleanup_boundary(expr.source, iir::cleanup::Boundary::Replacement)?;
-                    let slot = self.assignment_slot(place)?;
+                    let mut slot = self.assignment_slot(place)?;
+                    slot.volatile |= self.is_volatile_type(assigned_ty);
                     self.store(&slot, &value)?;
                     self.set_live(
                         place.root,
@@ -2258,14 +2361,17 @@ impl Emitter<'_> {
             } => {
                 let unaligned = self.is_packed_pointer_field(pointer);
                 let pointer_type = &pointer.ty;
+                let pointee_ty = pointers::pointee(pointer_type)?;
+                let volatile = self.is_volatile_pointer_field(pointer, pointee_ty);
                 let pointer = self.expr(pointer, depth)?;
                 if self.terminated {
                     Ok(Value::unit())
                 } else {
-                    let mut slot = self.pointer_slot(&pointer, pointers::pointee(pointer_type)?)?;
+                    let mut slot = self.pointer_slot(&pointer, pointee_ty)?;
                     if unaligned {
                         slot.align = Some(1);
                     }
+                    slot.volatile = volatile;
                     self.bit_write(slot, selections, value, depth)
                 }
             }
@@ -2854,14 +2960,8 @@ pub(super) fn emit_with_result_output(
                 let ty = repr(graph, &term, checked)?;
                 let align = matches!(ty, Ty::PackedRecord(_)).then_some(1);
                 raw_inputs.push((format!("ptr %ext_env{i}"), None));
-                e.locals.insert(
-                    binding,
-                    Slot {
-                        ty,
-                        pointer: format!("%ext_env{i}"),
-                        align,
-                    },
-                );
+                e.locals
+                    .insert(binding, Slot::new(ty, format!("%ext_env{i}"), align));
             }
         }
         e.bind_effect_parameters(&contracts, effect_row, &mut extra_inputs)?;

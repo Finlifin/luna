@@ -707,11 +707,7 @@ impl Emitter<'_> {
                 slot.pointer
             ),
         );
-        Ok(Some(Slot {
-            ty: Ty::Bool,
-            pointer: pointer.text,
-            align: None,
-        }))
+        Ok(Some(Slot::new(Ty::Bool, pointer.text, None)))
     }
 
     pub(super) fn set_live(
@@ -1051,6 +1047,7 @@ impl Emitter<'_> {
                 },
                 ty,
                 pointer,
+                volatile: slot.volatile,
             };
         }
         Ok(slot)
@@ -1122,6 +1119,7 @@ impl Emitter<'_> {
                 },
                 ty,
                 pointer,
+                volatile: slot.volatile,
             };
         }
         Ok(slot)

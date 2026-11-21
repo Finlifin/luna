@@ -680,6 +680,65 @@ impl<'a, 'b> Analyzer<'a, 'b> {
         self.memory = MemoryEffect::Unknown;
     }
 
+    fn mark_volatile(&mut self, origin: Option<&PtrOrigin>) {
+        self.memory = MemoryEffect::Unknown;
+        self.no_sync = false;
+        if let Some(origin) = origin {
+            for &src in &origin.sources {
+                if let PtrSource::Param(slot) = src
+                    && slot < self.written.len()
+                {
+                    self.written[slot] = true;
+                }
+            }
+        }
+    }
+
+    fn pointer_access_is_volatile(&mut self, pointer: &Expr, pointee_ty: &Term) -> bool {
+        if self.index.graph.type_is_volatile(pointee_ty, self.fuel) {
+            return true;
+        }
+        let mut cursor = pointer;
+        let mut remaining = 64usize;
+        while remaining > 0 {
+            remaining -= 1;
+            match &cursor.kind {
+                K::PointerField {
+                    pointer: inner,
+                    declaration,
+                    index,
+                } => {
+                    if self
+                        .index
+                        .graph
+                        .volatile_storage
+                        .is_field_volatile(*declaration, *index)
+                    {
+                        return true;
+                    }
+                    cursor = inner;
+                }
+                K::PointerAnonymousField { pointer: inner, .. } => cursor = inner,
+                _ => break,
+            }
+        }
+        false
+    }
+
+    fn place_is_volatile(&self, place: &nir::program::Place) -> bool {
+        place.fields.iter().any(|(owner, index)| {
+            matches!(
+                owner,
+                nir::program::FieldOwner::Nominal(declaration)
+                    if self
+                        .index
+                        .graph
+                        .volatile_storage
+                        .is_field_volatile(*declaration, *index)
+            )
+        })
+    }
+
     fn mark_escaped(&mut self, origin: &PtrOrigin) {
         for &src in &origin.sources {
             match src {
@@ -850,20 +909,48 @@ impl<'a, 'b> Analyzer<'a, 'b> {
 
             K::ConstAddress { .. } => Some(PtrOrigin::const_global()),
 
-            K::Local(id) => Some(self.local_origins.get(id).cloned().unwrap_or_default()),
+            K::Local(id) => {
+                let origin = self.local_origins.get(id).cloned().unwrap_or_default();
+                if self.index.graph.type_is_volatile(&expr.ty, self.fuel) {
+                    self.mark_volatile(Some(&origin));
+                }
+                Some(origin)
+            }
 
             K::AddressOf(inner) => self.address_origin(inner, next),
 
             K::PointerField { pointer, .. }
             | K::PointerAnonymousField { pointer, .. }
             | K::NewtypeConvert(pointer)
-            | K::Field { value: pointer, .. }
-            | K::AnonymousField { value: pointer, .. }
             | K::UnsafeScope(pointer) => self.visit_expr(pointer, next),
+
+            K::Field {
+                value: pointer,
+                declaration,
+                index,
+            } => {
+                let field_volatile = self
+                    .index
+                    .graph
+                    .volatile_storage
+                    .is_field_volatile(*declaration, *index)
+                    || self.index.graph.type_is_volatile(&expr.ty, self.fuel);
+                if field_volatile {
+                    let origin = self.address_origin(pointer, next)?;
+                    self.mark_volatile(Some(&origin));
+                }
+                self.visit_expr(pointer, next)
+            }
+
+            K::AnonymousField { value: pointer, .. } => self.visit_expr(pointer, next),
 
             K::ReadPointer(pointer) => {
                 let origin = self.visit_expr(pointer, next)?;
-                self.mark_read(&origin);
+                if self.pointer_access_is_volatile(pointer, &expr.ty) {
+                    self.mark_volatile(Some(&origin));
+                } else {
+                    self.mark_read(&origin);
+                }
                 if type_may_contain_pointer(self.index.graph, &expr.ty, self.fuel) {
                     Some(PtrOrigin::unknown())
                 } else {
@@ -875,6 +962,9 @@ impl<'a, 'b> Analyzer<'a, 'b> {
                 let ptr_origin = self.visit_expr(pointer, next)?;
                 let val_origin = self.visit_expr(value, next)?;
                 self.mark_written(&ptr_origin);
+                if self.pointer_access_is_volatile(pointer, &value.ty) {
+                    self.mark_volatile(Some(&ptr_origin));
+                }
                 self.mark_escaped(&val_origin);
                 Some(PtrOrigin::default())
             }
@@ -936,6 +1026,12 @@ impl<'a, 'b> Analyzer<'a, 'b> {
 
             K::Assign { place, value } => {
                 let origin = self.visit_expr(value, next)?;
+                if self.place_is_volatile(place)
+                    || self.index.graph.type_is_volatile(&value.ty, self.fuel)
+                {
+                    let root_origin = self.local_origins.get(&place.root).cloned();
+                    self.mark_volatile(root_origin.as_ref());
+                }
                 if !origin.is_empty() {
                     if place.fields.is_empty() {
                         self.local_origins

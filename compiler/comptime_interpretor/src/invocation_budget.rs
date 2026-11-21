@@ -4,6 +4,7 @@ use nir::program::{Package, TraitRequirement};
 
 #[cfg(test)]
 mod associated_tests;
+
 #[cfg(test)]
 mod phase_tests;
 
@@ -78,9 +79,11 @@ pub(super) fn charge_world_tables(
         newtypes,
         alias_contracts,
         enums,
+        volatile_storage,
         global_runtime_deliveries,
     } = package;
     let cost = [
+        volatile_storage.entry_count(),
         runtime_domains.len(),
         builtin_implementation_packages.len(),
         tests.len(),
@@ -150,6 +153,7 @@ struct Scope<'program, 'budget> {
     interpreter: Interpreter<'program>,
     budget: &'budget mut Budget,
 }
+
 impl Drop for Scope<'_, '_> {
     fn drop(&mut self) {
         // Keep the construction reservation even if host code replaced the VM

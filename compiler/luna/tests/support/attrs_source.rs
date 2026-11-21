@@ -18,6 +18,8 @@ concat!(
     include_str!("../../../../library/attrs/metadata_impl/constructors.fl"),
     "\n}} mod stability_impl { mod constructors {\n",
     include_str!("../../../../library/attrs/stability_impl/constructors.fl"),
+    "\n}} mod mem_impl { mod volatile {\n",
+    include_str!("../../../../library/attrs/mem_impl/volatile.fl"),
     "\n}}\n",
     include_str!("../../../../library/attrs/lib.fl"),
 )

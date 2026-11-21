@@ -1,8 +1,11 @@
 //! Evaluate metadata once and apply supported phase properties before interfaces.
 use super::*;
 use std::sync::Arc;
+
 mod demands;
+
 pub(super) use demands::{Demands, index_suppliers};
+
 mod derivation;
 mod effects;
 mod layout;
@@ -10,12 +13,15 @@ mod layouts;
 mod merge;
 mod metadata;
 mod phases;
+mod volatile;
+
 pub use derivation::{DefaultStrategyMarker, default_strategy_markers};
 pub use effects::{EffectDirectPassing, direct_passing_effects};
 pub use layout::{PackedStructLayout, packed_structs};
 pub use merge::{MergeFailure, MergedTarget, SelectedValue, merge};
 pub use metadata::{MetadataEntry, metadata_entries};
 pub use phases::{MemberPhase, member_phases};
+pub use volatile::{VolatileTarget, volatile_targets};
 
 /// An independently materialized attribute in HIR application order. Configuration
 /// entries retain their key; prefixes produce an Object. No merge has happened.
@@ -27,6 +33,7 @@ pub struct EvaluatedAttribute {
     pub configuration_key: Option<String>,
     pub value: n::Expr,
 }
+
 impl std::fmt::Display for EvaluatedAttribute {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -87,6 +94,12 @@ impl Checker<'_, '_> {
             let selected = merge(&attributes, 1024, &mut budget)?;
             let phases = member_phases(self.package, &selected, &mut budget)?;
             let packed = packed_structs(self.package, &selected, &mut budget)?;
+            let packed_owners: BTreeSet<OwnerId> = packed
+                .iter()
+                .filter(|entry| entry.enabled)
+                .map(|entry| entry.owner)
+                .collect();
+            let volatile = volatile_targets(self.package, &selected, &packed_owners, &mut budget)?;
             let direct_passing = direct_passing_effects(self.package, &selected, &mut budget)?;
             let _metadata = metadata_entries(self.package, &selected, &mut budget)?;
             let _defaults = default_strategy_markers(self.package, &selected, &mut budget)?;
@@ -95,7 +108,11 @@ impl Checker<'_, '_> {
                     if !inspect_only
                         && !matches!(
                             key,
-                            "comptime_phase" | "packed" | "direct_passing" | "metadata"
+                            "comptime_phase"
+                                | "packed"
+                                | "direct_passing"
+                                | "metadata"
+                                | "__flurry_volatile"
                         )
                     {
                         return Err(MergeFailure {
@@ -112,7 +129,7 @@ impl Checker<'_, '_> {
             } else {
                 Some(self.publish_definition_attributes(&selected, demanded, &mut budget)?)
             };
-            Ok((phases, packed, direct_passing, frozen))
+            Ok((phases, packed, volatile, direct_passing, frozen))
         })();
         self.required_steps = self
             .required_steps
@@ -126,7 +143,7 @@ impl Checker<'_, '_> {
         if inspect_only && result.is_err() {
             return Ok(attributes);
         }
-        let (phases, packed, direct_passing, frozen) = result.map_err(|failure| {
+        let (phases, packed, volatile, direct_passing, frozen) = result.map_err(|failure| {
             let mut diagnostic = error(Span::default(), failure.message);
             diagnostic.source = failure.source;
             diagnostic
@@ -148,6 +165,33 @@ impl Checker<'_, '_> {
             .filter(|entry| entry.enabled)
             .map(|entry| entry.owner)
             .collect();
+        self.volatile_storage = Default::default();
+        for entry in volatile {
+            match entry {
+                VolatileTarget::Definition {
+                    owner,
+                    enabled: true,
+                    ..
+                } => {
+                    let id = declaration(self.package, &self.package_identities, owner);
+                    self.volatile_storage.declarations.insert(id);
+                }
+                VolatileTarget::Field {
+                    owner,
+                    field_index,
+                    enabled: true,
+                    ..
+                } => {
+                    let id = declaration(self.package, &self.package_identities, owner);
+                    self.volatile_storage
+                        .fields
+                        .entry(id)
+                        .or_default()
+                        .insert(field_index);
+                }
+                _ => {}
+            }
+        }
         self.direct_passing_effects = direct_passing
             .into_iter()
             .map(|entry| (entry.owner, entry.enabled))

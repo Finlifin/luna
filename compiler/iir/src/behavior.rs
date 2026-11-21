@@ -131,6 +131,10 @@ impl BehaviorAttributes {
     pub fn degrade_for_volatile_access(&mut self) {
         self.memory = MemoryEffect::Unknown;
         self.no_sync = false;
+        for param in &mut self.pointer_params {
+            param.readonly = false;
+            param.noalias = false;
+        }
     }
 }
 

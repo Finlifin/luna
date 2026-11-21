@@ -780,19 +780,15 @@ impl Emitter<'_> {
             ));
             self.locals.insert(
                 capture.binding,
-                Slot {
-                    align: matches!(field, Ty::PackedRecord(_)).then_some(1),
-                    ty: field.clone(),
-                    pointer: format!("%{name}"),
-                },
+                Slot::new(
+                    field.clone(),
+                    format!("%{name}"),
+                    matches!(field, Ty::PackedRecord(_)).then_some(1),
+                ),
             );
             let mut paths = vec![];
             cleanup::product_paths(field, &mut vec![], &mut paths);
-            let environment = Slot {
-                ty: ty.clone(),
-                pointer: "%environment".into(),
-                align: None,
-            };
+            let environment = Slot::new(ty.clone(), "%environment".into(), None);
             for path in paths {
                 let full = std::iter::once(index)
                     .chain(path.iter().copied())
@@ -842,6 +838,7 @@ impl Emitter<'_> {
                     ty,
                     pointer: format!("%{name}"),
                     align,
+                    volatile: slot.volatile,
                 }))
             }
             _ => Ok(None),

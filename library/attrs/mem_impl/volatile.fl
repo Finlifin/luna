@@ -1,0 +1,2 @@
+{- Official volatile memory / MMIO access attribute (`__flurry_volatile: bool`). -}
+pub const volatile = { __flurry_volatile: true }

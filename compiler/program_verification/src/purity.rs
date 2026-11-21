@@ -1057,6 +1057,60 @@ impl<'a> Analysis<'a> {
         inspect(ty, &self.tuple_heads, 0)
     }
 
+    fn type_is_volatile(&mut self, ty: &Term) -> bool {
+        self.package.volatile_storage.type_is_volatile_in_nir(
+            &self.package.structs,
+            &self.package.newtypes,
+            ty,
+            &mut self.fuel,
+        )
+    }
+
+    fn place_is_volatile(&mut self, place: &n::Place) -> bool {
+        place.fields.iter().any(|(owner, index)| {
+            matches!(
+                owner,
+                n::FieldOwner::Nominal(declaration)
+                    if self
+                        .package
+                        .volatile_storage
+                        .is_field_volatile(*declaration, *index)
+            )
+        })
+    }
+
+    fn pointer_access_is_volatile(&mut self, pointer: &n::Expr, pointee_ty: &Term) -> bool {
+        if self.type_is_volatile(pointee_ty) {
+            return true;
+        }
+        let mut cursor = pointer;
+        let mut remaining = 64usize;
+        while remaining > 0 {
+            remaining -= 1;
+            match &cursor.kind {
+                K::PointerField {
+                    pointer: inner,
+                    declaration,
+                    index,
+                } => {
+                    if self
+                        .package
+                        .volatile_storage
+                        .is_field_volatile(*declaration, *index)
+                    {
+                        return true;
+                    }
+                    cursor = inner;
+                }
+                K::PointerAnonymousField { pointer: inner, .. } => {
+                    cursor = inner;
+                }
+                _ => break,
+            }
+        }
+        false
+    }
+
     fn expression(
         &mut self,
         value: &n::Expr,
@@ -1909,6 +1963,9 @@ impl<'a> Analysis<'a> {
                     })
             }
             K::Local(binding) => {
+                if self.type_is_volatile(&value.ty) {
+                    return false;
+                }
                 let mut fields = BTreeMap::new();
                 for (place, codes) in &self.callables {
                     if place.binding != *binding || place.fields.is_empty() {
@@ -1934,7 +1991,9 @@ impl<'a> Analysis<'a> {
             // initialized target. Never promote this evidence to runtime P4 or
             // cache a computed value across calls/storage versions.
             K::ReadPointer(pointer) if !self.finite => {
-                if !self.expression(pointer, private, returns, depth + 1) {
+                if self.pointer_access_is_volatile(pointer, &value.ty)
+                    || !self.expression(pointer, private, returns, depth + 1)
+                {
                     return false;
                 }
                 let Some(places) = self.result_addresses.take() else {
@@ -1979,7 +2038,9 @@ impl<'a> Analysis<'a> {
                 pointer,
                 value: replacement,
             } if !self.finite => {
-                if !self.expression(pointer, private, returns, depth + 1) {
+                if self.pointer_access_is_volatile(pointer, &replacement.ty)
+                    || !self.expression(pointer, private, returns, depth + 1)
+                {
                     return false;
                 }
                 let Some(places) = self.result_addresses.take() else {
@@ -2001,6 +2062,9 @@ impl<'a> Analysis<'a> {
                     && self.expression(replacement, private, returns, depth + 1)
             }
             K::ReadPointer(pointer) if self.finite => {
+                if self.pointer_access_is_volatile(pointer, &value.ty) {
+                    return false;
+                }
                 // In a checked resource scope the transfer report establishes
                 // Copy representation and target availability for nominal loads.
                 (self.copy_type(&value.ty) || self.resource_scope)
@@ -2048,10 +2112,15 @@ impl<'a> Analysis<'a> {
             | K::Literal(_)
             | K::Unit
             | K::AssociatedValue { .. } => self.copy_type(&value.ty),
-            K::Assign { place, value } => {
+            K::Assign {
+                place,
+                value: assigned,
+            } => {
                 if !private.contains(&place.root)
-                    || (self.finite && !self.resource_scope && !self.copy_type(&value.ty))
-                    || !self.expression(value, private, returns, depth + 1)
+                    || self.place_is_volatile(place)
+                    || self.type_is_volatile(&assigned.ty)
+                    || (self.finite && !self.resource_scope && !self.copy_type(&assigned.ty))
+                    || !self.expression(assigned, private, returns, depth + 1)
                 {
                     return false;
                 }
@@ -2097,6 +2166,8 @@ impl<'a> Analysis<'a> {
                 ..
             } => {
                 private.contains(&place.root)
+                    && !self.place_is_volatile(place)
+                    && !self.type_is_volatile(storage_type)
                     && self.copy_type(storage_type)
                     && self.expression(value, private, returns, depth + 1)
             }
@@ -2110,6 +2181,8 @@ impl<'a> Analysis<'a> {
                 // in preparation order before the payload. Bounds and storage
                 // validity remain obligations of the program verification pass.
                 private.contains(&place.root)
+                    && !self.place_is_volatile(place)
+                    && !self.type_is_volatile(storage_type)
                     && self.copy_type(storage_type)
                     && selections
                         .iter()
@@ -2381,6 +2454,15 @@ impl<'a> Analysis<'a> {
                 index,
                 ..
             } => {
+                if self.type_is_volatile(&value.ty)
+                    || matches!(
+                        &value.kind,
+                        K::Field { declaration, index: field_idx, .. }
+                            if self.package.volatile_storage.is_field_volatile(*declaration, *field_idx)
+                    )
+                {
+                    return false;
+                }
                 if self.finite && !self.resource_scope {
                     if !self.copy_type(&value.ty) {
                         return false;

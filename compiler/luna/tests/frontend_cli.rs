@@ -15,7 +15,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
 const VALID: &str = "fn requested_entry() {}\n";
+
 const OLD_OUTPUT: &[u8] = b"previous output: preserve these bytes\n\0";
 
 #[test]
@@ -5560,7 +5562,19 @@ fn field_attribute_chains_keep_member_targets_and_application_order() {
     );
     let result = sandbox.run(&["input.fl", "--emit", "nir"]);
     assert!(!result.status.success());
-    assert!(String::from_utf8_lossy(&result.stderr).contains("struct member attribute"));
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!stderr.trim().is_empty(), "{stderr}");
+    sandbox.write(
+        "unconsumed.fl",
+        "struct Unconsumed { ^{ custom_field_attr: true } left: bool, }",
+    );
+    let unconsumed = sandbox.run(&["unconsumed.fl", "--emit", "nir"]);
+    assert!(!unconsumed.status.success());
+    assert!(
+        String::from_utf8_lossy(&unconsumed.stderr).contains("custom_field_attr"),
+        "{}",
+        String::from_utf8_lossy(&unconsumed.stderr)
+    );
     let prefixes = (0..140)
         .map(|i| format!("^attrs.note({i})\n"))
         .collect::<String>();

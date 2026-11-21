@@ -1090,6 +1090,14 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         // Body: a Block containing struct fields and nested definitions
         let (fields, nested_items) = self.lower_struct_body(body_node);
         let fields_slice = self.arena.alloc_field_def_slice(fields);
+        let mut nodes = OwnerNodes::new();
+        for field in fields_slice {
+            nodes.insert(
+                field.hir_id.local_id,
+                ItemLocalId::ZERO,
+                hir::Node::FieldDef(field),
+            );
+        }
 
         let struct_def = StructDef {
             fields: fields_slice,
@@ -1109,7 +1117,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             owner_id,
             OwnerInfo {
                 node: OwnerNode::Item(item_ref),
-                nodes: OwnerNodes::new(),
+                nodes,
             },
         );
 
@@ -1282,12 +1290,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     nested_items.push(self.lower_top_level_node(elem));
                 }
                 Some(NodeKind::Attribute | NodeKind::AttributeSetTrue) => {
-                    self.package.pending_semantics.push((
-                        self.ast.get_span(elem).unwrap_or_default(),
-                        "struct member attribute".into(),
-                    ));
+                    let span = self.ast.get_span(elem).unwrap_or_default();
                     let mut cursor = elem;
                     let mut attributes = Vec::new();
+                    let mut has_set_true = false;
                     while let Some((
                         kind @ (NodeKind::Attribute | NodeKind::AttributeSetTrue),
                         _,
@@ -1296,10 +1302,21 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     {
                         if kind == NodeKind::Attribute {
                             attributes.push(parts[0]);
+                        } else {
+                            has_set_true = true;
                         }
                         cursor = parts[1];
                     }
                     if self.ast.get_node_kind(cursor) == Some(NodeKind::StructField) {
+                        self.package.pending_semantics.push((
+                            span,
+                            if has_set_true {
+                                "struct member modifier"
+                            } else {
+                                "struct member attribute"
+                            }
+                            .into(),
+                        ));
                         if let Some(field) = self.lower_struct_field(cursor) {
                             for expression in attributes.into_iter().rev() {
                                 let text = self.source_text(expression);

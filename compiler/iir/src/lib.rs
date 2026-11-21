@@ -232,6 +232,8 @@ pub struct Package {
     /// Package-level canonical runtime environment deliveries (e.g. global const
     /// addresses keyed by their `RuntimeId`).
     pub global_runtime_deliveries: std::collections::BTreeMap<RuntimeId, nir::program::Expr>,
+    /// Checked `__flurry_volatile` declarations and struct fields.
+    pub volatile_storage: nir::program::VolatileStorage,
 }
 
 impl Package {
@@ -273,6 +275,25 @@ impl Package {
 
     pub fn function(&self, key: &InstanceKey) -> Option<&FunctionInstance> {
         self.functions.iter().find(|function| &function.key == key)
+    }
+
+    pub fn type_is_volatile(&self, ty: &Term, fuel: &mut usize) -> bool {
+        self.volatile_storage.type_is_volatile_with(
+            |cur| {
+                let nominal = self.nominals.iter().find(|n| &n.ty == cur)?;
+                match &nominal.definition {
+                    NominalDefinition::Struct(def) => {
+                        Some(nir::program::VolatileNominal::Struct(&def.fields))
+                    }
+                    NominalDefinition::Newtype(def) => {
+                        Some(nir::program::VolatileNominal::Newtype(&def.representation))
+                    }
+                    NominalDefinition::Enum(_) => None,
+                }
+            },
+            ty,
+            fuel,
+        )
     }
 
     /// Validate completed annotations and closure of every named callable
@@ -869,6 +890,9 @@ impl fmt::Display for Package {
                 write!(f, " (delivery {id} {expr})")?;
             }
             f.write_str(")")?;
+        }
+        if !self.volatile_storage.is_empty() {
+            write!(f, " {}", self.volatile_storage)?;
         }
         if let Some(target) = self.target {
             write!(f, " {target}")?;

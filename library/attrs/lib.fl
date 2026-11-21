@@ -1,8 +1,13 @@
 {- Attribute values are ordinary comptime data checked by their consumers. -}
 pub use calling_convention.constructors.abi;
+pub use mem_impl.volatile.volatile;
 pub use metadata_impl.constructors.metadata;
 pub use stability_impl.constructors.stable_since;
 pub use staging.phase.comptime_phase;
+
+pub mod mem {
+    pub use .mem_impl.volatile.volatile;
+}
 
 pub mod packed {
     pub use .layout_impl.constructors.{bit, byte}

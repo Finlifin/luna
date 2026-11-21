@@ -268,11 +268,11 @@ impl Emitter<'_> {
                         payload_ptr.text
                     ),
                 );
-                let field_slot = Slot {
-                    align: matches!(value.ty, Ty::PackedRecord(_)).then_some(1),
-                    ty: value.ty.clone(),
-                    pointer: field_ptr.text,
-                };
+                let field_slot = Slot::new(
+                    value.ty.clone(),
+                    field_ptr.text,
+                    matches!(value.ty, Ty::PackedRecord(_)).then_some(1),
+                );
                 self.store(&field_slot, value)?;
             }
             self.finish_prepared_construction(source)?;
@@ -369,11 +369,11 @@ impl Emitter<'_> {
                     payload_ptr.text
                 ),
             );
-            let field_slot = Slot {
-                align: matches!(ty, Ty::PackedRecord(_)).then_some(1),
-                ty,
-                pointer: field_ptr.text,
-            };
+            let field_slot = Slot::new(
+                ty.clone(),
+                field_ptr.text,
+                matches!(ty, Ty::PackedRecord(_)).then_some(1),
+            );
             return Ok(self.load(&field_slot));
         }
         let width = layout.width;

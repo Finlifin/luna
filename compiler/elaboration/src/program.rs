@@ -489,7 +489,7 @@ fn elaborate_in_mode(
             && !(allow_derivation_pending && feature == "derivation expansion")
             && !matches!(
                 feature.as_str(),
-                "definition attribute" | "definition configuration"
+                "definition attribute" | "definition configuration" | "struct member attribute"
             )
     }) {
         return Err(error(
@@ -508,7 +508,7 @@ fn elaborate_in_mode(
         if let Some((span, feature)) = package.pending_semantics.iter().find(|(_, feature)| {
             matches!(
                 feature.as_str(),
-                "definition attribute" | "definition configuration"
+                "definition attribute" | "definition configuration" | "struct member attribute"
             )
         }) {
             return Err(error(
@@ -580,6 +580,7 @@ fn elaborate_in_mode(
         interfaces_ready: false,
         member_phases: BTreeMap::new(),
         packed_structs: BTreeSet::new(),
+        volatile_storage: n::VolatileStorage::default(),
         direct_passing_effects: BTreeMap::new(),
         definition_attributes,
         attribute_demands,
@@ -1603,6 +1604,7 @@ fn elaborate_candidate<'a, 'h>(
     output.refinements = std::mem::take(&mut checker.refinements);
     output.expansion_sources = std::mem::take(&mut checker.expansion_sources);
     output.definition_attributes = checker.definition_attributes.clone();
+    output.volatile_storage = checker.volatile_storage.clone();
     crate::verification::contracts::inherit(&mut output, &mut checker.next_temporary_binding)
         .map_err(|mut failure| {
             failure.source = failure
@@ -2388,6 +2390,7 @@ struct Checker<'a, 'h> {
     interfaces_ready: bool,
     member_phases: BTreeMap<OwnerId, n::TraitPhase>,
     packed_structs: BTreeSet<OwnerId>,
+    volatile_storage: n::VolatileStorage,
     direct_passing_effects: BTreeMap<OwnerId, bool>,
     definition_attributes: n::DefinitionAttributes,
     attribute_demands: attributes::Demands,
