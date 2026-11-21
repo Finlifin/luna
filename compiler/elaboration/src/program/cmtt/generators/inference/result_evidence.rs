@@ -4,6 +4,18 @@
 use super::*;
 
 mod control;
+use control::Paths;
+
+enum Caller<'a, 'result> {
+    Source(Option<(&'a [DeclarationId], &'a [Term])>),
+    Function(&'a mut control::Observation<'result>),
+}
+
+enum Operand {
+    Parameter(usize, Term),
+    Collected,
+    Tactic,
+}
 
 const FORMALS: Option<(&[DeclarationId], &[Term])> = Some((&[], &[]));
 
@@ -64,6 +76,27 @@ impl Checker<'_, '_> {
         depth: usize,
         bindings: Option<(&[DeclarationId], &[Term])>,
     ) -> Result<Option<Term>, Error> {
+        Ok(self
+            .call_result_paths(
+                callee,
+                arguments,
+                Some(domain),
+                depth,
+                Caller::Source(bindings),
+            )?
+            .and_then(Paths::known))
+    }
+
+    // None means the source call has no independent routing/signature evidence.
+    // A routed call can instead close the caller's path during preparation.
+    fn call_result_paths(
+        &mut self,
+        callee: &Expr<'_>,
+        arguments: &[Arg<'_>],
+        expected: Option<&Term>,
+        depth: usize,
+        mut caller: Caller<'_, '_>,
+    ) -> Result<Option<Paths>, Error> {
         let H::ResolvedDef { def_id, .. } = callee.kind else {
             return Ok(None);
         };
@@ -80,7 +113,6 @@ impl Checker<'_, '_> {
                 .type_parameters
                 .get(&owner)
                 .is_none_or(|params| !params.is_empty())
-            || self.observing_call_results.contains(&owner)
         {
             return Ok(None);
         }
@@ -89,7 +121,10 @@ impl Checker<'_, '_> {
         else {
             return Ok(None);
         };
-        if result.as_ref() != domain || parameters.len() != decl.params.len() {
+        let observed_domain = expected.filter(|domain| *domain == result.as_ref());
+        if parameters.len() != decl.params.len()
+            || (matches!(caller, Caller::Source(_)) && observed_domain.is_none())
+        {
             return Ok(None);
         }
         self.required_steps = self
@@ -104,34 +139,72 @@ impl Checker<'_, '_> {
         let Some(body) = self.package.body(*body).map(|body| body.value) else {
             return Ok(None);
         };
-        // Copy only the domains of individually routed operands before entering
-        // an operand observation, which can itself query another declaration.
-        let mut operands = Vec::new();
+        // A collector can group inputs on opposite sides of a named supply.
+        // Map destinations once, then visit the original sequence of operands.
+        let mut destinations: Vec<_> = (0..arguments.len()).map(|_| Operand::Collected).collect();
         for route in plan.routes {
-            if route.collected || route.lambda {
+            if route.lambda {
+                for position in route.sources {
+                    destinations[position] = Operand::Tactic;
+                }
+            } else if !route.collected {
+                let ty = declaration_inputs::copy_input_domain(
+                    &parameters[route.parameter].ty,
+                    &mut self.required_steps,
+                    callee.span,
+                )?;
+                destinations[route.sources[0]] = Operand::Parameter(route.parameter, ty);
+            }
+        }
+        let mut inputs = vec![None; decl.params.len()];
+        for (arg, destination) in arguments.iter().zip(destinations) {
+            if matches!(destination, Operand::Tactic) {
+                // Its source may be wrapped in a delayed body by call checking.
                 if !self.observing_call_results.is_empty() {
                     return Ok(None);
                 }
                 continue;
             }
-            let arg = match arguments[route.sources[0]] {
-                Arg::Named(_, value) | Arg::Positional(value) => value,
-                _ => return Ok(None),
-            };
-            let ty = declaration_inputs::copy_input_domain(
-                &parameters[route.parameter].ty,
-                &mut self.required_steps,
-                arg.span,
-            )?;
-            operands.push((route.parameter, arg, ty));
-        }
-        let mut inputs = vec![None; decl.params.len()];
-        for (slot, arg, ty) in operands {
-            if let Some(value) = self.generator_static_value_hint(arg, &ty, depth + 1, bindings)? {
-                inputs[slot] = Some((ty, value));
-            } else if !self.observing_call_results.is_empty() && !direct_read(arg) {
+            let (Arg::Named(_, arg) | Arg::Positional(arg)) = arg else {
                 return Ok(None);
+            };
+            let ty = match &destination {
+                Operand::Parameter(_, ty) => Some(ty),
+                _ => None,
+            };
+            let value = match &mut caller {
+                Caller::Function(flow) => match flow.expr(self, arg, ty, depth + 1)? {
+                    Paths::Closed => return Ok(Some(Paths::Closed)),
+                    normal => normal.known(),
+                },
+                Caller::Source(bindings) => {
+                    let value = match ty {
+                        Some(ty) => {
+                            self.generator_static_value_hint(arg, ty, depth + 1, *bindings)?
+                        }
+                        None => None,
+                    };
+                    if value.is_none()
+                        && !self.observing_call_results.is_empty()
+                        && !direct_read(arg)
+                    {
+                        return Ok(None);
+                    }
+                    value
+                }
+            };
+            if let Operand::Parameter(slot, ty) = destination {
+                inputs[slot] = value.map(|value| (ty, value));
             }
+        }
+        // Defaults and returns inside the called body belong to that call.
+        // A discarded or recursive result need not be known to account for
+        // lexical returns that have already occurred in its explicit inputs.
+        let Some(domain) = observed_domain else {
+            return Ok(Some(Paths::Unknown));
+        };
+        if self.observing_call_results.contains(&owner) {
+            return Ok(Some(Paths::Unknown));
         }
         self.observing_call_results.insert(owner);
         let result = self.in_formal_declaration(owner, |this| {
@@ -168,6 +241,6 @@ impl Checker<'_, '_> {
             control::result(this, body, domain, depth + 1)
         });
         self.observing_call_results.remove(&owner);
-        result
+        result.map(Some)
     }
 }

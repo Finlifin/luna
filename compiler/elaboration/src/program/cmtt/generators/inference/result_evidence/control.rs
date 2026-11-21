@@ -4,13 +4,20 @@ use super::*;
 
 // Closed has no normal completion. Unknown may complete with a value whose
 // identity is not fixed. Only the latter can invalidate a known alternative.
-enum Paths {
+pub(super) enum Paths {
     Closed,
     Known(Term),
     Unknown,
 }
 
 impl Paths {
+    pub(super) fn known(self) -> Option<Term> {
+        match self {
+            Self::Known(value) => Some(value),
+            _ => None,
+        }
+    }
+
     fn join(self, other: Self) -> Self {
         match (self, other) {
             (Self::Closed, other) | (other, Self::Closed) => other,
@@ -40,19 +47,16 @@ pub(super) fn result(
     body: &Expr<'_>,
     domain: &Term,
     depth: usize,
-) -> Result<Option<Term>, Error> {
+) -> Result<Paths, Error> {
     let mut flow = Observation {
         result: domain,
         returns: Paths::Closed,
     };
     let tail = flow.expr(checker, body, Some(domain), depth)?;
-    Ok(match flow.returns.join(tail) {
-        Paths::Known(value) => Some(value),
-        _ => None,
-    })
+    Ok(flow.returns.join(tail))
 }
 
-struct Observation<'a> {
+pub(super) struct Observation<'a> {
     result: &'a Term,
     returns: Paths,
 }
@@ -83,7 +87,7 @@ impl Observation<'_> {
         }
     }
 
-    fn expr(
+    pub(super) fn expr(
         &mut self,
         checker: &mut Checker<'_, '_>,
         value: &Expr<'_>,
@@ -190,6 +194,16 @@ impl Observation<'_> {
                     Paths::Known(Term::Bool(false)) => Paths::Closed,
                     _ => guard.discarded(expected),
                 })
+            }
+            H::Application(callee, args) => {
+                let observed = checker.call_result_paths(
+                    callee,
+                    args,
+                    expected,
+                    depth,
+                    Caller::Function(self),
+                )?;
+                Ok(observed.unwrap_or_else(|| self.opaque()))
             }
             H::Unit => Ok(Paths::void(expected)),
             _ => {

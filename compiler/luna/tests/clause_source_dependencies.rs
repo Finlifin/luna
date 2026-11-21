@@ -942,3 +942,50 @@ fn lexical_returns_and_fallthrough_supply_the_same_type_evidence() {
     "#;
     check_struct_events(source, "TypeExit", &["TypeExitMerge", "TypeExitSplit"]);
 }
+
+#[test]
+fn returns_in_call_operands_target_the_caller_in_written_order() {
+    let source = r#"
+        enum Packet { group.{byte(u8)} }
+        pure comptime fn Ignore(.first: bool = true, .second: bool = true) -> Type {
+            return ?u8;
+        }
+        pure comptime fn Select(first: bool, second: bool) -> Type {
+            Ignore(.second = do { if second { return Packet; }; false },
+                   .first = do { if first { return ?u8; }; true })
+        }
+        pure comptime fn Discard(flag: bool) -> Type {
+            Ignore(.first = do { if flag { return ?u8; }; true });
+            Packet
+        }
+        pure comptime fn Agrees(flag: bool) -> Type {
+            Ignore(.second = do { if flag { return Packet; }; false },
+                   .first = do { return Packet; false })
+        }
+        pure comptime fn Byte(value: bool) -> u8 { 0 }
+        pure comptime fn BeforeDelivery() -> Type { Byte(do { return Packet; true }) }
+        pure comptime fn Group(...items: Tuple<bool, bool>, .named: bool = false) -> Type { ?u8 }
+        pure comptime fn Mixed(flag: bool) -> Type {
+            Group(false, .named = do { if flag { return Packet; }; true }, do { return ?u8; false })
+        }
+        comptime fn flag() -> bool { false }
+        fn pick() -> T where .T: Type = bool, .items: meta.List<T> = [] {
+            const item = items[0];
+            item
+        }
+        fn run() -> bool {
+            let a = pick<.items = [.group.byte(9)], .T = Select(true, true)>();
+            let b = pick<.items = [.group.byte(0)], .T = Select(true, false)>();
+            let c = pick<.items = [.group.byte(3)], .T = Discard(false)>();
+            let d = pick<.items = [.group.byte(0)], .T = Discard(true)>();
+            let e = pick<.items = [.group.byte(5)], .T = Agrees(flag())>();
+            let f = pick<.items = [.group.byte(4)], .T = BeforeDelivery()>();
+            let g = pick<.items = [.group.byte(6)], .T = Mixed(true)>();
+            let h = pick<.items = [.group.byte(0)], .T = Mixed(false)>();
+            (f matches .group.byte(4)) and (g matches .group.byte(6)) and (h matches 103?)
+                and (a matches .group.byte(9)) and (b matches 103?) and (c matches .group.byte(3))
+                and (d matches 103?) and (e matches .group.byte(5))
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
