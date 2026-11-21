@@ -6303,3 +6303,51 @@ fn inline_if_and_inline_when_occurrence_typing_covers_traits_equality_kinds_cons
         assert!(compile_tuple(invalid).is_err(), "{invalid}");
     }
 }
+
+#[test]
+fn staged_trait_values_specialize_and_only_guard_implied_branches() {
+    let declarations = "
+        trait Ready { fn read(self) -> bool; }
+        impl Ready for bool { fn read(self) -> bool { self } }
+        struct Plain {}
+    ";
+    let functions = "
+        fn has(comptime active: bool, value: T) -> bool where T {
+            const yes: bool = (active and (T :- Ready)) and not (not (T :- Ready));
+            const no: bool = not (T :- Ready) or not active;
+            yes and not no
+        }
+        fn choose(comptime active: bool, value: T) -> bool where T {
+            inline if active and (T :- Ready) { value.read() } else { false }
+        }
+        fn fallback(comptime active: bool, value: T) -> bool where T {
+            inline when {
+                (not active) or not (T :- Ready) => false,
+                else => value.read(),
+            }
+        }
+        fn run() -> bool {
+            has(true, true) and not has(false, true) and not has(true, Plain {})
+                and choose(true, true) and not choose(false, true) and not choose(true, Plain {})
+                and fallback(true, true) and not fallback(false, true) and not fallback(true, Plain {})
+        }
+    ";
+    assert_eq!(
+        support::run_iir(&format!("{declarations}{functions}"), "run", vec![]),
+        Value::Bool(true)
+    );
+
+    for body in [
+        "inline if active or (T :- Ready) { value.read() } else { false }",
+        "inline if active and not (T :- Ready) { false } else { value.read() }",
+        "const observed = T :- Ready; value.read()",
+        "const impossible: T = T :- Ready; false",
+        "const malformed = T :- Plain; false",
+        "const wrong_phase = runtime_flag and (T :- Ready); false",
+    ] {
+        let source = format!(
+            "{declarations} fn bad(comptime active: bool, runtime_flag: bool, value: T) -> bool where T {{ {body} }}"
+        );
+        assert!(compile(&source).is_err(), "{body}");
+    }
+}

@@ -275,6 +275,20 @@ pub(super) struct Pending {
     span: Span,
 }
 
+fn combine_condition_facts(
+    conjunctive: bool,
+    left: Option<crate::ptc::Formula>,
+    right: Option<crate::ptc::Formula>,
+) -> Option<crate::ptc::Formula> {
+    use crate::ptc::Formula;
+    match (left, right) {
+        (Some(left), Some(right)) if conjunctive => Some(Formula::And(vec![left, right])),
+        (Some(left), Some(right)) => Some(Formula::Or(vec![left, right])),
+        (known, None) | (None, known) if conjunctive => known,
+        _ => None,
+    }
+}
+
 fn has_trait(predicate: &n::TypePredicate) -> bool {
     let mut work = vec![predicate];
     while let Some(predicate) = work.pop() {
@@ -723,43 +737,50 @@ impl Checker<'_, '_> {
                 let right = Self::condition_type_fact(right, positive, fuel, depth + 1)?;
                 // True conjunctions and false disjunctions imply every known
                 // component, even if other components are runtime Booleans.
-                return Ok(if and == positive {
-                    match (left, right) {
-                        (Some(left), Some(right)) => Some(F::And(vec![left, right])),
-                        (known, None) | (None, known) => known,
-                    }
-                } else {
-                    match (left, right) {
-                        (Some(left), Some(right)) => Some(F::Or(vec![left, right])),
-                        _ => None,
-                    }
-                });
+                return Ok(combine_condition_facts(and == positive, left, right));
             }
             _ => None,
         };
         Ok(full.map(|fact| if positive { fact } else { fact.negate() }))
     }
 
-    pub(super) fn under_type_condition<T>(
+    /// The Boolean spine has already been checked by open expression
+    /// description. Only immutable type observations can supply branch facts.
+    /// In particular an ordinary staged bool supplies no PTC formula.
+    pub(super) fn staged_condition_fact(
         &mut self,
-        condition: &n::Expr,
+        expr: &Expr<'_>,
         positive: bool,
-        span: Span,
-        check: impl FnOnce(&mut Self) -> Result<T, Error>,
-    ) -> Result<T, Error> {
-        let scope = self.enter_type_condition(condition, positive, span)?;
-        let result = check(self);
-        scope.leave(self);
-        result
-    }
-
-    pub(super) fn enter_type_condition(
-        &mut self,
-        condition: &n::Expr,
-        positive: bool,
-        span: Span,
-    ) -> Result<TypeConditionScope, Error> {
-        self.enter_source_type_condition(None, condition, positive, span)
+        depth: usize,
+    ) -> Result<Option<crate::ptc::Formula>, Error> {
+        if depth >= 128 {
+            return Err(error(expr.span, "staged condition depth exhausted"));
+        }
+        self.required_steps = self
+            .required_steps
+            .checked_sub(1)
+            .ok_or_else(|| error(expr.span, "staged condition budget exhausted"))?;
+        match expr.kind {
+            H::Unary(UnOp::Not, inner) => self.staged_condition_fact(inner, !positive, depth + 1),
+            H::Binary(op @ (BinOp::And | BinOp::Or), left, right) => {
+                let left = self.staged_condition_fact(left, positive, depth + 1)?;
+                let right = self.staged_condition_fact(right, positive, depth + 1)?;
+                Ok(combine_condition_facts(
+                    (op == BinOp::And) == positive,
+                    left,
+                    right,
+                ))
+            }
+            _ if self.is_type_assumption(expr) => {
+                let predicate = self.type_predicate(expr)?;
+                let fact = crate::ptc::Formula::from_predicate(&predicate);
+                self.context
+                    .validate_formula(&fact, &mut crate::ptc::Budget::default())
+                    .map_err(|e| error(expr.span, e.to_string()))?;
+                Ok(Some(if positive { fact } else { fact.negate() }))
+            }
+            _ => Ok(None),
+        }
     }
 
     pub(super) fn enter_source_type_condition(
@@ -769,16 +790,20 @@ impl Checker<'_, '_> {
         positive: bool,
         span: Span,
     ) -> Result<TypeConditionScope, Error> {
-        let Some(fact) =
-            self.checked_source_type_condition(source_expr, condition, positive, span)?
-        else {
-            return Ok(TypeConditionScope { parent: None });
-        };
-        let parent = self.context.clone();
-        self.context.assume(fact);
-        Ok(TypeConditionScope {
-            parent: Some(parent),
-        })
+        let fact = self.checked_source_type_condition(source_expr, condition, positive, span)?;
+        Ok(self.enter_condition_fact(fact))
+    }
+
+    pub(super) fn enter_condition_fact(
+        &mut self,
+        fact: Option<crate::ptc::Formula>,
+    ) -> TypeConditionScope {
+        let parent = fact.map(|fact| {
+            let parent = self.context.clone();
+            self.context.assume(fact);
+            parent
+        });
+        TypeConditionScope { parent }
     }
 
     pub(super) fn assume_source_type_condition(
@@ -883,17 +908,7 @@ impl Checker<'_, '_> {
                         depth + 1,
                         span,
                     )?;
-                    return Ok(if and == positive {
-                        match (left, right) {
-                            (Some(left), Some(right)) => Some(F::And(vec![left, right])),
-                            (known, None) | (None, known) => known,
-                        }
-                    } else {
-                        match (left, right) {
-                            (Some(left), Some(right)) => Some(F::Or(vec![left, right])),
-                            _ => None,
-                        }
-                    });
+                    return Ok(combine_condition_facts(and == positive, left, right));
                 }
                 _ => {}
             }

@@ -2616,6 +2616,19 @@ impl Checker<'_, '_> {
             }
         }
         match &expr.kind {
+            H::TraitBound(..) if self.in_staged_input => {
+                // The source instance will decide the query once its inputs
+                // are available. Checking its domain here needs a well-formed
+                // proposition, but supplies no evidence for either outcome.
+                let predicate = self.type_predicate(expr)?;
+                let formula = crate::ptc::Formula::from_predicate(&predicate);
+                self.context
+                    .validate_formula(&formula, &mut crate::ptc::Budget::default())
+                    .map_err(|e| error(expr.span, e.to_string()))?;
+                let domain = D::Known(p(P::Bool));
+                self.require_description(&domain, expected, expr.span)?;
+                Ok(domain)
+            }
             H::Unary(UnOp::Not | UnOp::Neg, _)
             | H::Binary(
                 BinOp::Eq
@@ -4024,6 +4037,7 @@ impl Checker<'_, '_> {
                 let transfers_before = self.open_loop_transfers.clone();
                 let mut arm_predicate: Option<(n::TypePredicate, crate::ptc::Formula)> = None;
                 let mut condition_evidence = None;
+                let mut staged_evidence = (None, None);
                 let condition = match arm.cond {
                     Some(hir_cond) => {
                         // Only the selector inherits the inline stage. Its
@@ -4044,21 +4058,18 @@ impl Checker<'_, '_> {
                             Some(self.with_staged_input(staged, |this| {
                                 this.describe_open_boolean(hir_cond, locals, returns, depth + 1)
                             })?)
-                        } else {
-                            let checked = self.with_staged_input(staged, |this| {
-                                let saved_unselected = if staged {
-                                    Some(std::mem::replace(&mut this.in_unselected_inline, true))
-                                } else {
-                                    None
-                                };
-                                let checked = this.expr(hir_cond, Some(&p(P::Bool)));
-                                if let Some(prev) = saved_unselected {
-                                    this.in_unselected_inline = prev;
-                                }
-                                let checked = checked?;
-                                this.check_open_fragment(&checked, hir_cond.span, false)?;
-                                Ok::<_, Error>(checked)
+                        } else if staged {
+                            let description = self.with_staged_input(true, |this| {
+                                this.describe_open_boolean(hir_cond, locals, returns, depth + 1)
                             })?;
+                            staged_evidence = (
+                                self.staged_condition_fact(hir_cond, true, 0)?,
+                                self.staged_condition_fact(hir_cond, false, 0)?,
+                            );
+                            Some(description)
+                        } else {
+                            let checked = self.expr(hir_cond, Some(&p(P::Bool)))?;
+                            self.check_open_fragment(&checked, hir_cond.span, false)?;
                             let description = OpenCondition {
                                 diverges: is_never(&checked.ty),
                                 choice: control::boolean(&checked),
@@ -4079,6 +4090,8 @@ impl Checker<'_, '_> {
                         self.definition_refinements
                             .requirements
                             .push(predicate.clone());
+                    } else if let Some(fact) = staged_evidence.0.take() {
+                        self.context.assume(fact);
                     } else if let Some(checked_cond) = &condition_evidence {
                         self.assume_source_type_condition(
                             arm.cond,
@@ -4124,6 +4137,8 @@ impl Checker<'_, '_> {
                     self.definition_refinements
                         .requirements
                         .push(n::TypePredicate::Not(Box::new(predicate)));
+                } else if let Some(fact) = staged_evidence.1 {
+                    self.context.assume(fact);
                 } else if let Some(checked_cond) = &condition_evidence {
                     self.assume_source_type_condition(
                         arm.cond,

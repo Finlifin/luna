@@ -184,8 +184,22 @@ impl Checker<'_, '_> {
                 };
                 let right_description =
                     if shape == p(P::Bool) && self.open_condition_has_type_evidence(left, 0) {
-                        let predicate = self.expr(left, Some(&p(P::Bool)))?;
-                        self.under_type_condition(&predicate, *op == BinOp::And, right.span, check)?
+                        let positive = *op == BinOp::And;
+                        let scope = if self.in_staged_input {
+                            let fact = self.staged_condition_fact(left, positive, 0)?;
+                            self.enter_condition_fact(fact)
+                        } else {
+                            let predicate = self.expr(left, Some(&p(P::Bool)))?;
+                            self.enter_source_type_condition(
+                                Some(left),
+                                &predicate,
+                                positive,
+                                right.span,
+                            )?
+                        };
+                        let result = check(self);
+                        scope.leave(self);
+                        result?
                     } else {
                         check(self)?
                     };
