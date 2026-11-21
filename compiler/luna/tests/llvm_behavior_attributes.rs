@@ -308,7 +308,7 @@ fn pointer_params_indirect_callsites_and_dealloc_attributes_pass_llvm23_opt_o3()
     // Verify indirect callsite in `run` attaches `#<group>`.
     let has_indirect_attr_call = ir
         .lines()
-        .any(|line| line.contains("call i1 %") && line.contains(" #"));
+        .any(|line| line.contains("call { i1, ptr } %") && line.contains(" #"));
     assert!(
         has_indirect_attr_call,
         "expected indirect callsite attribute group on `cb(loaded)`:\n{ir}"

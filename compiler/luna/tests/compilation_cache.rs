@@ -236,18 +236,24 @@ fn merged_attributes_track_constructor_changes_and_recover_from_invalid_objects(
     let mut cache = CompilationCache::new(2);
     let first = cache.compile(&request).unwrap();
     let report = first.compilation.artifact.to_string();
-    assert!(report.contains("(key \"abi\") (entry 0)"), "{report}");
+    assert!(
+        report.contains("(key \"__flurry_abi\") (entry 0)"),
+        "{report}"
+    );
     assert!(cache.compile(&request).unwrap().reused);
 
     files.write(
         "attrs.fl",
-        &constructor.replace("{abi: name}", "{abi: name, abi: .changed}"),
+        &constructor.replace(
+            "{ __flurry_abi: name }",
+            "{ __flurry_abi: name, __flurry_abi: .changed }",
+        ),
     );
     let changed = cache.compile(&request).unwrap();
     assert!(!changed.reused);
     let changed_report = changed.compilation.artifact.to_string();
     assert!(
-        changed_report.contains("(key \"abi\") (entry 1)"),
+        changed_report.contains("(key \"__flurry_abi\") (entry 1)"),
         "{changed_report}"
     );
     assert!(
@@ -256,7 +262,10 @@ fn merged_attributes_track_constructor_changes_and_recover_from_invalid_objects(
     );
     assert_eq!(first.compilation.artifact.to_string(), report);
 
-    files.write("attrs.fl", &constructor.replace("{abi: name}", "{name}"));
+    files.write(
+        "attrs.fl",
+        &constructor.replace("{ __flurry_abi: name }", "{name}"),
+    );
     let failure = cache
         .compile(&request)
         .err()

@@ -116,6 +116,8 @@ fn identity(value: u32) -> u32 {
 
 `attrs.abi(.c)` 提供函数的 C ABI 属性。函数声明和调用见[定义、调用与返回](../functions/calls-and-returns.md#函数-abi)。
 
+该构造器是普通的 `pure comptime fn`，接收 Symbol 并返回含 `__flurry_abi` 键的 Object。可以通过普通 `use` 取得别名，并用 `--emit attributes` 检查求值结果。Elaboration 检查目标为 runtime 函数，约定为 `.c` 且效应行为空。LLVM host 为受支持的具体签名生成 C 入口，未处理的控制转移在边界触发 trap。
+
 ### 直接提供元数据
 
 以下 `some_attr` 是示意元数据键，不指定额外的运行时行为。

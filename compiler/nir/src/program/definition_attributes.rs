@@ -21,6 +21,23 @@ impl DefinitionAttributes {
         }
     }
 
+    /// Inspect the completed calling-convention property in its owning world.
+    pub fn has_c_abi(&self, id: DeclarationId, fuel: &mut usize) -> Result<bool, &'static str> {
+        let object = self
+            .lookup(id)
+            .map_err(|_| "C ABI metadata is not available")?;
+        let Some(Term::NominalValue { fields, .. }) = object else {
+            return Ok(false);
+        };
+        *fuel = fuel
+            .checked_sub(fields.len())
+            .ok_or("C ABI metadata budget exhausted")?;
+        Ok(fields.iter().any(|entry| {
+            matches!(crate::objects::entry_parts(entry),
+            Some((Some("__flurry_abi"), _, Term::Symbol(convention))) if convention.as_ref() == "c")
+        }))
+    }
+
     pub fn len(&self) -> usize {
         match self {
             Self::Empty => 0,

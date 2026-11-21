@@ -317,32 +317,16 @@ impl Emitter<'_> {
             let ty = return_repr(self.graph, result, self.checked)?;
             let callsite = self.callsite_behavior(request);
             let mut call_attr_suffix = String::new();
-            let mut callee_no_trap = false;
-            if let Some(cs) = callsite {
-                callee_no_trap = cs.behavior.no_trap_or_unwind;
-                if let Some(table) = self.attr_table.as_deref_mut()
-                    && let Some(group) = table.intern_callsite(&cs.behavior)
-                {
-                    call_attr_suffix = format!(" #{group}");
-                }
+            if let Some(cs) = callsite
+                && let Some(table) = self.attr_table.as_deref_mut()
+                && let Some(group) = table.intern_callsite(&cs.behavior)
+            {
+                call_attr_suffix = format!(" #{group}");
             }
-            let call = format!(
-                "call {} {callee}({}){call_attr_suffix}",
-                ty.llvm(),
-                arguments.join(", ")
-            );
-            let value = if ty == Ty::Unit {
-                self.line(call);
-                Value::unit()
-            } else {
-                self.instruction(ty, call)
-            };
-            if self.failure_result.is_some() && !callee_no_trap {
-                let failed = self.instruction(Ty::Bool, "load i1, ptr @flurry_failed".into());
-                let succeeded = self.instruction(Ty::Bool, format!("xor i1 {}, true", failed.text));
-                self.guard_at(&succeeded, Some(request))?;
+            let (value, ctrl) = self.machine_call(callee, &arguments, ty, &call_attr_suffix);
+            if let Some(ctrl) = ctrl {
+                self.accept_control(&ctrl, request, true)?;
             }
-            self.check_effect_control(request)?;
             if **result == Term::Primitive(P::Never) {
                 self.line("unreachable");
                 self.terminated = true;
@@ -974,15 +958,18 @@ impl Emitter<'_> {
             if value.ty != result_ty {
                 return Err("host direct handler return representation mismatch".into());
             }
-            child.line(if value.ty == Ty::Unit {
-                "ret void".into()
-            } else {
-                format!("ret {} {}", value.ty.llvm(), value.text)
-            });
+            child.machine_return(&value, "null");
+        }
+        if child.checked {
+            inputs.push("ptr %task".into());
         }
         let definition = format!(
             "define internal {} @{symbol}({}) {{\nentry:\n{}{}}}\n",
-            result_ty.llvm(),
+            if child.checked {
+                control::packet(&result_ty).llvm()
+            } else {
+                result_ty.llvm()
+            },
             inputs.join(", "),
             child.prologue,
             child.body
@@ -995,36 +982,11 @@ impl Emitter<'_> {
 impl Emitter<'_> {
     /// Propagate control without running the current callable's postconditions:
     /// this is not a normal result (and not a user-visible error result).
-    pub(super) fn propagate_effect_control(&mut self) -> Result<(), String> {
-        let result = self
-            .failure_result
-            .clone()
-            .ok_or("host effect control needs a checked machine result")?;
-        self.line(if result == Ty::Unit {
-            "ret void".into()
-        } else {
-            format!("ret {} zeroinitializer", result.llvm())
-        });
-        self.terminated = true;
-        Ok(())
-    }
-
-    pub(super) fn check_effect_control(
+    pub(super) fn receive_effect_control(
         &mut self,
+        pending: &Value,
         source: nir::program::SourceRange,
     ) -> Result<(), String> {
-        if !self.checked {
-            return Ok(());
-        }
-        let pending = self.instruction(Ty::Pointer, "load ptr, ptr @flurry_effect_control".into());
-        let active = self.instruction(Ty::Bool, format!("icmp ne ptr {}, null", pending.text));
-        let escape = self.fresh();
-        let good = self.fresh();
-        self.line(format!(
-            "br i1 {}, label %{escape}, label %{good}",
-            active.text
-        ));
-        self.label(&escape);
         if let Some(storage) = self.native_return.clone() {
             let ours = self.instruction(
                 Ty::Bool,
@@ -1037,7 +999,6 @@ impl Emitter<'_> {
                 ours.text
             ));
             self.label(&receive);
-            self.line("store ptr null, ptr @flurry_effect_control");
             let value = self.load(&storage.value);
             self.receive_effect_return(&value, source)?;
             self.label(&forward);
@@ -1059,7 +1020,6 @@ impl Emitter<'_> {
                         ours.text
                     ));
                     self.label(&receive);
-                    self.line("store ptr null, ptr @flurry_effect_control");
                     self.receive_effect_loop(id, &target, source, is_break)?;
                     self.label(&forward);
                 }
@@ -1067,8 +1027,7 @@ impl Emitter<'_> {
         }
         self.cleanup_boundary(source, iir::cleanup::Boundary::EffectEscape)?;
         self.unwind_effect_frames()?;
-        self.propagate_effect_control()?;
-        self.label(&good);
+        self.control_return(&pending.text);
         Ok(())
     }
 }

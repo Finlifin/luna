@@ -2527,7 +2527,10 @@ fn host_preparation_retains_destructor_schedule_for_inspection() {
     assert!(!prepared.schedule().functions.is_empty());
     assert!(!prepared.graph().functions.is_empty());
     let ir = luna::host::llvm_ir_prepared(&prepared, 100_000).unwrap();
-    assert!(ir.contains("call void @flurry_"), "{ir}");
+    assert!(
+        ir.contains("call { {}, ptr } @flurry_") || ir.contains("_scalar(ptr "),
+        "{ir}"
+    );
     assert_eq!(prepared.to_string(), dump);
 }
 
@@ -2758,17 +2761,21 @@ fn native_predicate_failure_lowers_cleanup_before_propagation() {
         .unwrap();
     success(&out);
     let ir = String::from_utf8(out.stdout).unwrap();
-    let lines = ir.lines().collect::<Vec<_>>();
+    let failure_path = ir
+        .split_once("call i32 (i32, ptr, ...) @dprintf")
+        .expect("the failing predicate must produce its diagnostic")
+        .1
+        .split_once("ret { {}, ptr }")
+        .expect("the checked function must propagate failure")
+        .0;
+    let (cleanup, _) = failure_path
+        .split_once("ptr inttoptr (i32 1 to ptr), 1")
+        .expect("the failure packet must carry the reserved failure word");
     assert!(
-        lines.iter().enumerate().any(|(index, line)| {
-            line.trim_start().starts_with("call void @flurry_")
-                && line.contains("(ptr ")
-                && lines[index + 1..]
-                    .iter()
-                    .take_while(|line| !line.trim_start().starts_with("ret "))
-                    .any(|line| line.trim() == "call void @flurry_check_failure()")
-        }),
-        "{ir}"
+        cleanup
+            .lines()
+            .any(|line| { line.contains("call void @flurry_") && line.contains("_scalar(ptr ") }),
+        "the certified destructor must run before failure propagates:\n{failure_path}"
     );
     for level in ["0", "3"] {
         success(
@@ -2843,10 +2850,10 @@ fn native_function_contracts_retain_direct_cleanup() {
         let failures = lines
             .windows(2)
             .filter(|pair| {
-                pair[0].trim() == "call void @flurry_check_failure()"
-                    && pair[1].trim() == "store i1 true, ptr @flurry_failed"
+                pair[0].contains("ptr inttoptr (i32 1 to ptr), 1")
+                    && pair[1].trim_start().starts_with("ret {")
             })
-            .collect::<Vec<_>>();
+            .count();
         let expected = if !contract.contains("ensures") {
             1
         } else if body.starts_with("if") {
@@ -2854,13 +2861,7 @@ fn native_function_contracts_retain_direct_cleanup() {
         } else {
             2
         };
-        assert_eq!(failures.len(), expected, "{contract}: {body}\n{ir}");
-        assert!(
-            failures
-                .iter()
-                .all(|pair| pair[0].trim_start().starts_with("call void @flurry_")),
-            "{contract}: {body}\n{ir}"
-        );
+        assert_eq!(failures, expected, "{contract}: {body}\n{ir}");
         for level in ["0", "3"] {
             success(
                 &w.command()
@@ -3601,14 +3602,10 @@ fn native_postcondition_retains_owned_result_until_delivery() {
         let drops_before_propagation = ir
             .lines()
             .collect::<Vec<_>>()
-            .windows(3)
-            .filter(|lines| {
-                // Control-state suspension now sits between the destructor
-                // and its failure check. The owned-result live flag must
-                // still clear before propagating the predicate failure.
-                lines[0].trim() == "call void @flurry_check_failure()"
-                    && lines[1].trim_start().starts_with("store i1 false")
-                    && lines[2].trim() == "store i1 true, ptr @flurry_failed"
+            .windows(2)
+            .filter(|pair| {
+                pair[0].trim_start().starts_with("store i1 false")
+                    && pair[1].contains("ptr inttoptr (i32 1 to ptr), 1")
             })
             .count();
         assert_eq!(
@@ -5648,10 +5645,13 @@ fn assert_native_failure_count_ir(prepared: &luna::host::Prepared, ir: &str) {
 entry:
   %count = alloca i32
   store i32 0, ptr %count
-  call void @flurry_{index}(ptr %count, i1 true)
+  %task = alloca %flurry.task
+  call void @flurry_task_init(ptr %task, ptr null)
+  %r = call {{ {{}}, ptr }} @flurry_{index}(ptr %count, i1 true, ptr %task)
+  %ctrl = extractvalue {{ {{}}, ptr }} %r, 1
   %n = load i32, ptr %count
   %twice = icmp eq i32 %n, 2
-  %failed = load i1, ptr @flurry_failed
+  %failed = icmp eq ptr %ctrl, inttoptr (i32 1 to ptr)
   %ok = and i1 %twice, %failed
   %exit = select i1 %ok, i32 0, i32 1
   ret i32 %exit
@@ -5792,15 +5792,15 @@ define internal void @observe_terminal_failure() {{
 entry:
   %n = load i32, ptr @observed
   %first = icmp eq i32 %n, 1
-  %failed = load i1, ptr @flurry_failed
-  %ok = and i1 %first, %failed
-  %code = select i1 %ok, i32 0, i32 1
+  %code = select i1 %first, i32 0, i32 1
   call void @exit(i32 %code)
   unreachable
 }}
 define i32 @main() {{
 entry:
-  call void @flurry_{index}(ptr @observed, i1 true)
+  %task = alloca %flurry.task
+  call void @flurry_task_init(ptr %task, ptr null)
+  %r = call {{ {{}}, ptr }} @flurry_{index}(ptr @observed, i1 true, ptr %task)
   ret i32 1
 }}"
     );
@@ -5850,8 +5850,8 @@ entry:
             }
         }
         let ir = ir.replace(
-            &format!("call void @flurry_{index}(ptr @observed, i1 true)"),
-            &format!("call void @flurry_{index}(ptr @observed, i1 {flag})"),
+            &format!("@flurry_{index}(ptr @observed, i1 true, ptr %task)"),
+            &format!("@flurry_{index}(ptr @observed, i1 {flag}, ptr %task)"),
         );
         for optimization in [
             luna::host::OptimizationLevel::O0,
@@ -6342,12 +6342,17 @@ fn native_checked_handler_guard_cleans_private_nonrejecting_values() {
         // The only void callee is Watch.drop. Even an empty Drop is a selected
         // cleanup invocation before optimization, not permission to omit it.
         let ir = String::from_utf8(ir.stdout).unwrap();
+        let root = ir
+            .split_once("define internal { i1, ptr } @flurry_0(")
+            .unwrap()
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
         assert_eq!(
-            ir.lines()
-                .filter(|line| line
-                    .trim()
-                    .strip_prefix("call void @flurry_")
-                    .is_some_and(|name| name.as_bytes().first().is_some_and(u8::is_ascii_digit)))
+            root.lines()
+                .filter(|line| line.contains("call { {}, ptr } @flurry_")
+                    || (line.contains("call void @flurry_") && line.contains("_scalar(ptr ")))
                 .count(),
             body.matches("Watch {}").count(),
             "guard cleanup invocation count: {ir}"
@@ -14646,7 +14651,8 @@ fn native_computed_newtype_candidates_retire_nested_payloads() {
             assert_eq!(destructors.len(), 3);
             for (index, function) in destructors {
                 assert!(
-                    ir.contains(&format!("call void @flurry_{index}(ptr ")),
+                    ir.contains(&format!("call {{ {{}}, ptr }} @flurry_{index}(ptr "))
+                        || ir.contains(&format!("call void @flurry_{index}_scalar(ptr ")),
                     "missing {}: {ir}",
                     function.key
                 );

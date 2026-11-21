@@ -155,6 +155,22 @@ impl Checker<'_, '_> {
         let Term::Function { parameters, result } = &signature else {
             return Err(error(span, "source function needs a callable signature"));
         };
+        if matches!(result.as_ref(), Term::Computation { effects, .. } if !effects.is_empty())
+            && matches!(
+                self.definition_attributes,
+                n::DefinitionAttributes::Frozen(_)
+            )
+        {
+            let declaration = declaration(self.package, &self.package_identities, owner);
+            if self
+                .with_call_type_fuel(|checker, fuel| {
+                    checker.definition_attributes.has_c_abi(declaration, fuel)
+                })
+                .map_err(|failure| error(span, failure))?
+            {
+                return Err(error(span, "C ABI requires an empty effect row"));
+            }
+        }
         for (index, (parameter, ty)) in sig.params.iter().zip(parameters).enumerate() {
             let binding = local(parameter.hir_id);
             self.locals.insert(binding, ty.ty.clone());

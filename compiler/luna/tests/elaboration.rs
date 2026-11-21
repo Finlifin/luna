@@ -8456,22 +8456,24 @@ fn symbol_indexed_default_method_delegates_to_selected_member() {
 }
 
 #[test]
-fn unsupported_abi_attributes_cannot_publish_default_abi_functions() {
+fn c_abi_attachment_requires_a_runtime_function_and_supported_convention() {
     for source in [
-        "^attrs.abi(.c) fn identity(value:bool)->bool {value}",
-        "^attrs.abi(.c) inline fn identity(value:bool)->bool {value}",
-        "^attrs.abi(.c) pure fn identity(value:bool)->bool {value}",
-        "^attrs.abi(.c) fn identity(value:bool)->bool {value} fn entry()->bool {identity(true)}",
-        "^attrs.abi(.c) fn identity(value:bool)->bool {value} fn entry()->fn(bool)->bool {identity}",
-        "trait Foreign { ^attrs.abi(.c) fn identity(value:bool)->bool; }",
-        "mod foreign { ^attrs.abi(.c) fn identity(value:bool)->bool {value} }",
+        "^attrs.abi(.c) struct Foreign {}",
+        "^attrs.abi(.c) comptime fn identity(value:bool)->bool {value}",
+        "^attrs.abi(.unknown) fn identity(value:bool)->bool {value}",
     ] {
         let source = format!(
             "mod attrs {{{}}} {source}",
             include!("support/attrs_source.rs")
         );
-        rejected(&source, "definition attribute or modifier `abi`");
+        rejected(&source, "C ABI requires a runtime function");
     }
+    let effectful = format!(
+        "mod attrs {{{}}} effect read()->bool;
+        ^attrs.abi(.c) fn foreign()->#read bool {{read()#}}",
+        include!("support/attrs_source.rs")
+    );
+    rejected(&effectful, "C ABI requires an empty effect row");
 }
 
 #[test]

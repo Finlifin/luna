@@ -105,6 +105,24 @@ impl Checker<'_, '_> {
             let _defaults = default_strategy_markers(self.package, &selected, &mut budget)?;
             for target in &selected {
                 for (key, value) in target.iter() {
+                    if key == "__flurry_abi" {
+                        let runtime_function = matches!(target.target,
+                            hir::AttributeTarget::Definition(owner)
+                            if matches!(self.package.item(owner).map(|item| &item.kind),
+                                Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig))
+                                if !sig.modifiers.is_comptime && !sig.modifiers.is_quote));
+                        let c = matches!(&value.value.kind,
+                            K::Literal(n::Literal::Symbol(name)) if name == "c")
+                            || matches!(&value.value.kind, K::ComptimeValue(Term::Symbol(name)) if name.as_ref() == "c");
+                        if !runtime_function || value.value.ty != p(P::Symbol) || !c {
+                            return Err(MergeFailure {
+                                source: value.origin.source,
+                                message:
+                                    "the C ABI requires a runtime function and the .c convention"
+                                        .into(),
+                            });
+                        }
+                    }
                     if !inspect_only
                         && !matches!(
                             key,
@@ -113,6 +131,7 @@ impl Checker<'_, '_> {
                                 | "direct_passing"
                                 | "metadata"
                                 | "__flurry_volatile"
+                                | "__flurry_abi"
                         )
                     {
                         return Err(MergeFailure {

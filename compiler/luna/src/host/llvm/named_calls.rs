@@ -86,6 +86,15 @@ impl Emitter<'_> {
                 } else {
                     format!("@flurry_{function}_scope_{context}")
                 };
+            if let Some(known) = Self::direct_instance_index(&code.text) {
+                if known == function {
+                    return Ok(Value {
+                        ty: Ty::FunctionPointer,
+                        text: target,
+                    });
+                }
+                continue;
+            }
             let matches = self.instruction(
                 Ty::Bool,
                 format!("icmp eq ptr {}, @flurry_{function}", code.text),

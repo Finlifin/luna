@@ -1386,41 +1386,19 @@ impl Emitter<'_> {
                     call_args.push(format!("{} {}", val.ty.llvm(), val.text));
                 }
             }
-            // Cleanup is a separate invocation while an outer return may be
-            // pending. Its own effectful work must not consume that request.
-            let pending_return = if self.failure_result.is_some() {
-                let saved =
-                    self.instruction(Ty::Pointer, "load ptr, ptr @flurry_effect_control".into());
-                self.line("store ptr null, ptr @flurry_effect_control");
-                Some(saved)
-            } else {
-                None
-            };
             if let Some(schedule) = self.schedules {
                 // Production body emission independently requires acquired
                 // evidence. Here reject incompatible plans for this canonical
                 // destructor call (standalone emitter fixtures may supply stubs).
                 select_schedule(schedule, method, self.fuel)?;
             }
-            self.line(format!(
-                "call void @flurry_{index}({})",
-                call_args.join(", ")
-            ));
-            if let Some(saved) = pending_return {
-                let pending =
-                    self.instruction(Ty::Pointer, "load ptr, ptr @flurry_effect_control".into());
-                let settled =
-                    self.instruction(Ty::Bool, format!("icmp eq ptr {}, null", pending.text));
-                self.guard(&settled)?;
-                self.line(format!(
-                    "store ptr {}, ptr @flurry_effect_control",
-                    saved.text
-                ));
-            }
-            if self.failure_result.is_some() {
-                // A failure inside Drop terminates cleanup rather than running
-                // the rest of the frame with a half-destroyed subject.
-                self.line("call void @flurry_check_failure()");
+            let (_, control) =
+                self.machine_call(&format!("@flurry_{index}"), &call_args, Ty::Unit, "");
+            if let Some(control) = control {
+                // A second transfer from Drop cannot resume the interrupted cleanup.
+                let normal =
+                    self.instruction(Ty::Bool, format!("icmp eq ptr {}, null", control.text));
+                self.guard(&normal)?;
             }
         }
         Ok(())

@@ -633,7 +633,7 @@ fn analyze_instance(
     };
 
     // Soundness Red Lines 2 & 4: preconditions, postconditions, effects, or Never exits
-    // emit @flurry_failed / @llvm.trap / unreachable or effect control writes.
+    // may transfer control, trap, or diverge.
     if !func.preconditions.is_empty()
         || !func.postconditions.is_empty()
         || !effect_row.is_empty()
@@ -843,6 +843,7 @@ impl<'a, 'b> Analyzer<'a, 'b> {
                     }
                 }
                 Step::Invoke {
+                    subject,
                     method,
                     env_arguments,
                     ..
@@ -857,6 +858,22 @@ impl<'a, 'b> Analyzer<'a, 'b> {
                         .get(&(method.declaration, method.arguments.as_ref()))
                         .copied();
                     if let Some(target_idx) = target {
+                        // The cleanup receiver is a slot in this frame. A pointer
+                        // stored inside it can still derive from any incoming
+                        // parameter. Receiver attributes cover the slot itself.
+                        let may_publish_or_write =
+                            self.certified[target_idx].as_ref().is_none_or(|body| {
+                                matches!(
+                                    body.attrs.memory,
+                                    MemoryEffect::Unknown | MemoryEffect::ArgMemReadWrite
+                                )
+                            });
+                        if may_publish_or_write
+                            && type_may_contain_pointer(self.index.graph, subject, self.fuel)
+                        {
+                            self.written.fill(true);
+                            self.escaped.fill(true);
+                        }
                         self.apply_known_call(target_idx, &[PtrOrigin::unknown()], &env_origins);
                     } else {
                         self.fail_all_conservative();
@@ -1153,7 +1170,7 @@ impl<'a, 'b> Analyzer<'a, 'b> {
 
             K::CheckPredicate(cond) | K::RequirePredicate(cond) | K::EnsurePredicate(cond) => {
                 let _ = self.visit_expr(cond, next)?;
-                // Unelided runtime check writes `@flurry_failed` or traps.
+                // A failing runtime check transfers control or traps.
                 self.mark_trap();
                 Some(PtrOrigin::default())
             }
@@ -1562,7 +1579,7 @@ impl<'a, 'b> Analyzer<'a, 'b> {
     }
 
     fn finalize(&self) -> BehaviorAttributes {
-        // Soundness Red Line 2: any possible `@llvm.trap` or `@flurry_failed` write
+        // Soundness Red Line 2: an unexcluded trap or failure transfer
         // forbids `memory(none)`, `memory(argmem: read)`, `nounwind`, and `speculatable`.
         let memory = if !self.no_trap_or_unwind {
             MemoryEffect::Unknown
@@ -1732,7 +1749,7 @@ mod tests {
             ),
         );
 
-        // 2: Checked integer add (Red Line 2: trap / @flurry_failed forbid memory(none) / nounwind)
+        // 2: Checked integer add (Red Line 2: trap or failure transfer excludes memory(none) / nounwind)
         let trapping_add = runtime_fn(
             3,
             "add_checked",

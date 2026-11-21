@@ -201,12 +201,12 @@ def main():
                 matches = output == '(bool true)'
             elif label in ('attributes', 'merged-attributes'):
                 matches = (output.count('(evaluated-attribute ') == 1
-                           and '(property "abi")' in output
+                           and '(property "__flurry_abi")' in output
                            and '(symbol "c")' in output)
                 if label == 'merged-attributes':
                     matches = (matches and output.startswith('(attribute-inspection (evaluated ')
                                and output.count('(merged-attributes ') == 1
-                               and '(key "abi") (entry 0)' in output)
+                               and '(key "__flurry_abi") (entry 0)' in output)
             elif label in native_counts:
                 count = native_counts[label]
                 matches = f'(count {count}) (failures 0)' in output

@@ -1,0 +1,275 @@
+//! Machine results at checked Flurry call boundaries. Function values always
+//! point at the control-bearing entry; certified direct calls use the scalar body.
+use super::*;
+
+pub(super) const FAILURE: &str = "inttoptr (i32 1 to ptr)";
+pub(super) const LIKELY: &str = "!prof !{!\"branch_weights\", i32 2000, i32 1}";
+
+pub(super) fn packet(payload: &Ty) -> Ty {
+    Ty::Record(std::sync::Arc::new(vec![payload.clone(), Ty::Pointer]))
+}
+
+pub(super) fn scalar(instance: &iir::FunctionInstance) -> bool {
+    let Term::Function { result, .. } = &instance.function.signature else {
+        return false;
+    };
+    effects::row_result(result).0.is_empty()
+        && instance
+            .behavior
+            .as_ref()
+            .is_some_and(|b| b.no_trap_or_unwind)
+}
+
+impl Emitter<'_> {
+    pub(super) fn control_token(&mut self) -> String {
+        let token = self.fresh();
+        self.prologue
+            .push_str(&format!("  %{token} = alloca i8, align 2\n"));
+        format!("%{token}")
+    }
+
+    pub(super) fn machine_return(&mut self, value: &Value, control: &str) {
+        if self.failure_result.is_some() {
+            let ty = packet(&value.ty);
+            let mut fields = "zeroinitializer".to_string();
+            if value.ty != Ty::Unit && control == "null" {
+                fields = self
+                    .instruction(
+                        ty.clone(),
+                        format!(
+                            "insertvalue {} zeroinitializer, {} {}, 0",
+                            ty.llvm(),
+                            value.ty.llvm(),
+                            value.text
+                        ),
+                    )
+                    .text;
+            }
+            if control != "null" {
+                fields = self
+                    .instruction(
+                        ty.clone(),
+                        format!("insertvalue {} {fields}, ptr {control}, 1", ty.llvm()),
+                    )
+                    .text;
+            }
+            self.line(format!("ret {} {fields}", ty.llvm()));
+        } else if control != "null" {
+            self.line("call void @llvm.trap()");
+            self.line("unreachable");
+        } else if value.ty == Ty::Unit {
+            self.line("ret void");
+        } else {
+            self.line(format!("ret {} {}", value.ty.llvm(), value.text));
+        }
+        self.terminated = true;
+    }
+
+    pub(super) fn control_return(&mut self, control: &str) {
+        let ty = self.failure_result.clone().unwrap_or(Ty::Unit);
+        self.machine_return(
+            &Value {
+                ty,
+                text: String::new(),
+            },
+            control,
+        );
+    }
+
+    /// Only a statically resolved symbol selects the scalar entry. A pointer
+    /// remains callable even when two targets have different certifications.
+    pub(super) fn machine_call(
+        &mut self,
+        target: &str,
+        args: &[String],
+        payload: Ty,
+        suffix: &str,
+    ) -> (Value, Option<Value>) {
+        let fast = self.checked
+            && Self::direct_instance_index(target)
+                .and_then(|index| self.graph.functions.get(index))
+                .is_some_and(scalar);
+        let controlled = self.checked && !fast;
+        let ty = if controlled {
+            packet(&payload)
+        } else {
+            payload.clone()
+        };
+        let symbol = if fast {
+            format!("{target}_scalar")
+        } else {
+            target.to_string()
+        };
+        let mut args = args.join(", ");
+        if self.checked {
+            if !args.is_empty() {
+                args.push_str(", ");
+            }
+            args.push_str("ptr %task");
+        }
+        let call = format!("call {} {symbol}({args}){suffix}", ty.llvm());
+        if ty == Ty::Unit {
+            self.line(call);
+            return (Value::unit(), None);
+        }
+        let result = self.instruction(ty.clone(), call);
+        if !controlled {
+            return (result, None);
+        }
+        let extract = |field| format!("extractvalue {} {}, {field}", ty.llvm(), result.text);
+        let control = self.instruction(Ty::Pointer, extract(1));
+        let value = if payload == Ty::Unit {
+            Value::unit()
+        } else {
+            self.instruction(payload, extract(0))
+        };
+        (value, Some(control))
+    }
+
+    pub(super) fn accept_control(
+        &mut self,
+        ctrl: &Value,
+        source: nir::program::SourceRange,
+        effects: bool,
+    ) -> Result<(), String> {
+        let ok = self.instruction(Ty::Bool, format!("icmp eq ptr {}, null", ctrl.text));
+        let normal = self.fresh();
+        let escape = self.fresh();
+        self.line(format!(
+            "br i1 {}, label %{normal}, label %{escape}, {}",
+            ok.text, LIKELY
+        ));
+        self.label(&escape);
+        if effects {
+            let failed =
+                self.instruction(Ty::Bool, format!("icmp eq ptr {}, {FAILURE}", ctrl.text));
+            let failure = self.fresh();
+            let transfer = self.fresh();
+            self.line(format!(
+                "br i1 {}, label %{failure}, label %{transfer}",
+                failed.text
+            ));
+            self.label(&transfer);
+            self.receive_effect_control(ctrl, source)?;
+            self.label(&failure);
+        }
+        self.cleanup_boundary(source, iir::cleanup::Boundary::PredicateFailure)?;
+        self.unwind_resources()?;
+        self.control_return(&ctrl.text);
+        self.label(&normal);
+        Ok(())
+    }
+}
+
+/// A C caller owns neither a Flurry control continuation nor task-local state.
+/// Admit only representations whose C classification the host already knows.
+pub(super) fn export_c_entries(
+    graph: &iir::Package,
+    attributes: &nir::program::DefinitionAttributes,
+    module: &mut String,
+    checked: bool,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    if attributes.is_empty() {
+        return Ok(());
+    }
+    // Only published entries need a symbol check. Backend symbols here are bare
+    // LLVM names; C export names (which may be Unicode) are emitted quoted.
+    let mut names = None;
+    for (index, instance) in graph.functions.iter().enumerate() {
+        let function = &instance.function;
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("C ABI admission budget exhausted")?;
+        if !attributes.has_c_abi(function.declaration, fuel)? {
+            continue;
+        }
+        if !checked {
+            return Err("C ABI boundaries require a cleanup-checked host graph".into());
+        }
+        let Term::Function { parameters, result } = &function.signature else {
+            return Err("C ABI requires a concrete function".into());
+        };
+        let (row, result) = effects::row_result(result);
+        if !row.is_empty()
+            || !function.env_parameters.is_empty()
+            || !instance.key.arguments.is_empty()
+        {
+            return Err("C ABI requires a closed function with an empty effect row and no implicit environment".into());
+        }
+        let scalar = |term: &Term| {
+            matches!(
+                term,
+                Term::Pointer(_)
+                    | Term::Primitive(
+                        P::Bool
+                            | P::U8
+                            | P::U16
+                            | P::U32
+                            | P::U64
+                            | P::I8
+                            | P::I16
+                            | P::I32
+                            | P::I64
+                            | P::Isize
+                            | P::Usize
+                            | P::F32
+                            | P::F64
+                    )
+            )
+        };
+        let never = *result == Term::Primitive(P::Never);
+        if !scalar(result) && !matches!(result, Term::Primitive(P::Void | P::Never)) {
+            return Err("unsupported C ABI result representation".into());
+        }
+        let result = return_repr(graph, result, true)?;
+        let name = &function.name;
+        let published = names.get_or_insert_with(|| {
+            module
+                .lines()
+                .filter(|line| {
+                    line.starts_with("define ")
+                        || line.starts_with("declare ")
+                        || line.starts_with('@')
+                })
+                .filter_map(|line| line.split_once('@'))
+                .map(|(_, tail)| tail.split(['(', ' ', '=']).next().unwrap().to_owned())
+                .collect::<BTreeSet<_>>()
+        });
+        if !published.insert(name.clone()) {
+            return Err(format!("conflicting host C symbol {name}"));
+        }
+        let extension = |ty: &Ty| match ty {
+            Ty::Bool | Ty::Int(8 | 16, false) => "zeroext ",
+            Ty::Int(8 | 16, true) => "signext ",
+            _ => "",
+        };
+        let mut inputs = Vec::new();
+        let mut parameters_c = Vec::new();
+        for (i, parameter) in parameters.iter().enumerate() {
+            if parameter.sort != Sort::Runtime || !scalar(&parameter.ty) {
+                return Err("unsupported C ABI parameter representation".into());
+            }
+            let ty = repr(graph, &parameter.ty, true)?;
+            inputs.push(format!("{} %arg{i}", ty.llvm()));
+            parameters_c.push(format!("{} {}%arg{i}", ty.llvm(), extension(&ty)));
+        }
+        let decl = parameters_c.join(", ");
+        inputs.push("ptr %task".into());
+        let args = inputs.join(", ");
+        let packet = packet(&result).llvm();
+        let completed = if never {
+            "unreachable".into()
+        } else if result == Ty::Unit {
+            "ret void".into()
+        } else {
+            format!(
+                "%value = extractvalue {packet} %r, 0\n  ret {} %value",
+                result.llvm()
+            )
+        };
+        let symbol: String = name.bytes().map(|b| format!("\\{b:02X}")).collect();
+        module.push_str(&format!("define {}{} @\"{symbol}\"({decl}) {{\nentry:\n  %task = alloca %flurry.task\n  call void @flurry_task_init(ptr %task, ptr null)\n  %r = call {packet} @flurry_{index}({args})\n  %ctrl = extractvalue {packet} %r, 1\n  %normal = icmp eq ptr %ctrl, null\n  br i1 %normal, label %done, label %escape, {LIKELY}\nescape:\n  call void @llvm.trap()\n  unreachable\ndone:\n  {completed}\n}}\n", extension(&result), result.llvm()));
+    }
+    Ok(())
+}

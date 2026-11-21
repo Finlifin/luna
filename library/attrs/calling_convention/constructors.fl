@@ -5,6 +5,6 @@ use bindings.{Object, Symbol}
     the target and supported values before applying metadata to generated code.
 -}
 pub pure comptime fn abi(name: Symbol) -> Object {
-    let metadata = { abi: name }
+    let metadata = { __flurry_abi: name }
     metadata
 }

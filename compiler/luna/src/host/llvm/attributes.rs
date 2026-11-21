@@ -44,18 +44,13 @@ impl AttributeTable {
 }
 
 /// Apply final machine-IR soundness checks on the lowered LLVM prologue and body.
-/// Ensures no function touching `@llvm.trap`, `@flurry_failed`,
-/// `@flurry_effect_control`, or `volatile` memory ever retains unsound attributes.
+/// Reject speculation across machine traps and volatile memory accesses.
 pub(super) fn sanitize_for_emitted_body(
     attrs: &mut BehaviorAttributes,
     prologue: &str,
     body: &str,
 ) {
-    let mentions_failure_or_trap = |text: &str| {
-        text.contains("@llvm.trap")
-            || text.contains("@flurry_failed")
-            || text.contains("@flurry_effect_control")
-    };
+    let mentions_failure_or_trap = |text: &str| text.contains("@llvm.trap");
     if mentions_failure_or_trap(prologue) || mentions_failure_or_trap(body) {
         attrs.degrade_for_runtime_failure_access();
     }
@@ -83,7 +78,7 @@ fn format_tokens_inner(attrs: &BehaviorAttributes, allow_speculatable: bool) -> 
     if attrs.no_free {
         tokens.push("nofree");
     }
-    // Red Line 2: `@flurry_failed` writes or `@llvm.trap` forbid `memory(none)` and `argmem: read`.
+    // Only certified machine behavior can advertise restricted memory access.
     if attrs.no_trap_or_unwind {
         match attrs.memory {
             MemoryEffect::None => tokens.push("memory(none)"),

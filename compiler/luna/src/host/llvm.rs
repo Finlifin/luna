@@ -4,6 +4,7 @@ mod bits;
 mod callables;
 mod cleanup;
 mod closures;
+mod control;
 mod defaults;
 mod effects;
 mod entry;
@@ -841,22 +842,12 @@ impl Emitter<'_> {
         if let Some(source) = predicate {
             self.report_predicate_failure(source)?;
         }
-        if cleanup.is_some() && self.failure_result.is_some() {
-            // A callee failure must not make successful cleanup calls appear to
-            // fail. Restore the pending failure only after this frame unwinds.
-            self.line("store i1 false, ptr @flurry_failed");
-        }
         if let Some((source, boundary)) = cleanup {
             self.cleanup_boundary(source, boundary)?;
             self.unwind_resources()?;
         }
-        if let Some(result) = self.failure_result.clone().filter(|_| cleanup.is_some()) {
-            self.line("store i1 true, ptr @flurry_failed");
-            if result == Ty::Unit {
-                self.line("ret void");
-            } else {
-                self.line(format!("ret {} zeroinitializer", result.llvm()));
-            }
+        if cleanup.is_some() && self.checked {
+            self.control_return(control::FAILURE);
         } else {
             self.line("call void @llvm.trap()");
             self.line("unreachable");
@@ -915,11 +906,8 @@ impl Emitter<'_> {
             self.store(&storage.value, value)?;
             self.cleanup_boundary(source, iir::cleanup::Boundary::Return)?;
             self.unwind_effect_frames()?;
-            self.line(format!(
-                "store ptr {}, ptr @flurry_effect_control",
-                storage.token
-            ));
-            return self.propagate_effect_control();
+            self.control_return(&storage.token);
+            return Ok(());
         }
         if let Some(source) = return_source {
             if self.cleanup.is_some_and(|scope| {
@@ -971,12 +959,7 @@ impl Emitter<'_> {
         } else if let Some(source) = self.closure_body {
             self.cleanup_boundary(source, iir::cleanup::Boundary::FunctionEnd)?;
         }
-        self.line(if value.ty == Ty::Unit {
-            "ret void".into()
-        } else {
-            format!("ret {} {}", value.ty.llvm(), value.text)
-        });
-        self.terminated = true;
+        self.machine_return(value, "null");
         Ok(())
     }
 
@@ -1445,7 +1428,7 @@ impl Emitter<'_> {
         self.branch(&head);
         self.label(&head);
         let control = if self.checked && self.loop_destinations.contains(identity) {
-            Some((self.slot(Ty::Bool).pointer, self.slot(Ty::Bool).pointer))
+            Some((self.control_token(), self.control_token()))
         } else {
             None
         };
@@ -1621,44 +1604,17 @@ impl Emitter<'_> {
         args.extend(self.effect_arguments(row, selected)?);
         let ty = return_repr(self.graph, result, self.checked)?;
         let mut call_attr_suffix = String::new();
-        let mut callee_no_trap = false;
-        if let Some(target_idx) = Self::direct_instance_index(&function.text) {
-            callee_no_trap = self
-                .graph
-                .functions
-                .get(target_idx)
-                .and_then(|f| f.behavior.as_ref())
-                .is_some_and(|b| b.no_trap_or_unwind);
-        } else if !function.text.starts_with('@')
+        if !function.text.starts_with('@')
             && let Some(cs) = self.callsite_behavior(expr.source)
+            && let Some(table) = self.attr_table.as_deref_mut()
+            && let Some(group) = table.intern_callsite(&cs.behavior)
         {
-            callee_no_trap = cs.behavior.no_trap_or_unwind;
-            if let Some(table) = self.attr_table.as_deref_mut()
-                && let Some(group) = table.intern_callsite(&cs.behavior)
-            {
-                call_attr_suffix = format!(" #{group}");
-            }
+            call_attr_suffix = format!(" #{group}");
         }
-        let call = format!(
-            "call {} {}({}){call_attr_suffix}",
-            ty.llvm(),
-            function.text,
-            args.join(", ")
-        );
         self.finish_prepared_construction(expr.source)?;
-        let value = if ty == Ty::Unit {
-            self.line(call);
-            Value::unit()
-        } else {
-            self.instruction(ty, call)
-        };
-        if self.failure_result.is_some() && !(callee_no_trap && row.is_empty()) {
-            let failed = self.instruction(Ty::Bool, "load i1, ptr @flurry_failed".into());
-            let succeeded = self.instruction(Ty::Bool, format!("xor i1 {}, true", failed.text));
-            self.guard_at(&succeeded, Some(expr.source))?;
-        }
-        if !row.is_empty() {
-            self.check_effect_control(expr.source)?;
+        let (value, ctrl) = self.machine_call(&function.text, &args, ty, &call_attr_suffix);
+        if let Some(ctrl) = ctrl {
+            self.accept_control(&ctrl, expr.source, !row.is_empty())?;
         }
         if *logical_result == Term::Primitive(P::Never) {
             self.line("unreachable");
@@ -2039,11 +1995,7 @@ impl Emitter<'_> {
                             },
                         )?;
                         self.unwind_effect_frames()?;
-                        self.line(format!(
-                            "store ptr {}, ptr @flurry_effect_control",
-                            if is_break { exit } else { again }
-                        ));
-                        self.propagate_effect_control()?;
+                        self.control_return(if is_break { &exit } else { &again });
                         return Ok(Value::unit());
                     }
                 }
@@ -2704,6 +2656,7 @@ impl Emitter<'_> {
     }
 }
 
+#[cfg(test)]
 pub(super) fn emit(
     graph: &iir::Package,
     fuel: usize,
@@ -2711,7 +2664,15 @@ pub(super) fn emit(
     schedule: Option<&iir::cleanup::Schedule>,
     entry: Option<&iir::InstanceKey>,
 ) -> Result<String, String> {
-    emit_with_result_output(graph, fuel, checked, schedule, entry, true)
+    emit_with_result_output(
+        graph,
+        fuel,
+        checked,
+        schedule,
+        entry,
+        true,
+        &Default::default(),
+    )
 }
 
 pub(super) fn emit_with_result_output(
@@ -2721,6 +2682,7 @@ pub(super) fn emit_with_result_output(
     schedule: Option<&iir::cleanup::Schedule>,
     entry: Option<&iir::InstanceKey>,
     display_result: bool,
+    attributes: &nir::program::DefinitionAttributes,
 ) -> Result<String, String> {
     if graph.roots.is_empty() {
         return Err("host pipeline requires one entry".into());
@@ -2833,6 +2795,14 @@ pub(super) fn emit_with_result_output(
         if bindings.len() != parameters.len() {
             return Err("host parameter frame mismatch".into());
         }
+        let fast = checked
+            && metadata.is_some_and(|f| {
+                graph
+                    .functions
+                    .iter()
+                    .find(|instance| std::ptr::eq(&instance.function, f))
+                    .is_some_and(control::scalar)
+            });
         let mut e = Emitter {
             graph,
             cleanup: if let (Some(f), Some(schedule)) = (metadata, schedule) {
@@ -2863,7 +2833,7 @@ pub(super) fn emit_with_result_output(
             checked,
             function: metadata,
             closure_body: closure.map(|_| body.source),
-            failure_result: checked.then(|| result.clone()),
+            failure_result: (checked && !fast).then(|| result.clone()),
             effects: vec![],
             effect_resume: None,
             native_return: None,
@@ -2903,7 +2873,7 @@ pub(super) fn emit_with_result_output(
             let destinations = effects::control_destinations(body, e.fuel)?;
             e.loop_destinations = destinations.loops;
             if destinations.returns {
-                let token = e.slot(Ty::Bool).pointer;
+                let token = e.control_token();
                 let value = e.slot(result.clone());
                 e.native_return = Some(effects::ReturnStorage { token, value });
             }
@@ -3013,9 +2983,37 @@ pub(super) fn emit_with_result_output(
             }
         }
         let base_behavior = e.current_instance().and_then(|inst| inst.behavior.clone());
+        if checked {
+            raw_inputs.push(("ptr %task".into(), None));
+        }
+        if fast {
+            // Stored and dynamically selected code pointers use the uniform ABI.
+            let inputs: Vec<_> = raw_inputs.iter().map(|(input, _)| input.as_str()).collect();
+            let arguments = inputs.join(", ");
+            let wrapper_result = control::packet(&result).llvm();
+            let ret = if result == Ty::Unit {
+                format!(
+                    "call void @{symbol}_scalar({arguments})\n  ret {wrapper_result} zeroinitializer"
+                )
+            } else {
+                format!(
+                    "%value = call {ty} @{symbol}_scalar({arguments})\n  %result = insertvalue {wrapper_result} zeroinitializer, {ty} %value, 0\n  ret {wrapper_result} %result",
+                    ty = result.llvm()
+                )
+            };
+            functions.push_str(&format!("define internal {wrapper_result} @{symbol}({arguments}) {{\nentry:\n  {ret}\n}}\n\n"));
+        }
         emitted_bodies.push(EmittedBody {
-            symbol,
-            result_llvm: result.llvm(),
+            symbol: if fast {
+                format!("{symbol}_scalar")
+            } else {
+                symbol
+            },
+            result_llvm: if checked && !fast {
+                control::packet(&result).llvm()
+            } else {
+                result.llvm()
+            },
             inputs: raw_inputs,
             prologue: e.prologue,
             body: e.body,
@@ -3023,7 +3021,7 @@ pub(super) fn emit_with_result_output(
         });
     }
     // Layer 2 machine-IR soundness pass: strip unsafe attrs on any body or transitive
-    // callee that emitted `@llvm.trap`, `@flurry_failed`, `@flurry_effect_control`, or `volatile`.
+    // callee that emitted a trap or accessed volatile memory.
     let extract_direct_callees = |text: &str| -> Vec<String> {
         let mut out = Vec::new();
         let mut rest = text;
@@ -3125,9 +3123,10 @@ pub(super) fn emit_with_result_output(
         ));
     }
     let attr_defs = attr_table.render_declarations();
-    let with_attrs = |mut module: String| -> String {
+    let finish_module = |mut module: String, fuel: &mut usize| -> Result<String, String> {
+        control::export_c_entries(graph, attributes, &mut module, checked, fuel)?;
         module.push_str(&attr_defs);
-        module
+        Ok(module)
     };
     let Term::Function { parameters, result } = &graph.functions[root].function.signature else {
         unreachable!()
@@ -3158,19 +3157,24 @@ pub(super) fn emit_with_result_output(
         ));
     }
     if checked {
-        module.push_str("@flurry_failed = internal thread_local global i1 false\n@flurry_effect_control = internal thread_local global ptr null\n\n");
-        module.push_str("define internal void @flurry_check_failure() {\nentry:\n  %failed = load i1, ptr @flurry_failed\n  br i1 %failed, label %bad, label %good\nbad:\n  call void @llvm.trap()\n  unreachable\ngood:\n  ret void\n}\n\n");
-        let (call, ret) = if never_returns {
-            (format!("call void @flurry_{root}()"), "unreachable".into())
+        module.push_str(include_str!("llvm/task_context.ll"));
+        let packet = control::packet(&result).llvm();
+        let ret = if never_returns {
+            "unreachable".into()
         } else if result == Ty::Unit {
-            (format!("call void @flurry_{root}()"), "ret void".into())
+            "ret void".into()
         } else {
-            (
-                format!("%value = call {} @flurry_{root}()", result.llvm()),
-                format!("ret {} %value", result.llvm()),
+            format!(
+                "%value = extractvalue {packet} %result, 0\n  ret {} %value",
+                result.llvm()
             )
         };
-        module.push_str(&format!("define internal {} @flurry_entry() {{\nentry:\n  %outer_return = load ptr, ptr @flurry_effect_control\n  store ptr null, ptr @flurry_effect_control\n  store i1 false, ptr @flurry_failed\n  {call}\n  call void @flurry_check_failure()\n  %pending_return = load ptr, ptr @flurry_effect_control\n  %settled = icmp eq ptr %pending_return, null\n  br i1 %settled, label %complete, label %unhandled\nunhandled:\n  call void @llvm.trap()\n  unreachable\ncomplete:\n  store ptr %outer_return, ptr @flurry_effect_control\n  {ret}\n}}\n\n", result.llvm()));
+        // Scheduling is a cancellation point before the root owns arguments or locals.
+        module.push_str(&format!(
+            "define {packet} @flurry_task_entry(ptr nonnull %task) {{\nentry:\n  %ctrl = call ptr @flurry_task_poll(ptr %task)\n  %ready = icmp eq ptr %ctrl, null\n  br i1 %ready, label %start, label %cancel, {}\ncancel:\n  %stopped = insertvalue {packet} zeroinitializer, ptr %ctrl, 1\n  ret {packet} %stopped\nstart:\n  %result = call {packet} @flurry_{root}(ptr %task)\n  ret {packet} %result\n}}\n\n",
+            control::LIKELY
+        ));
+        module.push_str(&format!("define internal {} @flurry_entry() {{\nentry:\n  %task = alloca %flurry.task\n  call void @flurry_task_init(ptr %task, ptr null)\n  %result = call {packet} @flurry_task_entry(ptr %task)\n  %ctrl = extractvalue {packet} %result, 1\n  %ok = icmp eq ptr %ctrl, null\n  br i1 %ok, label %complete, label %unhandled, {}\nunhandled:\n  call void @llvm.trap()\n  unreachable\ncomplete:\n  {ret}\n}}\n\n", result.llvm(), control::LIKELY));
     }
     for declaration in declarations {
         module.push_str(&declaration);
@@ -3186,7 +3190,7 @@ pub(super) fn emit_with_result_output(
         module.push_str(&format!(
             "define i32 @main() {{\nentry:\n  call void @{target}()\n  unreachable\n}}\n"
         ));
-        return Ok(with_attrs(module));
+        return finish_module(module, &mut fuel);
     }
     if !display_result {
         if !checked || result != Ty::Unit {
@@ -3196,7 +3200,7 @@ pub(super) fn emit_with_result_output(
         module.push_str(
             "define i32 @main() {\nentry:\n  call void @flurry_entry()\n  ret i32 0\n}\n",
         );
-        return Ok(with_attrs(module));
+        return finish_module(module, &mut fuel);
     }
     if matches!(
         result,
@@ -3221,7 +3225,7 @@ pub(super) fn emit_with_result_output(
             checked,
             &mut fuel,
         )?);
-        return Ok(with_attrs(module));
+        return finish_module(module, &mut fuel);
     }
     if matches!(result, Ty::String | Ty::Symbol) {
         let printer = if result == Ty::Symbol {
@@ -3237,7 +3241,7 @@ pub(super) fn emit_with_result_output(
             format!("flurry_{root}")
         };
         module.push_str(&format!("define i32 @main() {{\nentry:\n  %value = call {{ ptr, i64 }} @{target}()\n  call void @{printer}({{ ptr, i64 }} %value)\n  call i32 @flurry_output_char(i32 10)\n  %status = call i32 @flurry_output_finish()\n  ret i32 %status\n}}\n"));
-        return Ok(with_attrs(module));
+        return finish_module(module, &mut fuel);
     }
     let (format, body) = match result {
         Ty::Unit => (
@@ -3377,7 +3381,7 @@ pub(super) fn emit_with_result_output(
     module.push_str(&format!(
         "define i32 @main() {{\nentry:\n{body}  call void @flurry_output_record(i32 %output_write)\n  %status = call i32 @flurry_output_finish()\n  ret i32 %status\n}}\n"
     ));
-    Ok(with_attrs(module))
+    finish_module(module, &mut fuel)
 }
 
 fn literal_value(literal: &Literal, ty: Ty) -> Result<Value, String> {

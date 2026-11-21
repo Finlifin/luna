@@ -77,6 +77,7 @@ pub fn llvm_ir_in_package(
 /// The constructor is private so an empty or edited schedule cannot bypass
 /// resource admission. Inspection uses the existing S-expression display.
 pub struct Prepared {
+    attributes: nir::program::DefinitionAttributes,
     executable: crate::cleanup::Executable,
 }
 
@@ -140,7 +141,10 @@ fn prepare_declaration_with_protocols(
     )
     .map_err(|e| format!("cannot prepare resource-checked native compilation: {e}"))?;
     executable.graph.validate(&mut steps)?;
-    Ok(Prepared { executable })
+    Ok(Prepared {
+        executable,
+        attributes: package.definition_attributes.clone(),
+    })
 }
 
 /// Lower exactly the graph/schedule pair produced by checked preparation.
@@ -165,6 +169,7 @@ fn llvm_ir_prepared_with_output(
         Some(&executable.schedule),
         Some(&executable.entry),
         display_result,
+        &prepared.attributes,
     )
 }
 
@@ -219,7 +224,15 @@ pub(crate) fn llvm_ir_declaration(
     graph.validate(&mut validation_steps)?;
     let mut cert_fuel = steps.max(250_000).min(2_000_000);
     elaboration::verification::behavior::certify_iir_package(&mut graph, None, &mut cert_fuel);
-    llvm::emit(&graph, steps, false, None, None)
+    llvm::emit_with_result_output(
+        &graph,
+        steps,
+        false,
+        None,
+        None,
+        true,
+        &package.definition_attributes,
+    )
 }
 
 /// Generate and verify LLVM, emit a native object, then link a complete executable.

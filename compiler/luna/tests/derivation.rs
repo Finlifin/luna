@@ -199,13 +199,10 @@ fn generated_prefix_attributes_preserve_override_order() {
 
 #[test]
 fn generated_attributes_still_require_an_implemented_consumer() {
-    let source = format!(
-        "mod attrs {{{}}} trait Flag {{fn flag()->bool;}} derive fn enabled for Flag {{^attrs.abi(.c) fn flag()->bool {{true}}}} struct Subject {{}} derive Flag.use(enabled) for Subject;",
-        include!("support/attrs_source.rs")
-    );
-    let error = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
+    let source = "trait Flag {fn flag()->bool;} derive fn enabled for Flag {^{ unimplemented_property: true } fn flag()->bool {true}} struct Subject {} derive Flag.use(enabled) for Subject;";
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
     assert!(
-        error.contains("definition attribute or modifier `abi`"),
+        error.contains("definition attribute or modifier `unimplemented_property`"),
         "{error}"
     );
 }

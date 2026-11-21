@@ -28,7 +28,7 @@ fn abi_constructor_preserves_symbol_and_object_entry_type() {
     };
     assert_eq!(object.entries().len(), 1);
     let entry = &object.entries()[0];
-    assert_eq!(entry.key(), Some("abi"));
+    assert_eq!(entry.key(), Some("__flurry_abi"));
     assert_eq!(entry.value().ty, Term::Primitive(Primitive::Symbol));
     assert_eq!(entry.value().value, Value::Symbol("c".into()));
 }
@@ -46,7 +46,7 @@ fn abi_constructor_rejects_wrong_domain_and_runtime_transport() {
 }
 
 #[test]
-fn repository_attribute_package_inspects_abi_without_claiming_abi_lowering() {
+fn repository_attribute_package_preserves_abi_through_nir() {
     let directory = std::env::temp_dir().join(format!("luna-library-attrs-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
@@ -82,7 +82,7 @@ fn repository_attribute_package_inspects_abi_without_claiming_abi_lowering() {
     );
     let dump = String::from_utf8_lossy(&output.stdout);
     assert_eq!(dump.matches("(evaluated-attribute ").count(), 1, "{dump}");
-    assert!(dump.contains("(property \"abi\")"), "{dump}");
+    assert!(dump.contains("(property \"__flurry_abi\")"), "{dump}");
     assert!(dump.contains("(symbol \"c\")"), "{dump}");
 
     let mut merged = arguments;
@@ -103,13 +103,20 @@ fn repository_attribute_package_inspects_abi_without_claiming_abi_lowering() {
         1,
         "{selected}"
     );
-    assert!(selected.contains("(key \"abi\") (entry 0)"), "{selected}");
+    assert!(
+        selected.contains("(key \"__flurry_abi\") (entry 0)"),
+        "{selected}"
+    );
 
     let mut ordinary = arguments;
     *ordinary.last_mut().unwrap() = "nir";
-    let rejected = run(&ordinary);
-    assert_eq!(rejected.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("attribute"));
+    let nir = run(&ordinary);
+    assert!(
+        nir.status.success(),
+        "{}",
+        String::from_utf8_lossy(&nir.stderr)
+    );
+    assert!(String::from_utf8_lossy(&nir.stdout).contains("__flurry_abi"));
     std::fs::remove_dir_all(directory).unwrap();
 }
 
@@ -261,7 +268,7 @@ fn sysroot_attribute_constructor_returns_the_public_meta_domain() {
     };
     assert_eq!(object.entries().len(), 1);
     let entry = &object.entries()[0];
-    assert_eq!(entry.key(), Some("abi"));
+    assert_eq!(entry.key(), Some("__flurry_abi"));
     assert_eq!(entry.value().ty, Term::Primitive(Primitive::Symbol));
     assert_eq!(entry.value().value, Value::Symbol("c".into()));
 }

@@ -2,7 +2,7 @@
 
 源码目录与待实现领域见 [六包结构](../STRUCTURE.md)。
 
-`abi(name: Symbol) -> Object` 是普通的 `pure comptime fn`，返回含 `abi`
+`abi(name: Symbol) -> Object` 是普通的 `pure comptime fn`，返回含 `__flurry_abi`
 属性的 Object，并保留 Symbol 值及其类型。`comptime_phase` 是包含
 `comptime_phase: true` 的 Object 常量，条目保留 Bool 类型。
 `metadata(data: Object) -> Object` 将用户自定义元数据包装为 `{ metadata: data }`。
@@ -78,4 +78,4 @@ comptime fn run() -> bool {
 单个 comptime 实现、泛型主体及该相可用的默认方法已有源码调用路径。
 同一关系的普通与 comptime 源码实现支持方法和关联项的合并，包括泛型参数改名。
 关联项按成员 phase 检查；共享值必须一致，泛型初始化程序目前要求替换参数后的
-结构一致。`derivation_default`、`packed`、`direct_passing` 与 `metadata` 已接通对应编译器消费者；`abi` 降码、`__flurry_packed_mode`（`attrs.packed.{byte, bit}`）与 `stable_since`（`__flurry_stable_since`）消费者仍未接通，普通 NIR 编译会明确拒绝 `abi`、`__flurry_packed_mode`、`__flurry_stable_since` 及其他未消费属性。
+结构一致。`derivation_default`、`packed`、`direct_passing` 与 `metadata` 已接通对应编译器消费者。`attrs.abi(.c)` 指定 runtime 函数的 C 调用约定，host 对支持的签名生成入口，并在控制字越过边界时 trap。`__flurry_packed_mode`（`attrs.packed.{byte, bit}`）与 `stable_since`（`__flurry_stable_since`）消费者仍未接通，普通 NIR 编译会明确拒绝 `__flurry_packed_mode`、`__flurry_stable_since` 及其他未消费属性。

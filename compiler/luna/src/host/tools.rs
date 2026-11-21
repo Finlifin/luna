@@ -576,9 +576,17 @@ impl Toolchain {
                 }
             }
         }
+        let split = match self.optimization {
+            OptimizationLevel::O2 | OptimizationLevel::O3 => ",hotcoldsplit",
+            _ => "",
+        };
         let mut args = vec![
             format!("-mtriple={}", target.triple).into(),
-            format!("-passes=default<{}>", self.optimization.name()).into(),
+            format!(
+                "-passes=default<{}>,deadargelim{split}",
+                self.optimization.name()
+            )
+            .into(),
             "-verify-each".into(),
             source.as_os_str().to_owned(),
             "-o".into(),

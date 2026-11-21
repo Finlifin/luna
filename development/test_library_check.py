@@ -22,10 +22,10 @@ class LibraryCheckTests(unittest.TestCase):
                 count = {'native-resources': 4, 'native-comparison': 6, 'native-math': 13, 'sysroot-qualified-methods': 1, 'native-option': 1, 'native-result': 1, 'native-tuple': 4, 'native-conversion': 3, 'sysroot-iteration': 30, 'sysroot-fallible-iteration': 13, 'sysroot-resources': 3, 'sysroot-patterns': 3, 'sysroot-meta-patterns': 3, 'sysroot-hash': 3, 'sysroot-meta': 1, 'sysroot-builders': 6, 'sysroot-enum-builder': 3, 'sysroot-object-enum-builder': 1, 'sysroot-symbol-enum': 2, 'sysroot-fixed-enum': 2, 'sysroot-build-mode': 1, 'sysroot-build-target': 2}
                 text = '(bool false)' if wrong_value else '(bool true)'
                 if label in ('attributes', 'merged-attributes'):
-                    text = '(evaluated-attribute (property "abi") (symbol "c"))'
+                    text = '(evaluated-attribute (property "__flurry_abi") (symbol "c"))'
                     if label == 'merged-attributes':
                         text = (f'(attribute-inspection (evaluated {text}) '
-                                '(selected (merged-attributes (key "abi") (entry 0))))')
+                                '(selected (merged-attributes (key "__flurry_abi") (entry 0))))')
                     if native_output is not None and label == native_stage:
                         text = native_output
                 if label in count:
@@ -119,7 +119,7 @@ class LibraryCheckTests(unittest.TestCase):
                 self.assertEqual(summary['stages'][0]['value_matches'], not wrong_value)
 
     def test_attribute_stages_require_evaluation_and_merge_evidence(self):
-        raw = '(evaluated-attribute (property "abi") (symbol "c"))'
+        raw = '(evaluated-attribute (property "__flurry_abi") (symbol "c"))'
         for label, output in [('attributes', ''), ('attributes', raw + raw),
                               ('attributes', raw.replace('"c"', '"other"')),
                               ('merged-attributes', raw),

@@ -635,7 +635,7 @@ fn closure_failure_unwinds_persistent_capture_state_once() {
                         .unwrap();
                     let (module, _) = ir.split_once("define i32 @main()").unwrap();
                     let ir = format!(
-                        "{module}\n@observed=internal global i32 0\ndefine i32 @main() {{\nentry:\n call void @flurry_{trial}(ptr @observed,i1 {take},i1 {passed})\n %count=load i32,ptr @observed\n %failed=load i1,ptr @flurry_failed\n %a=icmp eq i32 %count,{expected}\n %b=icmp eq i1 %failed,{}\n %ok=and i1 %a,%b\n %bad=xor i1 %ok,true\n %code=zext i1 %bad to i32\n ret i32 %code\n}}",
+                        "{module}\n@observed=internal global i32 0\ndefine i32 @main() {{\nentry:\n %task = alloca %flurry.task\n call void @flurry_task_init(ptr %task, ptr null)\n %r = call {{ {{}}, ptr }} @flurry_{trial}(ptr @observed,i1 {take},i1 {passed},ptr %task)\n %ctrl = extractvalue {{ {{}}, ptr }} %r, 1\n %count=load i32,ptr @observed\n %failed=icmp eq ptr %ctrl, inttoptr (i32 1 to ptr)\n %a=icmp eq i32 %count,{expected}\n %b=icmp eq i1 %failed,{}\n %ok=and i1 %a,%b\n %bad=xor i1 %ok,true\n %code=zext i1 %bad to i32\n ret i32 %code\n}}",
                         !passed
                     );
                     for optimization in [OptimizationLevel::O0, OptimizationLevel::O3] {
@@ -938,7 +938,7 @@ fn interface_exit_cleanup_owns_only_the_pending_result() {
             // Replace only the development entry adapter to inspect memory and
             // failure state after the generated function has unwound.
             let ir = format!(
-                "{module}\n@observed = internal global i32 0\ndefine i32 @main() {{\nentry:\n %result = call ptr @flurry_{trial}(ptr @observed)\n %count = load i32, ptr @observed\n %failed = load i1, ptr @flurry_failed\n %a = icmp eq i32 %count, {}\n %b = icmp eq i1 %failed, {}\n %ok = and i1 %a, %b\n %bad = xor i1 %ok, true\n %status = zext i1 %bad to i32\n ret i32 %status\n}}\n",
+                "{module}\n@observed = internal global i32 0\ndefine i32 @main() {{\nentry:\n %task = alloca %flurry.task\n call void @flurry_task_init(ptr %task, ptr null)\n %r = call {{ ptr, ptr }} @flurry_{trial}(ptr @observed,ptr %task)\n %ctrl = extractvalue {{ ptr, ptr }} %r, 1\n %count = load i32, ptr @observed\n %failed = icmp eq ptr %ctrl, inttoptr (i32 1 to ptr)\n %a = icmp eq i32 %count, {}\n %b = icmp eq i1 %failed, {}\n %ok = and i1 %a, %b\n %bad = xor i1 %ok, true\n %status = zext i1 %bad to i32\n ret i32 %status\n}}\n",
                 drops, fails
             );
             for optimization in [OptimizationLevel::O0, OptimizationLevel::O3] {
@@ -1528,9 +1528,9 @@ fn specialized_call_failures_preserve_prepared_and_callee_cleanup_order() {
                     @observed = internal global i32 0
                     define i32 @main() {{
                     entry:
-                        call void @flurry_{trial}(ptr @observed, i1 {passed})
+                        %task = alloca %flurry.task\n call void @flurry_task_init(ptr %task, ptr null)\n %r = call {{ {{}}, ptr }} @flurry_{trial}(ptr @observed, i1 {passed},ptr %task)\n %ctrl = extractvalue {{ {{}}, ptr }} %r, 1
                         %count = load i32, ptr @observed
-                        %failed = load i1, ptr @flurry_failed
+                        %failed = icmp eq ptr %ctrl, inttoptr (i32 1 to ptr)
                         %a = icmp eq i32 %count, {expected}
                         %b = icmp eq i1 %failed, {}
                         %ok = and i1 %a, %b

@@ -555,7 +555,10 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
                         },
                     )
                     .unwrap();
-                emitter.line(format!("call void @flurry_0(ptr {})", slot.pointer));
+                emitter.line(format!(
+                    "call {{ {{}}, ptr }} @flurry_0(ptr {}, ptr %task)",
+                    slot.pointer
+                ));
                 emitter.line("ret i32 0");
             }
         } else {
@@ -575,7 +578,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
             .collect::<Vec<_>>()
             .join("\n");
         let ir = format!(
-            "{declarations}\ndeclare void @llvm.trap()\ndeclare i64 @write(i32, ptr, i64)\ndefine void @flurry_0(ptr %p) {{\nentry:\n  %n = call i64 @write(i32 1, ptr %p, i64 1)\n  ret void\n}}\ndefine i32 @main() {{\nentry:\n{}{}}}\n",
+            "{declarations}\ndeclare void @llvm.trap()\ndeclare i64 @write(i32, ptr, i64)\ndefine {{ {{}}, ptr }} @flurry_0(ptr %p, ptr %task) {{\nentry:\n  %n = call i64 @write(i32 1, ptr %p, i64 1)\n  ret {{ {{}}, ptr }} zeroinitializer\n}}\ndefine i32 @main() {{\nentry:\n  %task = alloca {{ i8, ptr }}\n{}{}}}\n",
             emitter.prologue, emitter.body
         );
         for optimization in [

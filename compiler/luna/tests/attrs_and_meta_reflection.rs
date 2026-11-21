@@ -3,7 +3,7 @@
 //! - packed struct layout consumer (`.packed` / `attrs.layout.packed`), LLVM `<{...}>` / align 1,
 //!   native execution at O0 and O3 (including `Vec<Packed>`), and aligned field pointer rejection
 //! - `attrs.effects.direct_passing` ABI lowering, aliases/overrides, and invalid target checks
-//! - `attrs.metadata`, `meta.attrs_of`, `Type.attrs`, `Type.is_packed`, cycle rejection, and `abi` rejection
+//! - `attrs.metadata`, `meta.attrs_of`, `Type.attrs`, `Type.is_packed`, cycle rejection, and C ABI metadata
 //! - `meta.Object.{is_empty, has_key, keys, merge}` and `Symbol.{byte_length, byte}`
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
@@ -601,7 +601,7 @@ fn direct_passing_effect_attribute_aliases_overrides_and_validation() {
 }
 
 #[test]
-fn metadata_attrs_of_reflection_cycle_and_abi_nir_rejection() {
+fn metadata_attrs_of_reflection_cycle_and_c_abi() {
     let source = r#"
         ^attrs.metadata({ version: 2, author: .luna })
         ^attrs.layout.packed
@@ -660,11 +660,7 @@ fn metadata_attrs_of_reflection_cycle_and_abi_nir_rejection() {
         fn foreign_c() -> u64 { 1 }
         fn run() -> bool { true }
     "#;
-    let err = support::compile(abi_nir).unwrap_err();
-    assert!(
-        err.contains("elaboration is not implemented for definition attribute or modifier `abi`"),
-        "{err}"
-    );
+    support::compile(abi_nir).unwrap();
 }
 
 #[test]

@@ -99,7 +99,7 @@ fn identity(value: u32) -> u32 {
 
 ABI 属性附着在 identity 的函数定义上。
 
-当前实现只完成该属性形式的解析；通用属性的名称解析、comptime Object 求值，以及函数 ABI 信息进入类型与调用检查尚未接通。因此带此属性的函数会在生成已检查 NIR 前被拒绝，包括直接调用、取函数值、inline 函数和 trait 成员；不会退回默认 ABI 来接受程序。此限制不改变上述语言契约。
+`--emit attributes` 可检查该属性的名称解析与 comptime Object 求值结果。LLVM host 可为经过资源检查、进入具体实例图的 `^attrs.abi(.c)` 函数生成 C 入口。该入口在栈上建立任务上下文，正常时返回声明结果，发生未处理控制转移时 trap。Flurry 代码保留自己的函数值入口。可交付的 C 表示及控制字约定见[效应 ABI](../algebraic-effect-and-delimited-continuation/effect-abi.md)。
 
 ### 名字绑定与源码次序
 
