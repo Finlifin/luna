@@ -8,7 +8,7 @@ enum Entry {
 }
 struct BoundBody {
     slots: Arc<BTreeSet<usize>>,
-    binding: nir::FunctionInputBinding,
+    replacements: Vec<(Term, bool)>,
     body: Arc<Expr>,
 }
 #[derive(Default)]
@@ -135,18 +135,30 @@ impl Interpreter<'_> {
             None => None,
         };
         let scope = completed.as_ref().unwrap_or(scope);
-        // Rewriting depends only on this checked binding and the immutable
-        // source body. Equality covers all replacements and slot refinements,
-        // not just the resulting signature or the positions declared as Type.
+        // Admission handles the complete interface on every invocation. Only
+        // replacements read by this source body can affect its rewritten code.
         let persistent =
             self.abstract_type_parameters.is_empty() && self.abstract_value_parameters.is_empty();
-        if let Some(Entry::Dependent(previous)) = &cached {
-            if persistent {
-                self.charge_input_binding(scope, body.source)?;
-                self.charge_input_binding(&previous.binding, body.source)?;
-                if previous.binding == *scope {
-                    return Ok((previous.body.clone(), false));
+        if persistent && let Some(Entry::Dependent(previous)) = &cached {
+            let mut matches = true;
+            for (&slot, (old, old_refinement)) in previous.slots.iter().zip(&previous.replacements)
+            {
+                self.tick(Some(body.source))?;
+                let Some((current, refined)) = scope.slot_replacement(slot) else {
+                    matches = false;
+                    break;
+                };
+                self.charge_copy_work(Some(body.source), |fuel| {
+                    nir::copy_budget::charge_term_copy(current, fuel, 128)?;
+                    nir::copy_budget::charge_term_copy(old, fuel, 128)
+                })?;
+                if refined != *old_refinement || current != old {
+                    matches = false;
+                    break;
                 }
+            }
+            if matches {
+                return Ok((previous.body.clone(), false));
             }
         }
         if cached.is_some() {
@@ -164,21 +176,27 @@ impl Interpreter<'_> {
             let before = self.budget.steps;
             nir::copy_budget::charge_type_rewrite(&prepared, &mut self.budget.steps)
                 .map_err(|_| self.failure(ErrorKind::StepsExhausted, Some(body.source)))?;
-            if dependent {
-                self.charge_input_binding(scope, body.source)?;
-            }
-            let weight = (before - self.budget.steps)
-                .saturating_add(1)
-                .saturating_add(slots.as_ref().map_or(0, |s| s.len() as u64));
             let entry = if let Some(slots) = slots {
+                self.charge_preparation(slots.len())?;
+                let mut replacements = Vec::with_capacity(slots.len());
+                for &slot in slots.iter() {
+                    let (value, refined) = scope
+                        .slot_replacement(slot)
+                        .ok_or_else(|| self.failure(ErrorKind::Type, Some(body.source)))?;
+                    self.charge_copy_work(Some(body.source), |fuel| {
+                        nir::copy_budget::charge_term_copy(value, fuel, 128)
+                    })?;
+                    replacements.push((value.clone(), refined));
+                }
                 Entry::Dependent(Arc::new(BoundBody {
                     slots,
-                    binding: scope.clone(),
+                    replacements,
                     body: prepared.clone(),
                 }))
             } else {
                 Entry::Prepared(prepared.clone())
             };
+            let weight = (before - self.budget.steps).saturating_add(1);
             match key {
                 SourceKey::Named(origin) => self.input_body_cache.insert(origin, entry, weight),
                 SourceKey::Owned(body) => self.input_body_cache.insert_owned(body, entry, weight),
@@ -221,19 +239,6 @@ impl Interpreter<'_> {
         }
         self.query_admission(Some(source), |_, fuel| {
             Ok(Some(scope.bind_retained_bounded(supplied, fuel)?))
-        })
-    }
-
-    fn charge_input_binding(
-        &mut self,
-        binding: &nir::FunctionInputBinding,
-        source: SourceRange,
-    ) -> Result<(), Error> {
-        self.charge_copy_work(Some(source), |fuel| {
-            for term in binding.terms() {
-                nir::copy_budget::charge_type_substitution(term, &[], &[], fuel)?;
-            }
-            Ok(())
         })
     }
 }
@@ -757,6 +762,104 @@ mod tests {
     }
 
     #[test]
+    fn a_signature_only_type_checks_each_call_without_invalidating_body_code() {
+        let type_slot = nir::Parameter {
+            sort: nir::Sort::Type,
+            ty: Term::Primitive(Primitive::Type),
+        };
+        let bound = |index| Term::Bound {
+            depth: 0,
+            index,
+            sort: nir::Sort::Type,
+        };
+        let mut package = guarded_type_body(0);
+        let function = &mut package.functions[0];
+        function.interface.signature = Term::Function {
+            parameters: vec![
+                type_slot.clone(),
+                nir::Parameter {
+                    sort: nir::Sort::Runtime,
+                    ty: bound(0),
+                },
+                type_slot,
+            ],
+            result: Box::new(Term::Primitive(Primitive::Type)),
+        };
+        function.parameters.push(LocalId { owner: 1, index: 2 });
+        function.interface.preconditions.clear();
+        function.body = body(bound(2));
+        for tree in [false, true] {
+            let mut vm = if tree {
+                Interpreter::for_comptime_tree(&package, Budget::default())
+            } else {
+                Interpreter::for_comptime(&package, Budget::default())
+            }
+            .unwrap();
+            let mut previous = None;
+            for (domain, value, result, reused) in [
+                (Primitive::Bool, Value::Bool(false), Primitive::U8, false),
+                (Primitive::Char, Value::Char('a'), Primitive::U8, true),
+                (Primitive::Char, Value::Char('b'), Primitive::Char, false),
+            ] {
+                let result = Value::Type(Term::Primitive(result));
+                let arguments = vec![Value::Type(Term::Primitive(domain)), value, result.clone()];
+                assert_eq!(vm.invoke(id(1), arguments).unwrap(), result);
+                let (Entry::Dependent(entry), _) = &vm.input_body_cache.entries[&named(1)] else {
+                    panic!("expected a body specialized by the result Type operand");
+                };
+                assert_eq!(
+                    previous
+                        .as_ref()
+                        .is_some_and(|old| Arc::ptr_eq(old, &entry.body)),
+                    reused
+                );
+                previous = Some(entry.body.clone());
+            }
+            let wrong = vec![
+                Value::Type(Term::Primitive(Primitive::Char)),
+                Value::Bool(false),
+                Value::Type(Term::Primitive(Primitive::Char)),
+            ];
+            assert!(vm.invoke(id(1), wrong).is_err());
+        }
+    }
+
+    #[test]
+    fn warm_body_lookup_cost_is_independent_of_an_unread_type_operand() {
+        let parameter = nir::Parameter {
+            sort: nir::Sort::Type,
+            ty: Term::Primitive(Primitive::Type),
+        };
+        let signature = Term::Function {
+            parameters: vec![parameter; 2],
+            result: Box::new(Term::Primitive(Primitive::Type)),
+        };
+        let observed = Term::Primitive(Primitive::Char);
+        let bind = |other| {
+            signature
+                .prepare_function_inputs(&[Some(other), Some(observed.clone())])
+                .unwrap()
+        };
+        let small = bind(Term::Primitive(Primitive::Bool));
+        let large = bind(Term::Tuple(vec![observed.clone(); 512]));
+        let source = body(Term::Bound {
+            depth: 0,
+            index: 1,
+            sort: nir::Sort::Type,
+        });
+        let package = Package::default();
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let (cold, _) = vm.prepare_input_body(&source, &small, named(1)).unwrap();
+        let before = vm.remaining_steps();
+        vm.prepare_input_body(&source, &small, named(1)).unwrap();
+        let allowance = before - vm.remaining_steps();
+        vm.budget.steps = allowance;
+        let (same, _) = vm.prepare_input_body(&source, &large, named(1)).unwrap();
+        assert!(Arc::ptr_eq(&cold, &same));
+        assert_eq!(vm.remaining_steps(), 0);
+    }
+
+    #[test]
     fn only_body_type_uses_join_the_binding_on_cold_and_warm_calls() {
         let source = SourceRange { start: 1, end: 2 };
         let binding = |index| LocalId { owner: 1, index };
@@ -815,8 +918,8 @@ mod tests {
                 let (Entry::Dependent(bound), _) = &vm.input_body_cache.entries[&named(1)] else {
                     panic!("missing dependent body")
                 };
-                assert_eq!(bound.binding.rebind(&term(0)).unwrap(), term(0));
-                assert_eq!(bound.binding.rebind(&term(1)).unwrap(), Term::Bool(second));
+                assert_eq!(*bound.slots, BTreeSet::from([1]));
+                assert_eq!(bound.replacements[0].0, Term::Bool(second));
                 if let Some(previous) = &previous {
                     assert_eq!(Arc::ptr_eq(previous, &bound.body), !second);
                 }
@@ -915,7 +1018,8 @@ mod tests {
                 let (Entry::Dependent(entry), _) = &vm.input_body_cache.entries[&named(1)] else {
                     panic!("expected specialization by the second Type");
                 };
-                assert_eq!(entry.binding.rebind(&observed).unwrap(), element);
+                assert_eq!(*entry.slots, BTreeSet::from([1]));
+                assert_eq!(entry.replacements[0].0, element);
                 if let Some(previous) = &previous {
                     assert_eq!(Arc::ptr_eq(previous, &entry.body), shared);
                 }

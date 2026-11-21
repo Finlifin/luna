@@ -300,6 +300,15 @@ impl FunctionInputBinding {
         std::iter::once(&self.signature).chain(&self.replacements)
     }
 
+    /// Replacement consulted by `rebind` at an original telescope slot, and
+    /// whether a comptime-value reference there refines to a Type reference.
+    pub fn slot_replacement(&self, slot: usize) -> Option<(&Term, bool)> {
+        Some((
+            self.replacements.get(slot)?,
+            self.type_slots.contains(&slot),
+        ))
+    }
+
     /// Supply already admitted terms for retained inputs by original slot.
     /// The resulting binding still rewrites annotations of the original body.
     pub fn bind_retained_bounded(
