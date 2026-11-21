@@ -1708,7 +1708,7 @@ impl Checker<'_, '_> {
         resolved_defaults: &mut BTreeMap<OwnerId, OwnerId>,
         validated_deriver_attrs: &mut BTreeSet<OwnerId>,
     ) -> Result<(), Error> {
-        let evaluated = self.evaluate_attributes_filtered(|attribute| {
+        let (evaluated, _) = self.evaluate_attributes_filtered(|attribute| {
             let hir::AttributeTarget::Definition(owner) = attribute.target else {
                 return false;
             };

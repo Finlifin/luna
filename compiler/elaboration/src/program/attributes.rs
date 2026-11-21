@@ -1,5 +1,6 @@
 //! Evaluate metadata once and apply supported phase properties before interfaces.
 use super::*;
+use std::sync::Arc;
 mod demands;
 pub(super) use demands::{Demands, index_suppliers};
 mod derivation;
@@ -76,7 +77,7 @@ impl Checker<'_, '_> {
         {
             return Ok(Vec::new());
         }
-        let attributes = self.evaluate_attributes()?;
+        let (attributes, demanded) = self.evaluate_attributes_filtered(|_| true)?;
         let mut budget = comptime_runtime::Budget {
             steps: usize::try_from(self.required_steps).unwrap_or(usize::MAX),
             ..Default::default()
@@ -109,7 +110,7 @@ impl Checker<'_, '_> {
             let frozen = if inspect_only {
                 None
             } else {
-                Some(self.freeze_merged_attributes(&selected, &mut budget)?)
+                Some(self.publish_definition_attributes(&selected, demanded, &mut budget)?)
             };
             Ok((phases, packed, direct_passing, frozen))
         })();
@@ -161,59 +162,79 @@ impl Checker<'_, '_> {
         Ok(attributes)
     }
 
-    fn freeze_merged_attributes(
+    fn publish_definition_attributes(
         &self,
         selected: &[MergedTarget<'_>],
+        mut demanded: demands::FrozenSuppliers,
         budget: &mut comptime_runtime::Budget,
-    ) -> Result<BTreeMap<DeclarationId, Term>, MergeFailure> {
-        let mut frozen_map = BTreeMap::new();
+    ) -> Result<BTreeMap<DeclarationId, Arc<Term>>, MergeFailure> {
+        let mut published = BTreeMap::new();
         for target in selected {
             let hir::AttributeTarget::Definition(owner) = target.target else {
                 continue;
             };
-            let mut entries = Vec::new();
-            for (key, item) in target.iter() {
-                budget
-                    .consume(key.len().saturating_add(4))
-                    .map_err(|e| MergeFailure {
-                        source: item.origin.source,
-                        message: e.to_string(),
-                    })?;
-                let mut term_fuel = budget.steps;
-                nir::type_computations::charge_term(&item.value.ty, &mut term_fuel).map_err(
-                    |e| MergeFailure {
-                        source: item.origin.source,
-                        message: e.to_string(),
-                    },
-                )?;
-                budget.steps = term_fuel;
-                let domain = item.value.ty.clone();
-                let frozen = self
-                    .observe_normal_input_in(item.value, 0, budget, &BTreeMap::new())
-                    .map_err(|failure| MergeFailure {
-                        source: item.origin.source,
-                        message: format!(
-                            "attribute `{key}` requires a freezeable comptime value: {failure}"
-                        ),
-                    })?;
-                entries.push(nir::objects::entry(Some(key), domain, frozen));
+            let id = declaration(self.package, &self.package_identities, owner);
+            if !demanded.is_empty() {
+                let work = (usize::BITS - demanded.len().leading_zeros()) as usize + 1;
+                budget.consume(work).map_err(|e| MergeFailure {
+                    source: source(
+                        self.package
+                            .item(owner)
+                            .expect("checked attribute owner")
+                            .span,
+                    ),
+                    message: e.to_string(),
+                })?;
             }
-            if !entries.is_empty() {
-                let id = declaration(self.package, &self.package_identities, owner);
-                frozen_map.insert(id, nir::objects::value(entries));
+            let object = if let Some(value) = demanded.remove(&id) {
+                value
+            } else {
+                self.freeze_attribute_object(target, budget)?.map(Arc::new)
+            };
+            if let Some(value) = object {
+                published.insert(id, value);
             }
         }
-        Ok(frozen_map)
+        Ok(published)
     }
 
-    pub(super) fn evaluate_attributes(&mut self) -> Result<Vec<EvaluatedAttribute>, Error> {
-        self.evaluate_attributes_filtered(|_| true)
+    fn freeze_attribute_object(
+        &self,
+        target: &MergedTarget<'_>,
+        budget: &mut comptime_runtime::Budget,
+    ) -> Result<Option<Term>, MergeFailure> {
+        let mut entries = Vec::new();
+        for (key, item) in target.iter() {
+            budget
+                .consume(key.len().saturating_add(4))
+                .map_err(|e| MergeFailure {
+                    source: item.origin.source,
+                    message: e.to_string(),
+                })?;
+            nir::type_computations::charge_term(&item.value.ty, &mut budget.steps).map_err(
+                |e| MergeFailure {
+                    source: item.origin.source,
+                    message: e.to_string(),
+                },
+            )?;
+            let domain = item.value.ty.clone();
+            let frozen = self
+                .observe_normal_input_in(item.value, 0, budget, &BTreeMap::new())
+                .map_err(|failure| MergeFailure {
+                    source: item.origin.source,
+                    message: format!(
+                        "attribute `{key}` requires a freezeable comptime value: {failure}"
+                    ),
+                })?;
+            entries.push(nir::objects::entry(Some(key), domain, frozen));
+        }
+        Ok((!entries.is_empty()).then(|| nir::objects::value(entries)))
     }
 
     pub(super) fn evaluate_attributes_filtered(
         &mut self,
         mut filter: impl FnMut(&hir::DeferredDefinitionAttribute<'_>) -> bool,
-    ) -> Result<Vec<EvaluatedAttribute>, Error> {
+    ) -> Result<(Vec<EvaluatedAttribute>, demands::FrozenSuppliers), Error> {
         self.attribute_demands.evaluating = true;
         let requested: Result<Vec<usize>, Error> = (|| {
             let mut requested = Vec::new();
@@ -226,10 +247,11 @@ impl Checker<'_, '_> {
             Ok(requested)
         })();
         let mut demands = std::mem::take(&mut self.attribute_demands);
-        Ok(requested?
+        let attributes = requested?
             .into_iter()
             .map(|index| demands.values[index].take().expect("evaluated supplier"))
-            .collect())
+            .collect();
+        Ok((attributes, demands.merged))
     }
 
     fn evaluate_supplier_body(

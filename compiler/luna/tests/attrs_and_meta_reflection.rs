@@ -790,6 +790,62 @@ fn attribute_suppliers_follow_demand_and_reject_cycles() {
 }
 
 #[test]
+fn early_and_published_attribute_reads_agree_on_overrides_and_empty_objects() {
+    let source = r#"
+        ^attrs.metadata({ disabled: meta.attrs_of(Target).get<bool>(.packed) matches false?, empty: meta.attrs_of(Empty).is_empty() })
+        struct Reader {}
+
+        ^attrs.layout.packed_layout(.enabled = false)
+        struct Target {
+            .packed true,
+            tag: u8,
+        }
+
+        const empty_attrs: meta.Object = {};
+        ^empty_attrs
+        struct Empty {}
+
+        comptime fn run() -> bool {
+            Reader.attrs().get<meta.Object>(.metadata) match {
+                data? => (data.get<bool>(.disabled) matches true?)
+                    and (Target.attrs().get<bool>(.packed) matches false?)
+                    and (data.get<bool>(.empty) matches true?)
+                    and Empty.attrs().is_empty(),
+                null => false,
+            }
+        }
+    "#;
+    assert_eq!(support::invoke(source, "run").unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn early_attribute_reads_still_require_the_final_consumer_to_accept_the_target() {
+    let source = r#"
+        ^attrs.metadata(meta.attrs_of(late))
+        struct Reader {}
+        ^attrs.layout.packed
+        fn late() -> bool { true }
+    "#;
+    let failure = support::compile(source).unwrap_err();
+    assert!(
+        failure.contains("packed requires a struct definition"),
+        "{failure}"
+    );
+
+    let source = r#"
+        ^attrs.metadata(meta.attrs_of(Late))
+        struct Reader {}
+        ^{ metadata: false }
+        struct Late {}
+    "#;
+    let failure = support::compile(source).unwrap_err();
+    assert!(
+        failure.contains("metadata requires the Object domain"),
+        "{failure}"
+    );
+}
+
+#[test]
 fn attribute_supplier_depth_exhaustion_is_distinct_from_a_cycle() {
     let chain = |edges: usize| {
         let mut source = String::new();

@@ -633,17 +633,21 @@ fn capturing_attribute_worlds_retains_the_exact_publication_state() {
         ..Default::default()
     };
     let before = clone_declaration_source(&package, &mut 1).unwrap();
-    let payload = crate::objects::value(vec![crate::objects::entry(
+    let payload = std::sync::Arc::new(crate::objects::value(vec![crate::objects::entry(
         Some("data"),
         Term::Primitive(Primitive::Str),
         Term::String("x".repeat(100_000).into()),
-    )]);
+    )]));
     package.definition_attributes =
-        DefinitionAttributes::Frozen(BTreeMap::from([(target, payload)]).into());
+        DefinitionAttributes::Frozen(BTreeMap::from([(target, payload.clone())]).into());
     let after = clone_declaration_source(&package, &mut 1).unwrap();
     assert_eq!(before.definition_attributes.lookup(target), Err(target));
     assert_eq!(before.definition_attributes.lookup(plain), Ok(None));
     assert_eq!(after.definition_attributes.lookup(plain), Ok(None));
+    assert!(std::ptr::eq(
+        after.definition_attributes.lookup(target).unwrap().unwrap(),
+        payload.as_ref(),
+    ));
     assert!(std::ptr::eq(
         after.definition_attributes.lookup(target).unwrap().unwrap(),
         package

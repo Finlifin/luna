@@ -3,12 +3,14 @@
 use super::*;
 use std::sync::Arc;
 
+pub(super) type FrozenSuppliers = BTreeMap<DeclarationId, Option<Arc<Term>>>;
+
 #[derive(Default)]
 pub(in crate::program) struct Demands {
     suppliers: BTreeMap<DeclarationId, Arc<[usize]>>,
     pub(in crate::program) layouts: super::layouts::Generated,
     pub(super) values: Vec<Option<EvaluatedAttribute>>,
-    merged: BTreeMap<DeclarationId, Option<Arc<Term>>>,
+    pub(super) merged: FrozenSuppliers,
     active: Vec<usize>,
     pub(super) evaluating: bool,
 }
@@ -159,10 +161,13 @@ impl Checker<'_, '_> {
                     .expect("completed supplier")
             });
             let selected = merge::merge_entries(values, 1024, &mut budget)?;
-            Ok(self
-                .freeze_merged_attributes(&selected, &mut budget)?
-                .remove(&target)
-                .map(Arc::new))
+            // The supplier index groups all configurations and prefixes of
+            // exactly one declaration and always contains at least one entry.
+            let [group] = selected.as_slice() else {
+                unreachable!("one indexed attribute target")
+            };
+            self.freeze_attribute_object(group, &mut budget)
+                .map(|value| value.map(Arc::new))
         })();
         self.required_steps -= (before - budget.steps) as u64;
         let value = result.map_err(|failure: MergeFailure| {

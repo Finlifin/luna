@@ -8,7 +8,8 @@ pub enum DefinitionAttributes {
     #[default]
     Empty,
     Pending(Arc<BTreeSet<DeclarationId>>),
-    Frozen(Arc<BTreeMap<DeclarationId, Term>>),
+    /// Objects frozen for an early reader can be published by the same handle.
+    Frozen(Arc<BTreeMap<DeclarationId, Arc<Term>>>),
 }
 
 impl DefinitionAttributes {
@@ -16,7 +17,7 @@ impl DefinitionAttributes {
         match self {
             Self::Pending(ids) if ids.contains(&id) => Err(id),
             Self::Empty | Self::Pending(_) => Ok(None),
-            Self::Frozen(values) => Ok(values.get(&id)),
+            Self::Frozen(values) => Ok(values.get(&id).map(Arc::as_ref)),
         }
     }
 
