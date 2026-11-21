@@ -177,7 +177,7 @@ impl Checker<'_, '_> {
             if let Some(value) =
                 self.associated_projection(value, field.name.as_str(), expr.span, expr.hir_id)?
             {
-                return Self::associated_type_data(value, expr.span);
+                return self.associated_type_data(value, expr);
             }
         }
         match &expr.kind {
@@ -243,7 +243,7 @@ impl Checker<'_, '_> {
         match self.package.item(owner).map(|item| &item.kind) {
             Some(ItemKind::Associated(_)) => {
                 let value = self.lexical_associated_value(owner, expr.span)?;
-                Self::associated_type_data(value, expr.span)
+                self.associated_type_data(value, expr)
             }
             Some(ItemKind::Const(..)) => {
                 let value = self.constant_value(owner, expr.span)?;
@@ -265,15 +265,18 @@ impl Checker<'_, '_> {
         }
     }
 
-    fn associated_type_data(value: n::Expr, span: Span) -> Result<CompletedType, Error> {
-        match value.kind {
-            K::TypeValue(ty) => Ok(CompletedType::Identity(ty)),
-            K::Literal(n::Literal::Description(leaf)) => Ok(CompletedType::Description(leaf)),
-            _ => Err(error(
-                span,
+    fn associated_type_data(
+        &mut self,
+        value: n::Expr,
+        expr: &Expr<'_>,
+    ) -> Result<CompletedType, Error> {
+        if value.ty != p(P::Type) {
+            return Err(error(
+                expr.span,
                 "associated value used as a type does not contain a completed Type",
-            )),
+            ));
         }
+        self.complete_checked_type(expr, value)
     }
 
     fn bare_nominal_identity(&mut self, owner: OwnerId, span: Span) -> Result<Term, Error> {

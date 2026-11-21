@@ -57,3 +57,9 @@ VM 在绑定实参前会遍历签名，按节点与载荷扣除预算，并检�
 现在结构遍历走到投影处，先结算已消耗的步数，再把剩余预算交给关联项初始化器。成功时从当前位置继续；失败时保留初始化器报告的源码位置及剩余预算。两个执行器中，同样的字段名变化都只多扣 4096 步。外层末次投影使用本次查询中 A 的结果，B 的函数体仍独立执行它对 A 的读取。运行时解释和具体 IIR 的类型观察仍只读所在快照已交付的选择。[投影与预算交接](../compiler/comptime_interpretor/src/selected_types/projection.rs) · [求值顺序与失败恢复](../compiler/comptime_interpretor/src/selected_types/observation_tests.rs)
 
 当前取舍是让结构遍历的宿主栈帧在初始化器执行期间保持活动；剩余栈空间较小时在同一线程扩栈。类型结构沿用 64 层检查，字节码初始化器链由 VM 驱动。自举时若把结构遍历也迁到显式续延，续延需要携带已构造的字段、当前查询的关联项观察和交回的预算。若把观察放到 VM 全局，嵌套函数对 A 的读取就可能少执行一次。
+
+## 2026-11-21 · 关联 Type 初始化器的定义检查和实例求值
+
+设 `Selected(enabled)` 根据一个 bool 参数返回 bool 或 char。把它作为 `trait Source where enabled: bool` 中 `assoc Item: Type` 的默认值时，声明处已经知道结果属于 Type，分支选择仍依赖具体的 enabled。在基线 `deabc828`，仅检查这个声明就会尝试解释抽象的 enabled，报 `AbstractValueUnresolved`。现在泛型实现可保存检查并替换过的初始化程序；读取 `Holder<true>.as(Source<true>).Item` 作为局部注解或类型别名时，由该处的 required comptime 求值取得具体结果。若分支返回 `Wrapped<bool>`，交付的身份仍含 Wrapped 的 normal-form 头。[定义与选择](../compiler/elaboration/src/program/interfaces/associated.rs) · [经源码验证的实例](../compiler/luna/tests/deferred_associated_values.rs)
+
+当前的取舍是继续向只读的签名查询提供已完成的闭合 Type。以同一个 Source 为例，若泛型函数的参数为 `T.as(Source<flag>).Item`，调用处提供 `true`、`Holder<true>` 和实参 `true`，签名特化仍会在选中初始化程序时报告 `selected associated value is not a completed Type template`。自举时，选中程序的查询需要把完整接口实例、接收者和成员身份交还给 elaboration；由请求方承担求值的预算、失败与生成定义的发布，再用结果继续检查该次调用。直接在 PTC 内运行初始化程序会使只读类型查询承担这些职责。[当前签名查询](../compiler/elaboration/src/program/interfaces/values.rs) · [只读投影](../compiler/type_resolution/src/associated/values.rs)

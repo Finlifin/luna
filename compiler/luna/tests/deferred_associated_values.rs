@@ -308,3 +308,88 @@ fn arithmetic_evidence_comes_from_completed_closed_members() {
         );
     }
 }
+
+#[test]
+fn value_indexed_associated_type_programs_select_each_instance() {
+    let source = r#"
+        typealias Type = .Type'builtin;
+        typealias char = .char'builtin;
+        comptime fn Selected(enabled: bool) -> Type {
+            if enabled { bool } else { char }
+        }
+        trait Source where enabled: bool { assoc Item: Type = Selected(enabled); }
+        struct Holder where enabled: bool {}
+        impl Source<enabled> for Holder<enabled> where enabled: bool {}
+        impl Source<false> for bool {}
+        impl Source<true> for bool { assoc Item: Type = char; }
+
+        typealias Yes = Holder<true>.as(Source<true>).Item;
+        typealias No = Holder<false>.as(Source<false>).Item;
+        comptime fn yes() -> Yes { true }
+        comptime fn no() -> No { 'n' }
+        comptime fn inherited() -> bool.as(Source<false>).Item { 'i' }
+        comptime fn replaced() -> bool.as(Source<true>).Item { 'r' }
+    "#;
+    let package = support::compile(source);
+    for (name, expected) in [
+        ("yes", Value::Bool(true)),
+        ("no", Value::Char('n')),
+        ("inherited", Value::Char('i')),
+        ("replaced", Value::Char('r')),
+    ] {
+        assert_eq!(
+            luna::invocation::invoke(&package, name, 100_000).unwrap(),
+            expected
+        );
+    }
+    let wrong = source.replace("fn no() -> No { 'n' }", "fn no() -> No { false }");
+    let error = support::compile_with_protocols(&wrong, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("type mismatch") && error.contains("char"),
+        "{error}"
+    );
+}
+
+#[test]
+fn closed_associated_type_programs_remain_available_in_specialized_signatures() {
+    let source = r#"
+        typealias Type = .Type'builtin;
+        comptime fn Selected(enabled: bool) -> Type { if enabled { bool } else { Type } }
+        struct Holder where flag: bool {}
+        trait Source { assoc Item: Type; }
+        impl Source for Holder<flag> where flag: bool { assoc Item: Type = Selected(true); }
+        comptime fn keep(value: T.as(Source).Item) -> T.as(Source).Item where T :- Source { value }
+        comptime fn run() -> bool { keep<Holder<false>>(true) }
+    "#;
+    let package = support::compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn computed_associated_type_identities_preserve_normal_form_heads() {
+    let source = r#"
+        typealias Type = .Type'builtin;
+        pure comptime fn Wrapped<T> -> Type { T }
+        comptime fn Selected(flag: bool) -> Type { if flag { Wrapped<bool> } else { bool } }
+        struct Holder where flag: bool {}
+        trait Source { assoc Item: Type; }
+        impl Source for Holder<flag> where flag: bool { assoc Item: Type = Selected(flag); }
+        typealias Opaque = Holder<true>.as(Source).Item;
+        fn keep(value: Wrapped<bool>) -> Opaque { value }
+        comptime fn plain() -> Holder<false>.as(Source).Item { true }
+    "#;
+    let package = support::compile(source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "plain", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+    let unfolded = source.replace("fn keep(value: Wrapped<bool>)", "fn keep(value: bool)");
+    let error = support::compile_with_protocols(&unfolded, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("normal-form") && error.contains("bool"),
+        "{error}"
+    );
+}

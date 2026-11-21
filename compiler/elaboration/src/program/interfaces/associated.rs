@@ -1,5 +1,5 @@
 //! Associated signatures are admitted before their values are demanded.
-//! Only completed values enter published implementation tables.
+//! Rows carry completed values or checked programs awaiting concrete inputs.
 use super::*;
 use nir::associated_initializers::MemberSource;
 
@@ -14,6 +14,34 @@ pub(in crate::program) fn associated_source<'a>(
     let result = row.associated_source(member, &mut fuel);
     *steps -= (before - fuel) as u64;
     result.map_err(|failure| error(span, failure))
+}
+
+fn associated_program_is_open(
+    value: &n::Expr,
+    parameters: &[DeclarationId],
+    steps: &mut u64,
+    span: Span,
+) -> Result<bool, Error> {
+    let used =
+        nir::copy_budget::expression_declaration_inputs(value, steps).map_err(|failure| {
+            error(
+                span,
+                format!("associated default input observation failed: {failure:?}"),
+            )
+        })?;
+    if parameters.iter().any(|id| used.contains(id)) {
+        return Ok(true);
+    }
+    let before = usize::try_from(*steps).unwrap_or(usize::MAX);
+    let mut fuel = before;
+    let mut member_read = false;
+    let observed = iir::visit::expression(value, &mut fuel, |expr, _| {
+        member_read |= matches!(expr.kind, K::AssociatedValue { .. });
+        Ok(())
+    });
+    *steps -= (before - fuel) as u64;
+    observed.map_err(|failure| error(span, failure))?;
+    Ok(member_read)
 }
 
 enum Supply {
@@ -480,58 +508,64 @@ impl Checker<'_, '_> {
             let inputs = inputs.map_err(|failure| error(span, failure.to_string()))?;
             if generic {
                 let contract = self.associated_contract(owner, false)?;
-                if contract.ty != p(P::Type) {
-                    let template = self.associated_default_template(owner, &contract.ty)?;
-                    let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                    let mut fuel = before;
-                    let specialized = template.instantiate(&inputs, &mut fuel);
-                    self.required_steps -= (before - fuel) as u64;
-                    let template = specialized.map_err(|failure| error(span, failure))?;
-                    let before = fuel;
-                    let completed = nir::completed_values::validate_with_collection_evidence_in(
-                        template.expression(),
-                        self.newtypes.values(),
-                        &|ty| self.bound_tuple_elements(ty),
-                        &|ty, fuel| {
-                            let element = self.list_element_type(ty);
-                            if let Some(element) = element {
-                                nir::type_computations::charge_term(element, fuel)?;
-                            }
-                            Ok(element.cloned())
-                        },
-                        &|id, fuel| {
-                            *fuel = fuel
-                                .checked_sub(1)
-                                .ok_or(nir::NominalAdmissionError::Budget)?;
-                            Ok(match (self.structs.get(&id), self.enums.get(&id)) {
-                                (Some(definition), None) => Some(
-                                    nir::normal_forms::NominalValueDeclaration::Struct(definition),
-                                ),
-                                (None, Some(definition)) => Some(
-                                    nir::normal_forms::NominalValueDeclaration::Enum(definition),
-                                ),
-                                (None, None) => None,
-                                _ => return Err("duplicate completed nominal declaration".into()),
-                            })
-                        },
-                        self.target,
-                        &mut fuel,
-                    );
-                    self.required_steps -= (before - fuel) as u64;
-                    match completed {
-                        Ok(()) => {
-                            return template
-                                .into_expression(&mut self.required_steps)
-                                .map(Supply::Value)
-                                .map_err(|failure| error(span, failure));
+                let template = self.associated_default_template(owner, &contract.ty)?;
+                let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+                let mut fuel = before;
+                let specialized = template.instantiate(&inputs, &mut fuel);
+                self.required_steps -= (before - fuel) as u64;
+                let template = specialized.map_err(|failure| error(span, failure))?;
+                let before = fuel;
+                let completed = nir::completed_values::validate_with_collection_evidence_in(
+                    template.expression(),
+                    self.newtypes.values(),
+                    &|ty| self.bound_tuple_elements(ty),
+                    &|ty, fuel| {
+                        let element = self.list_element_type(ty);
+                        if let Some(element) = element {
+                            nir::type_computations::charge_term(element, fuel)?;
                         }
-                        Err(
-                            failure @ (nir::NominalAdmissionError::Budget
-                            | nir::NominalAdmissionError::Unresolved(_)),
-                        ) => return Err(error(span, failure)),
-                        // Reconstruction cannot provide this value. Preserve the
-                        // checked, specialized program for selection and execution.
-                        Err(nir::NominalAdmissionError::Invalid(_)) => {
+                        Ok(element.cloned())
+                    },
+                    &|id, fuel| {
+                        *fuel = fuel
+                            .checked_sub(1)
+                            .ok_or(nir::NominalAdmissionError::Budget)?;
+                        Ok(match (self.structs.get(&id), self.enums.get(&id)) {
+                            (Some(definition), None) => Some(
+                                nir::normal_forms::NominalValueDeclaration::Struct(definition),
+                            ),
+                            (None, Some(definition)) => {
+                                Some(nir::normal_forms::NominalValueDeclaration::Enum(definition))
+                            }
+                            (None, None) => None,
+                            _ => return Err("duplicate completed nominal declaration".into()),
+                        })
+                    },
+                    self.target,
+                    &mut fuel,
+                );
+                self.required_steps -= (before - fuel) as u64;
+                match completed {
+                    Ok(()) => {
+                        return template
+                            .into_expression(&mut self.required_steps)
+                            .map(Supply::Value)
+                            .map_err(|failure| error(span, failure));
+                    }
+                    Err(
+                        failure @ (nir::NominalAdmissionError::Budget
+                        | nir::NominalAdmissionError::Unresolved(_)),
+                    ) => return Err(error(span, failure)),
+                    Err(nir::NominalAdmissionError::Invalid(_)) => {
+                        // Keep closed Type identities available to passive signature queries.
+                        if contract.ty != p(P::Type)
+                            || associated_program_is_open(
+                                template.expression(),
+                                &self.checked_implementations[slot].type_parameters,
+                                &mut self.required_steps,
+                                span,
+                            )?
+                        {
                             return Ok(Supply::Initializer(template));
                         }
                     }
@@ -599,41 +633,20 @@ impl Checker<'_, '_> {
         for (interface, member) in members {
             let owner = self.associated_owner(member).unwrap();
             let mut contract = self.associated_contract(owner, false)?;
-            if contract.ty == p(P::Type) {
-                contract = self.associated_contract(owner, true)?;
-            } else if self.associated_has_initializer(member) {
+            if self.associated_has_initializer(member) {
                 let template = self.associated_default_template(owner, &contract.ty)?;
                 let span = self.package.item(owner).unwrap().span;
-                let used = nir::copy_budget::expression_declaration_inputs(
-                    template.expression(),
-                    &mut self.required_steps,
-                )
-                .map_err(|failure| {
-                    error(
-                        span,
-                        format!("associated default input observation failed: {failure:?}"),
-                    )
-                })?;
-                let dependent = self
+                let parameters = self
                     .checked_traits
                     .by_id(interface)
                     .unwrap()
-                    .parameters_with_self()
-                    .iter()
-                    .any(|id| used.contains(id));
-                let mut member_read = false;
-                if !dependent {
-                    let before = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-                    let mut fuel = before;
-                    let observed =
-                        iir::visit::expression(template.expression(), &mut fuel, |expr, _| {
-                            member_read |= matches!(expr.kind, K::AssociatedValue { .. });
-                            Ok(())
-                        });
-                    self.required_steps -= (before - fuel) as u64;
-                    observed.map_err(|failure| error(span, failure))?;
-                }
-                contract.default = if dependent || member_read {
+                    .parameters_with_self();
+                contract.default = if associated_program_is_open(
+                    template.expression(),
+                    &parameters,
+                    &mut self.required_steps,
+                    span,
+                )? {
                     Some(
                         template
                             .into_expression(&mut self.required_steps)
