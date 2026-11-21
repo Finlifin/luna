@@ -12,6 +12,37 @@ pub struct Protocol {
     pub rest_default: Option<DeclarationId>,
 }
 
+pub fn stable_protocol(
+    traits: &[Trait],
+    id: DeclarationId,
+    list_pattern: Option<DeclarationId>,
+) -> Result<(), String> {
+    let mut candidates = traits.iter().filter(|item| item.declaration == id);
+    let interface = candidates
+        .next()
+        .ok_or("StableListPatternView binding is not a trait")?;
+    if candidates.next().is_some()
+        || !interface.type_parameters.is_empty()
+        || interface.comptime_only
+    {
+        return Err(
+            "StableListPatternView requires one runtime trait without explicit parameters".into(),
+        );
+    }
+    if !interface.associated.is_empty() || !interface.methods.is_empty() {
+        return Err("StableListPatternView marker trait must not declare extra members".into());
+    }
+    if let Some(list_id) = list_pattern
+        && !interface
+            .parents
+            .iter()
+            .any(|parent| parent.declaration == list_id && parent.arguments.is_empty())
+    {
+        return Err("StableListPatternView must require ListPatternView as a supertrait".into());
+    }
+    Ok(())
+}
+
 pub fn protocol(traits: &[Trait], id: DeclarationId) -> Result<Protocol, String> {
     let runtime = phase_protocol(traits, id, false)?;
     if has_staged_contract(traits, id) {

@@ -30,6 +30,7 @@ pub struct Options {
     pub build_targets: crate::build_context::TargetOptions,
     pub list_pattern_protocol: Option<String>,
     pub comptime_list_pattern_protocol: Option<String>,
+    pub stable_list_pattern_protocol: Option<String>,
     pub iterator_protocol: Option<String>,
     pub into_iterator_protocol: Option<String>,
     pub index_protocol: Option<String>,
@@ -186,6 +187,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut meta_list_type = None;
     let mut list_pattern_protocol = None;
     let mut comptime_list_pattern_protocol = None;
+    let mut stable_list_pattern_protocol = None;
     let mut iterator_protocol = None;
     let mut into_iterator_protocol = None;
     let mut index_protocol = None;
@@ -597,6 +599,21 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     );
                     continue;
                 }
+                Some("--stable-list-pattern-protocol") => {
+                    if stable_list_pattern_protocol.is_some() {
+                        return Err(
+                            "--stable-list-pattern-protocol may only be specified once".into()
+                        );
+                    }
+                    stable_list_pattern_protocol = Some(
+                        option_value(&mut args, "--stable-list-pattern-protocol")?
+                            .into_string()
+                            .map_err(
+                                |_| "StableListPatternView protocol selector must be valid UTF-8",
+                            )?,
+                    );
+                    continue;
+                }
                 Some("--iterator-protocol") => {
                     if iterator_protocol.is_some() {
                         return Err("--iterator-protocol may only be specified once".into());
@@ -928,6 +945,7 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         arithmetic_protocols,
         list_pattern_protocol,
         comptime_list_pattern_protocol,
+        stable_list_pattern_protocol,
         iterator_protocol,
         into_iterator_protocol,
         index_protocol,
@@ -1093,6 +1111,7 @@ mod tests {
                 eq_protocol: None,
                 list_pattern_protocol: None,
                 comptime_list_pattern_protocol: None,
+                stable_list_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 literal_into_protocol: None,
@@ -1132,6 +1151,7 @@ mod tests {
                 eq_protocol: None,
                 list_pattern_protocol: None,
                 comptime_list_pattern_protocol: None,
+                stable_list_pattern_protocol: None,
                 iterator_protocol: None,
                 into_iterator_protocol: None,
                 literal_into_protocol: None,

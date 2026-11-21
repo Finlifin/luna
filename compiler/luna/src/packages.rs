@@ -894,6 +894,7 @@ fn all_resolved_protocols_in(
         protocols.equality,
         protocols.list_pattern,
         protocols.comptime_list_pattern,
+        protocols.stable_list_pattern,
         protocols.literal_into,
         protocols.splice,
         protocols.meta_list,

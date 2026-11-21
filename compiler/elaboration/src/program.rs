@@ -294,6 +294,7 @@ pub struct Protocols {
     pub equality: Option<DeclarationId>,
     pub list_pattern: Option<DeclarationId>,
     pub comptime_list_pattern: Option<DeclarationId>,
+    pub stable_list_pattern: Option<DeclarationId>,
     pub literal_into: Option<DeclarationId>,
     pub arithmetic: [Option<DeclarationId>; 7],
     pub splice: Option<DeclarationId>,
@@ -1379,6 +1380,14 @@ fn elaborate_candidate<'a, 'h>(
                 "comptime list pattern protocol requires comptime methods",
             ));
         }
+    }
+    if let Some(id) = checker.protocols.stable_list_pattern {
+        crate::list_patterns::stable_protocol(
+            &checker.checked_traits,
+            id,
+            checker.protocols.list_pattern,
+        )
+        .map_err(|reason| error(rustc_span::DUMMY_SP, reason))?;
     }
     if let Some(id) = checker.protocols.literal_into {
         crate::literal_conversion::protocol(&checker.checked_traits, id)

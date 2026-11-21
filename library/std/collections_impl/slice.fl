@@ -1,0 +1,216 @@
+use builtin.fmt.{ByteWriter, Debug}
+
+{-
+    Immutable contiguous slice view Slice<T>.
+
+    A Slice<T> holds an address and element count referencing externally owned
+    memory. Element extraction and pattern-matching (`ListPatternView` and
+    `StableListPatternView`) require `T :- Copy`, keeping slice reads side-effect
+    free and eligible for single-observation decision-DAG matching.
+-}
+pub struct Slice
+where
+    T,
+{
+    raw_addr: usize,
+    raw_len: usize,
+}
+
+fn elem_stride() -> ?usize where T {
+    let size = Type.size_of(T);
+    if size == 0 {
+        return 0;
+    }
+    let align = Type.align_of(T);
+    builtin.mem.align_up_usize(size, align)
+}
+
+fn slot_address(base: usize, index: usize) -> usize where T {
+    let stride = elem_stride<T>() match {
+        value? => value,
+        null => return Type.align_of(T),
+    }
+    if stride == 0 {
+        return Type.align_of(T);
+    }
+    let offset = builtin.mem.checked_mul_usize(index, stride) match {
+        value? => value,
+        null => return 0,
+    }
+    builtin.mem.checked_add_usize(base, offset) match {
+        addr? => addr,
+        null => 0,
+    }
+}
+
+impl Clone for Slice<T> where T {
+    fn clone(*self) -> Self {
+        Slice<T> {
+            raw_addr: self.raw_addr.*,
+            raw_len: self.raw_len.*,
+        }
+    }
+}
+
+impl Copy for Slice<T> where T {}
+
+impl Slice<T> where T {
+    pub pure fn empty() -> Self {
+        Slice<T> {
+            raw_addr: 0,
+            raw_len: 0,
+        }
+    }
+
+    pub unsafe fn from_raw_parts(addr: usize, len: usize) -> Self {
+        Slice<T> {
+            raw_addr: if Type.size_of(T) == 0 or len == 0 { 0 } else { addr },
+            raw_len: len,
+        }
+    }
+
+    pub fn len(*self) -> usize {
+        self.raw_len.*
+    }
+
+    pub fn is_empty(*self) -> bool {
+        self.raw_len.* == 0
+    }
+
+    pub fn as_addr(*self) -> usize {
+        if Type.size_of(T) == 0 or self.raw_len.* == 0 {
+            return Type.align_of(T);
+        }
+        self.raw_addr.*
+    }
+
+    pub fn slice(*self, start: usize, end: usize) -> ?Slice<T> {
+        let len = self.raw_len.*;
+        let base = self.raw_addr.*;
+        if start > end {
+            return null;
+        }
+        if end > len {
+            return null;
+        }
+        let sub_len = end - start;
+        if sub_len == 0 {
+            return Slice<T>.empty();
+        }
+        unsafe { Slice<T>.from_raw_parts(slot_address<T>(base, start), sub_len) }
+    }
+
+    pub fn subslice_from(*self, start: usize) -> ?Slice<T> {
+        let len = self.raw_len.*;
+        if start > len {
+            return null;
+        }
+        self.slice(start, len)
+    }
+
+    pub fn split_at(*self, mid: usize) -> ?Tuple<Slice<T>, Slice<T>> {
+        let len = self.raw_len.*;
+        if mid > len {
+            return null;
+        }
+        let left = self.slice(0, mid) match {
+            s? => s,
+            null => return null,
+        };
+        let right = self.slice(mid, len) match {
+            s? => s,
+            null => return null,
+        };
+        (left, right)
+    }
+}
+
+impl Slice<T> where T :- Copy {
+    pub fn get(*self, index: usize) -> ?T {
+        let len = self.raw_len.*;
+        let base = self.raw_addr.*;
+        if index >= len {
+            return null;
+        }
+        unsafe { builtin.mem.raw_read<T>(slot_address<T>(base, index)) }
+    }
+
+    pub fn first(*self) -> ?T {
+        self.get(0)
+    }
+
+    pub fn last(*self) -> ?T {
+        let len = self.raw_len.*;
+        if len == 0 {
+            return null;
+        }
+        self.get(len - 1)
+    }
+}
+
+impl ListPatternView for Slice<T> where T :- Copy {
+    assoc Element: Type = T;
+    assoc Rest: Type = Slice<T>;
+
+    fn list_pattern_view_get_len(*self) -> usize {
+        self.raw_len.*
+    }
+
+    fn list_pattern_view_get_element(*self, comptime index: usize) -> T {
+        unsafe { builtin.mem.raw_read<T>(slot_address<T>(self.raw_addr.*, index)) }
+    }
+
+    fn list_pattern_view_rest(*self, comptime start: usize) -> Slice<T> {
+        let len = self.raw_len.*;
+        let base = self.raw_addr.*;
+        if start >= len {
+            return Slice<T>.empty();
+        }
+        let remaining = len - start;
+        let addr = slot_address<T>(base, start);
+        unsafe { Slice<T>.from_raw_parts(addr, remaining) }
+    }
+}
+
+impl StableListPatternView for Slice<T> where T :- Copy {}
+
+impl Eq for Slice<T> where T :- Copy + Eq {
+    fn eq(self, other: Self) -> bool {
+        let len_a = self.raw_len;
+        let len_b = other.raw_len;
+        if len_a != len_b {
+            return false;
+        }
+        let addr_a = self.raw_addr;
+        let addr_b = other.raw_addr;
+        var i: usize = 0;
+        while i < len_a {
+            let left = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr_a, i)) }
+            let right = unsafe { builtin.mem.raw_read<T>(slot_address<T>(addr_b, i)) }
+            if not left.as(Eq).eq(right) {
+                return false;
+            }
+            i = i + 1;
+        }
+        true
+    }
+}
+
+impl Debug for Slice<T> where T :- Copy + Debug {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_byte(91)!;
+        let len = self.raw_len.*;
+        let base = self.raw_addr.*;
+        var i: usize = 0;
+        while i < len {
+            if i > 0 {
+                output.write_byte(44)!;
+                output.write_byte(32)!;
+            }
+            let elem = unsafe { builtin.mem.raw_read<T>(slot_address<T>(base, i)) }
+            elem.ref.as(Debug).write_debug(output)!;
+            i = i + 1;
+        }
+        output.write_byte(93)
+    }
+}

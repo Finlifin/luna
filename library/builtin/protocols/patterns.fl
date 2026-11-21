@@ -5,7 +5,19 @@
 -}
 pub trait ListPatternView {
     assoc Element: Type;
+    assoc Rest: Type = Self;
 
     fn list_pattern_view_get_len(*self) -> usize;
     fn list_pattern_view_get_element(*self, comptime index: usize) -> Element;
+
+    fn list_pattern_view_rest(*self, comptime start: usize) -> Rest {
+        while true {}
+    }
 }
+
+{-
+    Marker protocol guaranteeing that list length observation and indexing/slicing
+    are referentially stable across match arms without side effects, authorizing
+    single-observation decision DAGs and length-interval exhaustiveness proofs.
+-}
+pub trait StableListPatternView :- ListPatternView {}

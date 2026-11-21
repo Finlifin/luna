@@ -809,9 +809,15 @@ fn pattern_output_names(pattern: &Pattern<'_>) -> Vec<hir::common::Ident> {
             | PatternKind::OptionSome(inner)
             | PatternKind::ErrorOk(inner)
             | PatternKind::ErrorErr(inner) => pending.push(inner),
-            PatternKind::Tuple(fields)
-            | PatternKind::List(fields, _)
-            | PatternKind::AppTuple(_, fields) => pending.extend(*fields),
+            PatternKind::List(fields, rest) => {
+                pending.extend(*fields);
+                if let Some(rest) = rest {
+                    pending.push(rest);
+                }
+            }
+            PatternKind::Tuple(fields) | PatternKind::AppTuple(_, fields) => {
+                pending.extend(*fields)
+            }
             PatternKind::Struct(_, fields, _) => {
                 pending.extend(fields.iter().map(|field| &field.pat))
             }

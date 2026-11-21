@@ -1,6 +1,6 @@
 {- Runtime host facilities. std.prelude is imported explicitly. -}
 pub use builtin.*;
-use collections_impl.{hash_map, hash_set, vec, vec_deque}
+use collections_impl.{hash_map, hash_set, slice, vec, vec_deque}
 use fmt_impl.arguments;
 use fmt_impl.parse;
 use fs_impl.file;
@@ -52,6 +52,7 @@ pub mod mem {
 pub mod collections {
     pub use hash_map.{HashMap, HashMapIter}
     pub use hash_set.{HashSet, HashSetIter}
+    pub use slice.Slice;
     pub use vec.{Vec, VecIter}
     pub use vec_deque.{VecDeque, VecDequeIter}
 }
@@ -96,5 +97,6 @@ pub mod prelude {
     pub use builtin.fmt.{Debug, Display}
     pub use builtin.prelude.*;
     pub use string_mod.String;
+    pub use slice.Slice;
     pub use vec.Vec;
 }

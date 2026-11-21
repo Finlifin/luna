@@ -19,6 +19,7 @@ impl<T: PartialEq> PatternGuard<T> {
             _ => Self::Unknown,
         }
     }
+
     fn either(self, other: Self) -> Self {
         match (self, other) {
             (Self::Impossible, other) | (other, Self::Impossible) => other,
@@ -437,8 +438,13 @@ pub(in crate::program) fn pattern_binding_ids(
             PatternKind::NormalForm(_, arguments) => {
                 pending.extend(arguments.iter().map(|argument| &argument.pattern))
             }
+            PatternKind::List(fields, rest) => {
+                pending.extend(fields.iter());
+                if let Some(rest) = rest {
+                    pending.push(rest);
+                }
+            }
             PatternKind::Tuple(fields)
-            | PatternKind::List(fields, _)
             | PatternKind::AppTuple(_, fields)
             | PatternKind::Or(fields) => pending.extend(fields.iter()),
             PatternKind::Struct(_, fields, _) => {
@@ -518,9 +524,23 @@ pub(in crate::program) fn pattern_bindings(
                 }
             }
         }
-        PatternKind::Tuple(fields)
-        | PatternKind::List(fields, _)
-        | PatternKind::AppTuple(_, fields) => {
+        PatternKind::List(fields, rest) => {
+            for field in *fields {
+                for (name, id) in pattern_bindings(field)? {
+                    if result.insert(name, id).is_some() {
+                        return Err(error(field.span, "duplicate pattern binding"));
+                    }
+                }
+            }
+            if let Some(rest) = rest {
+                for (name, id) in pattern_bindings(rest)? {
+                    if result.insert(name, id).is_some() {
+                        return Err(error(rest.span, "duplicate pattern binding"));
+                    }
+                }
+            }
+        }
+        PatternKind::Tuple(fields) | PatternKind::AppTuple(_, fields) => {
             for field in *fields {
                 for (name, id) in pattern_bindings(field)? {
                     if result.insert(name, id).is_some() {

@@ -1,4 +1,5 @@
 use builtin.fmt.{ByteWriter, Debug}
+use collections_impl.slice.Slice;
 use mem_impl.allocator.{AllocErr, Allocator, DefaultAllocator, RawBlock, ReallocErr}
 use mem_impl.layout.Layout;
 
@@ -177,6 +178,12 @@ where
             return Type.align_of(T);
         }
         self.raw_addr.*
+    }
+
+    pub fn as_slice(*self) -> Slice<T> {
+        let addr = self.as_addr();
+        let len = self.raw_len.*;
+        unsafe { Slice<T>.from_raw_parts(addr, len) }
     }
 
     pub unsafe fn set_len(*self, new_len: usize) {
@@ -849,3 +856,41 @@ where
         output.write_byte(93)
     }
 }
+
+impl ListPatternView for Vec<T, .A = A, .allocator = alloc>
+where
+    T :- Copy,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{
+    assoc Element: Type = T;
+    assoc Rest: Type = Slice<T>;
+
+    fn list_pattern_view_get_len(*self) -> usize {
+        self.raw_len.*
+    }
+
+    fn list_pattern_view_get_element(*self, comptime index: usize) -> T {
+        unsafe { builtin.mem.raw_read<T>(slot_address<T>(self.raw_addr.*, index)) }
+    }
+
+    fn list_pattern_view_rest(*self, comptime start: usize) -> Slice<T> {
+        let len = self.raw_len.*;
+        let base = self.raw_addr.*;
+        if start >= len {
+            return Slice<T>.empty();
+        }
+        let remaining = len - start;
+        let addr = slot_address<T>(base, start);
+        unsafe { Slice<T>.from_raw_parts(addr, remaining) }
+    }
+}
+
+impl StableListPatternView for Vec<T, .A = A, .allocator = alloc>
+where
+    T :- Copy,
+    A: Type,
+    requires A :- Allocator,
+    quote alloc: lift *A,
+{}

@@ -18,6 +18,7 @@ pub struct Selectors<'a> {
     pub equality: Option<&'a str>,
     pub list_pattern: Option<&'a str>,
     pub comptime_list_pattern: Option<&'a str>,
+    pub stable_list_pattern: Option<&'a str>,
     pub literal_into: Option<&'a str>,
     pub arithmetic: [Option<&'a str>; 7],
     pub splice: Option<&'a str>,
@@ -51,6 +52,7 @@ impl Selectors<'_> {
                 self.equality,
                 self.list_pattern,
                 self.comptime_list_pattern,
+                self.stable_list_pattern,
                 self.literal_into,
                 self.splice,
                 self.meta_list,
@@ -230,6 +232,11 @@ pub(crate) fn resolve_source(
                 "ComptimeListPatternView".into(),
                 selectors.comptime_list_pattern,
                 &mut result.comptime_list_pattern,
+            ),
+            (
+                "StableListPatternView".into(),
+                selectors.stable_list_pattern,
+                &mut result.stable_list_pattern,
             ),
             (
                 "LiteralInto".into(),
@@ -467,6 +474,7 @@ pub(crate) struct SysrootBindings {
     equality: Option<String>,
     list_pattern: Option<String>,
     comptime_list_pattern: Option<String>,
+    stable_list_pattern: Option<String>,
     iterator: Option<String>,
     into_iterator: Option<String>,
     literal_into: Option<String>,
@@ -557,6 +565,7 @@ impl SysrootBindings {
                 "eq-protocol" => &mut result.equality,
                 "list-pattern-protocol" => &mut result.list_pattern,
                 "comptime-list-pattern-protocol" => &mut result.comptime_list_pattern,
+                "stable-list-pattern-protocol" => &mut result.stable_list_pattern,
                 "iterator-protocol" => &mut result.iterator,
                 "into-iterator-protocol" => &mut result.into_iterator,
                 "literal-into-protocol" => &mut result.literal_into,
@@ -708,6 +717,13 @@ impl SysrootBindings {
                     .comptime_list_pattern
                     .is_none()
                     .then_some(self.comptime_list_pattern.as_deref())
+                    .flatten()
+            }),
+            stable_list_pattern: explicit.stable_list_pattern.or_else(|| {
+                identities
+                    .stable_list_pattern
+                    .is_none()
+                    .then_some(self.stable_list_pattern.as_deref())
                     .flatten()
             }),
             iterator: explicit.iterator.or_else(|| {
@@ -1079,6 +1095,7 @@ mod stage_tests {
             eq_protocol: None,
             list_pattern_protocol: None,
             comptime_list_pattern_protocol: None,
+            stable_list_pattern_protocol: None,
             iterator_protocol: None,
             into_iterator_protocol: None,
             literal_into_protocol: None,
