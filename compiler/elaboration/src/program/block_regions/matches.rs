@@ -21,6 +21,7 @@ pub(super) struct Frame<'h> {
     ordinary: Option<Ordinary>,
     probe: Option<branch_probes::Probe>,
     input_delivery: Option<Destination>,
+    operand_scope: scoped_operands::Boundary,
     state: State,
     arms: Vec<(n::Pattern, CheckedBlock)>,
     scope: Option<LexicalScope>,
@@ -52,6 +53,7 @@ impl<'h> Frame<'h> {
             ordinary: None,
             probe: None,
             input_delivery: None,
+            operand_scope: Default::default(),
             state: State::Ready,
             arms: Vec::new(),
             scope: None,
@@ -88,6 +90,7 @@ impl<'h> Frame<'h> {
             ordinary: Some(ordinary),
             probe: None,
             input_delivery,
+            operand_scope: Default::default(),
             state: State::Ready,
             arms: Vec::new(),
             scope: None,
@@ -136,6 +139,14 @@ impl<'h> Frame<'h> {
                     self.accept_selector(checker, value)?;
                     return Ok(Step::Continue);
                 }
+                if self.ordinary.is_some()
+                    && matches!(selector.kind, H::Application(..))
+                    && !checker.runtime_value_context()
+                    && checker.inline_selection.is_none()
+                    && !checker.in_unselected_inline
+                {
+                    self.operand_scope.enter(checker, selector.hir_id);
+                }
                 self.state = State::Selector;
                 Ok(Step::Child(Request::expression(
                     selector,
@@ -143,6 +154,7 @@ impl<'h> Frame<'h> {
                 )))
             }
             (State::Selector, Some(value)) => {
+                self.operand_scope.leave(checker);
                 if let Some(ordinary) = &mut self.ordinary {
                     ordinary.selector_exit = value.selected_exit();
                 }
@@ -309,13 +321,8 @@ impl<'h> Frame<'h> {
                     })
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
-            CheckedBlock::Ordinary(ordinary.finish(
-                checker,
-                &self.source,
-                &self.destination,
-                value,
-                arms,
-            )?)
+            let value = ordinary.finish(checker, &self.source, &self.destination, value, arms)?;
+            CheckedBlock::Ordinary(self.operand_scope.close(checker, value, self.source.span)?)
         } else {
             let patterns: Vec<_> = self.arms.iter().map(|(pattern, _)| pattern).collect();
             checker.require_match_coverage(&patterns, &value.ty, self.source.span)?;
@@ -371,6 +378,7 @@ impl<'h> Frame<'h> {
             self.probe.is_none(),
             "finish the attempt before leaving its frame"
         );
+        self.operand_scope.leave(checker);
         self.leave_arm(checker);
         if let Some(ordinary) = self.ordinary {
             ordinary.unwind(checker);
@@ -408,7 +416,7 @@ impl std::fmt::Display for Frame<'_> {
         if let Some(destination) = &self.input_delivery {
             write!(f, " {destination}")?;
         }
-        f.write_str(") (arms")?;
+        write!(f, ") {} (arms", self.operand_scope)?;
         for (pattern, body) in &self.arms {
             write!(f, " (arm {pattern} {body})")?;
         }
@@ -454,6 +462,7 @@ mod tests {
             ordinary: None,
             probe: None,
             input_delivery: None,
+            operand_scope: Default::default(),
             state: State::Body(value, n::Pattern::Wild),
             arms: Vec::new(),
             scope: None,

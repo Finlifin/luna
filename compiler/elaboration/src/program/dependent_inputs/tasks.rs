@@ -255,10 +255,20 @@ impl InputWork {
                 call,
                 producer,
                 project_return,
-                ..
+                site,
             } => {
                 if project_return
                     && let Some(identity) = checker.projected_type_return(&producer, call)?
+                {
+                    return Ok(InputReply::Original {
+                        slot,
+                        producer,
+                        identity,
+                    });
+                }
+                if project_return
+                    && producer.ty == p(P::Type)
+                    && let Some(identity) = checker.bind_scoped_operand(site, slot, call)?
                 {
                     return Ok(InputReply::Original {
                         slot,

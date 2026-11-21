@@ -27,6 +27,7 @@ mod input_selection;
 mod intrinsics;
 mod lexical_domains;
 mod nominal_fields;
+mod scoped_operands;
 mod spreads;
 mod tactics;
 
@@ -677,6 +678,7 @@ fn elaborate_in_mode(
         target,
         protocols: protocols.clone(),
         comptime_callee_result: None,
+        operand_scope: None,
         structural_result_context: None,
         package_identities: package_identities.clone(),
         package,
@@ -2705,6 +2707,7 @@ struct Checker<'a, 'h> {
     /// Only this expression's result is being used as a callee. Argument and
     /// callback expressions keep their own phase and conversion boundaries.
     comptime_callee_result: Option<hir::HirId>,
+    operand_scope: Option<scoped_operands::Scope>,
     /// Partial result information belongs only to this exact call expression.
     structural_result_context: Option<(hir::HirId, crate::calls::InputContext)>,
     package_identities: BTreeMap<u32, u64>,

@@ -72,6 +72,7 @@ impl Checker<'_, '_> {
         let saved_instance_capabilities = self.open_instance_capabilities.take();
         let saved_inline = self.inline_selection.take();
         let saved_match_input = self.inline_match_input.take();
+        let saved_operand_scope = self.operand_scope.take();
         let saved_unselected = std::mem::replace(&mut self.in_unselected_inline, false);
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_code = std::mem::take(&mut self.in_code_body);
@@ -124,6 +125,7 @@ impl Checker<'_, '_> {
         self.open_instance_capabilities = saved_instance_capabilities;
         self.inline_selection = saved_inline;
         self.inline_match_input = saved_match_input;
+        self.operand_scope = saved_operand_scope;
         self.in_unselected_inline = saved_unselected;
         self.locals = saved_locals;
         self.pattern_codes = saved_patterns;

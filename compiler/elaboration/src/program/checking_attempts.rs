@@ -186,6 +186,7 @@ impl LexicalCheckpoint {
 /// blocks keep their synthetic dependency table, runtime origins/deliveries,
 /// and type-use stability obligations.
 struct RetainedCheckpoint {
+    operand_scope: Option<scoped_operands::Scope>,
     abstract_code_dependencies: BTreeMap<n::LocalId, BTreeSet<n::LocalId>>,
     local_runtime_origins: runtime_origins::LocalOrigins,
     local_runtime_deliveries: BTreeMap<nir::RuntimeId, LocalRuntimeDelivery>,
@@ -199,6 +200,7 @@ struct RetainedCheckpoint {
 impl RetainedCheckpoint {
     fn capture(checker: &Checker<'_, '_>) -> Self {
         Self {
+            operand_scope: checker.operand_scope,
             abstract_code_dependencies: checker.abstract_code_dependencies.clone(),
             local_runtime_origins: checker.local_runtime_origins.clone(),
             local_runtime_deliveries: checker.local_runtime_deliveries.clone(),
@@ -211,6 +213,7 @@ impl RetainedCheckpoint {
     }
 
     fn restore(self, checker: &mut Checker<'_, '_>) {
+        checker.operand_scope = self.operand_scope;
         checker
             .pending_refinements
             .truncate(self.pending_refinements_len);
@@ -471,6 +474,7 @@ mod tests {
             pending_len: Some(7),
         };
         let retained = RetainedCheckpoint {
+            operand_scope: None,
             abstract_code_dependencies: BTreeMap::new(),
             local_runtime_origins: Default::default(),
             local_runtime_deliveries: BTreeMap::new(),

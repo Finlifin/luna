@@ -193,3 +193,11 @@ VM 在同一发布器中检查三种定义的形成条件及有限存储。对�
 普通调用原来只对签名替换扣费。读取替换后的关联类型时，每个形参都会重新取得一份默认查询预算，因而调用者给定的额度不能约束整次准备。现由替换与类型观察共用余额；观察失败保留已消耗的工作，待供给的槽仍可重新准备。[变量替换](../compiler/nir/src/types/input_binding.rs) · [源码域查询](../compiler/elaboration/src/program/interfaces/call_types.rs)
 
 对 `empty(Selected(flag)) match { null => true, _ => false }` 做了对照。把同一段匹配移进 `consume(comptime ty: Type) -> bool` 并调用 `consume(Selected(flag))` 后，两个 flag 分支都能执行。形参把 ty 绑定在消费它的代码内，检查外层可选形状已经足够。内联写法在检查 relay 的定义时提前索取了 ty 的身份。源码驱动应能表达这段绑定的作用域，并保留 producer 的求值位置；把元素存入有具体类型注解的变量仍需要证明身份相容。VM 单独执行一段前缀的测试不能验收这条源码路径。
+
+### 在消费结果的位置绑定实际计算出的 Type
+
+对 `empty(Selected(flag)) match { null => true, _ => false }`，具名函数 empty 的签名已经给出结果形状 `?ty`。检查这两条分支时可以保持 ty 抽象。源码检查器现在为这个调用位置建立局部 Type 参数，使用通常的模式检查和穷尽性检查；离开匹配前，把参数的每个使用抽象进一个普通的 comptime 函数。两个 flag 分支分别带入各自实际算出的 Type。若模式取出载荷并将其赋给 bool，仍须证明该载荷类型是 bool。
+
+callee 和可以交付的显式实参在调用者内按书写顺序求值，包括出现在 Type 实参之前的具名实参。类型检查顺序不决定求值顺序。不读取模式绑定的分支可以留在调用者内，辅助函数交付选中的分支编号；这样分支能修改外层局部变量，也能从原函数返回。分支需要载荷时，消费载荷的代码须随其 Type 一起留在绑定作用域。显式传入 Any 后，使用 `?ty` 仍需要具体类型身份。
+
+这一实现复用了普通调用、正文特化、检查事务和 required invocation 的声明收集。代价是一个额外调用帧；把分支留在原地时还会按编号分派一次。现在的消费位置是普通 comptime 匹配，一次可关闭一个 Type 绑定。依赖外层绑定的载荷分支、多项相互依赖的实参和带运行时环境交付的调用仍需要更一般的词法续体。自举时可直接在执行区域表达这层绑定，以保留同样的检查边界并减少中间函数。[源码实现](../compiler/elaboration/src/program/scoped_operands.rs) · [源码验收](../compiler/luna/tests/ordinary_input_identity.rs)

@@ -1508,21 +1508,122 @@ fn source_projects_closed_operands_without_replaying_their_prefixes() {
 }
 
 #[test]
-fn source_operand_wait_keeps_the_named_slot_and_cannot_guess_a_free_selector() {
-    let failure = sysroot::compile(
+fn scoped_match_consumes_the_original_type_operand_once() {
+    let source = "
+        comptime fn mark() -> bool { true }
+        comptime fn Selected(flag: bool) -> Type {
+            mark(); if flag { bool } else { char }
+        }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn relay(flag: bool) -> bool {
+            empty(Selected(flag)) match { null => true, _ => false }
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }";
+    check_events(source, &[("mark", 2), ("Selected", 2), ("empty", 2)]);
+    let wrong = source.replace(
+        "null => true, _ => false",
+        "value? => do { let concrete: bool = value; concrete }, null => true",
+    );
+    let error = sysroot::compile(&wrong).expect_err("the hidden payload was accepted as bool");
+    assert!(error.contains("type mismatch"), "{error}");
+}
+
+#[test]
+fn scoped_match_keeps_named_routing_and_arm_control_in_the_caller() {
+    check_events(
         "
-        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn mark() -> bool { true }
+        comptime fn Selected(flag: bool) -> Type {
+            mark(); if flag { bool } else { char }
+        }
         comptime fn empty(.seed: bool = false, comptime .ty: Type = bool) -> ?ty { null }
         comptime fn relay(flag: bool) -> bool {
-            empty(.ty = Selected(flag), .seed = true) matches null
+            var success = false;
+            empty(.ty = Selected(flag), .seed = true) match {
+                null => do { if flag { return true; }; success = true; },
+                _ => return false,
+            };
+            success
         }
+        comptime fn check() -> bool { relay(true) and relay(false) }",
+        &[("Selected", 2), ("mark", 2), ("empty", 2)],
+    );
+}
+
+#[test]
+fn scoped_match_orders_named_operands_before_the_type_witness() {
+    check_events(
+        "
+        comptime fn Selected(ready: bool) -> Type {
+            assumes ready;
+            if ready { bool } else { char }
+        }
+        comptime fn empty(comptime .ty: Type = bool, .seed: bool = false) -> ?ty { null }
+        comptime fn relay() -> bool {
+            var ready = false;
+            empty(.seed = do { ready = true; true }, .ty = Selected(ready)) matches null
+        }
+        comptime fn check() -> bool { relay() }",
+        &[("Selected", 1), ("empty", 1)],
+    );
+}
+
+#[test]
+fn scoped_match_preserves_a_transfer_inside_the_operand() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn relay(flag: bool) -> bool {
+            empty(do { if flag { return true; }; Selected(flag) }) matches null
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }
+        ",
+        &[("Selected", 1), ("empty", 1)],
+    );
+}
+
+#[test]
+fn scoped_match_keeps_a_used_payload_inside_its_type_scope() {
+    let source = "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn nested(comptime ty: Type) -> ??ty {
+            let inner: ?ty = null; inner
+        }
+        comptime fn relay(flag: bool) -> bool {
+            nested(Selected(flag)) match { value? => value matches null, null => false }
+        }
+        const left = relay(true);
+        const right = relay(false);
+        comptime fn check() -> bool { left and right and relay(true) and relay(false) }
+    ";
+    check_events(source, &[("Selected", 2), ("nested", 2)]);
+}
+
+#[test]
+fn scoped_match_preserves_gradual_type_data_until_identity_is_needed() {
+    let package = sysroot::compile(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { Any } else { char } }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn relay(flag: bool) -> bool { empty(Selected(flag)) matches null }
     ",
     )
-    .unwrap_err();
-    assert!(
-        failure.contains("needs its original comptime invocation: slot 1, producer"),
-        "{failure}"
-    );
+    .unwrap();
+    let relay = sysroot::source_function(&package, "relay");
+    for tree in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            let error = vm.invoke(relay, vec![Value::Bool(true)]).unwrap_err();
+            assert_eq!(
+                error.kind,
+                comptime_interpretor::ErrorKind::TypeContractUnresolved
+            );
+            assert_eq!(
+                vm.invoke(relay, vec![Value::Bool(false)]).unwrap(),
+                Value::Bool(true)
+            );
+        });
+    }
 }
 
 #[test]
