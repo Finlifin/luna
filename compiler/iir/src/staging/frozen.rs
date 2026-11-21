@@ -44,6 +44,14 @@ fn decode(
         K::TypeValue(value.clone())
     } else {
         match value {
+            Term::FunctionValue {
+                declaration,
+                arguments,
+            } if arguments.is_empty() && matches!(ty, Term::NormalFormFunction(..)) => {
+                // The common admission step below validates the head's telescope.
+                K::Function(*declaration)
+            }
+
             Term::NominalValue {
                 ty: domain,
                 variant: None,

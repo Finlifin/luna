@@ -2915,6 +2915,27 @@ fn constant<'layout>(
                 method_arguments: method_arguments.clone(),
             }))
         }
+        (K::Function(declaration), Term::NormalFormFunction(..)) => {
+            charge(fuel, heads.len())?;
+            let head = heads
+                .iter()
+                .find(|head| head.declaration == *declaration)
+                .ok_or("staged normal-form callable has no declaration evidence")?;
+            crate::completed_type(&expr.ty, &BTreeSet::new(), fuel)?;
+            if head
+                .callable_type_in(fuel)
+                .map_err(|error| error.to_string())?
+                != expr.ty
+            {
+                return Err(
+                    "staged normal-form callable disagrees with its public telescope".into(),
+                );
+            }
+            Term::FunctionValue {
+                declaration: *declaration,
+                arguments: Vec::new(),
+            }
+        }
         (K::Function(declaration), ty)
             if matches!(
                 ty,
@@ -5402,6 +5423,61 @@ mod tests {
             );
             assert!(constant(&[], &value, &mut 1000, 0).is_err(), "{spelling}");
         }
+    }
+
+    #[test]
+    fn staged_normal_callables_require_their_unapplied_declaration() {
+        let declaration = nir::DeclarationId {
+            package: 1,
+            local: 2,
+        };
+        let head = nir::normal_forms::Head {
+            declaration,
+            parameters: vec![],
+            requirements: vec![],
+            collector: None,
+            role: Default::default(),
+        };
+        let ty = head.callable_type().unwrap();
+        let source = SourceRange { start: 0, end: 0 };
+        let identity = Term::FunctionValue {
+            declaration,
+            arguments: vec![],
+        };
+        let heads = [head];
+        for kind in [K::Function(declaration), K::ComptimeValue(identity.clone())] {
+            let value = Expr {
+                kind,
+                ty: ty.clone(),
+                source,
+            };
+            assert_eq!(constant(&heads, &value, &mut 1000, 0).unwrap(), identity);
+            assert!(constant(&[], &value, &mut 1000, 0).is_err());
+            assert!(constant(&heads, &value, &mut 0, 0).is_err());
+            let wrong = Expr {
+                ty: Term::NormalFormFunction(
+                    Box::new(Term::Function {
+                        parameters: vec![nir::Parameter {
+                            sort: Sort::Type,
+                            ty: Term::Primitive(Primitive::Type),
+                        }],
+                        result: Box::new(Term::Primitive(Primitive::Type)),
+                    }),
+                    None,
+                ),
+                ..value
+            };
+            assert!(constant(&heads, &wrong, &mut 1000, 0).is_err());
+        }
+        let applied = Expr {
+            source,
+            ty,
+            kind: K::ComptimeValue(Term::FunctionValue {
+                declaration,
+                arguments: vec![Term::Primitive(Primitive::Bool)],
+            }),
+        };
+        assert!(constant(&heads, &applied, &mut 1000, 0).is_err());
     }
 
     #[test]

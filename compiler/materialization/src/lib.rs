@@ -3223,7 +3223,11 @@ impl Builder<'_> {
                     .callable_signature(*declaration, arguments, &[], &mut self.fuel)
                     .map_err(|error| format!("IIR callable identity: {error}"))?
                     .ok_or("IIR callable identity has no declaration evidence")?;
-                if let Some(function) = self.world.function_formation(*declaration) {
+                // An unapplied NF head carries a public telescope. Its clauses
+                // are supplied and checked only when the head is applied.
+                if !signature.is_normal_form_callable()
+                    && let Some(function) = self.world.function_formation(*declaration)
+                {
                     let domains = self
                         .world
                         .input_domains(function.parameters, &mut self.fuel)?;

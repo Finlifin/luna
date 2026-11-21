@@ -456,3 +456,81 @@ fn nominal_values_cross_staged_parameters_with_nested_payloads() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn staged_normal_callables_specialize_by_head_and_check_obligations_at_application() {
+    let source = r#"
+        typealias Type = .Type'builtin;
+        typealias u8 = .u8'builtin;
+        trait Enabled {}
+        impl Enabled for bool {}
+        pure comptime fn Only<T> -> Type where requires T :- Enabled { T }
+        pure comptime fn Other<T> -> Type { T }
+        fn keep(comptime factory: pure comptime fn<Type> -> Type) -> bool { true }
+        fn apply(comptime factory: pure comptime fn<Type> -> Type,
+                 comptime T: Type, comptime expected: Type) -> bool {
+            const produced = factory<T>;
+            const same = produced == expected;
+            same
+        }
+        fn run() -> bool { keep(Only) and keep(Other) and apply(Only, bool, Only<bool>) }
+    "#;
+    let package = compile(source);
+    let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
+    let instance_heads: std::collections::BTreeSet<_> = graph
+        .functions
+        .iter()
+        .filter(|instance| instance.function.name == "keep")
+        .map(|instance| {
+            let [
+                Term::FunctionValue {
+                    declaration,
+                    arguments,
+                },
+            ] = instance.key.arguments.as_ref()
+            else {
+                panic!("missing staged head in {}", instance.key)
+            };
+            assert!(arguments.is_empty());
+            *declaration
+        })
+        .collect();
+    let expected: std::collections::BTreeSet<_> = package
+        .normal_forms
+        .iter()
+        .map(|head| head.declaration)
+        .collect();
+    assert_eq!(instance_heads, expected);
+    assert_eq!(instance_heads.len(), 2);
+    for id in instance_heads {
+        let evidence = graph
+            .callable_identities
+            .iter()
+            .find(|item| item.key.declaration == id)
+            .unwrap();
+        assert!(
+            evidence
+                .closed_signature()
+                .unwrap()
+                .is_normal_form_callable()
+        );
+        assert!(
+            graph
+                .functions
+                .iter()
+                .all(|instance| instance.key.declaration != id)
+        );
+    }
+    let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+
+    let bad = source.replace(
+        "apply(Only, bool, Only<bool>)",
+        "apply(Only, u8, Other<u8>)",
+    );
+    let error = support::compile_with_protocols(&bad, &Default::default()).unwrap_err();
+    assert!(error.contains("TypeContract"), "{error}");
+}
