@@ -221,6 +221,53 @@ impl CallableBindings {
         result.map_err(|failure| error(span, failure.to_string()))
     }
 
+    /// Project the callable type on the successful edge of packet admission.
+    /// Conditional identities never become observed input values or cache keys.
+    pub(in crate::program) fn admitted_signature<'d>(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        template: &Term,
+        admitted: &BTreeMap<DeclarationId, Term>,
+        declarations: impl ExactSizeIterator<Item = (DeclarationId, &'d Term)>,
+        span: Span,
+    ) -> Result<Term, Error> {
+        if self.pending.is_empty() {
+            return self.instantiate(template, &mut checker.required_steps, span);
+        }
+        let dependencies = input_observation::term(template, &mut checker.required_steps, span)?;
+        if self.pending.is_disjoint(&dependencies) {
+            return self.instantiate(template, &mut checker.required_steps, span);
+        }
+        if self
+            .pending
+            .intersection(&dependencies)
+            .any(|id| !admitted.contains_key(id))
+        {
+            return Err(error(
+                span,
+                "comptime callable signature still depends on an invocation-time clause input",
+            ));
+        }
+        environment::charge(&mut checker.required_steps, declarations.len(), span)?;
+        let mut observed = self.substitution.arguments().iter();
+        let mut inputs = BTreeMap::new();
+        for (id, domain) in declarations {
+            let value = if self.pending.contains(&id) {
+                admitted.get(&id)
+            } else {
+                observed.next()
+            };
+            if let Some(value) = value {
+                inputs.insert(id, (domain, value));
+            }
+        }
+        let frames = checker.call_input_frames();
+        nominal_fields::metered(&mut checker.required_steps, |fuel| {
+            nir::instantiate_observed_domain(template, |id| inputs.get(&id).copied(), &frames, fuel)
+        })
+        .map_err(|reason| error(span, reason.to_string()))
+    }
+
     /// After signature specialization the packet owns these terms. Move only
     /// the nonliteral observations; literal operands already expose an identity.
     pub(in crate::program) fn move_observations(

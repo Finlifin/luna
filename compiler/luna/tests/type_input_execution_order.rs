@@ -153,9 +153,59 @@ fn observed_type_identity_keeps_earlier_collected_value_snapshot() {
 }
 
 #[test]
-#[ignore = "pending source domains and callable signatures need the original execution continuation"]
 fn computed_type_wait_preserves_earlier_value_before_later_write() {
     check_twice(&captured_collector("Byte()"), &["check", "Byte", "first"]);
+}
+
+#[test]
+fn a_typed_clause_operand_determines_the_admitted_callable_interface() {
+    let source = "
+        comptime fn Selected(flag: bool) -> Type { if flag { u8 } else { bool } }
+        comptime fn echo(input: T) -> T where T, witness: T { input }
+        comptime fn check(flag: bool) -> bool {
+            let witness: u8 = 42;
+            let f = echo<Selected(flag), witness>;
+            f(witness) == 42
+        }";
+    check_alternating_admission(source, &["check", "Selected"], "echo");
+}
+
+#[test]
+fn admitted_signature_keeps_the_callers_generic_type_in_scope() {
+    check_twice(
+        "comptime fn Selected(domain: Type) -> Type { domain }
+         comptime fn first() -> T where T, ...values: meta.List<T> { values[0] }
+         comptime fn relay(value: U) -> U where U {
+             first<.values = [value], Selected(U)>()
+         }
+         comptime fn check() -> bool {
+             let byte: u8 = 7;
+             relay<u8>(byte) == 7 and relay<bool>(true)
+         }",
+        &[
+            "check", "relay", "Selected", "first", "relay", "Selected", "first",
+        ],
+    );
+}
+
+#[test]
+fn a_typed_branch_checks_the_domain_even_when_the_literal_branch_runs() {
+    let source = format!(
+        "comptime fn select() -> bool {{ false }} {}",
+        captured_collector("Byte()").replace("[byte]", "[if select() { byte } else { 7 }]")
+    );
+    check_twice(&source, &["check", "select", "Byte", "first"]);
+}
+
+#[test]
+fn a_dependent_result_still_checks_each_contextual_literal() {
+    let program = captured_collector("Byte()").replace("[byte]", "[byte, 256]");
+    let failure =
+        sysroot::compile(&format!("{program} fn run() -> bool {{ check() }}")).unwrap_err();
+    assert!(
+        failure.contains("required comptime evaluation failed: interpretation Type"),
+        "{failure}"
+    );
 }
 
 #[test]
@@ -202,7 +252,7 @@ fn checked_packet_keeps_earlier_snapshot_across_computed_type_input() {
 
 #[test]
 fn completed_input_domains_reject_before_entry_and_recover_in_the_same_vm() {
-    let package = sysroot::compile(
+    check_alternating_admission(
         "comptime fn Selected(flag: bool) -> Type { if flag { u8 } else { bool } }
          comptime fn packet() -> meta.List<u8> { [1, 255] }
          comptime fn count() -> Integer
@@ -211,8 +261,13 @@ fn completed_input_domains_reject_before_entry_and_recover_in_the_same_vm() {
          comptime fn check(flag: bool) -> bool {
              count<.values = packet(), Selected(flag)>() == 2
          }",
-    )
-    .unwrap();
+        &["check", "packet", "Selected"],
+        "count",
+    );
+}
+
+fn check_alternating_admission(source: &str, producer_calls: &[&str], callee: &str) {
+    let package = sysroot::compile(source).unwrap();
     let id = |name: &str| {
         package
             .functions
@@ -247,9 +302,9 @@ fn completed_input_domains_reject_before_entry_and_recover_in_the_same_vm() {
                         _ => None,
                     })
                     .collect::<Vec<_>>();
-                let mut expected = vec![id("check"), id("packet"), id("Selected")];
+                let mut expected: Vec<_> = producer_calls.iter().map(|name| id(name)).collect();
                 if valid {
-                    expected.push(id("count"));
+                    expected.push(id(callee));
                 }
                 assert_eq!(entered, expected, "reference={reference}, valid={valid}");
             }

@@ -4,12 +4,13 @@ use super::*;
 mod domain_checks;
 
 /// A checked packet keeps executable producers separate from static identities.
-/// Pending inputs can be supplied during invocation only when the consumer does
-/// not publish a callable signature that still depends on those identities.
+/// A typed operand may establish a signature equality conditional on successful
+/// admission. The pending producer still supplies the actual instance argument.
 pub(super) struct CallableClausePacket {
     declaration: domain_checks::Declaration,
     inputs: n::ClauseOperands,
     bindings: declaration_inputs::CallableBindings,
+    admitted: BTreeMap<DeclarationId, Term>,
     formation_deferred: bool,
 }
 
@@ -17,9 +18,13 @@ impl std::fmt::Display for CallableClausePacket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "(callable-clause-packet {} {} {} (formation-deferred {}))",
+            "(callable-clause-packet {} {} {} (formation-deferred {}) (admitted-domains",
             self.inputs, self.bindings, self.declaration, self.formation_deferred
-        )
+        )?;
+        for (id, ty) in &self.admitted {
+            write!(f, " ({id} {ty})")?;
+        }
+        f.write_str("))")
     }
 }
 
@@ -58,12 +63,13 @@ impl declaration_inputs::Completion for CallableCompletion {
             span,
         );
         checker.required_steps = steps;
-        checked?;
+        let admitted = checked?;
         let formation_deferred = declaration.check_formation(checker, formation, span)?;
         Ok(CallableClausePacket {
             declaration,
             inputs,
             bindings,
+            admitted,
             formation_deferred,
         })
     }
@@ -202,16 +208,15 @@ impl declaration_inputs::Completion for InstanceCompletion<'_> {
                 checker, &bindings, &formation, &arguments, &mut steps, span,
             );
             checker.required_steps = steps;
-            checked?;
+            let admitted = checked?;
             contract.check_formation(checker, formation, span)?;
-            if bindings.awaits_input(&self.signature, &mut checker.required_steps, span)? {
-                return Err(error(
-                    span,
-                    "comptime callable signature still depends on an invocation-time clause input",
-                ));
-            }
-            let signature =
-                bindings.instantiate(&self.signature, &mut checker.required_steps, span)?;
+            let signature = bindings.admitted_signature(
+                checker,
+                &self.signature,
+                &admitted,
+                contract.parameters.iter().copied().zip(&contract.domains),
+                span,
+            )?;
             let ty = checker.callable_type(owner, signature);
             if let Some(expected) = &self.expected {
                 checker.require(&ty, expected, span)?;
@@ -421,15 +426,6 @@ impl<'a, 'arena> Checker<'a, 'arena> {
         expected: Option<&Term>,
         allow_optional: bool,
     ) -> Result<n::Expr, Error> {
-        if packet
-            .bindings
-            .awaits_input(&signature, &mut self.required_steps, expr.span)?
-        {
-            return Err(error(
-                expr.span,
-                "comptime callable signature still depends on an invocation-time clause input",
-            ));
-        }
         if !packet.formation_deferred && packet.inputs.statements.is_empty() {
             // Only an already checked static application can use the direct
             // instance and declaration-side default substitution. An observed
@@ -445,10 +441,18 @@ impl<'a, 'arena> Checker<'a, 'arena> {
                 allow_optional,
             );
         }
-        let signature =
+        let signature = packet.bindings.admitted_signature(
+            self,
+            &signature,
+            &packet.admitted,
             packet
-                .bindings
-                .instantiate(&signature, &mut self.required_steps, expr.span)?;
+                .declaration
+                .parameters
+                .iter()
+                .copied()
+                .zip(&packet.declaration.domains),
+            expr.span,
+        )?;
         let ty = self.callable_type(owner, signature);
         if let Some(expected) = expected {
             self.require(&ty, expected, expr.span)?;
@@ -738,11 +742,13 @@ mod packet_tests {
             )
             .unwrap()
             .0,
+            admitted: BTreeMap::from([(last, p(P::Bool))]),
             formation_deferred: true,
         };
         let dump = packet.to_string();
         assert!(dump.contains(&producer));
         assert!(dump.contains(&format!("(pending {first} {last})")));
+        assert!(dump.contains(&format!("(admitted-domains ({last} {}))", p(P::Bool))));
         assert!(dump.find(&first.to_string()) < dump.find(&last.to_string()));
     }
 }

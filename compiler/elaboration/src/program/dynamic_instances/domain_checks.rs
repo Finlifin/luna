@@ -85,12 +85,15 @@ impl Declaration {
         operands: &[n::Expr],
         steps: &mut u64,
         span: Span,
-    ) -> Result<(), Error> {
+    ) -> Result<BTreeMap<DeclarationId, Term>, Error> {
         self.check_operand_domains(
             checker,
             bindings,
             formation,
-            operands.iter().zip(&self.domains),
+            operands
+                .iter()
+                .zip(&self.domains)
+                .map(|(expr, domain)| (expr, domain, true)),
             steps,
             span,
         )
@@ -104,7 +107,7 @@ impl Declaration {
         operands: &[n::NormalFormArgument],
         steps: &mut u64,
         span: Span,
-    ) -> Result<(), Error> {
+    ) -> Result<BTreeMap<DeclarationId, Term>, Error> {
         use n::NormalFormArgument as A;
         if operands.len() != self.domains.len() {
             return Err(error(span, "clause input packet domain arity mismatch"));
@@ -116,15 +119,19 @@ impl Declaration {
             Ok::<(), Error>(())
         };
         charge(operands.len())?;
-        let mut work: Vec<_> = operands.iter().zip(&self.domains).collect();
+        let mut work: Vec<_> = operands
+            .iter()
+            .zip(&self.domains)
+            .map(|(arg, domain)| (arg, domain, true))
+            .collect();
         let mut typed = Vec::new();
-        while let Some((operand, domain)) = work.pop() {
+        while let Some((operand, domain, unconditional)) = work.pop() {
             match operand {
-                A::Value(expr) | A::ListSpread(expr) => typed.push((expr, domain)),
+                A::Value(expr) | A::ListSpread(expr) => typed.push((expr, domain, unconditional)),
                 A::Block { result, .. } => {
                     if let Some(result) = result.as_deref() {
                         charge(1)?;
-                        work.push((result, domain));
+                        work.push((result, domain, unconditional));
                     }
                 }
                 A::If {
@@ -133,12 +140,12 @@ impl Declaration {
                     ..
                 } => {
                     charge(2)?;
-                    work.push((then_input, domain));
-                    work.push((else_input, domain));
+                    work.push((then_input, domain, false));
+                    work.push((else_input, domain, false));
                 }
                 A::Match { arms, .. } => {
                     charge(arms.len())?;
-                    work.extend(arms.iter().map(|arm| (&arm.body, domain)));
+                    work.extend(arms.iter().map(|arm| (&arm.body, domain, false)));
                 }
                 A::List { items, .. } => {
                     if let Some(element) = checker.list_element_type(domain) {
@@ -151,6 +158,7 @@ impl Declaration {
                                 } else {
                                     element
                                 },
+                                unconditional,
                             )
                         }));
                     }
@@ -168,7 +176,12 @@ impl Declaration {
                             return Err(error(span, "contextual tuple arity mismatch"));
                         }
                         charge(items.len())?;
-                        work.extend(items.iter().zip(fields));
+                        work.extend(
+                            items
+                                .iter()
+                                .zip(fields)
+                                .map(|(item, field)| (item, field, unconditional)),
+                        );
                     }
                 }
                 A::Unit { .. } | A::Null { .. } | A::Integer { .. } => {}
@@ -182,21 +195,25 @@ impl Declaration {
         checker: &Checker<'_, '_>,
         bindings: &CallableBindings,
         formation: &FormationInputs,
-        operands: impl IntoIterator<Item = (&'a n::Expr, &'a Term)>,
+        operands: impl IntoIterator<Item = (&'a n::Expr, &'a Term, bool)>,
         steps: &mut u64,
         span: Span,
-    ) -> Result<(), Error> {
+    ) -> Result<BTreeMap<DeclarationId, Term>, Error> {
         let mut pending = Vec::new();
-        for (operand, template) in operands {
+        for (operand, template, unconditional) in operands {
             if !bindings.awaits_input(template, steps, span)? {
                 let domain = bindings.instantiate(template, steps, span)?;
                 checker.require(&operand.ty, &domain, span)?;
             } else if !is_never(&operand.ty) {
-                pending.push((operand, template));
+                // All alternatives are checked. An unselected alternative whose
+                // annotation later becomes Never can pass without an equality.
+                let exact = unconditional
+                    || crate::ptc::distinct_outer_type_heads(&operand.ty, &p(P::Never));
+                pending.push((operand, template, exact));
             }
         }
         if pending.is_empty() {
-            return Ok(());
+            return Ok(BTreeMap::new());
         }
 
         // A single execution supplies one substitution for the whole packet.
@@ -204,20 +221,27 @@ impl Declaration {
         // identities for the same input.
         let proof = self.proof_substitution(checker, bindings, formation, steps, span)?;
         let mut equalities = Vec::with_capacity(pending.len());
-        for (operand, template) in &pending {
+        for (operand, template, exact) in &pending {
             let expected =
                 nominal_fields::metered(steps, |fuel| proof.instantiate_bounded(template, fuel))
                     .map_err(|reason| error(span, reason.to_string()))?;
             let (actual, expected) =
                 checker.scoped_equality_operands(&operand.ty, &expected, span)?;
-            equalities.push(crate::ptc::Formula::equal(actual, expected));
+            let equality = crate::ptc::Formula::equal(actual, expected);
+            equalities.push(if *exact {
+                equality
+            } else {
+                let (actual, never) =
+                    checker.scoped_equality_operands(&operand.ty, &p(P::Never), span)?;
+                crate::ptc::Formula::Or(vec![equality, crate::ptc::Formula::equal(actual, never)])
+            });
         }
         if disproves_domains(checker, equalities, steps, span)? {
             let mut failure = error(
                 span,
                 "type mismatch: no common substitution satisfies the clause input domains",
             );
-            for (operand, template) in pending {
+            for (operand, template, _) in pending {
                 failure.notes.push(DiagnosticNote {
                     source: operand.source,
                     message: format!(
@@ -228,7 +252,27 @@ impl Declaration {
             }
             return Err(failure);
         }
-        Ok(())
+        // A successful admission checks exact type equality for a typed leaf.
+        // For a bare declaration variable this gives its caller-side identity
+        // without inspecting the producer or choosing a satisfying PTC model.
+        let mut admitted = BTreeMap::new();
+        for (operand, template, exact) in pending {
+            if exact
+                && let Term::Rigid {
+                    declaration,
+                    sort: Sort::Type,
+                } = template
+                && let std::collections::btree_map::Entry::Vacant(entry) =
+                    admitted.entry(*declaration)
+            {
+                entry.insert(declaration_inputs::copy_input_domain(
+                    &operand.ty,
+                    steps,
+                    span,
+                )?);
+            }
+        }
+        Ok(admitted)
     }
 
     fn proof_substitution(
