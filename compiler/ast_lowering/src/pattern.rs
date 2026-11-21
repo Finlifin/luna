@@ -532,7 +532,18 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
             // Ctor { field: pat, ... } extended application pattern
             NodeKind::ExtendedApplicationPattern => {
-                let callee = self.lower_pattern(children[0]);
+                let head = children[0];
+                let callee = match self.ast.get_node_kind(head) {
+                    Some(NodeKind::Id | NodeKind::NormalFormHeadApplication) => {
+                        let value = self.lower_expr(ExprContext::PatternConstant, head);
+                        Pattern {
+                            hir_id: self.next_hir_id(),
+                            span: value.span,
+                            kind: PatternKind::Const(self.arena.alloc_expr(value)),
+                        }
+                    }
+                    _ => self.lower_pattern(head),
+                };
                 let callee_ref = self.arena.alloc_pattern(callee);
 
                 let fields_node = children[1];

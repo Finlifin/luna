@@ -607,6 +607,74 @@ fn multiple_error_rows_accept_named_variant_payload_patterns() {
 }
 
 #[test]
+fn named_record_error_patterns_select_instantiated_labels_and_bind_fields() {
+    use comptime_interpretor::Value;
+    let source = "typealias u8 = .u8'builtin;
+        typealias Type = .Type'builtin;
+        struct ParseErr where T { offset: T }
+        typealias ByteErr = ParseErr<u8>;
+        const ByteHead: Type = ByteErr;
+        enum IoErr { Closed, }
+        fn read(flag: bool) -> ![ParseErr<bool>, ByteErr, IoErr] bool {
+            if flag { error ParseErr<bool> { offset: true } }
+            else { error ByteErr { offset: 19 } }
+        }
+        fn inspect(flag: bool) -> u8 {
+            read(flag) match {
+                _! => 0,
+                error ParseErr<bool> { offset: true } => 7,
+                error ParseErr<bool> {} => 1,
+                error (ByteHead { offset } as whole) => if whole.offset == offset { offset } else { 0 },
+                error IoErr.Closed => 2,
+            }
+        }";
+    let package = support::compile(source);
+    let graph = luna::instantiation::instantiate(&package, "inspect", 100_000).unwrap();
+    let mut runtime =
+        comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    let staged = support::compile(&source.replace("fn ", "comptime fn "));
+    let inspect = support::id(&staged, "inspect");
+    let mut bytecode =
+        comptime_interpretor::Interpreter::for_comptime(&staged, Default::default()).unwrap();
+    let mut reference =
+        comptime_interpretor::Interpreter::for_comptime_tree(&staged, Default::default()).unwrap();
+    for (flag, offset) in [(true, 7), (false, 19)] {
+        let inputs = vec![Value::Bool(flag)];
+        let expected = Value::UnsignedInteger(offset);
+        assert_eq!(
+            runtime
+                .invoke_instance(&graph.roots[0], inputs.clone())
+                .unwrap(),
+            expected
+        );
+        assert_eq!(bytecode.invoke(inspect, inputs.clone()).unwrap(), expected);
+        assert_eq!(reference.invoke(inspect, inputs).unwrap(), expected);
+    }
+}
+
+#[test]
+fn named_record_error_patterns_reject_foreign_heads_and_invalid_fields() {
+    let source = "struct ParseErr { at: bool } struct OtherErr { at: bool }
+        enum IoErr { Closed, }
+        fn inspect(input: ![ParseErr, IoErr] bool) -> bool {
+            input match { _! => false, error HEAD => true, error _ => false, }
+        }";
+    for (head, diagnostic) in [
+        ("OtherErr { at }", "absent from the input error row"),
+        ("ParseErr { unknown }", "unknown struct pattern field"),
+        (
+            "ParseErr { at: _, at: true }",
+            "duplicate struct pattern field",
+        ),
+    ] {
+        let failure =
+            support::compile_with_protocols(&source.replace("HEAD", head), &Default::default())
+                .unwrap_err();
+        assert!(failure.contains(diagnostic), "{failure}");
+    }
+}
+
+#[test]
 fn source_error_patterns_reject_wrong_domains_and_missing_labels() {
     for (source, reason) in [
         (

@@ -56,24 +56,34 @@ impl Parser<'_> {
         self.scoped(|p| p.try_pattern_pratt(0, PatternOption::new().with_no_extended_call(true)))
     }
 
-    // A projection after the matching diamond makes this a type-expression
-    // qualifier (Choice<T>.value), not a type-pattern application (Choice<T>).
+    // A member or a record payload after the matching diamond uses a type
+    // expression as its constructor. A bare diamond still matches type inputs.
     // Look ahead without building speculative AST nodes or publishing binders.
-    fn diamond_qualifies_projection(&self) -> bool {
+    fn diamond_qualifies_constructor(&self, option: PatternOption) -> bool {
         let mut depth = 0usize;
+        let mut group_depth = 0usize;
         for (index, token) in self.tokens.iter().enumerate().skip(self.cursor + 1) {
             match token.kind {
-                TokenKind::Lt => depth += 1,
-                TokenKind::Gt => {
+                TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => group_depth += 1,
+                TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
+                    let Some(next) = group_depth.checked_sub(1) else {
+                        return false;
+                    };
+                    group_depth = next;
+                }
+                // Comparisons inside a grouped expression are local to that
+                // group and cannot close (or open) the surrounding diamond.
+                TokenKind::Lt if group_depth == 0 => depth += 1,
+                TokenKind::Gt if group_depth == 0 => {
                     let Some(next) = depth.checked_sub(1) else {
                         return false;
                     };
                     depth = next;
                     if depth == 0 {
-                        return self
-                            .tokens
-                            .get(index + 1)
-                            .is_some_and(|token| token.kind == TokenKind::Dot);
+                        return self.tokens.get(index + 1).is_some_and(|token| {
+                            token.kind == TokenKind::Dot
+                                || (token.kind == TokenKind::LBrace && !option.no_extended_call)
+                        });
                     }
                 }
                 TokenKind::Eof => return false,
@@ -378,7 +388,7 @@ impl Parser<'_> {
                 }
 
                 TokenKind::Lt => {
-                    if p.diamond_qualifies_projection() {
+                    if p.diamond_qualifies_constructor(option) {
                         return p.try_diamond_call_expr(left);
                     }
                     // 钻石模式调用

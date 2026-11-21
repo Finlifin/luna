@@ -441,6 +441,7 @@ fn std_fs_helpers_with_default_and_custom_allocators_run_natively() {
         use std.prelude.*;
         use std.fs.{read, read_to_string, remove_file, write_bytes, write_str};
         use std.io.IoErr;
+        use std.string.Utf8Err;
         use std.mem.{AllocErr, Allocator, FixedBufferAllocator, Layout, SystemAllocator};
 
         fn expect_byte(opt: ?u8, expected: u8) -> bool {
@@ -468,24 +469,24 @@ fn std_fs_helpers_with_default_and_custom_allocators_run_natively() {
             }
 
             var raw_in = Vec<u8, .A = FixedBufferAllocator, .allocator = fba>.new();
-            raw_in.ref.push(255)!;
+            raw_in.ref.push(65)!;
             raw_in.ref.push(254)!;
             raw_in.ref.push(10)!;
             raw_in.ref.push(0)!;
-            raw_in.ref.push(65)!;
+            raw_in.ref.push(255)!;
             write_bytes("stage2c_bin.dat", raw_in.ref)!;
 
             let def_bytes = read("stage2c_bin.dat")!;
             let fba_bytes = read<.A = FixedBufferAllocator, .allocator = fba>("stage2c_bin.dat")!;
             if def_bytes.ref.len() != 5
                 or fba_bytes.ref.len() != 5
-                or not expect_byte(def_bytes.ref.get(0), 255)
+                or not expect_byte(def_bytes.ref.get(0), 65)
                 or not expect_byte(def_bytes.ref.get(1), 254)
                 or not expect_byte(def_bytes.ref.get(2), 10)
                 or not expect_byte(def_bytes.ref.get(3), 0)
-                or not expect_byte(def_bytes.ref.get(4), 65)
-                or not expect_byte(fba_bytes.ref.get(0), 255)
-                or not expect_byte(fba_bytes.ref.get(4), 65)
+                or not expect_byte(def_bytes.ref.get(4), 255)
+                or not expect_byte(fba_bytes.ref.get(0), 65)
+                or not expect_byte(fba_bytes.ref.get(4), 255)
             {
                 return 5;
             }
@@ -497,7 +498,7 @@ fn std_fs_helpers_with_default_and_custom_allocators_run_natively() {
                 error IoErr.UnexpectedEof => false,
                 error AllocErr.OutOfMemory => false,
                 error AllocErr.InvalidLayout => false,
-                error _ => true,
+                error (Utf8Err {} as invalid) => invalid.valid_up_to() == 1,
             };
             if not invalid_utf8_caught {
                 return 6;

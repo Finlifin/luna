@@ -270,6 +270,39 @@ fn qualified_generic_pattern_heads_parse_type_expressions_in_diamonds() {
 }
 
 #[test]
+fn named_record_pattern_heads_parse_type_expressions_in_diamonds() {
+    for source in [
+        "pkg.Failure<Box<bool>> { value }",
+        "Failure<(3 > 2)> { value }",
+    ] {
+        let (ast, node, next, _) = parse_literal(source, true);
+        assert_eq!(next, TokenKind::Eof, "{source}");
+        assert_eq!(
+            ast.get_node_kind(node),
+            Some(NodeKind::ExtendedApplicationPattern)
+        );
+        let head = ast.get_children(node)[0];
+        assert_eq!(
+            ast.get_node_kind(head),
+            Some(NodeKind::NormalFormHeadApplication)
+        );
+    }
+
+    let map = SourceMap::new(FilePathMapping::empty());
+    let source = "Failure<'Expected> {";
+    let file = map.new_source_file(FileName::Custom("pattern.fl".into()), source.into());
+    let (tokens, symbols, errors) = lex::lex(source, file.start_pos);
+    assert!(errors.is_empty());
+    let mut parser = Parser::new(&map, tokens, symbols, file.start_pos);
+    let node = parser.try_pattern_without_extended_call().unwrap();
+    assert_eq!(parser.peek_next_token().kind, TokenKind::LBrace);
+    assert_eq!(
+        parser.finalize().get_node_kind(node),
+        Some(NodeKind::NormalFormHeadApplicationPattern)
+    );
+}
+
+#[test]
 fn unqualified_type_patterns_retain_pattern_argument_roles() {
     let (ast, node, next, _) = parse_literal("Array<'Expected, count>", true);
     assert_eq!(next, TokenKind::Eof);

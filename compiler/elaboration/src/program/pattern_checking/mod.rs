@@ -1,12 +1,15 @@
 //! Source pattern checking with candidate-local bindings and type evidence.
 //! Resource delivery remains the responsibility of program verification.
 use super::*;
+mod errors;
 mod evidence;
 mod matches;
+mod records;
 pub(super) use evidence::{
     PatternGuard, boolean_pattern_coverage, matched_type_pattern_value, pattern_binding_ids,
     pattern_bindings, pattern_guard_evidence, readonly_guard_comparison, readonly_guard_operand,
 };
+use records::RecordHead;
 
 impl Checker<'_, '_> {
     pub(super) fn pattern(
@@ -21,6 +24,19 @@ impl Checker<'_, '_> {
         pattern: &hir::pattern::Pattern<'_>,
         ty: &Term,
         observed: Option<&Term>,
+    ) -> Result<n::Pattern, Error> {
+        self.pattern_with_record_head(pattern, ty, observed, None)
+    }
+
+    // A heterogeneous error row resolves a named payload constructor before
+    // checking its fields. Carry that selection through its enclosing guards
+    // and bindings so formation never evaluates the constructor inputs twice.
+    fn pattern_with_record_head(
+        &mut self,
+        pattern: &hir::pattern::Pattern<'_>,
+        ty: &Term,
+        observed: Option<&Term>,
+        record: Option<RecordHead>,
     ) -> Result<n::Pattern, Error> {
         use hir::pattern::PatternKind as HP;
         match &pattern.kind {
@@ -40,82 +56,7 @@ impl Checker<'_, '_> {
                     inner: Box::new(self.pattern(inner, result)?),
                 })
             }
-            HP::ErrorErr(inner) => {
-                let Term::ErrorResult { errors, .. } = ty else {
-                    return Err(error(
-                        pattern.span,
-                        "error pattern requires an error-qualified input",
-                    ));
-                };
-                if matches!(inner.kind, HP::Wild) {
-                    self.required_steps = self
-                        .required_steps
-                        .checked_sub(errors.len() as u64)
-                        .ok_or_else(|| error(pattern.span, "error pattern budget exhausted"))?;
-                    return Ok(n::Pattern::Or(
-                        errors
-                            .iter()
-                            .map(|label| n::Pattern::ErrorResult {
-                                label: Some(label.clone()),
-                                inner: Box::new(n::Pattern::Wild),
-                            })
-                            .collect(),
-                    ));
-                }
-                let label = if errors.len() == 1 {
-                    errors[0].clone()
-                } else {
-                    let mut selected = *inner;
-                    loop {
-                        match &selected.kind {
-                            HP::Guard(first, _) | HP::Then(first, _, _) => selected = first,
-                            HP::Binding(_, _, Some(first)) => selected = first,
-                            _ => break,
-                        }
-                    }
-                    let callee = match &selected.kind {
-                        HP::Const(value) => *value,
-                        HP::AppTuple(head, _) | HP::Struct(head, _, _) => {
-                            let HP::Const(value) = &head.kind else {
-                                return Err(error(
-                                    pattern.span,
-                                    "error payload requires a type-identifying pattern",
-                                ));
-                            };
-                            *value
-                        }
-                        _ => {
-                            return Err(error(
-                                pattern.span,
-                                "multiple error types require a type-identifying payload pattern",
-                            ));
-                        }
-                    };
-                    let label = self
-                        .variant_target(callee, None)?
-                        .ok_or_else(|| {
-                            error(
-                                pattern.span,
-                                "multiple error types require a qualified variant pattern",
-                            )
-                        })?
-                        .0;
-                    errors
-                        .iter()
-                        .find(|allowed| self.require(&label, allowed, pattern.span).is_ok())
-                        .cloned()
-                        .ok_or_else(|| {
-                            error(
-                                pattern.span,
-                                "error pattern type is absent from the input error row",
-                            )
-                        })?
-                };
-                Ok(n::Pattern::ErrorResult {
-                    label: Some(label.clone()),
-                    inner: Box::new(self.pattern(inner, &label)?),
-                })
-            }
+            HP::ErrorErr(inner) => self.error_payload_pattern(inner, ty, pattern.span),
             HP::OptionSome(inner) => {
                 let payload = self.optional_payload(ty, pattern.span)?;
                 Ok(n::Pattern::OptionalPresent(Box::new(
@@ -452,7 +393,7 @@ impl Checker<'_, '_> {
                 })
             }
             HP::Then(first, value, next) => {
-                let first = self.pattern_observed(first, ty, observed)?;
+                let first = self.pattern_with_record_head(first, ty, observed, record)?;
                 let (value, next) = self.under_observed_pattern_type_facts(
                     &first,
                     observed,
@@ -467,7 +408,7 @@ impl Checker<'_, '_> {
                 self.lower_computed_pattern(first, value, next, pattern.span)
             }
             HP::Guard(pattern, condition) => {
-                let pattern = self.pattern_observed(pattern, ty, observed)?;
+                let pattern = self.pattern_with_record_head(pattern, ty, observed, record)?;
                 let condition = self.under_observed_pattern_type_facts(
                     &pattern,
                     observed,
@@ -670,97 +611,28 @@ impl Checker<'_, '_> {
                     .collect::<Result<Vec<_>, _>>()?;
                 Ok(n::Pattern::Tuple(fields))
             }
-            HP::Struct(callee, fields, rest) if matches!(callee.kind, HP::Wild) => {
-                let shape = self.structural_type(ty, pattern.span)?;
-                if let Term::Record(declared) = &shape {
-                    if *rest {
-                        return Err(error(
-                            pattern.span,
-                            "record rest binding is not implemented",
-                        ));
-                    }
-                    let mut routed = vec![None; declared.len()];
-                    let mut seen = BTreeSet::new();
-                    for field in *fields {
-                        let slot = declared
-                            .iter()
-                            .position(|(name, _)| name == field.ident.name.as_str())
-                            .ok_or_else(|| error(field.span, "unknown struct pattern field"))?;
-                        if !seen.insert(slot) {
-                            return Err(error(field.span, "duplicate struct pattern field"));
-                        }
-                        routed[slot] = Some(field);
-                    }
-                    // Runtime field traversal follows declaration order, so candidate
-                    // locals must become available to guards in that same order.
-                    let mut checked = Vec::with_capacity(routed.len());
-                    for (slot, field) in routed.into_iter().enumerate() {
-                        checked.push(match field {
-                            Some(field) => self.pattern(&field.pat, &declared[slot].1)?,
-                            None => n::Pattern::Wild,
-                        });
-                    }
-                    return Ok(n::Pattern::AnonymousRecord {
-                        names: declared.iter().map(|(name, _)| name.clone()).collect(),
-                        fields: checked,
-                    });
-                }
-                let Term::Nominal { declaration, .. } = &shape else {
-                    return Err(error(
-                        pattern.span,
-                        "record pattern requires a struct type; custom pattern view elaboration is not implemented",
-                    ));
-                };
-                if !self.structs.contains_key(declaration) {
-                    return Err(error(pattern.span, "record pattern requires a struct type"));
-                }
-                if *rest {
-                    return Err(error(
-                        pattern.span,
-                        "record rest binding is not implemented",
-                    ));
-                }
-                let declared = self.instantiated_fields(&shape, pattern.span)?;
-                let mut routed = vec![None; declared.len()];
-                let mut seen = BTreeSet::new();
-                for field in *fields {
-                    let slot = declared
-                        .iter()
-                        .position(|(name, _)| name == field.ident.name.as_str())
-                        .ok_or_else(|| error(field.span, "unknown struct pattern field"))?;
-                    if !seen.insert(slot) {
-                        return Err(error(field.span, "duplicate struct pattern field"));
-                    }
-                    routed[slot] = Some(field);
-                }
-                // Runtime field traversal follows declaration order, so candidate
-                // locals must become available to guards in that same order.
-                let mut checked = Vec::with_capacity(routed.len());
-                for (slot, field) in routed.into_iter().enumerate() {
-                    checked.push(match field {
-                        Some(field) => self.pattern(&field.pat, &declared[slot].1)?,
-                        None => n::Pattern::Wild,
-                    });
-                }
-                Ok(n::Pattern::Record {
-                    declaration: *declaration,
-                    fields: checked,
-                })
-            }
             HP::Struct(callee, fields, rest) => {
+                if matches!(callee.kind, HP::Wild) {
+                    return self.record_pattern(ty, fields, *rest, pattern.span);
+                }
                 let HP::Const(callee) = &callee.kind else {
                     return Err(error(
                         pattern.span,
-                        "named enum pattern requires a variant name",
+                        "named record pattern requires a constructor",
                     ));
                 };
-                let Some((variant_type, index)) = self.variant_target(callee, Some(ty))? else {
-                    return Err(error(
-                        pattern.span,
-                        "named enum pattern requires an enum context",
-                    ));
+                let head = match record {
+                    Some(head) => head,
+                    None => {
+                        let head = self.named_record_head(callee, Some(ty))?;
+                        self.require_type_identity(&head.ty, ty, pattern.span)?;
+                        head
+                    }
                 };
-                self.require(&variant_type, ty, pattern.span)?;
+                let variant_type = head.ty;
+                let Some(index) = head.variant else {
+                    return self.record_pattern(&variant_type, fields, *rest, pattern.span);
+                };
                 let Term::Nominal { declaration, .. } = variant_type else {
                     unreachable!()
                 };
@@ -844,7 +716,7 @@ impl Checker<'_, '_> {
             HP::Wild => Ok(n::Pattern::Wild),
             HP::Binding(hir::common::BindingMode::ByValue, _, inner) => {
                 let inner = inner
-                    .map(|p| self.pattern_observed(p, ty, observed))
+                    .map(|p| self.pattern_with_record_head(p, ty, observed, record))
                     .transpose()?
                     .unwrap_or(n::Pattern::Wild);
                 let binding = local(pattern.hir_id);
