@@ -14,6 +14,11 @@ enum Root<'r> {
     Plan(&'r mut dyn input_collection::InputPlan, &'r mut Environment),
 }
 
+enum SessionExit {
+    Returned(InvocationResult),
+    Flow(Option<Flow>),
+}
+
 impl Root<'_> {
     fn code(&mut self) -> Option<&mut bytecode::Frame> {
         match self {
@@ -161,10 +166,13 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
             self.pending = Some(request.resolve(self.vm));
             return Ok(Poll::Pending);
         }
-        self.advance(false)
+        Ok(self.advance(false)?.map(|exit| match exit {
+            SessionExit::Returned(result) => Some(Flow::Value(result.value)),
+            SessionExit::Flow(flow) => flow,
+        }))
     }
 
-    fn advance(&mut self, external: bool) -> Result<Poll<Option<Flow>>, Error> {
+    fn advance(&mut self, external: bool) -> Result<Poll<SessionExit>, Error> {
         if self.terminal {
             return Err(self.vm.failure(ErrorKind::InvalidControlFlow, None));
         }
@@ -192,7 +200,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
         self.vm.remaining_steps()
     }
 
-    fn step(&mut self, external: bool) -> Result<Poll<Option<Flow>>, Error> {
+    fn step(&mut self, external: bool) -> Result<Poll<SessionExit>, Error> {
         let Self {
             vm,
             root,
@@ -385,10 +393,19 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                     } else {
                         let (frame, environment) = root.plan().expect("input plan root");
                         if let Some(flow) = frame.accept_input(vm, environment, input)? {
-                            return Ok(Poll::Ready(Some(flow)));
+                            return Ok(Poll::Ready(SessionExit::Flow(Some(flow))));
                         }
                     }
                     return Ok(Poll::Pending);
+                }
+                Completion::Returned(delivered) => {
+                    if stack.is_empty() && matches!(root, Root::Invocation) {
+                        return Ok(Poll::Ready(SessionExit::Returned(delivered)));
+                    }
+                    (
+                        Ok(Flow::Value(delivered.value)),
+                        ReturnedEnvironment::Private,
+                    )
                 }
                 Completion::Ordinary { flow, bindings } => (flow, bindings),
             };
@@ -397,7 +414,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 .and_then(StackEntry::code)
                 .or_else(|| root.code())
             else {
-                return flow.map(|flow| Poll::Ready(Some(flow)));
+                return flow.map(|flow| Poll::Ready(SessionExit::Flow(Some(flow))));
             };
             let propagation = match parent.receive(flow, bindings) {
                 Ok(None) => None,
@@ -411,7 +428,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                     *result = Some(vm.complete_stack(parent, code, flow));
                     return Ok(Poll::Pending);
                 }
-                return flow.map(|flow| Poll::Ready(Some(flow)));
+                return flow.map(|flow| Poll::Ready(SessionExit::Flow(Some(flow))));
             }
         }
         if let Some(StackEntry::Plan(active)) = stack.last_mut() {
@@ -441,9 +458,11 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                         stack.push(StackEntry::Code(StackContext::Input(finish), code));
                     }
                     input_collection::Progress::Complete(flow) => {
-                        return Ok(Poll::Ready(Some(flow)));
+                        return Ok(Poll::Ready(SessionExit::Flow(Some(flow))));
                     }
-                    input_collection::Progress::InputsComplete => return Ok(Poll::Ready(None)),
+                    input_collection::Progress::InputsComplete => {
+                        return Ok(Poll::Ready(SessionExit::Flow(None)));
+                    }
                 }
                 return Ok(Poll::Pending);
             }
@@ -546,7 +565,7 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 if let Some(StackEntry::Code(completed, code)) = stack.pop() {
                     *result = Some(vm.complete_stack(completed, code, flow));
                 } else {
-                    return flow.map(|flow| Poll::Ready(Some(flow)));
+                    return flow.map(|flow| Poll::Ready(SessionExit::Flow(Some(flow))));
                 }
             }
         }
@@ -569,6 +588,10 @@ impl<'vm, 'a, 'r> Session<'vm, 'a, 'r> {
                 Completion::Continue(active) => self
                     .vm
                     .complete_execution(Execution::Invocation(active), Err(error)),
+                Completion::Returned(_) => Completion::Ordinary {
+                    flow: Err(error),
+                    bindings: ReturnedEnvironment::Private,
+                },
                 Completion::Ordinary { bindings, .. } => Completion::Ordinary {
                     flow: Err(error),
                     bindings,
@@ -644,6 +667,7 @@ impl fmt::Display for Session<'_, '_, '_> {
                     " (continue {} {})",
                     active.frame.target, active.frame.progress
                 )?,
+                Completion::Returned(delivered) => write!(f, " {delivered}")?,
                 Completion::Ordinary { bindings, .. } => f.write_str(match bindings {
                     ReturnedEnvironment::Private => " ordinary",
                     ReturnedEnvironment::Declaration(_) => " (ordinary declaration-bindings)",

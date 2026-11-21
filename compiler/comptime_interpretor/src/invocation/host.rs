@@ -47,14 +47,32 @@ pub struct InvocationSession<'vm, 'world> {
     session: Session<'vm, 'world, 'static>,
 }
 
+/// A normal return after the callee's exit checks. The result type is the
+/// admitted signature result with this invocation's ordinary inputs bound.
+#[derive(Debug)]
+pub struct InvocationResult {
+    pub value: Value,
+    pub result_type: Term,
+}
+
+impl fmt::Display for InvocationResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(invocation-result (type {}) (value {}))",
+            self.result_type, self.value
+        )
+    }
+}
+
 /// Running made internal progress; Waiting has an outstanding owned request.
-pub enum InvocationProgress<'world> {
+pub enum InvocationProgress<'world, T = Value> {
     Running,
     Waiting,
     Associated(AssociatedHostRequest<'world>),
     Definition(DefinitionHostRequest<'world>),
     Method(MethodHostRequest<'world>),
-    Complete(Value),
+    Complete(T),
 }
 
 /// Resolve against this immutable source package and the compiler's matching
@@ -199,11 +217,23 @@ impl<'world> InvocationSession<'_, 'world> {
     }
 
     pub fn run_with_associated(
+        self,
+        associated: impl FnMut(AssociatedHostRequest<'world>) -> AssociatedHostResponse<'world>,
+    ) -> Result<Value, Error> {
+        self.drive(associated).map(|result| result.value)
+    }
+
+    /// Drive this session and deliver the root's bound result type with its value.
+    pub fn run_with_result_type(self) -> Result<InvocationResult, Error> {
+        self.drive(AssociatedHostRequest::prepare)
+    }
+
+    fn drive(
         mut self,
         mut associated: impl FnMut(AssociatedHostRequest<'world>) -> AssociatedHostResponse<'world>,
-    ) -> Result<Value, Error> {
+    ) -> Result<InvocationResult, Error> {
         loop {
-            match self.poll()? {
+            match self.poll_with_result_type()? {
                 InvocationProgress::Complete(value) => return Ok(value),
                 InvocationProgress::Running => {}
                 InvocationProgress::Associated(request) => self
@@ -231,7 +261,14 @@ impl<'world> InvocationSession<'_, 'world> {
     /// host. Running may include synchronous services or tree execution; this
     /// boundary does not promise a wall-clock slice or preemption.
     pub fn poll(&mut self) -> Result<InvocationProgress<'world>, Error> {
-        self.session.poll_external()
+        self.session.poll_external(|result| result.value)
+    }
+
+    /// Like `poll`, preserving the result type on the successful terminal transition.
+    pub fn poll_with_result_type(
+        &mut self,
+    ) -> Result<InvocationProgress<'world, InvocationResult>, Error> {
+        self.session.poll_external(std::convert::identity)
     }
 
     /// Deliver an answer for later admission. A rejected answer is returned
@@ -304,7 +341,7 @@ impl fmt::Display for RejectedHostResponse<'_> {
         )
     }
 }
-impl fmt::Display for InvocationProgress<'_> {
+impl<T: fmt::Display> fmt::Display for InvocationProgress<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Running => f.write_str("(running)"),
@@ -322,7 +359,7 @@ impl fmt::Debug for InvocationSession<'_, '_> {
         fmt::Display::fmt(self, f)
     }
 }
-impl fmt::Debug for InvocationProgress<'_> {
+impl<T: fmt::Display> fmt::Debug for InvocationProgress<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(self, f)
     }

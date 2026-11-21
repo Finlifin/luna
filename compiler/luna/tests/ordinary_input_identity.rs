@@ -11,14 +11,7 @@ fn check_both(source: &str, entered: usize) {
 
 fn check_events(source: &str, events: &[(&str, usize)]) {
     let package = sysroot::compile(source).unwrap();
-    let id = |name: &str| {
-        package
-            .functions
-            .iter()
-            .find(|f| f.name == name)
-            .unwrap()
-            .declaration
-    };
+    let id = |name: &str| sysroot::source_function(&package, name);
     for tree in [false, true] {
         let budget = Budget {
             steps: 1_000_000,
@@ -158,6 +151,49 @@ fn an_explicit_type_consumer_uses_each_original_invocation_once() {
         ",
         &[("Selected", 2), ("consume", 2), ("empty", 2)],
     );
+}
+
+#[test]
+fn source_invocations_deliver_the_bound_result_domain_across_a_forwarder() {
+    let package = sysroot::compile(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn forward(comptime ty: Type) -> ?ty { empty(ty) }
+    ",
+    )
+    .unwrap();
+    let id = |name: &str| sysroot::source_function(&package, name);
+    sysroot::with_comptime(&package, Budget::default(), false, |vm| {
+        for (flag, element) in [(true, nir::Primitive::Bool), (false, nir::Primitive::Char)] {
+            let selected = vm
+                .start_invocation(Value::Function(id("Selected")), vec![Value::Bool(flag)])
+                .unwrap()
+                .run_with_result_type()
+                .unwrap();
+            assert_eq!(
+                selected.result_type,
+                nir::Term::Primitive(nir::Primitive::Type)
+            );
+            let returned = vm
+                .start_invocation(Value::Function(id("forward")), vec![selected.value])
+                .unwrap()
+                .run_with_result_type()
+                .unwrap();
+            let expected = nir::Term::Optional(Box::new(nir::Term::Primitive(element)));
+            assert_eq!(returned.result_type, expected);
+            assert_eq!(
+                returned.value,
+                Value::Optional {
+                    ty: expected,
+                    value: None
+                }
+            );
+        }
+        for name in ["Selected", "forward", "empty"] {
+            assert_eq!(vm.events().iter().filter(|event| matches!(event, Event::EnterFunction(entered) if *entered == id(name))).count(), 2, "{name}");
+        }
+    });
 }
 
 #[test]

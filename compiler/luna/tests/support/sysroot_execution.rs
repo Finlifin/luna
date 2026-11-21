@@ -15,6 +15,19 @@ pub(crate) const COMPTIME_BUDGET: Budget = Budget {
     depth: 128,
 };
 
+/// The single-source sysroot fixture assigns package 0 to the user's module.
+/// Imported libraries can define functions with the same unqualified names.
+#[allow(dead_code)]
+pub(crate) fn source_function(package: &nir::program::Package, name: &str) -> nir::DeclarationId {
+    let mut matches = package
+        .functions
+        .iter()
+        .filter(|function| function.declaration.package == 0 && function.name == name);
+    let selected = matches.next().expect("source function").declaration;
+    assert!(matches.next().is_none(), "ambiguous source function {name}");
+    selected
+}
+
 pub(crate) fn compile(source: &str) -> Result<nir::program::Package, String> {
     let result = with_options(source, frontend::compile);
     match result {

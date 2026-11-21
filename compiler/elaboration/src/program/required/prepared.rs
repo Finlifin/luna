@@ -454,7 +454,6 @@ impl PreparedRequired {
         let PreparedRequired {
             entry,
             inputs,
-            result_type,
             scope,
             ..
         } = self;
@@ -558,10 +557,10 @@ impl PreparedRequired {
         }
         let value = interpreter.with_code_session(code.session(), |vm| {
             vm.start_prepared_invocation(entry, inputs)?
-                .run_to_completion()
+                .run_with_result_type()
         });
         *steps = interpreter.remaining_steps();
-        let value = value.map_err(|failure| {
+        let delivered = value.map_err(|failure| {
             use comptime_interpretor::ErrorKind;
             if *in_signature && (failure.kind == ErrorKind::MissingBinding
                 || (failure.kind == ErrorKind::AbstractValueUnresolved
@@ -573,9 +572,32 @@ impl PreparedRequired {
             }
             error(span, format!("required comptime evaluation failed: {failure}"))
         })?;
+        let result_type = if scoped_parameters.is_empty() {
+            delivered.result_type
+        } else {
+            let mut fuel = usize::try_from(*steps).unwrap_or(usize::MAX);
+            let before = fuel;
+            let charged = nir::copy_budget::charge_type_substitution(
+                &delivered.result_type,
+                scoped_parameters,
+                scoped_arguments,
+                &mut fuel,
+            );
+            *steps -= (before - fuel) as u64;
+            charged.map_err(|e| {
+                error(
+                    span,
+                    format!("required result domain restoration failed: {e:?}"),
+                )
+            })?;
+            delivered
+                .result_type
+                .instantiate_parameters_in_scope(scoped_parameters, scoped_arguments, input_frames)
+                .map_err(|e| error(span, e.to_string()))?
+        };
         let value = restore_required_packet(
             steps,
-            value,
+            delivered.value,
             scoped_parameters,
             scoped_arguments,
             input_frames,
@@ -730,6 +752,104 @@ mod tests {
                 in_signature: false,
             }),
         }
+    }
+
+    #[test]
+    fn required_delivery_reports_the_domain_bound_by_this_invocation() {
+        let mut prepared = literal_preparation(false);
+        let parameter = n::LocalId {
+            owner: 11,
+            index: 0,
+        };
+        let ty = p(P::Type);
+        let result = Term::Optional(Box::new(Term::Bound {
+            depth: 0,
+            index: 0,
+            sort: Sort::Type,
+        }));
+        prepared.result_type = result.clone();
+        prepared.inputs.push((parameter, ty.clone(), None));
+        prepared.edit_scope().parameter_slots = vec![Some(0)].into_boxed_slice();
+        prepared.edit_package(|package| {
+            let function = &mut package.functions[0];
+            function.interface.signature = Term::Function {
+                parameters: vec![nir::Parameter {
+                    sort: Sort::Type,
+                    ty,
+                }],
+                result: Box::new(result.clone()),
+            };
+            function.parameters.push(parameter);
+            function.body.ty = result;
+            function.body.kind = K::OptionalAbsent;
+        });
+        for domain in [P::Bool, P::Char] {
+            let (value, result_type) = prepared
+                .clone()
+                .invoke_with_inputs(vec![(parameter, p(domain))], &mut 100_000, Span::default())
+                .unwrap();
+            let expected = Term::Optional(Box::new(p(domain)));
+            assert_eq!(result_type, expected);
+            assert_eq!(
+                value,
+                Value::Optional {
+                    ty: expected,
+                    value: None
+                }
+            );
+        }
+        let opaque = DeclarationId {
+            package: 7,
+            local: 90,
+        };
+        let outer = Term::Bound {
+            depth: 0,
+            index: 1,
+            sort: Sort::Type,
+        };
+        let scope = prepared.edit_scope();
+        scope.scoped_parameters.push(nir::DeclarationParameter {
+            declaration: opaque,
+            sort: Sort::Type,
+        });
+        scope.scoped_arguments.push(outer.clone());
+        scope.abstract_parameters.push(opaque);
+        scope
+            .input_frames
+            .push(vec![Sort::ComptimeValue, Sort::Type]);
+        let (value, domain) = prepared
+            .invoke_with_inputs(
+                vec![(
+                    parameter,
+                    Term::Rigid {
+                        declaration: opaque,
+                        sort: Sort::Type,
+                    },
+                )],
+                &mut 100_000,
+                Span::default(),
+            )
+            .unwrap();
+        let expected = Term::Optional(Box::new(outer));
+        assert_eq!(domain, expected);
+        assert_eq!(
+            value,
+            Value::Optional {
+                ty: expected,
+                value: None
+            }
+        );
+        let mut rejected = literal_preparation(false);
+        rejected.edit_package(|package| {
+            let mut condition = package.functions[0].body.clone();
+            condition.kind = K::Literal(n::Literal::Bool(false));
+            package.functions[0].postconditions.push(condition);
+        });
+        let failure = rejected.invoke(&mut 100_000, Span::default()).unwrap_err();
+        assert!(
+            failure.to_string().contains("ProgramContractRejected"),
+            "{failure}"
+        );
     }
 
     #[test]

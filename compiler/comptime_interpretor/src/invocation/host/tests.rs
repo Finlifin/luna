@@ -40,6 +40,7 @@ fn integer(value: &str) -> Expr {
     )
 }
 fn callable(body: Expr, child: Option<Value>) -> Value {
+    let result = body.ty.clone();
     Value::Closure(Arc::new(Closure {
         definition_source: None,
         parameters: vec![],
@@ -50,7 +51,7 @@ fn callable(body: Expr, child: Option<Value>) -> Value {
         body: Arc::new(body),
         ty: Term::ComptimeFunction(Box::new(Term::Function {
             parameters: vec![],
-            result: Box::new(ty(Primitive::Bool)),
+            result: Box::new(result),
         })),
     }))
 }
@@ -160,6 +161,49 @@ fn answer(request: AssociatedHostRequest<'_>) -> AssociatedHostResponse<'_> {
             fuel,
         )
     })
+}
+
+#[test]
+fn a_suspended_child_returns_its_value_to_the_enclosing_result_domain() {
+    let child = fixture(false, true);
+    let Value::Closure(closure) = &child else {
+        unreachable!()
+    };
+    let call = expr(
+        ty(Primitive::Bool),
+        K::Call {
+            callee: Box::new(expr(closure.ty.clone(), K::Local(local(0)))),
+            parameter_bindings: vec![],
+            arguments: vec![],
+            env_arguments: vec![],
+        },
+    );
+    let outer = callable(
+        expr(
+            ty(Primitive::Char),
+            K::If {
+                condition: Box::new(call),
+                then_branch: Box::new(expr(ty(Primitive::Char), K::Literal(Literal::Char('y')))),
+                else_branch: Some(Box::new(expr(
+                    ty(Primitive::Char),
+                    K::Literal(Literal::Char('n')),
+                ))),
+            },
+        ),
+        Some(child),
+    );
+    let package = Package::default();
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut session = vm.start_invocation(outer, vec![]).unwrap();
+    let request = take(&mut session);
+    assert!(matches!(
+        session.poll_with_result_type().unwrap(),
+        InvocationProgress::Waiting
+    ));
+    session.resume(answer(request)).unwrap();
+    let returned = session.run_with_result_type().unwrap();
+    assert_eq!(returned.value, Value::Char('y'));
+    assert_eq!(returned.result_type, ty(Primitive::Char));
 }
 
 #[test]

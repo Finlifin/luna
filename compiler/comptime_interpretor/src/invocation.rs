@@ -133,6 +133,7 @@ pub(super) enum ReturnedEnvironment {
 }
 
 enum Completion<'a> {
+    Returned(InvocationResult),
     Continue(Box<Activation<'a>>),
     Ordinary {
         flow: Result<Flow, Error>,
@@ -327,11 +328,17 @@ impl<'a> Interpreter<'a> {
                 match flow.and_then(|flow| self.accept_invocation_step(&mut activation.frame, flow))
                 {
                     Ok(None) => Completion::Continue(activation),
-                    result => {
+                    Ok(Some(value)) => {
+                        self.leave_invocation(activation.saved);
+                        Completion::Returned(InvocationResult {
+                            value,
+                            result_type: activation.frame.result_type,
+                        })
+                    }
+                    Err(error) => {
                         self.leave_invocation(activation.saved);
                         Completion::Ordinary {
-                            flow: result
-                                .map(|value| Flow::Value(value.expect("completed invocation"))),
+                            flow: Err(error),
                             bindings: ReturnedEnvironment::Private,
                         }
                     }

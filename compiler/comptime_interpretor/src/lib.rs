@@ -68,8 +68,8 @@ pub use invocation::definition_host::{
     DefinitionHostRequest, DefinitionHostResponse, RejectedDefinitionResponse,
 };
 pub use invocation::host::{
-    AssociatedHostRequest, AssociatedHostResponse, InvocationProgress, InvocationSession,
-    RejectedHostResponse,
+    AssociatedHostRequest, AssociatedHostResponse, InvocationProgress, InvocationResult,
+    InvocationSession, RejectedHostResponse,
 };
 pub use invocation::method_host::{MethodHostRequest, MethodHostResponse, RejectedMethodResponse};
 

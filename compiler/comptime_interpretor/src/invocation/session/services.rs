@@ -47,11 +47,11 @@ impl Service {
         }
     }
 
-    fn send<'a>(
+    fn send<'a, T>(
         self,
         vm: &Interpreter<'a>,
         lease: HostLease<'a>,
-    ) -> (InvocationProgress<'a>, HostContinuation) {
+    ) -> (InvocationProgress<'a, T>, HostContinuation) {
         match self {
             Self::Associated(request) => (
                 InvocationProgress::Associated(AssociatedHostRequest {
@@ -123,14 +123,17 @@ impl<'a> Session<'_, 'a, '_> {
         }
     }
 
-    pub(in crate::invocation) fn poll_external(&mut self) -> Result<InvocationProgress<'a>, Error> {
+    pub(in crate::invocation) fn poll_external<T>(
+        &mut self,
+        deliver: impl FnOnce(InvocationResult) -> T,
+    ) -> Result<InvocationProgress<'a, T>, Error> {
         if matches!(self.pending, Some(Pending::Waiting { .. })) {
             return Ok(InvocationProgress::Waiting);
         }
         if !matches!(self.pending, Some(Pending::Request(_))) {
             match self.advance(true)? {
-                Poll::Ready(Some(Flow::Value(value))) => {
-                    return Ok(InvocationProgress::Complete(value));
+                Poll::Ready(SessionExit::Returned(result)) => {
+                    return Ok(InvocationProgress::Complete(deliver(result)));
                 }
                 Poll::Ready(_) => return Err(self.vm.failure(ErrorKind::InvalidControlFlow, None)),
                 Poll::Pending => {}

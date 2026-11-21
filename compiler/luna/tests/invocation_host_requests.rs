@@ -73,14 +73,7 @@ fn source_selection(deferred: bool, contracts: bool) {
     assert!(!package.dispatch_instances.is_empty());
     let source = DeclarationSnapshot::new(std::sync::Arc::new(package));
     let package = source.package();
-    let id = |name: &str| {
-        package
-            .functions
-            .iter()
-            .find(|function| function.name == name)
-            .unwrap()
-            .declaration
-    };
+    let id = |name: &str| sysroot::source_function(package, name);
     let context = elaboration::ptc::Context::from_package(package).unwrap();
     let queries =
         SourceInvocationQueries::in_source(DeclarationSource::Snapshot(&source), &context, &[]);
@@ -259,12 +252,7 @@ fn public_builders_suspend_cross_kind_publication_and_reuse_completed_types() {
     ",
     )
     .unwrap();
-    let entry = package
-        .functions
-        .iter()
-        .find(|f| f.name == "Build")
-        .unwrap()
-        .declaration;
+    let entry = sysroot::source_function(&package, "Build");
     let context = elaboration::ptc::Context::from_package(&package).unwrap();
     let queries =
         SourceInvocationQueries::in_source(DeclarationSource::Borrowed(&package), &context, &[]);
