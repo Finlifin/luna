@@ -2,6 +2,7 @@
 use super::*;
 
 mod call_evidence;
+mod forward;
 mod selection;
 
 #[derive(Clone)]
@@ -317,12 +318,12 @@ impl Checker<'_, '_> {
         self.callable_input_view(&domain, span)
     }
 
-    fn supplied_trait_domain(
+    fn supplied_trait_domain<'v>(
         &mut self,
         owner: OwnerId,
         domain: &Term,
-        supplied: &[Option<Term>],
-        prefix: &[Term],
+        supplied: impl IntoIterator<Item = Option<&'v Term>>,
+        prefix: &'v [Term],
         subject: Option<&Term>,
         span: Span,
     ) -> Result<Term, Error> {
@@ -336,12 +337,7 @@ impl Checker<'_, '_> {
             });
             values.push(self.copy_alias_type(subject, span)?);
         }
-        for (binder, supplied) in binders.iter().zip(
-            prefix
-                .iter()
-                .map(Some)
-                .chain(supplied.iter().map(Option::as_ref)),
-        ) {
+        for (binder, supplied) in binders.iter().zip(prefix.iter().map(Some).chain(supplied)) {
             if let Some(value) = supplied {
                 substitutions.push(*binder);
                 values.push(self.copy_alias_type(value, span)?);
@@ -478,7 +474,7 @@ impl Checker<'_, '_> {
             let domain = self.supplied_trait_domain(
                 owner,
                 &domains[result.len()],
-                &supplied,
+                supplied.iter().map(Option::as_ref),
                 &fixed[..inherited],
                 None,
                 span,
@@ -710,6 +706,16 @@ impl Checker<'_, '_> {
                 .ok_or_else(|| error(span, "inferred input is outside the call telescope"))?;
             supplied[slot] = Some(ty);
         }
+        let mut destinations = forward::ClauseDomains::new(
+            owner,
+            &parameters,
+            domains,
+            &prefix,
+            subject,
+            &clauses,
+            args,
+            span,
+        );
         let mut pending_explicit = vec![None; clauses.len()];
         let mut pending_runtime = vec![None; clauses.len()];
         let mut positional = 0;
@@ -768,25 +774,9 @@ impl Checker<'_, '_> {
                         let mut types = Vec::new();
                         let mut ready = true;
                         for slot in slots {
-                            let domain = self.supplied_trait_domain(
-                                owner,
-                                &domains[*slot],
-                                &supplied,
-                                &prefix,
-                                subject,
-                                value.span,
-                            )?;
-                            if !input_observation::pending_domain_inputs(
-                                &domains[*slot],
-                                parameters
-                                    .iter()
-                                    .zip(&supplied)
-                                    .map(|(id, value)| (*id, value.is_some())),
-                                &mut self.required_steps,
-                                value.span,
-                            )?
-                            .is_empty()
-                            {
+                            let (domain, available) =
+                                destinations.checking_domain(self, *slot, &supplied, value.span)?;
+                            if !available {
                                 ready = false;
                                 break;
                             }
@@ -841,25 +831,12 @@ impl Checker<'_, '_> {
                             element => self.required_normal_term(element, value.span)?,
                         };
                         let field = ExplicitClause::computed(element, actual, value.span);
-                        let waiting = input_observation::pending_domain_inputs(
-                            &domains[slot],
-                            parameters
-                                .iter()
-                                .zip(&supplied)
-                                .map(|(id, value)| (*id, value.is_some())),
-                            &mut self.required_steps,
-                            value.span,
-                        )?;
-                        if waiting.is_empty() {
-                            let domain = self.supplied_trait_domain(
-                                owner,
-                                &domains[slot],
-                                &supplied,
-                                &prefix,
-                                subject,
-                                value.span,
-                            )?;
-                            supplied[slot] = Some(field.admit(self, &domain)?);
+                        let (domain, ready) =
+                            destinations.checking_domain(self, slot, &supplied, value.span)?;
+                        if ready {
+                            let actual = field.admit(self, &domain)?;
+                            destinations.confirm(self, slot, &actual, value.span)?;
+                            supplied[slot] = Some(actual);
                         } else {
                             pending_explicit[slot] = Some(field);
                         }
@@ -892,49 +869,32 @@ impl Checker<'_, '_> {
                 positional += 1;
                 slot
             };
-            let domain = domains
-                .get(slot)
-                .ok_or_else(|| error(span, "trait argument count mismatch"))?;
+            if slot >= domains.len() {
+                return Err(error(span, "trait argument count mismatch"));
+            }
             if supplied[slot].is_some()
                 || pending_explicit[slot].is_some()
                 || pending_runtime[slot].is_some()
             {
                 return Err(error(span, "duplicate trait argument"));
             }
-            // A supplied value is checked in the caller environment, against
-            // the domain instantiated by inputs already evaluated in source
-            // order. Do not reorder effectful argument computations.
-            let unresolved_domain = !input_observation::pending_domain_inputs(
-                domain,
-                parameters
-                    .iter()
-                    .zip(&supplied)
-                    .map(|(id, value)| (*id, value.is_some())),
-                &mut self.required_steps,
-                value.span,
-            )?
-            .is_empty();
-            let domain =
-                self.supplied_trait_domain(owner, domain, &supplied, &prefix, subject, value.span)?;
-            if unresolved_domain
-                && (clauses[slot].kind.is_quote() || matches!(domain, Term::Lift(_)))
-            {
+            let (domain, ready) =
+                destinations.checking_domain(self, slot, &supplied, value.span)?;
+            if !ready && (clauses[slot].kind.is_quote() || matches!(domain, Term::Lift(_))) {
                 pending_runtime[slot] = Some(value);
                 continue;
             }
             // A closed literal expression can receive its context after earlier
             // slots settle. Producers with observable evaluation stay in source order.
-            if unresolved_domain && self.is_closed_clause_literal(value)? {
+            if !ready && self.is_closed_clause_literal(value)? {
                 pending_explicit[slot] = Some(ExplicitClause::Contextual(value));
                 continue;
             }
-            if unresolved_domain
-                && let Some(selection) = selection::Selection::prepare(self, value)?
-            {
+            if !ready && let Some(selection) = selection::Selection::prepare(self, value)? {
                 pending_explicit[slot] = Some(selection);
                 continue;
             }
-            if unresolved_domain {
+            if !ready {
                 // Preserve source-order invocation when an earlier declaration
                 // slot is supplied later (or by a default). The expression's
                 // own checked type is retained for the final domain check.
@@ -957,7 +917,9 @@ impl Checker<'_, '_> {
                 };
                 pending_explicit[slot] = Some(ExplicitClause::computed(input, actual, value.span));
             } else {
-                supplied[slot] = Some(self.normal_value_argument(value, &domain)?);
+                let actual = self.normal_value_argument(value, &domain)?;
+                destinations.confirm(self, slot, &actual, value.span)?;
+                supplied[slot] = Some(actual);
             }
         }
         struct CallerScope {

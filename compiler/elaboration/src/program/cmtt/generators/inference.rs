@@ -1398,7 +1398,7 @@ impl Checker<'_, '_> {
         })
     }
 
-    pub(super) fn generator_static_type_hint(
+    pub(in crate::program) fn generator_static_type_hint(
         &mut self,
         value: &Expr<'_>,
         depth: usize,
@@ -1416,6 +1416,17 @@ impl Checker<'_, '_> {
                 Some(value) => self.generator_static_type_hint(value, depth + 1, bindings),
                 None => Ok(None),
             },
+            H::If(_, yes, Some(no)) if yes.stmts.is_empty() => {
+                let Some(yes) = yes.expr else { return Ok(None) };
+                let Some(left) = self.generator_static_type_hint(yes, depth + 1, bindings)? else {
+                    return Ok(None);
+                };
+                let right = self.generator_static_type_hint(no, depth + 1, bindings)?;
+                Ok((right.as_ref() == Some(&left)).then_some(left))
+            }
+            H::TyOptional(inner) => Ok(self
+                .generator_static_type_hint(inner, depth + 1, bindings)?
+                .map(|ty| Term::Optional(Box::new(ty)))),
             H::Builtin(_) | H::TyType | H::TyVoid | H::TyNoReturn => {
                 self.type_expr(value).map(Some)
             }
@@ -1460,6 +1471,9 @@ impl Checker<'_, '_> {
                         let Some(value) = value else { return Ok(None) };
                         types.push(value);
                     }
+                    if !self.nominal_capture_ids(owner).is_empty() {
+                        return Ok(None);
+                    }
                     return Ok(Some(Term::Nominal {
                         declaration: declaration(self.package, &self.package_identities, owner),
                         arguments: types,
@@ -1473,7 +1487,9 @@ impl Checker<'_, '_> {
                 if !signature.modifiers.is_normal_form_head {
                     return Ok(None);
                 }
-                self.ensure_signature(owner, value.span)?;
+                if !self.normal_parameters.contains_key(&owner) {
+                    return Ok(None);
+                }
                 self.generator_static_normal_form_hint(
                     owner, arguments, depth, bindings, value.span,
                 )
@@ -1485,6 +1501,7 @@ impl Checker<'_, '_> {
                 if self.package.item(owner).is_some_and(|item| {
                     matches!(item.kind, ItemKind::Struct(_) | ItemKind::Enum(_))
                 }) && self.type_parameters[&owner].is_empty()
+                    && self.nominal_capture_ids(owner).is_empty()
                 {
                     return Ok(Some(self.nominal_self_type(owner)));
                 }
@@ -1598,20 +1615,12 @@ impl Checker<'_, '_> {
                     signature: Box::new(signature),
                 }))
             }
-            H::Tuple(fields) => {
-                let mut types = Vec::with_capacity(fields.len());
-                for field in *fields {
-                    let Some(ty) = self.generator_static_type_hint(field, depth + 1, bindings)?
-                    else {
-                        return Ok(None);
-                    };
-                    types.push(ty);
-                }
-                self.tuple_value_type(types, value.span).map(Some)
-            }
             H::ResolvedLocal(_, id) | H::ResolvedFnParam(_, id)
                 if self.immutable.contains(&local(*id)) =>
             {
+                if let Some(ty) = self.observed_local_type(local(*id), value.span)? {
+                    return Ok(Some(ty));
+                }
                 let Some(Some(n::Expr {
                     kind: K::TypeValue(ty),
                     ..

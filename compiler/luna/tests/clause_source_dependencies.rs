@@ -718,3 +718,52 @@ fn clause_evidence_reads_signatures_without_invoking_an_ordinary_producer() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn later_type_suppliers_contextualize_earlier_clauses_without_running_early() {
+    let source = r#"
+        enum Packet { group.{byte(u8)} }
+        typealias Alias = Packet;
+        comptime fn mark(name: Symbol, value: u8) -> u8 {
+            let generated = meta.StructBuilder.new(.name = name).Build();
+            value
+        }
+        fn read() -> T where .T: Type = bool, .items: meta.List<T> = [], .stamp: u8 = 0 {
+            const item = items[0];
+            item
+        }
+        fn positional() -> T where T, .items: meta.List<T> = [] {
+            const item = items[0];
+            item
+        }
+        fn run() -> bool {
+            let selected = read<.items = [.group.byte(mark(.ForwardField, 7))],
+                .stamp = mark(.ForwardStamp, 0),
+                .T = if mark(.ForwardGuard, 1) == 1 { Packet } else { Alias }>();
+            let other = positional<.items = [.group.byte(9)], ...(Packet,)>();
+            let ordinary = read<.items = [.group.byte(0)], .T = ?u8>();
+            (selected matches .group.byte(7)) and (other matches .group.byte(9))
+                and (ordinary matches 103?)
+        }
+    "#;
+    let package = sysroot::compile(source).unwrap();
+    let mut events: Vec<_> = package
+        .structs
+        .iter()
+        .filter(|item| item.name.starts_with("Forward"))
+        .map(|item| (item.declaration, item.name.as_str()))
+        .collect();
+    events.sort_unstable();
+    assert_eq!(
+        events.into_iter().map(|(_, name)| name).collect::<Vec<_>>(),
+        ["ForwardField", "ForwardStamp", "ForwardGuard"]
+    );
+    let graph = luna::instantiation::instantiate(&package, "run", 1_000_000).unwrap();
+    let mut vm = comptime_interpretor::Interpreter::from_iir(&graph, Default::default()).unwrap();
+    assert_eq!(
+        vm.invoke_instance(&graph.roots[0], vec![]).unwrap(),
+        Value::Bool(true)
+    );
+    let invalid = source.replace("mark(.ForwardGuard, 1) == 1", "mark(.ForwardGuard, 1)");
+    assert!(sysroot::compile(&invalid).is_err());
+}
