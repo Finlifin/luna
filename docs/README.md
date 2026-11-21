@@ -72,6 +72,7 @@ Flurry 是一门面向系统级编程的语言，在正确性、性能、抽象�
 | 文档 | 内容 |
 |------|------|
 | [类型值与身份](type/type-identity.md) | 两层、声明身份、工厂与类型关系 |
+| [Type ID（不稳定）](type/type_id.md) | 跨会话/跨包/跨版本 128 位 Merkle ABI 身份与 `__flurry_stable_since` |
 | [参数化与 Any](type/comptime-gradual-dependent-type.md) | 上下文检查、分支汇合与实例交付 |
 | [PTC](type/propositional-constraints/index.md) | 19 类原子、11 个求解模块、组合与诊断 |
 | [成员与适配](type/receiver-adaptation.md) | 投影来源、接收者与隐式转换 |

@@ -29,6 +29,7 @@ refinement_type -> refines { expr } expr
 |---|---|
 | 类型怎样参与计算，与运行时怎样交界？ | [两层类型](2-level-type.md) |
 | 声明、别名、工厂产生的类型怎样比较？ | [类型身份与关系](type-identity.md) |
+| 跨会话、跨包、跨版本的 ABI 类型哈希身份怎样定义？ | [Type ID（不稳定）](type_id.md) |
 | Any、参数化与分支汇合怎样检查？ | [参数化与上下文检查](comptime-gradual-dependent-type.md) |
 | 约束能够提供哪些事实？ | [精化要求](refined-type.md)、[PTC](propositional-constraints/index.md) |
 | 编译器具体能证明什么？ | [原子目录](propositional-constraints/atoms.md)、[理论求解器](propositional-constraints/theory-solvers.md)、[组合与诊断](propositional-constraints/solver-protocol.md) |
