@@ -1051,3 +1051,48 @@ fn rebound_comptime_callbacks_share_their_capture_graph_with_residual_defaults()
         comptime fn check() -> bool { sample() }";
     check_events(source, &[("check", 1)]);
 }
+
+#[test]
+fn projected_type_inputs_use_the_public_normal_form_interface() {
+    let declarations = r#"
+        struct Holder where T { pub typealias Payload = T; }
+        comptime fn Make(T: Type) -> Type { Holder<T> }
+        const Renamed: pure comptime fn<...Fields: meta.List<Type>> -> Type = Tuple;
+        fn pair(comptime T: Type, value: defer T) -> defer T {
+            const Container = Make(T);
+            let both: Renamed<.Fields = [Container.Payload, bool]> = (value, true);
+            let (answer, _) = both;
+            answer
+        }
+    "#;
+    let entry = r#"
+        fn direct(comptime Container: Type, comptime T: Type, value: defer T) -> defer T {
+            let both: Tuple<Container.Payload, bool> = (value, true);
+            let (answer, _) = both;
+            answer
+        }
+        fn run() -> bool {
+            pair(bool, true) and pair(u32, 7) == 7 and direct(Holder<u32>, u32, 42) == 42
+        }
+    "#;
+    assert_eq!(
+        sysroot::run(&format!("{declarations}{entry}")),
+        Value::Bool(true)
+    );
+
+    // The public name and the independent second element can already be
+    // checked in an open definition, without an invocation of pair.
+    for (before, after, message) in [
+        (".Fields =", ".Es =", "unknown named normal-form argument"),
+        (
+            "Container.Payload, bool",
+            "Container.Payload, true",
+            "expected (primitive Type), found (primitive bool)",
+        ),
+    ] {
+        let error = sysroot::compile(&declarations.replace(before, after)).unwrap_err();
+        assert!(error.contains(message), "{error}");
+    }
+    let invalid = declarations.replace("Container.Payload", "Container.Missing");
+    assert!(sysroot::compile(&format!("{invalid}{entry}")).is_err());
+}

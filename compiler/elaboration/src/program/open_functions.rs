@@ -16,6 +16,7 @@ mod fragments;
 mod inline_evidence;
 mod inputs;
 mod live_defaults;
+mod normal_applications;
 mod observations;
 mod pending_inputs;
 mod scalar_descriptions;
@@ -2662,155 +2663,9 @@ impl Checker<'_, '_> {
                 D::Unknown
             }
             H::NFApplication(head, arguments) => {
-                // A callable's signature is evidence even when its value is
-                // supplied by a parameter or local. Only declaration heads
-                // use the declaration telescope below; source syntax does not
-                // establish that a callable has a known declaration identity.
-                let H::ResolvedDef { def_id, .. } = head.kind else {
-                    return self.describe_known_region(expr, expected);
-                };
-                let inputs = self.source_expression_inputs(expr.hir_id.owner, expr)?;
-                // Knowing an input's domain is sufficient to check the ordinary
-                // input plan; its value need not be available or executed.
-                // This includes locals captured by referenced declarations.
-                // Reserve description-only routing for genuinely missing
-                // domains, so known defaults and formation requirements are
-                // checked by the same rules as concrete applications.
-                if inputs
-                    .locals
-                    .iter()
-                    .all(|binding| self.locals.contains_key(binding))
-                {
-                    return self.describe_known_region(expr, expected);
-                }
-                let owner = self
-                    .package
-                    .definition_owner(def_id)
-                    .ok_or_else(|| error(expr.span, "missing type application declaration"))?;
-                if !matches!(self.package.item(owner).map(|item| &item.kind),
-                    Some(ItemKind::Fn(sig, _)) if sig.modifiers.is_normal_form_head)
-                {
-                    return self.describe_known_region(expr, expected);
-                }
-                self.ensure_signature(owner, expr.span)?;
-                let parameters = self.normal_parameters[&owner].clone();
-                let clauses = self.type_clause_params(owner);
-                let collector = self.clause_collector(owner).map(|(slot, _)| slot);
-                let mut routing =
-                    clause_inputs::ClauseInputRouting::new(&clauses, arguments, expr.span)?;
-                // Retain source order. The final marker distinguishes a single
-                // collected element from a whole input or collection spread.
-                let mut routed = Vec::new();
-                for argument in *arguments {
-                    match argument {
-                        Arg::Positional(value) | Arg::Named(_, value) => {
-                            let name = match argument {
-                                Arg::Named(name, _) => Some(*name),
-                                _ => None,
-                            };
-                            let slot = routing.slot(name, value.span)?;
-                            let element = name.is_none() && collector == Some(slot);
-                            routed.push((slot, Some(*value), None, value.span, element));
-                        }
-                        Arg::Expand(value) => {
-                            match routing.spread(value)? {
-                                clause_inputs::Spread::Collection(slot) => {
-                                    routed.push((slot, Some(*value), None, value.span, false));
-                                    continue;
-                                }
-                                clause_inputs::Spread::Fields(fields) => {
-                                    let slots = routing.packet_slots(fields.len(), value.span)?;
-                                    for (field, slot) in fields.iter().zip(slots) {
-                                        routed.push((slot, Some(field), None, field.span, false));
-                                    }
-                                    continue;
-                                }
-                                clause_inputs::Spread::Packet => {}
-                            }
-                            let packet = self.describe_open_expression(
-                                value,
-                                locals,
-                                returns,
-                                None,
-                                depth + 1,
-                            )?;
-                            let D::Known(ty) = packet else {
-                                return Err(error(
-                                    value.span,
-                                    "type input packet requires a known tuple domain",
-                                ));
-                            };
-                            let Term::Tuple(fields) = self.structural_type(&ty, value.span)? else {
-                                return Err(error(
-                                    value.span,
-                                    "type argument spread requires a tuple",
-                                ));
-                            };
-                            let slots = routing.packet_slots(fields.len(), value.span)?;
-                            for (domain, slot) in fields.into_iter().zip(slots) {
-                                routed.push((slot, None, Some(domain), value.span, false));
-                            }
-                        }
-                        _ => {
-                            return Err(error(expr.span, "unsupported normal-form input marker"));
-                        }
-                    }
-                }
-                // A Type-valued head input can substitute a later domain only
-                // when its value is available without invocation inputs. Keep
-                // the remaining domain as a description, never a fabricated
-                // rigid Type value for an ordinary comptime parameter.
-                let mut known_parameters = Vec::new();
-                let mut known_arguments = Vec::new();
-                for (slot, value, _, _, _) in &routed {
-                    let Some(value) = value else { continue };
-                    if parameters[*slot].2 == p(P::Type)
-                        && self
-                            .source_expression_inputs(value.hir_id.owner, value)?
-                            .locals
-                            .is_empty()
-                    {
-                        known_parameters.push(parameters[*slot].0);
-                        known_arguments.push(self.type_expr(value)?);
-                    }
-                }
-                for (slot, value, packet_domain, span, element) in routed {
-                    let declared = if element {
-                        self.list_element_type(&parameters[slot].2).ok_or_else(|| {
-                            error(span, "variadic input requires a bound meta.List<T>")
-                        })?
-                    } else {
-                        &parameters[slot].2
-                    };
-                    let domain = declared
-                        .instantiate_types(&known_parameters, &known_arguments)
-                        .map_err(|failure| error(span, failure.to_string()))?;
-                    let inputs = self.term_declaration_inputs(&domain, span)?;
-                    let description = if parameters.iter().any(|(id, _, _)| inputs.contains(id)) {
-                        D::Unknown
-                    } else {
-                        D::Known(domain)
-                    };
-                    if let Some(value) = value {
-                        self.describe_open_expression(
-                            value,
-                            locals,
-                            returns,
-                            Some(&description),
-                            depth + 1,
-                        )?;
-                    } else {
-                        self.require_description(
-                            &D::Known(packet_domain.unwrap()),
-                            Some(&description),
-                            span,
-                        )?;
-                    }
-                }
-                if routing.missing_required() {
-                    return Err(error(expr.span, "missing required type argument"));
-                }
-                D::Known(p(P::Type))
+                return self.describe_normal_application(
+                    expr, head, arguments, locals, returns, expected, depth,
+                );
             }
             H::List(elements) if matches!(expected, Some(D::Known(ty)) if self.list_element_type(ty).is_some()) =>
             {

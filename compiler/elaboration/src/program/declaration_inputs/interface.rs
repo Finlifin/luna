@@ -77,6 +77,31 @@ impl<'h> Interface<'h> {
     }
 }
 
+impl Checker<'_, '_> {
+    /// Description checking routes against the same public interface as
+    /// concrete preparation, even when a constant renames a collector.
+    pub(in crate::program) fn describe_normal_routing(
+        &self,
+        supply: normal::Supply,
+        count: usize,
+        inputs: &[Arg<'_>],
+        span: Span,
+    ) -> Result<(clause_inputs::ClauseInputRouting, Option<usize>), Error> {
+        let interface = match supply {
+            normal::Supply::Declaration(owner) => {
+                Interface::declaration(owner, &self.type_clause_params(owner))
+            }
+            normal::Supply::Callable { collector } => {
+                Interface::callable(count, collector.as_ref(), span)?
+            }
+        };
+        let collector = interface.entries.iter().position(|entry| entry.variadic);
+        let routing =
+            clause_inputs::ClauseInputRouting::from_entries(interface.entries, inputs, span)?;
+        Ok((routing, collector))
+    }
+}
+
 impl std::fmt::Display for Interface<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("(input-interface-projection")?;
