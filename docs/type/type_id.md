@@ -49,7 +49,7 @@ std@"1.0.0".collections.Vec<u32, .A = DefaultAllocator, .allocator = DefaultAllo
 | 输入分量 | 必须包含的内容 | 作用 |
 |---|---|---|
 | **完整规范路径与有效版本**（Full Path） | 包名、有效版本（默认当前包版本；若标有 `__flurry_stable_since` 则取其指定版本）、规范模块路径、声明名及全部规范化实参（类型实参、comptime 值实参、提升的运行时依赖来源路径） | 区分来源包、版本归属、模块名义身份与参数化实例 |
-| **目标 ABI 布局**（Layout of Type） | 针对目标平台的尺寸、对齐、表示策略（默认、`packed`、`C`、定宽枚举位宽、Tagged Union 标签/载荷格式、指针/BitVec 宽度）、物理字段偏移、变体判别值与载荷布局 | 确保底层内存布局发生任何变化时 `type_id` 自动改变 |
+| **目标 ABI 布局**（Layout of Type） | 针对目标平台的尺寸、对齐、表示策略（默认、`packed.byte`、`packed.bit`（含逻辑位宽 `W` 与字段位偏移）、`C`、定宽枚举位宽、Tagged Union 标签/载荷格式、指针/BitVec 宽度）、物理字段偏移、变体判别值与载荷布局 | 确保底层内存布局发生任何变化时 `type_id` 自动改变 |
 | **全部符号依赖**（Every Symbol Dependency） | 字段类型、枚举变体载荷、基元或包装底层类型、类型/值实参、normal-form 头及关联约束符号的递归 `type_id` / 规范身份 | 形成完整 Merkle 树，使任意深层依赖的改动沿树向上传递 |
 
 补充规则如下：

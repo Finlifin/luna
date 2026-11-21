@@ -373,3 +373,101 @@ fn repository_attribute_package_inspects_stable_since_without_claiming_abi_stabi
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("attribute"));
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn packed_mode_constants_preserve_symbol_and_object_entry_type() {
+    let package = support::compile(&format!(
+        "mod attrs {{ {ATTRS} }}
+        use attrs.packed;
+        comptime fn byte_sample() -> attrs.bindings.Object {{ packed.byte }}
+        comptime fn bit_sample() -> attrs.bindings.Object {{ packed.bit }}"
+    ));
+    let mut vm = Interpreter::for_comptime(&package, Default::default()).unwrap();
+    for (entry_fn, expected_mode) in [("byte_sample", "byte"), ("bit_sample", "bit")] {
+        let value = vm.invoke(support::id(&package, entry_fn), vec![]).unwrap();
+        let Value::Object(object) = value else {
+            panic!("expected attribute object for {entry_fn}")
+        };
+        assert_eq!(object.entries().len(), 1);
+        let entry = &object.entries()[0];
+        assert_eq!(entry.key(), Some("__flurry_packed"));
+        assert_eq!(entry.value().ty, Term::Primitive(Primitive::Symbol));
+        assert_eq!(entry.value().value, Value::Symbol(expected_mode.into()));
+    }
+}
+
+#[test]
+fn repository_attribute_package_inspects_packed_byte_and_bit_with_merge_override() {
+    let directory =
+        std::env::temp_dir().join(format!("luna-library-packed-modes-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("input.fl"),
+        "^attrs.packed.byte struct BytePacked { a: u8, b: u64 }
+         ^attrs.packed.bit struct BitPacked { flag: bool, tag: u8 }
+         ^attrs.packed.bit ^attrs.packed.byte struct Overridden { a: u8 }",
+    )
+    .unwrap();
+    let run = |arguments: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_luna"))
+            .current_dir(&directory)
+            .args(arguments)
+            .output()
+            .unwrap()
+    };
+    let library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../library");
+    let arguments = [
+        "dump",
+        "input.fl",
+        "--sysroot",
+        library.to_str().unwrap(),
+        "--build-target",
+        "x86_64",
+        "linux",
+        "64",
+        "--emit",
+        "attributes",
+    ];
+    let output = run(&arguments);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dump = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(dump.matches("(evaluated-attribute ").count(), 4, "{dump}");
+    assert_eq!(
+        dump.matches("(property \"__flurry_packed\")").count(),
+        4,
+        "{dump}"
+    );
+    assert_eq!(dump.matches("(symbol \"byte\")").count(), 2, "{dump}");
+    assert_eq!(dump.matches("(symbol \"bit\")").count(), 2, "{dump}");
+
+    let mut merged = arguments;
+    *merged.last_mut().unwrap() = "merged-attributes";
+    let selected = run(&merged);
+    assert!(
+        selected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected.stderr)
+    );
+    let selected = String::from_utf8_lossy(&selected.stdout);
+    assert_eq!(
+        selected.matches("(merged-attributes ").count(),
+        3,
+        "{selected}"
+    );
+    assert_eq!(
+        selected.matches("(key \"__flurry_packed\")").count(),
+        3,
+        "{selected}"
+    );
+
+    let mut ordinary = arguments;
+    *ordinary.last_mut().unwrap() = "nir";
+    let rejected = run(&ordinary);
+    assert_eq!(rejected.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("__flurry_packed"));
+    std::fs::remove_dir_all(directory).unwrap();
+}

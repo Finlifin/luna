@@ -1,5 +1,12 @@
 use bindings.{Object, bool}
 
+{- Byte-packed struct layout (`size = sum(field.size)`, `align = 1`). -}
+pub const byte = { __flurry_packed: .byte }
+
+{- Bit-packed struct layout lowered to `BitVec<total_bits>` via `bitvec_opt`. -}
+pub const bit = { __flurry_packed: .bit }
+
+{- Legacy transition wrappers while compiler consumers migrate to `__flurry_packed`. -}
 pub const packed = { packed: true }
 
 pub pure comptime fn packed_layout(.enabled: bool = true) -> Object {

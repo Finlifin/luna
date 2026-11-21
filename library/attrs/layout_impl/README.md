@@ -1,3 +1,5 @@
-# attrs.layout
+# attrs.layout & attrs.packed
 
-`attrs.layout.packed` and `attrs.layout.packed_layout(.enabled = true)` produce `{ packed: bool }` attribute Objects consumed by struct layout checking (`size = sum` of field sizes, `align = 1`, taking aligned field pointers forbidden).
+- `attrs.packed.byte` produces `{ __flurry_packed: .byte }` for byte-packed structs (`align = 1`, `size = sum(field.size)`, arbitrary runtime fields allowed, aligned field pointers forbidden).
+- `attrs.packed.bit` produces `{ __flurry_packed: .bit }` for bit-packed POD structs lowered directly to `BitVec<W>` sharing `bitvec_opt` (emits a non-fatal compiler warning when total bit width exceeds 256 bits).
+- Legacy `attrs.layout.{packed, packed_layout}` remain as transition wrappers producing `{ packed: bool }` while compiler consumers migrate from `packed` to `__flurry_packed`.

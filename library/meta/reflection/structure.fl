@@ -125,10 +125,31 @@ impl Type {
         bindings.attrs_of(self)
     }
 
-    {- Report whether the merged `packed` attribute enables packed layout. -}
+    {- Report the merged packed layout mode (`.byte` or `.bit`), or `null` for default layout. -}
+    pub pure comptime fn packed_mode(self) -> ?Symbol {
+        self.attrs().get<Symbol>(.__flurry_packed) match {
+            mode? => {
+                if mode == .byte or mode == .bit {
+                    mode
+                } else {
+                    null
+                }
+            },
+            null => {
+                self.attrs().get<bool>(.packed) match {
+                    value? => {
+                        if value { .byte } else { null }
+                    },
+                    null => null,
+                }
+            },
+        }
+    }
+
+    {- Report whether the merged packed attribute enables byte- or bit-packed layout. -}
     pub pure comptime fn is_packed(self) -> bool {
-        self.attrs().get<bool>(.packed) match {
-            value? => value,
+        self.packed_mode() match {
+            _? => true,
             null => false,
         }
     }

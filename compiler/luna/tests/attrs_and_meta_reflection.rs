@@ -623,7 +623,10 @@ fn metadata_attrs_of_reflection_cycle_and_abi_nir_rejection() {
             let fn_attrs = meta.attrs_of(annotated_fn);
             let plain_attrs = Plain.attrs();
 
-            let packed_ok = Record.is_packed() and not Plain.is_packed();
+            let packed_ok = Record.is_packed()
+                and not Plain.is_packed()
+                and (Record.packed_mode() matches .byte?)
+                and (Plain.packed_mode() matches null);
             let struct_meta_ok = record_attrs.get<meta.Object>(.metadata) match {
                 m? => (m.get<Integer>(.version) matches 2?)
                     and (m.get<Symbol>(.author) matches .luna?),
