@@ -3,24 +3,29 @@ use type_resolution::implementation::{
     Applicability as A, Error, ImplementationHead, Index, Key, Selection,
 };
 use type_resolution::ptc::Budget;
+
 fn id(local: u32) -> Id {
     Id { package: 0, local }
 }
+
 fn var(n: u32) -> Term {
     Term::Rigid {
         declaration: id(n),
         sort: Sort::Type,
     }
 }
+
 fn ty(p: P) -> Term {
     Term::Primitive(p)
 }
+
 fn node(n: u32, args: Vec<Term>) -> Term {
     Term::Nominal {
         declaration: id(n),
         arguments: args,
     }
 }
+
 fn head(n: u32, subject: Term) -> ImplementationHead {
     ImplementationHead {
         parameter_types: vec![],
@@ -74,6 +79,7 @@ fn unresolved_parameter_domain_keeps_the_implementation_candidate_pending() {
     )
     .unwrap();
 }
+
 fn add(index: &mut Index, n: u32, subject: Term) {
     index.insert(head(n, subject), Budget::default()).unwrap();
 }
@@ -745,6 +751,7 @@ fn generic(n: u32, subject: Term, parameters: Vec<Id>) -> ImplementationHead {
     h.type_parameters = parameters;
     h
 }
+
 fn context() -> type_resolution::ptc::Context {
     let mut context = type_resolution::ptc::Context::default();
     for n in [10, 11, 12] {
@@ -1427,6 +1434,7 @@ fn foreign_head(subject: Term, arguments: Vec<Term>) -> ImplementationHead {
         ..head(200, subject)
     }
 }
+
 fn local_nominal(arguments: Vec<Term>) -> Term {
     Term::Nominal {
         declaration: Id {
@@ -4413,4 +4421,154 @@ fn drop_impl_selects_and_verifies_runtime_allocator_dependency_domain() {
             "{rejected}"
         );
     }
+}
+
+#[test]
+fn symbolic_list_subject_excludes_generic_nominal_candidates() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    use type_resolution::{
+        implementation::TypeAssessment,
+        ptc::{Context, Formula},
+    };
+    let list_head = id(992);
+    let package = nir::program::Package {
+        normal_forms: vec![Head {
+            collector: None,
+            declaration: list_head,
+            role: Role::TypeList,
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: id(993),
+                binding: nir::program::LocalId {
+                    owner: 992,
+                    index: 0,
+                },
+                kind: Kind::Type,
+                ty: ty(P::Type),
+            }],
+        }],
+        ..Default::default()
+    };
+    let list = |element| Term::NormalForm {
+        head: list_head,
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
+    let mut context = Context::from_package(&package).unwrap();
+    context.admit_nominal_constructor(id(10));
+    let subject = var(90);
+    context.assume(Formula::equal(subject.clone(), list(var(91))));
+
+    let map_impl = generic(200, node(10, vec![var(1), var(2)]), vec![id(1), id(2)]);
+    let list_impl = generic(201, list(var(1)), vec![id(1)]);
+
+    let TypeAssessment::Excluded(proof) =
+        map_impl.assess_types(&subject, &[], &context, Budget::default())
+    else {
+        panic!("expected Map<K, V> to be excluded for symbolic A == List<U>");
+    };
+    context.verify_proof(&proof, Budget::default()).unwrap();
+    assert!(matches!(
+        list_impl.assess_types(&subject, &[], &context, Budget::default()),
+        TypeAssessment::Applicable(_)
+    ));
+}
+
+#[test]
+fn symbolic_nominal_subject_excludes_different_generic_nominal_candidate() {
+    use type_resolution::{
+        implementation::TypeAssessment,
+        ptc::{Context, Formula},
+    };
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(10));
+    context.admit_nominal_constructor(id(11));
+    let subject = var(90);
+    context.assume(Formula::equal(subject.clone(), node(10, vec![var(91)])));
+
+    let bar_impl = generic(202, node(11, vec![var(1), var(2)]), vec![id(1), id(2)]);
+    let TypeAssessment::Excluded(proof) =
+        bar_impl.assess_types(&subject, &[], &context, Budget::default())
+    else {
+        panic!("expected Bar<K, V> to be excluded for symbolic A == Foo<U>");
+    };
+    context.verify_proof(&proof, Budget::default()).unwrap();
+}
+
+#[test]
+fn generic_refutation_freshens_colliding_impl_parameters() {
+    use type_resolution::{
+        implementation::TypeAssessment,
+        ptc::{Context, Formula},
+    };
+    let mut context = Context::default();
+    context.admit_nominal_constructor(id(10));
+    context.admit_nominal_constructor(id(11));
+    context.admit_nominal_constructor(id(12));
+    let subject = var(90);
+    // Caller constraints fix T = u8 while Foo<T> quantifiably matches Foo<bool>.
+    context.assume(Formula::equal(var(1), ty(P::U8)));
+    context.assume(Formula::Or(vec![
+        Formula::equal(subject.clone(), node(10, vec![ty(P::Bool)])),
+        Formula::equal(subject.clone(), node(11, vec![ty(P::Bool)])),
+    ]));
+
+    let foo_impl = generic(203, node(10, vec![var(1)]), vec![id(1)]);
+    let baz_impl = generic(204, node(12, vec![var(1)]), vec![id(1)]);
+
+    let foo_assessment = foo_impl.assess_types(&subject, &[], &context, Budget::default());
+    assert!(
+        matches!(foo_assessment, TypeAssessment::Pending(_)),
+        "colliding impl parameter must not cause false exclusion: {foo_assessment}"
+    );
+    let TypeAssessment::Excluded(proof) =
+        baz_impl.assess_types(&subject, &[], &context, Budget::default())
+    else {
+        panic!("unrelated nominal Baz<T> must still be excluded");
+    };
+    context.verify_proof(&proof, Budget::default()).unwrap();
+}
+
+#[test]
+fn opaque_normal_form_subject_does_not_exclude_generic_nominal_candidate() {
+    use nir::normal_forms::{Head, Kind, Parameter, Role};
+    use type_resolution::{
+        implementation::TypeAssessment,
+        ptc::{Context, Formula},
+    };
+    let opaque_head = id(80);
+    let package = nir::program::Package {
+        normal_forms: vec![Head {
+            collector: None,
+            declaration: opaque_head,
+            role: Role::Opaque,
+            requirements: vec![],
+            parameters: vec![Parameter {
+                declaration: id(81),
+                binding: nir::program::LocalId {
+                    owner: 80,
+                    index: 0,
+                },
+                kind: Kind::Type,
+                ty: ty(P::Type),
+            }],
+        }],
+        ..Default::default()
+    };
+    let opaque = |element| Term::NormalForm {
+        head: opaque_head,
+        sort: Sort::Type,
+        arguments: vec![element],
+    };
+    let mut context = Context::from_package(&package).unwrap();
+    context.admit_nominal_constructor(id(10));
+    let subject = var(90);
+    context.assume(Formula::equal(subject.clone(), opaque(var(91))));
+
+    let map_impl = generic(205, node(10, vec![var(1), var(2)]), vec![id(1), id(2)]);
+    let assessment = map_impl.assess_types(&subject, &[], &context, Budget::default());
+    assert!(
+        matches!(assessment, TypeAssessment::Pending(_)),
+        "opaque normal form must not be assumed disjoint from Map<K, V>: {assessment}"
+    );
 }

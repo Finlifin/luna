@@ -155,6 +155,103 @@ impl ImplementationHead {
         result
     }
 
+    fn freshen_subject_for_refutation(
+        &self,
+        subject: &Term,
+        context: &Context,
+        budget: &mut Budget,
+    ) -> Option<Term> {
+        if self.type_parameters.is_empty() {
+            return Some(self.subject.clone());
+        }
+        enum Visit<'a> {
+            Formula(&'a Formula),
+            Term(&'a Term),
+        }
+        let mut used = BTreeSet::new();
+        let mut work = Vec::with_capacity(1 + context.assumptions().len());
+        work.push(Visit::Term(subject));
+        for formula in context.assumptions() {
+            work.push(Visit::Formula(formula));
+        }
+        while let Some(item) = work.pop() {
+            budget.steps = budget.steps.checked_sub(1)?;
+            match item {
+                Visit::Formula(Formula::Equal(crate::ptc::Equality(left, right))) => {
+                    work.push(Visit::Term(left));
+                    work.push(Visit::Term(right));
+                }
+                Visit::Formula(Formula::Kind(query)) => work.push(Visit::Term(&query.ty)),
+                Visit::Formula(Formula::Trait(query)) => {
+                    work.extend(query.inputs().map(Visit::Term));
+                }
+                Visit::Formula(Formula::IntLe(le)) => {
+                    used.extend(le.left.variable);
+                    used.extend(le.right.variable);
+                }
+                Visit::Formula(Formula::Not(inner)) => work.push(Visit::Formula(inner)),
+                Visit::Formula(Formula::And(parts) | Formula::Or(parts)) => {
+                    work.extend(parts.iter().map(Visit::Formula));
+                }
+                Visit::Formula(Formula::True | Formula::False) => {}
+                Visit::Term(term) => {
+                    if let Term::Rigid { declaration, .. } = term {
+                        used.insert(*declaration);
+                    }
+                    term.visit_children(|child| {
+                        work.push(Visit::Term(child));
+                        Ok::<_, std::convert::Infallible>(())
+                    })
+                    .unwrap_or_else(|never| match never {});
+                }
+            }
+        }
+        if !self.type_parameters.iter().any(|id| used.contains(id)) {
+            return Some(self.subject.clone());
+        }
+        used.extend(self.type_parameters.iter().copied());
+        let mut subject_terms = vec![&self.subject];
+        while let Some(term) = subject_terms.pop() {
+            budget.steps = budget.steps.checked_sub(1)?;
+            if let Term::Rigid { declaration, .. } = term {
+                used.insert(*declaration);
+            }
+            term.visit_children(|child| {
+                subject_terms.push(child);
+                Ok::<_, std::convert::Infallible>(())
+            })
+            .unwrap_or_else(|never| match never {});
+        }
+        let parameters = self.parameter_binders().ok()?;
+        let mut next = u64::MAX;
+        let mut replacements = Vec::with_capacity(parameters.len());
+        for parameter in &parameters {
+            loop {
+                budget.steps = budget.steps.checked_sub(1)?;
+                let id = DeclarationId {
+                    package: next,
+                    local: 0,
+                };
+                next = next.checked_sub(1)?;
+                if used.insert(id) {
+                    replacements.push(Term::Rigid {
+                        declaration: id,
+                        sort: parameter.sort,
+                    });
+                    break;
+                }
+            }
+        }
+        nir::type_computations::instantiate_parameters_bounded(
+            &self.subject,
+            &parameters,
+            &replacements,
+            &[][..],
+            &mut budget.steps,
+        )
+        .ok()
+    }
+
     /// Replay head matching only. Success does not discharge the retained
     /// requirements or authorize selection/dispatch of this implementation.
     pub fn verify_head_match(
@@ -819,10 +916,28 @@ impl ImplementationHead {
             steps: allowance.saturating_mul(self.interface_arguments.len().saturating_add(6)),
             ..budget
         };
+        let (shape, eligibility_proof) =
+            eligibility::subject_view(context, subject, budget, &mut head_budget)?;
+        if matches!(shape, Term::Closure { .. } | Term::ContextualClosure { .. }) {
+            return Err(TypeAssessment::ForbiddenSubject(shape));
+        }
+        if !eligible_shape(context, &shape)
+            && !eligibility_proof
+                .as_ref()
+                .is_some_and(|proof| eligible_alternatives(context, subject, &proof.goal))
+        {
+            return Err(TypeAssessment::Pending(
+                "user implementation subject eligibility is unresolved".into(),
+            ));
+        }
         // Known outer structure can refute a candidate before all of its
-        // parameters are inferred: Tuple versus a known non-tuple constructor, or an explicit error
-        // prefix versus an ordinary type. Require a replayable PTC proof;
-        // grant neither injectivity nor disjointness to opaque factories.
+        // parameters are inferred: Tuple/List/admitted nominals/records versus
+        // incompatible constructors, an explicit error prefix versus an
+        // ordinary type, or a symbolic disjunction against incompatible heads.
+        // Check against the discovered structural view `shape` as well as
+        // `subject`, without granting injectivity or disjointness to opaque
+        // normal-form heads. Freshen head parameters when they collide with
+        // caller rigid identifiers so refutation quantifies over the head.
         let nominal = |ty: &Term| {
             matches!(ty,
             Term::Nominal { declaration, .. } if context.is_nominal_constructor(*declaration))
@@ -848,46 +963,32 @@ impl ImplementationHead {
         let non_tuple =
             |ty: &Term| ordinary(ty) && !context.is_tuple_type(ty) && !matches!(ty, Term::Tuple(_));
         let non_list = |ty: &Term| ordinary(ty) && !context.is_list_type(ty);
-        if (context.is_list_type(subject) && non_list(&self.subject))
-            || (context.is_list_type(&self.subject) && non_list(subject))
-            || (context.is_tuple_type(subject) && non_tuple(&self.subject))
-            || (context.is_tuple_type(&self.subject) && non_tuple(subject))
-            || (matches!(&self.subject, Term::ErrorResult { .. }) && ordinary(subject))
-            || (matches!(subject, Term::ErrorResult { .. }) && ordinary(&self.subject))
-        {
-            if let Outcome::Entailed(proof) = context.prove_metered(
-                Formula::equal(self.subject.clone(), subject.clone()).negate(),
-                &mut head_budget,
-            ) {
-                return Err(TypeAssessment::Excluded(proof));
-            }
-        }
-        let (shape, eligibility_proof) =
-            eligibility::subject_view(context, subject, budget, &mut head_budget)?;
-        if matches!(shape, Term::Closure { .. } | Term::ContextualClosure { .. }) {
-            return Err(TypeAssessment::ForbiddenSubject(shape));
-        }
-        if !eligible_shape(context, &shape)
-            && !eligibility_proof
-                .as_ref()
-                .is_some_and(|proof| eligible_alternatives(context, subject, &proof.goal))
-        {
-            return Err(TypeAssessment::Pending(
-                "user implementation subject eligibility is unresolved".into(),
-            ));
-        }
-        // A symbolic union can exclude structurally incompatible finer heads
-        // (for example *U against f16 | bf16) without inferring their inputs.
-        if eligibility_proof
+        let distinct_record = |a: &Term, b: &Term| {
+            matches!(a, Term::Record(_)) && ordinary(b) && !matches!(b, Term::Record(_))
+        };
+        let outer_disjoint = crate::ptc::distinct_outer_type_heads(&self.subject, &shape)
+            || (context.is_list_type(&shape) && non_list(&self.subject))
+            || (context.is_list_type(&self.subject) && non_list(&shape))
+            || (context.is_tuple_type(&shape) && non_tuple(&self.subject))
+            || (context.is_tuple_type(&self.subject) && non_tuple(&shape))
+            || (matches!(&self.subject, Term::ErrorResult { .. }) && ordinary(&shape))
+            || (matches!(&shape, Term::ErrorResult { .. }) && ordinary(&self.subject))
+            || distinct_record(&self.subject, &shape)
+            || distinct_record(&shape, &self.subject);
+        let symbolic_alternatives = eligibility_proof
             .as_ref()
             .is_some_and(|proof| eligible_alternatives(context, subject, &proof.goal))
-            && eligible_shape(context, &self.subject)
-        {
-            if let Outcome::Entailed(proof) = context.prove_metered(
-                Formula::equal(self.subject.clone(), subject.clone()).negate(),
-                &mut head_budget,
-            ) {
-                return Err(TypeAssessment::Excluded(proof));
+            && eligible_shape(context, &self.subject);
+        if outer_disjoint || symbolic_alternatives {
+            if let Some(candidate_subject) =
+                self.freshen_subject_for_refutation(subject, context, &mut head_budget)
+            {
+                if let Outcome::Entailed(proof) = context.prove_metered(
+                    Formula::equal(candidate_subject, subject.clone()).negate(),
+                    &mut head_budget,
+                ) {
+                    return Err(TypeAssessment::Excluded(proof));
+                }
             }
         }
         let parameters = self
