@@ -119,12 +119,12 @@ impl Checker<'_, '_> {
                 &mut self.required_steps,
                 arg.span,
             )?;
-            operands.push((local(decl.params[route.parameter].hir_id), arg, ty));
+            operands.push((route.parameter, arg, ty));
         }
-        let mut inputs = Vec::new();
-        for (id, arg, ty) in operands {
+        let mut inputs = vec![None; decl.params.len()];
+        for (slot, arg, ty) in operands {
             if let Some(value) = self.generator_static_value_hint(arg, &ty, depth + 1, bindings)? {
-                inputs.push((id, ty, value));
+                inputs[slot] = Some((ty, value));
             } else if !self.observing_call_results.is_empty() && !direct_read(arg) {
                 return Ok(None);
             }
@@ -132,7 +132,29 @@ impl Checker<'_, '_> {
         self.observing_call_results.insert(owner);
         let result = self.in_formal_declaration(owner, |this| {
             this.in_required_comptime = true;
-            for (id, ty, value) in inputs {
+            // Defaults bind only their declaration prefix. Even an unknown
+            // explicit operand suppresses its default at this call site.
+            let formals: Option<(&[DeclarationId], &[Term])> = Some((&[], &[]));
+            for ((parameter, assigned), explicit) in
+                decl.params.iter().zip(plan.assigned).zip(inputs)
+            {
+                let evidence = if assigned {
+                    explicit
+                } else if let TyParamKind::Optional(_, annotation, default) = parameter.ty.kind {
+                    let Some(ty) =
+                        this.generator_static_type_hint(annotation, depth + 1, formals)?
+                    else {
+                        continue;
+                    };
+                    this.generator_static_value_hint(default, &ty, depth + 1, formals)?
+                        .map(|value| (ty, value))
+                } else {
+                    None
+                };
+                let Some((ty, value)) = evidence else {
+                    continue;
+                };
+                let id = local(parameter.hir_id);
                 this.locals.insert(id, ty);
                 this.immutable.insert(id);
                 this.generator_data.insert(id, None);
@@ -140,7 +162,7 @@ impl Checker<'_, '_> {
                     .partial
                     .insert(id, constants::PartialStagedValue::known(value));
             }
-            this.generator_static_value_hint(body, domain, depth + 1, Some((&[], &[])))
+            this.generator_static_value_hint(body, domain, depth + 1, formals)
         });
         self.observing_call_results.remove(&owner);
         result

@@ -863,3 +863,35 @@ fn computed_type_suppliers_select_context_without_replaying_call_operands() {
     let error = sysroot::compile(&invalid).unwrap_err();
     assert!(error.contains("ProgramContractRejected"), "{error}");
 }
+
+#[test]
+fn type_producer_defaults_observe_only_the_selected_declaration_prefix() {
+    let source = r#"
+        enum Packet { group.{byte(u8)} }
+        pure comptime fn Select(seed: Type, .first: Type = seed, .picked: Type = first) -> Type {
+            picked
+        }
+        pure comptime fn Checked(flag: bool) -> Type {
+            assumes flag;
+            Packet
+        }
+        comptime fn Opaque() -> Type { ?u8 }
+        pure comptime fn Override(.picked: Type = Checked(false)) -> Type { picked }
+        fn read() -> T where .T: Type = bool, .items: meta.List<T> = [] {
+            const item = items[0];
+            item
+        }
+        fn run() -> bool {
+            let first = read<.items = [.group.byte(7)], .T = Select(Packet)>();
+            let second = read<.items = [.group.byte(0)], .T = Select(Packet, .first = ?u8)>();
+            let third = read<.items = [.group.byte(3)], .T = Override(.picked = Packet)>();
+            let last = read<.items = [.group.byte(0)], .T = Select(Packet, .first = Opaque())>();
+            (first matches .group.byte(7)) and (second matches 103?)
+                and (third matches .group.byte(3)) and (last matches 103?)
+        }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let invalid = source.replace("Override(.picked = Packet)", "Override()");
+    let error = sysroot::compile(&invalid).unwrap_err();
+    assert!(error.contains("ProgramContractRejected"), "{error}");
+}
