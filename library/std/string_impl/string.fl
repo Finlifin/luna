@@ -768,15 +768,10 @@ where
 
     pub fn write_to(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
         let len = self.len();
-        var i: usize = 0;
-        while i < len {
-            let byte = self.byte(i) match {
-                v? => v,
-                null => return,
-            }
-            output.write_byte(byte)!;
-            i = i + 1;
+        if len == 0 {
+            return;
         }
+        unsafe { output.as(ByteWriter).write_raw_bytes(self.as_bytes_addr(), len) }
     }
 }
 

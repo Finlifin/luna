@@ -528,6 +528,10 @@ where
         self.buffer_byte(byte)
     }
 
+    unsafe fn write_raw_bytes(*self, src: usize, len: usize) -> !W.as(Write).Err void {
+        self.as(Write).write_all_raw(src, len)
+    }
+
     fn write_str(*self, text: str) -> !W.as(Write).Err void {
         let len = builtin.compiler.str_byte_length(text);
         var index: u64 = 0;

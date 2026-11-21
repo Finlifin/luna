@@ -28,26 +28,24 @@ fn write_escaped_byte(
     output: *W,
 ) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
     if byte == 0 {
-        output.write_byte(92)!;
-        output.write_byte(48)
+        output.write_str("\\0")
     } else if byte == 9 {
-        output.write_byte(92)!;
-        output.write_byte(116)
+        output.write_str("\\t")
     } else if byte == 10 {
-        output.write_byte(92)!;
-        output.write_byte(110)
+        output.write_str("\\n")
     } else if byte == 13 {
-        output.write_byte(92)!;
-        output.write_byte(114)
+        output.write_str("\\r")
     } else if byte == 92 {
-        output.write_byte(92)!;
-        output.write_byte(92)
+        output.write_str("\\\\")
     } else if byte == quote_byte {
-        output.write_byte(92)!;
-        output.write_byte(quote_byte)
+        if quote_byte == 34 {
+            output.write_str("\\\"")
+        } else {
+            output.write_byte(92)!;
+            output.write_byte(quote_byte)
+        }
     } else if byte < 32 or byte == 127 {
-        output.write_byte(92)!;
-        output.write_byte(120)!;
+        output.write_str("\\x")!;
         output.write_byte(hex_digit(byte / 16))!;
         output.write_byte(hex_digit(byte % 16))
     } else {
@@ -63,8 +61,7 @@ impl Debug for bool {
 
 impl Debug for void {
     fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
-        output.write_byte(40)!;
-        output.write_byte(41)
+        output.write_str("()")
     }
 }
 

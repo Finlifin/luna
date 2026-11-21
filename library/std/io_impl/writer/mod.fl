@@ -123,6 +123,10 @@ impl ByteWriter for Writer {
         unix.write_byte(self.descriptor.*, byte)
     }
 
+    unsafe fn write_raw_bytes(*self, src: usize, len: usize) -> !IoErr void {
+        write_all_raw(self.descriptor.*, src, len)
+    }
+
     fn write_str(*self, text: str) -> !IoErr void {
         write_all_str(self.descriptor.*, text)
     }

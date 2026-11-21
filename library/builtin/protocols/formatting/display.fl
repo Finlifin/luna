@@ -32,16 +32,9 @@ fn signed_decimal(value: i128, output: *W) -> !W.as(ByteWriter).Err void where W
 impl Display for bool {
     fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
         if self {
-            output.write_byte(116)!;
-            output.write_byte(114)!;
-            output.write_byte(117)!;
-            output.write_byte(101)
+            output.write_str("true")
         } else {
-            output.write_byte(102)!;
-            output.write_byte(97)!;
-            output.write_byte(108)!;
-            output.write_byte(115)!;
-            output.write_byte(101)
+            output.write_str("false")
         }
     }
 }
