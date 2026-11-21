@@ -2435,6 +2435,22 @@ fn scoped_call_binding_refines_domains_without_capturing_caller_inputs() {
             }),
         }
     );
+    let rebuilt = FunctionCallBinding::new_bounded(
+        &signature,
+        &inputs,
+        vec![vec![Sort::Type]],
+        &mut 100,
+        |ty| Ok::<_, TypeError>(ty.clone()),
+    )
+    .unwrap();
+    assert_eq!(
+        rebuilt.substitute_bounded(&annotation, &mut 100),
+        binding.substitute(&annotation)
+    );
+    assert_eq!(
+        rebuilt.substitute_bounded(&bound(0, 2, Sort::Runtime), &mut 10),
+        Err(TypeError::MissingArgument(2)),
+    );
     assert!(annotation.substitute_partial(&inputs).is_err());
     assert!(matches!(
         binding.substitute(&bound(0, 2, Sort::Runtime)),
@@ -2526,6 +2542,80 @@ fn call_observations_resume_in_dependency_order_and_leave_failed_slots_open() {
     let mut unfinished = FunctionCallPreparation::new(&signature, vec![]).unwrap();
     unfinished.prepare(2, view).unwrap();
     assert_eq!(unfinished.finish(), Err(TypeError::MissingArgument(2)));
+}
+
+#[test]
+fn sparse_call_expansion_charges_reached_payloads_before_publishing_slots() {
+    let types = primitive(Primitive::Type);
+    let pair = |left, right| Term::NormalForm {
+        head: IDENTITY,
+        sort: Sort::Type,
+        arguments: vec![left, right],
+    };
+    let first = bound(0, 0, Sort::Type);
+    let signature = Term::Function {
+        parameters: vec![
+            Parameter {
+                sort: Sort::Type,
+                ty: types.clone(),
+            },
+            Parameter {
+                sort: Sort::Runtime,
+                ty: pair(first.clone(), first),
+            },
+            Parameter {
+                sort: Sort::Type,
+                ty: types.clone(),
+            },
+        ],
+        result: Box::new(primitive(Primitive::Bool)),
+    };
+    let payload = |width| Term::NormalForm {
+        head: IDENTITY,
+        sort: Sort::Type,
+        arguments: vec![primitive(Primitive::Bool); width],
+    };
+    let mut call = FunctionCallPreparation::new(&signature, vec![]).unwrap();
+    let view = |domain: &Term| Ok::<_, TypeError>(domain.clone());
+    call.prepare_bounded(2, &mut 1, view).unwrap();
+    call.supply(2, payload(4096)).unwrap();
+    call.prepare_bounded(0, &mut 1, view).unwrap();
+    call.supply(0, payload(80)).unwrap();
+
+    let mut fuel = 140;
+    assert_eq!(
+        call.prepare_bounded(1, &mut fuel, |_| -> Result<Term, TypeError> {
+            panic!("domain observation must follow successful expansion")
+        }),
+        Err(CallError::Shape(TypeError::ConstructionBudget))
+    );
+    assert!(fuel < 60);
+    assert_eq!(
+        call.supply(1, Term::Unit),
+        Err(TypeError::UnpreparedCallInput(1))
+    );
+    let expected = pair(payload(80), payload(80));
+    assert_eq!(call.prepare_bounded(1, &mut 200, view).unwrap(), expected);
+    let local = bound(0, 2, Sort::Type);
+    let nested = Term::Function {
+        parameters: vec![
+            Parameter {
+                sort: Sort::Type,
+                ty: types
+            };
+            3
+        ],
+        result: Box::new(local),
+    };
+    assert_eq!(
+        call.binding().substitute_bounded(&nested, &mut 8).unwrap(),
+        nested
+    );
+    assert_eq!(
+        call.binding()
+            .substitute_bounded(&bound(0, 2, Sort::Type), &mut 200),
+        Err(TypeError::ConstructionBudget)
+    );
 }
 
 #[test]

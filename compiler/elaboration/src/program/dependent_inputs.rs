@@ -112,17 +112,31 @@ pub(super) struct PreparedInputs {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn with_call_type_fuel<T>(
+        &mut self,
+        inspect: impl FnOnce(&Self, &mut usize) -> T,
+    ) -> T {
+        let granted = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
+        let mut fuel = granted;
+        let result = inspect(self, &mut fuel);
+        self.required_steps -= (granted - fuel) as u64;
+        result
+    }
+
     /// Move annotations out of the callee's ordinary parameter scope once.
     /// Captured values supplied separately are already in the caller's scope.
-    fn specialize_default_annotations(
+    pub(super) fn specialize_default_annotations(
         &mut self,
         expression: &mut n::Expr,
         binding: &nir::FunctionCallBinding,
         span: Span,
     ) -> Result<(), Error> {
-        expression
-            .rewrite_types(&mut |ty| binding.substitute(ty))
-            .map_err(|failure| error(span, failure.to_string()))?;
+        nir::copy_budget::charge_type_rewrite(expression, &mut self.required_steps)
+            .map_err(|limit| input_observation::structural_limit(limit, span))?;
+        self.with_call_type_fuel(|_, fuel| {
+            expression.rewrite_types(&mut |ty| binding.substitute_bounded(ty, fuel))
+        })
+        .map_err(|failure| error(span, failure.to_string()))?;
         expression.rewrite_types(&mut |term| self.callable_argument_term_view(term, span))
     }
 
@@ -425,10 +439,15 @@ impl Checker<'_, '_> {
         signature: &Term,
         inputs: &[Option<Term>],
         span: Span,
+        fuel: &mut usize,
     ) -> Result<nir::FunctionCallBinding, Error> {
-        nir::FunctionCallBinding::new(signature, inputs, &self.call_input_frames(), |ty| {
-            self.callable_input_view(ty, span)
-        })
+        nir::FunctionCallBinding::new_bounded(
+            signature,
+            inputs,
+            self.call_input_frames(),
+            fuel,
+            |ty| self.callable_input_view(ty, span),
+        )
         .map_err(|e| match e {
             nir::CallError::Contract { error, .. } => error,
             other => error(span, other.to_string()),
@@ -673,20 +692,34 @@ impl Checker<'_, '_> {
             return Ok(());
         };
         let mut dependent = Vec::new();
-        for requirement in requirements {
+        for (index, requirement) in requirements.iter().enumerate() {
             for ty in required::requirement_terms(requirement, span)? {
                 if !input_observation::substitution_term(ty, &mut self.required_steps, span)?
                     .is_empty()
                 {
-                    dependent.push(requirement);
+                    dependent.push(index);
                     break;
                 }
             }
         }
-        let requirements = dependent;
-        if requirements.is_empty() {
+        if dependent.is_empty() {
             return Ok(());
         }
+        self.with_call_type_fuel(|checker, fuel| {
+            checker
+                .prove_ordinary_type_requirements(owner, arguments, inputs, &dependent, span, fuel)
+        })
+    }
+
+    fn prove_ordinary_type_requirements(
+        &self,
+        owner: OwnerId,
+        arguments: &[Term],
+        inputs: &[Option<Term>],
+        dependent: &[usize],
+        span: Span,
+        fuel: &mut usize,
+    ) -> Result<(), Error> {
         let signature = self
             .declared_signature(owner)
             .ok_or_else(|| error(span, "ordinary type requirement needs a function signature"))?;
@@ -706,7 +739,7 @@ impl Checker<'_, '_> {
         let Term::Function { parameters, .. } = signature.callable_signature() else {
             return Err(error(span, "expected a function signature"));
         };
-        let binding = self.prepare_call_binding(&signature, inputs, span)?;
+        let binding = self.prepare_call_binding(&signature, inputs, span, fuel)?;
         frames.push(parameters.iter().map(|p| p.sort).collect());
 
         let arguments = arguments
@@ -717,15 +750,15 @@ impl Checker<'_, '_> {
         let substitution = self
             .input_substitution(&declarations, &arguments, &frames)
             .map_err(|e| error(span, e.to_string()))?;
-        for requirement in requirements {
+        for &index in dependent {
             let requirement = substitution
-                .instantiate_predicate(requirement)
+                .instantiate_predicate_bounded(&self.requirements[&owner][index], fuel)
                 .map_err(|e| error(span, e.to_string()))?;
             let requirement = required::map_requirement(
                 &requirement,
                 &mut |ty| {
                     let ty = binding
-                        .substitute(ty)
+                        .substitute_bounded(ty, fuel)
                         .map_err(|e| error(span, e.to_string()))?;
                     self.callable_input_view(&ty, span)
                 },

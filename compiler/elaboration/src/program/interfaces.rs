@@ -2060,7 +2060,7 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn check_ordinary_capabilities(
-        &self,
+        &mut self,
         owner: OwnerId,
         type_arguments: &[Term],
         inputs: &[Option<Term>],
@@ -2069,20 +2069,42 @@ impl Checker<'_, '_> {
         let Some(requirements) = self.capabilities.get(&owner) else {
             return Ok(());
         };
-        let requirements = requirements
-            .iter()
-            .filter(|requirement| {
-                std::iter::once(&requirement.subject)
-                    .chain(&requirement.interface_arguments)
-                    .any(|ty| {
-                        ty.substitution_parameters()
-                            .is_ok_and(|slots| !slots.is_empty())
-                    })
-            })
-            .collect::<Vec<_>>();
-        if requirements.is_empty() {
+        let mut dependent = Vec::new();
+        for (index, requirement) in requirements.iter().enumerate() {
+            for ty in std::iter::once(&requirement.subject).chain(&requirement.interface_arguments)
+            {
+                if !input_observation::substitution_term(ty, &mut self.required_steps, span)?
+                    .is_empty()
+                {
+                    dependent.push(index);
+                    break;
+                }
+            }
+        }
+        if dependent.is_empty() {
             return Ok(());
         }
+        self.with_call_type_fuel(|checker, fuel| {
+            checker.prove_ordinary_capabilities(
+                owner,
+                type_arguments,
+                inputs,
+                &dependent,
+                span,
+                fuel,
+            )
+        })
+    }
+
+    fn prove_ordinary_capabilities(
+        &self,
+        owner: OwnerId,
+        type_arguments: &[Term],
+        inputs: &[Option<Term>],
+        dependent: &[usize],
+        span: Span,
+        fuel: &mut usize,
+    ) -> Result<(), Error> {
         let signature = self
             .declared_signature(owner)
             .ok_or_else(|| error(span, "ordinary capability requires function signature"))?;
@@ -2106,7 +2128,7 @@ impl Checker<'_, '_> {
             &frames,
             span,
         )?;
-        let binding = self.prepare_call_binding(&specialized, inputs, span)?;
+        let binding = self.prepare_call_binding(&specialized, inputs, span, fuel)?;
         frames.push(ordinary.iter().map(|p| p.sort).collect());
         let arguments = type_arguments
             .iter()
@@ -2116,15 +2138,15 @@ impl Checker<'_, '_> {
         let substitution = self
             .input_substitution(&parameters, &arguments, &frames)
             .map_err(|e| error(span, e.to_string()))?;
-        for requirement in requirements {
+        for &index in dependent {
             let requirement = substitution
-                .instantiate_requirement_bounded(requirement, &mut 100_000)
+                .instantiate_requirement_bounded(&self.capabilities[&owner][index], fuel)
                 .map_err(|e| error(span, e.to_string()))?;
             let requirement = n::TraitRequirement {
                 interface: requirement.interface,
                 subject: self.callable_input_view(
                     &binding
-                        .substitute(&requirement.subject)
+                        .substitute_bounded(&requirement.subject, fuel)
                         .map_err(|e| error(span, e.to_string()))?,
                     span,
                 )?,
@@ -2133,7 +2155,7 @@ impl Checker<'_, '_> {
                     .iter()
                     .map(|ty| {
                         let ty = binding
-                            .substitute(ty)
+                            .substitute_bounded(ty, fuel)
                             .map_err(|e| error(span, e.to_string()))?;
                         self.callable_input_view(&ty, span)
                     })

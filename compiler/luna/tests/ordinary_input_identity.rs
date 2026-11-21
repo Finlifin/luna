@@ -74,6 +74,25 @@ fn unobserved_dependencies_do_not_start_an_isolated_invocation() {
 }
 
 #[test]
+fn an_explicit_type_consumer_uses_each_original_invocation_once() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn consume(comptime ty: Type, flag: bool) -> bool {
+            empty(ty) match {
+                null => if flag { ty == bool } else { ty == char },
+                _ => false,
+            }
+        }
+        comptime fn relay(flag: bool) -> bool { consume(Selected(flag), flag) }
+        comptime fn check() -> bool { relay(true) and relay(false) }
+        ",
+        &[("Selected", 2), ("consume", 2), ("empty", 2)],
+    );
+}
+
+#[test]
 fn a_default_keeps_its_scalar_prefix_across_an_independent_call() {
     check_events(
         &format!(

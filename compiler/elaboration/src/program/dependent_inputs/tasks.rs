@@ -372,8 +372,12 @@ impl Frame {
                 )?;
             }
             Task::Check(slot) => {
-                let expected = call
-                    .prepare(slot, |ty| checker.callable_input_view(ty, source.span))
+                let expected = checker
+                    .with_call_type_fuel(|checker, fuel| {
+                        call.prepare_bounded(slot, fuel, |ty| {
+                            checker.callable_input_view(ty, source.span)
+                        })
+                    })
                     .map_err(|failure| match failure {
                         nir::CallError::Contract { error, .. } => error,
                         other => error(source.span, other.to_string()),

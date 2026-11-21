@@ -222,12 +222,14 @@ impl<'h> Root<'h> for CallInputs<'h> {
             self.next += 1;
             let slot = self.offset + input.parameter;
             let parameter = &signature.parameters[slot];
-            let domain = binding.substitute(&parameter.ty).map_err(|failure| {
-                error(
-                    site.source.span,
-                    format!("dependent call input is not available: {failure}"),
-                )
-            })?;
+            let domain = checker
+                .with_call_type_fuel(|_, fuel| binding.substitute_bounded(&parameter.ty, fuel))
+                .map_err(|failure| {
+                    error(
+                        site.source.span,
+                        format!("dependent call input is not available: {failure}"),
+                    )
+                })?;
             let domain = checker.observe_call_type(&domain, &site.source)?;
             input.require_collection_type(checker, &domain, site.source.span)?;
             if let Some(value) = prepared.values[slot].take() {
@@ -257,12 +259,7 @@ impl<'h> Root<'h> for CallInputs<'h> {
                 let mut value = prepared.defaults[parameter]
                     .take()
                     .expect("prepared default");
-                value
-                    .rewrite_types(&mut |ty| binding.substitute(ty))
-                    .map_err(|failure| error(site.source.span, failure.to_string()))?;
-                value.rewrite_types(&mut |ty| {
-                    checker.callable_argument_term_view(ty, site.source.span)
-                })?;
+                checker.specialize_default_annotations(&mut value, binding, site.source.span)?;
                 value
             };
             self.arguments.push(n::CallArgument {
@@ -351,12 +348,16 @@ impl Completion<'_> {
         {
             p(P::Never)
         } else {
-            let result = call_binding.substitute(signature.result).map_err(|e| {
-                error(
-                    expr.span,
-                    format!("dependent call result is not available: {e}"),
-                )
-            })?;
+            let result = checker
+                .with_call_type_fuel(|_, fuel| {
+                    call_binding.substitute_bounded(signature.result, fuel)
+                })
+                .map_err(|e| {
+                    error(
+                        expr.span,
+                        format!("dependent call result is not available: {e}"),
+                    )
+                })?;
             checker.observe_call_type(&result, expr)?
         };
         if let Some(expected) = &expected {

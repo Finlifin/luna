@@ -473,6 +473,26 @@ impl<S: std::borrow::Borrow<Term>> FunctionCallPreparation<S> {
         index: usize,
         view: impl FnOnce(&Term) -> Result<Term, E>,
     ) -> Result<Term, CallError<E>> {
+        self.prepare_using(index, view, FunctionCallBinding::substitute)
+    }
+
+    pub fn prepare_bounded<E>(
+        &mut self,
+        index: usize,
+        fuel: &mut usize,
+        view: impl FnOnce(&Term) -> Result<Term, E>,
+    ) -> Result<Term, CallError<E>> {
+        self.prepare_using(index, view, |binding, ty| {
+            binding.substitute_bounded(ty, fuel)
+        })
+    }
+
+    fn prepare_using<E>(
+        &mut self,
+        index: usize,
+        view: impl FnOnce(&Term) -> Result<Term, E>,
+        substitute: impl FnOnce(&FunctionCallBinding, &Term) -> Result<Term, TypeError>,
+    ) -> Result<Term, CallError<E>> {
         let parameter = self
             .parameters()
             .get(index)
@@ -481,10 +501,7 @@ impl<S: std::borrow::Borrow<Term>> FunctionCallPreparation<S> {
             return Err(CallError::Shape(TypeError::DuplicateCallInput(index)));
         }
         let caller = self.binding.caller_frames();
-        let domain = self
-            .binding
-            .substitute(&parameter.ty)
-            .map_err(CallError::Shape)?;
+        let domain = substitute(&self.binding, &parameter.ty).map_err(CallError::Shape)?;
         let domain = view(&domain).map_err(|error| CallError::Contract {
             parameter: index,
             error,
@@ -528,6 +545,44 @@ impl FunctionCallBinding {
         caller_frames: &[Vec<Sort>],
         mut view: impl FnMut(&Term) -> Result<Term, E>,
     ) -> Result<Self, CallError<E>> {
+        Self::from_observations(
+            signature,
+            inputs,
+            caller_frames.to_vec(),
+            |call, index, input| {
+                call.prepare(index, &mut view)?;
+                call.supply(index, input.clone()).map_err(CallError::Shape)
+            },
+        )
+    }
+
+    pub fn new_bounded<E>(
+        signature: &Term,
+        inputs: &[Option<Term>],
+        caller_frames: Vec<Vec<Sort>>,
+        fuel: &mut usize,
+        mut view: impl FnMut(&Term) -> Result<Term, E>,
+    ) -> Result<Self, CallError<E>> {
+        crate::type_computations::charge_term(signature, fuel)
+            .map_err(|_| CallError::Shape(TypeError::ConstructionBudget))?;
+        Self::from_observations(signature, inputs, caller_frames, |call, index, input| {
+            call.prepare_bounded(index, fuel, &mut view)?;
+            let input = crate::copy_budget::clone_term(input, fuel)
+                .map_err(|_| CallError::Shape(TypeError::ConstructionBudget))?;
+            call.supply(index, input).map_err(CallError::Shape)
+        })
+    }
+
+    fn from_observations<E>(
+        signature: &Term,
+        inputs: &[Option<Term>],
+        caller_frames: Vec<Vec<Sort>>,
+        mut supply: impl FnMut(
+            &mut FunctionCallPreparation<&Term>,
+            usize,
+            &Term,
+        ) -> Result<(), CallError<E>>,
+    ) -> Result<Self, CallError<E>> {
         let Term::Function { parameters, .. } = signature.callable_signature() else {
             return Err(CallError::NotFunction);
         };
@@ -537,13 +592,11 @@ impl FunctionCallBinding {
                 actual: inputs.len(),
             }));
         }
-        let mut call = FunctionCallPreparation::new(signature, caller_frames.to_vec())
-            .map_err(CallError::Shape)?;
+        let mut call =
+            FunctionCallPreparation::new(signature, caller_frames).map_err(CallError::Shape)?;
         for (index, input) in inputs.iter().enumerate() {
             if let Some(input) = input {
-                call.prepare(index, &mut view)?;
-                call.supply(index, input.clone())
-                    .map_err(CallError::Shape)?;
+                supply(&mut call, index, input)?;
             }
         }
         call.finish().map_err(CallError::Shape)
@@ -555,6 +608,18 @@ impl FunctionCallBinding {
 
     pub fn observations(&self) -> &[Option<Term>] {
         &self.arguments
+    }
+
+    /// Charge the actual expansion before copying it. An unobserved or unrelated
+    /// slot costs nothing unless the template reaches it at this binder depth.
+    pub fn substitute_bounded(&self, term: &Term, fuel: &mut usize) -> Result<Term, TypeError> {
+        crate::type_computations::charge_frame_slots(
+            term,
+            |index| self.arguments.get(index)?.as_ref(),
+            fuel,
+        )
+        .map_err(|_| TypeError::ConstructionBudget)?;
+        self.substitute(term)
     }
 
     pub fn substitute(&self, term: &Term) -> Result<Term, TypeError> {
