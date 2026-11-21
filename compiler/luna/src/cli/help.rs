@@ -6,6 +6,9 @@ pub const HELP: &str = "Luna — Flurry compiler\n\nUsage: luna <command> [optio
 const FRONTEND: &str = "
 Frontend options:
   --sysroot <path>
+  --cache-dir <path>
+  --no-cache
+  -j, --jobs <count>
   --dispatch-fuel <steps>
   --build-mode <mode>
   --build-target <arch> <os> <bits>

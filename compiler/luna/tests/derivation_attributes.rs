@@ -2,7 +2,9 @@
 use luna::cli::{Emit, Options};
 use luna::frontend::{self, Artifact};
 use std::sync::atomic::{AtomicU64, Ordering};
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
 fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
     let path = std::env::temp_dir().join(format!(
         "luna-derive-attributes-{}-{}.fl",
@@ -31,10 +33,12 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         into_iterator_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
+        incremental: Default::default(),
     });
     std::fs::remove_file(path).unwrap();
     result
 }
+
 const MARKER: &str =
     "comptime fn marker(flag:bool)->.Object'builtin {let metadata={selected:flag};metadata}";
 

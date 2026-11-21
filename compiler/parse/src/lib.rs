@@ -1,3 +1,5 @@
+pub use ast;
+
 pub mod basic;
 mod cmtt;
 pub mod diagnostics;

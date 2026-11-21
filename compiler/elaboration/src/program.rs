@@ -320,6 +320,17 @@ impl Protocols {
     }
 }
 
+/// Controls incremental upstream skip gates and multi-threaded verification.
+#[derive(Clone, Debug, Default)]
+pub struct IncrementalOptions {
+    /// Semantic package identities whose source declarations and implementations
+    /// already passed contract inheritance, purity, and machine-flow checks in
+    /// the upstream base.
+    pub verified_upstream_packages: BTreeSet<u64>,
+    /// Worker count for parallel verification passes (`None` uses default).
+    pub jobs: Option<usize>,
+}
+
 pub fn elaborate_packages_with_protocols(
     package: &hir::Package<'_>,
     package_identities: &BTreeMap<u32, u64>,
@@ -340,13 +351,30 @@ pub fn elaborate_packages_for_target(
     protocols: &Protocols,
     target: Option<nir::target::TargetData>,
 ) -> Result<n::Package, Error> {
+    elaborate_packages_incremental(
+        package,
+        package_identities,
+        protocols,
+        target,
+        &IncrementalOptions::default(),
+    )
+}
+
+pub fn elaborate_packages_incremental(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+    target: Option<nir::target::TargetData>,
+    incremental: &IncrementalOptions,
+) -> Result<n::Package, Error> {
     let mut invocation_steps = default_elaboration_steps(package_identities.len());
-    elaborate_packages_with_invocation_budget(
+    elaborate_packages_with_invocation_budget_incremental(
         package,
         package_identities,
         protocols,
         target,
         &mut invocation_steps,
+        incremental,
     )
 }
 
@@ -360,13 +388,32 @@ pub fn elaborate_packages_with_invocation_budget(
     target: Option<nir::target::TargetData>,
     invocation_steps: &mut u64,
 ) -> Result<n::Package, Error> {
-    elaborate_with_attributes(
+    elaborate_packages_with_invocation_budget_incremental(
+        package,
+        package_identities,
+        protocols,
+        target,
+        invocation_steps,
+        &IncrementalOptions::default(),
+    )
+}
+
+pub fn elaborate_packages_with_invocation_budget_incremental(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+    target: Option<nir::target::TargetData>,
+    invocation_steps: &mut u64,
+    incremental: &IncrementalOptions,
+) -> Result<n::Package, Error> {
+    elaborate_with_attributes_incremental(
         package,
         package_identities,
         protocols,
         target,
         false,
         invocation_steps,
+        incremental,
     )
     .map(|(program, _)| program)
 }
@@ -388,6 +435,26 @@ fn elaborate_with_attributes(
     inspect_attributes: bool,
     invocation_steps: &mut u64,
 ) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
+    elaborate_with_attributes_incremental(
+        package,
+        package_identities,
+        protocols,
+        target,
+        inspect_attributes,
+        invocation_steps,
+        &IncrementalOptions::default(),
+    )
+}
+
+fn elaborate_with_attributes_incremental(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+    target: Option<nir::target::TargetData>,
+    inspect_attributes: bool,
+    invocation_steps: &mut u64,
+    incremental: &IncrementalOptions,
+) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
     let mode = if inspect_attributes {
         ElaborationMode::InspectAttributes
     } else {
@@ -400,6 +467,7 @@ fn elaborate_with_attributes(
         target,
         mode,
         invocation_steps,
+        incremental,
     )
 }
 
@@ -410,6 +478,7 @@ fn elaborate_in_mode(
     target: Option<nir::target::TargetData>,
     mode: ElaborationMode<'_>,
     invocation_steps: &mut u64,
+    incremental: &IncrementalOptions,
 ) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
     if package
         .pending_semantics
@@ -425,6 +494,7 @@ fn elaborate_in_mode(
             target,
             mode,
             invocation_steps,
+            incremental,
         );
     }
     if matches!(mode, ElaborationMode::Full)
@@ -462,6 +532,7 @@ fn elaborate_in_mode(
                     validated_deriver_attrs: &mut validated_deriver_attrs,
                 },
                 invocation_steps,
+                incremental,
             )?;
         }
         let arena = hir::HirArena::new();
@@ -480,6 +551,7 @@ fn elaborate_in_mode(
             target,
             ElaborationMode::Full,
             invocation_steps,
+            incremental,
         )
         .map_err(|failure| derivation::with_context(package, failure));
     }
@@ -727,7 +799,14 @@ fn elaborate_in_mode(
     // Account even on unwinding, then preserve the original panic. Candidate
     // state remains private; this does not recover or reuse a panicking checker.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        elaborate_candidate(&mut checker, package, package_identities, target, mode)
+        elaborate_candidate(
+            &mut checker,
+            package,
+            package_identities,
+            target,
+            mode,
+            incremental,
+        )
     }));
     *invocation_steps = checker.required_steps;
     match result {
@@ -742,6 +821,7 @@ fn elaborate_candidate<'a, 'h>(
     package_identities: &BTreeMap<u32, u64>,
     target: Option<nir::target::TargetData>,
     mode: ElaborationMode<'_>,
+    incremental: &IncrementalOptions,
 ) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
     // Register all declaration telescopes before interpreting interface arguments.
     for (owner, info) in package.owners() {
@@ -1605,22 +1685,63 @@ fn elaborate_candidate<'a, 'h>(
     output.expansion_sources = std::mem::take(&mut checker.expansion_sources);
     output.definition_attributes = checker.definition_attributes.clone();
     output.volatile_storage = checker.volatile_storage.clone();
-    crate::verification::contracts::inherit(&mut output, &mut checker.next_temporary_binding)
-        .map_err(|mut failure| {
-            failure.source = failure
-                .source
-                .original(&output.expansion_sources)
-                .unwrap_or(failure.source);
-            Error {
-                source: failure.source,
-                message: failure.to_string(),
-                notes: Vec::new(),
-                needs_context: false,
-                needs_tactic: false,
-                retry_after_capability_progress: false,
-                incompatible_context: false,
+    let mut verified_upstream = crate::verification::flow::VerifiedUpstream::default();
+    if !incremental.verified_upstream_packages.is_empty() {
+        for function in output
+            .functions
+            .iter()
+            .chain(&checker.ordinary_behavior_functions)
+        {
+            if incremental
+                .verified_upstream_packages
+                .contains(&function.declaration.package)
+                && checker
+                    .source_declarations
+                    .owner(function.declaration)
+                    .is_some()
+            {
+                verified_upstream.functions.insert(function.declaration);
             }
-        })?;
+        }
+        for implementation in &output.implementations {
+            if incremental
+                .verified_upstream_packages
+                .contains(&implementation.declaration.package)
+                && checker
+                    .source_declarations
+                    .owner(implementation.declaration)
+                    .is_some()
+            {
+                verified_upstream
+                    .implementations
+                    .insert(implementation.declaration);
+            }
+        }
+    }
+    let inherit_result = if verified_upstream.implementations.is_empty() {
+        crate::verification::contracts::inherit(&mut output, &mut checker.next_temporary_binding)
+    } else {
+        crate::verification::contracts::inherit_incremental_skip_proofs(
+            &mut output,
+            &mut checker.next_temporary_binding,
+            &verified_upstream,
+        )
+    };
+    inherit_result.map_err(|mut failure| {
+        failure.source = failure
+            .source
+            .original(&output.expansion_sources)
+            .unwrap_or(failure.source);
+        Error {
+            source: failure.source,
+            message: failure.to_string(),
+            notes: Vec::new(),
+            needs_context: false,
+            needs_tactic: false,
+            retry_after_capability_progress: false,
+            incompatible_context: false,
+        }
+    })?;
     // Definition-side witnesses are analysis-only, including suppliers whose
     // inline alternatives must be checked before their inputs are supplied.
     output.runtime_domains = checker.runtime_domains.clone();
@@ -1649,6 +1770,20 @@ fn elaborate_candidate<'a, 'h>(
         &mut checker.next_temporary_binding,
         &mut checker.required_steps,
     )?;
+    if !incremental.verified_upstream_packages.is_empty() {
+        for template in &output.quote_templates {
+            if incremental
+                .verified_upstream_packages
+                .contains(&template.declaration.package)
+                && checker
+                    .source_declarations
+                    .owner(template.declaration)
+                    .is_some()
+            {
+                verified_upstream.functions.insert(template.declaration);
+            }
+        }
+    }
     output.runtime_domains = checker.runtime_domains.clone();
     output.global_runtime_deliveries = checker.global_runtime_deliveries.clone();
     output.quote_identity_cursor = checker.next_temporary_binding;
@@ -1682,9 +1817,30 @@ fn elaborate_candidate<'a, 'h>(
     purity::with_definition_bodies(
         &mut output,
         &mut checker.ordinary_behavior_functions,
-        |output| purity::validate_runtime_promises(output, &checker.protocols),
+        |output| {
+            if verified_upstream.functions.is_empty() {
+                purity::validate_runtime_promises(output, &checker.protocols)
+            } else {
+                purity::validate_runtime_promises_incremental(
+                    output,
+                    &checker.protocols,
+                    &verified_upstream,
+                )
+            }
+        },
     )?;
-    crate::verification::flow::validate_machine_operations(&output).map_err(|mut failure| {
+    let flow_result = match incremental.jobs {
+        Some(jobs) => crate::verification::flow::validate_machine_operations_with_jobs(
+            &output,
+            &verified_upstream,
+            jobs,
+        ),
+        None => crate::verification::flow::validate_machine_operations_incremental(
+            &output,
+            &verified_upstream,
+        ),
+    };
+    flow_result.map_err(|mut failure| {
         failure.source = failure
             .source
             .original(&output.expansion_sources)

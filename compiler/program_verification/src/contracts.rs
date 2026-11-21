@@ -132,14 +132,45 @@ pub fn inherit_incremental_with_limits(
     verified: &flow::VerifiedUpstream,
     limits: &mut Limits,
 ) -> Result<(), flow::Error> {
-    let filter = (!verified.implementations.is_empty()).then_some(verified);
+    let filter =
+        (!verified.implementations.is_empty()).then_some(IncrementalFilter::SkipAll(verified));
     inherit_inner(package, next, filter, limits)
+}
+
+/// Apply trait-contract inheritance to all implementations while skipping
+/// weakening proof obligations for already-verified upstream implementations.
+/// Use when upstream declarations were freshly lowered rather than deserialized
+/// post-inheritance.
+pub fn inherit_incremental_skip_proofs(
+    package: &mut Package,
+    next: &mut u32,
+    verified: &flow::VerifiedUpstream,
+) -> Result<(), flow::Error> {
+    inherit_incremental_skip_proofs_with_limits(package, next, verified, &mut Limits::default())
+}
+
+/// Budgeted version of [`inherit_incremental_skip_proofs`].
+pub fn inherit_incremental_skip_proofs_with_limits(
+    package: &mut Package,
+    next: &mut u32,
+    verified: &flow::VerifiedUpstream,
+    limits: &mut Limits,
+) -> Result<(), flow::Error> {
+    let filter =
+        (!verified.implementations.is_empty()).then_some(IncrementalFilter::SkipProofs(verified));
+    inherit_inner(package, next, filter, limits)
+}
+
+#[derive(Clone, Copy)]
+enum IncrementalFilter<'a> {
+    SkipAll(&'a flow::VerifiedUpstream),
+    SkipProofs(&'a flow::VerifiedUpstream),
 }
 
 fn inherit_inner(
     package: &mut Package,
     next: &mut u32,
-    verified: Option<&flow::VerifiedUpstream>,
+    verified: Option<IncrementalFilter<'_>>,
     limits: &mut Limits,
 ) -> Result<(), flow::Error> {
     let mut prepared_next = *next;
@@ -170,7 +201,7 @@ fn inherit_inner(
 fn prepare(
     package: &Package,
     next: &mut u32,
-    verified: Option<&flow::VerifiedUpstream>,
+    verified: Option<IncrementalFilter<'_>>,
     limits: &mut Limits,
 ) -> Result<
     (
@@ -240,9 +271,17 @@ fn prepare(
     let mut obligations = Vec::new();
     for implementation in &package.implementations {
         limits.step(1).map_err(|_| budget(source))?;
-        if verified.is_some_and(|v| v.implementations.contains(&implementation.declaration)) {
+        let skip_all = matches!(
+            verified,
+            Some(IncrementalFilter::SkipAll(v)) if v.implementations.contains(&implementation.declaration)
+        );
+        if skip_all {
             continue;
         }
+        let skip_proof = matches!(
+            verified,
+            Some(IncrementalFilter::SkipProofs(v)) if v.implementations.contains(&implementation.declaration)
+        );
         let Some(interface) = implementation.interface else {
             continue;
         };
@@ -383,7 +422,7 @@ fn prepare(
             if inherited_domain {
                 // An omitted program entry clause uses the interface domain.
                 actual.preconditions = copy_expressions(&contract.preconditions, limits)?;
-            } else {
+            } else if !skip_proof {
                 let mut obligation = copy_declaration(&actual, source, limits)?;
                 obligation.preconditions = copy_expressions(&contract.preconditions, limits)?;
                 obligation.postconditions = copy_expressions(&actual.preconditions, limits)?;

@@ -9,6 +9,7 @@ fn protocols(value: &Protocols) -> purity::Protocols {
         drop: value.drop,
     }
 }
+
 fn diagnostic(failure: purity::Error) -> Error {
     Error {
         source: failure.source,
@@ -20,6 +21,7 @@ fn diagnostic(failure: purity::Error) -> Error {
         incompatible_context: false,
     }
 }
+
 /// Open witnesses have their own declarations. A closed source and its
 /// residual share an identity, so check both worlds without duplicate IDs.
 /// The executable package is restored on success and on diagnostic return.
@@ -67,6 +69,16 @@ pub(super) fn validate_runtime_promises(
 ) -> Result<(), Error> {
     purity::validate_runtime_promises(package, &protocols(identities)).map_err(diagnostic)
 }
+
+pub(super) fn validate_runtime_promises_incremental(
+    package: &n::Package,
+    identities: &Protocols,
+    verified: &crate::verification::flow::VerifiedUpstream,
+) -> Result<(), Error> {
+    purity::validate_runtime_promises_incremental(package, &protocols(identities), verified)
+        .map_err(diagnostic)
+}
+
 pub(super) fn validate_defaults(
     package: &n::Package,
     obligations: &[StableObservation],

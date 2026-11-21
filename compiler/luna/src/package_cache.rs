@@ -13,6 +13,9 @@
 //!   atomic content-addressed `.flpkg` disk cache (`DiskPackageCache`).
 
 use crate::packages::SourcePackage;
+use lex::Symbol;
+use parse::ast::{Ast, NodeKind};
+use rustc_span::{BytePos, DUMMY_SP, Span};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::fmt;
 use std::fs::{self, File};
@@ -23,11 +26,19 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 const MAX_CODEC_BYTES: usize = 256 * 1024 * 1024;
 
+const MAX_CODEC_ELEMENTS: usize = MAX_CODEC_BYTES / 4;
+
 const DISK_MAGIC: [u8; 4] = *b"FLPK";
 
 const DISK_FORMAT_VERSION: u32 = 1;
 
 const KEY_DOMAIN_V1: &[u8] = b"flurry-pkg-snapshot-key-v1";
+
+const PARSED_PKG_KEY_DOMAIN_V1: &[u8] = b"flurry-parsed-pkg-v1";
+
+const PARSED_PKG_CODEC_VERSION: u32 = 1;
+
+const VERIFIED_UPSTREAM_CODEC_VERSION: u32 = 1;
 
 const WORKER_STACK_BYTES: usize = 8 * 1024 * 1024;
 
@@ -215,6 +226,7 @@ pub enum CodecError {
     InvalidUtf8,
     LengthLimitExceeded,
     InvalidTag(u8),
+    InvalidStructure(&'static str),
 }
 
 impl fmt::Display for CodecError {
@@ -226,6 +238,9 @@ impl fmt::Display for CodecError {
                 f.write_str("slice length exceeds maximum allowed snapshot bound")
             }
             Self::InvalidTag(tag) => write!(f, "invalid enum tag {tag} in package cache stream"),
+            Self::InvalidStructure(reason) => {
+                write!(f, "invalid package snapshot structure: {reason}")
+            }
         }
     }
 }
@@ -795,21 +810,191 @@ impl fmt::Display for PackageSnapshotKey {
 
 /// Return a deterministic SHA-256 fingerprint for the currently running compiler
 /// binary (falling back to build metadata only if the executable cannot be read).
+fn read_elf_gnu_build_id(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Seek;
+
+    const PT_NOTE: u32 = 4;
+    const NT_GNU_BUILD_ID: u32 = 3;
+    const MAX_PHDR_BYTES: usize = 64 * 1024;
+    const MAX_NOTE_BYTES: usize = 64 * 1024;
+
+    let mut file = File::open(path).ok()?;
+    let mut ehdr = [0u8; 64];
+    file.read_exact(&mut ehdr).ok()?;
+    if &ehdr[0..4] != b"\x7fELF" {
+        return None;
+    }
+    let ei_class = ehdr[4];
+    let little_endian = match ehdr[5] {
+        1 => true,
+        2 => false,
+        _ => return None,
+    };
+    let read_u16 = |b: &[u8]| -> u16 {
+        let arr: [u8; 2] = b[..2].try_into().unwrap();
+        if little_endian {
+            u16::from_le_bytes(arr)
+        } else {
+            u16::from_be_bytes(arr)
+        }
+    };
+    let read_u32 = |b: &[u8]| -> u32 {
+        let arr: [u8; 4] = b[..4].try_into().unwrap();
+        if little_endian {
+            u32::from_le_bytes(arr)
+        } else {
+            u32::from_be_bytes(arr)
+        }
+    };
+    let read_u64 = |b: &[u8]| -> u64 {
+        let arr: [u8; 8] = b[..8].try_into().unwrap();
+        if little_endian {
+            u64::from_le_bytes(arr)
+        } else {
+            u64::from_be_bytes(arr)
+        }
+    };
+
+    let (e_phoff, e_phentsize, e_phnum) = match ei_class {
+        1 => {
+            let phoff = u64::from(read_u32(&ehdr[28..32]));
+            let phentsize = usize::from(read_u16(&ehdr[42..44]));
+            let phnum = usize::from(read_u16(&ehdr[44..46]));
+            if phentsize < 32 {
+                return None;
+            }
+            (phoff, phentsize, phnum)
+        }
+        2 => {
+            let phoff = read_u64(&ehdr[32..40]);
+            let phentsize = usize::from(read_u16(&ehdr[54..56]));
+            let phnum = usize::from(read_u16(&ehdr[56..58]));
+            if phentsize < 56 {
+                return None;
+            }
+            (phoff, phentsize, phnum)
+        }
+        _ => return None,
+    };
+
+    if e_phnum == 0 || e_phnum > 512 {
+        return None;
+    }
+    let total_ph_bytes = e_phentsize.checked_mul(e_phnum)?;
+    if total_ph_bytes > MAX_PHDR_BYTES {
+        return None;
+    }
+    file.seek(std::io::SeekFrom::Start(e_phoff)).ok()?;
+    let mut ph_buf = vec![0u8; total_ph_bytes];
+    file.read_exact(&mut ph_buf).ok()?;
+
+    for i in 0..e_phnum {
+        let ph = &ph_buf[i * e_phentsize..(i + 1) * e_phentsize];
+        if read_u32(&ph[0..4]) != PT_NOTE {
+            continue;
+        }
+        let (p_offset, p_filesz, p_align) = if ei_class == 1 {
+            (
+                u64::from(read_u32(&ph[4..8])),
+                u64::from(read_u32(&ph[16..20])),
+                u64::from(read_u32(&ph[28..32])),
+            )
+        } else {
+            (
+                read_u64(&ph[8..16]),
+                read_u64(&ph[32..40]),
+                read_u64(&ph[48..56]),
+            )
+        };
+        if p_filesz == 0 || p_filesz > MAX_NOTE_BYTES as u64 {
+            continue;
+        }
+        if file.seek(std::io::SeekFrom::Start(p_offset)).is_err() {
+            continue;
+        }
+        let mut note_buf = vec![0u8; p_filesz as usize];
+        if file.read_exact(&mut note_buf).is_err() {
+            continue;
+        }
+        let align = if ei_class == 2 && p_align == 8 { 8 } else { 4 };
+        let align_up = |n: usize| n.checked_add(align - 1).map(|v| (v / align) * align);
+        let mut off = 0usize;
+        while off
+            .checked_add(12)
+            .is_some_and(|hdr_end| hdr_end <= note_buf.len())
+        {
+            let namesz = read_u32(&note_buf[off..off + 4]) as usize;
+            let descsz = read_u32(&note_buf[off + 4..off + 8]) as usize;
+            let ntype = read_u32(&note_buf[off + 8..off + 12]);
+            let name_start = off + 12;
+            let Some(name_end) = name_start.checked_add(namesz) else {
+                break;
+            };
+            let Some(desc_start) = align_up(name_end) else {
+                break;
+            };
+            let Some(desc_end) = desc_start.checked_add(descsz) else {
+                break;
+            };
+            if desc_end > note_buf.len() {
+                break;
+            }
+            if ntype == NT_GNU_BUILD_ID
+                && (1..=64).contains(&descsz)
+                && &note_buf[name_start..name_end] == b"GNU\0"
+            {
+                return Some(note_buf[desc_start..desc_end].to_vec());
+            }
+            let Some(next_off) = align_up(desc_end) else {
+                break;
+            };
+            off = next_off;
+        }
+    }
+    None
+}
+
 pub fn compiler_fingerprint() -> [u8; 32] {
     static FINGERPRINT: OnceLock<[u8; 32]> = OnceLock::new();
     *FINGERPRINT.get_or_init(|| {
         if let Ok(exe) = std::env::current_exe() {
-            if let Ok(mut file) = File::open(&exe) {
+            if let Some(build_id) = read_elf_gnu_build_id(&exe) {
                 let mut hasher = Sha256::new();
-                hasher.update_str("flurry-compiler-binary-v1");
-                let mut buf = [0u8; 64 * 1024];
-                loop {
-                    match file.read(&mut buf) {
-                        Ok(0) => return hasher.finalize(),
-                        Ok(n) => hasher.update(&buf[..n]),
-                        Err(_) => break,
+                hasher.update_str("flurry-compiler-elf-build-id-v1");
+                hasher.update(&build_id);
+                hasher.update_str(env!("CARGO_PKG_VERSION"));
+                hasher.update_str(std::env::consts::ARCH);
+                hasher.update_str(std::env::consts::OS);
+                return hasher.finalize();
+            }
+            if let Ok(meta) = fs::metadata(&exe) {
+                let mut hasher = Sha256::new();
+                hasher.update_str("flurry-compiler-stat-v1");
+                hasher.update_u64(meta.len());
+                match meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                {
+                    Some(dur) => {
+                        hasher.update_bool(true);
+                        hasher.update_u64(dur.as_secs());
+                        hasher.update_u32(dur.subsec_nanos());
                     }
+                    None => hasher.update_bool(false),
                 }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    hasher.update_u64(meta.dev());
+                    hasher.update_u64(meta.ino());
+                    hasher.update_u64(meta.ctime() as u64);
+                    hasher.update_u64(meta.ctime_nsec() as u64);
+                }
+                hasher.update_str(env!("CARGO_PKG_VERSION"));
+                hasher.update_str(std::env::consts::ARCH);
+                hasher.update_str(std::env::consts::OS);
+                return hasher.finalize();
             }
         }
         let mut fallback = Sha256::new();
@@ -936,6 +1121,30 @@ fn hash_single_package_sources(
             fs::read(&full).map_err(|e| format!("cannot read source '{}': {e}", full.display()))?;
         hasher.update_str(&rel.to_string_lossy());
         hasher.update_len_prefixed(&bytes);
+    }
+
+    if let Some(scripts_dir) = crate::macro_host::find_package_scripts_dir(&package.entry) {
+        hasher.update_bool(true);
+        let (mut script_files, mut script_dirs) =
+            crate::frontend::discover_sources_excluding(&scripts_dir, &[])?;
+        script_dirs.sort();
+        script_dirs.dedup();
+        script_files.sort();
+        script_files.dedup();
+        hasher.update_u64(script_dirs.len() as u64);
+        for dir in &script_dirs {
+            hasher.update_str(&dir.to_string_lossy());
+        }
+        hasher.update_u64(script_files.len() as u64);
+        for rel in &script_files {
+            let full = scripts_dir.join(rel);
+            let bytes = fs::read(&full)
+                .map_err(|e| format!("cannot read macro script '{}': {e}", full.display()))?;
+            hasher.update_str(&rel.to_string_lossy());
+            hasher.update_len_prefixed(&bytes);
+        }
+    } else {
+        hasher.update_bool(false);
     }
 
     let root = fs::canonicalize(&directory).unwrap_or(directory);
@@ -1245,11 +1454,54 @@ fn hash_scoped_protocols(
 // Two-Tier Storage: DiskPackageCache (.flpkg) & MemoryPackageCache<T>
 // ---------------------------------------------------------------------------
 
+/// Driver-level configuration for package snapshot caching and parallel workers.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct IncrementalConfig {
+    pub cache_dir: Option<PathBuf>,
+    pub no_cache: bool,
+    pub jobs: Option<usize>,
+}
+
+impl IncrementalConfig {
+    pub fn cache_enabled(&self) -> bool {
+        if self.no_cache {
+            return false;
+        }
+        if let Ok(raw) = std::env::var("LUNA_NO_CACHE") {
+            let trimmed = raw.trim();
+            if trimmed == "1"
+                || trimmed.eq_ignore_ascii_case("true")
+                || trimmed.eq_ignore_ascii_case("yes")
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn effective_jobs(&self) -> usize {
+        resolve_jobs(self.jobs)
+    }
+
+    pub fn disk_cache(&self) -> DiskPackageCache {
+        if !self.cache_enabled() {
+            return DiskPackageCache::disabled();
+        }
+        DiskPackageCache::new(
+            self.cache_dir
+                .clone()
+                .unwrap_or_else(DiskPackageCache::default_location),
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u32)]
 pub enum ArtifactKind {
     ResolvedBase = 1,
     ElaboratedBase = 2,
+    ParsedPackage = 3,
+    VerifiedUpstream = 4,
 }
 
 impl ArtifactKind {
@@ -1257,6 +1509,8 @@ impl ArtifactKind {
         match raw {
             1 => Some(Self::ResolvedBase),
             2 => Some(Self::ElaboratedBase),
+            3 => Some(Self::ParsedPackage),
+            4 => Some(Self::VerifiedUpstream),
             _ => None,
         }
     }
@@ -1507,5 +1761,466 @@ impl<T> MemoryPackageCache<T> {
 
     pub fn stats(&self) -> CacheStats {
         self.inner.lock().expect("memory cache lock poisoned").stats
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Portable ParsedPackage & VerifiedUpstream Snapshot Codecs + Global Caches
+// ---------------------------------------------------------------------------
+
+/// Compute a deterministic key for a package's parsed AST snapshot.
+pub fn compute_parsed_package_key(
+    package_name: &str,
+    files: &[(PathBuf, &[u8])],
+) -> PackageSnapshotKey {
+    let mut sorted: Vec<(&Path, &[u8])> = files.iter().map(|(p, b)| (p.as_path(), *b)).collect();
+    sorted.sort_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut hasher = Sha256::new();
+    hasher.update_str(std::str::from_utf8(PARSED_PKG_KEY_DOMAIN_V1).expect("ASCII domain tag"));
+    let compiler = compiler_fingerprint();
+    hasher.update(&compiler);
+    hasher.update_str(package_name);
+    hasher.update_u64(sorted.len() as u64);
+    for (rel, bytes) in sorted {
+        hasher.update_str(&rel.to_string_lossy());
+        hasher.update_len_prefixed(bytes);
+    }
+    PackageSnapshotKey(hasher.finalize())
+}
+
+/// Deterministic byte tag for protocol selectors so upstream verification caches
+/// invalidate when any source protocol or intrinsic selector changes.
+pub fn encode_selectors_tag(
+    selectors: &crate::protocols::type_constructors::Selectors<'_>,
+) -> Vec<u8> {
+    let crate::protocols::type_constructors::Selectors {
+        dispatch_fuel,
+        host_fma,
+        host_sqrt,
+        host_copysign,
+        comptime_intrinsics,
+        host_intrinsics,
+        copy,
+        drop,
+        index,
+        iterator,
+        into_iterator,
+        ordering,
+        equality,
+        list_pattern,
+        comptime_list_pattern,
+        literal_into,
+        arithmetic,
+        splice,
+        meta_list,
+        tuple,
+    } = selectors;
+
+    let mut writer = BinaryWriter::new();
+    let write_opt_str = |w: &mut BinaryWriter, value: Option<&str>| match value {
+        Some(s) => {
+            w.write_bool(true);
+            w.write_str(s);
+        }
+        None => w.write_bool(false),
+    };
+    let write_intrinsics =
+        |w: &mut BinaryWriter, items: &[(nir::intrinsics::Operation, String)]| {
+            let mut entries: Vec<(&str, &str)> = items
+                .iter()
+                .map(|(op, sel)| (op.name(), sel.as_str()))
+                .collect();
+            entries.sort();
+            w.write_u64(entries.len() as u64);
+            for (op, sel) in entries {
+                w.write_str(op);
+                w.write_str(sel);
+            }
+        };
+
+    match dispatch_fuel {
+        Some(fuel) => {
+            writer.write_bool(true);
+            writer.write_u64(*fuel as u64);
+        }
+        None => writer.write_bool(false),
+    }
+    write_opt_str(&mut writer, *host_fma);
+    write_opt_str(&mut writer, *host_sqrt);
+    write_opt_str(&mut writer, *host_copysign);
+    write_intrinsics(&mut writer, comptime_intrinsics);
+    write_intrinsics(&mut writer, host_intrinsics);
+    for opt in [
+        *copy,
+        *drop,
+        *index,
+        *iterator,
+        *into_iterator,
+        *ordering,
+        *equality,
+        *list_pattern,
+        *comptime_list_pattern,
+        *literal_into,
+        *splice,
+        *meta_list,
+        *tuple,
+    ] {
+        write_opt_str(&mut writer, opt);
+    }
+    for opt in arithmetic {
+        write_opt_str(&mut writer, *opt);
+    }
+    writer.into_vec()
+}
+
+#[derive(Clone, Debug)]
+pub struct CachedParsedFile {
+    pub rel_path: String,
+    pub content_hash: [u8; 32],
+    pub ast: Option<Ast>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CachedParsedPackage {
+    pub files: Vec<CachedParsedFile>,
+}
+
+fn bounded_count(
+    reader: &mut BinaryReader<'_>,
+    min_item_bytes: usize,
+) -> Result<usize, CodecError> {
+    let raw = reader.read_u64()?;
+    let count = usize::try_from(raw).map_err(|_| CodecError::LengthLimitExceeded)?;
+    if count > MAX_CODEC_ELEMENTS {
+        return Err(CodecError::LengthLimitExceeded);
+    }
+    if min_item_bytes > 0 {
+        let needed = count
+            .checked_mul(min_item_bytes)
+            .ok_or(CodecError::LengthLimitExceeded)?;
+        if needed > reader.remaining() {
+            return Err(CodecError::UnexpectedEof);
+        }
+    }
+    Ok(count)
+}
+
+fn encode_ast(writer: &mut BinaryWriter, ast: &Ast) -> Result<(), CodecError> {
+    ast.validate_structure()
+        .map_err(|_| CodecError::InvalidStructure("invalid AST layout before encoding"))?;
+    if ast.nodes.is_empty()
+        || ast.nodes.len() != ast.spans.len()
+        || ast.nodes.len() != ast.children_start.len()
+        || ast.nodes.len() != ast.children_len.len()
+    {
+        return Err(CodecError::InvalidStructure(
+            "mismatched AST parallel vector lengths",
+        ));
+    }
+
+    let mut children = ast.children.clone();
+    let mut strings: Vec<String> = Vec::new();
+    let mut string_ids: HashMap<Symbol, u32> = HashMap::new();
+
+    for (idx, &kind) in ast.nodes.iter().enumerate().skip(1) {
+        if kind == NodeKind::Id {
+            let start = ast.children_start[idx] as usize;
+            let len = ast.children_len[idx] as usize;
+            if len != 2 || start.checked_add(1).is_none_or(|end| end >= children.len()) {
+                return Err(CodecError::InvalidStructure(
+                    "invalid NodeKind::Id storage slots",
+                ));
+            }
+            let hi = children[start];
+            let lo = children[start + 1];
+            // SAFETY: Validated AST `NodeKind::Id` nodes produced by Parser (or
+            // decoded in this process) store `(hi, lo)` from `Symbol::to_raw_parts`.
+            let sym = unsafe { Symbol::from_raw_parts(hi, lo) };
+            let table_idx = match string_ids.get(&sym) {
+                Some(&existing) => existing,
+                None => {
+                    let next = u32::try_from(strings.len())
+                        .map_err(|_| CodecError::LengthLimitExceeded)?;
+                    strings.push(sym.as_str().to_owned());
+                    string_ids.insert(sym, next);
+                    next
+                }
+            };
+            children[start] = table_idx;
+            children[start + 1] = 0;
+        }
+    }
+
+    writer.write_u64(strings.len() as u64);
+    for text in &strings {
+        writer.write_str(text);
+    }
+
+    writer.write_u32(ast.root);
+    writer.write_u64(ast.nodes.len() as u64);
+    let base = ast.file_byte_pos.0;
+    for i in 0..ast.nodes.len() {
+        writer.write_u32(ast.nodes[i] as u32);
+        let span = ast.spans[i];
+        if i == 0 || span == DUMMY_SP {
+            writer.write_bool(true);
+        } else {
+            let rel_lo = span
+                .lo()
+                .0
+                .checked_sub(base)
+                .ok_or(CodecError::InvalidStructure("span lo precedes file start"))?;
+            let rel_hi = span
+                .hi()
+                .0
+                .checked_sub(base)
+                .ok_or(CodecError::InvalidStructure("span hi precedes file start"))?;
+            writer.write_bool(false);
+            writer.write_u32(rel_lo);
+            writer.write_u32(rel_hi);
+        }
+        writer.write_u32(ast.children_start[i]);
+        writer.write_u32(ast.children_len[i]);
+    }
+
+    writer.write_u64(children.len() as u64);
+    for word in children {
+        writer.write_u32(word);
+    }
+    Ok(())
+}
+
+fn decode_ast(reader: &mut BinaryReader<'_>) -> Result<Ast, CodecError> {
+    let string_count = bounded_count(reader, 8)?;
+    let mut interned_parts = Vec::with_capacity(string_count);
+    for _ in 0..string_count {
+        let sym = Symbol::intern(reader.read_str()?);
+        interned_parts.push(sym.to_raw_parts());
+    }
+
+    let root = reader.read_u32()?;
+    // Minimum per node: u32 kind (4) + bool is_dummy (1) + u32 start (4) + u32 len (4) = 13 bytes.
+    let node_count = bounded_count(reader, 13)?;
+    if node_count == 0 {
+        return Err(CodecError::InvalidStructure("missing AST sentinel node 0"));
+    }
+
+    let mut nodes = Vec::with_capacity(node_count);
+    let mut spans = Vec::with_capacity(node_count);
+    let mut children_start = Vec::with_capacity(node_count);
+    let mut children_len = Vec::with_capacity(node_count);
+    for idx in 0..node_count {
+        let kind_raw = reader.read_u32()?;
+        let kind = NodeKind::from_u32(kind_raw).ok_or(CodecError::InvalidStructure(
+            "unknown AST NodeKind discriminant",
+        ))?;
+        if idx == 0 && kind != NodeKind::Invalid {
+            return Err(CodecError::InvalidStructure(
+                "AST sentinel node 0 must be Invalid",
+            ));
+        }
+        let is_dummy = reader.read_bool()?;
+        let span = if is_dummy {
+            DUMMY_SP
+        } else {
+            let rel_lo = reader.read_u32()?;
+            let rel_hi = reader.read_u32()?;
+            if rel_lo > rel_hi {
+                return Err(CodecError::InvalidStructure("inverted AST span bounds"));
+            }
+            let lo = rel_lo.checked_add(1).ok_or(CodecError::InvalidStructure(
+                "AST span lo overflows BytePos(1) base",
+            ))?;
+            let hi = rel_hi.checked_add(1).ok_or(CodecError::InvalidStructure(
+                "AST span hi overflows BytePos(1) base",
+            ))?;
+            Span::new(BytePos(lo), BytePos(hi))
+        };
+        let start = reader.read_u32()?;
+        let len = reader.read_u32()?;
+        nodes.push(kind);
+        spans.push(span);
+        children_start.push(start);
+        children_len.push(len);
+    }
+
+    let children_count = bounded_count(reader, 4)?;
+    if children_count == 0 {
+        return Err(CodecError::InvalidStructure(
+            "missing AST children sentinel 0",
+        ));
+    }
+    let mut children = Vec::with_capacity(children_count);
+    for _ in 0..children_count {
+        children.push(reader.read_u32()?);
+    }
+
+    for (idx, &kind) in nodes.iter().enumerate().skip(1) {
+        if kind == NodeKind::Id {
+            let start = children_start[idx] as usize;
+            let len = children_len[idx] as usize;
+            if len != 2 || start.checked_add(1).is_none_or(|end| end >= children.len()) {
+                return Err(CodecError::InvalidStructure(
+                    "invalid decoded NodeKind::Id storage slots",
+                ));
+            }
+            let sym_idx = children[start] as usize;
+            if children[start + 1] != 0 {
+                return Err(CodecError::InvalidStructure(
+                    "corrupt NodeKind::Id symbol sentinel",
+                ));
+            }
+            let &(hi, lo) = interned_parts
+                .get(sym_idx)
+                .ok_or(CodecError::InvalidStructure(
+                    "AST NodeKind::Id string table index out of bounds",
+                ))?;
+            children[start] = hi;
+            children[start + 1] = lo;
+        }
+    }
+
+    let ast = Ast {
+        nodes,
+        spans,
+        children_start,
+        children_len,
+        children,
+        root,
+        file_byte_pos: BytePos(1),
+    };
+    if root != 0 && ast.get_node_kind(root).is_none() {
+        return Err(CodecError::InvalidStructure("AST root out of bounds"));
+    }
+    ast.validate_structure()
+        .map_err(|_| CodecError::InvalidStructure("AST failed structural validation"))?;
+    Ok(ast)
+}
+
+pub fn encode_parsed_package(pkg: &CachedParsedPackage) -> Result<Vec<u8>, CodecError> {
+    let mut writer = BinaryWriter::new();
+    writer.write_u32(PARSED_PKG_CODEC_VERSION);
+    writer.write_u64(pkg.files.len() as u64);
+    for file in &pkg.files {
+        writer.write_str(&file.rel_path);
+        writer.write_array32(&file.content_hash);
+        match &file.ast {
+            Some(ast) => {
+                writer.write_bool(true);
+                encode_ast(&mut writer, ast)?;
+            }
+            None => writer.write_bool(false),
+        }
+        if writer.as_slice().len() > MAX_CODEC_BYTES {
+            return Err(CodecError::LengthLimitExceeded);
+        }
+    }
+    Ok(writer.into_vec())
+}
+
+pub fn decode_parsed_package(data: &[u8]) -> Result<CachedParsedPackage, CodecError> {
+    if data.len() > MAX_CODEC_BYTES {
+        return Err(CodecError::LengthLimitExceeded);
+    }
+    let mut reader = BinaryReader::new(data);
+    let version = reader.read_u32()?;
+    if version != PARSED_PKG_CODEC_VERSION {
+        return Err(CodecError::InvalidStructure(
+            "unsupported parsed package codec version",
+        ));
+    }
+    // Minimum per file: 8-byte path len + 32-byte hash + 1-byte has_ast flag = 41 bytes.
+    let file_count = bounded_count(&mut reader, 41)?;
+    let mut files = Vec::with_capacity(file_count);
+    for _ in 0..file_count {
+        let rel_path = reader.read_str()?.to_owned();
+        let content_hash = reader.read_array32()?;
+        let has_ast = reader.read_bool()?;
+        let ast = if has_ast {
+            Some(decode_ast(&mut reader)?)
+        } else {
+            None
+        };
+        files.push(CachedParsedFile {
+            rel_path,
+            content_hash,
+            ast,
+        });
+    }
+    if reader.remaining() != 0 {
+        return Err(CodecError::InvalidStructure(
+            "trailing bytes in parsed package snapshot",
+        ));
+    }
+    Ok(CachedParsedPackage { files })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedUpstreamCertificate {
+    pub upstream_identities: Vec<u64>,
+}
+
+pub fn encode_verified_upstream(cert: &VerifiedUpstreamCertificate) -> Vec<u8> {
+    let mut writer = BinaryWriter::new();
+    writer.write_u32(VERIFIED_UPSTREAM_CODEC_VERSION);
+    writer.write_u64(cert.upstream_identities.len() as u64);
+    for &id in &cert.upstream_identities {
+        writer.write_u64(id);
+    }
+    writer.into_vec()
+}
+
+pub fn decode_verified_upstream(data: &[u8]) -> Result<VerifiedUpstreamCertificate, CodecError> {
+    let mut reader = BinaryReader::new(data);
+    let version = reader.read_u32()?;
+    if version != VERIFIED_UPSTREAM_CODEC_VERSION {
+        return Err(CodecError::InvalidStructure(
+            "unsupported verified upstream certificate version",
+        ));
+    }
+    let count = bounded_count(&mut reader, 8)?;
+    let mut upstream_identities = Vec::with_capacity(count);
+    for _ in 0..count {
+        upstream_identities.push(reader.read_u64()?);
+    }
+    if reader.remaining() != 0 {
+        return Err(CodecError::InvalidStructure(
+            "trailing bytes in verified upstream certificate",
+        ));
+    }
+    Ok(VerifiedUpstreamCertificate {
+        upstream_identities,
+    })
+}
+
+pub fn global_parsed_cache() -> &'static MemoryPackageCache<CachedParsedPackage> {
+    static CACHE: OnceLock<MemoryPackageCache<CachedParsedPackage>> = OnceLock::new();
+    CACHE.get_or_init(|| MemoryPackageCache::new(256))
+}
+
+pub fn global_verified_cache() -> &'static MemoryPackageCache<VerifiedUpstreamCertificate> {
+    static CACHE: OnceLock<MemoryPackageCache<VerifiedUpstreamCertificate>> = OnceLock::new();
+    CACHE.get_or_init(|| MemoryPackageCache::new(64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compiler_fingerprint_is_deterministic_and_non_zero() {
+        let first = compiler_fingerprint();
+        let second = compiler_fingerprint();
+        assert_eq!(first, second);
+        assert_ne!(first, [0u8; 32]);
+
+        #[cfg(target_os = "linux")]
+        {
+            let exe = std::env::current_exe().unwrap();
+            let build_id = read_elf_gnu_build_id(&exe)
+                .expect("Linux test binary should expose NT_GNU_BUILD_ID");
+            assert!(!build_id.is_empty());
+        }
     }
 }

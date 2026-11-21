@@ -413,3 +413,80 @@ fn incremental_inheritance_skips_verified_upstream_while_checking_downstream() {
     let error = inherit_incremental(&mut candidate, &mut next, &verified).unwrap_err();
     assert!(error.to_string().contains("strengthens"), "{error}");
 }
+
+#[test]
+fn inherit_incremental_skip_proofs_installs_drafts_without_reproving_upstream() {
+    let mut candidate = package();
+    // Upstream impl id(4) has a stronger explicit precondition on method_3 (id(13))
+    // than the trait, which would fail proof if re-checked; `inherit_incremental_skip_proofs`
+    // still copies inherited `pure` and postconditions onto its freshly lowered interface
+    // while skipping the upstream weakening proof.
+    candidate.implementations[0].declaration = nir::DeclarationId {
+        package: 1,
+        local: 4,
+    };
+    candidate.traits[0].methods[1].pure = true;
+
+    let downstream_fn_id = nir::DeclarationId {
+        package: 2,
+        local: 30,
+    };
+    let mut downstream_fn = candidate.functions[1].clone();
+    downstream_fn.interface.declaration = downstream_fn_id;
+    downstream_fn.interface.name = "downstream_method_3".into();
+    downstream_fn.interface.preconditions = vec![];
+    downstream_fn.interface.postconditions = vec![];
+    candidate.functions.push(downstream_fn);
+
+    candidate.functions[1].preconditions = vec![boolean(false)];
+    candidate.functions[1].interface.pure = false;
+    candidate.functions[1].postconditions = vec![];
+
+    candidate.implementations.push(Implementation {
+        declaration: nir::DeclarationId {
+            package: 2,
+            local: 20,
+        },
+        methods: vec![
+            ("method_2".into(), id(12)),
+            ("method_3".into(), downstream_fn_id),
+        ],
+        ..candidate.implementations[0].clone()
+    });
+
+    let mut verified = flow::VerifiedUpstream::default();
+    verified
+        .implementations
+        .insert(candidate.implementations[0].declaration);
+
+    let mut next = 100;
+    inherit_incremental_skip_proofs(&mut candidate, &mut next, &verified).unwrap();
+    let up = candidate
+        .functions
+        .iter()
+        .find(|f| f.declaration == id(13))
+        .unwrap();
+    assert!(up.interface.pure, "upstream method must still inherit pure");
+    assert_eq!(
+        up.postconditions.len(),
+        1,
+        "upstream method must still receive guarded trait postcondition"
+    );
+    let down = candidate
+        .functions
+        .iter()
+        .find(|f| f.declaration == downstream_fn_id)
+        .unwrap();
+    assert_eq!(down.preconditions.len(), 1);
+    assert_eq!(down.postconditions.len(), 1);
+
+    // Strengthening trait precondition in downstream impl id(20) must still be rejected.
+    candidate
+        .functions
+        .iter_mut()
+        .find(|f| f.declaration == downstream_fn_id)
+        .unwrap()
+        .preconditions = vec![boolean(false)];
+    let error = inherit_incremental_skip_proofs(&mut candidate, &mut next, &verified).unwrap_err();
+    assert!(error.to_string().contains("strengthens"), "{error}");
+}

@@ -475,6 +475,7 @@ pub(crate) struct SysrootBindings {
     meta_list: Option<String>,
     tuple: Option<String>,
 }
+
 impl SysrootBindings {
     pub(crate) fn load(root: &std::path::Path) -> Result<Self, String> {
         use std::io::Read;
@@ -498,6 +499,7 @@ impl SysrootBindings {
         }
         Self::parse(&text).map_err(|error| format!("{}: {error}", path.display()))
     }
+
     fn parse(text: &str) -> Result<Self, String> {
         let mut result = Self::default();
         let mut version = false;
@@ -595,6 +597,7 @@ impl SysrootBindings {
         }
         Ok(result)
     }
+
     /// Merge defaults by operation, retaining explicit selectors verbatim so
     /// duplicate/conflicting user bindings still reach normal validation.
     pub(crate) fn merged_host_intrinsics(
@@ -623,6 +626,7 @@ impl SysrootBindings {
         }
         merged
     }
+
     pub(crate) fn merged_comptime_intrinsics(
         &self,
         explicit: Selectors<'_>,
@@ -644,6 +648,7 @@ impl SysrootBindings {
         }
         merged
     }
+
     pub(crate) fn apply<'a>(
         &'a self,
         explicit: Selectors<'a>,
@@ -762,6 +767,7 @@ impl SysrootBindings {
 #[cfg(test)]
 mod literal_binding_tests {
     use super::*;
+
     #[test]
     fn list_pattern_binding_configuration_preserves_driver_authority() {
         let config =
@@ -794,6 +800,7 @@ mod literal_binding_tests {
         );
         assert!(SysrootBindings::parse("version = 1\nlist-pattern-protocol = input.One\nlist-pattern-protocol = input.Two\n").is_err());
     }
+
     #[test]
     fn comptime_list_pattern_binding_configuration_preserves_driver_authority() {
         let config =
@@ -830,6 +837,7 @@ mod literal_binding_tests {
         );
         assert!(SysrootBindings::parse("version = 1\ncomptime-list-pattern-protocol = input.One\ncomptime-list-pattern-protocol = input.Two\n").is_err());
     }
+
     #[test]
     fn iterator_binding_configuration_preserves_driver_authority() {
         let config =
@@ -863,6 +871,7 @@ mod literal_binding_tests {
             .is_err()
         );
     }
+
     #[test]
     fn literal_binding_configuration_preserves_explicit_authority() {
         let config =
@@ -1077,6 +1086,7 @@ mod stage_tests {
             splice_protocol: None,
             meta_list_type: None,
             tuple_type: None,
+            incremental: Default::default(),
         };
         for selector in selectors {
             // Validate before filesystem access, including selectors supplied

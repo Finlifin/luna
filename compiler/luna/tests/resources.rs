@@ -1,13 +1,16 @@
 //! Source resource analysis: moves, captures, control flow and call preparation.
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
+
 #[path = "support/execution.rs"]
 mod tuple_support;
+
 use luna::{
     cli::{Emit, Options},
     frontend::{self, Artifact},
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
@@ -1442,9 +1445,11 @@ fn aggregate_defaults_keep_prepared_parameter_pointer_origins() {
 fn compile(source: &str) -> nir::program::Package {
     compile_in(source, 0)
 }
+
 fn compile_in(source: &str, identity: u64) -> nir::program::Package {
     compile_in_with_resources(source, identity, None, None)
 }
+
 fn compile_in_with_resources(
     source: &str,
     identity: u64,
@@ -1479,6 +1484,7 @@ fn compile_in_with_resources(
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             tuple_type: None,
+            incremental: Default::default(),
         },
         identity,
         &Default::default(),
@@ -1495,6 +1501,7 @@ fn compile_in_with_resources(
     };
     package
 }
+
 #[test]
 fn source_moves_follow_delivery_order_and_branch_availability() {
     use elaboration::verification::moves::{Delivery, analyze};
@@ -15569,6 +15576,7 @@ fn immediate_borrowed_results_retain_pointer_storage_and_reject_unknown_code() {
         );
     }
 }
+
 #[test]
 fn prepared_code_absence_requires_a_variant_guarded_callable_leaf() {
     use elaboration::verification::memory::{self, CallableInput, CodeResult};

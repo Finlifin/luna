@@ -7,6 +7,7 @@ use luna::cli::{Emit, Options};
 use luna::frontend::{self, Artifact};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
@@ -130,7 +131,9 @@ fn nested_type_visibility_is_checked_at_each_projection() {
         );
     }
 }
+
 struct Project(PathBuf, bool);
+
 impl Project {
     fn new(files: &[(&str, &str)]) -> Self {
         let root = std::env::temp_dir().join(format!(
@@ -146,6 +149,7 @@ impl Project {
         }
         Self(root, false)
     }
+
     fn with_tuple(files: &[(&str, &str)]) -> Self {
         let mut project = Self::new(files);
         let main = project.0.join("main.fl");
@@ -162,6 +166,7 @@ impl Project {
         project.1 = true;
         project
     }
+
     fn compile(&self) -> Result<nir::program::Package, String> {
         match frontend::compile(&Options {
             dispatch_fuel: None,
@@ -184,11 +189,13 @@ impl Project {
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             tuple_type: self.1.then(|| "input.Tuple".into()),
+            incremental: Default::default(),
         })? {
             Artifact::Nir(package) => Ok(package),
             _ => panic!("expected NIR"),
         }
     }
+
     fn run(&self) -> Value {
         let package = self.compile().unwrap();
         let entry = package
@@ -203,6 +210,7 @@ impl Project {
             .unwrap()
     }
 }
+
 impl Drop for Project {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
@@ -412,6 +420,7 @@ fn output_cannot_overwrite_an_automatically_discovered_source() {
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,
+        incremental: Default::default(),
     });
     assert!(result.err().unwrap().contains("discovered source"));
     assert_eq!(
@@ -696,6 +705,7 @@ fn grouped_imports_preserve_shared_prefixes_nested_paths_and_aliases() {
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,
+        incremental: Default::default(),
     })
     .unwrap()
     .to_string();

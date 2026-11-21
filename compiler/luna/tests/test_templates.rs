@@ -3,9 +3,12 @@ use luna::{
     frontend::{self, Artifact},
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
 #[path = "support/execution.rs"]
 mod execution_support;
+
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
 
@@ -631,6 +634,7 @@ fn compile_with_constructors(
         into_iterator_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
+        incremental: Default::default(),
     });
     std::fs::remove_dir_all(directory).unwrap();
     result

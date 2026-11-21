@@ -156,4 +156,7 @@ query(key):
 #### 当前实现分层状态
 
 - **已落地（Layer 1 & Layer 2）**：`program_verification` 增量上游跳过门禁与多核确定性并行 `flow` 验证；`luna::package_cache` 的 SHA-256 指纹引擎、并行目录/文件哈希、闭上游分区与 Tarjan SCC 并行波次调度器、两级 `.flpkg` / 内存快照缓存引擎。
-- **待协同接入（Layer 3）**：将 `resolve::extend_package_set`、`elaboration::program::ElaboratedBase`、`.flpkg` `NirBase` 序列化与 `luna` 前端的真实 sysroot 快照加载/保存端到端接通（需待涉及 `resolve/module_builder.rs`、`elaboration/program.rs`、`luna/{frontend,packages}.rs` 的在途改动合入后统一接入）。
+- **已落地（Layer 3A：源码加载/解析并行化 + `ParsedPackage` AST / `VerifiedUpstream` 跨进程增量缓存）**：
+  - `ast` 支持 `NodeKind::from_u32` 与 `Ast::rebase`，`package_cache` 提供带长度/结构/checksum 校验的 `ParsedPackage`（`.flpkg`，带字符串表重驻留与基于 `BytePos(1)` 的相对 span）及 `VerifiedUpstream` 跨进程证书编码。
+  - `luna` 驱动接入 `--cache-dir <path>`、`--no-cache`（及 `LUNA_NO_CACHE`）、`-j/--jobs <count>`（及 `LUNA_JOBS`），实现全包源码发现/读取并行化、无宏上游包两级 AST 快照复用、非宏文件多线程解析，以及 `contracts::inherit_incremental_skip_proofs` / `purity::validate_runtime_promises_incremental` / `flow::validate_machine_operations_with_jobs` 增量验证接线（已核验上游包跳过重证但完整保留继承契约、下游及动态生成定义仍全量检查）。
+- **待协同推进（Layer 3B：完整已分析上游快照复用）**：在 `resolve/module_builder.rs` 等在途工作稳定后，接通 `resolve::extend_package_set`、`elaboration::program::ElaboratedBase` 与 `.flpkg` `NirBase` 序列化，进一步消除下游改动时对未改动上游 sysroot 的 `resolve` / `ast_lowering` / `elaboration` 重复执行。

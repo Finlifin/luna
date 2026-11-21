@@ -689,6 +689,21 @@ fn package_preparation_fuel(package: &n::Package) -> usize {
 }
 
 pub fn validate_runtime_promises(package: &n::Package, protocols: &Protocols) -> Result<(), Error> {
+    validate_runtime_promises_incremental(
+        package,
+        protocols,
+        &crate::flow::VerifiedUpstream::default(),
+    )
+}
+
+/// Incremental version of [`validate_runtime_promises`] that skips re-checking
+/// bodies of functions already in `verified.functions` while keeping all
+/// declarations and signatures visible to downstream callers.
+pub fn validate_runtime_promises_incremental(
+    package: &n::Package,
+    protocols: &Protocols,
+    verified: &crate::flow::VerifiedUpstream,
+) -> Result<(), Error> {
     let mut analysis = Analysis::with_fuel(package, false, package_preparation_fuel(package));
     analysis.protocols = protocols.clone();
     if analysis.parameter_sorts.is_none() {
@@ -697,18 +712,24 @@ pub fn validate_runtime_promises(package: &n::Package, protocols: &Protocols) ->
             "invalid declaration parameter sorts in purity analysis",
         ));
     }
-    if protocols.drop.is_some()
-        && package
-            .functions
-            .iter()
-            .any(|function| function.phase == n::FunctionPhase::Runtime && function.pure)
-    {
+    let has_unverified_runtime_pure = package.functions.iter().any(|function| {
+        function.phase == n::FunctionPhase::Runtime
+            && function.pure
+            && !verified.functions.contains(&function.declaration)
+    });
+    if !has_unverified_runtime_pure {
+        return Ok(());
+    }
+    if protocols.drop.is_some() {
         // Prepare and cache the immutable resource world under package-scaled fuel
         // before assigning an independent budget to each runtime pure function.
         let _ = analysis.resource_world_parts();
     }
     for function in &package.functions {
-        if function.phase != n::FunctionPhase::Runtime || !function.pure {
+        if function.phase != n::FunctionPhase::Runtime
+            || !function.pure
+            || verified.functions.contains(&function.declaration)
+        {
             continue;
         }
         analysis.fuel = PER_FUNCTION_FUEL;

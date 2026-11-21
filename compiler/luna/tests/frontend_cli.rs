@@ -1043,6 +1043,7 @@ fn splice_selector_api_rejects_conflicting_identity_and_nonsemantic_output() {
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
         tuple_type: None,
+        incremental: Default::default(),
     };
     let foreign = elaboration::program::Protocols {
         splice: Some(nir::DeclarationId {

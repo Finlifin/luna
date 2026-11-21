@@ -98,11 +98,13 @@ fn take(args: &mut impl Iterator<Item = OsString>, what: &str) -> Result<OsStrin
     args.next()
         .ok_or_else(|| format!("missing {what} in --packages-v1 request"))
 }
+
 fn text(args: &mut impl Iterator<Item = OsString>, what: &str) -> Result<String, String> {
     take(args, what)?
         .into_string()
         .map_err(|_| format!("{what} must be UTF-8"))
 }
+
 fn number<T: std::str::FromStr>(
     args: &mut impl Iterator<Item = OsString>,
     what: &str,
@@ -174,8 +176,8 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
                 }
             }
             Some(
-                "--discard-result" | "--inline-functions" | "--test" | "--test-native"
-                | "--list-tests",
+                "--discard-result" | "--inline-functions" | "--no-cache" | "--test"
+                | "--test-native" | "--list-tests",
             ) => forwarded.push(argument),
             Some(
                 flag @ ("--build-target" | "--package-build-target" | "--package-build-feature"),
@@ -192,6 +194,9 @@ pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Request, String
             }
             Some(
                 "--build"
+                | "--cache-dir"
+                | "-j"
+                | "--jobs"
                 | "--emit-llvm"
                 | "--emit-asm"
                 | "--emit-object"
@@ -557,9 +562,11 @@ impl Request {
     pub fn compile(&self) -> Result<Artifact, String> {
         self.compile_bound().map(|(artifact, _)| artifact)
     }
+
     fn compile_bound(&self) -> Result<(Artifact, elaboration::program::Protocols), String> {
         self.compile_observed(None)
     }
+
     pub(crate) fn semantic_target(&self) -> Result<Option<nir::target::TargetData>, String> {
         let target = if matches!(&self.action, Action::Build { .. } | Action::EmitHost { .. }) {
             Some(
@@ -690,7 +697,7 @@ impl Request {
             .map_err(|error| error.to_string())?
             .configure(&mut configured);
         }
-        crate::packages::compile_observed_for_target_with_invocation(
+        crate::packages::compile_observed_for_target_with_incremental(
             &self.packages,
             &dependencies,
             self.primary,
@@ -750,6 +757,7 @@ impl Request {
             inputs,
             target,
             invocation,
+            &self.options.incremental,
         )
     }
 }

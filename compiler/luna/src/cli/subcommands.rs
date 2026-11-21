@@ -13,6 +13,7 @@ fn value(args: &[OsString], index: &mut usize, flag: &str) -> Result<OsString, S
     }
     Ok(value.clone())
 }
+
 fn once(slot: &mut Option<OsString>, value: OsString, flag: &str) -> Result<(), String> {
     if slot.replace(value).is_some() {
         return Err(format!("{flag} may only be specified once"));
@@ -198,7 +199,7 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
             }
             _ if flag.starts_with('-') => {
                 let count = match flag {
-                    "--inline-functions" | "--discard-result" => 0,
+                    "--inline-functions" | "--discard-result" | "--no-cache" => 0,
                     "--with-inputs" if packages && command != "check" => 0,
                     "--package" if packages => 4,
                     "--dependency" if packages => 3,
@@ -214,6 +215,9 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     "--package-build-target" => 4,
                     "--package-build-feature" => 2,
                     "--sysroot"
+                    | "--cache-dir"
+                    | "-j"
+                    | "--jobs"
                     | "--fuel"
                     | "--dispatch-fuel"
                     | "--build-mode"

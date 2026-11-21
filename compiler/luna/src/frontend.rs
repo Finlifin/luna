@@ -508,11 +508,15 @@ fn compile_bound_for_target_with_invocation(
                 protocols,
             ));
         }
-        let program = elaboration::program::elaborate_packages_for_target(
+        let program = elaboration::program::elaborate_packages_incremental(
             package.package(),
             &std::collections::BTreeMap::from([(0, package_identity)]),
             &protocols,
             target,
+            &elaboration::program::IncrementalOptions {
+                verified_upstream_packages: std::collections::BTreeSet::new(),
+                jobs: Some(options.incremental.effective_jobs()),
+            },
         )
         .map_err(|error| format!("elaboration failed: {error}"))?;
         crate::protocols::type_constructors::validate(&program, &protocols)?;
@@ -666,7 +670,8 @@ fn compile_sysroot(
         .filter(|package| package.name != "std")
         .map(|package| package.resolution_id)
         .collect();
-    crate::packages::compile_observed_with_preludes_and_macro_selectors(
+    let config_files = [root.join("language-items.conf")];
+    crate::packages::compile_observed_with_preludes_and_macro_selectors_and_incremental(
         &packages,
         &dependencies,
         0,
@@ -680,6 +685,8 @@ fn compile_sysroot(
         target,
         &preludes,
         invocation,
+        &options.incremental,
+        &config_files,
     )
 }
 

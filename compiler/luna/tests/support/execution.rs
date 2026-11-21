@@ -105,6 +105,7 @@ pub(crate) fn compile_explicit_source_with_bindings(
             into_iterator_protocol: selectors.into_iterator.map(str::to_owned),
             literal_into_protocol: selectors.literal_into.map(str::to_owned),
             arithmetic_protocols: selectors.arithmetic.map(|value| value.map(str::to_owned)),
+            incremental: Default::default(),
         },
         0,
         protocols,

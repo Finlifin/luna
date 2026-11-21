@@ -1,12 +1,15 @@
 //! Source membership phases remain independent of function execution stages.
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
+
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use luna::cli::{Emit, Options};
 use luna::frontend::{self, Artifact};
 use std::sync::atomic::{AtomicU64, Ordering};
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
@@ -37,6 +40,7 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         into_iterator_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
+        incremental: Default::default(),
     });
     std::fs::remove_file(path).unwrap();
     result
@@ -628,6 +632,7 @@ fn complementary_generic_scalar_initializers_preserve_value_inputs() {
         "{diagnostic}"
     );
 }
+
 #[test]
 fn member_prefix_attributes_can_use_the_enclosing_impl_self() {
     let source = "typealias Type=.Type'builtin; comptime fn metadata(T:Type)->.Object'builtin {let value={comptime_phase:T == Subject};value} trait Flag {^{comptime_phase:true} comptime fn flag()->bool;} struct Subject {} comptime impl Flag for Subject {^metadata(Self) comptime fn flag()->bool {true}} comptime fn run()->bool {Subject.as(Flag).flag()}";

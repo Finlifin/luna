@@ -354,6 +354,8 @@ pub(crate) struct MacroHost {
     providers: HashMap<ProviderKey, PreparedMacroProvider>,
     active_stack: Vec<ProviderKey>,
     compiled_macros: HashMap<MacroId, CompiledMacroEntry>,
+    expanded_packages: HashSet<u32>,
+    incremental: crate::package_cache::IncrementalConfig,
     next_res_id: u32,
     next_identity: u64,
     macro_fuel_per_call: u64,
@@ -394,11 +396,25 @@ impl MacroHost {
             providers: HashMap::new(),
             active_stack: Vec::new(),
             compiled_macros: HashMap::new(),
+            expanded_packages: HashSet::new(),
+            incremental: crate::package_cache::IncrementalConfig::default(),
             next_res_id,
             next_identity,
             macro_fuel_per_call: DEFAULT_MACRO_CALL_FUEL,
             current_source_ranges: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_incremental(
+        mut self,
+        incremental: crate::package_cache::IncrementalConfig,
+    ) -> Self {
+        self.incremental = incremental;
+        self
+    }
+
+    pub(crate) fn expanded_package(&self, res_id: u32) -> bool {
+        self.expanded_packages.contains(&res_id)
     }
 
     /// Inspect all VFS packages; if any references non-builtin macros, prepare required providers,
@@ -479,6 +495,7 @@ impl MacroHost {
             if !combined_refs.has_non_builtin_macros {
                 continue;
             }
+            self.expanded_packages.insert(pkg_res_id);
 
             let err_start_pos = first_ref_start.unwrap_or(BytePos(0));
 
@@ -848,6 +865,7 @@ impl MacroHost {
         let selectors_owned = self.selectors.clone();
         let preludes_owned = self.preludes.clone();
         let target_owned = self.target.clone();
+        let incremental_owned = self.incremental.clone();
         let output = crate::packages::compile_for_macro_provider(
             &sub_packages,
             &sub_dependencies,
@@ -861,6 +879,7 @@ impl MacroHost {
             self,
             &virtual_sources,
             force_discovery,
+            &incremental_owned,
         )?;
 
         if let (Some(target_obs), Some(script_obs)) = (observed, provider_observed) {

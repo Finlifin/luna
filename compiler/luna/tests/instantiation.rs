@@ -1,6 +1,7 @@
 //! Source -> concrete high-level instance graph, without interpreting templates.
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
+
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
@@ -10,6 +11,7 @@ use luna::{
     frontend::{self, Artifact},
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
@@ -131,6 +133,7 @@ fn binary_dependency_chains_preserve_calls_and_recover_from_depth_exhaustion() {
 fn compile(source: &str) -> nir::program::Package {
     compile_in(source, 0)
 }
+
 fn compile_in(source: &str, identity: u64) -> nir::program::Package {
     let path = std::env::temp_dir().join(format!(
         "luna-iir-{}-{}.fl",
@@ -160,6 +163,7 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             tuple_type: None,
+            incremental: Default::default(),
         },
         identity,
     );
@@ -169,6 +173,7 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
     };
     package
 }
+
 #[test]
 fn instances_close_recursive_generic_closure_and_dispatch_dependencies() {
     let source = compile(include_str!(

@@ -6188,7 +6188,7 @@ fn default_verification_jobs() -> usize {
     std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1)
-        .clamp(1, 8)
+        .clamp(1, 32)
 }
 
 /// Mandatory source gate before interpreting or delivering machine arithmetic.

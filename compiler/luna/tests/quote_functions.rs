@@ -1,10 +1,12 @@
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
+
 use luna::{
     cli::{Emit, Options},
     frontend::{self, Artifact},
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
@@ -48,6 +50,7 @@ fn compile_with_tuple_option(source: &str, emit: Emit, tuple: bool) -> Result<Ar
         into_iterator_protocol: None,
         literal_into_protocol: None,
         arithmetic_protocols: Default::default(),
+        incremental: Default::default(),
     });
     std::fs::remove_file(path).unwrap();
     result

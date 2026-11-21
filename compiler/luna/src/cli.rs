@@ -44,6 +44,7 @@ pub struct Options {
     pub splice_protocol: Option<String>,
     pub meta_list_type: Option<String>,
     pub tuple_type: Option<String>,
+    pub incremental: crate::package_cache::IncrementalConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +219,9 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     let mut fuel = None;
     let mut dispatch_fuel = None;
     let mut definition_fuel = None;
+    let mut cache_dir = None;
+    let mut no_cache = false;
+    let mut jobs = None;
     while let Some(arg) = args.next() {
         if !positional {
             match arg.to_str() {
@@ -721,6 +725,32 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
                     sysroot = Some(PathBuf::from(option_value(&mut args, "--sysroot")?));
                     continue;
                 }
+                Some("--cache-dir") => {
+                    if cache_dir.is_some() {
+                        return Err("--cache-dir may only be specified once".into());
+                    }
+                    cache_dir = Some(PathBuf::from(option_value(&mut args, "--cache-dir")?));
+                    continue;
+                }
+                Some("--no-cache") => {
+                    if std::mem::replace(&mut no_cache, true) {
+                        return Err("--no-cache may only be specified once".into());
+                    }
+                    continue;
+                }
+                Some(flag @ ("-j" | "--jobs")) => {
+                    if jobs.is_some() {
+                        return Err(format!("{flag} may only be specified once"));
+                    }
+                    let value = option_value(&mut args, flag)?;
+                    let count = value
+                        .to_str()
+                        .and_then(|value| value.parse::<usize>().ok())
+                        .filter(|count| *count > 0)
+                        .ok_or_else(|| format!("{flag} requires a positive integer"))?;
+                    jobs = Some(count);
+                    continue;
+                }
                 _ if is_option(&arg) => {
                     return Err(format!("unknown option '{}'", arg.to_string_lossy()));
                 }
@@ -870,6 +900,9 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
     if definition_fuel.is_some() && entry.is_none() {
         return Err("--definition-fuel requires --invoke-comptime".into());
     }
+    if no_cache && cache_dir.is_some() {
+        return Err("--cache-dir cannot be combined with --no-cache".into());
+    }
     let options = Options {
         dispatch_fuel,
         comptime_intrinsics,
@@ -901,6 +934,11 @@ pub(crate) fn parse_options(args: impl IntoIterator<Item = OsString>) -> Result<
         ord_protocol,
         eq_protocol,
         literal_into_protocol,
+        incremental: crate::package_cache::IncrementalConfig {
+            cache_dir,
+            no_cache,
+            jobs,
+        },
     };
     options.build_modes.validate_stage(options.emit)?;
     options.build_targets.validate_stage(options.emit)?;
@@ -1060,6 +1098,7 @@ mod tests {
                 literal_into_protocol: None,
                 arithmetic_protocols: Default::default(),
                 tuple_type: None,
+                incremental: Default::default(),
             })
         );
     }
@@ -1098,6 +1137,7 @@ mod tests {
                 literal_into_protocol: None,
                 arithmetic_protocols: Default::default(),
                 tuple_type: None,
+                incremental: Default::default(),
             })
         );
     }

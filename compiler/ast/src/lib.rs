@@ -114,6 +114,27 @@ impl Ast {
         self.get_node_kind(node_index)?;
         self.spans.get(node_index as usize).copied()
     }
+
+    /// Shift every non-dummy span in this AST so that it sits at `new_file_byte_pos`.
+    pub fn rebase(&mut self, new_file_byte_pos: BytePos) {
+        let old_base = i64::from(self.file_byte_pos.0);
+        let new_base = i64::from(new_file_byte_pos.0);
+        let delta = new_base - old_base;
+        self.file_byte_pos = new_file_byte_pos;
+        if delta == 0 {
+            return;
+        }
+        for span in self.spans.iter_mut().skip(1) {
+            if *span == rustc_span::DUMMY_SP {
+                continue;
+            }
+            let lo = u32::try_from(i64::from(span.lo().0) + delta)
+                .expect("rebased span lo out of u32 BytePos range");
+            let hi = u32::try_from(i64::from(span.hi().0) + delta)
+                .expect("rebased span hi out of u32 BytePos range");
+            *span = Span::new(BytePos(lo), BytePos(hi));
+        }
+    }
 }
 
 pub struct NodeBuilder {
@@ -678,6 +699,269 @@ pub enum NodeType {
 }
 
 impl NodeKind {
+    /// Convert a raw discriminant (`kind as u32`) back into [`NodeKind`].
+    pub fn from_u32(raw: u32) -> Option<Self> {
+        macro_rules! map_variants {
+            ($($variant:ident),* $(,)?) => {{
+                fn _assert_exhaustive(kind: NodeKind) {
+                    match kind {
+                        $(NodeKind::$variant => (),)*
+                    }
+                }
+                match raw {
+                    $(x if x == Self::$variant as u32 => Some(Self::$variant),)*
+                    _ => None,
+                }
+            }};
+        }
+        map_variants!(
+            Invalid,
+            Id,
+            Str,
+            StringConcat,
+            Int,
+            Real,
+            Char,
+            Bool,
+            Unit,
+            Symbol,
+            Wildcard,
+            LiteralExtension,
+            Defer,
+            RefinedType,
+            QuoteExpr,
+            QuotePattern,
+            SpliceExpr,
+            SplicePattern,
+            CodeSubstitution,
+            ContextualExprType,
+            ContextualPatternType,
+            CodeContextBinding,
+            ListOf,
+            Tuple,
+            Object,
+            TokenBuffer,
+            TokenBufferToken,
+            TokenBufferInterp,
+            TokenBufferDollar,
+            Lambda,
+            BoolNot,
+            Negative,
+            ErrorNew,
+            SelfLower,
+            SelfCap,
+            Null,
+            Undefined,
+            EffectQualifiedType,
+            ErrorQualifiedType,
+            ReachabilityQualifiedType,
+            ClosureQualifiedType,
+            ClosureEnvironment,
+            ClosureEnvironmentBinding,
+            OptionalType,
+            TraitObjectType,
+            PointerType,
+            LiftType,
+            ForallType,
+            ForType,
+            FnType,
+            BoolForall,
+            BoolExists,
+            RangeFull,
+            RangeTo,
+            RangeToInclusive,
+            RangeFrom,
+            RangeFromTo,
+            RangeFromToInclusive,
+            Add,
+            Sub,
+            Mul,
+            Div,
+            Mod,
+            AddAdd,
+            BoolEq,
+            BoolNotEq,
+            BoolAnd,
+            BoolOr,
+            BoolGt,
+            BoolGtEq,
+            BoolLt,
+            BoolLtEq,
+            BoolImplies,
+            BoolMatches,
+            Arrow,
+            TypedWith,
+            Subtype,
+            TraitBound,
+            FieldMethodBound,
+            DeclarationBound,
+            Projection,
+            TakeView,
+            Pipe,
+            PipePrepend,
+            Deref,
+            Refer,
+            Await,
+            HandlerApplication,
+            TypeCast,
+            DynCast,
+            EffectElimination,
+            ErrorElimination,
+            OptionElimination,
+            EffectPropagation,
+            ErrorPropagation,
+            OptionPropagation,
+            Application,
+            IndexApplication,
+            ExtendedApplication,
+            NormalFormHeadApplication,
+            PostMatch,
+            PostLambda,
+            CaseArm,
+            ConditionArm,
+            CatchArm,
+            ExprStatement,
+            InlineStatement,
+            Assign,
+            AddAssign,
+            SubAssign,
+            MulAssign,
+            DivAssign,
+            RemAssign,
+            ConstDecl,
+            VarDecl,
+            LetDecl,
+            ReturnStatement,
+            ResumeStatement,
+            BreakStatement,
+            ContinueStatement,
+            IfStatement,
+            IfIsMatch,
+            IfMatch,
+            WhenStatement,
+            WhileStatement,
+            WhileIsMatch,
+            WhileMatch,
+            ForStatement,
+            IfGuardPattern,
+            AndIsPattern,
+            AsBindPattern,
+            OrPattern,
+            OptionSomePattern,
+            ErrorOkPattern,
+            ErrorPattern,
+            RefPattern,
+            ApplicationPattern,
+            ExtendedApplicationPattern,
+            NormalFormHeadApplicationPattern,
+            ExprAsPattern,
+            RangeToPattern,
+            RangeToInclusivePattern,
+            RangeFromPattern,
+            RangeFromToPattern,
+            RangeFromToInclusivePattern,
+            PropertyPattern,
+            ListRestPattern,
+            StructPattern,
+            ListPattern,
+            TuplePattern,
+            BitVecBinPattern,
+            BitVecOctPattern,
+            BitVecHexPattern,
+            AsyncPattern,
+            NotPattern,
+            TypeBindPattern,
+            Function,
+            NormalFormHeadDef,
+            AlgebraicEffect,
+            EffectEnumDef,
+            ResultWithId,
+            StructDef,
+            StructField,
+            EnumDef,
+            PatternEnumVariant,
+            ExprEnumVariant,
+            TupleEnumVariant,
+            StructEnumVariant,
+            SubEnumEnumVariant,
+            UnionDef,
+            UnionVariant,
+            TraitDef,
+            AssocDecl,
+            ImplDef,
+            ImplTraitDef,
+            ExtendDef,
+            ExtendTraitDef,
+            DeriveDef,
+            DeriverDef,
+            CaseDef,
+            TypealiasDef,
+            NewtypeDef,
+            ConstDef,
+            ModuleDef,
+            TestDef,
+            TestTemplateDef,
+            FunctionTemplateDef,
+            FunctionTemplateInstance,
+            FunctionTemplateInstanceWithParams,
+            TestTemplateInstance,
+            ModStatement,
+            UseStatement,
+            ProjectionPath,
+            ProjectionMultiPath,
+            ProjectionAllPath,
+            SuperPath,
+            PackagePath,
+            PathAsBind,
+            Asserts,
+            Assumes,
+            Axiom,
+            Invariant,
+            Decreases,
+            Outcomes,
+            Requires,
+            Ensures,
+            TraitBoundDeclClause,
+            TypeBoundDeclClause,
+            OptionalDeclClause,
+            VarargDeclClause,
+            QuoteDeclClause,
+            TypeDeclClause,
+            OptionalTypeParam,
+            OptionalParam,
+            TypeBoundParam,
+            TraitBoundParam,
+            SelfParam,
+            SelfRefParam,
+            ItselfParam,
+            ItselfRefParam,
+            VarargParam,
+            ComptimeParam,
+            ErrorParam,
+            CatchParam,
+            LambdaParam,
+            ImplicitParam,
+            QuoteParam,
+            AssocParam,
+            AttrParam,
+            Block,
+            AtomicBlock,
+            DoBlock,
+            AsyncBlock,
+            UnsafeBlock,
+            ComptimeBlock,
+            FileScope,
+            Pub,
+            Private,
+            Attribute,
+            AttributeSetTrue,
+            Property,
+            Configuration,
+            OptionalArg,
+            ExpandArg,
+        )
+    }
+
     pub fn node_type(&self) -> NodeType {
         use NodeKind::*;
 
@@ -1362,5 +1646,56 @@ impl Ast {
         } else {
             format!("Invalid node index: {}", node_index)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_kind_from_u32_roundtrips_all_discriminants() {
+        let max = NodeKind::ExpandArg as u32;
+        for raw in 0..=max {
+            let kind = NodeKind::from_u32(raw).expect("valid discriminant");
+            assert_eq!(kind as u32, raw);
+        }
+        assert_eq!(NodeKind::from_u32(max + 1), None);
+        assert_eq!(NodeKind::from_u32(u32::MAX), None);
+    }
+
+    #[test]
+    fn ast_rebase_shifts_non_dummy_spans_forward_and_backward() {
+        let mut ast = Ast::new(BytePos(100));
+        let real_a =
+            NodeBuilder::new(NodeKind::Null, Span::new(BytePos(105), BytePos(109))).build(&mut ast);
+        let dummy = NodeBuilder::new(NodeKind::Wildcard, rustc_span::DUMMY_SP).build(&mut ast);
+        let root = NodeBuilder::new(NodeKind::FileScope, Span::new(BytePos(100), BytePos(120)))
+            .add_multiple_children(vec![real_a, dummy])
+            .build(&mut ast);
+        ast.root = root;
+
+        ast.rebase(BytePos(500));
+        assert_eq!(ast.file_byte_pos, BytePos(500));
+        assert_eq!(ast.spans[0], rustc_span::DUMMY_SP);
+        assert_eq!(
+            ast.get_span(real_a),
+            Some(Span::new(BytePos(505), BytePos(509)))
+        );
+        assert_eq!(ast.get_span(dummy), Some(rustc_span::DUMMY_SP));
+        assert_eq!(
+            ast.get_span(root),
+            Some(Span::new(BytePos(500), BytePos(520)))
+        );
+
+        ast.rebase(BytePos(0));
+        assert_eq!(ast.file_byte_pos, BytePos(0));
+        assert_eq!(ast.spans[0], rustc_span::DUMMY_SP);
+        assert_eq!(
+            ast.get_span(real_a),
+            Some(Span::new(BytePos(5), BytePos(9)))
+        );
+        assert_eq!(ast.get_span(dummy), Some(rustc_span::DUMMY_SP));
+        assert_eq!(ast.get_span(root), Some(Span::new(BytePos(0), BytePos(20))));
     }
 }

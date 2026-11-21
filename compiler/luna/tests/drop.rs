@@ -1,6 +1,7 @@
 //! Source Drop protocol selection and reference-receiver contracts.
 #[path = "support/execution.rs"]
 mod finite_default_support;
+
 #[test]
 fn cleanup_access_export_retains_parameter_and_indirect_origins() {
     use elaboration::verification::{memory, moves};
@@ -3098,6 +3099,7 @@ use luna::{
     frontend::{self, Artifact},
 };
 use std::sync::atomic::{AtomicU64, Ordering};
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
@@ -3380,9 +3382,11 @@ fn representation_copy_rejects_hidden_affine_and_drop_responsibilities() {
         assert!(failure.contains(reason), "{failure}");
     }
 }
+
 fn compile(source: &str) -> nir::program::Package {
     compile_in(source, 0)
 }
+
 fn compile_in(source: &str, identity: u64) -> nir::program::Package {
     let path = std::env::temp_dir().join(format!(
         "luna-drop-{}-{}.fl",
@@ -3412,6 +3416,7 @@ fn compile_in(source: &str, identity: u64) -> nir::program::Package {
             literal_into_protocol: None,
             arithmetic_protocols: Default::default(),
             tuple_type: None,
+            incremental: Default::default(),
         },
         identity,
     );
@@ -3429,6 +3434,7 @@ use elaboration::{
     verification::drop::Resolution,
 };
 use intrinsic::{LangItem, LangItems};
+
 fn world<T>(package: &nir::program::Package, run: impl FnOnce(&World<'_>, &LangItems) -> T) -> T {
     let context = Context::from_package(package).unwrap();
     let mut index = Index::default();
@@ -3473,6 +3479,7 @@ fn world<T>(package: &nir::program::Package, run: impl FnOnce(&World<'_>, &LangI
         &items,
     )
 }
+
 fn nominal(package: &nir::program::Package, name: &str, arguments: Vec<nir::Term>) -> nir::Term {
     nir::Term::Nominal {
         declaration: package
@@ -3958,6 +3965,7 @@ fn trait_implementation_receiver_modes_must_match() {
                 literal_into_protocol: None,
                 arithmetic_protocols: Default::default(),
                 tuple_type: None,
+                incremental: Default::default(),
             },
             0,
         );
@@ -6160,6 +6168,7 @@ fn source_executable(
         )
     })
 }
+
 fn executed_names(
     package: &nir::program::Package,
     executable: &luna::cleanup::Executable,
@@ -8922,6 +8931,7 @@ fn scheduled_closure_invocation_failed_local_drop_stops_caller_environment_clean
         ["entry", "drop Local"]
     );
 }
+
 #[test]
 fn scheduled_closure_invocation_keeps_return_contracts_in_their_own_scope() {
     use comptime_interpretor::{Interpreter, Value};
