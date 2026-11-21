@@ -77,7 +77,7 @@ impl<'a> AstScanner<'a> {
                 NodeKind::TypealiasDef | NodeKind::NewtypeDef => {
                     self.scan_named_type(parent_scope, inner, vis)?
                 }
-                NodeKind::ConstDef | NodeKind::ConstDecl => {
+                NodeKind::ConstDef | NodeKind::ConstDecl | NodeKind::StaticDef => {
                     let name = self.extract_name(self.ast.get_children(inner)[0])?;
                     let def_id = self.def_gen.next();
                     self.define_in_scope(

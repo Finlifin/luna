@@ -23,6 +23,7 @@ impl Checker<'_, '_> {
         self.readable_storage_input(ty, &mut 10_000, 0, true, false)
             .unwrap_or(false)
     }
+
     /// Form aggregate loads; resource checking still requires Copy and live origins.
     pub(super) fn copy_read_input(&self, ty: &Term) -> bool {
         self.wrapped_read_input(ty)
@@ -44,6 +45,7 @@ impl Checker<'_, '_> {
                 .is_ok()
             })
     }
+
     fn readable_storage_input(
         &self,
         ty: &Term,
@@ -137,6 +139,7 @@ impl Checker<'_, '_> {
         }
         Ok(true)
     }
+
     pub(super) fn intrinsic_pointer_input(&self, ty: &Term) -> bool {
         n::intrinsic_pointer_value(ty)
             // Formation can retain a rigid scalar constrained to several
@@ -153,26 +156,72 @@ impl Checker<'_, '_> {
                 .is_ok_and(|view| view.is_some_and(|(ty, _)| n::intrinsic_pointer_value(&ty)))
     }
 
+    pub(super) fn static_owner_of(&mut self, expr: &Expr<'_>) -> Result<Option<OwnerId>, Error> {
+        match &expr.kind {
+            H::ResolvedDef { def_id, .. } => {
+                let Some(owner) = self.package.definition_owner(*def_id) else {
+                    return Ok(None);
+                };
+                if self
+                    .package
+                    .item(owner)
+                    .is_some_and(|item| matches!(item.kind, ItemKind::Static(..)))
+                {
+                    Ok(Some(owner))
+                } else {
+                    Ok(None)
+                }
+            }
+            H::Projection(..) => self.projected_static_owner(expr),
+            _ => Ok(None),
+        }
+    }
+
+    pub(super) fn static_pointer(&mut self, owner: OwnerId, span: Span) -> Result<n::Expr, Error> {
+        if !self.runtime_value_context() {
+            return Err(error(span, "cannot access runtime static at comptime"));
+        }
+        let static_def = self.ensure_static(owner, span)?;
+        Ok(n::Expr {
+            source: source(span),
+            ty: Term::Pointer(Box::new(static_def.ty)),
+            kind: K::StaticAddress(static_def.declaration),
+        })
+    }
+
     pub(super) fn dereferenced_place(&mut self, expr: &Expr<'_>) -> Result<Option<n::Expr>, Error> {
         let mut base = expr;
         let mut fields = Vec::new();
-        while let H::Projection(inner, field) = &base.kind {
+        let mut static_owner = None;
+        loop {
+            if let Some(owner) = self.static_owner_of(base)? {
+                static_owner = Some(owner);
+                break;
+            }
+            let H::Projection(inner, field) = &base.kind else {
+                break;
+            };
             if fields.len() == 128 {
                 return Err(error(expr.span, "dereferenced place depth exhausted"));
             }
             fields.push(*field);
             base = inner;
         }
-        let H::Deref(pointer) = &base.kind else {
-            return Ok(None);
+        let mut pointer = if let Some(owner) = static_owner {
+            self.static_pointer(owner, base.span)?
+        } else {
+            let H::Deref(pointer) = &base.kind else {
+                return Ok(None);
+            };
+            let prev_allow = std::mem::replace(&mut self.allow_packed_pointer_projection, true);
+            let pointer = self.expr(pointer, None);
+            self.allow_packed_pointer_projection = prev_allow;
+            let pointer = pointer?;
+            if !matches!(pointer.ty, Term::Pointer(_)) {
+                return Err(error(base.span, "dereference requires a pointer"));
+            }
+            pointer
         };
-        let prev_allow = std::mem::replace(&mut self.allow_packed_pointer_projection, true);
-        let pointer = self.expr(pointer, None);
-        self.allow_packed_pointer_projection = prev_allow;
-        let mut pointer = pointer?;
-        if !matches!(pointer.ty, Term::Pointer(_)) {
-            return Err(error(base.span, "dereference requires a pointer"));
-        }
         for field in fields.into_iter().rev() {
             let Term::Pointer(subject) = &pointer.ty else {
                 unreachable!()

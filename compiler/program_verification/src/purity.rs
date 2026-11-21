@@ -2055,6 +2055,7 @@ impl<'a> Analysis<'a> {
                     .is_some_and(|free| free.is_empty())
                     && self.expression(value, private, returns, depth + 1)
             }
+            K::StaticAddress(_) => false,
             K::WritePointer {
                 pointer,
                 value: replacement,

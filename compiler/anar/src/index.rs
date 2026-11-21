@@ -347,6 +347,7 @@ fn item_clauses<'hir>(item: &Item<'hir>) -> &'hir [ClauseParam<'hir>] {
         | ItemKind::Mod(_)
         | ItemKind::Use(_)
         | ItemKind::Const(..)
+        | ItemKind::Static(..)
         | ItemKind::Invalid => &[],
     }
 }
@@ -1383,6 +1384,12 @@ impl<'a> IndexBuilder<'a> {
                 ItemKind::Const(ty, init) => {
                     self.walk_expr(&ctx, ty, false);
                     self.walk_expr(&ctx, init, false);
+                }
+                ItemKind::Static(ty, init) => {
+                    self.walk_expr(&ctx, ty, false);
+                    if let Some(init) = init {
+                        self.walk_expr(&ctx, init, false);
+                    }
                 }
                 ItemKind::Use(use_path) => {
                     let enclosing_scope = self.enclosing_scope_for_owner(pkg, owner_id, item.span);
@@ -2979,7 +2986,7 @@ fn item_lsp_kinds(kind: &ItemKind<'_>) -> (u32, u32) {
             (lsp_symbol_kind::TYPE_PARAMETER, lsp_completion_kind::STRUCT)
         }
         DefKind::Const => (lsp_symbol_kind::CONSTANT, lsp_completion_kind::CONSTANT),
-        DefKind::Use | DefKind::Invalid => {
+        DefKind::Static | DefKind::Use | DefKind::Invalid => {
             (lsp_symbol_kind::VARIABLE, lsp_completion_kind::VARIABLE)
         }
     }
@@ -3071,6 +3078,15 @@ pub fn format_item_signature(
                 ),
                 Vec::new(),
             )
+        }
+        ItemKind::Static(ty, init) => {
+            let ty_s = format_expr_compact(ty, source_map);
+            if let Some(init) = init {
+                let init_s = format_expr_compact(init, source_map);
+                (format!("static {name}: {ty_s} = {init_s}"), Vec::new())
+            } else {
+                (format!("static {name}: {ty_s}"), Vec::new())
+            }
         }
         ItemKind::Const(ty, init) => {
             let ty_s = format_expr_compact(ty, source_map);

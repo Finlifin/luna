@@ -741,6 +741,7 @@ impl<'a> PhaseContext<'a> {
                             expr.kind,
                             K::AddressOf(_)
                                 | K::ConstAddress { .. }
+                                | K::StaticAddress(_)
                                 | K::ReadPointer(_)
                                 | K::WritePointer { .. }
                                 | K::PointerField { .. }
@@ -2099,7 +2100,8 @@ impl<'a> PhaseContext<'a> {
                         | K::OptionalAbsent
                         | K::Unit
                         | K::Break(_)
-                        | K::Continue(_) => {}
+                        | K::Continue(_)
+                        | K::StaticAddress(_) => {}
                     }
                 }
             }

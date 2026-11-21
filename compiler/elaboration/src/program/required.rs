@@ -410,7 +410,9 @@ impl Checker<'_, '_> {
                 // Lexical const initializers and explicit template-instance inputs
                 // have no declaration clauses of their own. The selected
                 // template contract is checked after preparing its inputs.
-                ItemKind::Const(..) | ItemKind::TestTemplateInstance { .. } => &[],
+                ItemKind::Const(..)
+                | ItemKind::Static(..)
+                | ItemKind::TestTemplateInstance { .. } => &[],
                 _ => return Err(error(span, "declaration does not have a type contract")),
             };
             let lexical_parent = matches!(
@@ -1588,6 +1590,7 @@ impl Checker<'_, '_> {
                 newtypes: self.newtypes.values().cloned().collect(),
                 alias_contracts: self.alias_contracts.values().cloned().collect(),
                 enums: self.enums.values().cloned().collect(),
+                statics: self.statics.values().cloned().collect(),
                 definition_attributes: self.definition_attributes.clone(),
                 runtime_domains: self.runtime_domains.clone(),
                 ..Default::default()

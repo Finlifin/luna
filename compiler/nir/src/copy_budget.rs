@@ -1343,6 +1343,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         }
                         0
                     }
+                    K::StaticAddress(_) => 0,
                 }
             }
             Node::Argument(argument) => {

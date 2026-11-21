@@ -25,6 +25,7 @@ pub fn clauses<'hir>(item: &Item<'hir>) -> &'hir [ClauseParam<'hir>] {
         | ItemKind::Mod(_)
         | ItemKind::Use(_)
         | ItemKind::Const(..)
+        | ItemKind::Static(..)
         | ItemKind::Invalid => &[],
     }
 }
@@ -124,7 +125,11 @@ pub(super) fn validate(item: &Item<'_>, fuel: &mut usize) -> Result<(), Error> {
             }
             return Ok(());
         }
-        ItemKind::Mod(_) | ItemKind::Use(_) | ItemKind::Const(..) | ItemKind::Invalid => {
+        ItemKind::Mod(_)
+        | ItemKind::Use(_)
+        | ItemKind::Const(..)
+        | ItemKind::Static(..)
+        | ItemKind::Invalid => {
             return Ok(());
         }
     };

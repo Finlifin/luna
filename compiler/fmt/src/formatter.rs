@@ -1130,6 +1130,7 @@ fn declaration_requires_semicolon_without_brace(kind: Option<NodeKind>) -> bool 
                 | NodeKind::VarDecl
                 | NodeKind::ConstDecl
                 | NodeKind::ConstDef
+                | NodeKind::StaticDef
                 | NodeKind::TypealiasDef
                 | NodeKind::NewtypeDef
                 | NodeKind::UseStatement
@@ -1182,6 +1183,7 @@ fn ends_in_open_expr(base_kind: Option<NodeKind>, ast: &ast::Ast, mut node: Node
         Some(
             NodeKind::ExprStatement
             | NodeKind::ConstDef
+            | NodeKind::StaticDef
             | NodeKind::TypealiasDef
             | NodeKind::NewtypeDef
             | NodeKind::Assign

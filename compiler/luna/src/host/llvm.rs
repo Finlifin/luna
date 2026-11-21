@@ -1425,6 +1425,7 @@ impl Emitter<'_> {
             }
             K::AddressOf(place) => self.address(place, depth),
             K::ConstAddress { declaration, value } => self.const_address(*declaration, value),
+            K::StaticAddress(declaration) => self.static_address(*declaration),
             K::Unit => Ok(Value::unit()),
             K::LetPattern {
                 pattern,

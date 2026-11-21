@@ -520,6 +520,7 @@ fn token_can_start_node(node_kind: Option<NodeKind>, tok: TokenKind) -> bool {
         Some(NodeKind::LetDecl) => tok == TokenKind::Let,
         Some(NodeKind::VarDecl) => tok == TokenKind::Var,
         Some(NodeKind::ConstDecl | NodeKind::ConstDef) => tok == TokenKind::Const,
+        Some(NodeKind::StaticDef) => tok == TokenKind::Static,
         Some(NodeKind::UseStatement) => tok == TokenKind::Use,
         Some(NodeKind::ModuleDef | NodeKind::ModStatement) => tok == TokenKind::Mod,
         Some(NodeKind::TypealiasDef) => tok == TokenKind::Typealias,

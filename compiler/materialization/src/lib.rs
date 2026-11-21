@@ -619,6 +619,7 @@ impl<'a> InstantiationSession<'a> {
             interfaces,
             normal_forms,
             callable_identities,
+            statics: package.statics.clone(),
         };
         output.validate(&mut publication_fuel)?;
         budget.steps = publication_fuel;
@@ -846,6 +847,7 @@ impl<'a> InstantiationSession<'a> {
             interfaces: builder.interface_contracts.clone(),
             normal_forms,
             callable_identities: builder.callable_identities.clone(),
+            statics: package.statics.clone(),
         };
         output.validate(&mut publication_fuel)?;
         self.incremental = Some(IncrementalIir {
@@ -4697,7 +4699,8 @@ impl Builder<'_, '_> {
             | K::OptionalAbsent
             | K::Unit
             | K::Break(_)
-            | K::Continue(_) => {}
+            | K::Continue(_)
+            | K::StaticAddress(_) => {}
         }
         Ok(())
     }

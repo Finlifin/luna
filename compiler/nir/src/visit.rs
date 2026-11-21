@@ -929,7 +929,8 @@ fn walk_mut(
                     | K::Continue(_)
                     | K::Function(_)
                     | K::FunctionInstance { .. }
-                    | K::TraitMethod { .. } => {}
+                    | K::TraitMethod { .. }
+                    | K::StaticAddress(_) => {}
                 }
             }
         }

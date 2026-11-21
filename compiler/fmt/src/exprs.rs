@@ -2683,6 +2683,7 @@ fn can_single_line_block_elem(
                 | NodeKind::VarDecl
                 | NodeKind::ConstDecl
                 | NodeKind::ConstDef
+                | NodeKind::StaticDef
                 | NodeKind::TypealiasDef
                 | NodeKind::NewtypeDef
                 | NodeKind::UseStatement

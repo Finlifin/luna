@@ -402,6 +402,9 @@ impl Display for ItemKind<'_> {
             }
             Self::Use(path) => form!(f, "use", "import" => path),
             Self::Const(ty, value) => form!(f, "const", "type" => ty, "value" => value),
+            Self::Static(ty, initializer) => {
+                form!(f, "static", "type" => ty, "initializer" => Maybe(*initializer))
+            }
             Self::Invalid => form!(f, "invalid"),
         }
     }

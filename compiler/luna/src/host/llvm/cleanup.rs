@@ -1423,6 +1423,7 @@ impl Emitter<'_> {
             }
             K::AddressOf(place) => self.address_pure(place, depth + 1),
             K::ConstAddress { declaration, value } => self.const_address(*declaration, value),
+            K::StaticAddress(declaration) => self.static_address(*declaration),
             K::PointerField { pointer, index, .. }
             | K::PointerAnonymousField { pointer, index, .. } => {
                 let base = self.eval_cleanup_env(pointer, depth + 1)?;

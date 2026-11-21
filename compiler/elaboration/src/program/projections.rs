@@ -429,6 +429,21 @@ impl Checker<'_, '_> {
         &mut self,
         expr: &Expr<'_>,
     ) -> Result<Option<OwnerId>, Error> {
+        self.projected_owner_matching(expr, |kind| matches!(kind, ItemKind::Const(..)))
+    }
+
+    pub(super) fn projected_static_owner(
+        &mut self,
+        expr: &Expr<'_>,
+    ) -> Result<Option<OwnerId>, Error> {
+        self.projected_owner_matching(expr, |kind| matches!(kind, ItemKind::Static(..)))
+    }
+
+    fn projected_owner_matching(
+        &mut self,
+        expr: &Expr<'_>,
+        predicate: fn(&ItemKind<'_>) -> bool,
+    ) -> Result<Option<OwnerId>, Error> {
         let H::Projection(base, _) = expr.kind else {
             return Ok(None);
         };
@@ -478,7 +493,7 @@ impl Checker<'_, '_> {
         if !self
             .package
             .item(owner)
-            .is_some_and(|item| matches!(item.kind, ItemKind::Const(..)))
+            .is_some_and(|item| predicate(&item.kind))
         {
             return Ok(None);
         }

@@ -2480,6 +2480,25 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         Ok(())
     }
 
+    fn ensure_static_global(
+        &mut self,
+        flow: &mut Flow,
+        declaration: nir::DeclarationId,
+        ty: &Term,
+        source: SourceRange,
+    ) -> Result<(), Error> {
+        let id = crate::static_global_place(declaration);
+        if flow.types.contains_key(&id) {
+            return Ok(());
+        }
+        let shape = (self.shape)(ty).map_err(|e| error(source, e))?;
+        flow.state
+            .declare(id, &shape, true, &mut self.fuel)
+            .map_err(|e| error(source, format!("cannot establish static storage: {e:?}")))?;
+        flow.types.insert(id, ty.clone());
+        Ok(())
+    }
+
     fn predeclare_const_globals(
         &mut self,
         flow: &mut Flow,
@@ -12959,6 +12978,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     fields: vec![],
                 }]))
             }
+            K::StaticAddress(declaration) => Ok(BTreeSet::from([Place {
+                root: crate::static_global_place(*declaration),
+                fields: vec![],
+            }])),
             K::Local(_) | K::AnonymousField { .. } | K::Field { .. } => {
                 let slot = expression_place(expr)
                     .ok_or_else(|| error(expr.source, "pointer value requires a local place"))?;

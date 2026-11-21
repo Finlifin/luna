@@ -2843,7 +2843,7 @@ impl<'a> Interpreter<'a> {
             K::Not(..) => self.eval_not(expr, environment),
             K::And(..) | K::Or(..) => self.eval_and(expr, environment),
             K::Call { .. } => self.eval_call(expr, environment),
-            K::ConstAddress { .. } => {
+            K::ConstAddress { .. } | K::StaticAddress(_) => {
                 return Err(self.failure(
                     if self.comptime_only {
                         ErrorKind::PhaseMismatch

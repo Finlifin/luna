@@ -2,6 +2,74 @@
 use super::*;
 
 impl Checker<'_, '_> {
+    pub(in crate::program) fn ensure_static(
+        &mut self,
+        owner: OwnerId,
+        span: Span,
+    ) -> Result<n::Static, Error> {
+        if let Some(existing) = self.statics.get(&owner) {
+            return Ok(existing.clone());
+        }
+        if self.active_statics.len() >= 64 || !self.active_statics.insert(owner) {
+            return Err(error(span, "cyclic or excessively deep static dependency"));
+        }
+        let result = self.in_formal_declaration(owner, |this| {
+            this.in_required_comptime = true;
+            this.context = this.nominal_context();
+            let item = this.package.item(owner).unwrap();
+            let ItemKind::Static(annotation, initializer) = &item.kind else {
+                return Err(error(span, "declaration is not a static"));
+            };
+            let name = item.ident.name.as_str().to_string();
+            let ty = this.type_expr(annotation)?;
+            if matches!(
+                ty,
+                Term::Primitive(P::Type) | Term::ComptimeFunction(_) | Term::NormalFormFunction(..)
+            ) {
+                return Err(error(
+                    annotation.span,
+                    "static declaration requires a runtime value type",
+                ));
+            }
+            let evaluated_init = if let Some(init) = initializer {
+                let (value, init_ty) = this.required_typed_expression(init, Some(&ty))?;
+                let mut snapshot = Materialization::default();
+                let expr =
+                    this.constant_expression(&value, init_ty, init.span, 0, &mut snapshot)?;
+                if !snapshot.bindings.is_empty() {
+                    return Err(error(
+                        init.span,
+                        "static initializer must evaluate to a constant without local bindings",
+                    ));
+                }
+                let mut work = usize::try_from(this.required_steps).unwrap_or(usize::MAX);
+                let before = work;
+                let free = nir::free_bindings::collect(&expr, &mut work)
+                    .map_err(|reason| error(init.span, reason.to_string()))?;
+                this.required_steps = this.required_steps.saturating_sub((before - work) as u64);
+                if !free.is_empty() {
+                    return Err(error(
+                        init.span,
+                        "static initializer cannot depend on local bindings",
+                    ));
+                }
+                Some(expr)
+            } else {
+                None
+            };
+            Ok(n::Static {
+                declaration: declaration(this.package, &this.package_identities, owner),
+                name,
+                ty,
+                initializer: evaluated_init,
+            })
+        });
+        self.active_statics.remove(&owner);
+        let static_def = result?;
+        self.statics.insert(owner, static_def.clone());
+        Ok(static_def)
+    }
+
     pub(in crate::program) fn constant_value(
         &mut self,
         owner: OwnerId,

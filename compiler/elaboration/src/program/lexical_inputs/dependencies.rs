@@ -725,6 +725,12 @@ impl<'a, 'h> Reads<'a, 'h> {
                 self.expression(ty)?;
                 self.expression(value)?;
             }
+            ItemKind::Static(ty, init) => {
+                self.expression(ty)?;
+                if let Some(init) = init {
+                    self.expression(init)?;
+                }
+            }
             ItemKind::Struct(def) => {
                 self.fields(def.fields)?;
                 self.clauses(def.clause_params, def.clause_constraints)?;

@@ -258,6 +258,30 @@ impl Checker<'_, '_> {
                 }
                 if matches!(
                     self.package.item(owner).map(|i| &i.kind),
+                    Some(ItemKind::Static(..))
+                ) {
+                    let pointer = self.static_pointer(owner, expr.span)?;
+                    let Term::Pointer(pointee) = &pointer.ty else {
+                        unreachable!();
+                    };
+                    if !self.intrinsic_pointer_input(pointee) && !self.copy_read_input(pointee) {
+                        return Err(error(
+                            expr.span,
+                            "reading a non-Copy static requires Copy evidence; take `.ref` instead",
+                        ));
+                    }
+                    let value = n::Expr {
+                        ty: (**pointee).clone(),
+                        source: source(expr.span),
+                        kind: K::ReadPointer(Box::new(pointer)),
+                    };
+                    if let Some(expected) = expected {
+                        self.require(&value.ty, expected, expr.span)?;
+                    }
+                    return Ok(value);
+                }
+                if matches!(
+                    self.package.item(owner).map(|i| &i.kind),
                     Some(ItemKind::Const(..))
                 ) {
                     if self.runtime_value_context() {

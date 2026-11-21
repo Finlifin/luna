@@ -863,6 +863,8 @@ fn elaborate_in_mode(
         preserve_effect_value: false,
         captures: Vec::new(),
         structs: BTreeMap::new(),
+        statics: BTreeMap::new(),
+        active_statics: BTreeSet::new(),
         newtypes: BTreeMap::new(),
         alias_contracts: BTreeMap::new(),
         enums: BTreeMap::new(),
@@ -1501,6 +1503,9 @@ fn elaborate_candidate<'a, 'h>(
                     checker.constant_value(owner, item.span)?;
                 }
             }
+            ItemKind::Static(..) => {
+                checker.ensure_static(owner, item.span)?;
+            }
             ItemKind::Associated(_) => {}
             _ => {
                 return Err(error(
@@ -1740,6 +1745,7 @@ fn elaborate_candidate<'a, 'h>(
     }
     output.traits = checker.checked_traits.to_vec();
     output.implementations = implementations;
+    output.statics = checker.statics.values().cloned().collect();
     // Code methods belong to the elaboration world. Ordinary execution keeps
     // the same trait/implementation identities but no code-only member slots.
     let code_methods: BTreeSet<_> = checker
@@ -2929,6 +2935,8 @@ struct Checker<'a, 'h> {
     preserve_effect_value: bool,
     captures: Vec<CaptureFrame>,
     structs: BTreeMap<DeclarationId, n::Struct>,
+    statics: BTreeMap<OwnerId, n::Static>,
+    active_statics: BTreeSet<OwnerId>,
     newtypes: BTreeMap<DeclarationId, nir::newtypes::Newtype>,
     alias_contracts: BTreeMap<DeclarationId, nir::type_aliases::Contract>,
     enums: BTreeMap<DeclarationId, n::Enum>,

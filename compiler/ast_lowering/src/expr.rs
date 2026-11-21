@@ -1399,6 +1399,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 | NodeKind::CaseDef
                 | NodeKind::NewtypeDef
                 | NodeKind::ConstDef
+                | NodeKind::StaticDef
                 | NodeKind::TestDef
                 | NodeKind::TestTemplateDef
                 | NodeKind::TestTemplateInstance => {
@@ -1484,6 +1485,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                 | NodeKind::CaseDef
                                 | NodeKind::NewtypeDef
                                 | NodeKind::ConstDef
+                                | NodeKind::StaticDef
                                 | NodeKind::TestDef
                                 | NodeKind::TestTemplateDef
                                 | NodeKind::TestTemplateInstance

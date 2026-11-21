@@ -112,6 +112,7 @@ impl Parser<'_> {
                 TokenKind::Effect => p.try_effect(),
                 TokenKind::Typealias => p.try_typealias(),
                 TokenKind::Newtype => p.try_newtype(),
+                TokenKind::Static => p.try_static_def(),
                 TokenKind::Case => p.try_case(),
                 TokenKind::Test => p.try_test(),
                 TokenKind::Template => p.try_test_template(),

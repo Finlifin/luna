@@ -81,6 +81,7 @@ fn is_definition_only_node_kind(kind: NodeKind) -> bool {
             | NodeKind::CaseDef
             | NodeKind::TypealiasDef
             | NodeKind::NewtypeDef
+            | NodeKind::StaticDef
             | NodeKind::ModuleDef
             | NodeKind::ModStatement
             | NodeKind::TestDef

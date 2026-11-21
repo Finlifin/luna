@@ -215,6 +215,9 @@ impl Infer<'_, '_> {
             if matches!(target.root, PointerRoot::ConstGlobal(_)) {
                 return Err("cannot write through a pointer to a global constant".into());
             }
+            if matches!(target.root, PointerRoot::StaticGlobal(_)) {
+                continue;
+            }
             let PointerRoot::Local { binding, storage } = target.root else {
                 return Err("external code store requires a callable transition contract".into());
             };
@@ -297,6 +300,9 @@ impl Infer<'_, '_> {
         for target in targets {
             if matches!(target.root, PointerRoot::ConstGlobal(_)) {
                 return Err("cannot write through a pointer to a global constant".into());
+            }
+            if matches!(target.root, PointerRoot::StaticGlobal(_)) {
+                continue;
             }
             let PointerRoot::Local { binding, storage } = target.root else {
                 return Err("pointer store or owned write requires a richer contract".into());

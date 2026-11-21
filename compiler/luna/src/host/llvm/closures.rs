@@ -309,7 +309,7 @@ fn collect_env_expr_locals(
         | K::AnonymousField { value: inner, .. } => {
             collect_env_expr_locals(inner, out, fuel, depth + 1)
         }
-        K::ConstAddress { .. } | K::Literal(_) | K::Unit => Ok(()),
+        K::ConstAddress { .. } | K::StaticAddress(_) | K::Literal(_) | K::Unit => Ok(()),
         _ => Err("host cleanup environment argument requires a pure expression".into()),
     }
 }

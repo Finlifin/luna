@@ -155,7 +155,7 @@ impl Walker<'_> {
                         })?
                         .map(|target| (state.frame, vec![target]));
             }
-            K::ConstAddress { .. } => {}
+            K::ConstAddress { .. } | K::StaticAddress(_) => {}
             K::PointerField {
                 pointer,
                 declaration,

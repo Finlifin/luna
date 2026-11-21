@@ -1490,6 +1490,8 @@ pub enum ExprKind {
         declaration: DeclarationId,
         value: Box<Expr>,
     },
+    /// Address global runtime static storage.
+    StaticAddress(DeclarationId),
     ReadPointer(Box<Expr>),
     PointerAnonymousField {
         pointer: Box<Expr>,
@@ -2232,6 +2234,14 @@ impl fmt::Display for TraitRequirement {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct Static {
+    pub declaration: DeclarationId,
+    pub name: String,
+    pub ty: Term,
+    pub initializer: Option<Expr>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
     pub refinements: crate::refinements::Refinements,
@@ -2287,6 +2297,7 @@ pub struct Package {
     pub newtypes: Vec<crate::newtypes::Newtype>,
     pub alias_contracts: Vec<crate::type_aliases::Contract>,
     pub enums: Vec<Enum>,
+    pub statics: Vec<Static>,
     pub definition_attributes: DefinitionAttributes,
     pub volatile_storage: VolatileStorage,
     pub match_plans: MatchPlans,
@@ -3838,6 +3849,7 @@ impl fmt::Display for ExprKind {
             Self::ConstAddress { declaration, value } => {
                 write!(f, "(const-address (declaration {declaration}) {value})")
             }
+            Self::StaticAddress(declaration) => write!(f, "(static-address {declaration})"),
             Self::ReadPointer(pointer) => write!(f, "(read-pointer (pointer {pointer}))"),
             Self::PointerAnonymousField {
                 pointer,
@@ -4976,7 +4988,8 @@ impl Expr {
             | ExprKind::OptionalAbsent
             | ExprKind::Unit
             | ExprKind::Break(_)
-            | ExprKind::Continue(_) => {}
+            | ExprKind::Continue(_)
+            | ExprKind::StaticAddress(_) => {}
         }
         Ok(())
     }
@@ -5409,6 +5422,11 @@ pub fn pointer_operation_error_in(
         K::ConstAddress { value, .. } => {
             if expr.ty != Term::Pointer(Box::new(value.ty.clone())) {
                 return Some("const-address type disagrees with pointee");
+            }
+        }
+        K::StaticAddress(_) => {
+            if !matches!(expr.ty, Term::Pointer(_)) {
+                return Some("static-address must have pointer type");
             }
         }
         K::AddressOf(place) => {

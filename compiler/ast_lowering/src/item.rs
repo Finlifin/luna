@@ -361,6 +361,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             NodeKind::ConstDef => self.lower_const_def(node),
             // TODO: parser还不是能很好地区分ConstDef和ConstDecl，先将两者都当成ConstDef来处理，后续再完善parser以区分两者
             NodeKind::ConstDecl => self.lower_const_def(node),
+            NodeKind::StaticDef => self.lower_static_def(node),
 
             // Visibility modified definitions, TODO: handle the visibility modifier properly instead of just skipping it
             NodeKind::Pub | NodeKind::Private => self.lower_top_level_node(children[0]),
@@ -1221,6 +1222,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     | NodeKind::EnumDef
                     | NodeKind::ConstDef
                     | NodeKind::ConstDecl
+                    | NodeKind::StaticDef
                     | NodeKind::ImplDef
                     | NodeKind::ImplTraitDef,
                 ) => {
@@ -1241,6 +1243,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                     | NodeKind::NormalFormHeadDef
                                     | NodeKind::ConstDef
                                     | NodeKind::ConstDecl
+                                    | NodeKind::StaticDef
                             )
                         )
                     }) =>
@@ -1261,6 +1264,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                     | NodeKind::EnumDef
                                     | NodeKind::ConstDef
                                     | NodeKind::ConstDecl
+                                    | NodeKind::StaticDef
                                     | NodeKind::ImplDef
                                     | NodeKind::ImplTraitDef
                             )
@@ -1592,7 +1596,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     | NodeKind::StructDef
                     | NodeKind::EnumDef
                     | NodeKind::ConstDef
-                    | NodeKind::ConstDecl,
+                    | NodeKind::ConstDecl
+                    | NodeKind::StaticDef,
                 ) => {
                     let owner = self.lower_top_level_node(elem);
                     nested_items.push(owner);
@@ -1611,6 +1616,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                     | NodeKind::NormalFormHeadDef
                                     | NodeKind::ConstDef
                                     | NodeKind::ConstDecl
+                                    | NodeKind::StaticDef
                             )
                         )
                     }) =>
@@ -1630,6 +1636,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                     | NodeKind::EnumDef
                                     | NodeKind::ConstDef
                                     | NodeKind::ConstDecl
+                                    | NodeKind::StaticDef
                             )
                         )
                     }) =>
@@ -1900,6 +1907,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     | NodeKind::NewtypeDef
                     | NodeKind::ConstDef
                     | NodeKind::ConstDecl
+                    | NodeKind::StaticDef
                     | NodeKind::StructDef
                     | NodeKind::EnumDef
                     | NodeKind::TraitDef
@@ -2598,6 +2606,57 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             owner_id,
             ident,
             kind: ItemKind::Const(type_expr, value_expr),
+            span,
+        };
+        let item_ref = self.arena.alloc_item(item);
+        self.package.insert_owner(
+            owner_id,
+            OwnerInfo {
+                node: OwnerNode::Item(item_ref),
+                nodes: OwnerNodes::new(),
+            },
+        );
+
+        self.current_owner = prev_owner;
+        owner_id
+    }
+
+    fn lower_static_def(&mut self, node: NodeIndex) -> OwnerId {
+        let Some((NodeKind::StaticDef, span, children)) = self.ast.get_node(node) else {
+            unreachable!("invalid static def node or no such node index {:?}", node);
+        };
+
+        let id_node = children[0];
+        let type_node = children[1];
+        let init_node = children[2];
+
+        let owner_id = self.package.alloc_owner_id();
+        let prev_owner = self.current_owner;
+        self.current_owner = owner_id;
+        self.ensure_owner_counter();
+
+        let ident = self.node_to_ident(id_node);
+        if let Ok(binding) = self.resolve_declared(ident) {
+            if let resolve::BindingKind::Definition(definition, _) = binding.kind {
+                self.package.bind_definition(definition, owner_id);
+            }
+        }
+        let type_expr = self
+            .arena
+            .alloc_expr(self.lower_expr(ExprContext::Type, type_node));
+        let init_expr = if init_node != 0 {
+            Some(
+                self.arena
+                    .alloc_expr(self.lower_expr(ExprContext::ConstDefValue, init_node)),
+            )
+        } else {
+            None
+        };
+
+        let item = Item {
+            owner_id,
+            ident,
+            kind: ItemKind::Static(type_expr, init_expr),
             span,
         };
         let item_ref = self.arena.alloc_item(item);

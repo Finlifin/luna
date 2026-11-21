@@ -321,6 +321,7 @@ impl<'a> Formatter<'a> {
                 self.format_typealias_or_newtype(inner_node, kind, inner_slot)
             }
             NodeKind::ConstDef => self.format_const_def(inner_node, inner_slot),
+            NodeKind::StaticDef => self.format_static_def(inner_node, inner_slot),
             NodeKind::TestDef => {
                 let ch = self.parsed.ast.get_children(inner_node);
                 let id = ch[0];
@@ -1557,6 +1558,60 @@ impl<'a> Formatter<'a> {
             Doc::group(Doc::concat([
                 Doc::str("const "),
                 Doc::text(id_str),
+                ty_doc,
+                Doc::str(" ="),
+                Doc::indent(tab, Doc::concat([Doc::Line, init_doc])),
+            ]))
+        };
+        (doc, ends_b)
+    }
+
+    fn format_static_def(&mut self, node: NodeIndex, slot: TokenSlot) -> (Doc, bool) {
+        let ch = self.parsed.ast.get_children(node);
+        let id_str = self.decode_id(ch[0], slot.first + 1);
+        let ty = ch[1];
+        let init = ch[2];
+
+        let mut cursor = slot.first + 2;
+        let colon_tok = self
+            .parsed
+            .find_depth_zero_token(cursor, slot.last, |k| k == TokenKind::Colon, false)
+            .unwrap_or(cursor);
+        let ty_slot = slot.child_slot_from(self.parsed, colon_tok + 1, ty);
+        cursor = ty_slot.last + 1;
+        let ty_doc = self.format_expr(ty, ty_slot);
+
+        if init == 0 {
+            let doc = Doc::concat([
+                Doc::str("static "),
+                Doc::text(id_str),
+                Doc::str(": "),
+                ty_doc,
+            ]);
+            return (doc, false);
+        }
+
+        let eq_tok = self
+            .parsed
+            .find_depth_zero_token(cursor, slot.last, |k| k == TokenKind::Eq, false)
+            .unwrap_or(cursor);
+        let init_slot = slot.child_slot_from(self.parsed, eq_tok + 1, init);
+        let (init_doc, ends_b) = self.format_expr_with_rbrace(init, init_slot);
+        let tab = self.tab_spaces();
+        let doc = if ends_b {
+            Doc::concat([
+                Doc::str("static "),
+                Doc::text(id_str),
+                Doc::str(": "),
+                ty_doc,
+                Doc::str(" = "),
+                init_doc,
+            ])
+        } else {
+            Doc::group(Doc::concat([
+                Doc::str("static "),
+                Doc::text(id_str),
+                Doc::str(": "),
                 ty_doc,
                 Doc::str(" ="),
                 Doc::indent(tab, Doc::concat([Doc::Line, init_doc])),

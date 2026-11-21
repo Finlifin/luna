@@ -236,6 +236,7 @@ pub struct Package {
     pub volatile_storage: nir::program::VolatileStorage,
     /// Compiled pattern-matching decision DAGs and list-view metadata keyed by `(function, source)`.
     pub match_plans: nir::match_plan::MatchPlans,
+    pub statics: Vec<nir::program::Static>,
 }
 
 impl Package {

@@ -1807,6 +1807,58 @@ impl Parser<'_> {
         })
     }
 
+    // static id : expr (= expr)?
+    pub fn try_static_def(&mut self) -> ParseResult {
+        self.scoped_with_expected_prefix(TokenKind::Static.as_ref(), |p| {
+            p.eat_tokens(1); // eat 'static'
+            let id = p.try_id()?;
+            if id == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "expected an identifier after `static`".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            if !p.eat_token(TokenKind::Colon) {
+                return Err(ParseError::unexpected_token(
+                    TokenKind::Colon,
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            let ty = p.try_expr_without_extended_call()?;
+            if ty == 0 {
+                return Err(ParseError::invalid_syntax(
+                    "expected a type after `:` in static definition".to_string(),
+                    p.peek_next_token().kind,
+                    p.next_token_span(),
+                ));
+            }
+
+            let init = if p.eat_token(TokenKind::Eq) {
+                let expr = p.try_expr()?;
+                if expr == 0 {
+                    return Err(ParseError::invalid_syntax(
+                        "expected an expression after `=` in static definition".to_string(),
+                        p.peek_next_token().kind,
+                        p.next_token_span(),
+                    ));
+                }
+                expr
+            } else {
+                0
+            };
+
+            Ok(NodeBuilder::new(NodeKind::StaticDef, p.current_span())
+                .add_single_child(id)
+                .add_single_child(ty)
+                .add_single_child(init)
+                .build(&mut p.ast))
+        })
+    }
+
     // typealias id ( <param*> )? = type_expr
     pub fn try_typealias(&mut self) -> ParseResult {
         self.scoped_with_expected_prefix(TokenKind::Typealias.as_ref(), |p| {

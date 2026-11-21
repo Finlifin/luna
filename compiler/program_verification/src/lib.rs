@@ -42,6 +42,27 @@ pub(crate) fn is_const_global_place(id: PlaceId) -> bool {
     (id.owner & (0b11u64 << 62)) == CONST_GLOBAL_OWNER_TAG
 }
 
+const STATIC_GLOBAL_OWNER_TAG: u64 = 1u64 << 63;
+
+const STATIC_GLOBAL_HASHED_OWNER_TAG: u64 = (1u64 << 63) | (1u64 << 61);
+
+pub(crate) fn static_global_place(declaration: nir::DeclarationId) -> PlaceId {
+    let owner = if declaration.package <= u64::from(u32::MAX) {
+        STATIC_GLOBAL_OWNER_TAG | declaration.package
+    } else {
+        let folded = (declaration.package ^ (declaration.package >> 32)) & 0xFFFF_FFFF;
+        STATIC_GLOBAL_HASHED_OWNER_TAG | folded
+    };
+    PlaceId {
+        owner,
+        local: declaration.local,
+    }
+}
+
+pub(crate) fn is_static_global_place(id: PlaceId) -> bool {
+    (id.owner & (0b11u64 << 62)) == STATIC_GLOBAL_OWNER_TAG
+}
+
 use type_resolution::{associated, capabilities, implementation, ptc};
 
 /// Reusable package-scoped verification caches retained across fixpoint rounds

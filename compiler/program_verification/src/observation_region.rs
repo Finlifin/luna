@@ -99,6 +99,7 @@ fn reachable(
 fn packet(ty: &Term, package: &Package) -> bool {
     matches!(ty,Term::Nominal {declaration,..} if package.internal_return_packets.contains(declaration))
 }
+
 fn value(ty: &Term, package: &Package, fuel: &mut usize) -> Result<bool, String> {
     if matches!(ty, Term::Primitive(_)) && nir::program::intrinsic_pointer_value(ty)
         || matches!(
@@ -178,6 +179,7 @@ fn pattern_locals(
     }
     Ok(())
 }
+
 pub(super) fn check(
     expr: &Expr,
     package: &Package,
@@ -254,6 +256,7 @@ pub(super) fn check(
             | K::AnonymousField { .. }
             | K::AddressOf(_)
             | K::ConstAddress { .. }
+            | K::StaticAddress(_)
             | K::ReadPointer(_)
             | K::PointerField { .. }
             | K::PointerAnonymousField { .. }

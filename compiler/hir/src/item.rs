@@ -86,6 +86,7 @@ pub enum ItemKind<'hir> {
     ),
     Use(UsePath<'hir>),
     Const(&'hir Expr<'hir>, &'hir Expr<'hir>),
+    Static(&'hir Expr<'hir>, Option<&'hir Expr<'hir>>),
     Invalid,
 }
 
@@ -391,6 +392,7 @@ pub enum DefKind {
     Newtype,
     Use,
     Const,
+    Static,
     Invalid,
 }
 
@@ -415,6 +417,7 @@ impl DefKind {
             ItemKind::Newtype(..) => DefKind::Newtype,
             ItemKind::Use(..) => DefKind::Use,
             ItemKind::Const(..) => DefKind::Const,
+            ItemKind::Static(..) => DefKind::Static,
             ItemKind::Invalid => DefKind::Invalid,
         }
     }

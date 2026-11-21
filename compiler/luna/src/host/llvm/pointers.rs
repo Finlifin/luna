@@ -118,6 +118,46 @@ impl Emitter<'_> {
         })
     }
 
+    pub(super) fn static_address(
+        &mut self,
+        declaration: nir::DeclarationId,
+    ) -> Result<Value, String> {
+        if !self.checked {
+            return Err("host data pointers require paired Copy/Drop resource verification".into());
+        }
+        let static_def = self
+            .graph
+            .statics
+            .iter()
+            .find(|s| s.declaration == declaration)
+            .cloned()
+            .ok_or_else(|| format!("missing static declaration {declaration}"))?;
+        let pointer_bits = self.graph.target.map_or(64, |t| t.pointer_bits());
+        let (llvm_ty, llvm_init, align) = if let Some(init) = &static_def.initializer {
+            let const_val = self.const_eval(init, &BTreeMap::new(), 0)?;
+            const_val.to_llvm_global(pointer_bits, self.fuel)?
+        } else {
+            let ty = repr(self.graph, &static_def.ty, self.checked)?;
+            let layout = ty.storage_layout_at(pointer_bits, 0, self.fuel)?;
+            if ty == Ty::Unit || layout.size == 0 {
+                ("i8".into(), "0".into(), 1)
+            } else {
+                (ty.llvm(), "zeroinitializer".into(), layout.align)
+            }
+        };
+        let symbol = format!(
+            "flurry_static_{}_{}",
+            declaration.package, declaration.local
+        );
+        self.declarations.insert(format!(
+            "@{symbol} = internal global {llvm_ty} {llvm_init}, align {align}"
+        ));
+        Ok(Value {
+            ty: Ty::Pointer,
+            text: format!("@{symbol}"),
+        })
+    }
+
     fn const_eval(
         &mut self,
         expr: &Expr,
@@ -250,6 +290,18 @@ impl Emitter<'_> {
                     return Err("host constant address representation mismatch".into());
                 }
                 let ptr = self.const_address(*declaration, value)?;
+                Ok(ConstValue::Atom {
+                    ty: Ty::Pointer,
+                    llvm_ty: "ptr".into(),
+                    llvm_init: ptr.text,
+                    zero_sized: false,
+                })
+            }
+            K::StaticAddress(declaration) => {
+                if ty != Ty::Pointer {
+                    return Err("host static address representation mismatch".into());
+                }
+                let ptr = self.static_address(*declaration)?;
                 Ok(ConstValue::Atom {
                     ty: Ty::Pointer,
                     llvm_ty: "ptr".into(),

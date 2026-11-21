@@ -6039,6 +6039,7 @@ impl Walker<'_> {
         match &expr.kind {
             K::AddressOf(_)
             | K::ConstAddress { .. }
+            | K::StaticAddress(_)
             | K::PointerField { .. }
             | K::PointerAnonymousField { .. }
             | K::ReadPointer(_) => self.pointer_read_expression(expr, state, depth),

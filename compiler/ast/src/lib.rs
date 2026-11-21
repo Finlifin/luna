@@ -471,6 +471,8 @@ pub enum NodeKind {
     NewtypeDef, // a, N, b
     // const id (: expr)? = expr
     ConstDef, // a, b, c
+    // static id : expr (= expr)?
+    StaticDef, // a, b, c
 
     // mod id { (definition | statement)* }
     ModuleDef, // a, b
@@ -898,6 +900,7 @@ impl NodeKind {
             TypealiasDef,
             NewtypeDef,
             ConstDef,
+            StaticDef,
             ModuleDef,
             TestDef,
             TestTemplateDef,
@@ -1120,6 +1123,7 @@ impl NodeKind {
 
             // Triple children (a, b, c)
             ConstDef
+            | StaticDef
             | TestTemplateInstance
             | FunctionTemplateInstance
             | IfStatement

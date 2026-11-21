@@ -81,6 +81,7 @@ pub(super) fn charge_world_tables(
         enums,
         volatile_storage,
         match_plans,
+        statics: _,
         global_runtime_deliveries,
     } = package;
     let cost = [

@@ -397,7 +397,8 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
             | K::Continue(_)
             | K::Function(_)
             | K::FunctionInstance { .. }
-            | K::TraitMethod { .. } => {}
+            | K::TraitMethod { .. }
+            | K::StaticAddress(_) => {}
         },
     }
     Ok(())

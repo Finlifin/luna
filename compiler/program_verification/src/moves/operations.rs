@@ -46,6 +46,12 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 }
                 self.ensure_const_global(flow, *declaration, &value.ty, source)?;
             }
+            K::StaticAddress(declaration) => {
+                let Term::Pointer(pointee) = &expr.ty else {
+                    return Err(error(source, "static address must have pointer type"));
+                };
+                self.ensure_static_global(flow, *declaration, pointee, source)?;
+            }
             K::PointerAnonymousField { .. } | K::PointerField { .. } => {
                 self.evaluate_pointer_value(expr, flow, depth + 1)?;
             }

@@ -294,6 +294,7 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::CheckTypeAlias { .. }
         | K::AddressOf(_)
         | K::ConstAddress { .. }
+        | K::StaticAddress(_)
         | K::ReadPointer(_)
         | K::PointerAnonymousField { .. }
         | K::PointerField { .. }

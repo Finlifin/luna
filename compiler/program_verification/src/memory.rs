@@ -97,6 +97,7 @@ enum PointerRoot {
     Parameter(usize),
     Local { binding: LocalId, storage: usize },
     ConstGlobal(DeclarationId),
+    StaticGlobal(DeclarationId),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -218,6 +219,7 @@ impl fmt::Display for PointerPlace {
                 write!(f, "(local (binding {binding}) (storage {storage}))")?
             }
             PointerRoot::ConstGlobal(declaration) => write!(f, "(const-global {declaration})")?,
+            PointerRoot::StaticGlobal(declaration) => write!(f, "(static-global {declaration})")?,
         }
         f.write_str(")")?;
         if !self.input_fields.is_empty() {
@@ -4858,6 +4860,13 @@ impl<'a> Infer<'a, '_> {
                     fields: vec![],
                 }])))
             }
+            K::StaticAddress(declaration) => Ok(Some(BTreeSet::from([PointerPlace {
+                root: PointerRoot::StaticGlobal(*declaration),
+                input_fields: vec![],
+                through: vec![],
+                conditions: BTreeMap::new(),
+                fields: vec![],
+            }]))),
             K::Local(id) => {
                 // Charge before copying potentially large alternatives.
                 if let Some(Some(targets)) = self.environment.pointers.get(id) {
@@ -5090,6 +5099,9 @@ impl<'a> Infer<'a, '_> {
                 if write {
                     return Err("cannot write through a pointer to a global constant".into());
                 }
+                continue;
+            }
+            if matches!(target.root, PointerRoot::StaticGlobal(_)) {
                 continue;
             }
             if let PointerRoot::Local { binding, storage } = target.root {
