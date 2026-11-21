@@ -30,9 +30,22 @@ fn lower_package_ast(db: &Db) -> Arc<HirPackageBox> {
     let diag_ctx = input.diag_ctx();
 
     Arc::new(HirPackageBox::new(|arena| {
-        let mut resolver = Resolver::new(&input.module_tree);
-
         let mut package = Package::new();
+        for (file_id, ast, scope) in &input.prefix_files {
+            let mut resolver = Resolver::new(&input.module_tree);
+            crate::lower_to_hir(
+                ast,
+                *file_id,
+                arena,
+                source_map,
+                diag_ctx,
+                &mut package,
+                &mut resolver,
+                *scope,
+            );
+        }
+
+        let mut resolver = Resolver::new(&input.module_tree);
         crate::lower_to_hir(
             input.ast(),
             input.file_id(),

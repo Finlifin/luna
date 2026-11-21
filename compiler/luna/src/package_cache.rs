@@ -2204,6 +2204,13 @@ pub fn global_verified_cache() -> &'static MemoryPackageCache<VerifiedUpstreamCe
     CACHE.get_or_init(|| MemoryPackageCache::new(64))
 }
 
+pub fn global_elaborated_cache()
+-> &'static MemoryPackageCache<elaboration::program::CachedUpstreamBodies> {
+    static CACHE: OnceLock<MemoryPackageCache<elaboration::program::CachedUpstreamBodies>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| MemoryPackageCache::new(32))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

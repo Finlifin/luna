@@ -320,6 +320,20 @@ impl Protocols {
     }
 }
 
+/// Pre-elaborated NIR function body and whether it is an ordinary behavior
+/// witness for a pure function template (`checker.ordinary_behavior_functions`).
+#[derive(Clone, Debug)]
+pub struct CachedUpstreamFunction {
+    pub function: n::Function,
+    pub is_template_behavior: bool,
+}
+
+/// Side-effect-free elaborated upstream function bodies reusable across compiles.
+#[derive(Clone, Debug, Default)]
+pub struct CachedUpstreamBodies {
+    pub functions: BTreeMap<DeclarationId, CachedUpstreamFunction>,
+}
+
 /// Controls incremental upstream skip gates and multi-threaded verification.
 #[derive(Clone, Debug, Default)]
 pub struct IncrementalOptions {
@@ -327,6 +341,11 @@ pub struct IncrementalOptions {
     /// already passed contract inheritance, purity, and machine-flow checks in
     /// the upstream base.
     pub verified_upstream_packages: BTreeSet<u64>,
+    /// Pre-elaborated source function bodies for verified upstream declarations.
+    pub cached_upstream_bodies: Option<std::sync::Arc<CachedUpstreamBodies>>,
+    /// Semantic upstream package identities whose side-effect-free function bodies
+    /// may be recorded for reuse after all checks succeed.
+    pub record_upstream_packages: BTreeSet<u64>,
     /// Worker count for parallel verification passes (`None` uses default).
     pub jobs: Option<usize>,
 }
@@ -367,8 +386,25 @@ pub fn elaborate_packages_incremental(
     target: Option<nir::target::TargetData>,
     incremental: &IncrementalOptions,
 ) -> Result<n::Package, Error> {
+    elaborate_packages_incremental_with_cache(
+        package,
+        package_identities,
+        protocols,
+        target,
+        incremental,
+    )
+    .map(|(program, _)| program)
+}
+
+pub fn elaborate_packages_incremental_with_cache(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+    target: Option<nir::target::TargetData>,
+    incremental: &IncrementalOptions,
+) -> Result<(n::Package, Option<CachedUpstreamBodies>), Error> {
     let mut invocation_steps = default_elaboration_steps(package_identities.len());
-    elaborate_packages_with_invocation_budget_incremental(
+    elaborate_packages_with_invocation_budget_incremental_with_cache(
         package,
         package_identities,
         protocols,
@@ -406,6 +442,25 @@ pub fn elaborate_packages_with_invocation_budget_incremental(
     invocation_steps: &mut u64,
     incremental: &IncrementalOptions,
 ) -> Result<n::Package, Error> {
+    elaborate_packages_with_invocation_budget_incremental_with_cache(
+        package,
+        package_identities,
+        protocols,
+        target,
+        invocation_steps,
+        incremental,
+    )
+    .map(|(program, _)| program)
+}
+
+pub fn elaborate_packages_with_invocation_budget_incremental_with_cache(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+    target: Option<nir::target::TargetData>,
+    invocation_steps: &mut u64,
+    incremental: &IncrementalOptions,
+) -> Result<(n::Package, Option<CachedUpstreamBodies>), Error> {
     elaborate_with_attributes_incremental(
         package,
         package_identities,
@@ -415,7 +470,7 @@ pub fn elaborate_packages_with_invocation_budget_incremental(
         invocation_steps,
         incremental,
     )
-    .map(|(program, _)| program)
+    .map(|(program, _, cache)| (program, cache))
 }
 
 enum ElaborationMode<'r> {
@@ -444,6 +499,7 @@ fn elaborate_with_attributes(
         invocation_steps,
         &IncrementalOptions::default(),
     )
+    .map(|(program, attrs, _)| (program, attrs))
 }
 
 fn elaborate_with_attributes_incremental(
@@ -454,7 +510,14 @@ fn elaborate_with_attributes_incremental(
     inspect_attributes: bool,
     invocation_steps: &mut u64,
     incremental: &IncrementalOptions,
-) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
+) -> Result<
+    (
+        n::Package,
+        Vec<attributes::EvaluatedAttribute>,
+        Option<CachedUpstreamBodies>,
+    ),
+    Error,
+> {
     let mode = if inspect_attributes {
         ElaborationMode::InspectAttributes
     } else {
@@ -479,7 +542,14 @@ fn elaborate_in_mode(
     mode: ElaborationMode<'_>,
     invocation_steps: &mut u64,
     incremental: &IncrementalOptions,
-) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
+) -> Result<
+    (
+        n::Package,
+        Vec<attributes::EvaluatedAttribute>,
+        Option<CachedUpstreamBodies>,
+    ),
+    Error,
+> {
     if package
         .pending_semantics
         .iter()
@@ -815,6 +885,59 @@ fn elaborate_in_mode(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct BodySideState {
+    next_temporary_binding: u32,
+    next_runtime_id: u32,
+    definition_identity_next: u32,
+    generated_functions: (u32, usize, usize),
+    structs: usize,
+    enums: usize,
+    newtypes: usize,
+    alias_contracts: usize,
+    computed_scalar_packets: usize,
+    code_packet_nominals: usize,
+    expansion_sources: usize,
+    runtime_domains: usize,
+    global_runtime_deliveries: usize,
+    pending_default_stability: usize,
+    pending_predicate_stability: usize,
+    refinements: usize,
+    volatile_storage: usize,
+    observed_associated_types: usize,
+    delivered_types: usize,
+    constants: usize,
+    ordinary_behavior_functions: usize,
+    default_behavior_functions: usize,
+}
+
+fn checker_body_side_state(checker: &Checker<'_, '_>) -> BodySideState {
+    BodySideState {
+        next_temporary_binding: checker.next_temporary_binding,
+        next_runtime_id: checker.next_runtime_id,
+        definition_identity_next: checker.definition_identities.next(),
+        generated_functions: checker.generated_functions.snapshot_counts(),
+        structs: checker.structs.len(),
+        enums: checker.enums.len(),
+        newtypes: checker.newtypes.len(),
+        alias_contracts: checker.alias_contracts.len(),
+        computed_scalar_packets: checker.computed_scalar_packets.len(),
+        code_packet_nominals: checker.code_packet_nominals.len(),
+        expansion_sources: checker.expansion_sources.len(),
+        runtime_domains: checker.runtime_domains.len(),
+        global_runtime_deliveries: checker.global_runtime_deliveries.len(),
+        pending_default_stability: checker.pending_default_stability.len(),
+        pending_predicate_stability: checker.pending_predicate_stability.len(),
+        refinements: checker.refinements.len(),
+        volatile_storage: checker.volatile_storage.entry_count(),
+        observed_associated_types: checker.observed_associated_types.len(),
+        delivered_types: checker.delivered_types.len(),
+        constants: checker.constants.len(),
+        ordinary_behavior_functions: checker.ordinary_behavior_functions.len(),
+        default_behavior_functions: checker.default_behavior_functions.len(),
+    }
+}
+
 fn elaborate_candidate<'a, 'h>(
     checker: &mut Checker<'a, 'h>,
     package: &'a hir::Package<'h>,
@@ -822,7 +945,14 @@ fn elaborate_candidate<'a, 'h>(
     target: Option<nir::target::TargetData>,
     mode: ElaborationMode<'_>,
     incremental: &IncrementalOptions,
-) -> Result<(n::Package, Vec<attributes::EvaluatedAttribute>), Error> {
+) -> Result<
+    (
+        n::Package,
+        Vec<attributes::EvaluatedAttribute>,
+        Option<CachedUpstreamBodies>,
+    ),
+    Error,
+> {
     // Register all declaration telescopes before interpreting interface arguments.
     for (owner, info) in package.owners() {
         if matches!(&info.node.expect_item().kind, ItemKind::Fn(sig, _) if sig.modifiers.is_test_template)
@@ -1148,6 +1278,7 @@ fn elaborate_candidate<'a, 'h>(
                     ..Default::default()
                 },
                 Vec::new(),
+                None,
             ));
         }
     };
@@ -1167,6 +1298,7 @@ fn elaborate_candidate<'a, 'h>(
                 ..Default::default()
             },
             prepared_attributes,
+            None,
         ));
     }
     checker.checked_implementations = checker.check_interfaces()?;
@@ -1422,6 +1554,23 @@ fn elaborate_candidate<'a, 'h>(
         .into_iter()
         .chain(std::mem::take(&mut checker.signature_type_uses))
     {
+        if !incremental.verified_upstream_packages.is_empty()
+            && let Some(owner) = scope
+        {
+            let scope_decl = declaration(package, package_identities, owner);
+            let target_decl = declaration(package, package_identities, target);
+            if incremental
+                .verified_upstream_packages
+                .contains(&scope_decl.package)
+                && incremental
+                    .verified_upstream_packages
+                    .contains(&target_decl.package)
+                && checker.source_declarations.owner(scope_decl).is_some()
+                && checker.source_declarations.owner(target_decl).is_some()
+            {
+                continue;
+            }
+        }
         checker.signature_owner = scope;
         checker.context = match scope {
             Some(owner) if assume_requirements => checker.definition_context(owner),
@@ -1606,21 +1755,67 @@ fn elaborate_candidate<'a, 'h>(
     for owner in checker.data_consumers.keys().copied().collect::<Vec<_>>() {
         checker.check_data_consumer(owner)?;
     }
+    let mut recorded_bodies =
+        (!incremental.record_upstream_packages.is_empty()).then(CachedUpstreamBodies::default);
     for (owner, item, sig) in functions {
         if checker.open_functions.contains_key(&owner) {
             continue;
         }
+        let decl_id = declaration(package, package_identities, owner);
         let signature = checker.signatures[&owner].clone();
+        let template_behavior = sig.modifiers.is_function_template;
+        let skip_non_pure_template = template_behavior && !sig.modifiers.is_pure;
+        let eligible_upstream_decl =
+            !skip_non_pure_template && checker.source_declarations.owner(decl_id) == Some(owner);
+        if eligible_upstream_decl
+            && incremental
+                .verified_upstream_packages
+                .contains(&decl_id.package)
+            && let Some(cached_fn) = incremental
+                .cached_upstream_bodies
+                .as_ref()
+                .and_then(|cache| cache.functions.get(&decl_id))
+            && cached_fn.is_template_behavior == template_behavior
+            && cached_fn.function.declaration == decl_id
+            && cached_fn.function.interface.signature == signature
+        {
+            if template_behavior {
+                checker
+                    .ordinary_behavior_functions
+                    .push(cached_fn.function.clone());
+            } else {
+                output.functions.push(cached_fn.function.clone());
+            }
+            continue;
+        }
+        let should_record = recorded_bodies.is_some()
+            && eligible_upstream_decl
+            && incremental
+                .record_upstream_packages
+                .contains(&decl_id.package);
+        let before_state = should_record.then(|| checker_body_side_state(checker));
         let function = checker.check_source_function(
             owner,
             signature,
             function_bodies::SourceBody::Package,
             item.span,
         )?;
-        if sig.modifiers.is_function_template && !sig.modifiers.is_pure {
+        if let Some(expected_state) = before_state
+            && checker_body_side_state(checker) == expected_state
+            && let Some(cache) = recorded_bodies.as_mut()
+        {
+            cache.functions.insert(
+                decl_id,
+                CachedUpstreamFunction {
+                    function: function.clone(),
+                    is_template_behavior: template_behavior,
+                },
+            );
+        }
+        if skip_non_pure_template {
             continue;
         }
-        if sig.modifiers.is_function_template {
+        if template_behavior {
             checker.ordinary_behavior_functions.push(function);
         } else {
             output.functions.push(function);
@@ -1860,7 +2055,7 @@ fn elaborate_candidate<'a, 'h>(
         &output,
         &mut checker.required_steps,
     )?;
-    Ok((output, attributes))
+    Ok((output, attributes, recorded_bodies))
 }
 
 impl Checker<'_, '_> {

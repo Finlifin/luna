@@ -7,8 +7,8 @@ use crate::package_cache::{
     PackageSnapshotKey, Sha256, UpstreamKeyInputs, VerifiedUpstreamCertificate,
     compute_parsed_package_key, compute_upstream_key_with_jobs, decode_parsed_package,
     decode_verified_upstream, encode_parsed_package, encode_selectors_tag,
-    encode_verified_upstream, global_parsed_cache, global_verified_cache, parallel_map_ordered,
-    partition_closed_upstream,
+    encode_verified_upstream, global_elaborated_cache, global_parsed_cache, global_verified_cache,
+    parallel_map_ordered, partition_closed_upstream,
 };
 use diagnostic::FlurryError;
 use interface::{CompilerConfig, CompilerInstance, Session};
@@ -984,6 +984,28 @@ fn compile_packages_core(
         builtin,
     )
     .map_err(|error| format!("invalid package graph: {}", error.message()))?;
+    let caller_packages = packages;
+    let partition = partition_closed_upstream(packages, dependencies, primary);
+    let upstream_set: BTreeSet<u32> = partition.upstream.iter().copied().collect();
+    let reordered_packages = !partition.upstream.is_empty() && emit != Emit::Ast;
+    let ordered_packages: Vec<SourcePackage> = if reordered_packages {
+        let mut upstream_pkgs: Vec<SourcePackage> = packages
+            .iter()
+            .filter(|pkg| upstream_set.contains(&pkg.resolution_id))
+            .cloned()
+            .collect();
+        upstream_pkgs.sort_by_key(|pkg| pkg.resolution_id);
+        upstream_pkgs.extend(
+            packages
+                .iter()
+                .filter(|pkg| !upstream_set.contains(&pkg.resolution_id))
+                .cloned(),
+        );
+        upstream_pkgs
+    } else {
+        packages.to_vec()
+    };
+    let packages: &[SourcePackage] = &ordered_packages;
     // Ownership comes from the explicit package inputs, not incidental root
     // filenames found while walking another package's directory.
     let boundaries = parallel_map_ordered(packages, jobs, |package| -> Result<_, String> {
@@ -1118,6 +1140,13 @@ fn compile_packages_core(
     );
     let mut instance = CompilerInstance::new(&session);
     let mut inputs = Vec::with_capacity(packages.len());
+    #[derive(Default)]
+    struct PackageObserved {
+        sources: Vec<SourceInput>,
+        discovery: Option<SourceDiscovery>,
+        directories: Vec<(u32, PathBuf)>,
+    }
+    let mut observed_by_package: HashMap<u32, PackageObserved> = HashMap::new();
     for (package, read_pkg) in packages.iter().zip(parallel_reads) {
         let directory = package
             .entry
@@ -1146,9 +1175,10 @@ fn compile_packages_core(
                 .load_file(&package.entry)
                 .map_err(|e| format!("cannot read package {}: {e}", package.name))?
         };
-        if let Some(inputs) = observed.as_deref_mut() {
+        let mut pkg_obs = observed.is_some().then(PackageObserved::default);
+        if let Some(obs) = pkg_obs.as_mut() {
             if is_virtual.is_none() {
-                inputs.sources.push(SourceInput {
+                obs.sources.push(SourceInput {
                     resolution_id: package.resolution_id,
                     identity: package.identity,
                     path: cwd.join(&package.entry),
@@ -1166,8 +1196,8 @@ fn compile_packages_core(
         let root = vfs.add_file(filename.into(), source);
         vfs.selected_root = Some(root);
         if let Some(disc) = read_pkg.discovery {
-            if let Some(inputs) = observed.as_deref_mut() {
-                inputs.discovery.push(SourceDiscovery {
+            if let Some(obs) = pkg_obs.as_mut() {
+                obs.discovery = Some(SourceDiscovery {
                     resolution_id: package.resolution_id,
                     root: cwd.join(directory),
                     canonical_root: disc.canonical_root,
@@ -1175,10 +1205,9 @@ fn compile_packages_core(
                     files: disc.files,
                     directories: disc.directories.clone(),
                 });
-                inputs
-                    .directories
+                obs.directories
                     .push((package.resolution_id, cwd.join(directory)));
-                inputs.directories.extend(
+                obs.directories.extend(
                     disc.directories.iter().map(|relative| {
                         (package.resolution_id, cwd.join(directory).join(relative))
                     }),
@@ -1194,8 +1223,8 @@ fn compile_packages_core(
                     .source_map
                     .load_file(&directory.join(&relative))
                     .map_err(|e| e.to_string())?;
-                if let Some(inputs) = observed.as_deref_mut() {
-                    inputs.sources.push(SourceInput {
+                if let Some(obs) = pkg_obs.as_mut() {
+                    obs.sources.push(SourceInput {
                         resolution_id: package.resolution_id,
                         identity: package.identity,
                         path: cwd.join(directory).join(&relative),
@@ -1212,12 +1241,24 @@ fn compile_packages_core(
                 vfs.add_file(relative, source);
             }
         }
+        if let Some(obs) = pkg_obs {
+            observed_by_package.insert(package.resolution_id, obs);
+        }
         inputs.push((package.resolution_id, vfs));
     }
+    if let Some(inputs) = observed.as_deref_mut() {
+        for package in caller_packages {
+            if let Some(obs) = observed_by_package.remove(&package.resolution_id) {
+                inputs.sources.extend(obs.sources);
+                if let Some(discovery) = obs.discovery {
+                    inputs.discovery.push(discovery);
+                }
+                inputs.directories.extend(obs.directories);
+            }
+        }
+    }
 
-    // Closed-upstream partition + ParsedPackage AST cache lookup (memory LRU + `.flpkg`).
-    let partition = partition_closed_upstream(packages, dependencies, primary);
-    let upstream_set: BTreeSet<u32> = partition.upstream.iter().copied().collect();
+    // Closed-upstream ParsedPackage AST cache lookup (memory LRU + `.flpkg`).
     struct PendingParsedCache {
         pkg_idx: usize,
         key: PackageSnapshotKey,
@@ -1642,11 +1683,16 @@ fn compile_packages_core(
             let ast = vfs
                 .get_ast(local_file)
                 .ok_or("dependency AST was not parsed")?;
-            input.additional_files.push((
-                combined,
-                Arc::new(ast.clone()),
-                input.module_tree.file_scopes[&combined],
-            ));
+            let scope = input.module_tree.file_scopes[&combined];
+            if upstream_set.contains(id) {
+                input
+                    .prefix_files
+                    .push((combined, Arc::new(ast.clone()), scope));
+            } else {
+                input
+                    .additional_files
+                    .push((combined, Arc::new(ast.clone()), scope));
+            }
         }
     }
     ast_lowering::set_providers(&mut instance.db.providers);
@@ -1769,7 +1815,10 @@ fn compile_packages_core(
         && all_resolved_protocols_in(&protocols, &upstream_identities);
 
     let selector_tag = encode_selectors_tag(&selectors);
+    let mut upstream_cache_key: Option<PackageSnapshotKey> = None;
     let mut verified_publish_target: Option<(PackageSnapshotKey, Vec<u64>)> = None;
+    let mut cached_upstream_bodies = None;
+    let mut record_upstream_packages = BTreeSet::new();
     let verified_upstream_packages = if cache_enabled && upstream_verification_eligible {
         let (upstream_key, _) = compute_upstream_key_with_jobs(
             &UpstreamKeyInputs {
@@ -1786,6 +1835,7 @@ fn compile_packages_core(
             },
             jobs,
         )?;
+        upstream_cache_key = Some(upstream_key);
         let expected_sorted: Vec<u64> = upstream_identities.iter().copied().collect();
         let cached_cert = global_verified_cache()
             .get(upstream_key, ArtifactKind::VerifiedUpstream)
@@ -1803,27 +1853,49 @@ fn compile_packages_core(
             .as_ref()
             .is_some_and(|cert| cert.upstream_identities == expected_sorted)
         {
+            cached_upstream_bodies =
+                global_elaborated_cache().get(upstream_key, ArtifactKind::ElaboratedBase);
+            if cached_upstream_bodies.is_none() {
+                record_upstream_packages = upstream_identities.clone();
+            }
             upstream_identities
         } else {
             verified_publish_target = Some((upstream_key, expected_sorted));
+            record_upstream_packages = upstream_identities.clone();
             BTreeSet::new()
         }
     } else {
         BTreeSet::new()
     };
 
-    let nir = elaboration::program::elaborate_packages_incremental(
-        package,
-        &identities,
-        &protocols,
-        target,
-        &elaboration::program::IncrementalOptions {
-            verified_upstream_packages,
-            jobs: Some(jobs),
-        },
-    )
-    .map_err(|e| format!("multi-package elaboration failed: {e}"))?;
+    let (mut nir, recorded_bodies) =
+        elaboration::program::elaborate_packages_incremental_with_cache(
+            package,
+            &identities,
+            &protocols,
+            target,
+            &elaboration::program::IncrementalOptions {
+                verified_upstream_packages,
+                cached_upstream_bodies,
+                record_upstream_packages,
+                jobs: Some(jobs),
+            },
+        )
+        .map_err(|e| format!("multi-package elaboration failed: {e}"))?;
+    if reordered_packages {
+        reorder_nir_by_package_rank(&mut nir, caller_packages);
+    }
     crate::protocols::type_constructors::validate(&nir, &protocols)?;
+    if let Some(upstream_key) = upstream_cache_key
+        && let Some(bodies) = recorded_bodies
+        && !bodies.functions.is_empty()
+    {
+        global_elaborated_cache().insert(
+            upstream_key,
+            ArtifactKind::ElaboratedBase,
+            Arc::new(bodies),
+        );
+    }
     if let Some((upstream_key, upstream_sorted)) = verified_publish_target {
         let cert = VerifiedUpstreamCertificate {
             upstream_identities: upstream_sorted,
@@ -1863,6 +1935,43 @@ fn compile_packages_core(
         ));
     }
     Ok((CoreArtifact::Driver(Artifact::Nir(nir)), protocols))
+}
+
+/// Restores caller-specified package order across NIR item vectors after
+/// canonical upstream-first resolution/elaboration, without disturbing
+/// intra-package item order or `expansion_sources` indices.
+fn reorder_nir_by_package_rank(nir: &mut nir::program::Package, caller_packages: &[SourcePackage]) {
+    let rank: BTreeMap<u64, usize> = caller_packages
+        .iter()
+        .enumerate()
+        .map(|(index, pkg)| (pkg.identity, index))
+        .collect();
+    let pkg_rank = |pkg: u64| rank.get(&pkg).copied().unwrap_or(usize::MAX);
+    nir.tests.sort_by_key(|id| pkg_rank(id.package));
+    nir.functions
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
+    nir.structs
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
+    nir.enums
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
+    nir.newtypes
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
+    nir.traits
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
+    nir.implementations
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
+    nir.effects
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
+    nir.normal_forms
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
+    nir.quote_templates
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
+    nir.runtime_function_identities
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
+    nir.function_parameters
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
+    nir.alias_contracts
+        .sort_by_key(|item| pkg_rank(item.declaration.package));
 }
 
 pub(crate) fn protect_source_output(

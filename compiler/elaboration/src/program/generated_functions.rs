@@ -37,6 +37,10 @@ pub(super) struct GeneratedFunctions {
 }
 
 impl GeneratedFunctions {
+    pub(super) fn snapshot_counts(&self) -> (u32, usize, usize) {
+        (self.next, self.bodies.len(), self.reservations.len())
+    }
+
     pub(super) fn fresh_identity(&mut self, span: Span) -> Result<DeclarationId, Error> {
         let local = self.next;
         self.next = local

@@ -13,6 +13,8 @@ use rustc_span::SourceMap;
 pub struct HirQueryInput<'session> {
     /// Parsed AST of the source file.
     pub ast: Arc<Ast>,
+    /// Closed-upstream files lowered strictly before the primary package.
+    pub prefix_files: Vec<(vfs::FileId, Arc<Ast>, ScopeId)>,
     pub additional_files: Vec<(vfs::FileId, Arc<Ast>, ScopeId)>,
     /// Module/scope tree produced by name resolution.
     pub module_tree: Arc<ModuleTree>,
@@ -35,6 +37,7 @@ impl<'session> HirQueryInput<'session> {
     ) -> Self {
         Self {
             ast,
+            prefix_files: Vec::new(),
             additional_files: Vec::new(),
             file_id,
             module_tree,

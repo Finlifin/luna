@@ -3,10 +3,11 @@
 //! `--cache-dir`, `--no-cache`, `-j`/`--jobs`).
 
 use luna::cli::{self, Command};
+use luna::frontend::{self, Artifact};
 use luna::package_cache::{
     ArtifactKind, CachedParsedFile, CachedParsedPackage, DiskPackageCache, PackageSnapshotKey,
     Sha256, VerifiedUpstreamCertificate, decode_parsed_package, decode_verified_upstream,
-    encode_parsed_package, encode_verified_upstream,
+    encode_parsed_package, encode_verified_upstream, global_elaborated_cache,
 };
 use parse::ast::{Ast, NodeBuilder, NodeKind};
 use parse::parser::Parser;
@@ -819,4 +820,243 @@ fn cli_incremental_flags_validation_and_forwarding() {
             "accepted invalid args: {invalid:?}"
         );
     }
+}
+
+static ELAB_CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn parse_in_proc_nir_options(
+    input: &Path,
+    lib: &Path,
+    cache_dir: Option<&Path>,
+    no_cache: bool,
+) -> luna::cli::Options {
+    let mut args = vec![
+        "dump",
+        input.to_str().unwrap(),
+        "--emit",
+        "nir",
+        "--sysroot",
+        lib.to_str().unwrap(),
+        "--build-target",
+        "x86_64",
+        "linux",
+        "64",
+    ];
+    if let Some(dir) = cache_dir {
+        args.push("--cache-dir");
+        args.push(dir.to_str().unwrap());
+    }
+    if no_cache {
+        args.push("--no-cache");
+    }
+    let Command::Compile(opts) = cli::parse(args.into_iter().map(OsString::from)).unwrap() else {
+        panic!("expected Compile");
+    };
+    opts
+}
+
+#[test]
+fn in_process_elaborated_body_cache_reuses_upstream_bodies_with_exact_nir_parity() {
+    let _guard = ELAB_CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let ws = TempWorkspace::new("inproc-elab-parity");
+    let cache_dir = ws.path("cache");
+    let lib = repo_library();
+
+    let first_input = ws.write(
+        "first.fl",
+        "\
+use std.prelude.*;
+fn helper(x: u32) -> u32 where requires x < 1000 { x + 2 }
+fn main() -> bool { helper(40) == 42 }
+",
+    );
+    let second_input = ws.write(
+        "second.fl",
+        "\
+use std.prelude.*;
+struct ExtraBox { value: u32 }
+fn added_one(v: u32) -> u32 { v }
+fn added_two(v: u32) -> u32 where requires v < 1000 { v + 1 }
+fn helper(x: u32) -> u32 where requires x < 1000 { x + 8 }
+fn main() -> bool {
+    let b = ExtraBox { value: added_one(added_two(41)) };
+    let h = helper(34);
+    b.value == h
+}
+",
+    );
+
+    let before = global_elaborated_cache().stats();
+    let len_before = global_elaborated_cache().len();
+    let Artifact::Nir(first_nir) = frontend::compile(&parse_in_proc_nir_options(
+        &first_input,
+        &lib,
+        Some(&cache_dir),
+        false,
+    ))
+    .unwrap() else {
+        panic!("expected NIR");
+    };
+    let after_cold = global_elaborated_cache().stats();
+    assert_eq!(global_elaborated_cache().len(), len_before + 1);
+    assert_eq!(after_cold.hits, before.hits);
+
+    let Artifact::Nir(warm_nir) = frontend::compile(&parse_in_proc_nir_options(
+        &second_input,
+        &lib,
+        Some(&cache_dir),
+        false,
+    ))
+    .unwrap() else {
+        panic!("expected NIR");
+    };
+    let after_warm = global_elaborated_cache().stats();
+    assert_eq!(after_warm.hits, after_cold.hits + 1);
+
+    let Artifact::Nir(nocache_nir) =
+        frontend::compile(&parse_in_proc_nir_options(&second_input, &lib, None, true)).unwrap()
+    else {
+        panic!("expected NIR");
+    };
+    assert_eq!(
+        warm_nir.to_string(),
+        nocache_nir.to_string(),
+        "warm in-process elaborated cache NIR must match --no-cache identically"
+    );
+
+    let upstream_fns = |pkg: &nir::program::Package| -> Vec<(nir::DeclarationId, String)> {
+        pkg.functions
+            .iter()
+            .filter(|f| f.declaration.package != 0)
+            .map(|f| (f.declaration, f.name.clone()))
+            .collect()
+    };
+    assert_eq!(
+        upstream_fns(&first_nir),
+        upstream_fns(&warm_nir),
+        "upstream DeclarationIds must remain invariant across downstream additions"
+    );
+}
+
+#[test]
+fn in_process_elaborated_body_cache_invalidates_on_upstream_body_change() {
+    let _guard = ELAB_CACHE_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let ws = TempWorkspace::new("inproc-elab-inval");
+    let cache_dir = ws.path("cache");
+    let lib = ws.path("library");
+
+    let mk_builtin = |val: u8, body_safe: bool| {
+        if body_safe {
+            format!(
+                "\
+pub typealias u8 = .u8'builtin;
+pub typealias bool = .bool'builtin;
+pub mod prelude {{
+    pub use .bool;
+    pub use .u8;
+    pub use .upstream_val;
+    pub use .upstream_inc;
+}}
+pub pure fn upstream_val() -> u8 {{ {val} }}
+pub fn upstream_inc(x: u8) -> u8 where requires x < 200 {{ x + 1 }}
+"
+            )
+        } else {
+            "\
+pub typealias u8 = .u8'builtin;
+pub typealias bool = .bool'builtin;
+pub mod prelude {
+    pub use .bool;
+    pub use .u8;
+    pub use .upstream_val;
+    pub use .upstream_inc;
+}
+pub pure fn upstream_val() -> u8 { 10 }
+pub fn upstream_inc(x: u8) -> u8 { x + 1 }
+"
+            .to_string()
+        }
+    };
+
+    setup_minimal_sysroot(&ws, &mk_builtin(10, true));
+    let input1 = ws.write(
+        "input1.fl",
+        "fn main() -> u8 { let _ = upstream_inc(5); upstream_val() }",
+    );
+    let input2 = ws.write(
+        "input2.fl",
+        "fn helper() -> bool { true } fn main() -> u8 { let _ = upstream_inc(5); upstream_val() }",
+    );
+
+    let s0 = global_elaborated_cache().stats();
+    let len0 = global_elaborated_cache().len();
+    let Artifact::Nir(cold_nir) = frontend::compile(&parse_in_proc_nir_options(
+        &input1,
+        &lib,
+        Some(&cache_dir),
+        false,
+    ))
+    .unwrap() else {
+        panic!("expected NIR");
+    };
+    let s1 = global_elaborated_cache().stats();
+    assert_eq!(s1.hits, s0.hits);
+    assert_eq!(global_elaborated_cache().len(), len0 + 1);
+
+    let Artifact::Nir(warm_nir) = frontend::compile(&parse_in_proc_nir_options(
+        &input2,
+        &lib,
+        Some(&cache_dir),
+        false,
+    ))
+    .unwrap() else {
+        panic!("expected NIR");
+    };
+    let s2 = global_elaborated_cache().stats();
+    assert_eq!(s2.hits, s1.hits + 1);
+    assert_ne!(cold_nir.functions.len(), warm_nir.functions.len());
+
+    // Changing an upstream body in builtin invalidates both VerifiedUpstream and ElaboratedBase.
+    setup_minimal_sysroot(&ws, &mk_builtin(77, true));
+    let Artifact::Nir(updated_nir) = frontend::compile(&parse_in_proc_nir_options(
+        &input2,
+        &lib,
+        Some(&cache_dir),
+        false,
+    ))
+    .unwrap() else {
+        panic!("expected NIR");
+    };
+    let s3 = global_elaborated_cache().stats();
+    assert_eq!(
+        s3.hits, s2.hits,
+        "stale elaborated cache must not hit after upstream edit"
+    );
+    assert_eq!(global_elaborated_cache().len(), len0 + 2);
+    let updated_val_fn = updated_nir
+        .functions
+        .iter()
+        .find(|f| f.name == "upstream_val")
+        .unwrap();
+    assert!(
+        updated_val_fn.body.to_string().contains("77"),
+        "expected updated constant 77 in upstream_val body: {}",
+        updated_val_fn.body
+    );
+
+    // Introducing an overflow bug in upstream fails cleanly instead of reusing stale bodies.
+    setup_minimal_sysroot(&ws, &mk_builtin(10, false));
+    let Err(err) = frontend::compile(&parse_in_proc_nir_options(
+        &input2,
+        &lib,
+        Some(&cache_dir),
+        false,
+    )) else {
+        panic!("expected upstream overflow failure");
+    };
+    assert!(err.contains("flow-error"), "{err}");
 }

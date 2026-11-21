@@ -516,6 +516,7 @@ fn compile_bound_for_target_with_invocation(
             &elaboration::program::IncrementalOptions {
                 verified_upstream_packages: std::collections::BTreeSet::new(),
                 jobs: Some(options.incremental.effective_jobs()),
+                ..Default::default()
             },
         )
         .map_err(|error| format!("elaboration failed: {error}"))?;

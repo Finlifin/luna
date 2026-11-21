@@ -32,6 +32,10 @@ impl ObservedAssociatedTypes {
         self.0.is_empty()
     }
 
+    pub fn len(&self) -> usize {
+        self.0.values().map(Vec::len).sum()
+    }
+
     /// Stage only the affected buckets. No delivery becomes visible if
     /// retaining the last result in a traversal runs out of fuel.
     pub fn publish(

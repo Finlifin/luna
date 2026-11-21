@@ -26,19 +26,24 @@ impl PartialEq for Refinement {
         Arc::ptr_eq(&self.0, &other.0)
     }
 }
+
 impl Eq for Refinement {}
+
 impl Hash for Refinement {
     fn hash<H: Hasher>(&self, state: &mut H) {
         Arc::as_ptr(&self.0).hash(state);
     }
 }
+
 impl fmt::Display for Refinement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(refinement {})", self.0.slot)
     }
 }
+
 /// Only a registry that owns the handle can lend a requirement for use.
 pub struct BoundRequirement<'a>(&'a Entry);
+
 impl BoundRequirement<'_> {
     pub fn instantiate(
         &self,
@@ -116,11 +121,17 @@ impl Refinements {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
     pub(crate) fn contains_refinement(&self, r: &Refinement) -> bool {
         self.0
             .get(r.0.slot)
             .is_some_and(|entry| entry.requirement == *r)
     }
+
     pub fn contains(&self, description: &DescriptionLiteral) -> bool {
         match description {
             DescriptionLiteral::Application(a) => a.belongs_to(&self.1, self),
@@ -169,6 +180,7 @@ impl Refinements {
             requirements,
         })
     }
+
     pub fn application(
         &self,
         head: crate::DeclarationId,
@@ -185,6 +197,7 @@ impl Refinements {
         )
         .map(DescriptionLiteral::Application)
     }
+
     pub fn publish(
         &mut self,
         base: DescriptionLiteral,
@@ -227,6 +240,7 @@ impl Refinements {
         Ok(DescriptionLiteral::Refined(handle))
     }
 }
+
 impl fmt::Display for Refinements {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(refinements")?;

@@ -159,4 +159,6 @@ query(key):
 - **已落地（Layer 3A：源码加载/解析并行化 + `ParsedPackage` AST / `VerifiedUpstream` 跨进程增量缓存）**：
   - `ast` 支持 `NodeKind::from_u32` 与 `Ast::rebase`，`package_cache` 提供带长度/结构/checksum 校验的 `ParsedPackage`（`.flpkg`，带字符串表重驻留与基于 `BytePos(1)` 的相对 span）及 `VerifiedUpstream` 跨进程证书编码。
   - `luna` 驱动接入 `--cache-dir <path>`、`--no-cache`（及 `LUNA_NO_CACHE`）、`-j/--jobs <count>`（及 `LUNA_JOBS`），实现全包源码发现/读取并行化、无宏上游包两级 AST 快照复用、非宏文件多线程解析，以及 `contracts::inherit_incremental_skip_proofs` / `purity::validate_runtime_promises_incremental` / `flow::validate_machine_operations_with_jobs` 增量验证接线（已核验上游包跳过重证但完整保留继承契约、下游及动态生成定义仍全量检查）。
-- **待协同推进（Layer 3B：完整已分析上游快照复用）**：在 `resolve/module_builder.rs` 等在途工作稳定后，接通 `resolve::extend_package_set`、`elaboration::program::ElaboratedBase` 与 `.flpkg` `NirBase` 序列化，进一步消除下游改动时对未改动上游 sysroot 的 `resolve` / `ast_lowering` / `elaboration` 重复执行。
+- **已落地（Layer 3B-1：规范上游优先序 + 进程内 `ElaboratedBase` 函数体缓存）**：
+  - `luna::packages` 对非单文件 AST 请求按闭上游升序排列包并在 `HirQueryInput::prefix_files` / `ast_lowering` 中先于下游 lowering，保证闭上游声明身份跨下游增删保持不变；`elaboration` 在上游跳过闭上游-闭上游 formation 重复证明，并对无副作用上游函数体提供 `CachedUpstreamBodies` 复用（经 `global_elaborated_cache()` 按 `UpstreamKey` 存储，下游编辑后输出 NIR 与 `--no-cache` 逐字节一致）。
+- **待推进（Layer 3B-2：`.flpkg` `ResolvedBase` / `NirBase` 磁盘持久化）**：在 `luna::package_cache` 实现跨进程 `.flpkg` 符号表与 NIR 编解码，进一步在 CLI 冷启动场景跳过未改动上游 sysroot 的 `resolve` / `ast_lowering` / `elaboration`。
