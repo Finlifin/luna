@@ -77,6 +77,46 @@ struct Segment {
     arguments: Vec<n::NormalFormArgument>,
 }
 
+struct OperandSchedule {
+    segments: Vec<Segment>,
+    current: Segment,
+    pending: BTreeSet<DeclarationId>,
+    unavailable: BTreeSet<DeclarationId>,
+}
+
+impl OperandSchedule {
+    fn enter(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        expression: &n::Expr,
+        span: Span,
+    ) -> Result<(), Error> {
+        let uses = checker.checked_declaration_inputs(expression, span)?;
+        if !uses.is_disjoint(&self.unavailable) {
+            return Err(needs_frame(span, "operand needs a later type input"));
+        }
+        if !uses.is_disjoint(&self.pending) {
+            self.segments.push(std::mem::take(&mut self.current));
+            self.pending.clear();
+        }
+        Ok(())
+    }
+
+    fn supply(&mut self, binder: DeclarationId, binding: n::LocalId, source: n::SourceRange) {
+        if self.unavailable.remove(&binder) {
+            self.pending.insert(binder);
+            self.current.parameters.push(binder);
+            self.current
+                .arguments
+                .push(n::NormalFormArgument::Value(n::Expr {
+                    source,
+                    ty: p(P::Type),
+                    kind: K::Local(binding),
+                }));
+        }
+    }
+}
+
 fn needs_frame(span: Span, reason: &str) -> Error {
     context_error(
         span,
@@ -132,54 +172,132 @@ impl Checker<'_, '_> {
         let K::Match { value, .. } = &mut body.kind else {
             return Err(needs_frame(span, "expected the original match"));
         };
+        // Routing may already have evaluated the callee, a spread packet, or
+        // collected inputs into private locals. Transfer these statements in
+        // their original order before staging the normalized call's operands.
+        let mut prefix = Vec::new();
+        while let K::CallPreparation {
+            statements,
+            result: Some(result),
+        } = &mut value.kind
+        {
+            dependent_inputs::tasks::spend(&mut self.required_steps, statements.len() + 1, span)?;
+            prefix.append(statements);
+            let inner = std::mem::replace(
+                result.as_mut(),
+                n::Expr {
+                    ty: p(P::Void),
+                    source: body.source,
+                    kind: K::Unit,
+                },
+            );
+            **value = inner;
+        }
         let K::Call {
             callee, arguments, ..
         } = &mut value.kind
         else {
             return Err(needs_frame(span, "expected the original selector call"));
         };
-
-        let mut segments = Vec::new();
-        let mut segment = Segment::default();
-        let mut pending = BTreeSet::new();
-        let mut unavailable = identities;
-        self.retain_lexical_operand(callee, &mut segment, span)?;
+        let mut schedule = OperandSchedule {
+            segments: Vec::new(),
+            current: Segment::default(),
+            pending: BTreeSet::new(),
+            unavailable: identities,
+        };
+        let mut prepared = BTreeMap::<_, Vec<_>>::new();
+        if !prefix.is_empty() {
+            dependent_inputs::tasks::spend(&mut self.required_steps, arguments.len(), span)?;
+            for argument in arguments.iter() {
+                if let K::Local(binding) = argument.value.kind
+                    && let Some(binder) = inputs.get(&argument.parameter)
+                {
+                    prepared
+                        .entry(binding)
+                        .or_default()
+                        .push((binder.declaration, argument.value.source));
+                }
+            }
+        }
+        for statement in prefix {
+            schedule.enter(self, &statement, span)?;
+            let preparation = n::NormalFormPreparation {
+                before: schedule.current.arguments.len(),
+                expression: statement,
+            };
+            let valid = preparation.visit_bindings(
+                |n| dependent_inputs::tasks::spend(&mut self.required_steps, n, span),
+                |binding| {
+                    if let Some(witnesses) = prepared.remove(&binding) {
+                        for (binder, source) in witnesses {
+                            schedule.supply(binder, binding, source);
+                        }
+                    }
+                },
+            )?;
+            if !valid {
+                return Err(needs_frame(span, "invalid selector preparation"));
+            }
+            schedule.current.preparations.push(preparation);
+        }
+        schedule.enter(self, callee, span)?;
+        if !schedule.current.parameters.is_empty() || !schedule.unavailable.is_empty() {
+            self.retain_lexical_operand(callee, &mut schedule.current, span)?;
+        }
         for argument in arguments {
-            if unavailable.is_empty() {
+            if argument.is_default {
                 break;
             }
             dependent_inputs::tasks::spend(&mut self.required_steps, 1, span)?;
-            if argument.is_default {
-                return Err(needs_frame(span, "operand follows an omitted default"));
+            schedule.enter(self, &argument.value, span)?;
+            if schedule.current.parameters.is_empty() && schedule.unavailable.is_empty() {
+                break;
             }
-            let uses = self.checked_declaration_inputs(&argument.value, span)?;
-            if !uses.is_disjoint(&unavailable) {
-                return Err(needs_frame(span, "operand needs a later type input"));
-            }
-            if !uses.is_disjoint(&pending) {
-                segments.push(std::mem::take(&mut segment));
-                pending.clear();
-            }
-            if let Some(value) =
+            if let Some(operand) =
                 arguments::operand_to_prepare(&mut argument.value, argument.passing)
             {
-                self.retain_lexical_operand(value, &mut segment, span)?;
-            }
-            if let Some(binder) = inputs.get(&argument.parameter) {
-                unavailable.remove(&binder.declaration);
-                pending.insert(binder.declaration);
-                segment.parameters.push(binder.declaration);
-                // This read and the original selector use the same fresh local.
-                segment
-                    .arguments
-                    .push(n::NormalFormArgument::Value(argument.value.clone()));
+                let binding = self.retain_lexical_operand(operand, &mut schedule.current, span)?;
+                if let Some(binder) = inputs.get(&argument.parameter) {
+                    schedule.supply(binder.declaration, binding, operand.source);
+                }
             }
         }
-        if !unavailable.is_empty() {
+        if !schedule.unavailable.is_empty() {
             return Err(needs_frame(span, "missing lexical type operand"));
         }
-        segments.push(segment);
-        for segment in segments.into_iter().rev() {
+        if schedule.current.parameters.is_empty() {
+            // All witnesses are in enclosing segments. These final producers
+            // already use their types and remain ordinary call preparation.
+            if !schedule.current.preparations.is_empty() {
+                let statements = schedule
+                    .current
+                    .preparations
+                    .into_iter()
+                    .map(|p| p.expression)
+                    .collect();
+                let source = value.source;
+                let ty = declaration_inputs::copy_input_domain(
+                    &value.ty,
+                    &mut self.required_steps,
+                    span,
+                )?;
+                let call = std::mem::replace(
+                    value.as_mut(),
+                    n::Expr {
+                        source,
+                        ty,
+                        kind: K::Unit,
+                    },
+                );
+                value.kind = K::CallPreparation {
+                    statements,
+                    result: Some(Box::new(call)),
+                };
+            }
+        } else {
+            schedule.segments.push(schedule.current);
+        }
+        for segment in schedule.segments.into_iter().rev() {
             let ty =
                 declaration_inputs::copy_input_domain(&body.ty, &mut self.required_steps, span)?;
             let source = body.source;
@@ -202,7 +320,7 @@ impl Checker<'_, '_> {
         operand: &mut n::Expr,
         segment: &mut Segment,
         span: Span,
-    ) -> Result<(), Error> {
+    ) -> Result<n::LocalId, Error> {
         let binding = self.spread_binding(span)?;
         let source = operand.source;
         let read = n::Expr {
@@ -221,6 +339,6 @@ impl Checker<'_, '_> {
                 },
             },
         });
-        Ok(())
+        Ok(binding)
     }
 }

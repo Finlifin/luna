@@ -1831,6 +1831,55 @@ fn scoped_match_receiver_keeps_the_original_let_rebind_permission() {
 }
 
 #[test]
+fn scoped_match_preserves_collection_and_packet_preparations() {
+    check_events(
+        "
+        struct Cell { value: bool }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn packet(ready: bool) -> Tuple<bool, bool> {
+            assumes ready; (true, true)
+        }
+        impl Cell {
+            comptime fn collect(self, comptime ty: Type, ...items: Tuple<bool, bool>) -> ?ty {
+                let (a, b) = items;
+                self.value = a and b;
+                null
+            }
+        }
+        comptime fn relay(flag: bool) -> bool {
+            var ready = false;
+            var cell = Cell { value: false };
+            let first = cell.collect(do { ready = true; Selected(flag) }, ready, ready) matches null;
+            if not (first and cell.value) { return false; };
+            ready = false;
+            cell.value = false;
+            let second = cell.collect(do { ready = true; Selected(not flag) }, ...packet(ready)) matches null;
+            second and cell.value
+        }
+        const left = relay(true);
+        comptime fn check() -> bool { left and relay(true) and relay(false) }
+        ",
+        &[("Selected", 4), ("packet", 2)],
+    );
+}
+
+#[test]
+fn scoped_match_skips_identity_demand_when_a_later_operand_exits() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { Any } else { char } }
+        comptime fn mark() -> bool { true }
+        comptime fn empty(comptime ty: Type, seed: bool) -> ?ty { null }
+        comptime fn relay(flag: bool) -> bool {
+            empty(Selected(flag), do { mark(); if flag { return true; }; false }) matches null
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }
+        ",
+        &[("Selected", 2), ("mark", 2), ("empty", 1)],
+    );
+}
+
+#[test]
 fn scoped_match_preserves_gradual_type_data_until_identity_is_needed() {
     let package = sysroot::compile(
         "
