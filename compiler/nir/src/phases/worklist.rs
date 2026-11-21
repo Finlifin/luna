@@ -89,7 +89,7 @@ impl<'a> Worklist<'a> {
         let arg = |a| Work::Argument(a, ct);
         match input {
             A::Value(value) | A::ListSpread(value) => self.push(expr(value), fuel)?,
-            A::Null { .. } | A::Unit { .. } | A::Integer { .. } => {}
+            A::Null { .. } | A::Unit { .. } | A::Integer { .. } | A::Symbol { .. } => {}
             A::List { items, .. } | A::Tuple { items, .. } => {
                 self.extend(items.iter().map(arg), fuel)?;
             }

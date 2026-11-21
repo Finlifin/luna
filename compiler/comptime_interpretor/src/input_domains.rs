@@ -33,6 +33,7 @@ enum Kind<'a> {
     Unit,
     Null,
     Integer(&'a str, bool),
+    Symbol(&'a str),
     Choice(&'a Term, SourceRange),
     Block(bool),
     Match(usize),
@@ -114,6 +115,7 @@ impl<'a> Node<'a> {
             Self::Source(input, _) => match input {
                 A::Value(value) | A::ListSpread(value) => Kind::Value(&value.ty),
                 A::Null { .. } => Kind::Null,
+                A::Symbol { name, .. } => Kind::Symbol(name),
                 A::Unit { .. } => Kind::Unit,
                 A::Integer {
                     spelling, negative, ..
@@ -127,6 +129,7 @@ impl<'a> Node<'a> {
             Self::Compiled(shape) => match &shape.kind {
                 ShapeKind::Scalar(Scalar::Value(ty)) => Kind::Value(ty),
                 ShapeKind::Scalar(Scalar::Null) => Kind::Null,
+                ShapeKind::Scalar(Scalar::Symbol(name)) => Kind::Symbol(name),
                 ShapeKind::Scalar(Scalar::Unit) => Kind::Unit,
                 ShapeKind::Scalar(Scalar::Integer { spelling, negative }) => {
                     Kind::Integer(spelling, *negative)
@@ -327,6 +330,11 @@ impl Interpreter<'_> {
                     key,
                     Prepared::Literal(self.normal_unit_value(expected, source)?),
                 ));
+                return Ok(None);
+            }
+            Kind::Symbol(name) => {
+                let value = self.normal_symbol_value(expected, name, source)?;
+                entries.push((key, Prepared::Literal(value)));
                 return Ok(None);
             }
             Kind::Integer(spelling, negative) => {

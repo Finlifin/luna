@@ -3697,13 +3697,8 @@ impl Checker<'_, '_> {
             .get(declaration)
             .ok_or_else(|| error(span, "variant requires an enum type"))?;
         let index = definition
-            .variants
-            .iter()
-            .position(|variant| variant.name == name)
-            .ok_or_else(|| error(span, format!("unknown enum variant {name}")))?;
-        if definition.variants[index].shape != n::VariantShape::Unit {
-            return Err(error(span, "enum payload variant requires arguments"));
-        }
+            .unit_variant_index(name, &mut self.required_steps)
+            .map_err(|reason| error(span, reason.to_string()))?;
         Ok(n::Expr {
             ty: ty.clone(),
             source: source(span),

@@ -267,6 +267,27 @@ fn fixed_packet_layout_does_not_absorb_collector_sources() {
 }
 
 #[test]
+fn contextual_symbol_collectors_keep_names_across_interleaved_inputs() {
+    let package = sysroot::compile(
+        "
+        enum Status { other, ready }
+        pure comptime fn Packet<.T: Type = Status, .flag: bool = true, ...values: meta.List<T>> -> Type { bool }
+        comptime fn mark() -> bool { true }
+        comptime fn Select(ty: Type) -> Type { Packet<.ready, .flag = mark(), .T = ty, .other> }
+        comptime fn Collected() -> Type { Select(Status) }
+        comptime fn Direct() -> Type { Packet<.T = Status, .values = [.ready, .other]> }
+        ",
+    ).unwrap();
+    let direct = invoke_both(&package, "Direct");
+    trace_both(
+        &package,
+        "Collected",
+        &direct,
+        &["Collected", "Select", "mark"],
+    );
+}
+
+#[test]
 fn contextual_alias_collectors_keep_element_domains_until_invocation() {
     let source = "
         pure comptime fn Packet<T, ...values: meta.List<T>> -> Type { bool }

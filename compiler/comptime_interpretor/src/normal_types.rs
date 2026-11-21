@@ -91,6 +91,68 @@ impl Interpreter<'_> {
         Ok(Value::Unit)
     }
 
+    pub(super) fn normal_symbol_value(
+        &mut self,
+        expected: &Term,
+        name: &str,
+        source: SourceRange,
+    ) -> Result<Value, Error> {
+        let ty = self.prepare_aggregate(expected, source)?;
+        let mut layers = Vec::new();
+        let mut leaf = &ty;
+        while let Term::Optional(inner) | Term::ErrorResult { result: inner, .. } = leaf {
+            self.tick(Some(source))?;
+            layers.push(leaf);
+            leaf = inner;
+        }
+        let mut value = match leaf {
+            Term::Primitive(Primitive::Symbol) => {
+                self.integer_operation(Some(source), |budget| {
+                    budget.consume(name.len().saturating_add(1))
+                })?;
+                Value::Symbol(name.into())
+            }
+            Term::Nominal { declaration, .. } => {
+                let definition = self.selected_enum_definition(leaf, Some(source))?;
+                let index = definition
+                    .unit_variant_index(name, &mut self.budget.steps)
+                    .map_err(|reason| {
+                        let kind = match reason {
+                            nir::program::UnitVariantError::Budget => ErrorKind::StepsExhausted,
+                            _ => ErrorKind::EnumVariant(reason),
+                        };
+                        self.failure(kind, Some(source))
+                    })?;
+                self.construct_variant(leaf, *declaration, index, vec![], source)?
+            }
+            _ => return Err(self.failure(ErrorKind::Type, Some(source))),
+        };
+        // A bare symbol selects a payload. Restore every optional presence
+        // and success tag in the same order as ordinary expression delivery.
+        for layer in layers.into_iter().rev() {
+            value = match layer {
+                Term::Optional(_) => self.complete_optional(layer, Some(value), source)?,
+                Term::ErrorResult { result, .. } => {
+                    let plan = self.prepare_error_conversion(
+                        nir::error_results::Conversion::Success,
+                        result,
+                        layer,
+                        source,
+                    )?;
+                    self.complete_error_conversion(
+                        plan.conversion,
+                        &plan.input,
+                        &plan.output,
+                        value,
+                        source,
+                    )?
+                }
+                _ => unreachable!("only optional and error result layers were peeled"),
+            };
+        }
+        Ok(value)
+    }
+
     pub(super) fn normal_integer_value(
         &mut self,
         expected: &Term,

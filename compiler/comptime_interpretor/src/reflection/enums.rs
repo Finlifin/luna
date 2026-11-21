@@ -80,19 +80,7 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::PhaseMismatch, None));
         }
         let selected = self.reflection_type(ty)?;
-        let ty = &selected;
-        let Term::Nominal { declaration, .. } = ty else {
-            return Err(self.failure(ErrorKind::Type, None));
-        };
-        let definition = if self.graph.is_some() {
-            match self.concrete_nominal_metered(ty)? {
-                Some(ConcreteNominal::Enum(definition)) => Some(definition),
-                _ => None,
-            }
-        } else {
-            self.enums.get(declaration).cloned()
-        }
-        .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
+        let definition = self.selected_enum_definition(&selected, None)?;
         Ok((selected, definition))
     }
 

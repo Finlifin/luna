@@ -18,7 +18,7 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
             use crate::program::NormalFormArgument as A;
             match argument {
                 A::ListSpread(value) | A::Value(value) => push!(work, fuel, Node::Expr(value)),
-                A::Unit { .. } | A::Null { .. } | A::Integer { .. } => {}
+                A::Unit { .. } | A::Null { .. } | A::Integer { .. } | A::Symbol { .. } => {}
                 A::If {
                     condition,
                     then_input,

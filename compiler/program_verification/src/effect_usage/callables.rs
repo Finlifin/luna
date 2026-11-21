@@ -143,7 +143,8 @@ fn argument_binds(
             | A::Value(_)
             | A::Unit { .. }
             | A::Null { .. }
-            | A::Integer { .. } => {}
+            | A::Integer { .. }
+            | A::Symbol { .. } => {}
         }
     }
     Ok(())

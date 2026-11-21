@@ -106,7 +106,10 @@ impl Interpreter<'_> {
                             A::ListSpread(value) | A::Value(value) => {
                                 completed = Some(operand!(vm.eval(value, environment)).into());
                             }
-                            A::Integer { .. } | A::Unit { .. } | A::Null { .. } => {
+                            A::Integer { .. }
+                            | A::Symbol { .. }
+                            | A::Unit { .. }
+                            | A::Null { .. } => {
                                 completed = Some(delivery.literal(key, input.source())?);
                             }
                             A::List { items, .. } | A::Tuple { items, .. } => {

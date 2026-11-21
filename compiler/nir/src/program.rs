@@ -439,6 +439,11 @@ pub enum NormalFormArgument {
     Unit {
         source: SourceRange,
     },
+    /// A bare symbol selects Symbol data or a unit variant in the supplied domain.
+    Symbol {
+        source: SourceRange,
+        name: String,
+    },
     Integer {
         source: SourceRange,
         spelling: String,
@@ -504,7 +509,10 @@ impl NormalFormArgument {
         while let Some(input) = pending.pop() {
             match input {
                 Self::ListSpread(value) | Self::Value(value) => result.push(value),
-                Self::Integer { .. } | Self::Unit { .. } | Self::Null { .. } => {}
+                Self::Integer { .. }
+                | Self::Symbol { .. }
+                | Self::Unit { .. }
+                | Self::Null { .. } => {}
                 Self::If {
                     condition,
                     then_input,
@@ -548,7 +556,10 @@ impl NormalFormArgument {
         while let Some(input) = pending.pop() {
             match input {
                 Self::ListSpread(value) | Self::Value(value) => result.push(value),
-                Self::Integer { .. } | Self::Unit { .. } | Self::Null { .. } => {}
+                Self::Integer { .. }
+                | Self::Symbol { .. }
+                | Self::Unit { .. }
+                | Self::Null { .. } => {}
                 Self::If {
                     condition,
                     then_input,
@@ -663,6 +674,7 @@ impl NormalFormArgument {
             | Self::Tuple { .. }
             | Self::Null { .. }
             | Self::Integer { .. }
+            | Self::Symbol { .. }
             | Self::Unit { .. } => false,
         }
     }
@@ -718,6 +730,7 @@ impl NormalFormArgument {
                     | Self::Unit { .. }
                     | Self::Null { .. }
                     | Self::Integer { .. }
+                    | Self::Symbol { .. }
                     | Self::Block { result: None, .. } => false,
                 }
             };
@@ -746,6 +759,7 @@ impl NormalFormArgument {
             Self::Null { source }
             | Self::Unit { source }
             | Self::Integer { source, .. }
+            | Self::Symbol { source, .. }
             | Self::If { source, .. }
             | Self::Block { source, .. }
             | Self::List { source, .. }
@@ -813,6 +827,11 @@ impl fmt::Display for NormalFormArgument {
                 f.write_str("))")
             }
             Self::Null { source } => write!(f, "(contextual-null-input (source {source}))"),
+            Self::Symbol { source, name } => {
+                write!(f, "(contextual-symbol-input (source {source}) (name ")?;
+                string(f, name)?;
+                f.write_str("))")
+            }
             Self::Unit { source } => write!(f, "(contextual-unit-input (source {source}))"),
             Self::Integer {
                 source,
@@ -2802,7 +2821,59 @@ pub enum VariantShape {
     Named(Vec<String>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnitVariantError {
+    Budget,
+    Unknown(String),
+    RequiresArguments(String),
+}
+
+impl fmt::Display for UnitVariantError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Budget => f.write_str("enum variant lookup budget exhausted"),
+            Self::Unknown(name) => write!(f, "unknown enum variant {name}"),
+            Self::RequiresArguments(name) => {
+                write!(f, "enum payload variant requires arguments: {name}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for UnitVariantError {}
+
 impl Enum {
+    /// Resolve a bare variant name against the declaration's logical variants.
+    /// Representation codes and groups do not supply constructors.
+    pub fn unit_variant_index(
+        &self,
+        name: &str,
+        steps: &mut u64,
+    ) -> Result<usize, UnitVariantError> {
+        // Cover retaining the spelling for a diagnostic as well as scanning
+        // candidates. String equality compares bytes only for equal lengths.
+        *steps = steps
+            .checked_sub(name.len() as u64)
+            .ok_or(UnitVariantError::Budget)?;
+        for (index, variant) in self.variants.iter().enumerate() {
+            let work = if variant.name.len() == name.len() {
+                name.len() as u64
+            } else {
+                0
+            };
+            *steps = steps
+                .checked_sub(work.saturating_add(1))
+                .ok_or(UnitVariantError::Budget)?;
+            if variant.name == name {
+                return match variant.shape {
+                    VariantShape::Unit => Ok(index),
+                    _ => Err(UnitVariantError::RequiresArguments(name.to_owned())),
+                };
+            }
+        }
+        Err(UnitVariantError::Unknown(name.to_owned()))
+    }
+
     /// Check completed indices before constructing a concrete layout instance.
     pub fn validate_completed_arguments(
         &self,

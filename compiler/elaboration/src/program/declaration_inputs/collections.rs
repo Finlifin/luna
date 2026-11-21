@@ -193,6 +193,7 @@ impl<'b, 'h> Frame<'b, 'h> {
             State::ContextualTail => value,
             State::ContextualLiteral => match value {
                 value @ (n::NormalFormArgument::Integer { .. }
+                | n::NormalFormArgument::Symbol { .. }
                 | n::NormalFormArgument::Null { .. }) => value,
                 _ => {
                     return Err(context_error(

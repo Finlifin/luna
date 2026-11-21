@@ -599,6 +599,7 @@ pub enum ErrorKind {
     PhaseMismatch,
     InvalidPhase(nir::phases::Error),
     InvalidBitWidth,
+    EnumVariant(nir::program::UnitVariantError),
     ProgramContractRejected,
     TypeContractRejected,
     TypeContractUnresolved,
@@ -656,6 +657,7 @@ impl fmt::Display for Error {
                 write!(f, "cyclic associated initializer for member {member}")?
             }
             ErrorKind::InvalidDefinition(reason) => write!(f, "interpretation {reason}")?,
+            ErrorKind::EnumVariant(reason) => write!(f, "{reason}")?,
             ErrorKind::InvalidTypeContract(reason) => write!(f, "invalid type contract: {reason}")?,
             ErrorKind::InvalidPhase(reason) => {
                 write!(f, "interpretation phase: {}", reason.message)?

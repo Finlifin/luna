@@ -1859,6 +1859,122 @@ fn contextual_alias_explicit_literals_keep_external_type_parameters_open() {
 }
 
 #[test]
+fn contextual_symbol_in_an_alias_selects_the_instantiated_enum() {
+    let source = "typealias Type = .Type'builtin;
+        typealias u8 = .u8'builtin;
+        enum Choice where T {none,some(T)}
+        newtype Indexed<T,value:T,tag:Choice<T>> = bool;
+        typealias Alias<T> = Indexed<T,7,.none>;
+        comptime fn Build(ty:Type)->Type {Alias<ty>}
+        fn read(value:Indexed<u8,7,.none>)->bool {value.as(bool)}
+        fn run()->bool {read(true.as(Build(u8)))}";
+    assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
+}
+
+#[test]
+fn contextual_symbols_follow_each_invocations_domain_and_check_unselected_arms() {
+    use comptime_interpretor::Interpreter;
+    let source = "typealias Type = .Type'builtin;
+        typealias Symbol = .Symbol'builtin;
+        enum ReadErr {Missing}
+        enum First {ready,other}
+        enum Second {other,ready}
+        enum Payload {ready(bool)}
+        enum Missing {other}
+        newtype Key<T,.tag:T=.ready> = bool;
+        comptime fn Select(ty:Type)->Type {Key<ty,.tag=.ready>}
+        comptime fn DefaultKey(ty:Type)->Type {Key<ty>}
+        comptime fn typed()->Symbol {.ready}
+        comptime fn Typed(ty:Type)->Type {Key<ty,.tag=typed()>}
+        comptime fn InvalidBranch(ty:Type)->Type {Key<ty,.tag=if true {.ready} else {.invalid}>}
+        comptime fn Qualified()->Type {!ReadErr ??Second}
+        comptime fn DirectQualified()->Type {Key<!ReadErr ??Second,.tag=.ready>}
+        comptime fn DirectFirst()->Type {Key<First,.tag=.ready>}
+        comptime fn DirectSecond()->Type {Key<Second,.tag=.ready>}
+        comptime fn DirectSymbol()->Type {Key<Symbol,.tag=.ready>}
+        comptime fn DirectOptional()->Type {Key<??Symbol,.tag=.ready>}";
+    let package = support::compile(source);
+    let enumeration = |name| nir::Term::Nominal {
+        declaration: package
+            .enums
+            .iter()
+            .find(|e| e.name == name)
+            .unwrap()
+            .declaration,
+        arguments: vec![],
+    };
+    let symbol = nir::Term::Primitive(nir::Primitive::Symbol);
+    let select = support::id(&package, "Select");
+    let invalid = support::id(&package, "InvalidBranch");
+    for new_vm in [Interpreter::for_comptime, Interpreter::for_comptime_tree] {
+        let mut vm = new_vm(&package, Default::default()).unwrap();
+        let payload = vm
+            .invoke(select, vec![Value::Type(enumeration("Payload"))])
+            .unwrap_err();
+        assert!(
+            payload
+                .to_string()
+                .contains("variant requires arguments: ready"),
+            "{payload}"
+        );
+        let missing = vm
+            .invoke(select, vec![Value::Type(enumeration("Missing"))])
+            .unwrap_err();
+        assert!(
+            missing.to_string().contains("unknown enum variant ready"),
+            "{missing}"
+        );
+        assert!(
+            vm.invoke(
+                select,
+                vec![Value::Type(nir::Term::Primitive(nir::Primitive::Bool))]
+            )
+            .is_err()
+        );
+        assert!(
+            vm.invoke(
+                support::id(&package, "Typed"),
+                vec![Value::Type(enumeration("First"))]
+            )
+            .is_err()
+        );
+        let failure = vm
+            .invoke(invalid, vec![Value::Type(enumeration("First"))])
+            .unwrap_err();
+        assert!(
+            failure.to_string().contains("unknown enum variant invalid"),
+            "{failure}"
+        );
+        let at = failure.source.unwrap();
+        assert_eq!(&source[at.start as usize..at.end as usize], ".invalid");
+        let Value::Type(qualified) = vm
+            .invoke(support::id(&package, "Qualified"), vec![])
+            .unwrap()
+        else {
+            panic!("expected a qualified type");
+        };
+        for (domain, direct) in [
+            (qualified, "DirectQualified"),
+            (enumeration("First"), "DirectFirst"),
+            (enumeration("Second"), "DirectSecond"),
+            (symbol.clone(), "DirectSymbol"),
+            (
+                nir::Term::Optional(Box::new(nir::Term::Optional(Box::new(symbol.clone())))),
+                "DirectOptional",
+            ),
+        ] {
+            let expected = vm.invoke(support::id(&package, direct), vec![]).unwrap();
+            for build in [select, support::id(&package, "DefaultKey")] {
+                assert_eq!(
+                    vm.invoke(build, vec![Value::Type(domain.clone())]).unwrap(),
+                    expected
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn contextual_alias_checks_known_domains_while_describing_open_inputs() {
     let source = "typealias u8 = .u8'builtin;
         enum Choice where T {none,some(T)}

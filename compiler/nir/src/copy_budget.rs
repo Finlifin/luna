@@ -1267,6 +1267,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         0
                     }
                     A::Integer { spelling, .. } => spelling.len(),
+                    A::Symbol { name, .. } => name.len(),
                     A::Unit { .. } | A::Null { .. } => 0,
                     A::Tuple { items, .. } | A::List { items, .. } => {
                         charge_width(steps, items.len())?;

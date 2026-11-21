@@ -2,7 +2,26 @@
 //! Tree evaluation additionally retains scheduled prepared-value cleanup.
 use super::*;
 
-impl Interpreter<'_> {
+impl<'a> Interpreter<'a> {
+    pub(super) fn selected_enum_definition(
+        &mut self,
+        ty: &Term,
+        source: Option<SourceRange>,
+    ) -> Result<generated_enums::EnumDefinition<'a>, Error> {
+        let Term::Nominal { declaration, .. } = ty else {
+            return Err(self.failure(ErrorKind::Type, source));
+        };
+        if self.graph.is_some() {
+            match self.concrete_nominal_metered(ty)? {
+                Some(ConcreteNominal::Enum(definition)) => Some(definition),
+                _ => None,
+            }
+        } else {
+            self.enums.get(declaration).cloned()
+        }
+        .ok_or_else(|| self.failure(ErrorKind::Type, source))
+    }
+
     pub(super) fn prepare_aggregate(
         &mut self,
         ty: &Term,

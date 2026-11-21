@@ -8,6 +8,7 @@ pub enum Input {
     Value(Term),
     Unit,
     Null,
+    Symbol(String),
     Integer { spelling: String, negative: bool },
 }
 impl Input {
@@ -20,6 +21,7 @@ impl fmt::Display for Input {
         match self {
             Self::Value(ty) => write!(f, "(value {ty})"),
             Self::Null => write!(f, "(null)"),
+            Self::Symbol(name) => write!(f, "(symbol {})", nir::QuotedDisplay(name)),
             Self::Unit => write!(f, "(unit)"),
             Self::Integer { spelling, negative } => {
                 write!(f, "(integer {spelling:?} (negative {negative}))")
@@ -344,6 +346,10 @@ pub(super) fn compile_input<'a>(
                     }
                     A::Unit { .. } => Some(Input::Unit),
                     A::Null { .. } => Some(Input::Null),
+                    A::Symbol { source, name } => {
+                        *fuel = fuel.checked_sub(name.len()).ok_or(Error::Budget(*source))?;
+                        Some(Input::Symbol(name.clone()))
+                    }
                     A::Integer {
                         spelling, negative, ..
                     } => {
@@ -511,6 +517,28 @@ mod tests {
     use super::*;
     use nir::program::NormalFormArgument as A;
     const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
+
+    #[test]
+    fn staged_symbol_owns_its_spelling_and_charges_it_before_copying() {
+        let name = "tag\"\\\n雪".repeat(32);
+        let input = A::Symbol {
+            source: SOURCE,
+            name: name.clone(),
+        };
+        let (_, shape) = compile_staged_input(&input, &mut 10_000).unwrap();
+        let quoted = nir::QuotedDisplay(&name).to_string();
+        assert!(input.to_string().contains(&quoted));
+        drop(input);
+        assert!(shape.to_string().contains(&format!("(symbol {quoted})")));
+        let long = A::Symbol {
+            source: SOURCE,
+            name: "x".repeat(1024),
+        };
+        assert!(matches!(
+            compile_staged_input(&long, &mut 512),
+            Err(Error::Budget(SOURCE))
+        ));
+    }
 
     #[test]
     fn contextual_shapes_bound_work_and_depth_before_execution() {

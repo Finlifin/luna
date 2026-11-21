@@ -1741,6 +1741,21 @@ impl Checker<'_, '_> {
         if depth >= 128 {
             return Err(error(input.span, "contextual input nesting limit exceeded"));
         }
+        if let H::Lit(hir::Lit {
+            kind: hir::LitKind::Symbol(name),
+            ..
+        }) = &input.kind
+        {
+            let name = name.as_str();
+            self.required_steps = self
+                .required_steps
+                .checked_sub(name.len() as u64)
+                .ok_or_else(|| error(input.span, "contextual symbol input budget exhausted"))?;
+            return Ok(n::NormalFormArgument::Symbol {
+                source: source(input.span),
+                name: name.to_owned(),
+            });
+        }
         if matches!(input.kind, H::Null) {
             return Ok(n::NormalFormArgument::Null {
                 source: source(input.span),
