@@ -9,6 +9,9 @@ use text_impl.bindings;
 pub pure comptime trait ComptimeTextBytes {
     pure comptime fn byte_length(self) -> u64;
     pure comptime fn byte(self, index: u64) -> ?u8;
+    pure comptime fn is_empty(self) -> bool;
+    pure comptime fn is_ascii(self) -> bool;
+    pure comptime fn is_char_boundary(self, index: u64) -> bool;
     pure comptime fn slice(self, start: u64, end: u64) -> ?str;
     pure comptime fn concat(self, other: str) -> str;
     pure comptime fn starts_with(self, prefix: str) -> bool;
@@ -24,6 +27,40 @@ comptime impl ComptimeTextBytes for str {
 
     pure comptime fn byte(self, index: u64) -> ?u8 {
         bindings.byte(self, index)
+    }
+
+    pure comptime fn is_empty(self) -> bool {
+        bindings.byte_length(self) == 0
+    }
+
+    pure comptime fn is_ascii(self) -> bool {
+        let length = bindings.byte_length(self);
+        var index: u64 = 0;
+        while index < length {
+            let value = bindings.byte(self, index) match {
+                b? => b,
+                null => return false,
+            }
+            if value > 127 {
+                return false;
+            }
+            index = index + 1;
+        }
+        true
+    }
+
+    pure comptime fn is_char_boundary(self, index: u64) -> bool {
+        let length = bindings.byte_length(self);
+        if index == 0 or index == length {
+            return true;
+        }
+        if index > length {
+            return false;
+        }
+        bindings.byte(self, index) match {
+            value? => value < 128 or value >= 192,
+            null => false,
+        }
     }
 
     pure comptime fn slice(self, start: u64, end: u64) -> ?str {

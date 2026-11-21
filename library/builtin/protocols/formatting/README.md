@@ -22,6 +22,7 @@ ByteWriter 借用接收者，不要求 Clone/Copy。write_byte 成功恰好接�
 已写前缀，也不返回已写长度。调用者不能在失败后盲目重试整个格式化操作；恢复
 方式由具体 writer 的状态与错误契约决定。完整文本/批量写入需要独立的进度契约。
 
-整数和 bool 的 Display 实现在此目录。std 的文件与标准输出提供 ByteWriter
-实现；用户 writer 可以维护自己的状态、错误和重试策略，不需要文件描述符。
-Debug、格式选项、完整格式计划、动态文本和批量进度接口仍未交付。
+整数、bool、unit (`void`)、Unicode 标量 `char`、`str` 与 `Symbol` 的 `Display`/`Debug`
+实现在此目录。std 的文件、`Vec<u8>` 与标准输出提供 ByteWriter 实现；用户 writer 可以
+维护自己的状态、错误和重试策略，不需要文件描述符。
+浮点格式化、格式选项（宽度/对齐/精度）和批量进度接口仍未交付。

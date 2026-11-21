@@ -2,6 +2,7 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use elaboration::verification::memory::{self, TextRegionOrigin as Origin};
 use std::collections::BTreeSet;
 
@@ -18,6 +19,7 @@ fn infer(
         .declaration;
     memory::infer_text_regions(package, id, &[], &mut { fuel })
 }
+
 fn parameter(parameter: usize, fields: &[usize]) -> Origin {
     Origin::Parameter {
         parameter,
@@ -111,17 +113,23 @@ fn aggregate_and_optional_results_keep_region_paths_and_absence() {
 
 #[test]
 fn byte_reads_export_region_obligations_through_discarded_results() {
-    let package = support::compile(&format!(
-        "mod primitives {{ {} }} use primitives.*; mod bindings {{ {} }} mod text {{ {} }} use text.TextBytes;
-        fn reads(a:str,b:str)->?u8 {{let ignored=a.byte(0);b.byte(0)}}
-        fn overwritten(a:str,b:str)->str {{var slot=a;let old=slot.byte(0);slot=b;slot}}
-        fn static_read()->?u8 {{\"x\".byte(0)}}
-        fn equal(a:str,b:str)->bool {{a == b}}
-        fn length(value:str)->u64 {{value.byte_length()}}",
-        include_str!("../../../library/builtin/primitives.fl"),
-        include_str!("../../../library/builtin/bindings.fl"),
-        include_str!("../../../library/builtin/text_impl/bytes.fl")
-    ));
+    let package = support::compile_with_source_bindings(
+        &format!(
+            "mod primitives {{ {} }} use primitives.*; mod bindings {{ {} }} mod resources {{ {} }} mod text {{ {} }} use text.TextBytes;
+            fn reads(a:str,b:str)->?u8 {{let ignored=a.byte(0);b.byte(0)}}
+            fn overwritten(a:str,b:str)->str {{var slot=a;let old=slot.byte(0);slot=b;slot}}
+            fn static_read()->?u8 {{\"x\".byte(0)}}
+            fn equal(a:str,b:str)->bool {{a == b}}
+            fn length(value:str)->u64 {{value.byte_length()}}",
+            include_str!("../../../library/builtin/primitives.fl"),
+            include_str!("../../../library/builtin/bindings.fl"),
+            include_str!("../../../library/builtin/protocols/resources.fl"),
+            include_str!("../../../library/builtin/text_impl/bytes.fl")
+        ),
+        &Default::default(),
+        support::text_fixture_selectors(),
+    )
+    .unwrap();
     assert_eq!(
         infer(&package, "reads", 100_000).unwrap().reads,
         BTreeSet::from([parameter(0, &[]), parameter(1, &[])])
@@ -887,23 +895,29 @@ fn optional_and_error_propagation_keep_separate_exit_dependencies() {
 
 #[test]
 fn scalar_index_operations_preserve_text_scan_dependencies() {
-    let package = support::compile(&format!(
-        "mod primitives {{ {} }} use primitives.*; mod bindings {{ {} }} mod text {{ {} }} use text.TextBytes;
-        fn contains(value:str,needle:u8)->bool {{
-            let length=value.byte_length();var index:u64=0;
-            while index < length {{
-                let byte?=value.byte(index) else {{return false;}};
-                if byte'bitvec.as(u64) == needle'bitvec.as(u64) {{return true;}}
-                index = index + 1;
+    let package = support::compile_with_source_bindings(
+        &format!(
+            "mod primitives {{ {} }} use primitives.*; mod bindings {{ {} }} mod resources {{ {} }} mod text {{ {} }} use text.TextBytes;
+            fn contains_byte(value:str,needle:u8)->bool {{
+                let length=value.byte_length();var index:u64=0;
+                while index < length {{
+                    let byte?=value.byte(index) else {{return false;}};
+                    if byte'bitvec.as(u64) == needle'bitvec.as(u64) {{return true;}}
+                    index = index + 1;
+                }}
+                false
             }}
-            false
-        }}
-        fn run()->bool {{contains(\"Aé\",169) and not contains(\"Aé\",0) and not contains(\"\",65)}}",
-        include_str!("../../../library/builtin/primitives.fl"),
-        include_str!("../../../library/builtin/bindings.fl"),
-        include_str!("../../../library/builtin/text_impl/bytes.fl")
-    ));
-    let scan = infer(&package, "contains", 100_000).unwrap();
+            fn run()->bool {{contains_byte(\"Aé\",169) and not contains_byte(\"Aé\",0) and not contains_byte(\"\",65)}}",
+            include_str!("../../../library/builtin/primitives.fl"),
+            include_str!("../../../library/builtin/bindings.fl"),
+            include_str!("../../../library/builtin/protocols/resources.fl"),
+            include_str!("../../../library/builtin/text_impl/bytes.fl")
+        ),
+        &Default::default(),
+        support::text_fixture_selectors(),
+    )
+    .unwrap();
+    let scan = infer(&package, "contains_byte", 100_000).unwrap();
     assert_eq!(scan.reads, BTreeSet::from([parameter(0, &[])]));
     assert!(scan.returned.unwrap().is_empty());
     assert_eq!(

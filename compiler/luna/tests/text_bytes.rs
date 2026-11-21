@@ -10,18 +10,24 @@ fn source(body: &str) -> String {
 
 // This fixture embeds the shipped meta implementation in package zero.
 fn compile_text(source: &str) -> nir::program::Package {
-    support::compile_with_protocols(source, &support::meta_fixture_protocols()).unwrap()
+    support::compile_with_source_bindings(
+        source,
+        &support::meta_fixture_protocols(),
+        support::text_fixture_selectors(),
+    )
+    .unwrap()
 }
 
 #[test]
 fn runtime_function_alias_constants_require_cross_stage_conversion() {
-    let error = support::compile_with_protocols(
+    let error = support::compile_with_source_bindings(
         &source(
             "fn identity(value: bool) -> bool { value }
         const alias = identity;
         fn run() -> bool { alias(true) }",
         ),
         &support::meta_fixture_protocols(),
+        support::text_fixture_selectors(),
     )
     .unwrap_err();
     assert!(error.contains("Splice"), "{error}");
@@ -106,9 +112,10 @@ fn text_queries_preserve_early_exit_and_reject_wrong_input_domains() {
         "str.byte(\"a\",-1)",
     ] {
         assert!(
-            support::compile_with_protocols(
+            support::compile_with_source_bindings(
                 &source(&format!("fn invalid() {{{body};}}")),
-                &support::meta_fixture_protocols()
+                &support::meta_fixture_protocols(),
+                support::text_fixture_selectors(),
             )
             .is_err()
         );
@@ -228,9 +235,10 @@ fn symbol_byte_queries_keep_distinct_domains_and_checked_indices() {
 
 #[test]
 fn explicit_runtime_text_trait_does_not_bypass_comptime_phase_checks() {
-    let error = support::compile_with_protocols(
+    let error = support::compile_with_source_bindings(
         &source("comptime fn invalid()->u64 {\"abc\".as(text.TextBytes).byte_length()}"),
         &support::meta_fixture_protocols(),
+        support::text_fixture_selectors(),
     )
     .unwrap_err();
     assert!(!error.contains("parsing failed"), "{error}");
@@ -242,7 +250,7 @@ fn explicit_runtime_text_trait_does_not_bypass_comptime_phase_checks() {
 
 #[test]
 fn runtime_symbol_operation_bindings_keep_alias_identity_and_argument_order() {
-    let package = support::compile_with_bindings(&source(
+    let package = support::compile_with_source_bindings(&source(
         "trait Splice { assoc RuntimeTarget: Type; fn splice(comptime data: Self) -> RuntimeTarget; }
         typealias Length = fn(Symbol) -> u64;
         typealias Byte = fn(Symbol, u64) -> ?u8;
@@ -269,7 +277,10 @@ fn runtime_symbol_operation_bindings_keep_alias_identity_and_argument_order() {
             byte(do {return true; .hello}, 0);
             false
         }",
-    ), &support::meta_fixture_protocols(), Some("Splice")).unwrap();
+    ), &support::meta_fixture_protocols(), luna::protocols::type_constructors::Selectors {
+        splice: Some("Splice"),
+        ..support::text_fixture_selectors()
+    }).unwrap();
     for name in ["run", "early"] {
         assert_eq!(
             luna::execution::interpret(&package, name, 100_000).unwrap(),
@@ -348,9 +359,12 @@ fn comptime_text_slice_and_concat_enforce_utf8_boundaries_and_phase() {
         "fn bad(s: str) -> ?str { s.as(meta.ComptimeTextBytes).slice(0, 1) }",
         "fn bad(a: str, b: str) -> str { a.as(meta.ComptimeTextBytes).concat(b) }",
     ] {
-        let error =
-            support::compile_with_protocols(&source(invalid), &support::meta_fixture_protocols())
-                .unwrap_err();
+        let error = support::compile_with_source_bindings(
+            &source(invalid),
+            &support::meta_fixture_protocols(),
+            support::text_fixture_selectors(),
+        )
+        .unwrap_err();
         assert!(
             error.contains("runtime") || error.contains("phase") || error.contains("comptime"),
             "{invalid}: {error}"

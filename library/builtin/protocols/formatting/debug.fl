@@ -169,3 +169,10 @@ impl Debug for str {
         output.write_byte(34)
     }
 }
+
+impl Debug for Symbol {
+    fn write_debug(*self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        output.write_byte(46)!;
+        self.*.as(Display).write(output)
+    }
+}

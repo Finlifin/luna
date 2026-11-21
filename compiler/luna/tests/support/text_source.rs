@@ -2,6 +2,7 @@
 concat!(
     "mod primitives {\n", include_str!("../../../../library/builtin/primitives.fl"), "\n}\nuse primitives.*;\n",
     "mod bindings {\n", include_str!("../../../../library/builtin/bindings.fl"), "\n}\n",
+    "mod resources {\n", include_str!("../../../../library/builtin/protocols/resources.fl"), "\n}\n",
     "mod builtin {pub use primitives.*; pub mod compiler {pub use bindings.*;}}\n",
     "mod text {\n", include_str!("../../../../library/builtin/text_impl/bytes.fl"), "\n}\nuse text.TextBytes;\n",
     "mod meta {mod text_impl {mod bindings {\n",

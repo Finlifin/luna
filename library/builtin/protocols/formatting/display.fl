@@ -1,3 +1,5 @@
+use bindings.{symbol_byte, symbol_byte_length}
+use primitives.{Symbol, u64}
 use protocols.formatting.writer.ByteWriter;
 
 pub trait Display {
@@ -183,5 +185,21 @@ impl Display for char {
 impl Display for str {
     fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
         output.write_str(self)
+    }
+}
+
+impl Display for Symbol {
+    fn write(self, output: *W) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
+        let name = self;
+        let length = symbol_byte_length(name);
+        var index: u64 = 0;
+        while index < length {
+            let byte = symbol_byte(name, index) match {
+                value? => value,
+                null => break,
+            }
+            output.write_byte(byte)!;
+            index = index + 1;
+        }
     }
 }

@@ -1,8 +1,9 @@
 {-
     Formatting is a comptime library operation. A plan retains byte ranges in
     the original text and ordered argument positions, without copying text or
-    constructing runtime storage. Empty fields use Display; doubled braces
-    produce one literal brace. Other field syntax is rejected explicitly.
+    constructing runtime storage. `{}` selects Display, `{:?}` selects Debug,
+    and doubled braces produce one literal brace. Other field syntax is
+    rejected explicitly.
 
     This scanner is the lexical input to Parse's parameter-domain computation.
     It does not replace the Type description or admit runtime arguments.
@@ -10,6 +11,7 @@
 pub enum FormatPiece {
     text(u64, u64),
     argument(Integer),
+    debug_argument(Integer),
 }
 
 pub enum FormatErr {
@@ -41,6 +43,7 @@ impl FormatPlan {
                 }
                 let next = cursor + 1;
                 let following = format.byte(next);
+                var advanced = false;
                 if byte == 123 {
                     following match {
                         123? => {
@@ -49,6 +52,34 @@ impl FormatPlan {
                         125? => {
                             pieces = pieces.concat([FormatPiece.argument(arguments)]);
                             arguments = arguments + 1;
+                        },
+                        58? => {
+                            if next > 18446744073709551615 - 2 {
+                                return error FormatErr.UnclosedField(cursor);
+                            }
+                            let spec_byte = format.byte(next + 1);
+                            spec_byte match {
+                                63? => {
+                                    let close = format.byte(next + 2);
+                                    close match {
+                                        125? => {
+                                            pieces = pieces.concat([
+                                                FormatPiece.debug_argument(arguments),
+                                            ]);
+                                            arguments = arguments + 1;
+                                            let close_pos = next + 2;
+                                            assumes close_pos < length;
+                                            cursor = close_pos + 1;
+                                            start = cursor;
+                                            advanced = true;
+                                        },
+                                        null => return error FormatErr.UnclosedField(cursor),
+                                        _? => return error FormatErr.UnsupportedField(cursor),
+                                    };
+                                },
+                                null => return error FormatErr.UnclosedField(cursor),
+                                _? => return error FormatErr.UnsupportedField(cursor),
+                            };
                         },
                         null => return error FormatErr.UnclosedField(cursor),
                         _? => return error FormatErr.UnsupportedField(cursor),
@@ -62,10 +93,12 @@ impl FormatPlan {
                     };
                 }
 
-                {- Every successful brace branch consumed a second byte. -}
-                assumes next < length;
-                cursor = next + 1;
-                start = cursor;
+                if not advanced {
+                    {- Every two-byte brace token consumed a second byte. -}
+                    assumes next < length;
+                    cursor = next + 1;
+                    start = cursor;
+                }
             } else {
                 cursor = cursor + 1;
             }
@@ -79,16 +112,69 @@ impl FormatPlan {
         }
     }
 
-    {- Each field admits its own concrete runtime type at the call site. -}
+    {- Each field admits its own concrete runtime type and trait requirement. -}
     pub pure comptime fn argument_domains(self) -> meta.List<Type> {
-        let field = refines { Itself :- Display } Any;
+        let display_field = refines { Itself :- Display } Any;
+        let debug_field = refines { Itself :- Debug } Any;
         var domains: meta.List<Type> = [];
         var index: Integer = 0;
-        while index < self.argument_count {
-            domains = domains.concat([field]);
+        let piece_count = self.pieces.length();
+        while index < piece_count {
+            let piece = self.pieces.get(index) match {
+                value? => value,
+                null => {
+                    assumes false;
+                    return domains;
+                },
+            }
+            piece match {
+                FormatPiece.text(_, _) => {},
+                FormatPiece.argument(_) => {
+                    domains = domains.concat([display_field]);
+                },
+                FormatPiece.debug_argument(_) => {
+                    domains = domains.concat([debug_field]);
+                },
+            }
             index = index + 1;
         }
         domains
+    }
+
+    pub pure comptime fn argument_is_debug(self) -> meta.List<bool> {
+        var flags: meta.List<bool> = [];
+        var index: Integer = 0;
+        let piece_count = self.pieces.length();
+        while index < piece_count {
+            let piece = self.pieces.get(index) match {
+                value? => value,
+                null => {
+                    assumes false;
+                    return flags;
+                },
+            }
+            piece match {
+                FormatPiece.text(_, _) => {},
+                FormatPiece.argument(_) => {
+                    flags = flags.concat([false]);
+                },
+                FormatPiece.debug_argument(_) => {
+                    flags = flags.concat([true]);
+                },
+            }
+            index = index + 1;
+        }
+        flags
+    }
+
+    pub pure comptime fn argument_is_debug_for(format: str) -> meta.List<bool> {
+        FormatPlan.parse(format) match {
+            plan! => plan.argument_is_debug(),
+            error _ => {
+                assumes false;
+                []
+            },
+        }
     }
 
     pub pure comptime fn literal_segments(self, format: str) -> meta.List<str> {
@@ -113,6 +199,10 @@ impl FormatPlan {
                     current = current.concat(chunk);
                 },
                 FormatPiece.argument(_) => {
+                    segments = segments.concat([current]);
+                    current = "";
+                },
+                FormatPiece.debug_argument(_) => {
                     segments = segments.concat([current]);
                     current = "";
                 },

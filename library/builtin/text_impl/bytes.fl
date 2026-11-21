@@ -1,4 +1,4 @@
-use primitives.{str, u64, u8}
+use primitives.{bool, str, u64, u8}
 
 use bindings.{str_byte as text_str_byte, str_byte_length as text_str_byte_length}
 
@@ -10,6 +10,41 @@ use bindings.{str_byte as text_str_byte, str_byte_length as text_str_byte_length
 pub trait TextBytes {
     pure fn byte_length(self) -> u64;
     pure fn byte(self, index: u64) -> ?u8;
+    pure fn is_empty(self) -> bool;
+    pure fn is_ascii(self) -> bool;
+    pure fn is_char_boundary(self, index: u64) -> bool;
+    pure fn starts_with(self, prefix: str) -> bool;
+    pure fn ends_with(self, suffix: str) -> bool;
+    pure fn find(self, needle: str) -> ?u64;
+    pure fn contains(self, needle: str) -> bool;
+}
+
+pure fn matches_bytes_at(
+    haystack: str,
+    pattern: str,
+    start: u64,
+    pattern_length: u64,
+) -> bool {
+    let length = text_str_byte_length(haystack);
+    if start > length or pattern_length > length - start {
+        return false;
+    }
+    var index: u64 = 0;
+    while index < pattern_length {
+        let actual = text_str_byte(haystack, start + index) match {
+            value? => value,
+            null => return false,
+        }
+        let expected = text_str_byte(pattern, index) match {
+            value? => value,
+            null => return false,
+        }
+        if actual != expected {
+            return false;
+        }
+        index = index + 1;
+    }
+    true
 }
 
 impl TextBytes for str {
@@ -19,5 +54,84 @@ impl TextBytes for str {
 
     pure fn byte(self, index: u64) -> ?u8 {
         text_str_byte(self, index)
+    }
+
+    pure fn is_empty(self) -> bool {
+        text_str_byte_length(self) == 0
+    }
+
+    pure fn is_ascii(self) -> bool {
+        let length = text_str_byte_length(self);
+        var index: u64 = 0;
+        while index < length {
+            let value = text_str_byte(self, index) match {
+                b? => b,
+                null => return false,
+            }
+            if value > 127 {
+                return false;
+            }
+            index = index + 1;
+        }
+        true
+    }
+
+    pure fn is_char_boundary(self, index: u64) -> bool {
+        let length = text_str_byte_length(self);
+        if index == 0 or index == length {
+            return true;
+        }
+        if index > length {
+            return false;
+        }
+        text_str_byte(self, index) match {
+            value? => value < 128 or value >= 192,
+            null => false,
+        }
+    }
+
+    pure fn starts_with(self, prefix: str) -> bool {
+        let prefix_length = text_str_byte_length(prefix);
+        if prefix_length > text_str_byte_length(self) {
+            return false;
+        }
+        matches_bytes_at(self, prefix, 0, prefix_length)
+    }
+
+    pure fn ends_with(self, suffix: str) -> bool {
+        let length = text_str_byte_length(self);
+        let suffix_length = text_str_byte_length(suffix);
+        if suffix_length > length {
+            return false;
+        }
+        matches_bytes_at(self, suffix, length - suffix_length, suffix_length)
+    }
+
+    pure fn find(self, needle: str) -> ?u64 {
+        let length = text_str_byte_length(self);
+        let needle_length = text_str_byte_length(needle);
+        if needle_length == 0 {
+            return 0;
+        }
+        if needle_length > length {
+            return null;
+        }
+        let last = length - needle_length;
+        var start: u64 = 0;
+        while start < last {
+            if matches_bytes_at(self, needle, start, needle_length) {
+                return start;
+            }
+            start = start + 1;
+        }
+        if matches_bytes_at(self, needle, last, needle_length) {
+            last
+        } else {
+            null
+        }
+    }
+
+    pure fn contains(self, needle: str) -> bool {
+        self.find(needle) matches _?
     }
 }

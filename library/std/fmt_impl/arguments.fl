@@ -27,20 +27,51 @@ fn write_segment(
     }
 }
 
+{- Dispatch one argument via Display (`{}`) or borrowed Debug (`{:?}`). -}
+fn write_arg(
+    output: *W,
+    index: usize,
+    value: T,
+) -> !W.as(ByteWriter).Err void
+where
+    W :- ByteWriter,
+    T,
+    is_debug: meta.List<bool>,
+{
+    inline for i in 0..is_debug.length() {
+        const arg_index: usize = i.to_usize();
+        if index == arg_index {
+            const want_debug: bool = is_debug.get(i) match {
+                flag? => flag,
+                null => false,
+            }
+            inline if want_debug {
+                inline if T :- Debug {
+                    return value.ref.as(Debug).write_debug(output);
+                }
+            } else {
+                inline if T :- Display {
+                    return value.write(output);
+                }
+            }
+            return;
+        }
+    }
+}
+
 fn write_fmt_tuple(
     output: *W,
     comptime format: str,
     values: defer Parse(format),
 ) -> !W.as(ByteWriter).Err void where W :- ByteWriter {
     const segments = FormatPlan.literal_segments_for(format);
+    const is_debug = FormatPlan.argument_is_debug_for(format);
     const segment_count: usize = segments.length().to_usize();
     var index: usize = 0;
     inline for value in values'tuple_enumerate {
         write_segment<W, segments>(output, index)!;
         const T = value'type;
-        inline if T :- Display {
-            value.write(output)!;
-        }
+        write_arg<W, T, is_debug>(output, index, value)!;
         if index < segment_count {
             index = index + 1;
         }

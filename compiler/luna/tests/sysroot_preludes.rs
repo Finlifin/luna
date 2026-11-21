@@ -224,7 +224,7 @@ fn shipped_text_module_exposes_checked_utf8_byte_reads() {
     let input = Inputs::new();
     input.write(
         "library/builtin/lib.fl",
-        "pub use primitives.*; pub mod text {pub use text_bytes.*;} pub mod prelude {pub use primitives.*;pub use text_bytes.TextBytes;}",
+        "pub use primitives.*; pub use resources.*; pub mod text {pub use text_bytes.*;} pub mod prelude {pub use primitives.*;pub use text_bytes.TextBytes;}",
     );
     input.write(
         "library/builtin/primitives.fl",
@@ -235,8 +235,16 @@ fn shipped_text_module_exposes_checked_utf8_byte_reads() {
         include_str!("../../../library/builtin/bindings.fl"),
     );
     input.write(
+        "library/builtin/resources.fl",
+        include_str!("../../../library/builtin/protocols/resources.fl"),
+    );
+    input.write(
         "library/builtin/text_bytes.fl",
         include_str!("../../../library/builtin/text_impl/bytes.fl"),
+    );
+    input.write(
+        "library/language-items.conf",
+        "version = 1\ncopy-protocol = builtin.resources.Copy\ndrop-protocol = builtin.resources.Drop\n",
     );
     for package in ["meta", "build", "attrs", "verification", "std"] {
         input.write(&format!("library/{package}/lib.fl"), "pub mod prelude {}");

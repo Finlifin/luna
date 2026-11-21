@@ -2,6 +2,7 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use comptime_interpretor::{Budget, Interpreter, Value};
 
 #[test]
@@ -39,8 +40,12 @@ fn text_search_agrees_with_reference_for_boundaries_utf8_and_overlap() {
         }
         "#
     );
-    let package =
-        support::compile_with_protocols(&source, &support::meta_fixture_protocols()).unwrap();
+    let package = support::compile_with_source_bindings(
+        &source,
+        &support::meta_fixture_protocols(),
+        support::text_fixture_selectors(),
+    )
+    .unwrap();
     let mut bytecode = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     let mut reference = Interpreter::for_comptime_tree(&package, Budget::default()).unwrap();
     for name in ["run", "order"] {

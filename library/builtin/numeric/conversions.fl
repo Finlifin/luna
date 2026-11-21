@@ -883,4 +883,104 @@ impl char {
     pub fn from_u32(code: u32) -> ?char {
         try_u32_to_char(code)
     }
+
+    pub pure fn as_u32(self) -> u32 {
+        self'bitvec.as(u32)
+    }
+
+    pub pure fn len_utf8(self) -> usize {
+        let code = self'bitvec.as(u32);
+        if code <= 127 {
+            1
+        } else if code <= 2047 {
+            2
+        } else if code <= 65535 {
+            3
+        } else {
+            4
+        }
+    }
+
+    pub pure fn is_ascii(self) -> bool {
+        self'bitvec.as(u32) <= 127
+    }
+
+    pub pure fn is_ascii_uppercase(self) -> bool {
+        let code = self'bitvec.as(u32);
+        code >= 65 and code <= 90
+    }
+
+    pub pure fn is_ascii_lowercase(self) -> bool {
+        let code = self'bitvec.as(u32);
+        code >= 97 and code <= 122
+    }
+
+    pub pure fn is_ascii_alphabetic(self) -> bool {
+        self.is_ascii_uppercase() or self.is_ascii_lowercase()
+    }
+
+    pub pure fn is_ascii_digit(self) -> bool {
+        let code = self'bitvec.as(u32);
+        code >= 48 and code <= 57
+    }
+
+    pub pure fn is_ascii_hexdigit(self) -> bool {
+        let code = self'bitvec.as(u32);
+        (code >= 48 and code <= 57) or (code >= 65 and code <= 70) or (code >= 97 and code <= 102)
+    }
+
+    pub pure fn is_ascii_alphanumeric(self) -> bool {
+        self.is_ascii_alphabetic() or self.is_ascii_digit()
+    }
+
+    pub pure fn is_ascii_whitespace(self) -> bool {
+        let code = self'bitvec.as(u32);
+        code == 9 or code == 10 or code == 12 or code == 13 or code == 32
+    }
+
+    pub pure fn is_ascii_control(self) -> bool {
+        let code = self'bitvec.as(u32);
+        code <= 31 or code == 127
+    }
+
+    pub pure fn is_ascii_graphic(self) -> bool {
+        let code = self'bitvec.as(u32);
+        code >= 33 and code <= 126
+    }
+
+    pub pure fn is_ascii_punctuation(self) -> bool {
+        let code = self'bitvec.as(u32);
+        (code >= 33 and code <= 47)
+            or (code >= 58 and code <= 64)
+            or (code >= 91 and code <= 96)
+            or (code >= 123 and code <= 126)
+    }
+
+    pub fn to_ascii_lowercase(self) -> char {
+        let code = self'bitvec.as(u32);
+        if code >= 65 and code <= 90 {
+            try_u32_to_char(code + 32) match {
+                lower? => lower,
+                null => self,
+            }
+        } else {
+            self
+        }
+    }
+
+    pub fn to_ascii_uppercase(self) -> char {
+        let code = self'bitvec.as(u32);
+        if code >= 97 and code <= 122 {
+            try_u32_to_char(code - 32) match {
+                upper? => upper,
+                null => self,
+            }
+        } else {
+            self
+        }
+    }
+
+    pub fn eq_ignore_ascii_case(self, other: char) -> bool {
+        self.to_ascii_lowercase() == other.to_ascii_lowercase()
+    }
 }

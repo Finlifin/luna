@@ -1,16 +1,19 @@
 //! Shared source compilation and interpreter assertions for execution suites.
 #[path = "primitive_bindings.rs"]
 mod primitive_bindings;
+
 use comptime_interpretor::{Event, Interpreter, Value};
 use luna::cli::{Emit, Options};
 use luna::frontend::{self, Artifact};
 use nir::program::Package;
 use std::sync::atomic::{AtomicU64, Ordering};
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn compile(source: &str) -> Package {
     compile_with_protocols(source, &Default::default()).unwrap()
 }
+
 /// Instantiate checked source and execute its concrete IIR entry.
 pub(crate) fn run_iir(
     source: &str,
@@ -22,12 +25,14 @@ pub(crate) fn run_iir(
     let mut vm = Interpreter::from_iir(&graph, Default::default()).unwrap();
     vm.invoke_instance(&graph.roots[0], inputs).unwrap()
 }
+
 pub(crate) fn compile_with_protocols(
     source: &str,
     protocols: &elaboration::program::Protocols,
 ) -> Result<Package, String> {
     compile_with_bindings(source, protocols, None)
 }
+
 pub(crate) fn compile_with_bindings(
     source: &str,
     protocols: &elaboration::program::Protocols,
@@ -42,6 +47,7 @@ pub(crate) fn compile_with_bindings(
         },
     )
 }
+
 pub(crate) fn compile_with_source_bindings(
     source: &str,
     protocols: &elaboration::program::Protocols,
@@ -112,6 +118,7 @@ pub(crate) fn compile_explicit_source_with_bindings(
     };
     Ok(package)
 }
+
 pub(crate) fn id(package: &Package, name: &str) -> nir::DeclarationId {
     package
         .functions
@@ -120,6 +127,7 @@ pub(crate) fn id(package: &Package, name: &str) -> nir::DeclarationId {
         .unwrap()
         .declaration
 }
+
 pub(crate) fn calls(package: &Package, interpreter: &Interpreter<'_>) -> Vec<String> {
     interpreter
         .events()
@@ -203,6 +211,7 @@ pub(crate) fn run_iir_with_tuple(
 
 #[path = "library.rs"]
 mod library;
+
 #[allow(unused_imports)]
 pub(crate) use library::with_attrs;
 
@@ -212,6 +221,14 @@ pub(crate) use library::with_attrs;
 pub(crate) fn meta_fixture_protocols() -> elaboration::program::Protocols {
     elaboration::program::Protocols {
         builtin_implementation_packages: [0].into(),
+        ..Default::default()
+    }
+}
+
+pub(crate) fn text_fixture_selectors() -> luna::protocols::type_constructors::Selectors<'static> {
+    luna::protocols::type_constructors::Selectors {
+        copy: Some("input.resources.Copy"),
+        drop: Some("input.resources.Drop"),
         ..Default::default()
     }
 }
