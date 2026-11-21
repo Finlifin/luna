@@ -800,3 +800,23 @@ fn runtime_defaults_read_staged_slots_at_their_own_position() {
     );
     assert_eq!(sysroot::run(&specialized), Value::Bool(true));
 }
+
+#[test]
+fn inference_delivers_the_selected_comptime_default_once() {
+    let source = "
+        typealias Selector = %{flag: bool} comptime fn() -> Type;
+        comptime fn make() -> Selector {
+            var flag = false;
+            || { flag = not flag; if flag { bool } else { char } }
+        }
+        comptime fn select_once(.select: Selector = make(), .chosen: Type = select(),
+            .value: defer chosen = true) -> T where T, requires T == bool {
+            select() == char
+        }
+        comptime fn forward() -> bool { select_once() }
+        comptime fn override_chosen() -> bool { select_once(.chosen = char, .value = 'z') }
+        const chosen = forward();
+        const skipped = override_chosen();
+        fn run() -> bool { chosen and not skipped }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}

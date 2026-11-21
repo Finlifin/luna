@@ -7766,6 +7766,12 @@ impl Checker<'_, '_> {
                     continue;
                 }
                 if !assigned[slot] && sig.modifiers.is_comptime {
+                    // Inference can finish a default whose result is ordinary
+                    // data even when its producer mutates a live closure.
+                    if let (Some(value), Some(_)) = (&values[slot], &symbols[slot]) {
+                        self.require_expression(&value.ty, &ty, expr.span)?;
+                        continue;
+                    }
                     let (completed, domain) = self
                         .prepare_open_live_default(
                             owner,
