@@ -8,6 +8,7 @@
 | 文档 | 回答的问题 |
 | --- | --- |
 | [语言契约](language-contracts.md) | 哪些设计必须保持，哪些“未知”与阶段不能混淆？ |
+| [自举编译器备忘](bootstrap-lessons.md) | 当前 comptime 与 elaboration 为何采用这些折衷？自举时用什么反例重新检验？ |
 | [架构审计](architecture-audit.md) | 当前源码究竟在哪里偏离，哪些旧报告已经过时？ |
 | [晚报回复](audit-reply.md) | 哪些生产路径已接通，待决参数域需要谁保存源码、值与控制流？ |
 | [一致性边界](consistency-boundaries.md) | 哪些信息在变换中容易丢失，用什么反例检查？ |
