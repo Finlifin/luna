@@ -106,9 +106,10 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         })? {
             domain::Poll::Continue => Ok(Poll::Continue),
             domain::Poll::Input { slot, domain } => self.check_slot(checker, slot, domain),
-            domain::Poll::Complete(domain) => {
+            domain::Poll::Complete(mut domain) => {
                 let slot = self.dependencies.take().unwrap().slot();
                 if let Some(collection) = &mut self.collection {
+                    domain.await_alias_representation(checker, self.checking, true);
                     collection.accept_domain(domain)?;
                     Ok(Poll::Continue)
                 } else {
@@ -142,7 +143,7 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         &mut self,
         checker: &mut Checker<'_, '_>,
         slot: usize,
-        domain: DeclarationInputDomain,
+        mut domain: DeclarationInputDomain,
     ) -> Result<Poll<'b, 'h>, Error> {
         if self.routed[slot].is_none() && self.interface.is_collector(slot) {
             let ty = domain.ty;
@@ -172,6 +173,11 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             )?;
             return Ok(Poll::Continue);
         }
+        let collecting = matches!(
+            self.routed[slot],
+            Some(RoutedDeclarationInput::Collected(_))
+        );
+        domain.await_alias_representation(checker, self.checking, collecting);
         if matches!(domain.ty, Term::Lift(_)) && !domain.pending.is_empty() {
             return Err(error(
                 self.span,

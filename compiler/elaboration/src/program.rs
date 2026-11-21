@@ -667,6 +667,7 @@ fn elaborate_in_mode(
         aliases: BTreeSet::new(),
         completed_aliases: std::collections::HashMap::new(),
         checked_alias_definitions: BTreeSet::new(),
+        abstract_alias_types: Default::default(),
         alias_substitution: DeclarationBindings::default(),
         alias_value_bindings: DeclarationBindings::default(),
         default_template_inputs: DeclarationBindings::default(),
@@ -2473,6 +2474,7 @@ struct Checker<'a, 'h> {
     completed_aliases:
         std::collections::HashMap<aliases::Application, std::sync::Arc<CompletedType>>,
     checked_alias_definitions: BTreeSet<OwnerId>,
+    abstract_alias_types: BTreeSet<DeclarationId>,
     alias_scopes: BTreeMap<OwnerId, Option<OwnerId>>,
     alias_substitution: DeclarationBindings<Term>,
     alias_value_bindings: DeclarationBindings<n::LocalId>,
@@ -6846,15 +6848,20 @@ impl Checker<'_, '_> {
                 P::Usize,
                 P::Isize,
             ];
-            self.establish_type_requirement(
-                &n::TypePredicate::Or(
-                    domains
-                        .into_iter()
-                        .map(|domain| n::TypePredicate::Equal(target.clone(), p(domain)))
-                        .collect(),
-                ),
-                span,
-            )?;
+            // A transparent alias rechecks this supplier on expansion. Keep
+            // the literal's spelling inside a known aggregate until its
+            // element domain is supplied, just as for a standalone operand.
+            if self.alias_representation_input(&target).is_none() {
+                self.establish_type_requirement(
+                    &n::TypePredicate::Or(
+                        domains
+                            .into_iter()
+                            .map(|domain| n::TypePredicate::Equal(target.clone(), p(domain)))
+                            .collect(),
+                    ),
+                    span,
+                )?;
+            }
             comptime_runtime::Integer::parse_literal(
                 spelling,
                 &mut comptime_runtime::Budget::default(),

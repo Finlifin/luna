@@ -61,6 +61,7 @@ impl Checker<'_, '_> {
         inputs: input_facts::State,
         check: impl FnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
+        let saved_alias_inputs = std::mem::take(&mut self.abstract_alias_types);
         let saved_refinements = std::mem::take(&mut self.definition_refinements);
         let saved_behavior_inputs = std::mem::take(&mut self.ordinary_behavior_inputs);
         let saved_behavior = std::mem::replace(&mut self.checking_open_behavior, false);
@@ -112,6 +113,7 @@ impl Checker<'_, '_> {
         self.local_write_versions = saved_local_write_versions;
         self.local_runtime_deliveries = saved_local_runtime_deliveries;
         self.local_runtime_origins = saved_local_runtime_origins;
+        self.abstract_alias_types = saved_alias_inputs;
         self.definition_refinements = saved_refinements;
         self.ordinary_behavior_inputs = saved_behavior_inputs;
         self.checking_open_behavior = saved_behavior;

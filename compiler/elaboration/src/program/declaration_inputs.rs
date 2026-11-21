@@ -212,11 +212,34 @@ impl std::fmt::Display for PendingDeclarationCollection<'_, '_> {
     }
 }
 
-/// A caller-scoped domain can remain generic while all of this call's
-/// dependencies are supplied. Pending refers to callee inputs, not rigidity.
+/// Inputs still needed to choose the operand representation. These may be
+/// callee slots, lexical suppliers or abstract inputs of an enclosing alias.
 struct DeclarationInputDomain {
     ty: Term,
     pending: BTreeSet<DeclarationId>,
+}
+impl DeclarationInputDomain {
+    /// An alias parameter has a symbolic identity for formation proofs, but
+    /// an input expecting that parameter still needs the caller's choice of
+    /// representation. A constructed domain keeps its known outer shape.
+    fn await_alias_representation(
+        &mut self,
+        checker: &Checker<'_, '_>,
+        checking: InputChecking,
+        collecting: bool,
+    ) {
+        if checking != InputChecking::Contextual {
+            return;
+        }
+        let expected = if collecting {
+            checker.list_element_type(&self.ty).unwrap_or(&self.ty)
+        } else {
+            &self.ty
+        };
+        if let Some(input) = checker.alias_representation_input(expected) {
+            self.pending.insert(input);
+        }
+    }
 }
 impl std::fmt::Display for DeclarationInputDomain {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

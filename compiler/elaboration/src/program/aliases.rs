@@ -31,6 +31,16 @@ impl Checker<'_, '_> {
         })
     }
 
+    pub(super) fn alias_representation_input(&self, ty: &Term) -> Option<DeclarationId> {
+        match ty {
+            Term::Rigid {
+                declaration,
+                sort: Sort::Type,
+            } if self.abstract_alias_types.contains(declaration) => Some(*declaration),
+            _ => None,
+        }
+    }
+
     pub(super) fn check_alias_definition(
         &mut self,
         owner: OwnerId,
@@ -55,6 +65,7 @@ impl Checker<'_, '_> {
         let saved_value_bindings = std::mem::take(&mut self.alias_value_bindings);
         let saved_normal_bindings = self.normal_default_bindings.clone();
         let saved_scopes = std::mem::take(&mut self.alias_scopes);
+        let saved_definition_inputs = std::mem::take(&mut self.abstract_alias_types);
         self.context = self.binder_context(owner);
         // Normalize/check the target as a Type-valued expression without
         // demanding concrete results of calls whose inputs are still symbolic.
@@ -67,7 +78,9 @@ impl Checker<'_, '_> {
             parameters.extend(self.type_parameters[&owner].iter().copied());
             domains.extend(self.trait_domains(owner)?);
             for (parameter, domain) in parameters.into_iter().zip(domains) {
-                if domain != p(P::Type) {
+                if domain == p(P::Type) {
+                    self.abstract_alias_types.insert(parameter);
+                } else {
                     let binding = self.spread_binding(span)?;
                     self.locals.insert(binding, domain.clone());
                     self.normal_default_bindings
@@ -76,6 +89,7 @@ impl Checker<'_, '_> {
             }
             self.expr(value, Some(&p(P::Type))).map(|_| ())
         })();
+        self.abstract_alias_types = saved_definition_inputs;
         self.signature_owner = saved_owner;
         self.context = saved_context;
         self.locals = saved_locals;

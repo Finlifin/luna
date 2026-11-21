@@ -1859,6 +1859,43 @@ fn contextual_alias_explicit_literals_keep_external_type_parameters_open() {
 }
 
 #[test]
+fn contextual_alias_checks_known_domains_while_describing_open_inputs() {
+    let source = "typealias u8 = .u8'builtin;
+        enum Choice where T {none,some(T)}
+        struct Indexed where T,value:T,tag:Choice<T>,enabled:bool {}
+        typealias Alias<T> = Indexed<T,7,.none,true>;";
+    let concrete = format!(
+        "{source}
+        fn read(value:Indexed<u8,7,.none,true>)->bool {{true}}
+        fn run()->bool {{read(Alias<u8>{{}})}}"
+    );
+    assert_eq!(
+        support::run_iir(&concrete, "run", vec![]),
+        Value::Bool(true)
+    );
+    for (invalid, reason) in [
+        (source.replace(".none,true", ".unknown,true"), "variant"),
+        (source.replace(".none,true", ".none,42"), "integer"),
+    ] {
+        let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+        assert!(failure.contains(reason), "{failure}");
+    }
+}
+
+#[test]
+fn contextual_alias_preserves_independent_formation_evidence() {
+    let source = "struct Checked where X,Y,value:X,requires X == Y {}
+        typealias Alias<T> = Checked<T,T,7>;";
+    support::compile(source);
+    let invalid = source.replace("Checked<T,T,7>", "Checked<T,bool,7>");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(
+        failure.contains("type requirement is not satisfied"),
+        "{failure}"
+    );
+}
+
+#[test]
 fn transparent_aliases_accept_value_parameters_without_adding_identity() {
     let source = "typealias Type=.Type'builtin;
         newtype Indexed<flag:bool> = bool;

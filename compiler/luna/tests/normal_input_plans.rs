@@ -267,6 +267,36 @@ fn fixed_packet_layout_does_not_absorb_collector_sources() {
 }
 
 #[test]
+fn contextual_alias_collectors_keep_element_domains_until_invocation() {
+    let source = "
+        pure comptime fn Packet<T, ...values: meta.List<T>> -> Type { bool }
+        typealias Elements<T> = Packet<T, 1, 255>;
+        typealias Whole<T> = Packet<T, .values = [1, 255]>;
+        comptime fn Build(ty: Type) -> Type { Elements<ty> }
+        comptime fn BuildWhole(ty: Type) -> Type { Whole<ty> }
+        comptime fn Direct() -> Type { Packet<u8, .values = [1, 255]> }
+        ";
+    let package = sysroot::compile(source).unwrap();
+    let invalid = source.replace(".values = [1, 255]>;", ".values = 7>;");
+    let failure = sysroot::compile(&invalid).unwrap_err();
+    assert!(failure.contains("integer"), "{failure}");
+    let expected = invoke_both(&package, "Direct");
+    for reference in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, reference, |vm| {
+            for name in ["Build", "BuildWhole"] {
+                let function = id(&package, name);
+                let input = |domain| vec![Value::Type(nir::Term::Primitive(domain))];
+                assert!(vm.invoke(function, input(nir::Primitive::I8)).is_err());
+                assert_eq!(
+                    vm.invoke(function, input(nir::Primitive::U8)).unwrap(),
+                    expected
+                );
+            }
+        });
+    }
+}
+
+#[test]
 fn late_static_domains_contextualize_whole_collections_as_ordinary_expressions() {
     let package = sysroot::compile(
         "
