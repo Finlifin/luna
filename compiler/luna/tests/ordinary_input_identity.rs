@@ -253,6 +253,55 @@ fn writes_inside_a_default_replace_its_entry_snapshot() {
 }
 
 #[test]
+fn a_default_can_determine_its_result_without_observing_the_overwritten_input() {
+    let source = "
+        trait Flag {} impl Flag for char {}
+        comptime fn Initial() -> Type { bool }
+        comptime fn note(t: Type) -> bool { t == bool }
+        comptime fn accept(comptime .T: Type = bool, comptime .S: Type = char,
+            comptime .U: Type = do { note(T); T = S; T }, x: U) -> bool
+        where requires U :- Flag { true }
+        comptime fn check() -> bool { accept('z', .T = Initial()) }";
+    check_events(source, &[("Initial", 1), ("note", 1), ("accept", 1)]);
+    let failure =
+        sysroot::compile(&source.replace("impl Flag for char", "impl Flag for bool")).unwrap_err();
+    assert!(
+        failure.contains("not established") && failure.contains("(primitive char)"),
+        "{failure}"
+    );
+    // A self-assignment still reads the entry value.
+    let failure = sysroot::compile(&source.replace("T = S", "T = T")).unwrap_err();
+    assert!(
+        failure.contains("original comptime invocation"),
+        "{failure}"
+    );
+}
+
+#[test]
+fn earlier_local_reads_keep_their_version_in_a_default_result() {
+    let source = "
+        comptime fn Initial() -> Type { bool }
+        comptime fn accept(comptime .T: Type = bool, comptime .S: Type = char,
+            comptime .U: Type = do { let saved = S; S = T; saved }, x: U) -> bool { true }
+        comptime fn check() -> bool { accept('z', .T = Initial()) }";
+    check_events(source, &[("Initial", 1), ("accept", 1)]);
+}
+
+#[test]
+fn an_unobserved_runtime_default_restores_captures_for_required_execution() {
+    let source = "
+        comptime fn check_flag(flag: bool) -> bool { assumes flag; true }
+        comptime fn Selected() -> Type { char }
+        fn accept(comptime .flag: bool = true,
+            comptime .T: Type = do { check_flag(flag); Selected() }, x: T) -> bool { true }
+        fn run() -> bool { accept('z') }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let failure =
+        sysroot::compile(&source.replace("accept('z')", "accept('z', .flag = false)")).unwrap_err();
+    assert!(failure.contains("ProgramContractRejected"), "{failure}");
+}
+
+#[test]
 fn scalar_default_snapshots_cover_value_requirements_and_literal_overrides() {
     let source = "
         trait Enabled where flag: bool {}

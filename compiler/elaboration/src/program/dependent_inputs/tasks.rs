@@ -10,6 +10,7 @@ enum Task {
         slot: usize,
         value: n::Expr,
         references: BTreeMap<n::LocalId, usize>,
+        deferred: BTreeMap<n::LocalId, usize>,
         stores: BTreeSet<usize>,
     },
 }
@@ -22,10 +23,15 @@ impl std::fmt::Display for Task {
                 slot,
                 value,
                 references,
+                deferred,
                 stores,
             } => {
                 write!(f, "(complete-default {slot} (references")?;
                 for (binding, dependency) in references {
+                    write!(f, " (input {dependency} {binding})")?;
+                }
+                f.write_str(") (deferred")?;
+                for (binding, dependency) in deferred {
                     write!(f, " (input {dependency} {binding})")?;
                 }
                 f.write_str(") (stores")?;
@@ -80,6 +86,33 @@ impl Progress {
         self.tasks.push(continuation);
         self.tasks.extend(dependencies.rev().map(Task::Enter));
         Ok(())
+    }
+    fn schedule_default(
+        &mut self,
+        writes: &Writes,
+        slot: usize,
+        value: n::Expr,
+        references: BTreeMap<n::LocalId, usize>,
+        deferred: BTreeMap<n::LocalId, usize>,
+        fuel: &mut u64,
+        span: Span,
+    ) -> Result<(), Error> {
+        let reads = references
+            .iter()
+            .map(|(&id, &arg)| writes.read(id, arg, slot));
+        let (dependencies, stores) = writes.dependencies(reads, fuel, span)?;
+        self.after(
+            dependencies.into_iter(),
+            Task::Default {
+                slot,
+                value,
+                references,
+                deferred,
+                stores,
+            },
+            fuel,
+            span,
+        )
     }
     fn complete(&mut self, slot: usize, span: Span) -> Result<(), Error> {
         if self.path.last() != Some(&slot) {
@@ -319,7 +352,13 @@ impl Frame {
                     ));
                 }
                 progress.enter(slot, source.span)?;
-                let dependencies = checker.term_substitution_inputs(&parameter.ty, source.span)?;
+                let mut dependencies =
+                    checker.term_substitution_inputs(&parameter.ty, source.span)?;
+                if let Some(default) = &prepared.defaults[slot] {
+                    // Specialize the producer's annotations even if its value
+                    // stops depending on an entry argument after a store.
+                    dependencies.extend(checker.checked_substitution_inputs(default, source.span)?);
+                }
                 progress.after(
                     dependencies.into_keys(),
                     Task::Check(slot),
@@ -357,10 +396,16 @@ impl Frame {
                             "dependent default needs declaration parameter metadata",
                         )
                     })?;
-                    let value = match prepared.defaults[slot].take() {
+                    let mut value = match prepared.defaults[slot].take() {
                         Some(value) => value,
                         None => checker.call_default(owner, slot, callee, source.span)?,
                     };
+                    value
+                        .rewrite_types(&mut |ty| call.binding().substitute(ty))
+                        .map_err(|e| error(source.span, e.to_string()))?;
+                    value.rewrite_types(&mut |term| {
+                        checker.callable_argument_term_view(term, source.span)
+                    })?;
                     let ids = match &mut self.default_slots {
                         Some(slots) => slots,
                         vacant @ None => {
@@ -405,21 +450,24 @@ impl Frame {
                             "dependent comptime input cannot read a runtime argument",
                         ));
                     }
-                    let (dependencies, stores) = self.default_writes.dependencies(
+                    let (references, deferred) = if !references.is_empty()
+                        && matches!(value.kind, K::Block { .. } | K::CallPreparation { .. })
+                    {
+                        let live = checker.with_observation_budget(source.span, |_, budget| {
+                            input_observation::normal_exit_inputs(&value, budget)
+                        })?;
                         references
-                            .iter()
-                            .map(|(&id, &arg)| self.default_writes.read(id, arg, slot)),
-                        &mut checker.required_steps,
-                        source.span,
-                    )?;
-                    progress.after(
-                        dependencies.into_iter(),
-                        Task::Default {
-                            slot,
-                            value,
-                            references,
-                            stores,
-                        },
+                            .into_iter()
+                            .partition(|(id, _)| live.contains(id))
+                    } else {
+                        (references, BTreeMap::new())
+                    };
+                    progress.schedule_default(
+                        &self.default_writes,
+                        slot,
+                        value,
+                        references,
+                        deferred,
                         &mut checker.required_steps,
                         source.span,
                     )?;
@@ -437,22 +485,17 @@ impl Frame {
             }
             Task::Default {
                 slot,
-                mut value,
-                references,
+                value,
+                mut references,
+                deferred,
                 stores,
             } => {
-                value
-                    .rewrite_types(&mut |ty| call.binding().substitute(ty))
-                    .map_err(|e| error(source.span, e.to_string()))?;
-                value.rewrite_types(&mut |term| {
-                    checker.callable_argument_term_view(term, source.span)
-                })?;
                 let symbols = call.binding().observations();
                 self.default_writes
                     .observe(checker, stores, symbols, source.span)?;
                 let receiver = checker.has_comptime_value_receiver(owner);
                 let mut captures = BTreeMap::new();
-                for (id, arg) in references {
+                for (&id, &arg) in &references {
                     let read = self.default_writes.read(id, arg, slot);
                     let symbol = self.default_writes.value(read, symbols, source.span)?;
                     let domain = prepared.values[arg]
@@ -468,6 +511,53 @@ impl Frame {
                             written: !matches!(read, Read::Argument(i) if i == arg),
                         },
                     );
+                }
+                if !deferred.is_empty() {
+                    let mut facts = BTreeMap::new();
+                    let mut snapshots = BTreeSet::new();
+                    for (&id, capture) in &captures {
+                        facts.insert(
+                            id,
+                            std::sync::Arc::new(copy_evidence(
+                                capture.symbol,
+                                &mut checker.required_steps,
+                                source.span,
+                            )?),
+                        );
+                        if capture.detached {
+                            snapshots.insert(id);
+                        }
+                    }
+                    for (&id, &arg) in &deferred {
+                        if !(receiver && arg == 0)
+                            && matches!(call.parameters()[arg].ty, Term::Primitive(p) if p != P::Object)
+                        {
+                            snapshots.insert(id);
+                        }
+                    }
+                    let identity =
+                        checker.with_observation_budget(source.span, |checker, budget| {
+                            normal::observation::hint(
+                                checker.observe_input_tail_in(&value, facts, snapshots, budget),
+                            )
+                        })?;
+                    if let Some(identity) = identity {
+                        self.deliver(slot, value, identity)?;
+                    } else {
+                        // The slice is only a hint. An opaque producer may
+                        // still need every capture in its executable frame.
+                        references.extend(deferred);
+                        progress.schedule_default(
+                            &self.default_writes,
+                            slot,
+                            value,
+                            references,
+                            BTreeMap::new(),
+                            &mut checker.required_steps,
+                            source.span,
+                        )?;
+                    }
+                    return Ok(Poll::Continue);
                 }
                 let resolution = checker
                     .resolve_type_dependency(owner, callee, source, false, value, captures)?;
@@ -637,7 +727,7 @@ impl Checker<'_, '_> {
                         source.span,
                     )?)))
                 },
-                &snapshots,
+                snapshots,
                 source.span,
             )?,
         };
@@ -875,6 +965,7 @@ mod tests {
             slot: 3,
             value,
             references: BTreeMap::from([(n::LocalId { owner: 4, index: 2 }, 1)]),
+            deferred: BTreeMap::from([(n::LocalId { owner: 4, index: 0 }, 0)]),
             stores: BTreeSet::new(),
         };
         let mut progress = Progress::new(3);
@@ -891,6 +982,7 @@ mod tests {
             dump.contains("(references (input 1 (local 4 2)))"),
             "{dump}"
         );
+        assert!(dump.contains("(deferred (input 0 (local 4 0)))"), "{dump}");
         assert!(dump.contains("default\\\"\\n"), "{dump}");
         let term = Term::String("x".repeat(1024).into());
         assert!(copy_evidence(&term, &mut 1, span).is_err());

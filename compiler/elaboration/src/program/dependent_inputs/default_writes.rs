@@ -284,7 +284,7 @@ impl Writes {
                     budget.consume(facts.len())?;
                     let snapshots = facts.keys().copied().collect();
                     normal::observation::hint(
-                        checker.observe_preserved_input_in(&store.rhs, facts, &snapshots, budget),
+                        checker.observe_preserved_input_in(&store.rhs, facts, snapshots, budget),
                     )
                 })?
                 .ok_or_else(|| unavailable(span))?;

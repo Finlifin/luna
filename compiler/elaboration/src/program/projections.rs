@@ -880,7 +880,7 @@ impl Checker<'_, '_> {
                 self.observe_input_prefix_in(
                     statements,
                     &mut known_parent,
-                    &BTreeSet::new(),
+                    &mut BTreeSet::new(),
                     &mut budget,
                 )
             } else {

@@ -112,6 +112,52 @@ pub(super) fn pending_domain_inputs(
     Ok(pending)
 }
 
+/// Candidate entry reads for the normal result of a checked block. Trace the
+/// tail backwards through local bindings and whole-slot stores. Other effects
+/// are still inspected by the forward observer and executed by the caller.
+/// This slice alone cannot establish an identity.
+pub(super) fn normal_exit_inputs(
+    mut expr: &n::Expr,
+    budget: &mut comptime_runtime::Budget,
+) -> Result<BTreeSet<n::LocalId>, Failure> {
+    let mut prefixes = Vec::new();
+    while let K::Block {
+        statements,
+        result: Some(tail),
+    }
+    | K::CallPreparation {
+        statements,
+        result: Some(tail),
+    } = &expr.kind
+    {
+        budget.consume(1)?;
+        prefixes.push(statements.as_slice());
+        expr = tail;
+    }
+    let mut inputs = nir::free_bindings::collect(expr, &mut budget.steps)?;
+    for prefix in prefixes.into_iter().rev() {
+        for statement in prefix.iter().rev() {
+            budget.consume(1)?;
+            let kind = match &statement.kind {
+                K::Discard(value) => &value.kind,
+                kind => kind,
+            };
+            let rhs = match kind {
+                K::Let { binding, value } if inputs.remove(binding) => value,
+                K::Assign { place, value } if place.is_root() && inputs.remove(&place.root) => {
+                    value
+                }
+                K::LetPattern { .. } => statement,
+                _ => continue,
+            };
+            let reads = nir::free_bindings::collect(rhs, &mut budget.steps)?;
+            budget.consume(reads.len())?;
+            inputs.extend(reads);
+        }
+    }
+    Ok(inputs)
+}
+
 impl Checker<'_, '_> {
     /// Observe identity while retaining the whole producer for execution.
     /// Facts describe earlier bound default inputs and new immutable locals.
@@ -122,14 +168,14 @@ impl Checker<'_, '_> {
         prepared: impl FnMut(n::LocalId, &mut u64) -> Result<Option<std::sync::Arc<Term>>, Error>,
         span: Span,
     ) -> Result<Option<Term>, Error> {
-        self.preserved_input_with_snapshots(producer, prepared, &BTreeSet::new(), span)
+        self.preserved_input_with_snapshots(producer, prepared, BTreeSet::new(), span)
     }
 
     pub(super) fn preserved_input_with_snapshots(
         &mut self,
         producer: &n::Expr,
         mut prepared: impl FnMut(n::LocalId, &mut u64) -> Result<Option<std::sync::Arc<Term>>, Error>,
-        snapshots: &BTreeSet<n::LocalId>,
+        snapshots: BTreeSet<n::LocalId>,
         span: Span,
     ) -> Result<Option<Term>, Error> {
         // Each new observation may use completed immutable caller bindings.
@@ -171,8 +217,8 @@ impl Checker<'_, '_> {
     pub(super) fn observe_preserved_input_in(
         &self,
         producer: &n::Expr,
-        mut facts: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-        snapshots: &BTreeSet<n::LocalId>,
+        facts: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        snapshots: BTreeSet<n::LocalId>,
         budget: &mut comptime_runtime::Budget,
     ) -> Result<Term, Failure> {
         if let Some(identity) =
@@ -180,6 +226,18 @@ impl Checker<'_, '_> {
         {
             return Ok(identity);
         }
+        self.observe_input_tail_in(producer, facts, snapshots, budget)
+    }
+
+    /// Partial call-frame observations start here. A missing callee slot must
+    /// never be resolved from a similarly numbered binding of the caller.
+    pub(super) fn observe_input_tail_in(
+        &self,
+        producer: &n::Expr,
+        mut facts: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
+        mut snapshots: BTreeSet<n::LocalId>,
+        budget: &mut comptime_runtime::Budget,
+    ) -> Result<Term, Failure> {
         let mut result = producer;
         loop {
             budget.consume(1)?;
@@ -195,7 +253,7 @@ impl Checker<'_, '_> {
                     };
                 }
             };
-            self.observe_input_prefix_in(statements, &mut facts, snapshots, budget)?;
+            self.observe_input_prefix_in(statements, &mut facts, &mut snapshots, budget)?;
             let Some(tail) = tail else {
                 return Err(Failure::Unavailable);
             };
@@ -209,7 +267,7 @@ impl Checker<'_, '_> {
         &self,
         statements: &[n::Expr],
         facts: &mut BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-        snapshots: &BTreeSet<n::LocalId>,
+        snapshots: &mut BTreeSet<n::LocalId>,
         budget: &mut comptime_runtime::Budget,
     ) -> Result<(), Failure> {
         for statement in statements {
@@ -225,7 +283,13 @@ impl Checker<'_, '_> {
                 observation::optional(self.observe_normal_input_in(statement, 0, budget, facts))?
                     .is_some()
             };
-            if !observed {
+            if observed {
+                if let K::Let { binding, value } = &statement.kind
+                    && matches!(value.ty, Term::Primitive(p) if p != P::Object)
+                {
+                    snapshots.insert(*binding);
+                }
+            } else {
                 // A whole-slot store reads the pre-statement facts. Publish its
                 // value only after invalidating the effects of the whole RHS.
                 let operation = match &statement.kind {
