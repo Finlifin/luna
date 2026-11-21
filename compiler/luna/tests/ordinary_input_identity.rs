@@ -1120,3 +1120,67 @@ fn const_opaque_heads_keep_projected_member_inputs_until_instantiation() {
     let diagnostic = sysroot::compile(&invalid).unwrap_err();
     assert!(diagnostic.contains("normal-form"), "{diagnostic}");
 }
+
+#[test]
+fn only_normal_operand_exits_supply_the_original_comptime_call() {
+    check_events(
+        r#"
+        comptime fn select(flag: bool) -> bool { flag }
+        comptime fn accept(comptime ty: Type, value: ty) -> ty { value }
+        comptime fn relay(flag: bool) -> bool {
+            var trace: Integer = 0;
+            let result = accept(
+                if select(flag) { trace = trace + 1; return trace == 0; }
+                else { trace = trace + 1; bool },
+                do { trace = trace * 10 + 2; true }
+            );
+            result and trace == 12
+        }
+        comptime fn check() -> bool { relay(false) and not relay(true) }
+        "#,
+        &[("select", 2), ("accept", 1)],
+    );
+}
+
+#[test]
+fn matching_operand_exits_keep_guard_effects_and_reject_disagreement() {
+    let definitions = r#"
+        comptime fn select(flag: bool) -> bool { flag }
+        comptime fn accept(comptime ty: Type, value: ty) -> ty { value }
+        comptime fn relay(flag: bool) -> bool {
+            var trace: Integer = 0;
+            let result = accept(select(flag) match {
+                true if do { trace = trace + 1; false } => bool,
+                true => do { trace = trace + 2; bool },
+                false => do { trace = trace + 3; bool },
+            }, true);
+            result and trace == 3
+        }
+        comptime fn check() -> bool { relay(false) and relay(true) }
+    "#;
+    check_events(definitions, &[("select", 2), ("accept", 2)]);
+    let error = sysroot::compile(&definitions.replace("trace + 2; bool", "trace + 2; char"))
+        .expect_err("inconsistent operand domains were accepted");
+    assert!(error.contains("original comptime invocation"), "{error}");
+}
+
+#[test]
+fn an_opaque_selector_cannot_preserve_a_type_from_before_its_write() {
+    let failure = sysroot::compile(
+        r#"
+        comptime fn choose(flag: bool) -> bool { flag }
+        comptime fn accept(comptime ty: Type, value: ty) -> ty { value }
+        comptime fn check() -> bool {
+            accept(do {
+                var saved: Type = bool;
+                if do { saved = char; choose(false) } { saved } else { saved }
+            }, true)
+        }
+    "#,
+    )
+    .expect_err("a write in the selector cannot leave bool as the payload type");
+    assert!(
+        failure.contains("original comptime invocation") || failure.contains("type mismatch"),
+        "{failure}"
+    );
+}

@@ -1,6 +1,7 @@
 //! Bounded, read-only observations of checked declaration inputs. These do not
 //! establish stage availability, scope admission, or permission to invoke code.
 use super::*;
+mod exits;
 use normal::observation::{self, Failure};
 
 pub(super) fn structural_limit(limit: nir::copy_budget::CopyBudgetExhausted, span: Span) -> Error {
@@ -227,38 +228,6 @@ impl Checker<'_, '_> {
             return Ok(identity);
         }
         self.observe_input_tail_in(producer, facts, snapshots, budget)
-    }
-
-    /// Partial call-frame observations start here. A missing callee slot must
-    /// never be resolved from a similarly numbered binding of the caller.
-    pub(super) fn observe_input_tail_in(
-        &self,
-        producer: &n::Expr,
-        mut facts: BTreeMap<n::LocalId, std::sync::Arc<Term>>,
-        mut snapshots: BTreeSet<n::LocalId>,
-        budget: &mut comptime_runtime::Budget,
-    ) -> Result<Term, Failure> {
-        let mut result = producer;
-        loop {
-            budget.consume(1)?;
-            let (statements, tail) = match &result.kind {
-                K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                    (statements, result)
-                }
-                _ => {
-                    return if input_facts_cover(result, &facts, budget)? {
-                        self.observe_normal_input_in(result, 0, budget, &facts)
-                    } else {
-                        Err(Failure::Unavailable)
-                    };
-                }
-            };
-            self.observe_input_prefix_in(statements, &mut facts, &mut snapshots, budget)?;
-            let Some(tail) = tail else {
-                return Err(Failure::Unavailable);
-            };
-            result = tail;
-        }
     }
 
     /// Retain only facts surviving this executable prefix. The caller keeps
