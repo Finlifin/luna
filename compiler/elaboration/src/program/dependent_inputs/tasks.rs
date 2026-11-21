@@ -400,12 +400,11 @@ impl Frame {
                         Some(value) => value,
                         None => checker.call_default(owner, slot, callee, source.span)?,
                     };
-                    value
-                        .rewrite_types(&mut |ty| call.binding().substitute(ty))
-                        .map_err(|e| error(source.span, e.to_string()))?;
-                    value.rewrite_types(&mut |term| {
-                        checker.callable_argument_term_view(term, source.span)
-                    })?;
+                    checker.specialize_default_annotations(
+                        &mut value,
+                        call.binding(),
+                        source.span,
+                    )?;
                     let ids = match &mut self.default_slots {
                         Some(slots) => slots,
                         vacant @ None => {
@@ -492,7 +491,7 @@ impl Frame {
             } => {
                 let symbols = call.binding().observations();
                 self.default_writes
-                    .observe(checker, stores, symbols, source.span)?;
+                    .observe(checker, stores, call.binding(), source.span)?;
                 let receiver = checker.has_comptime_value_receiver(owner);
                 let mut captures = BTreeMap::new();
                 for (&id, &arg) in &references {

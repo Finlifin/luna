@@ -217,6 +217,30 @@ fn stored_values_depend_on_the_inputs_of_each_call() {
 }
 
 #[test]
+fn store_annotations_follow_the_callers_type_inputs() {
+    let source = "
+        comptime fn Selected(comptime .S: Type = bool, comptime .T: Type = char,
+            .write: bool = do { T = do { let items: meta.List<S> = []; items'type }; true },
+            comptime .U: Type = T,
+            comptime .V: Type = if T == U { U } else { char }, x: V) -> Type { V }
+        comptime fn forwarded(comptime element: Type) -> bool {
+            Selected([], .S = element) == meta.List<element>
+        }
+        comptime fn check() -> bool {
+            Selected([]) == meta.List<bool> and Selected([], .S = char) == meta.List<char>
+                and forwarded(char)
+        }";
+    check_events(source, &[("Selected", 3), ("forwarded", 1)]);
+    let error =
+        sysroot::compile(&source.replace("Selected([], .S = char)", "Selected([true], .S = char)"))
+            .unwrap_err();
+    assert!(
+        error.contains("expected (primitive char), found (primitive bool)"),
+        "{error}"
+    );
+}
+
+#[test]
 fn an_opaque_store_drops_the_old_version_until_a_definite_overwrite() {
     let source = "
         trait Flag {} impl Flag for char {}

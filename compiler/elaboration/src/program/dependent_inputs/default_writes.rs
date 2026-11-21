@@ -22,6 +22,7 @@ impl std::fmt::Display for Read {
 
 struct Store {
     rhs: n::Expr,
+    annotation_slots: Vec<usize>,
     inputs: BTreeMap<n::LocalId, Read>,
     value: Option<Arc<Term>>,
 }
@@ -132,11 +133,10 @@ impl Writes {
         if let K::Local(id) = rhs.kind {
             return Ok(locals.get(&id).copied().unwrap_or(Read::Unknown));
         }
-        // An open annotation belongs to its declaration telescope. Keep it
-        // unavailable until observation can specialize that scope at the read.
-        if !checker.checked_substitution_inputs(rhs, span)?.is_empty() {
-            return Ok(Read::Unknown);
-        }
+        let annotation_slots = checker
+            .checked_substitution_inputs(rhs, span)?
+            .into_keys()
+            .collect();
         let free = checker.with_observation_budget(span, |_, budget| {
             Ok(nir::free_bindings::collect(rhs, &mut budget.steps)?)
         })?;
@@ -154,6 +154,7 @@ impl Writes {
         let id = self.stores.len();
         self.stores.push(Store {
             rhs: rhs.clone(),
+            annotation_slots,
             inputs,
             value: None,
         });
@@ -227,9 +228,17 @@ impl Writes {
                     arguments.insert(slot);
                 }
                 Read::Store(id) if self.stores[id].value.is_none() && stores.insert(id) => {
-                    let inputs = &self.stores[id].inputs;
-                    tasks::spend(steps, inputs.len(), span)?;
-                    pending.extend(inputs.values().copied());
+                    let store = &self.stores[id];
+                    tasks::spend(
+                        steps,
+                        store
+                            .inputs
+                            .len()
+                            .saturating_add(store.annotation_slots.len()),
+                        span,
+                    )?;
+                    arguments.extend(store.annotation_slots.iter().copied());
+                    pending.extend(store.inputs.values().copied());
                 }
                 Read::Store(_) => {}
                 Read::Unknown => return Err(unavailable(span)),
@@ -256,27 +265,34 @@ impl Writes {
         &mut self,
         checker: &mut Checker<'_, '_>,
         stores: BTreeSet<usize>,
-        arguments: &[Option<Term>],
+        binding: &nir::FunctionCallBinding,
         span: Span,
     ) -> Result<(), Error> {
         for id in stores {
             let store = &self.stores[id];
+            // A nested dependency may have completed this store after the
+            // parent scheduled it. Its RHS has already crossed the binder.
+            if store.value.is_some() {
+                continue;
+            }
             let mut facts = BTreeMap::new();
-            for (&binding, &read) in &store.inputs {
+            for (&local, &read) in &store.inputs {
                 let value = match read {
                     Read::Store(id) => self.stores[id]
                         .value
                         .clone()
                         .ok_or_else(|| unavailable(span))?,
                     Read::Argument(_) => Arc::new(tasks::copy_evidence(
-                        self.value(read, arguments, span)?,
+                        self.value(read, binding.observations(), span)?,
                         &mut checker.required_steps,
                         span,
                     )?),
                     Read::Unknown => return Err(unavailable(span)),
                 };
-                facts.insert(binding, value);
+                facts.insert(local, value);
             }
+            let store = &mut self.stores[id];
+            checker.specialize_default_annotations(&mut store.rhs, binding, span)?;
             let value = checker
                 .with_observation_budget(span, |checker, budget| {
                     // Captured store inputs are detached scalars. Independent
@@ -288,7 +304,7 @@ impl Writes {
                     )
                 })?
                 .ok_or_else(|| unavailable(span))?;
-            self.stores[id].value = Some(Arc::new(value));
+            store.value = Some(Arc::new(value));
         }
         Ok(())
     }
@@ -303,7 +319,11 @@ impl std::fmt::Display for Writes {
             }
         }
         for (index, store) in self.stores.iter().enumerate() {
-            write!(f, " (store {index} (rhs {}) (inputs", store.rhs)?;
+            write!(f, " (store {index} (rhs {}) (annotation-slots", store.rhs)?;
+            for slot in &store.annotation_slots {
+                write!(f, " {slot}")?;
+            }
+            f.write_str(") (inputs")?;
             for (id, read) in &store.inputs {
                 write!(f, " (input {id} {read})")?;
             }

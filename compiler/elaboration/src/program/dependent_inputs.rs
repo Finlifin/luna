@@ -74,6 +74,20 @@ pub(super) struct PreparedInputs {
 }
 
 impl Checker<'_, '_> {
+    /// Move annotations out of the callee's ordinary parameter scope once.
+    /// Captured values supplied separately are already in the caller's scope.
+    fn specialize_default_annotations(
+        &mut self,
+        expression: &mut n::Expr,
+        binding: &nir::FunctionCallBinding,
+        span: Span,
+    ) -> Result<(), Error> {
+        expression
+            .rewrite_types(&mut |ty| binding.substitute(ty))
+            .map_err(|failure| error(span, failure.to_string()))?;
+        expression.rewrite_types(&mut |term| self.callable_argument_term_view(term, span))
+    }
+
     /// A required computation may wait for a staged parameter, but cannot
     /// capture an ordinary parameter of a runtime function. Ordinary inputs of
     /// a comptime function are supplied by its interpreter invocation instead.
