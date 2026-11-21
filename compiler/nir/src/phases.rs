@@ -1368,6 +1368,52 @@ impl<'a> PhaseContext<'a> {
                             )?;
                             work.push(Work::Expr(signature, false, ct), inspection_fuel)?;
                         }
+                        K::WithTypeInputs {
+                            preparations,
+                            parameters,
+                            arguments,
+                            body,
+                        } => {
+                            work.extend(
+                                preparations
+                                    .iter()
+                                    .map(|p| Work::Expr(&p.expression, false, ct)),
+                                inspection_fuel,
+                            )?;
+                            let schedule = crate::program::InputSchedule {
+                                preparations,
+                                ..Default::default()
+                            };
+                            if schedule
+                                .check(arguments.len(), |n| {
+                                    Worklist::charge(inspection_fuel, n, expr.source)
+                                })?
+                                .is_none()
+                            {
+                                return Err(error("invalid lexical Type input preparations"));
+                            }
+                            let valid = crate::program::check_lexical_type_inputs(
+                                parameters,
+                                arguments,
+                                &expr.ty,
+                                &body.ty,
+                                inspection_fuel,
+                            )
+                            .map_err(|_| {
+                                Error::budget(
+                                    expr.source,
+                                    "lexical Type input inspection exhausted",
+                                )
+                            })?;
+                            if !ct || !valid {
+                                return Err(error("invalid lexical Type input scope"));
+                            }
+                            work.push(Work::Expr(body, false, ct), inspection_fuel)?;
+                            work.extend(
+                                arguments.iter().map(|a| Work::Argument(a, ct)),
+                                inspection_fuel,
+                            )?;
+                        }
                         K::CheckTypeAlias {
                             declaration,
                             arguments,

@@ -10,6 +10,53 @@ pub(super) struct Binders {
     pub(super) positions: BTreeMap<DeclarationId, (usize, Sort)>,
 }
 
+/// A nested lexical scope can reuse the binder IDs of an inlined template.
+struct ExpressionSubstitution<'a, T> {
+    binders: &'a Binders,
+    arguments: &'a [T],
+    frames: &'a [Vec<Sort>],
+    shadowed: BTreeSet<DeclarationId>,
+}
+
+impl<T: Borrow<Term>> crate::program::Rewriter for ExpressionSubstitution<'_, T> {
+    const SPECIALIZE: bool = true;
+    type Error = TypeError;
+
+    fn ty(&mut self, ty: &mut Term) -> Result<(), TypeError> {
+        if self.shadowed.is_empty() {
+            *ty = self.binders.instantiate(ty, self.arguments, self.frames)?;
+        } else {
+            let replaced = ty.replace_declarations(&|id| {
+                if self.shadowed.contains(&id) {
+                    return None;
+                }
+                let &(index, sort) = self.binders.positions.get(&id)?;
+                Some((sort, self.arguments[index].borrow()))
+            })?;
+            replaced.check_scope(self.frames)?;
+            *ty = replaced;
+        }
+        Ok(())
+    }
+
+    fn lexical_body(
+        &mut self,
+        ids: &[DeclarationId],
+        body: &mut crate::program::Expr,
+    ) -> Result<(), TypeError> {
+        let hidden: Vec<_> = ids
+            .iter()
+            .copied()
+            .filter(|id| self.binders.positions.contains_key(id) && self.shadowed.insert(*id))
+            .collect();
+        let result = body.rewrite_with(self);
+        for id in hidden {
+            self.shadowed.remove(&id);
+        }
+        result
+    }
+}
+
 impl Binders {
     pub(super) fn new<T: Borrow<Term>>(
         ids: &[DeclarationId],
@@ -175,7 +222,12 @@ impl Binders {
         .map_err(ExpressionInstantiationError::Copy)?;
         let mut value = template.clone();
         value
-            .rewrite_types(&mut |ty| self.instantiate(ty, arguments, frames))
+            .rewrite_with(&mut ExpressionSubstitution {
+                binders: self,
+                arguments,
+                frames,
+                shadowed: BTreeSet::new(),
+            })
             .map_err(ExpressionInstantiationError::Scope)?;
         Ok(value)
     }

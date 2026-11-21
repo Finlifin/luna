@@ -226,6 +226,8 @@ pub fn charge_argument_type_rewrite(
 }
 
 pub(crate) enum Node<'a> {
+    EnterLexical(&'a [crate::DeclarationId]),
+    LeaveLexical(&'a [crate::DeclarationId]),
     Region(&'a n::DefinitionRegion),
     Function(&'a n::Function),
     FunctionDeclaration(&'a n::FunctionDeclaration),
@@ -482,13 +484,33 @@ fn charge_node_observed<'a>(
         root,
         steps,
         if rewrite { Walk::Rewrite } else { Walk::Copy },
-        |ty, depth, fuel| {
+        |ty, depth, fuel, hidden| {
+            if hidden.is_empty() {
+                return crate::type_computations::visit_expansion(
+                    ty,
+                    fuel,
+                    depth,
+                    replacements.unwrap_or(&|_| None),
+                    observe,
+                );
+            }
             crate::type_computations::visit_expansion(
                 ty,
                 fuel,
                 depth,
-                replacements.unwrap_or(&|_| None),
-                observe,
+                &|id| {
+                    if hidden.contains_key(&id) {
+                        None
+                    } else {
+                        replacements.and_then(|find| find(id))
+                    }
+                },
+                &mut |term, nesting| {
+                    if !matches!(term, Term::Rigid { declaration, .. } if hidden.contains_key(declaration))
+                    {
+                        observe(term, nesting);
+                    }
+                },
             )
         },
     )
@@ -505,22 +527,27 @@ fn capture_slots(
     let mut slots = std::collections::BTreeSet::new();
     let mut steps = *fuel as u64;
     let empty = std::collections::BTreeMap::new();
-    let result = walk_node_terms(root, &mut steps, Walk::Rewrite, |ty, depth, remaining| {
-        crate::type_computations::visit_expanded_term_scoped_for_copy(
-            ty,
-            remaining,
-            depth,
-            &empty,
-            &mut |term, nesting| {
-                if let Term::Bound { depth, index, .. } = term
-                    && *depth == nesting
-                {
-                    slots.insert(*index);
-                }
-            },
-        )?;
-        ty.check_scope(frames).map_err(Error::Scope)
-    });
+    let result = walk_node_terms(
+        root,
+        &mut steps,
+        Walk::Rewrite,
+        |ty, depth, remaining, _| {
+            crate::type_computations::visit_expanded_term_scoped_for_copy(
+                ty,
+                remaining,
+                depth,
+                &empty,
+                &mut |term, nesting| {
+                    if let Term::Bound { depth, index, .. } = term
+                        && *depth == nesting
+                    {
+                        slots.insert(*index);
+                    }
+                },
+            )?;
+            ty.check_scope(frames).map_err(Error::Scope)
+        },
+    );
     *fuel = steps as usize;
     result.map(|()| slots)
 }
@@ -578,7 +605,7 @@ pub(crate) fn check_retained_body(
         .chain(expressions.map(Node::Expr));
     let mut steps = *fuel as u64;
     let checked = roots.try_for_each(|root| {
-        walk_node_terms(root, &mut steps, Walk::Inspect, |ty, _, fuel| {
+        walk_node_terms(root, &mut steps, Walk::Inspect, |ty, _, fuel, _| {
             substitution.instantiate_bounded(ty, fuel).map(drop)
         })
     });
@@ -590,7 +617,12 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
     root: Node<'_>,
     steps: &mut u64,
     walk: Walk,
-    mut term: impl FnMut(&Term, usize, &mut usize) -> Result<(), E>,
+    mut term: impl FnMut(
+        &Term,
+        usize,
+        &mut usize,
+        &std::collections::BTreeMap<crate::DeclarationId, usize>,
+    ) -> Result<(), E>,
 ) -> Result<(), E> {
     fn charge_width(steps: &mut u64, width: usize) -> Result<(), CopyBudgetExhausted> {
         *steps = steps
@@ -610,6 +642,7 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
             _ => 0,
         }
     }
+    let mut hidden = std::collections::BTreeMap::new();
     let mut work = vec![(root, 0usize)];
     while let Some((node, depth)) = work.pop() {
         // Inspection iterates borrowed syntax. Its term consumer bounds each
@@ -625,13 +658,30 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
         if let Node::Type(ty) = node {
             let before = usize::try_from(*steps).unwrap_or(usize::MAX);
             let mut fuel = before;
-            let inspected = term(ty, term_depth, &mut fuel);
+            let inspected = term(ty, term_depth, &mut fuel, &hidden);
             *steps -= (before - fuel) as u64;
             inspected?;
             continue;
         }
         *steps -= 1;
         let size = match node {
+            Node::EnterLexical(ids) => {
+                charge_width(steps, ids.len())?;
+                for &id in ids {
+                    *hidden.entry(id).or_insert(0) += 1;
+                }
+                0
+            }
+            Node::LeaveLexical(ids) => {
+                for id in ids {
+                    let count = hidden.get_mut(id).expect("paired lexical scope");
+                    *count -= 1;
+                    if *count == 0 {
+                        hidden.remove(id);
+                    }
+                }
+                0
+            }
             Node::Region(region) => {
                 for width in [
                     region.parameters.len(),
@@ -966,6 +1016,25 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         }
                         work.extend(fields.iter().map(|field| (Node::Expr(field), depth + 1)));
                         0
+                    }
+                    K::WithTypeInputs {
+                        preparations,
+                        parameters,
+                        arguments,
+                        body,
+                    } => {
+                        charge_width(steps, preparations.len())?;
+                        work.extend(
+                            preparations
+                                .iter()
+                                .map(|p| (Node::Expr(&p.expression), depth + 1)),
+                        );
+                        charge_width(steps, arguments.len())?;
+                        work.extend(arguments.iter().map(|e| (Node::Argument(e), depth + 1)));
+                        work.push((Node::LeaveLexical(parameters), depth));
+                        work.push((Node::Expr(body), depth + 1));
+                        work.push((Node::EnterLexical(parameters), depth));
+                        parameters.len()
                     }
                     K::CheckTypeAlias {
                         arguments,

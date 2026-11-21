@@ -492,3 +492,53 @@ fn closed_clause_inputs_and_ordinary_contract_binders_have_distinct_scopes() {
         NominalAdmissionError::Unresolved("waiting for binder".into())
     );
 }
+
+#[test]
+fn lexical_type_inputs_shadow_substitution_only_inside_the_body() {
+    use nir::program::{Expr, ExprKind as K, NormalFormArgument as A, SourceRange};
+    let ids = [id(1), id(2)];
+    let types = [p(Primitive::Bool), p(Primitive::Char)];
+    let substitution =
+        nir::DeclarationSubstitution::bounded(&ids, &[], &types, &[], &mut 200).unwrap();
+    let source = SourceRange { start: 1, end: 2 };
+    let read = |ty| Expr {
+        source,
+        ty: p(Primitive::Type),
+        kind: K::TypeValue(ty),
+    };
+    let outer = rigid(1, Sort::Type);
+    let scope = Expr {
+        source,
+        ty: p(Primitive::Type),
+        kind: K::WithTypeInputs {
+            parameters: vec![id(1)],
+            preparations: vec![],
+            arguments: vec![A::Value(read(outer.clone()))],
+            body: Box::new(read(Term::Tuple(vec![outer.clone(), rigid(2, Sort::Type)]))),
+        },
+    };
+    let mut closed_input = scope.clone();
+    let K::WithTypeInputs { arguments, .. } = &mut closed_input.kind else {
+        unreachable!()
+    };
+    arguments[0] = A::Value(read(p(Primitive::Bool)));
+    assert_eq!(
+        nir::copy_budget::expression_declaration_inputs(&closed_input, &mut 1000).unwrap(),
+        [id(2)].into_iter().collect(),
+    );
+    assert_eq!(
+        nir::copy_budget::expression_declaration_inputs(&scope, &mut 1000).unwrap(),
+        [id(1), id(2)].into_iter().collect(),
+    );
+    let actual = substitution
+        .instantiate_expression_bounded(&scope, &mut 1000)
+        .unwrap();
+    let K::WithTypeInputs {
+        arguments, body, ..
+    } = actual.kind
+    else {
+        panic!()
+    };
+    assert_eq!(arguments, [A::Value(read(p(Primitive::Bool)))]);
+    assert_eq!(*body, read(Term::Tuple(vec![outer, p(Primitive::Char)])));
+}

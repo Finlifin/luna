@@ -158,6 +158,17 @@ impl<'a> CheckedInputSchedule<'a> {
 impl ExprKind {
     pub fn declaration_inputs(&self) -> Option<(&[NormalFormArgument], InputSchedule<'_>)> {
         match self {
+            Self::WithTypeInputs {
+                arguments,
+                preparations,
+                ..
+            } => Some((
+                arguments,
+                InputSchedule {
+                    preparations,
+                    ..Default::default()
+                },
+            )),
             Self::PlannedFunctionInstance {
                 arguments, plan, ..
             }
@@ -191,6 +202,38 @@ impl ExprKind {
             _ => None,
         }
     }
+}
+
+/// Lexical witnesses are concrete Type inputs. Their identities are private
+/// to the body; independently typed caller results may mention other binders.
+pub fn check_lexical_type_inputs(
+    parameters: &[crate::DeclarationId],
+    arguments: &[NormalFormArgument],
+    result: &crate::Term,
+    body_result: &crate::Term,
+    fuel: &mut usize,
+) -> Result<bool, crate::type_computations::Error> {
+    use crate::{Primitive, Term, type_computations as types};
+    if parameters.is_empty() || parameters.len() != arguments.len() {
+        return Ok(false);
+    }
+    *fuel = fuel
+        .checked_sub(parameters.len())
+        .ok_or(types::Error::Budget)?;
+    if arguments.iter().any(|argument| {
+        !matches!(argument, NormalFormArgument::Value(value)
+        if value.ty == Term::Primitive(Primitive::Type))
+    }) {
+        return Ok(false);
+    }
+    let bound: BTreeSet<_> = parameters.iter().copied().collect();
+    if bound.len() != parameters.len() {
+        return Ok(false);
+    }
+    let mut escaping = BTreeSet::new();
+    types::rigid_declarations_bounded(result, fuel, &mut escaping)?;
+    types::charge_term(body_result, fuel)?;
+    Ok(bound.is_disjoint(&escaping) && result == body_result)
 }
 
 impl fmt::Display for InputSchedule<'_> {

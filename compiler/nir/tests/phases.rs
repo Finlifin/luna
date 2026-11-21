@@ -2496,3 +2496,60 @@ fn const_address_and_runtime_deliveries_validate_phase_and_captures() {
     );
     assert!(nir::phases::validate(&captured_global).is_err());
 }
+
+#[test]
+fn lexical_type_input_scopes_enforce_phase_distinctness_and_result_scope() {
+    use nir::program::NormalFormArgument as A;
+    let binder = DeclarationId {
+        package: 1,
+        local: 98,
+    };
+    let mut entry = function(90, Phase::Comptime, &[]);
+    let input = A::Value(Expr {
+        source: entry.body.source,
+        ty: Term::Primitive(Primitive::Type),
+        kind: K::TypeValue(Term::Primitive(Primitive::Bool)),
+    });
+    let scope = |ids: Vec<DeclarationId>, result: Term| {
+        let mut body = flag(K::Literal(Literal::Bool(true)));
+        body.ty = result.clone();
+        Expr {
+            source: body.source,
+            ty: result,
+            kind: K::WithTypeInputs {
+                preparations: vec![],
+                arguments: vec![input.clone(); ids.len()],
+                parameters: ids,
+                body: Box::new(body),
+            },
+        }
+    };
+    entry.body = scope(vec![binder], Term::Primitive(Primitive::Bool));
+    let mut package = Package {
+        functions: vec![entry],
+        ..Default::default()
+    };
+    nir::phases::validate(&package).unwrap();
+    package.functions[0].phase = Phase::Runtime;
+    assert_eq!(
+        nir::phases::validate(&package).unwrap_err().message,
+        "invalid lexical Type input scope"
+    );
+    package.functions[0].phase = Phase::Comptime;
+    for body in [
+        scope(vec![binder, binder], Term::Primitive(Primitive::Bool)),
+        scope(
+            vec![binder],
+            Term::Rigid {
+                declaration: binder,
+                sort: nir::Sort::Type,
+            },
+        ),
+    ] {
+        package.functions[0].body = body;
+        assert_eq!(
+            nir::phases::validate(&package).unwrap_err().message,
+            "invalid lexical Type input scope"
+        );
+    }
+}

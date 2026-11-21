@@ -440,6 +440,7 @@ impl Walker<'_> {
             | K::ApplyNormalForm { .. }
             | K::NormalFormType { .. }
             | K::NominalType { .. }
+            | K::WithTypeInputs { .. }
             | K::CheckTypeAlias { .. } => {
                 let public = if let K::ApplyNormalForm {
                     callee, input_ids, ..
@@ -504,7 +505,8 @@ impl Walker<'_> {
                 }
                 if let K::CheckTypeAlias {
                     body: Some(body), ..
-                } = &expr.kind
+                }
+                | K::WithTypeInputs { body, .. } = &expr.kind
                     && state.facts.is_reachable()
                 {
                     self.child(body, state, depth)?;

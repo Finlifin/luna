@@ -6054,6 +6054,7 @@ impl Walker<'_> {
             | K::ApplyNormalForm { .. }
             | K::NormalFormType { .. }
             | K::NominalType { .. }
+            | K::WithTypeInputs { .. }
             | K::CheckTypeAlias { .. }
             | K::TypeList(_)
             | K::FunctionType { .. }

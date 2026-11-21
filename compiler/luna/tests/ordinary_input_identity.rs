@@ -1650,6 +1650,82 @@ fn scoped_match_keeps_a_used_payload_inside_its_type_scope() {
 }
 
 #[test]
+fn scoped_match_keeps_payload_and_enclosing_control_in_one_lexical_frame() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn nested(comptime ty: Type) -> ??ty {
+            let inner: ?ty = null; inner
+        }
+        comptime fn relay(flag: bool) -> bool {
+            var observed = false;
+            nested(Selected(flag)) match {
+                value? => do {
+                    observed = value matches null;
+                    if flag { return observed; };
+                },
+                null => return false,
+            };
+            observed and not flag
+        }
+        const first = relay(true);
+        const second = relay(false);
+        comptime fn check() -> bool { first and second and relay(true) and relay(false) }
+        ",
+        &[("Selected", 2), ("nested", 2)],
+    );
+}
+
+#[test]
+fn scoped_match_guard_writes_survive_loop_transfers() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn nested(comptime ty: Type) -> ??ty {
+            let inner: ?ty = null; inner
+        }
+        comptime fn relay(flag: bool) -> bool {
+            var visits: Integer = 0;
+            while visits < 3 {
+                nested(Selected(flag)) match {
+                    value? if do { visits = visits + 1; value matches null } => do {
+                        if visits == 1 { continue; };
+                        break;
+                    },
+                    _ => return false,
+                };
+                visits = 99;
+            }
+            visits == 2
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }
+        ",
+        &[("Selected", 4), ("nested", 4)],
+    );
+}
+
+#[test]
+fn scoped_match_prepares_a_dependent_value_before_the_next_type_operand() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn inspect(comptime a: Type, left: ?a, comptime b: Type) -> ??b {
+            assumes left matches null;
+            let inner: ?b = null; inner
+        }
+        comptime fn relay(flag: bool) -> bool {
+            var ready = false;
+            inspect(Selected(flag), do { ready = true; null }, do {
+                assumes ready; Selected(not flag)
+            }) match { value? => value matches null, null => false }
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }
+        ",
+        &[("Selected", 4), ("inspect", 2)],
+    );
+}
+
+#[test]
 fn scoped_match_preserves_gradual_type_data_until_identity_is_needed() {
     let package = sysroot::compile(
         "

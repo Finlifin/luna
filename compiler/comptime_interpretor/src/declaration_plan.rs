@@ -40,6 +40,7 @@ impl Contract<'_> {
 
 enum Receiver<'a> {
     Type(Contract<'a>),
+    Lexical,
     Callable(dynamic_instances::FunctionTarget),
 }
 
@@ -106,6 +107,29 @@ impl<'a, 'e> Frame<'a, 'e> {
                 let parameters = nir::declaration_parameters(&definition.type_parameters, &domains)
                     .map_err(|_| vm.failure(ErrorKind::Type, Some(view.source)))?;
                 (Receiver::Callable(target), parameters, domains, referenced)
+            }
+            Target::Lexical { parameters, body } => {
+                let valid = admitted_work(vm, view.source, |fuel| {
+                    nir::program::check_lexical_type_inputs(
+                        parameters,
+                        view.arguments,
+                        view.ty,
+                        &body.ty,
+                        fuel,
+                    )
+                })?;
+                if !vm.comptime_only || !valid {
+                    return Err(vm.failure(ErrorKind::InvalidCallPlan, Some(view.source)));
+                }
+                vm.effect_charge(parameters.len(), Some(view.source))?;
+                let binders = parameters
+                    .iter()
+                    .map(|&declaration| nir::DeclarationParameter {
+                        declaration,
+                        sort: nir::Sort::Type,
+                    })
+                    .collect();
+                (Receiver::Lexical, binders, Vec::new(), Default::default())
             }
             Target::Alias { .. } | Target::Nominal(_) => {
                 let contract = Contract::open(vm, view, plan.inputs_diverge())?;
@@ -311,10 +335,21 @@ impl Frame<'_, '_> {
             }
             let (receiver, inputs) = self.inputs.take().expect("completed declaration inputs");
             let view = self.plan.view();
-            let types = inputs
-                .finish()
-                .ok_or_else(|| vm.failure(ErrorKind::Type, Some(view.source)))?;
+            let types = inputs.finish().ok_or_else(|| {
+                let kind = match receiver {
+                    Receiver::Lexical => ErrorKind::TypeContractUnresolved,
+                    _ => ErrorKind::Type,
+                };
+                vm.failure(kind, Some(view.source))
+            })?;
             let admitted = match receiver {
+                Receiver::Lexical => {
+                    let Target::Lexical { parameters, body } = view.target else {
+                        unreachable!()
+                    };
+                    let body = vm.specialize_function_expression(body, parameters, &types, &[])?;
+                    Admitted::Body(Arc::new(body))
+                }
                 Receiver::Type(contract) => contract.finish(vm, view, types)?,
                 Receiver::Callable(target) => Admitted::Value(
                     vm.finish_dynamic_function_instance(target, &types, view.ty, view.source)?,

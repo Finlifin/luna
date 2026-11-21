@@ -4407,6 +4407,25 @@ impl Builder<'_, '_> {
                 }
                 self.expr(signature, depth + 1, comptime)?;
             }
+            K::WithTypeInputs {
+                arguments,
+                body,
+                preparations,
+                ..
+            } => {
+                for preparation in preparations {
+                    self.expr(&preparation.expression, depth + 1, comptime)?;
+                }
+                for argument in arguments {
+                    for pattern in argument.patterns() {
+                        self.pattern(pattern, depth + 1, comptime)?;
+                    }
+                    for expression in argument.expressions() {
+                        self.expr(expression, depth + 1, comptime)?;
+                    }
+                }
+                self.expr(body, depth + 1, comptime)?;
+            }
             K::CheckTypeAlias {
                 arguments,
                 body,

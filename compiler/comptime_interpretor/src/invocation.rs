@@ -260,9 +260,14 @@ impl<'a> Interpreter<'a> {
             Target::Normal(_) | Target::Selected { .. } => Ok(Box::new(
                 normal_plan::Frame::application(self, plan, environment, selected)?,
             )),
-            Target::Callable(_) | Target::Nominal(_) | Target::Alias { .. } => Ok(Box::new(
-                declaration_plan::Frame::new(self, plan, environment)?,
-            )),
+            Target::Callable(_)
+            | Target::Nominal(_)
+            | Target::Alias { .. }
+            | Target::Lexical { .. } => Ok(Box::new(declaration_plan::Frame::new(
+                self,
+                plan,
+                environment,
+            )?)),
         }
     }
 

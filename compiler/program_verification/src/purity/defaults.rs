@@ -290,6 +290,7 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::ListConcat(..)
         | K::TypeListIndex(..)
         | K::NominalType { .. }
+        | K::WithTypeInputs { .. }
         | K::CheckTypeAlias { .. }
         | K::AddressOf(_)
         | K::ConstAddress { .. }

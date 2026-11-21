@@ -48,14 +48,22 @@ impl<'e> Source<'e> {
         specialize: bool,
         locals: Arc<[LocalId]>,
     ) -> Self {
+        let ids = parameters.iter().map(|parameter| parameter.declaration);
+        let completed = if matches!(plan.view().target, input_collection::Target::Lexical { .. }) {
+            input_bindings::Bindings::structural(ids)
+        } else {
+            input_bindings::Bindings::admitted(ids)
+        };
         Self {
             locals,
             specialize,
             check_annotation: matches!(
                 plan.view().target,
-                input_collection::Target::Alias { .. } | input_collection::Target::Callable(_)
+                input_collection::Target::Alias { .. }
+                    | input_collection::Target::Callable(_)
+                    | input_collection::Target::Lexical { .. }
             ),
-            completed: input_bindings::Bindings::admitted(parameters.iter().map(|p| p.declaration)),
+            completed,
             plan,
             parameters,
             domains,

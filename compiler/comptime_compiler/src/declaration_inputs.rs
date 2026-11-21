@@ -18,6 +18,10 @@ pub enum Target<S, I, B> {
     },
     Nominal(DeclarationId),
     Callable(DeclarationId),
+    Lexical {
+        parameters: I,
+        body: B,
+    },
     Alias {
         declaration: DeclarationId,
         body: Option<B>,
@@ -47,6 +51,12 @@ impl<'a> PlanView<'a> {
             },
             K::PlannedFunctionInstance { declaration, .. } => Target::Callable(*declaration),
             K::NominalType { declaration, .. } => Target::Nominal(*declaration),
+            K::WithTypeInputs {
+                parameters, body, ..
+            } => Target::Lexical {
+                parameters: parameters.as_slice(),
+                body: body.as_ref(),
+            },
             K::CheckTypeAlias {
                 declaration, body, ..
             } => Target::Alias {
@@ -124,6 +134,10 @@ impl DeclarationInputPlan {
                 source,
                 input_ids: input_ids.to_vec(),
             },
+            Target::Lexical { parameters, body } => Target::Lexical {
+                parameters: parameters.to_vec(),
+                body: Box::new(body.clone()),
+            },
             Target::Alias { declaration, body } => Target::Alias {
                 declaration,
                 body: body.map(|expr| Box::new(expr.clone())),
@@ -160,6 +174,10 @@ impl DeclarationInputPlan {
                 signature,
                 source: *source,
                 input_ids: input_ids.as_slice(),
+            },
+            Target::Lexical { parameters, body } => Target::Lexical {
+                parameters: parameters.as_slice(),
+                body: body.as_ref(),
             },
             Target::Alias { declaration, body } => Target::Alias {
                 declaration: *declaration,
@@ -199,6 +217,13 @@ impl fmt::Display for PlanView<'_> {
             Target::Normal(id) => write!(f, "(normal {id})")?,
             Target::Nominal(id) => write!(f, "(nominal {id})")?,
             Target::Callable(id) => write!(f, "(callable {id})")?,
+            Target::Lexical { parameters, body } => {
+                f.write_str("(lexical (parameters")?;
+                for id in parameters {
+                    write!(f, " {id}")?;
+                }
+                write!(f, ") (body {body}))")?;
+            }
             Target::Alias { declaration, body } => {
                 write!(f, "(alias {declaration}")?;
                 if let Some(body) = body {

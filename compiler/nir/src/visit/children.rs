@@ -167,6 +167,20 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
                 extend!(work, fuel, environment.iter().map(Node::Expr));
                 push!(work, fuel, Node::Expr(signature));
             }
+            K::WithTypeInputs {
+                preparations,
+                arguments,
+                body,
+                ..
+            } => {
+                extend!(
+                    work,
+                    fuel,
+                    preparations.iter().map(|p| Node::Expr(&p.expression))
+                );
+                extend!(work, fuel, arguments.iter().map(Node::Argument));
+                push!(work, fuel, Node::Expr(body));
+            }
             K::CheckTypeAlias {
                 arguments,
                 body,

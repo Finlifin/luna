@@ -2226,7 +2226,8 @@ fn compile_root<'a>(
                     | K::ApplyNormalForm { .. }
                     | K::PlannedFunctionInstance { .. }
                     | K::NominalType { .. }
-                    | K::CheckTypeAlias { .. } => {
+                    | K::CheckTypeAlias { .. }
+                    | K::WithTypeInputs { .. } => {
                         let (plan, imports) = DeclarationInputPlan::compile(expr, fuel)?;
                         *fuel = fuel
                             .checked_sub(imports.len())

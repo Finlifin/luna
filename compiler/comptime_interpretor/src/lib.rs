@@ -2773,7 +2773,9 @@ impl<'a> Interpreter<'a> {
             K::PlannedFunctionInstance { .. } | K::NominalType { .. } => {
                 self.eval_declaration_plan(expr, environment)
             }
-            K::CheckTypeAlias { .. } => self.eval_declaration_plan(expr, environment),
+            K::CheckTypeAlias { .. } | K::WithTypeInputs { .. } => {
+                self.eval_declaration_plan(expr, environment)
+            }
             K::ScalarEqual(..)
             | K::ScalarLessEqual(..)
             | K::ScalarLess(..)

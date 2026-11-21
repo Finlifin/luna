@@ -21,7 +21,9 @@ pub use published_definitions::PublishedDefinitions;
 
 mod input_schedule;
 
-pub use input_schedule::{CheckedInputSchedule, InputPath, InputSchedule, InputStep};
+pub use input_schedule::{
+    CheckedInputSchedule, InputPath, InputSchedule, InputStep, check_lexical_type_inputs,
+};
 
 mod function;
 
@@ -1436,6 +1438,14 @@ pub enum ExprKind {
         order: Option<Vec<usize>>,
         declaration: DeclarationId,
         arguments: Vec<NormalFormArgument>,
+    },
+    /// Evaluate the Type operands, specialize the lexical body, and resume it in
+    /// the caller's environment. The scope owns fresh declaration identities.
+    WithTypeInputs {
+        preparations: Vec<NormalFormPreparation>,
+        parameters: Vec<DeclarationId>,
+        arguments: Vec<NormalFormArgument>,
+        body: Box<Expr>,
     },
     /// Comptime-only guard before expanding a transparent type alias.
     CheckTypeAlias {
@@ -3640,6 +3650,29 @@ impl fmt::Display for ExprKind {
                 }
                 f.write_str(")")
             }
+            Self::WithTypeInputs {
+                preparations,
+                parameters,
+                arguments,
+                body,
+            } => {
+                write!(
+                    f,
+                    "(with-type-inputs {} (parameters",
+                    InputSchedule {
+                        preparations,
+                        ..Default::default()
+                    }
+                )?;
+                for id in parameters {
+                    write!(f, " {id}")?;
+                }
+                f.write_str(") (arguments")?;
+                for argument in arguments {
+                    write!(f, " {argument}")?;
+                }
+                write!(f, ") (body {body}))")
+            }
             Self::CheckTypeAlias {
                 declaration,
                 arguments,
@@ -4657,6 +4690,25 @@ impl Expr {
                     field.rewrite_with(rewriter)?;
                 }
             }
+            ExprKind::WithTypeInputs {
+                arguments,
+                body,
+                preparations,
+                parameters,
+            } => {
+                for preparation in preparations {
+                    preparation.expression.rewrite_with(rewriter)?;
+                }
+                for argument in arguments {
+                    for pattern in argument.patterns_mut() {
+                        pattern.rewrite_with(rewriter)?;
+                    }
+                    for expression in argument.expressions_mut() {
+                        expression.rewrite_with(rewriter)?;
+                    }
+                }
+                rewriter.lexical_body(parameters, body)?;
+            }
             ExprKind::CheckTypeAlias {
                 arguments,
                 body,
@@ -5073,6 +5125,19 @@ pub trait Rewriter {
 
     fn expression(&mut self, _expression: &mut Expr) -> Result<bool, Self::Error> {
         Ok(true)
+    }
+
+    /// Preparations and arguments are in the enclosing scope. Only the body
+    /// sees the new declarations, including when an inline copy reuses IDs.
+    fn lexical_body(
+        &mut self,
+        _parameters: &[DeclarationId],
+        body: &mut Expr,
+    ) -> Result<(), Self::Error>
+    where
+        Self: Sized,
+    {
+        body.rewrite_with(self)
     }
 
     fn pattern(&mut self, _pattern: &mut Pattern) -> Result<(), Self::Error> {

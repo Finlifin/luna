@@ -276,7 +276,8 @@ impl<'a> Walk<'a> {
         self.scope();
         if let K::CheckTypeAlias {
             body: Some(body), ..
-        } = &node.kind
+        }
+        | K::WithTypeInputs { body, .. } = &node.kind
         {
             self.tasks.push(Step::Expr(body));
         }
@@ -349,6 +350,7 @@ impl<'a> Walk<'a> {
             }
             K::NominalType { .. }
             | K::CheckTypeAlias { .. }
+            | K::WithTypeInputs { .. }
             | K::PlannedFunctionInstance { .. }
             | K::NormalFormType { .. }
             | K::ApplyNormalForm { .. } => {

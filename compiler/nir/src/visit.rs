@@ -695,6 +695,22 @@ fn walk_mut(
                         extend!(work, fuel, environment.iter_mut().map(Node::Expr));
                         push!(work, fuel, Node::Expr(signature));
                     }
+                    K::WithTypeInputs {
+                        preparations,
+                        arguments,
+                        body,
+                        ..
+                    } => {
+                        extend!(
+                            work,
+                            fuel,
+                            preparations
+                                .iter_mut()
+                                .map(|p| Node::Expr(&mut p.expression))
+                        );
+                        extend!(work, fuel, arguments.iter_mut().map(Node::Argument));
+                        push!(work, fuel, Node::Expr(body));
+                    }
                     K::CheckTypeAlias {
                         arguments,
                         body,
