@@ -1947,11 +1947,16 @@ impl Checker<'_, '_> {
         if let Some(frame) = self.captures.last() {
             return Ok(frame.const_regions.contains(block));
         }
-        if let Some(instance) = &self.open_instance {
-            return Ok(self
-                .open_functions
-                .get(&instance.owner)
-                .is_some_and(|definition| definition.checked_const_continuation(block)));
+        // A default is specialized in its declaration's input frame before
+        // the callee's body instance exists. Both paths consume the proof
+        // attached to this exact source block by definition checking.
+        let owner = self
+            .open_instance
+            .as_ref()
+            .map(|instance| instance.owner)
+            .or(self.default_input_owner);
+        if let Some(definition) = owner.and_then(|owner| self.open_functions.get(&owner)) {
+            return Ok(definition.checked_const_continuation(block));
         }
         let Some(owner) = self
             .signature_owner
