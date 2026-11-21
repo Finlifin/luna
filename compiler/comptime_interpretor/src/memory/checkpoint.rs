@@ -58,10 +58,14 @@ impl OwnedGraphCheckpoint {
     /// cells only, and leaves borrowed runtime pointer targets untouched.
     pub fn capture_retained(roots: &[Value], fuel: &mut u64) -> Result<Self, ErrorKind> {
         capture(roots, fuel, |value, fuel| {
-            charge_clone(value, fuel, 0)?;
+            charge_retained_clone(value, fuel)?;
             Ok(value.clone())
         })
     }
+}
+
+pub(crate) fn charge_retained_clone(value: &Value, fuel: &mut u64) -> Result<(), ErrorKind> {
+    charge_clone(value, fuel, 0)
 }
 
 fn term(value: &Term, fuel: &mut u64) -> Result<(), ErrorKind> {

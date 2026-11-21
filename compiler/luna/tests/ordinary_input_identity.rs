@@ -890,6 +890,30 @@ fn runtime_defaults_read_staged_slots_at_their_own_position() {
 }
 
 #[test]
+fn defaults_read_actual_computed_types_once_and_keep_their_written_version() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn inspect(comptime ty: Type, expected: Type) -> bool {
+            (empty(ty) matches null) and ty == expected
+        }
+        comptime fn accept(comptime ty: Type, expected: Type,
+            .before: bool = inspect(ty, expected),
+            .changed: bool = do { ty = u8; true },
+            .after: bool = inspect(ty, u8)) -> bool {
+            before and changed and after and ty == expected
+        }
+        comptime fn relay(flag: bool) -> bool {
+            accept(Selected(flag), if flag { bool } else { char })
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }
+        ",
+        &[("Selected", 2), ("inspect", 4), ("empty", 4), ("accept", 2)],
+    );
+}
+
+#[test]
 fn inference_delivers_the_selected_comptime_default_once() {
     let source = "
         typealias Selector = %{flag: bool} comptime fn() -> Type;

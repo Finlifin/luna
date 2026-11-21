@@ -2,6 +2,7 @@
 //! source memory verifier remains responsible for proving accesses statically.
 use super::{ErrorKind, Value};
 mod checkpoint;
+pub(crate) use checkpoint::charge_retained_clone;
 use nir::{DeclarationId, Term};
 use std::{
     collections::BTreeMap,

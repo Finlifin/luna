@@ -440,6 +440,7 @@ pub enum Op {
         call: Register,
         destination: Register,
         value: Arc<Expr>,
+        imports: Vec<LocalId>,
         dynamic: bool,
     },
     StoreCallArgument {
@@ -1224,11 +1225,18 @@ impl fmt::Display for Program {
                     call,
                     destination,
                     value,
+                    imports,
                     dynamic,
-                } => write!(
-                    f,
-                    "(default-argument {call} {destination} (dynamic {dynamic}) {value})"
-                )?,
+                } => {
+                    write!(
+                        f,
+                        "(default-argument {call} {destination} (dynamic {dynamic}) (imports"
+                    )?;
+                    for binding in imports {
+                        write!(f, " {binding}")?;
+                    }
+                    write!(f, ") {value})")?;
+                }
                 Op::StoreCallArgument {
                     call,
                     parameter,
@@ -1974,6 +1982,11 @@ fn compile_root<'a>(
                                     Op::DefaultArgument {
                                         call,
                                         destination: value,
+                                        imports: default_imports(
+                                            &argument.value,
+                                            parameter_bindings,
+                                            fuel,
+                                        )?,
                                         value: Arc::new(argument.value.clone()),
                                         dynamic: !matches!(
                                             callee.kind,
@@ -3363,6 +3376,35 @@ fn compile_root<'a>(
         },
         shape,
     ))
+}
+
+/// Lexical inputs of one selected ordinary default. Declaration substitution
+/// specializes annotations and leaves ordinary local identities intact.
+pub fn default_imports(
+    value: &Expr,
+    bindings: &[LocalId],
+    fuel: &mut usize,
+) -> Result<Vec<LocalId>, Error> {
+    if bindings.is_empty() {
+        return Ok(Vec::new());
+    }
+    match nir::free_bindings::collect(value, fuel) {
+        Ok(reads) => {
+            *fuel = fuel
+                .checked_sub(reads.len())
+                .ok_or(Error::Budget(value.source))?;
+            Ok(reads.into_iter().collect())
+        }
+        Err(nir::visit::Error::Budget(_)) => Err(Error::Budget(value.source)),
+        // Retained pattern evidence may not yet expose executable code.
+        // Preserve the complete lexical environment until execution selects it.
+        Err(nir::visit::Error::Invalid(_)) => {
+            *fuel = fuel
+                .checked_sub(bindings.len())
+                .ok_or(Error::Budget(value.source))?;
+            Ok(bindings.to_vec())
+        }
+    }
 }
 
 fn copy_error(error: nir::copy_budget::CopyBudgetExhausted, source: SourceRange) -> Error {

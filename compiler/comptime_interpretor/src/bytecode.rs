@@ -2348,6 +2348,7 @@ impl<'a> Interpreter<'a> {
                     call,
                     destination,
                     value,
+                    imports,
                     dynamic,
                 } => {
                     let pending = frame.current_call(*call).ok_or_else(missing)?;
@@ -2358,6 +2359,7 @@ impl<'a> Interpreter<'a> {
                         &pending.callee,
                         source,
                     )?;
+                    pending.operands.import(self, imports, value.source)?;
                     let environment = std::mem::take(&mut pending.operands.defaults);
                     frame.waiting = Some(Waiting::Default {
                         call: *call,

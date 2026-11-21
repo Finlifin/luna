@@ -296,6 +296,18 @@ fn default_templates_are_owned_and_copy_work_is_bounded() {
     };
     assert!(code.storage_work() >= 4096);
     let dump = code.to_string();
+    let imports = code
+        .instructions()
+        .iter()
+        .find_map(|instruction| match &instruction.op {
+            comptime_compiler::Op::DefaultArgument { imports, .. } => Some(imports),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        imports.is_empty(),
+        "a literal default has no lexical inputs"
+    );
     assert!(dump.contains("(default-argument "));
     assert!(dump.contains("(prepare-defaults true)"));
     assert!(dump.contains("\\\"\\n"));

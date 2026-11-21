@@ -4671,6 +4671,7 @@ impl<'a> Interpreter<'a> {
                 expr.source,
             )?;
             let value = if argument.is_default {
+                operands.import_default(this, &argument.value)?;
                 if let Some(inputs) = &trait_default_inputs {
                     prepared_value!(this.evaluate_bound_default(
                         expr.source,
