@@ -513,6 +513,12 @@ impl Interpreter<'_> {
 #[path = "metadata_tests.rs"]
 mod metadata_tests;
 
+impl Interpreter<'_> {
+    pub(super) fn evaluate_type_kind(&self, kind: nir::TypeKind, ty: &Term) -> Option<bool> {
+        nir::layout::evaluate_kind(&InterpreterLayoutWorld(self), kind, ty)
+    }
+}
+
 struct InterpreterLayoutWorld<'a, 'b>(&'a Interpreter<'b>);
 
 impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
@@ -534,16 +540,25 @@ impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
             .is_some_and(|meta| meta.role == nir::normal_forms::Role::TypeList)
     }
 
-    fn is_known_nominal(&self, ty: &Term) -> bool {
+    fn nominal_kind(&self, ty: &Term) -> Option<nir::NominalKind> {
         let Term::Nominal { declaration, .. } = ty else {
-            return false;
+            return None;
         };
         if self.0.graph.is_some() {
-            self.0.concrete_nominal(ty).is_some()
+            return Some(match self.0.concrete_nominal(ty)? {
+                ConcreteNominal::Struct(_) => nir::NominalKind::Struct,
+                ConcreteNominal::Enum(_) => nir::NominalKind::Enum,
+                ConcreteNominal::Newtype(_) => nir::NominalKind::Newtype,
+            });
+        }
+        if self.0.structs.contains_key(declaration) {
+            Some(nir::NominalKind::Struct)
+        } else if self.0.enums.contains_key(declaration) {
+            Some(nir::NominalKind::Enum)
+        } else if self.0.newtypes.contains_key(declaration) {
+            Some(nir::NominalKind::Newtype)
         } else {
-            self.0.structs.contains_key(declaration)
-                || self.0.enums.contains_key(declaration)
-                || self.0.newtypes.get(declaration).is_some()
+            None
         }
     }
 

@@ -3,6 +3,72 @@ use super::*;
 use nir::program::TypePredicate as P;
 
 impl Interpreter<'_> {
+    /// Builder publication currently admits closed, parameterless definitions.
+    /// Fold just those classification atoms. Send the complete Boolean formula
+    /// back to the declaration solver so relationships among other atoms survive.
+    pub(super) fn published_kind_predicate(
+        &mut self,
+        predicate: &P,
+    ) -> Result<Option<P>, ErrorKind> {
+        let structs = self.structs.published();
+        let enums = self.enums.published();
+        let newtypes = self.newtypes.published();
+        if structs.is_empty() && enums.is_empty() && newtypes.is_empty() {
+            return Ok(None);
+        }
+        match predicate {
+            P::Kind(ty, kind) => return Ok(self.published_kind(ty, *kind).map(P::Bool)),
+            P::Bool(_) | P::Equal(..) | P::Trait(_) => return Ok(None),
+            P::Not(_) | P::And(_) | P::Or(_) => {}
+        }
+        self.charge_copy_work(None, |fuel| {
+            nir::copy_budget::charge_predicate_substitution(predicate, &[], &[], fuel)
+        })
+        .map_err(|error| error.kind)?;
+        fn fold(vm: &Interpreter<'_>, predicate: &mut P) {
+            match predicate {
+                P::Kind(ty, kind) => {
+                    if let Some(result) = vm.published_kind(ty, *kind) {
+                        *predicate = P::Bool(result);
+                    }
+                }
+                P::Not(inner) => fold(vm, inner),
+                P::And(items) | P::Or(items) => {
+                    for item in items {
+                        fold(vm, item);
+                    }
+                }
+                P::Bool(_) | P::Equal(..) | P::Trait(_) => {}
+            }
+        }
+        let mut local = predicate.clone();
+        fold(self, &mut local);
+        Ok(Some(local))
+    }
+
+    fn published_kind(&self, ty: &Term, kind: nir::TypeKind) -> Option<bool> {
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return None;
+        };
+        if !arguments.is_empty() {
+            return None;
+        }
+        let category = if self.structs.published().contains_key(declaration) {
+            nir::NominalKind::Struct
+        } else if self.enums.published().contains_key(declaration) {
+            nir::NominalKind::Enum
+        } else if self.newtypes.published().contains_key(declaration) {
+            nir::NominalKind::Newtype
+        } else {
+            return None;
+        };
+        Some(nir::TypeKind::Nominal(category).implies(kind))
+    }
+
     pub(super) fn retained_type_contract(
         &mut self,
         predicate: &P,
@@ -40,28 +106,10 @@ impl Interpreter<'_> {
                     nir::copy_budget::charge_type_substitution(ty, &[], &[], fuel)
                 })
                 .map_err(|error| error.kind)?;
-                if matches!(ty, Term::NormalForm { head, .. } if self.normal_forms.get(head).is_some_and(|m| m.role == nir::normal_forms::Role::Tuple))
-                {
-                    match kind.evaluate(&Term::Tuple(vec![])) {
-                        Some(true) => Satisfied,
-                        Some(false) => Rejected,
-                        None => Unknown,
-                    }
-                } else if matches!(ty, Term::Nominal { declaration, .. }
-                if if self.graph.is_some() {
-                    self.concrete_nominal(ty).is_some()
-                } else {
-                    self.structs.contains_key(declaration)
-                        || self.enums.contains_key(declaration)
-                        || self.newtypes.contains_key(declaration)
-                }) {
-                    Rejected
-                } else {
-                    match kind.evaluate(ty) {
-                        Some(true) => Satisfied,
-                        Some(false) => Rejected,
-                        None => Unknown,
-                    }
+                match self.evaluate_type_kind(*kind, ty) {
+                    Some(true) => Satisfied,
+                    Some(false) => Rejected,
+                    None => Unknown,
                 }
             }
             P::Trait(requirement) => {

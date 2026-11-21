@@ -7,6 +7,15 @@ pub(super) struct SourceDeclarations<'a, 'h> {
     pub(super) nominal_context: crate::ptc::Context,
 }
 
+pub(super) fn nominal_kind(item: &ItemKind<'_>) -> Option<nir::NominalKind> {
+    Some(match item {
+        ItemKind::Struct(_) => nir::NominalKind::Struct,
+        ItemKind::Enum(_) => nir::NominalKind::Enum,
+        ItemKind::Newtype(..) => nir::NominalKind::Newtype,
+        _ => return None,
+    })
+}
+
 impl<'a, 'h> SourceDeclarations<'a, 'h> {
     pub(super) fn new(
         package: &'a hir::Package<'h>,
@@ -31,11 +40,8 @@ impl<'a, 'h> SourceDeclarations<'a, 'h> {
                 continue;
             }
             let identity = declaration(package, identities, owner);
-            if matches!(
-                item.kind,
-                ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(..)
-            ) {
-                nominal_context.admit_nominal_constructor(identity);
+            if let Some(kind) = nominal_kind(&item.kind) {
+                nominal_context.admit_nominal_kind(identity, kind);
             }
             if owners.insert(identity, owner).is_some() {
                 return Err(error(

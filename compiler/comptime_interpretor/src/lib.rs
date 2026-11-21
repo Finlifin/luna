@@ -1725,6 +1725,14 @@ impl<'a> Interpreter<'a> {
         &mut self,
         predicate: &nir::program::TypePredicate,
     ) -> ContractQueryResult {
+        // The declaration resolver owns a frozen source world. Supply facts
+        // established by completed publications in this invocation as well.
+        let local = if matches!(self.type_solver, Some(TypeSolver::Declarations(_))) {
+            self.published_kind_predicate(predicate)?
+        } else {
+            None
+        };
+        let predicate = local.as_ref().unwrap_or(predicate);
         match &self.type_solver {
             Some(TypeSolver::Unmetered(solver)) => Ok(solver(predicate)),
             Some(TypeSolver::Budgeted(solver) | TypeSolver::Declarations(solver)) => {

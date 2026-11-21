@@ -14,6 +14,9 @@ impl<T> Default for Catalog<T> {
     }
 }
 impl<T> Catalog<T> {
+    pub(super) fn published(&self) -> &BTreeMap<DeclarationId, T> {
+        &self.local
+    }
     pub(super) fn from_base(base: Arc<BTreeMap<DeclarationId, T>>) -> Self {
         Self {
             base,

@@ -275,8 +275,13 @@ impl nir::LayoutWorld for HostLayoutWorld<'_> {
             .any(|nf| nf.declaration == head && nf.role == nir::normal_forms::Role::TypeList)
     }
 
-    fn is_known_nominal(&self, ty: &Term) -> bool {
-        self.0.nominals.iter().any(|n| n.ty == *ty)
+    fn nominal_kind(&self, ty: &Term) -> Option<nir::NominalKind> {
+        let instance = self.0.nominals.iter().find(|entry| entry.ty == *ty)?;
+        Some(match &instance.definition {
+            iir::NominalDefinition::Struct(_) => nir::NominalKind::Struct,
+            iir::NominalDefinition::Enum(_) => nir::NominalKind::Enum,
+            iir::NominalDefinition::Newtype(_) => nir::NominalKind::Newtype,
+        })
     }
 
     fn is_template_identity(&self, ty: &Term) -> bool {

@@ -25,6 +25,53 @@ fn definition(local: u32, representation: Term) -> Newtype {
     }
 }
 #[test]
+fn only_committed_nominal_kinds_reach_the_frozen_declaration_resolver() {
+    use nir::program::TypePredicate as P;
+    let package = Package::default();
+    let definitions = [definition(1, boolean())];
+    let kind = nir::TypeKind::Nominal(nir::NominalKind::Newtype);
+    let local = P::Kind(ty(1), kind);
+    let other = P::Kind(ty(2), kind);
+    let query = P::And(vec![local.clone(), P::Not(Box::new(other.clone()))]);
+    let folded = P::And(vec![P::Bool(true), P::Not(Box::new(other))]);
+    let resolver = |predicate: &P, _: &mut u64| {
+        Ok(if predicate == &folded {
+            ContractOutcome::Satisfied
+        } else {
+            ContractOutcome::Unknown
+        })
+    };
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    vm.type_solver = Some(TypeSolver::Declarations(&resolver));
+    assert!(
+        vm.install_generated_newtypes_with(&definitions, || Err::<(), _>("declined"))
+            .is_err()
+    );
+    assert_eq!(
+        vm.solve_type_predicate(&query),
+        Ok(ContractOutcome::Unknown)
+    );
+    vm.install_generated_newtypes(&definitions).unwrap();
+    assert_eq!(
+        vm.solve_type_predicate(&query),
+        Ok(ContractOutcome::Satisfied)
+    );
+    let malformed = Term::Nominal {
+        declaration: id(1),
+        arguments: vec![boolean()],
+    };
+    assert_eq!(
+        vm.published_kind_predicate(&P::Kind(malformed, kind)),
+        Ok(None)
+    );
+    vm.budget.steps = 1;
+    assert_eq!(
+        vm.solve_type_predicate(&query),
+        Err(ErrorKind::StepsExhausted)
+    );
+}
+
+#[test]
 fn owned_definitions_execute_conversions_in_both_carriers_and_release_with_vm() {
     let package = Package::default();
     for compiled in [false, true] {

@@ -83,7 +83,7 @@ impl Search<'_> {
                 let mut accepts = true;
                 for &(other, kind, truth) in &theory.kinds {
                     self.steps = self.steps.checked_sub(1)?;
-                    if other == root && kind.evaluate(candidate) != Some(truth) {
+                    if other == root && self.context.evaluate_kind(kind, candidate) != Some(truth) {
                         accepts = false;
                         break;
                     }
@@ -152,7 +152,9 @@ impl Search<'_> {
                         let mut accepts = true;
                         for &(other, kind, truth) in &theory.kinds {
                             self.steps = self.steps.checked_sub(1)?;
-                            if other == *root && kind.evaluate(candidate) != Some(truth) {
+                            if other == *root
+                                && self.context.evaluate_kind(kind, candidate) != Some(truth)
+                            {
                                 accepts = false;
                                 break;
                             }

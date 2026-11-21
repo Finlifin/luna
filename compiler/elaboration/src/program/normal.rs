@@ -2043,13 +2043,19 @@ impl nir::LayoutWorld for Checker<'_, '_> {
         self.protocols.meta_list == Some(head)
     }
 
-    fn is_known_nominal(&self, ty: &Term) -> bool {
+    fn nominal_kind(&self, ty: &Term) -> Option<nir::NominalKind> {
         let Term::Nominal { declaration, .. } = ty else {
-            return false;
+            return None;
         };
-        self.structs.contains_key(declaration)
-            || self.enums.contains_key(declaration)
-            || self.newtypes.contains_key(declaration)
+        if self.structs.contains_key(declaration) {
+            Some(nir::NominalKind::Struct)
+        } else if self.enums.contains_key(declaration) {
+            Some(nir::NominalKind::Enum)
+        } else if self.newtypes.contains_key(declaration) {
+            Some(nir::NominalKind::Newtype)
+        } else {
+            None
+        }
     }
 
     fn nominal_layout(

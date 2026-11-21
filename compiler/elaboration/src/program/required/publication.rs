@@ -90,9 +90,9 @@ impl Receiver<'_> {
         for batch in &definitions.structs {
             for definition in batch.iter() {
                 self.declared_nominals
-                    .admit_nominal_constructor(definition.declaration);
+                    .admit_nominal_kind(definition.declaration, nir::NominalKind::Struct);
                 self.context
-                    .admit_nominal_constructor(definition.declaration);
+                    .admit_nominal_kind(definition.declaration, nir::NominalKind::Struct);
                 self.structs
                     .insert(definition.declaration, definition.clone());
             }
@@ -100,9 +100,9 @@ impl Receiver<'_> {
         for batch in &definitions.enums {
             for definition in batch.iter() {
                 self.declared_nominals
-                    .admit_nominal_constructor(definition.declaration);
+                    .admit_nominal_kind(definition.declaration, nir::NominalKind::Enum);
                 self.context
-                    .admit_nominal_constructor(definition.declaration);
+                    .admit_nominal_kind(definition.declaration, nir::NominalKind::Enum);
                 self.enums
                     .insert(definition.declaration, definition.clone());
             }
@@ -110,9 +110,9 @@ impl Receiver<'_> {
         for batch in &definitions.newtypes {
             for definition in batch.iter() {
                 self.declared_nominals
-                    .admit_nominal_constructor(definition.declaration);
+                    .admit_nominal_kind(definition.declaration, nir::NominalKind::Newtype);
                 self.context
-                    .admit_nominal_constructor(definition.declaration);
+                    .admit_nominal_kind(definition.declaration, nir::NominalKind::Newtype);
                 self.newtypes
                     .insert(definition.declaration, definition.clone());
             }

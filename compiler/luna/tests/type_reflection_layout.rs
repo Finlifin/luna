@@ -219,6 +219,41 @@ fn type_predicates_cover_all_nine_closed_axes_and_nominal_boundaries() {
 }
 
 #[test]
+fn nominal_kind_predicates_follow_declarations_across_stages() {
+    let source = r#"
+        struct Cell where T { value: T }
+        enum Choice { on, off }
+        newtype Wrapped = Cell<bool>;
+        typealias Alias = Cell<bool>;
+
+        comptime fn accepts_record(subject: Type) -> bool {
+            Type.predicates.is_struct(subject)
+        }
+
+        fn describe(value: T) -> bool where T, requires Type.predicates.is_struct(T) {
+            inline if Type.predicates.is_newtype(T) { false } else { true }
+        }
+
+        fn run() -> bool {
+            const reflected = accepts_record(Alias);
+            reflected and describe(Alias { value: true })
+                and Type.predicates.is_enum(Choice)
+                and Type.predicates.is_newtype(Wrapped)
+                and not Type.predicates.is_struct(Wrapped)
+                and not Type.predicates.is_enum(?Choice)
+                and not Type.predicates.is_struct(Tuple<bool>)
+        }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
+    let wrong = source.replace("describe(Alias { value: true })", "describe(Choice.on)");
+    let error = support::compile(&wrong).unwrap_err();
+    assert!(
+        error.contains("requirement") || error.contains("obligation"),
+        "{error}"
+    );
+}
+
+#[test]
 fn layout_reflection_matches_llvm_and_docs_across_native_and_target_widths() {
     let source = r#"
         use std.prelude.*;

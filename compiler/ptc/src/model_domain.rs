@@ -4,7 +4,7 @@
 //! witnesses use this domain, and exported substitutions require source proofs.
 use super::*;
 
-pub(super) fn closed_type(term: &Term, nominal: &BTreeSet<DeclarationId>) -> bool {
+pub(super) fn closed_type(term: &Term, nominal: &NominalConstructors) -> bool {
     // This checks the model domain, not executable NIR formation. Interpreted
     // payload tags can denote a closed Type without exposing a source layout.
     // Keep callable shape/sort checks here as well as recursive closure: merely
@@ -76,7 +76,7 @@ pub(super) fn closed_type(term: &Term, nominal: &BTreeSet<DeclarationId>) -> boo
         // A nominal Type's parameters are ordinary comptime inputs, not an
         // implicit all-Type telescope. Declaration formation remains the
         // producer's responsibility; model replay checks completed arguments.
-        return (arguments.is_empty() || nominal.contains(declaration))
+        return (arguments.is_empty() || nominal.contains_key(declaration))
             && arguments
                 .iter()
                 .all(|argument| model_applications::closed_argument(argument, nominal));

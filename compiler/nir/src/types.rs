@@ -141,6 +141,24 @@ impl Primitive {
     }
 }
 
+/// The declaration that introduces a nominal type determines its category.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum NominalKind {
+    Struct,
+    Enum,
+    Newtype,
+}
+
+impl fmt::Display for NominalKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Struct => "struct",
+            Self::Enum => "enum",
+            Self::Newtype => "newtype",
+        })
+    }
+}
+
 /// Closed type classification axes evaluated conservatively over structural terms.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TypeKind {
@@ -150,6 +168,7 @@ pub enum TypeKind {
     SignedInteger,
     UnsignedInteger,
     FloatingPoint,
+    Nominal(NominalKind),
     Tuple,
     Pointer,
     Function,
@@ -177,6 +196,29 @@ impl TypeKind {
             Some(false)
         } else {
             None
+        }
+    }
+
+    pub fn evaluate_with_declarations(
+        self,
+        ty: &Term,
+        tuple_head: impl FnOnce(DeclarationId) -> bool,
+        nominal_kind: impl FnOnce(DeclarationId) -> Option<NominalKind>,
+    ) -> Option<bool> {
+        match ty {
+            Term::NormalForm {
+                head,
+                sort: Sort::Type,
+                arguments,
+            } if tuple_head(*head)
+                && matches!(arguments.as_slice(), [input] if input.sort() == Sort::ComptimeValue) =>
+            {
+                Some(Self::Tuple.implies(self))
+            }
+            Term::Nominal { declaration, .. } => {
+                nominal_kind(*declaration).map(|kind| Self::Nominal(kind).implies(self))
+            }
+            _ => self.evaluate(ty),
         }
     }
 
@@ -241,6 +283,7 @@ impl fmt::Display for TypeKind {
             Self::SignedInteger => "signed-integer",
             Self::UnsignedInteger => "unsigned-integer",
             Self::FloatingPoint => "floating-point",
+            Self::Nominal(kind) => return kind.fmt(f),
             Self::Tuple => "tuple",
             Self::Pointer => "pointer",
             Self::Function => "function",

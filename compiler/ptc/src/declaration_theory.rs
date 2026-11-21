@@ -1,6 +1,13 @@
 //! Package-level type contracts that can be shared independently of lexical proofs.
 use super::{Context, DeclarationId, ProofError};
-use std::{collections::BTreeSet, fmt, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    sync::Arc,
+};
+
+/// A head can carry identity authority before its declaration category is known.
+pub type NominalConstructors = BTreeMap<DeclarationId, Option<nir::NominalKind>>;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeclarationTheory {
@@ -14,7 +21,7 @@ pub struct DeclarationTheory {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ConstructorContracts {
     pub congruence_heads: Arc<BTreeSet<DeclarationId>>,
-    pub nominal_constructors: Arc<BTreeSet<DeclarationId>>,
+    pub nominal_constructors: Arc<NominalConstructors>,
     /// Trusted Tuple classification/layout contracts; never body equations.
     pub tuple_heads: Arc<BTreeSet<DeclarationId>>,
 }
@@ -23,24 +30,39 @@ impl ConstructorContracts {
     pub(super) fn verify(&self, recorded: &Self, steps: &mut usize) -> Result<(), ProofError> {
         for (current, recorded) in [
             (&self.congruence_heads, &recorded.congruence_heads),
-            (&self.nominal_constructors, &recorded.nominal_constructors),
             (&self.tuple_heads, &recorded.tuple_heads),
         ] {
             if Arc::ptr_eq(current, recorded) {
                 continue;
             }
-            if current.len() != recorded.len() {
-                return Err(ProofError::Invalid);
-            }
-            for (left, right) in current.iter().zip(recorded.iter()) {
-                *steps = steps.checked_sub(1).ok_or(ProofError::BudgetExhausted)?;
-                if left != right {
-                    return Err(ProofError::Invalid);
-                }
-            }
+            verify_entries(current.iter(), recorded.iter(), steps)?;
+        }
+        if !Arc::ptr_eq(&self.nominal_constructors, &recorded.nominal_constructors) {
+            verify_entries(
+                self.nominal_constructors.iter(),
+                recorded.nominal_constructors.iter(),
+                steps,
+            )?;
         }
         Ok(())
     }
+}
+
+fn verify_entries<T: PartialEq>(
+    current: impl ExactSizeIterator<Item = T>,
+    recorded: impl ExactSizeIterator<Item = T>,
+    steps: &mut usize,
+) -> Result<(), ProofError> {
+    if current.len() != recorded.len() {
+        return Err(ProofError::Invalid);
+    }
+    for (left, right) in current.zip(recorded) {
+        *steps = steps.checked_sub(1).ok_or(ProofError::BudgetExhausted)?;
+        if left != right {
+            return Err(ProofError::Invalid);
+        }
+    }
+    Ok(())
 }
 
 impl DeclarationTheory {
@@ -51,17 +73,34 @@ impl DeclarationTheory {
     ) -> Result<Self, nir::normal_forms::ValidationError> {
         nir::normal_forms::validate_in(package, fuel)?;
         let mut theory = Self::default();
-        for declaration in package
+        for (declaration, kind) in package
             .structs
             .iter()
-            .map(|s| s.declaration)
-            .chain(package.enums.iter().map(|e| e.declaration))
-            .chain(package.newtypes.iter().map(|n| n.declaration))
+            .map(|s| (s.declaration, nir::NominalKind::Struct))
+            .chain(
+                package
+                    .enums
+                    .iter()
+                    .map(|e| (e.declaration, nir::NominalKind::Enum)),
+            )
+            .chain(
+                package
+                    .newtypes
+                    .iter()
+                    .map(|n| (n.declaration, nir::NominalKind::Newtype)),
+            )
         {
             *fuel = fuel
                 .checked_sub(1)
                 .ok_or(nir::normal_forms::ValidationError::Budget)?;
-            Arc::make_mut(&mut theory.constructors.nominal_constructors).insert(declaration);
+            if Arc::make_mut(&mut theory.constructors.nominal_constructors)
+                .insert(declaration, Some(kind))
+                .is_some()
+            {
+                return Err(nir::normal_forms::ValidationError::Invalid(
+                    "duplicate nominal declaration identity",
+                ));
+            }
         }
         for head in &package.normal_forms {
             *fuel = fuel
@@ -126,7 +165,15 @@ impl fmt::Display for ConstructorContracts {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(constructor-contracts")?;
         write_group(f, "congruence-heads", &self.congruence_heads)?;
-        write_group(f, "nominal-constructors", &self.nominal_constructors)?;
+        f.write_str(" (nominal-constructors")?;
+        for (id, kind) in self.nominal_constructors.iter() {
+            if let Some(kind) = kind {
+                write!(f, " ({kind} {id})")?;
+            } else {
+                write!(f, " {id}")?;
+            }
+        }
+        f.write_str(")")?;
         write_group(f, "tuple-heads", &self.tuple_heads)?;
         f.write_str(")")
     }
@@ -136,6 +183,46 @@ impl fmt::Display for ConstructorContracts {
 mod tests {
     use super::*;
     use crate::{Budget, Formula, Outcome};
+
+    #[test]
+    fn nominal_kind_evidence_requires_the_same_descriptor_on_replay() {
+        use nir::{NominalKind, Term, TypeKind};
+        let id = DeclarationId {
+            package: 2,
+            local: 3,
+        };
+        let ty = Term::Nominal {
+            declaration: id,
+            arguments: vec![],
+        };
+        let goal = Formula::kind(ty.clone(), TypeKind::Nominal(NominalKind::Enum));
+        let mut bare = Context::default();
+        bare.admit_nominal_constructor(id);
+        assert_eq!(
+            bare.evaluate_kind(TypeKind::Nominal(NominalKind::Enum), &ty),
+            None
+        );
+        let mut enums = bare.fork();
+        enums.admit_nominal_kind(id, NominalKind::Enum);
+        let mut records = bare.fork();
+        records.admit_nominal_kind(id, NominalKind::Struct);
+        let Outcome::Entailed(proof) = enums.prove(goal.clone(), Budget::default()) else {
+            panic!("enum descriptor")
+        };
+        let Outcome::NotEntailed(witness) = records.prove(goal, Budget::default()) else {
+            panic!("struct witness")
+        };
+        enums.verify_proof(&proof, Budget::default()).unwrap();
+        records.verify_witness(&witness, Budget::default()).unwrap();
+        assert_eq!(
+            records.verify_proof(&proof, Budget::default()),
+            Err(ProofError::Invalid)
+        );
+        assert_eq!(
+            enums.verify_witness(&witness, Budget::default()),
+            Err(ProofError::Invalid)
+        );
+    }
 
     #[test]
     fn replay_shares_exact_sets_and_meters_equal_independent_support() {

@@ -20,9 +20,12 @@ fn explicit_and_required_builders_prove_fields_against_source_implementations() 
             choice.Build()
         }
         comptime fn inspect() -> bool {
-            let fields = Build().enum_variant_field_types()[0];
+            let choice = Build();
+            let fields = choice.enum_variant_field_types()[0];
             let record = fields[0].struct_field_types();
-            record[0].NewtypeRepresentation() == Checked<bool> and
+            Type.predicates.is_enum(choice) and Type.predicates.is_struct(fields[0]) and
+                Type.predicates.is_newtype(record[0]) and
+                record[0].NewtypeRepresentation() == Checked<bool> and
                 record[1] == Checked<bool> and fields[1] == Checked<bool>
         }
         fn run() -> bool { inspect() }

@@ -58,6 +58,11 @@ pub(super) struct Newtypes<'a> {
     local: BTreeMap<DeclarationId, generated_newtypes::NewtypeDefinition<'a>>,
 }
 impl<'a> Newtypes<'a> {
+    pub(super) fn published(
+        &self,
+    ) -> &BTreeMap<DeclarationId, generated_newtypes::NewtypeDefinition<'a>> {
+        &self.local
+    }
     pub(super) fn new(
         declarations: &'a [nir::newtypes::Newtype],
         positions: Option<Arc<BTreeMap<DeclarationId, usize>>>,

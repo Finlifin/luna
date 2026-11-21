@@ -4,14 +4,14 @@
 use super::*;
 use nir::effects::Operation;
 
-fn argument(value: &Term, nominal: &BTreeSet<DeclarationId>) -> bool {
+fn argument(value: &Term, nominal: &NominalConstructors) -> bool {
     model_applications::closed_argument(value, nominal)
 }
 
 pub(super) fn rebuild(
     effects: &[Operation],
     result: &Term,
-    nominal: &BTreeSet<DeclarationId>,
+    nominal: &NominalConstructors,
     child: &mut impl FnMut(&Term) -> Option<Term>,
 ) -> Option<Term> {
     let effects = effects
@@ -47,7 +47,7 @@ pub(super) fn rebuild(
 pub(super) fn canonical(
     effects: &[Operation],
     result: &Term,
-    nominal: &BTreeSet<DeclarationId>,
+    nominal: &NominalConstructors,
 ) -> bool {
     if effects.is_empty()
         || matches!(result, Term::Computation { .. })

@@ -109,7 +109,7 @@ pub trait LayoutWorld {
 
     fn is_list_head(&self, head: DeclarationId) -> bool;
 
-    fn is_known_nominal(&self, ty: &Term) -> bool;
+    fn nominal_kind(&self, ty: &Term) -> Option<crate::NominalKind>;
 
     fn is_template_identity(&self, _ty: &Term) -> bool {
         false
@@ -132,21 +132,11 @@ pub fn compute_layout(
 }
 
 pub fn evaluate_kind(world: &impl LayoutWorld, kind: TypeKind, ty: &Term) -> Option<bool> {
-    if let Term::NormalForm {
-        head,
-        sort: Sort::Type,
-        arguments,
-    } = ty
-        && world.is_tuple_head(*head)
-        && arguments.len() == 1
-        && arguments[0].sort() == Sort::ComptimeValue
-    {
-        return Some(TypeKind::Tuple.implies(kind));
-    }
-    if matches!(ty, Term::Nominal { .. }) && world.is_known_nominal(ty) {
-        return Some(false);
-    }
-    kind.evaluate(ty)
+    kind.evaluate_with_declarations(
+        ty,
+        |head| world.is_tuple_head(head),
+        |_| world.nominal_kind(ty),
+    )
 }
 
 fn charge(fuel: &mut usize, amount: usize) -> Result<(), LayoutError> {
@@ -582,8 +572,15 @@ mod tests {
             self.list_head == Some(head)
         }
 
-        fn is_known_nominal(&self, ty: &Term) -> bool {
-            self.nominals.iter().any(|(key, _)| key == ty)
+        fn nominal_kind(&self, ty: &Term) -> Option<crate::NominalKind> {
+            let (_, descriptor) = self.nominals.iter().find(|(key, _)| key == ty)?;
+            Some(match descriptor {
+                NominalLayout::Struct(_) | NominalLayout::PackedStruct(_) => {
+                    crate::NominalKind::Struct
+                }
+                NominalLayout::Newtype(_) => crate::NominalKind::Newtype,
+                _ => crate::NominalKind::Enum,
+            })
         }
 
         fn nominal_layout(

@@ -1014,15 +1014,8 @@ fn elaborate_candidate<'a, 'h>(
                 definition.capabilities = checker.capabilities[&owner].clone();
                 definition.parameter_types = parameter_types;
             }
-            if matches!(
-                info.node.expect_item().kind,
-                ItemKind::Struct(_) | ItemKind::Enum(_) | ItemKind::Newtype(..)
-            ) {
-                checker.context.admit_nominal_constructor(declaration(
-                    package,
-                    package_identities,
-                    owner,
-                ));
+            if let Some(kind) = source_declarations::nominal_kind(&info.node.expect_item().kind) {
+                checker.context.admit_nominal_kind(nominal_id, kind);
             }
         }
     }
@@ -4690,7 +4683,7 @@ impl Checker<'_, '_> {
     fn nominal_context(&self) -> crate::ptc::Context {
         let mut context = self.declared_theory.clone();
         for declaration in &self.code_packet_nominals {
-            context.admit_nominal_constructor(*declaration);
+            context.admit_nominal_kind(*declaration, nir::NominalKind::Enum);
         }
         // A recursive check may refer to an enclosing head whose telescope
         // has been formed but whose signature has not yet been published.

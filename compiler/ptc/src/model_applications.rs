@@ -36,7 +36,7 @@ pub(super) fn fixed_argument(term: &Term) -> bool {
 
 /// A ground model packet may contain interpreted Type leaves. Pending source
 /// Types are accepted only by application discovery, never witness replay.
-pub(super) fn closed_argument(term: &Term, nominal: &BTreeSet<DeclarationId>) -> bool {
+pub(super) fn closed_argument(term: &Term, nominal: &NominalConstructors) -> bool {
     argument_with_types(term, &|ty| closed_type(ty, nominal))
 }
 

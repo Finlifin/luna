@@ -30,7 +30,7 @@ pub use type_inputs::{TypeInputOutcome, TypeInputSolution};
 
 mod declaration_theory;
 
-pub use declaration_theory::{ConstructorContracts, DeclarationTheory};
+pub use declaration_theory::{ConstructorContracts, DeclarationTheory, NominalConstructors};
 
 mod theory_state;
 
@@ -682,14 +682,21 @@ impl Context {
     /// Register a generative nominal declaration whose semantic arguments are
     /// part of its identity. This does not admit any normal-form inverse.
     pub fn admit_nominal_constructor(&mut self, declaration: DeclarationId) {
-        Arc::make_mut(&mut self.theory.constructors.nominal_constructors).insert(declaration);
+        Arc::make_mut(&mut self.theory.constructors.nominal_constructors)
+            .entry(declaration)
+            .or_insert(None);
+    }
+
+    pub fn admit_nominal_kind(&mut self, declaration: DeclarationId, kind: nir::NominalKind) {
+        Arc::make_mut(&mut self.theory.constructors.nominal_constructors)
+            .insert(declaration, Some(kind));
     }
 
     pub fn is_nominal_constructor(&self, declaration: DeclarationId) -> bool {
         self.theory
             .constructors
             .nominal_constructors
-            .contains(&declaration)
+            .contains_key(&declaration)
     }
 
     /// Branch facts are isolated by copy-on-write ownership. Read-only forks
@@ -1869,18 +1876,25 @@ fn strict_structural_children<'a>(context: &Context, terms: &'a Terms, id: usize
 fn evaluate_kind_with_heads(
     kind: TypeKind,
     ty: &Term,
-    nominal: &BTreeSet<DeclarationId>,
+    nominal: &NominalConstructors,
     tuple_heads: &BTreeSet<DeclarationId>,
 ) -> Option<bool> {
-    if matches!(ty, Term::NormalForm {head,sort:Sort::Type,arguments}
-        if tuple_heads.contains(head) && arguments.len()==1 && arguments[0].sort()==Sort::ComptimeValue)
+    if let Term::Nominal { declaration, .. } = ty
+        && nominal.get(declaration) == Some(&None)
     {
-        Some(TypeKind::Tuple.implies(kind))
-    } else if matches!(ty, Term::Nominal { declaration, .. } if nominal.contains(declaration)) {
-        Some(false)
-    } else {
-        kind.evaluate(ty)
+        // A generative nominal head excludes the structural and scalar kinds
+        // even when its precise declaration category has not been published.
+        return if matches!(kind, TypeKind::Nominal(_)) {
+            None
+        } else {
+            Some(false)
+        };
     }
+    kind.evaluate_with_declarations(
+        ty,
+        |head| tuple_heads.contains(&head),
+        |id| nominal.get(&id).copied().flatten(),
+    )
 }
 
 fn evaluate_model(
@@ -1890,7 +1904,7 @@ fn evaluate_model(
     applications: &model_applications::Applications,
     fuel: &std::cell::Cell<usize>,
     integers: &BTreeMap<DeclarationId, i128>,
-    nominal: &BTreeSet<DeclarationId>,
+    nominal: &NominalConstructors,
     tuple_heads: &BTreeSet<DeclarationId>,
 ) -> Option<bool> {
     evaluate(formula, &|atom| {
@@ -1914,7 +1928,7 @@ fn model_atom(
     applications: &model_applications::Applications,
     fuel: &std::cell::Cell<usize>,
     integers: &BTreeMap<DeclarationId, i128>,
-    nominal: &BTreeSet<DeclarationId>,
+    nominal: &NominalConstructors,
     tuple_heads: &BTreeSet<DeclarationId>,
 ) -> Option<bool> {
     match atom {
@@ -1952,11 +1966,7 @@ fn model_atom(
 // Kind witnesses need a completed input, not a model of its producing code.
 // This structural closure check never compares opaque results or supplies
 // equations for values. Formation/domain admission belongs to the caller.
-fn closed_classification_input(
-    term: &Term,
-    nominal: &BTreeSet<DeclarationId>,
-    depth: usize,
-) -> bool {
+fn closed_classification_input(term: &Term, nominal: &NominalConstructors, depth: usize) -> bool {
     if depth >= 128 {
         return false;
     }
@@ -1992,7 +2002,7 @@ fn reify(
     representatives: &HashMap<usize, usize>,
     free: &mut HashMap<usize, Term>,
     active: &mut BTreeSet<usize>,
-    nominal: &BTreeSet<DeclarationId>,
+    nominal: &NominalConstructors,
     fuel: &mut usize,
 ) -> Option<Term> {
     *fuel = fuel.checked_sub(1)?;
@@ -2061,7 +2071,7 @@ fn reify(
 
 fn rebuild(
     term: &Term,
-    nominal: &BTreeSet<DeclarationId>,
+    nominal: &NominalConstructors,
     child: &mut impl FnMut(&Term) -> Option<Term>,
 ) -> Option<Term> {
     match term {
@@ -2166,7 +2176,7 @@ fn rebuild(
         Term::Nominal {
             declaration,
             arguments,
-        } if arguments.is_empty() || nominal.contains(declaration) => Some(Term::Nominal {
+        } if arguments.is_empty() || nominal.contains_key(declaration) => Some(Term::Nominal {
             declaration: *declaration,
             arguments: arguments.iter().map(&mut *child).collect::<Option<_>>()?,
         }),
@@ -2180,7 +2190,7 @@ fn substitute_types(
     bound_types: &BTreeMap<TypeBinder, Term>,
     applications: &model_applications::Applications,
     fuel: &std::cell::Cell<usize>,
-    nominal: &BTreeSet<DeclarationId>,
+    nominal: &NominalConstructors,
 ) -> Option<Term> {
     let Some(remaining) = fuel.get().checked_sub(1) else {
         fuel.set(0);
