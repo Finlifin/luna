@@ -95,20 +95,23 @@ fn println_and_display_preserve_bytes_and_external_effects() {
             counter.* = previous + 1;
             previous
         }
+        fn line(comptime format: str, ...fields: defer std.fmt.Parse(format)) -> !std.io.IoErr void {
+            println(format, .varargs = fields)
+        }
         fn output() -> !std.io.IoErr void {
             println("Hello, Flurry! 世界")!;
             print("embedded\0NUL")!;
-            println("")!;
+            line("")!;
             let small: i8 = -128;
             let large: u128 = 340282366920938463463374607431768211455;
             let least: i128 = -170141183460469231731687303715884105728;
-            println_value(small)!;
-            println_value(large)!;
-            println_value(least)!;
+            println("{}", small)!;
+            println("{}", large)!;
+            line("{}", least)!;
             println_value(true)!;
-            println("界{{{}}}\0{}", .varargs = (Label { value: 42 }, false))!;
+            line("界{{{}}}\0{}", .fields = (Label { value: 42 }, false))!;
             var calls: u8 = 0;
-            println("{}{}", mark(calls.ref), mark(calls.ref))!;
+            line("{}{}", mark(calls.ref), mark(calls.ref))!;
             assumes calls == 2;
             eprintln("stderr")
         }
