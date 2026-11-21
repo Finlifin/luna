@@ -2,6 +2,7 @@
 //! VM publication does not itself publish those descriptions into the caller.
 use super::*;
 use crate::definitions::PublishedDefinitions;
+use nir::normal_forms::NominalValueDeclaration as Nominal;
 
 pub(super) struct Receiver<'a> {
     pub context: &'a mut crate::ptc::Context,
@@ -90,9 +91,9 @@ impl Receiver<'_> {
         for batch in &definitions.structs {
             for definition in batch.iter() {
                 self.declared_nominals
-                    .admit_nominal_kind(definition.declaration, nir::NominalKind::Struct);
+                    .admit_checked_nominal(Nominal::Struct(definition));
                 self.context
-                    .admit_nominal_kind(definition.declaration, nir::NominalKind::Struct);
+                    .admit_checked_nominal(Nominal::Struct(definition));
                 self.structs
                     .insert(definition.declaration, definition.clone());
             }
@@ -100,9 +101,9 @@ impl Receiver<'_> {
         for batch in &definitions.enums {
             for definition in batch.iter() {
                 self.declared_nominals
-                    .admit_nominal_kind(definition.declaration, nir::NominalKind::Enum);
+                    .admit_checked_nominal(Nominal::Enum(definition));
                 self.context
-                    .admit_nominal_kind(definition.declaration, nir::NominalKind::Enum);
+                    .admit_checked_nominal(Nominal::Enum(definition));
                 self.enums
                     .insert(definition.declaration, definition.clone());
             }
@@ -110,9 +111,9 @@ impl Receiver<'_> {
         for batch in &definitions.newtypes {
             for definition in batch.iter() {
                 self.declared_nominals
-                    .admit_nominal_kind(definition.declaration, nir::NominalKind::Newtype);
+                    .admit_checked_nominal(Nominal::Newtype(definition));
                 self.context
-                    .admit_nominal_kind(definition.declaration, nir::NominalKind::Newtype);
+                    .admit_checked_nominal(Nominal::Newtype(definition));
                 self.newtypes
                     .insert(definition.declaration, definition.clone());
             }

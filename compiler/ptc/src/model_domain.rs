@@ -87,3 +87,15 @@ pub(super) fn closed_type(term: &Term, nominal: &NominalConstructors) -> bool {
             .into_iter()
             .all(|child| closed_type(child, nominal))
 }
+
+/// A nullary nominal appearing in a checked query already has a source of
+/// formation. Introducing one from outside the query needs declaration evidence.
+pub(super) fn nullary_nominal(term: &Term) -> Option<DeclarationId> {
+    match term {
+        Term::Nominal {
+            declaration,
+            arguments,
+        } if arguments.is_empty() => Some(*declaration),
+        _ => None,
+    }
+}

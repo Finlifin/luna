@@ -177,3 +177,115 @@ fn structural_classifications_generate_distinct_shapes_without_source_examples()
         assert!(context.assumptions().is_empty());
     }
 }
+
+#[test]
+fn nominal_model_search_requires_formation_evidence_for_unmentioned_heads() {
+    use nir::NominalKind;
+    use nir::normal_forms::NominalValueDeclaration::Struct;
+    use nir::program::{Package, TypePredicate};
+    let record = |local| nir::program::Struct {
+        declaration: id(local),
+        name: format!("R{local}"),
+        fields: vec![],
+        packed: false,
+        type_parameters: vec![],
+        parameter_types: vec![],
+        requirements: vec![],
+        capabilities: vec![],
+    };
+    let mut generic = record(10);
+    generic.type_parameters.push(id(110));
+    let mut guarded = record(11);
+    guarded.requirements.push(TypePredicate::Bool(false));
+    let mut package = Package {
+        structs: vec![generic, guarded, record(12), record(13)],
+        ..Default::default()
+    };
+    let kind = TypeKind::Nominal(NominalKind::Struct);
+    let constraint = F::kind(input(0), kind);
+    let search = |ctx: &Context| {
+        ctx.search_type_inputs(&[id(0)], constraint.clone(), &mut Budget::default())
+    };
+    let problem = |ctx: &Context| {
+        ctx.type_input_context(&[id(0)], constraint.clone(), &mut Budget::default())
+            .unwrap()
+    };
+    let provisional = Context::from_package(&package).unwrap();
+    assert!(matches!(search(&provisional), TypeInputOutcome::Unknown(_)));
+    for record in &package.structs[..3] {
+        package
+            .formed_nullary_nominals
+            .admit_checked(Struct(record));
+    }
+    // A singleton supply cannot discharge the uniqueness obligation.
+    let one = Context::from_package(&package).unwrap();
+    assert!(matches!(search(&one), TypeInputOutcome::Unknown(_)));
+    package
+        .formed_nullary_nominals
+        .admit_checked(Struct(&package.structs[3]));
+    let context = Context::from_package(&package).unwrap();
+    let TypeInputOutcome::Ambiguous {
+        candidate,
+        alternative,
+        ..
+    } = search(&context)
+    else {
+        panic!("two distinct checked structs")
+    };
+    assert_ne!(candidate.types[&id(0)], alternative.types[&id(0)]);
+    for witness in [&candidate, &alternative] {
+        assert!(
+            matches!(&witness.types[&id(0)], Term::Nominal { declaration, arguments } if [id(12),id(13)].contains(declaration) && arguments.is_empty())
+        );
+        problem(&context)
+            .verify_witness(witness, Budget::default())
+            .unwrap();
+    }
+    assert!(
+        problem(&provisional)
+            .verify_witness(&candidate, Budget::default())
+            .is_err()
+    );
+    let mut forged = candidate;
+    forged.types.insert(
+        id(0),
+        Term::Nominal {
+            declaration: id(10),
+            arguments: vec![],
+        },
+    );
+    assert!(
+        problem(&context)
+            .verify_witness(&forged, Budget::default())
+            .is_err()
+    );
+    // The same evidence is required when the only choice is an opaque
+    // function's interpreted result and there are no exported Type bindings.
+    let mut opaque = context.fork();
+    opaque.admit_congruence(id(99));
+    opaque.assume(F::kind(
+        Term::NormalForm {
+            head: id(99),
+            sort: Sort::Type,
+            arguments: vec![Term::Bool(true)],
+        },
+        kind,
+    ));
+    let ptc::Outcome::NotEntailed(mut model) = opaque.prove(F::False, Budget::default()) else {
+        panic!("an opaque Type result can denote a checked struct")
+    };
+    opaque.verify_witness(&model, Budget::default()).unwrap();
+    assert!(model.types.is_empty());
+    model.applications[0].result = Term::Nominal {
+        declaration: id(11),
+        arguments: vec![],
+    };
+    assert_eq!(
+        opaque.verify_witness(&model, Budget::default()),
+        Err(ptc::ProofError::Invalid)
+    );
+    package.structs[3]
+        .requirements
+        .push(TypePredicate::Bool(false));
+    assert!(Context::from_package(&package).is_err());
+}

@@ -15,6 +15,36 @@ pub struct PublishedDefinitions {
     pub newtypes: Vec<Arc<[nir::newtypes::Newtype]>>,
 }
 
+impl PublishedDefinitions {
+    /// Transfer completed builder products to the package returned by an
+    /// invocation. Source checking has a separate transactional receiver.
+    pub fn append_to(self, package: &mut Package) {
+        use nir::normal_forms::NominalValueDeclaration as D;
+        for batch in self.structs {
+            for def in batch.iter() {
+                package
+                    .formed_nullary_nominals
+                    .admit_checked(D::Struct(def));
+            }
+            package.structs.extend(batch.iter().cloned());
+        }
+        for batch in self.enums {
+            for def in batch.iter() {
+                package.formed_nullary_nominals.admit_checked(D::Enum(def));
+            }
+            package.enums.extend(batch.iter().cloned());
+        }
+        for batch in self.newtypes {
+            for def in batch.iter() {
+                package
+                    .formed_nullary_nominals
+                    .admit_checked(D::Newtype(def));
+            }
+            package.newtypes.extend(batch.iter().cloned());
+        }
+    }
+}
+
 /// One immutable candidate. Its descriptors cannot be replaced after checking.
 /// Dropping it abandons publication; commit performs only prepaid installation.
 pub struct PreparedDefinitions<'a> {

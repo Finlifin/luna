@@ -129,6 +129,7 @@ pub(super) fn index(
     context: &Context,
     fuel: &mut usize,
     depth: usize,
+    mut visit: impl FnMut(&Term) -> Result<(), ProofError>,
 ) -> Result<Applications, ProofError> {
     let mut result = HashMap::new();
     for entry in entries {
@@ -152,9 +153,7 @@ pub(super) fn index(
             .map(|value| (value, true))
             .chain(std::iter::once((&entry.result, false)))
         {
-            if !within_input_limits(Input::Term(value), depth, fuel) {
-                return Err(ProofError::BudgetExhausted);
-            }
+            visit_input_terms(Input::Term(value), depth, fuel, &mut visit)?;
             if !(closed_type(value, &context.theory.constructors.nominal_constructors)
                 || (is_argument
                     && closed_argument(value, &context.theory.constructors.nominal_constructors)))

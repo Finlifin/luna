@@ -99,6 +99,38 @@ impl Search<'_> {
                     }
                 }
             }
+            // A negative classification may also admit nominal types. Consult
+            // only populated categories, even when every primitive seed fails.
+            let formed = self.context.formed_nullary_nominals();
+            for kind in formed.kinds() {
+                let category = TypeKind::Nominal(kind);
+                let mut permitted = true;
+                for &(other, test, truth) in &theory.kinds {
+                    self.steps = self.steps.checked_sub(1)?;
+                    if root == other && category.consequence(true, test) != Some(truth) {
+                        permitted = false;
+                        break;
+                    }
+                }
+                if !permitted {
+                    continue;
+                }
+                // At most one distinct head per query term plus a spare.
+                // Exhaustion limits coverage and grants no uniqueness proof.
+                for declaration in formed
+                    .of_kind(kind)
+                    .take(self.terms.nodes.len().saturating_add(1))
+                {
+                    self.steps = self.steps.checked_sub(1)?;
+                    let candidate = Term::Nominal {
+                        declaration,
+                        arguments: Vec::new(),
+                    };
+                    if !self.terms.ids.contains_key(&candidate) {
+                        candidates.push(candidate);
+                    }
+                }
+            }
             if candidates.is_empty() {
                 return None;
             }
@@ -297,6 +329,7 @@ impl Search<'_> {
             self.context,
             &mut self.steps,
             self.max_depth.min(128),
+            |_| Ok(()),
         )
         .ok()?;
         // A Boolean short circuit must not conceal an uninterpreted atom in

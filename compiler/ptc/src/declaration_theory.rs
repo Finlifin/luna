@@ -12,6 +12,7 @@ pub type NominalConstructors = BTreeMap<DeclarationId, Option<nir::NominalKind>>
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeclarationTheory {
     pub(super) constructors: ConstructorContracts,
+    pub(super) formed_nominals: nir::program::FormedNullaryNominals,
     /// Trusted List domain and candidate metadata; never a solver injectivity rule.
     pub(super) list_inference_heads: Arc<BTreeSet<DeclarationId>>,
 }
@@ -73,26 +74,24 @@ impl DeclarationTheory {
     ) -> Result<Self, nir::normal_forms::ValidationError> {
         nir::normal_forms::validate_in(package, fuel)?;
         let mut theory = Self::default();
-        for (declaration, kind) in package
+        use nir::normal_forms::NominalValueDeclaration as D;
+        let mut formed = 0;
+        for definition in package
             .structs
             .iter()
-            .map(|s| (s.declaration, nir::NominalKind::Struct))
-            .chain(
-                package
-                    .enums
-                    .iter()
-                    .map(|e| (e.declaration, nir::NominalKind::Enum)),
-            )
-            .chain(
-                package
-                    .newtypes
-                    .iter()
-                    .map(|n| (n.declaration, nir::NominalKind::Newtype)),
-            )
+            .map(D::Struct)
+            .chain(package.enums.iter().map(D::Enum))
+            .chain(package.newtypes.iter().map(D::Newtype))
         {
             *fuel = fuel
                 .checked_sub(1)
                 .ok_or(nir::normal_forms::ValidationError::Budget)?;
+            let (kind, declaration) = definition.identity();
+            if package.formed_nullary_nominals.contains(kind, declaration)
+                && definition.is_unconditional_nullary()
+            {
+                formed += 1;
+            }
             if Arc::make_mut(&mut theory.constructors.nominal_constructors)
                 .insert(declaration, Some(kind))
                 .is_some()
@@ -102,6 +101,12 @@ impl DeclarationTheory {
                 ));
             }
         }
+        if formed != package.formed_nullary_nominals.len() {
+            return Err(nir::normal_forms::ValidationError::Invalid(
+                "nullary nominal formation evidence lacks a matching unconditional declaration",
+            ));
+        }
+        theory.formed_nominals = package.formed_nullary_nominals.clone();
         for head in &package.normal_forms {
             *fuel = fuel
                 .checked_sub(1)
@@ -135,6 +140,20 @@ impl DeclarationTheory {
 }
 
 impl Context {
+    /// Called by the declaration owner only after checking all formation obligations.
+    pub fn admit_checked_nominal(
+        &mut self,
+        definition: nir::normal_forms::NominalValueDeclaration<'_>,
+    ) {
+        let (kind, id) = definition.identity();
+        self.admit_nominal_kind(id, kind);
+        self.theory.formed_nominals.admit_checked(definition);
+    }
+
+    pub fn formed_nullary_nominals(&self) -> &nir::program::FormedNullaryNominals {
+        &self.theory.formed_nominals
+    }
+
     /// Publish the owner's checked head contract. Congruence is forward only;
     /// tuple classification and list inference require their own layout roles.
     pub fn admit_normal_form_head(&mut self, head: DeclarationId, role: nir::normal_forms::Role) {
@@ -145,6 +164,7 @@ impl Context {
 impl fmt::Display for DeclarationTheory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(declaration-theory {}", self.constructors)?;
+        write!(f, " {}", self.formed_nominals)?;
         write_group(f, "list-inference-heads", &self.list_inference_heads)?;
         f.write_str(")")
     }

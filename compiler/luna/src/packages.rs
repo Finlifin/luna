@@ -644,15 +644,7 @@ impl BuilderInvocation<'_> {
         )?;
         self.value = Some(value);
         nir.definition_identity_cursor = next_identity;
-        for batch in definitions.structs {
-            nir.structs.extend(batch.iter().cloned());
-        }
-        for batch in definitions.enums {
-            nir.enums.extend(batch.iter().cloned());
-        }
-        for batch in definitions.newtypes {
-            nir.newtypes.extend(batch.iter().cloned());
-        }
+        definitions.append_to(&mut nir);
         let completed = nir;
         crate::protocols::type_constructors::validate(&completed, protocols)?;
         Ok(completed)

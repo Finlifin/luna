@@ -105,6 +105,8 @@ impl World {
         assert!(self.newtypes.is_empty());
         assert!(self.context.is_nominal_constructor(id(1)));
         assert!(self.declared_nominals.is_nominal_constructor(id(1)));
+        assert_eq!(self.context.formed_nullary_nominals().len(), 1);
+        assert_eq!(self.declared_nominals.formed_nullary_nominals().len(), 1);
         for local in 10..=13 {
             assert!(!self.declared_nominals.is_nominal_constructor(id(local)));
             assert!(
@@ -117,6 +119,15 @@ impl World {
     }
 
     fn assert_complete(&self, definitions: &PublishedDefinitions) {
+        for ctx in [&self.context, &self.declared_nominals] {
+            let formed = ctx.formed_nullary_nominals();
+            assert_eq!(
+                formed.of_kind(nir::NominalKind::Struct).collect::<Vec<_>>(),
+                [id(1), id(10), id(11)]
+            );
+            assert!(formed.contains(nir::NominalKind::Enum, id(12)));
+            assert!(formed.contains(nir::NominalKind::Newtype, id(13)));
+        }
         assert_eq!(self.structs.len(), 3);
         assert_eq!(self.enums.len(), 1);
         assert_eq!(self.newtypes.len(), 1);

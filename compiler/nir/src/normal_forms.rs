@@ -796,10 +796,52 @@ pub fn nominal_value_fields(
 ) -> Option<Vec<Term>> {
     nominal_value_fields_budgeted(package, ty, variant, &mut 100_000)
 }
+#[derive(Clone, Copy)]
 pub enum NominalValueDeclaration<'a> {
     Struct(&'a crate::program::Struct),
     Enum(&'a crate::program::Enum),
     Newtype(&'a crate::newtypes::Newtype),
+}
+
+impl NominalValueDeclaration<'_> {
+    pub fn identity(self) -> (crate::NominalKind, DeclarationId) {
+        use crate::NominalKind::*;
+        match self {
+            Self::Struct(s) => (Struct, s.declaration),
+            Self::Enum(e) => (Enum, e.declaration),
+            Self::Newtype(n) => (Newtype, n.declaration),
+        }
+    }
+
+    /// Meaningful for complete declarations only. An empty, partially prepared
+    /// telescope is not evidence that the type can be formed without inputs.
+    pub fn is_unconditional_nullary(self) -> bool {
+        let (parameters, domains, requirements, capabilities) = match self {
+            Self::Struct(s) => (
+                &s.type_parameters,
+                &s.parameter_types,
+                &s.requirements,
+                &s.capabilities,
+            ),
+            Self::Enum(e) => (
+                &e.type_parameters,
+                &e.parameter_types,
+                &e.requirements,
+                &e.capabilities,
+            ),
+            Self::Newtype(n) if n.capture_count == 0 => (
+                &n.type_parameters,
+                &n.parameter_types,
+                &n.requirements,
+                &n.capabilities,
+            ),
+            Self::Newtype(_) => return false,
+        };
+        parameters.is_empty()
+            && domains.is_empty()
+            && requirements.is_empty()
+            && capabilities.is_empty()
+    }
 }
 
 /// Compatibility for optional layout observers. Typed admission callers use

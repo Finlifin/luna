@@ -1345,6 +1345,37 @@ fn elaborate_candidate<'a, 'h>(
         };
         checker.check_formation_requirements(target, &arguments, span)?;
     }
+    // Early required invocations can see provisional layouts. Only now have
+    // source contracts, including the formation of their operands, settled.
+    use nir::normal_forms::NominalValueDeclaration as Nominal;
+    for def in checker
+        .structs
+        .values()
+        .map(Nominal::Struct)
+        .chain(checker.enums.values().map(Nominal::Enum))
+        .chain(checker.newtypes.values().map(Nominal::Newtype))
+    {
+        checker.required_steps = checker.required_steps.checked_sub(1).ok_or_else(|| {
+            error(
+                Span::default(),
+                "nominal formation catalog budget exhausted",
+            )
+        })?;
+        let (_, id) = def.identity();
+        if let Some(owner) = checker.source_declarations.owner(id)
+            // A member or block-local declaration can require an enclosing
+            // instance. Its own telescope alone cannot establish global formation.
+            && !checker.self_containers.contains_key(&owner)
+            && !checker.package.lexical_parents.contains_key(&owner)
+            && checker.requirements.contains_key(&owner)
+            && checker
+                .program_requirements
+                .get(&owner)
+                .is_none_or(Vec::is_empty)
+        {
+            checker.declared_theory.admit_checked_nominal(def);
+        }
+    }
     checker.context = checker.nominal_context();
     checker.signature_owner = None;
     // Definition-scope default checking precedes body checking. Only earlier
@@ -1512,6 +1543,7 @@ fn elaborate_candidate<'a, 'h>(
     }
     let attributes = prepared_attributes;
     checker.expand_test_templates(&mut output)?;
+    output.formed_nullary_nominals = checker.declared_theory.formed_nullary_nominals().clone();
     // Required invocations in bodies, defaults and templates can publish types
     // after the initial layout snapshot. Consumers below need their complete
     // descriptions for contract, purity and quote analysis, not just emission.

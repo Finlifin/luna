@@ -520,6 +520,11 @@ fn public_struct_builder_copies_reflected_fields_through_mutating_methods() {
         .iter()
         .find(|item| item.name == "Columns")
         .unwrap();
+    assert!(
+        package
+            .formed_nullary_nominals
+            .contains(nir::NominalKind::Struct, generated.declaration)
+    );
     assert_eq!(generated.declaration.package, 900);
     assert_eq!(generated.fields.len(), 2);
 }

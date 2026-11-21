@@ -7,6 +7,9 @@ use crate::{DeclarationId, Term};
 use std::fmt;
 use std::sync::Arc;
 
+mod formed_nominals;
+pub use formed_nominals::FormedNullaryNominals;
+
 mod input_schedule;
 
 pub use input_schedule::{CheckedInputSchedule, InputPath, InputSchedule, InputStep};
@@ -2165,6 +2168,9 @@ pub struct Package {
     pub traits: Vec<Trait>,
     pub implementations: Vec<Implementation>,
     pub functions: Vec<Function>,
+    /// Positive formation evidence published after contract checking. Invocation
+    /// snapshots may contain additional, still provisional layout descriptors.
+    pub formed_nullary_nominals: FormedNullaryNominals,
     pub structs: Vec<Struct>,
     pub newtypes: Vec<crate::newtypes::Newtype>,
     pub alias_contracts: Vec<crate::type_aliases::Contract>,
@@ -3732,6 +3738,9 @@ impl fmt::Display for ExprKind {
 impl fmt::Display for Package {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(nir-package")?;
+        if !self.formed_nullary_nominals.is_empty() {
+            write!(f, " {}", self.formed_nullary_nominals)?;
+        }
         if !self.refinements.is_empty() {
             write!(f, "\n {}", self.refinements)?;
         }

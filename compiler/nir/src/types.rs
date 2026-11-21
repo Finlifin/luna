@@ -142,7 +142,7 @@ impl Primitive {
 }
 
 /// The declaration that introduces a nominal type determines its category.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NominalKind {
     Struct,
     Enum,

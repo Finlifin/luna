@@ -6916,3 +6916,43 @@ fn program_flow_accepts_enum_value_indices_and_preserves_query_failures() {
     flow::analyze_in_package(&package, read, &mut Limits::default()).unwrap();
     assert_eq!(support::run_iir(source, "run", vec![]), Value::Bool(true));
 }
+
+#[test]
+fn source_contracts_publish_only_unconditional_nullary_nominal_models() {
+    use elaboration::ptc::{Budget, Context, Formula, TypeInputOutcome};
+    use nir::{DeclarationId, NominalKind, Sort, Term, TypeKind};
+    let package = support::compile(
+        r#"
+        struct A {}
+        struct B {}
+        struct Generic where T { pub newtype Nested = bool; }
+        struct Guarded where requires bool == ?bool {}
+        newtype Key = bool;
+        "#,
+    );
+    let input = DeclarationId {
+        package: 987,
+        local: 0,
+    };
+    let context = Context::from_package(&package).unwrap();
+    let kind = NominalKind::Struct;
+    assert_eq!(package.formed_nullary_nominals.of_kind(kind).count(), 2);
+    assert_eq!(
+        package
+            .formed_nullary_nominals
+            .of_kind(NominalKind::Newtype)
+            .count(),
+        1
+    );
+    let constraint = Formula::kind(
+        Term::Rigid {
+            declaration: input,
+            sort: Sort::Type,
+        },
+        TypeKind::Nominal(kind),
+    );
+    assert!(matches!(
+        context.search_type_inputs(&[input], constraint, &mut Budget::default()),
+        TypeInputOutcome::Ambiguous { .. }
+    ));
+}

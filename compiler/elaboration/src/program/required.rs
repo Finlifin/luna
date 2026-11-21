@@ -1521,6 +1521,7 @@ impl Checker<'_, '_> {
                 method_links,
             } = self.required_trait_world(&retained, expr.span)?;
             let mut package = n::Package {
+                formed_nullary_nominals: self.declared_theory.formed_nullary_nominals().clone(),
                 builtin_implementation_packages: self
                     .protocols
                     .builtin_implementation_packages

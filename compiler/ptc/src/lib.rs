@@ -466,16 +466,29 @@ impl Context {
     ) -> Result<(), ProofError> {
         let fuel = &mut budget.steps;
         let limit = budget.max_depth.min(256);
+        let mut mentioned_nominals = BTreeSet::new();
         for formula in self
             .assumptions
             .iter()
             .chain(&witness.assumptions)
             .chain(std::iter::once(&witness.goal))
         {
-            if !within_limits(formula, limit, fuel) {
-                return Err(ProofError::BudgetExhausted);
-            }
+            visit_input_terms(Input::Formula(formula), limit, fuel, |term| {
+                if let Some(id) = model_domain::nullary_nominal(term) {
+                    mentioned_nominals.insert(id);
+                }
+                Ok(())
+            })?;
         }
+        let admit_nominal = |term: &Term| {
+            if let Some(id) = model_domain::nullary_nominal(term)
+                && !mentioned_nominals.contains(&id)
+                && !self.formed_nullary_nominals().contains_declaration(id)
+            {
+                return Err(ProofError::Invalid);
+            }
+            Ok(())
+        };
         for binder in witness.bound_types.keys() {
             *fuel = fuel.checked_sub(1).ok_or(ProofError::BudgetExhausted)?;
             binder
@@ -484,9 +497,7 @@ impl Context {
                 .map_err(|_| ProofError::Invalid)?;
         }
         for ty in witness.types.values().chain(witness.bound_types.values()) {
-            if !within_input_limits(Input::Term(ty), limit, fuel) {
-                return Err(ProofError::BudgetExhausted);
-            }
+            visit_input_terms(Input::Term(ty), limit, fuel, admit_nominal)?;
             if !closed_type(ty, &self.theory.constructors.nominal_constructors) {
                 return Err(ProofError::Invalid);
             }
@@ -501,7 +512,8 @@ impl Context {
         self.theory
             .constructors
             .verify(&witness.constructors, fuel)?;
-        let applications = model_applications::index(&witness.applications, self, fuel, limit)?;
+        let applications =
+            model_applications::index(&witness.applications, self, fuel, limit, admit_nominal)?;
         let mut atoms = Vec::new();
         let mut terms = Terms::default();
         for formula in self
@@ -688,8 +700,14 @@ impl Context {
     }
 
     pub fn admit_nominal_kind(&mut self, declaration: DeclarationId, kind: nir::NominalKind) {
-        Arc::make_mut(&mut self.theory.constructors.nominal_constructors)
-            .insert(declaration, Some(kind));
+        let entries = &mut self.theory.constructors.nominal_constructors;
+        if let Some(previous) = entries.get(&declaration).copied().flatten() {
+            if previous == kind {
+                return;
+            }
+            self.theory.formed_nominals.remove(previous, declaration);
+        }
+        Arc::make_mut(entries).insert(declaration, Some(kind));
     }
 
     pub fn is_nominal_constructor(&self, declaration: DeclarationId) -> bool {
@@ -847,11 +865,20 @@ pub fn within_limits(formula: &Formula, limit: usize, fuel: &mut usize) -> bool 
 }
 
 fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool {
+    visit_input_terms(input, limit, fuel, |_| Ok(())).is_ok()
+}
+
+fn visit_input_terms(
+    input: Input<'_>,
+    limit: usize,
+    fuel: &mut usize,
+    mut visit: impl FnMut(&Term) -> Result<(), ProofError>,
+) -> Result<(), ProofError> {
     use nir::program::TypePredicate as P;
     let mut pending = vec![(input, 0usize)];
     while let Some((input, depth)) = pending.pop() {
         if depth >= limit || *fuel == 0 {
-            return false;
+            return Err(ProofError::BudgetExhausted);
         }
         *fuel -= 1;
         // Pending roots already require at least one step each. Check width
@@ -869,14 +896,14 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
             Input::Predicate(P::Kind(ty, _)) => pending.push((Input::Term(ty), depth + 1)),
             Input::Formula(Formula::Trait(query)) => {
                 if query.arguments.len().saturating_add(1) > room {
-                    return false;
+                    return Err(ProofError::BudgetExhausted);
                 }
                 pending.extend(query.inputs().map(|term| (Input::Term(term), depth + 1)));
             }
             Input::Formula(Formula::Not(inner)) => pending.push((Input::Formula(inner), depth + 1)),
             Input::Formula(Formula::And(items) | Formula::Or(items)) => {
                 if items.len() > room {
-                    return false;
+                    return Err(ProofError::BudgetExhausted);
                 }
                 for item in items {
                     pending.push((Input::Formula(item), depth + 1));
@@ -884,7 +911,7 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
             }
             Input::Predicate(P::Trait(requirement)) => {
                 if requirement.interface_arguments.len().saturating_add(1) > room {
-                    return false;
+                    return Err(ProofError::BudgetExhausted);
                 }
                 pending.push((Input::Term(&requirement.subject), depth + 1));
                 pending.extend(
@@ -897,14 +924,15 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
             Input::Predicate(P::Not(inner)) => pending.push((Input::Predicate(inner), depth + 1)),
             Input::Predicate(P::And(items) | P::Or(items)) => {
                 if items.len() > room {
-                    return false;
+                    return Err(ProofError::BudgetExhausted);
                 }
                 pending.extend(items.iter().map(|item| (Input::Predicate(item), depth + 1)));
             }
             Input::Term(term) => {
                 if nir::copy_budget::charge_term_payload(term, fuel).is_err() {
-                    return false;
+                    return Err(ProofError::BudgetExhausted);
                 }
+                visit(term)?;
                 if term
                     .visit_children(|child| {
                         if pending.len() >= *fuel {
@@ -915,14 +943,14 @@ fn within_input_limits(input: Input<'_>, limit: usize, fuel: &mut usize) -> bool
                     })
                     .is_err()
                 {
-                    return false;
+                    return Err(ProofError::BudgetExhausted);
                 }
             }
             Input::Predicate(P::Bool(_))
             | Input::Formula(Formula::True | Formula::False | Formula::IntLe(_)) => {}
         }
     }
-    true
+    Ok(())
 }
 
 #[derive(Default)]
