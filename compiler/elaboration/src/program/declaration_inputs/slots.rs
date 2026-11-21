@@ -395,6 +395,13 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
         }
         // The provider can name preceding slots. Explicit source operands live
         // in the caller and receive only their instantiated expected domain.
+        if self.checking == InputChecking::Contextual {
+            let captures = &self.progress.telescope.default_captures;
+            environment::charge(&mut checker.required_steps, captures.len(), self.span)?;
+            checker
+                .default_template_inputs
+                .extend(captures.iter().map(|(id, binding)| (*id, *binding)));
+        }
         let mut observations = BTreeMap::new();
         environment::charge(&mut checker.required_steps, slot, self.span)?;
         for previous in 0..slot {
@@ -407,6 +414,8 @@ impl<'b, 'h: 'b> Frame<'b, 'h> {
             checker.normal_default_bindings.remove(&parameter);
             if let Some(value) = known {
                 checker.alias_substitution.insert(parameter, value.clone());
+            } else if self.checking == InputChecking::Contextual {
+                checker.default_template_inputs.insert(parameter, binding);
             }
             checker.locals.insert(
                 binding,

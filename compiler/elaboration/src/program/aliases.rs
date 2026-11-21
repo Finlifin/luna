@@ -333,14 +333,39 @@ impl Checker<'_, '_> {
         if domains.is_empty() {
             domains.resize(parameters.len(), p(P::Type));
         }
+        let has_defaults = self.has_optional_type_clauses(owner);
         if requirements.is_empty()
             && capabilities.is_empty()
             && domains.iter().all(|ty| *ty == p(P::Type))
+            && !has_defaults
         {
             return Ok(Vec::new());
         }
-        let captures =
-            self.ordered_alias_captures(&parameters, &domains, &requirements, &capabilities, span)?;
+        let mut captured_defaults = if has_defaults {
+            self.nominal_capture_ids(owner)
+        } else {
+            Vec::new()
+        };
+        if !captured_defaults.is_empty() {
+            // A fixed result domain can hide type annotations in the supplier.
+            // Capture only its lexical reads, including reads in local callees.
+            let mut reads = BTreeSet::new();
+            for clause in self.type_clause_params(owner).iter() {
+                if let hir::clause::ClauseParamKind::Optional(_, _, value) = *clause.kind.unquoted()
+                {
+                    reads.extend(self.expression_declaration_dependencies(owner, value)?);
+                }
+            }
+            captured_defaults.retain(|id| reads.contains(id));
+        }
+        let captures = self.ordered_alias_captures(
+            &parameters,
+            &domains,
+            &requirements,
+            &capabilities,
+            &captured_defaults,
+            span,
+        )?;
         let (mut ids, mut types): (Vec<_>, Vec<_>) = captures.into_iter().unzip();
         let capture_ids = ids.clone();
         ids.append(&mut parameters);
@@ -366,10 +391,15 @@ impl Checker<'_, '_> {
         domains: &[Term],
         requirements: &[n::TypePredicate],
         capabilities: &[n::TraitRequirement],
+        captured_defaults: &[DeclarationId],
         span: Span,
     ) -> Result<Vec<(DeclarationId, Term)>, Error> {
         let own: BTreeSet<_> = parameters.iter().copied().collect();
-        let mut references = Vec::new();
+        let mut references: Vec<_> = self
+            .input_binders(captured_defaults)
+            .into_iter()
+            .map(|binder| (binder.declaration, binder.sort))
+            .collect();
         let mut observe = |term| -> Result<(), Error> {
             references.extend(
                 input_observation::term_inputs(term, &mut self.required_steps, span)?.declarations,

@@ -4516,6 +4516,105 @@ fn member_record_defaults_use_selected_value_capture() {
 }
 
 #[test]
+fn record_default_annotations_follow_selected_type_and_preceding_value_inputs() {
+    let source = "typealias Type=.Type'builtin;
+        struct Config where T,enabled:bool { flag:bool }
+        newtype Indexed<T,enabled:bool,config:Config<T,enabled>> = bool;
+        struct Holder where T {
+            pub typealias Entry<enabled:bool,.config:Config<T,enabled> =
+                defer Config<T,enabled>{flag:observe(enabled)}> = Indexed<T,enabled,config>;
+        }
+        comptime fn observe(value:bool)->bool {value}
+        comptime fn Build(ty:Type,flag:bool)->Type {Holder<ty>.Entry<flag>}
+        comptime fn Expected()->Type {Indexed<bool,true,Config<bool,true>{flag:true}>}
+        comptime fn Other()->Type {Indexed<char,false,Config<char,false>{flag:false}>}
+        typealias char=.char'builtin;";
+    let package = support::compile(source);
+    let mut vm =
+        comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let build = support::id(&package, "Build");
+    let observe = support::id(&package, "observe");
+    let mut count = 0;
+    for (ty, flag, name) in [
+        (nir::Primitive::Bool, true, "Expected"),
+        (nir::Primitive::Char, false, "Other"),
+        (nir::Primitive::Bool, true, "Expected"),
+    ] {
+        let actual = vm
+            .invoke(
+                build,
+                vec![Value::Type(nir::Term::Primitive(ty)), Value::Bool(flag)],
+            )
+            .unwrap();
+        count += 1;
+        assert_eq!(vm.events().iter().filter(|e| matches!(e, comptime_interpretor::Event::EnterFunction(id) if *id == observe)).count(), count);
+        assert_eq!(
+            actual,
+            vm.invoke(support::id(&package, name), vec![]).unwrap()
+        );
+    }
+    let fixed_index = source.replace("defer Config<T,enabled>", "defer Config<T,true>");
+    let package = support::compile(&fixed_index);
+    let mut vm =
+        comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let build = support::id(&package, "Build");
+    let args = |flag| {
+        vec![
+            Value::Type(nir::Term::Primitive(nir::Primitive::Bool)),
+            Value::Bool(flag),
+        ]
+    };
+    assert!(vm.invoke(build, args(false)).is_err());
+    let actual = vm.invoke(build, args(true)).unwrap();
+    assert_eq!(
+        actual,
+        vm.invoke(support::id(&package, "Expected"), vec![])
+            .unwrap()
+    );
+}
+
+#[test]
+fn closed_default_result_domains_retain_dependencies_inside_the_producer() {
+    let source = "typealias Type=.Type'builtin;
+        struct Config where T,enabled:bool {flag:bool}
+        newtype Mark<flag:bool> = bool;
+        struct Parent where T,k:bool {
+            pub typealias Entry<.flag:bool=defer Config<T,k>{flag:observe(k)}.flag> = Mark<flag>;
+        }
+        comptime fn observe(flag:bool)->bool {flag}
+        comptime fn Build(ty:Type,flag:bool)->Type {Parent<ty,flag>.Entry<>}
+        comptime fn Override(ty:Type,flag:bool)->Type {Parent<ty,flag>.Entry<.flag=false>}
+        comptime fn On()->Type {Mark<true>}
+        comptime fn Off()->Type {Mark<false>}";
+    let package = support::compile(source);
+    let mut vm =
+        comptime_interpretor::Interpreter::for_comptime(&package, Default::default()).unwrap();
+    let args = |flag| {
+        vec![
+            Value::Type(nir::Term::Primitive(nir::Primitive::Bool)),
+            Value::Bool(flag),
+        ]
+    };
+    let on = vm.invoke(support::id(&package, "On"), vec![]).unwrap();
+    let off = vm.invoke(support::id(&package, "Off"), vec![]).unwrap();
+    assert_ne!(on, off);
+    let build = support::id(&package, "Build");
+    assert_eq!(vm.invoke(build, args(true)).unwrap(), on);
+    assert_eq!(vm.invoke(build, args(false)).unwrap(), off);
+    assert_eq!(
+        vm.invoke(support::id(&package, "Override"), args(true))
+            .unwrap(),
+        off
+    );
+    assert_eq!(
+        support::calls(&package, &vm),
+        [
+            "On", "Off", "Build", "observe", "Build", "observe", "Override"
+        ]
+    );
+}
+
+#[test]
 fn comptime_calls_accept_values_with_record_indexed_nominal_types() {
     for source in [
         "struct Config {flag:bool}

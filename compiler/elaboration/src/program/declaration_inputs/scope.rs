@@ -9,6 +9,7 @@ pub(super) struct Scope {
     environment: environment::Environment,
     owner: Option<OwnerId>,
     mode: bool,
+    template_inputs: DeclarationBindings<n::LocalId>,
     input_scope: Option<lexical_domains::RetainedDomains>,
     input_owner: Option<OwnerId>,
 }
@@ -32,6 +33,7 @@ impl Scope {
             environment,
             owner: checker.signature_owner,
             mode: checker.in_required_comptime,
+            template_inputs: checker.default_template_inputs.clone(),
             input_scope,
             input_owner,
         })
@@ -42,6 +44,7 @@ impl Scope {
         self.environment.restore(checker);
         checker.signature_owner = self.owner;
         checker.in_required_comptime = self.mode;
+        checker.default_template_inputs = self.template_inputs;
         checker.default_input_scope = self.input_scope;
         checker.default_input_owner = self.input_owner;
     }
@@ -64,6 +67,10 @@ impl std::fmt::Display for Scope {
         f.write_str(") (locals")?;
         for (binding, ty) in &self.locals {
             write!(f, " (binding {binding} {ty})")?;
+        }
+        f.write_str(") (template-inputs")?;
+        for (id, local) in &self.template_inputs {
+            write!(f, " (binding {id} {local})")?;
         }
         f.write_str(") (input-scope")?;
         if let Some(inputs) = &self.input_scope {
@@ -106,6 +113,7 @@ mod tests {
             environment,
             owner: Some(owner),
             mode: true,
+            template_inputs: DeclarationBindings::from([(id, local)]),
             input_scope: Some([(Sort::Type, None), (Sort::ComptimeValue, Some(p(P::Str)))].into()),
             input_owner: Some(owner),
         };
@@ -114,6 +122,7 @@ mod tests {
             "(declaration-input-scope (comptime true)",
             "(locals (binding ",
             "(defaults (binding ",
+            "(template-inputs (binding ",
             "(type-values (binding ",
             "(input-scope (input ",
             "caller\\\"\\n",

@@ -247,31 +247,50 @@ impl Checker<'_, '_> {
         let domains = self.trait_domains(owner)?;
         let captures = self.nominal_captures(owner, span)?;
         let parameters = self.type_parameters[&owner].clone();
-        if !domains.iter().any(|domain| {
+        let dependent_domain = domains.iter().any(|domain| {
             parameters
                 .iter()
                 .chain(&captures)
                 .any(|id| domain.mentions_rigid(*id))
                 || (alias.is_some() && domain != &p(P::Type))
-        }) {
+        });
+        // A default can use an input in its body even with a closed result
+        // domain. Keep the provider inside the invocation's substitution scope.
+        if !dependent_domain && !self.has_optional_type_clauses(owner) {
             return Ok(None);
         }
         if let Some(expanded) = normal::literal_spreads(args) {
             return self.contextual_nominal_expression_in(owner, &expanded, span, expected, caller);
         }
-        let mut dynamic_captures = BTreeSet::new();
+        // The alias contract stores captures before its own parameters.
+        // Nominal identities store captures after them. In both cases
+        // capture reads precede every source operand, including spreads.
+        let capture_ids = if alias.is_some() {
+            let required = self.alias_formation_captures(owner, span)?;
+            let available: BTreeSet<_> = captures.into_iter().collect();
+            if required.iter().any(|id| !available.contains(id)) {
+                return Err(error(span, "alias input capture is unavailable"));
+            }
+            required
+        } else {
+            captures
+        };
+        let mut dynamic_captures = DeclarationBindings::default();
         let mut capture_binders = Vec::new();
         let mut capture_values = Vec::new();
-        for binder in self.input_binders(&captures) {
-            if let Some(value) = self.alias_substitution.shared(&binder.declaration).cloned() {
+        for binder in self.input_binders(&capture_ids) {
+            let id = binder.declaration;
+            if let Some(value) = self.alias_substitution.shared(&id).cloned() {
                 capture_values.push(self.copy_alias_type(&value, span)?);
                 capture_binders.push(binder);
-            } else if self.alias_value_bindings.contains_key(&binder.declaration)
-                || self
-                    .normal_default_bindings
-                    .contains_key(&binder.declaration)
+            } else if let Some(binding) =
+                self.alias_value_bindings.get(&id).copied().or_else(|| {
+                    self.normal_default_bindings
+                        .get(&id)
+                        .map(|(binding, _)| *binding)
+                })
             {
-                dynamic_captures.insert(binder.declaration);
+                dynamic_captures.insert(id, binding);
             }
         }
         let templates = domains;
@@ -305,7 +324,7 @@ impl Checker<'_, '_> {
                 declaration_inputs::Telescope::new(telescope, &mut self.required_steps, span)?;
             telescope.track_captures(
                 &templates,
-                &dynamic_captures,
+                dynamic_captures,
                 &mut self.required_steps,
                 span,
             )?;
@@ -335,19 +354,6 @@ impl Checker<'_, '_> {
             self.signature_owner = saved_owner;
             self.context = saved_context.clone();
             self.in_required_comptime = saved_mode;
-            // The alias contract stores captures before its own parameters.
-            // Nominal identities store captures after them. In both cases
-            // capture reads precede every source operand, including spreads.
-            let capture_ids = if alias.is_some() {
-                let required = self.alias_formation_captures(owner, span)?;
-                let available: BTreeSet<_> = captures.into_iter().collect();
-                if required.iter().any(|id| !available.contains(id)) {
-                    return Err(error(span, "alias input capture is unavailable"));
-                }
-                required
-            } else {
-                captures
-            };
             let formation = prepared.observations.into_formation();
             let formation_deferred_empty = formation.deferred.is_empty();
             self.check_formation_application(owner, formation, span)?;

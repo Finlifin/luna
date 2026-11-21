@@ -333,7 +333,7 @@ impl Checker<'_, '_> {
                 },
             ));
         }
-        if matches!(value.kind, H::ResolvedClauseParam(..)) {
+        if let H::ResolvedClauseParam(_, id) = value.kind {
             // Symbolic inputs use the same contextual conversions as ordinary
             // expressions. Observing a checked identifier preserves its scope;
             // it does not require a concrete invocation-time value.
@@ -342,6 +342,15 @@ impl Checker<'_, '_> {
                 self.preserved_input_identity(&checked, |_, _| Ok(None), value.span)?
             {
                 return Ok(identity);
+            }
+            let declaration = self.visible_clause_input(id, value.span)?;
+            if let K::Local(binding) = &checked.kind
+                && self.default_template_inputs.get(&declaration) == Some(binding)
+            {
+                return Ok(Term::Rigid {
+                    declaration,
+                    sort: Sort::of_comptime_domain(&checked.ty),
+                });
             }
             let (result, _) = self.required_normal_input(value, checked, Vec::new())?;
             return self.required_normal_term(result, value.span);

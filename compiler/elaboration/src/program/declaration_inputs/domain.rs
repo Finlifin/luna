@@ -17,6 +17,7 @@ pub(in crate::program) struct Telescope {
     pub(super) parameters: Parameters,
     pub(super) positions: BTreeMap<DeclarationId, usize>,
     edges: Vec<Vec<usize>>,
+    pub(super) default_captures: DeclarationBindings<n::LocalId>,
     pub(super) waiting_captures: BTreeMap<usize, Vec<DeclarationId>>,
 }
 
@@ -48,6 +49,7 @@ impl Telescope {
             parameters,
             positions,
             edges,
+            default_captures: DeclarationBindings::default(),
             waiting_captures: BTreeMap::new(),
         })
     }
@@ -57,7 +59,7 @@ impl Telescope {
     pub(in crate::program) fn track_captures(
         &mut self,
         templates: &[Term],
-        dynamic: &BTreeSet<DeclarationId>,
+        dynamic: DeclarationBindings<n::LocalId>,
         fuel: &mut u64,
         span: Span,
     ) -> Result<(), Error> {
@@ -67,12 +69,16 @@ impl Telescope {
         if !dynamic.is_empty() {
             for (slot, template) in templates.iter().enumerate() {
                 let refs = input_observation::term_inputs(template, fuel, span)?.declarations;
-                let waiting: Vec<_> = refs.into_keys().filter(|id| dynamic.contains(id)).collect();
+                let waiting: Vec<_> = refs
+                    .into_keys()
+                    .filter(|id| dynamic.contains_key(id))
+                    .collect();
                 if !waiting.is_empty() {
                     self.waiting_captures.insert(slot, waiting);
                 }
             }
         }
+        self.default_captures = dynamic;
         Ok(())
     }
 
@@ -385,7 +391,12 @@ mod tests {
         let span = Span::default();
         let mut telescope = Telescope::new(parameters, &mut fuel, span).unwrap();
         telescope
-            .track_captures(&templates, &BTreeSet::from([id(7)]), &mut fuel, span)
+            .track_captures(
+                &templates,
+                DeclarationBindings::from([(id(7), n::LocalId { owner: 3, index: 0 })]),
+                &mut fuel,
+                span,
+            )
             .unwrap();
         assert_eq!(
             telescope.waiting_captures,

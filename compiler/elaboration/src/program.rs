@@ -669,6 +669,7 @@ fn elaborate_in_mode(
         checked_alias_definitions: BTreeSet::new(),
         alias_substitution: DeclarationBindings::default(),
         alias_value_bindings: DeclarationBindings::default(),
+        default_template_inputs: DeclarationBindings::default(),
         normal_default_bindings: DeclarationBindings::default(),
         definition_inputs: BTreeMap::new(),
         prepared_template_applications: BTreeSet::new(),
@@ -2475,6 +2476,9 @@ struct Checker<'a, 'h> {
     alias_scopes: BTreeMap<OwnerId, Option<OwnerId>>,
     alias_substitution: DeclarationBindings<Term>,
     alias_value_bindings: DeclarationBindings<n::LocalId>,
+    // Local reads retain their values; annotations in a default template can
+    // refer to these same inputs by the receiving plan's declaration identity.
+    default_template_inputs: DeclarationBindings<n::LocalId>,
     normal_default_bindings: DeclarationBindings<(n::LocalId, Term)>,
     definition_inputs: BTreeMap<DeclarationId, n::Expr>,
     prepared_template_applications: BTreeSet<OwnerId>,
@@ -4522,7 +4526,13 @@ impl Checker<'_, '_> {
                         ));
                     }
                 }
-                if self.alias_value_bindings.contains_key(&declaration) {
+                if let Some(binding) = self.alias_value_bindings.get(&declaration) {
+                    if self.default_template_inputs.get(&declaration) == Some(binding) {
+                        return Ok(Term::Rigid {
+                            declaration,
+                            sort: Sort::Type,
+                        });
+                    }
                     return Err(error(
                         expr.span,
                         "required comptime input is not yet available in this definition",
