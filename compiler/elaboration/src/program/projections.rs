@@ -723,8 +723,7 @@ impl Checker<'_, '_> {
             })
             .cloned()
         {
-            let Some((parent_id, instance, arguments)) = self.prepared_alias_container(base)?
-            else {
+            let Some((parent_id, receiver)) = self.prepared_nominal_receiver(base)? else {
                 return Ok(None);
             };
             let selected = candidates.iter().find_map(|(container, member)| {
@@ -735,6 +734,7 @@ impl Checker<'_, '_> {
             let Some((member, parent)) = selected else {
                 return Ok(None);
             };
+            let (instance, arguments) = self.expose_nominal_inputs(parent, receiver, base.span)?;
             (member, Some((parent, instance, arguments)))
         } else {
             let Some(member) = self
@@ -771,8 +771,7 @@ impl Checker<'_, '_> {
             prepared
         } else if !matches!(base.kind, H::NFApplication(head, _) if matches!(head.kind, H::ResolvedDef { .. }))
         {
-            let Some((parent_id, instance, arguments)) = self.prepared_alias_container(base)?
-            else {
+            let Some((parent_id, receiver)) = self.prepared_nominal_receiver(base)? else {
                 return Ok(None);
             };
             let Some(parent) = self.self_containers.get(&owner).copied() else {
@@ -781,6 +780,7 @@ impl Checker<'_, '_> {
             if declaration(self.package, &self.package_identities, parent) != parent_id {
                 return Err(error(base.span, "type member container identity mismatch"));
             }
+            let (instance, arguments) = self.expose_nominal_inputs(parent, receiver, base.span)?;
             (parent, instance, arguments)
         } else {
             let H::NFApplication(head, inputs) = base.kind else {
@@ -1190,13 +1190,13 @@ impl Checker<'_, '_> {
         Ok((instance, arguments))
     }
 
-    /// Preserve an alias's evaluation prefix and expose the arguments of its
-    /// final nominal constructor. This inspects generated code, never unfolds a
-    /// normal-form head or re-invokes a Type computation to recover its inputs.
-    fn prepared_alias_container(
+    /// Retain the receiver while matching its nominal identity against visible
+    /// source members. A generated nominal can have a namespace without a HIR
+    /// container. Only a selected source member needs the declaration inputs.
+    fn prepared_nominal_receiver(
         &mut self,
         base: &Expr<'_>,
-    ) -> Result<Option<(DeclarationId, n::Expr, Vec<n::Expr>)>, Error> {
+    ) -> Result<Option<(DeclarationId, n::Expr)>, Error> {
         let value = if self.completed_type_call(base)?
             || (matches!(
                 base.kind,
@@ -1222,12 +1222,7 @@ impl Checker<'_, '_> {
             | K::TypeValue(Term::Nominal { declaration, .. }) => *declaration,
             _ => return Ok(None),
         };
-        let owner = self
-            .source_declarations
-            .owner(parent)
-            .ok_or_else(|| error(base.span, "nominal container declaration is missing"))?;
-        let (instance, arguments) = self.expose_nominal_inputs(owner, value, base.span)?;
-        Ok(Some((parent, instance, arguments)))
+        Ok(Some((parent, value)))
     }
 
     fn with_projected_type_member<R>(
