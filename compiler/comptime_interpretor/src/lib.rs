@@ -2275,39 +2275,23 @@ impl<'a> Interpreter<'a> {
             if self.comptime_only {
                 self.admit_embedded_type_descriptions(&representation, 0)?;
             }
-            let input = if parameter.sort == nir::Sort::Type
-                || (parameter.sort == nir::Sort::ComptimeValue
-                    && expected == Term::Primitive(Primitive::Type))
-            {
-                match representation.as_ref() {
-                    Value::Type(ty) => Some(ty.clone()),
-                    Value::TypeParameter(declaration)
-                        if self.abstract_type_parameters.contains(declaration) =>
-                    {
-                        Some(Term::Rigid {
-                            declaration: *declaration,
-                            sort: nir::Sort::Type,
-                        })
-                    }
-                    Value::Description(_) => {
-                        // A checked Type datum can travel through the ordinary
-                        // local. Retain its telescope slot so that consuming
-                        // it in an exact domain still requires an identity.
-                        needs_binding = true;
-                        None
-                    }
-                    _ => return Err(self.failure(ErrorKind::Type, Some(source))),
-                }
-            } else if parameter.sort == nir::Sort::ComptimeValue
+            let input = if parameter.sort != nir::Sort::Runtime
                 && matches!(representation, std::borrow::Cow::Borrowed(_))
                 && let Some((entry, deferred)) = defer.as_mut()
                 && !entry.contains(&index)
             {
-                // Direct owned arguments survive suspension in the activation.
-                // Storage and value-reference receivers use their entry snapshot.
+                // The activation owns this argument. Materialize an identity
+                // only if a body annotation reads this slot. References and
+                // storage must instead retain their entry-time observation.
                 deferred.push((index, *binding));
                 needs_binding = true;
                 None
+            } else if parameter.sort == nir::Sort::Type
+                || (parameter.sort == nir::Sort::ComptimeValue
+                    && expected == Term::Primitive(Primitive::Type))
+            {
+                needs_binding = true;
+                self.ordinary_type_identity(&representation, source)?
             } else if parameter.sort == nir::Sort::ComptimeValue
                 && self.normal_input_is_data(&representation, source)?
             {
@@ -2339,6 +2323,33 @@ impl<'a> Interpreter<'a> {
             })
         } else {
             Ok(None)
+        }
+    }
+
+    /// The domain and representation have been admitted in this invocation.
+    /// A description stays live as data without supplying an exact type term.
+    fn ordinary_type_identity(
+        &mut self,
+        value: &Value,
+        source: SourceRange,
+    ) -> Result<Option<Term>, Error> {
+        match value {
+            Value::Type(ty) => {
+                self.charge_copy_work(Some(source), |fuel| {
+                    nir::copy_budget::charge_term_copy(ty, fuel, 128)
+                })?;
+                Ok(Some(ty.clone()))
+            }
+            Value::TypeParameter(declaration)
+                if self.abstract_type_parameters.contains(declaration) =>
+            {
+                Ok(Some(Term::Rigid {
+                    declaration: *declaration,
+                    sort: nir::Sort::Type,
+                }))
+            }
+            Value::Description(_) => Ok(None),
+            _ => Err(self.failure(ErrorKind::Type, Some(source))),
         }
     }
 

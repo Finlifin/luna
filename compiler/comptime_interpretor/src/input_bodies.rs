@@ -202,8 +202,17 @@ impl Interpreter<'_> {
                 let value = environment
                     .get(binding)
                     .ok_or_else(|| self.failure(ErrorKind::MissingBinding, Some(source)))?;
-                if self.normal_input_is_data(value, source)? {
-                    supplied.insert(*slot, self.borrowed_residual_input_term(value, source)?);
+                let term = match value {
+                    Value::Type(_) | Value::TypeParameter(_) | Value::Description(_) => {
+                        self.ordinary_type_identity(value, source)?
+                    }
+                    value if self.normal_input_is_data(value, source)? => {
+                        Some(self.borrowed_residual_input_term(value, source)?)
+                    }
+                    _ => None,
+                };
+                if let Some(term) = term {
+                    supplied.insert(*slot, term);
                 }
             }
         }
@@ -829,6 +838,105 @@ mod tests {
             assert!(
                 vm.invoke(id(1), vec![Value::Unit, Value::Bool(true)])
                     .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn type_data_reads_use_current_values_with_shared_specialized_code() {
+        let source = SourceRange { start: 1, end: 2 };
+        let mut package = guarded_type_body(0);
+        let function = &mut package.functions[0];
+        let type_domain = Term::Primitive(Primitive::Type);
+        let result = Term::Tuple(vec![type_domain.clone(); 2]);
+        function.interface.signature = Term::Function {
+            parameters: vec![
+                nir::Parameter {
+                    sort: nir::Sort::Type,
+                    ty: type_domain.clone()
+                };
+                2
+            ],
+            result: Box::new(result.clone()),
+        };
+        function.interface.preconditions.clear();
+        let observed = Term::Bound {
+            depth: 0,
+            index: 1,
+            sort: nir::Sort::Type,
+        };
+        function.body = Expr {
+            source,
+            ty: result,
+            kind: K::Tuple(vec![
+                Expr {
+                    source,
+                    ty: type_domain,
+                    kind: K::Local(function.parameters[0]),
+                },
+                body(observed.clone()),
+            ]),
+        };
+        for tree in [false, true] {
+            let mut vm = if tree {
+                Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+            } else {
+                Interpreter::for_comptime(&package, Budget::default()).unwrap()
+            };
+            let mut previous = None;
+            for (data, element, shared) in [
+                (
+                    Value::Type(Term::Primitive(Primitive::Bool)),
+                    Primitive::Char,
+                    false,
+                ),
+                (
+                    Value::Type(Term::Primitive(Primitive::Char)),
+                    Primitive::Char,
+                    true,
+                ),
+                (
+                    Value::Description(nir::program::DescriptionLiteral::Any),
+                    Primitive::Char,
+                    true,
+                ),
+                (
+                    Value::Type(Term::Primitive(Primitive::Bool)),
+                    Primitive::U8,
+                    false,
+                ),
+            ] {
+                let element = Term::Primitive(element);
+                let inputs = vec![data, Value::Type(element.clone())];
+                assert_eq!(
+                    vm.invoke(id(1), inputs.clone()).unwrap(),
+                    Value::Tuple(inputs)
+                );
+                let (Entry::Dependent(entry), _) = &vm.input_body_cache.entries[&named(1)] else {
+                    panic!("expected specialization by the second Type");
+                };
+                assert_eq!(entry.binding.rebind(&observed).unwrap(), element);
+                if let Some(previous) = &previous {
+                    assert_eq!(Arc::ptr_eq(previous, &entry.body), shared);
+                }
+                previous = Some(entry.body.clone());
+            }
+            let data = Value::Type(Term::Primitive(Primitive::Bool));
+            let original = Value::Type(Term::Primitive(Primitive::Char));
+            let storage = Storage::new(original.clone());
+            let receiver =
+                Value::ComptimeReference(value_reference::ValueReference::root(storage.clone()));
+            let mut fuel = 100_000;
+            let call = vm
+                .admit_source_call(id(1), vec![], vec![data.clone(), receiver], &mut fuel)
+                .unwrap();
+            storage
+                .pointer(Term::Primitive(Primitive::Type), vec![])
+                .write(Value::Type(Term::Primitive(Primitive::U8)), |_| Ok(()))
+                .unwrap();
+            assert_eq!(
+                call.resume(&mut fuel).unwrap(),
+                Value::Tuple(vec![data, original])
             );
         }
     }

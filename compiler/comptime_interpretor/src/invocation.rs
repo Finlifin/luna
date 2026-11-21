@@ -671,9 +671,8 @@ impl<'a> Interpreter<'a> {
                     && f.result_guarantees.is_empty()
             })
             && let Term::Function { parameters, result } = signature.callable_signature()
-            && parameters.iter().any(|p| {
-                p.sort == nir::Sort::ComptimeValue && p.ty != Term::Primitive(Primitive::Type)
-            }) {
+            && parameters.iter().any(|p| p.sort != nir::Sort::Runtime)
+        {
             entry_slots =
                 nir::copy_budget::signature_input_slots(parameters, result, &mut self.budget.steps)
                     .map_err(|reason| {
