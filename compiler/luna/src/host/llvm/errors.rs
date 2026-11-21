@@ -4,71 +4,114 @@ use nir::error_results::Conversion;
 
 impl Emitter<'_> {
     pub(super) fn error_index(&self, ty: &Ty, label: Option<&Term>) -> Result<usize, String> {
-        let Ty::ErrorResult(fields) = ty else {
+        let Ty::ErrorResult(layout) = ty else {
             return Err("host error result layout missing".into());
         };
-        fields
+        layout
+            .branches
             .iter()
             .position(|(candidate, _)| candidate.as_ref() == label)
             .ok_or("host error label missing".into())
     }
+
     pub(super) fn error_tag(&mut self, value: &Value) -> Result<Value, String> {
-        if !matches!(value.ty, Ty::ErrorResult(_)) {
+        let Ty::ErrorResult(layout) = &value.ty else {
             return Err("host error result tag requires its layout".into());
-        }
+        };
         Ok(self.instruction(
-            Ty::Int(32, false),
+            Ty::Int(layout.tag_bits, false),
             format!("extractvalue {} {}, 0", value.ty.llvm(), value.text),
         ))
     }
+
     pub(super) fn error_payload(&mut self, value: &Value, index: usize) -> Result<Value, String> {
-        let Ty::ErrorResult(fields) = &value.ty else {
+        let Ty::ErrorResult(layout) = &value.ty else {
             return Err("host error payload layout missing".into());
         };
-        let ty = fields
+        let branch_ty = layout
+            .branches
             .get(index)
             .ok_or("host error tag out of range")?
             .1
             .clone();
-        if ty == Ty::Unit {
+        if branch_ty == Ty::Unit {
             return Ok(Value::unit());
         }
-        Ok(self.instruction(
-            ty,
+        if layout.payload_size == 0 {
+            return Ok(Value {
+                ty: branch_ty,
+                text: "zeroinitializer".into(),
+            });
+        }
+        let slot = self.slot(value.ty.clone());
+        self.store(&slot, value)?;
+        let payload_ptr = self.instruction(
+            Ty::Pointer,
             format!(
-                "extractvalue {} {}, {}",
+                "getelementptr {}, ptr {}, i32 0, i32 1",
                 value.ty.llvm(),
-                value.text,
-                index + 1
+                slot.pointer
             ),
-        ))
+        );
+        let payload_slot = Slot {
+            align: matches!(branch_ty, Ty::PackedRecord(_)).then_some(1),
+            ty: branch_ty,
+            pointer: payload_ptr.text,
+        };
+        Ok(self.load(&payload_slot))
     }
+
     fn error_pack(&mut self, ty: Ty, index: usize, payload: Value) -> Result<Value, String> {
-        let Ty::ErrorResult(fields) = &ty else {
+        let Ty::ErrorResult(layout) = &ty else {
             return Err("host error destination layout missing".into());
         };
-        if fields.get(index).map(|(_, ty)| ty) != Some(&payload.ty) {
+        if layout.branches.get(index).map(|(_, ty)| ty) != Some(&payload.ty) {
             return Err("host error payload representation mismatch".into());
         }
-        let tagged = self.instruction(
-            ty.clone(),
-            format!("insertvalue {} zeroinitializer, i32 {index}, 0", ty.llvm()),
-        );
-        let (storage, text) = if payload.ty == Ty::Unit {
-            ("{}".into(), "zeroinitializer".into())
-        } else {
-            (payload.ty.llvm(), payload.text)
-        };
-        Ok(self.instruction(
-            ty.clone(),
+        let tag_bits = layout.tag_bits;
+        if payload.ty == Ty::Unit || layout.payload_size == 0 {
+            return Ok(self.instruction(
+                ty.clone(),
+                format!(
+                    "insertvalue {} zeroinitializer, i{tag_bits} {index}, 0",
+                    ty.llvm()
+                ),
+            ));
+        }
+        let slot = self.slot(ty.clone());
+        self.store(
+            &slot,
+            &Value {
+                ty: ty.clone(),
+                text: "zeroinitializer".into(),
+            },
+        )?;
+        let tag_ptr = self.instruction(
+            Ty::Pointer,
             format!(
-                "insertvalue {} {}, {storage} {text}, {}",
+                "getelementptr {}, ptr {}, i32 0, i32 0",
                 ty.llvm(),
-                tagged.text,
-                index + 1
+                slot.pointer
             ),
-        ))
+        );
+        self.line(format!("store i{tag_bits} {index}, ptr {}", tag_ptr.text));
+        let payload_ptr = self.instruction(
+            Ty::Pointer,
+            format!(
+                "getelementptr {}, ptr {}, i32 0, i32 1",
+                ty.llvm(),
+                slot.pointer
+            ),
+        );
+        let payload_slot = Slot {
+            align: matches!(payload.ty, Ty::PackedRecord(_)).then_some(1),
+            ty: payload.ty.clone(),
+            pointer: payload_ptr.text,
+        };
+        self.store(&payload_slot, &payload)?;
+        Ok(self.load(&slot))
     }
+
     pub(super) fn error_convert(
         &mut self,
         conversion: Conversion,
@@ -88,10 +131,11 @@ impl Emitter<'_> {
                 self.error_pack(ty, index, value)
             }
             Conversion::Embed => {
-                let Ty::ErrorResult(fields) = &value.ty else {
+                let Ty::ErrorResult(layout) = &value.ty else {
                     return Err("host error embedding source layout missing".into());
                 };
-                let fields = fields.clone();
+                let fields = layout.branches.clone();
+                let src_tag_bits = layout.tag_bits;
                 let tag = self.error_tag(&value)?;
                 let result = self.slot(ty.clone());
                 let done = self.fresh();
@@ -103,8 +147,10 @@ impl Emitter<'_> {
                     }
                     let yes = self.fresh();
                     let next = self.fresh();
-                    let condition =
-                        self.instruction(Ty::Bool, format!("icmp eq i32 {}, {index}", tag.text));
+                    let condition = self.instruction(
+                        Ty::Bool,
+                        format!("icmp eq i{src_tag_bits} {}, {index}", tag.text),
+                    );
                     self.line(format!(
                         "br i1 {}, label %{yes}, label %{next}",
                         condition.text
@@ -184,6 +230,7 @@ impl Emitter<'_> {
             ),
         }
     }
+
     fn error_transport_fields<'a>(
         &mut self,
         plans: impl ExactSizeIterator<Item = &'a nir::error_results::RepresentationTransport>,
@@ -314,10 +361,17 @@ mod tests {
                 fuel: &mut fuel,
             };
             let row_ty = repr(&graph, &source_row, true).unwrap();
+            let Ty::ErrorResult(row_layout) = &row_ty else {
+                panic!("expected error result layout");
+            };
             let packed = if tag == 9 {
                 emitter.instruction(
                     row_ty.clone(),
-                    format!("insertvalue {} zeroinitializer, i32 9, 0", row_ty.llvm()),
+                    format!(
+                        "insertvalue {} zeroinitializer, i{} 9, 0",
+                        row_ty.llvm(),
+                        row_layout.tag_bits
+                    ),
                 )
             } else {
                 let payload = if tag == 2 {
@@ -366,8 +420,16 @@ mod tests {
                 _ => 1,
             };
             let actual = emitter.error_tag(&result).unwrap();
-            let equal =
-                emitter.instruction(Ty::Bool, format!("icmp eq i32 {}, {expected}", actual.text));
+            let Ty::ErrorResult(result_layout) = &result.ty else {
+                panic!("expected converted error result layout");
+            };
+            let equal = emitter.instruction(
+                Ty::Bool,
+                format!(
+                    "icmp eq i{} {}, {expected}",
+                    result_layout.tag_bits, actual.text
+                ),
+            );
             emitter.guard(&equal).unwrap();
             let payload = emitter.error_payload(&result, expected).unwrap();
             let equal = emitter.instruction(
@@ -397,5 +459,165 @@ mod tests {
                 assert_eq!(output.status.success(), tag != 9, "tag {tag}");
             }
         }
+    }
+
+    #[test]
+    fn sum_type_abi_reduces_error_row_size_and_aligns_llvm_union() {
+        let graph = iir::Package::default();
+        let u8_u64 = Term::ErrorResult {
+            errors: vec![Term::Primitive(P::U8)],
+            result: Box::new(Term::Primitive(P::U64)),
+        };
+        let u8_u64_ty = repr(&graph, &u8_u64, true).unwrap();
+        assert_eq!(u8_u64_ty.llvm(), "{ i8, [1 x i64] }");
+        assert_eq!(
+            u8_u64_ty.storage_layout_at(64, 0, &mut 1000).unwrap(),
+            nir::TypeLayout { size: 16, align: 8 }
+        );
+
+        let many_u64 = Term::ErrorResult {
+            errors: vec![Term::Primitive(P::U64); 4],
+            result: Box::new(Term::Primitive(P::U64)),
+        };
+        let many_u64_ty = repr(&graph, &many_u64, true).unwrap();
+        assert_eq!(many_u64_ty.llvm(), "{ i8, [1 x i64] }");
+        assert_eq!(
+            many_u64_ty.storage_layout_at(64, 0, &mut 1000).unwrap(),
+            nir::TypeLayout { size: 16, align: 8 }
+        );
+
+        let u128_u8 = Term::ErrorResult {
+            errors: vec![Term::Primitive(P::U128)],
+            result: Box::new(Term::Primitive(P::U8)),
+        };
+        let u128_u8_ty = repr(&graph, &u128_u8, true).unwrap();
+        assert_eq!(u128_u8_ty.llvm(), "{ i8, [1 x i128] }");
+        assert_eq!(
+            u128_u8_ty.storage_layout_at(64, 0, &mut 1000).unwrap(),
+            nir::TypeLayout {
+                size: 32,
+                align: 16,
+            }
+        );
+
+        let void_void = Term::ErrorResult {
+            errors: vec![Term::Primitive(P::Void)],
+            result: Box::new(Term::Primitive(P::Void)),
+        };
+        let void_void_ty = repr(&graph, &void_void, true).unwrap();
+        assert_eq!(void_void_ty.llvm(), "{ i8, {} }");
+        assert_eq!(
+            void_void_ty.storage_layout_at(64, 0, &mut 1000).unwrap(),
+            nir::TypeLayout { size: 1, align: 1 }
+        );
+
+        let packed_9b_layout = Ty::ErrorResult(std::sync::Arc::new(
+            ErrorResultLayout::new(
+                vec![
+                    (None, Ty::Int(64, false)),
+                    (
+                        Some(Term::Primitive(P::U8)),
+                        Ty::PackedRecord(std::sync::Arc::new(vec![
+                            Ty::Int(64, false),
+                            Ty::Int(8, false),
+                        ])),
+                    ),
+                ],
+                64,
+            )
+            .unwrap(),
+        ));
+        assert_eq!(packed_9b_layout.llvm(), "{ i8, [2 x i64] }");
+        assert_eq!(
+            packed_9b_layout
+                .storage_layout_at(64, 0, &mut 1000)
+                .unwrap(),
+            nir::TypeLayout { size: 24, align: 8 }
+        );
+    }
+
+    #[test]
+    fn sum_type_abi_o3_eliminates_alloca_roundtrip() {
+        let graph = iir::Package::default();
+        let lambdas = BTreeMap::new();
+        let template_identities = callables::TemplateIdentities::default();
+        let row = Term::ErrorResult {
+            errors: vec![Term::Primitive(P::U8)],
+            result: Box::new(Term::Primitive(P::U64)),
+        };
+        let row_ty = repr(&graph, &row, true).unwrap();
+        let mut declarations = BTreeSet::new();
+        let mut fuel = 10_000;
+        let mut emitter = Emitter {
+            graph: &graph,
+            cleanup: None,
+            schedules: None,
+            resource_unwinds: vec![],
+            checked: true,
+            function: None,
+            closure_body: None,
+            failure_result: None,
+            effects: vec![],
+            effect_resume: None,
+            native_return: None,
+            loop_destinations: Default::default(),
+            outlined_return: None,
+            outlined_loops: BTreeMap::new(),
+            lambdas: &lambdas,
+            template_identities: &template_identities,
+            locals: BTreeMap::new(),
+            live: BTreeMap::new(),
+            temporaries: BTreeMap::new(),
+            temporary_live: BTreeMap::new(),
+            prepared: BTreeMap::new(),
+            receipt_paths: vec![],
+            pattern_orders: BTreeMap::new(),
+            temporary_fields: BTreeMap::new(),
+            loops: BTreeMap::new(),
+            prologue: String::new(),
+            body: String::new(),
+            declarations: &mut declarations,
+            text_constants: &mut strings::TextConstants::default(),
+            serial: 0,
+            terminated: false,
+            fuel: &mut fuel,
+        };
+        let packed = emitter
+            .error_pack(
+                row_ty.clone(),
+                0,
+                Value {
+                    ty: Ty::Int(64, false),
+                    text: "%x".into(),
+                },
+            )
+            .unwrap();
+        let tag = emitter.error_tag(&packed).unwrap();
+        let payload = emitter.error_payload(&packed, 0).unwrap();
+        let unpacked = emitter
+            .error_payload(
+                &Value {
+                    ty: row_ty.clone(),
+                    text: "%v".into(),
+                },
+                1,
+            )
+            .unwrap();
+        emitter.line(format!("ret {} {}", payload.ty.llvm(), payload.text));
+        let ir = format!(
+            "define {} @roundtrip(i64 %x, {} %v) {{\nentry:\n{}{}}}\n",
+            payload.ty.llvm(),
+            row_ty.llvm(),
+            emitter.prologue,
+            emitter.body
+        );
+        let _ = (tag, unpacked);
+        let toolchain = crate::host::Toolchain {
+            optimization: crate::host::OptimizationLevel::O3,
+            ..Default::default()
+        };
+        let optimized = toolchain.optimized_ir(&ir).unwrap();
+        assert!(!optimized.contains("alloca"), "{optimized}");
+        assert!(optimized.contains("ret i64 %x"), "{optimized}");
     }
 }

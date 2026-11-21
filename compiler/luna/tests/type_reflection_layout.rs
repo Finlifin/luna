@@ -326,7 +326,7 @@ fn layout_reflection_matches_llvm_and_docs_across_native_and_target_widths() {
                 and Type.size_of(Tuple<u8, u64>) == 16 and Type.align_of(Tuple<u8, u64>) == 8
                 and Type.size_of(?u64) == 16 and Type.align_of(?u64) == 8
                 and Type.size_of(?void) == 1 and Type.align_of(?void) == 1
-                and Type.size_of(!u8 u64) == 24 and Type.align_of(!u8 u64) == 8
+                and Type.size_of(!u8 u64) == 16 and Type.align_of(!u8 u64) == 8
                 and Type.size_of(Padded) == 12 and Type.align_of(Padded) == 4
                 and Type.size_of(Link) == 24 and Type.align_of(Link) == 8
                 and Type.size_of(Pair<u8, u64>) == 16 and Type.align_of(Pair<u8, u64>) == 8
@@ -475,4 +475,178 @@ fn std_mem_layout_and_builtin_display_ord_work_natively() {
     let output = case.run();
     assert_success(&output);
     assert_eq!(output.stdout, "chars:A:é:中:🦀\n(bool true)\n".as_bytes());
+}
+
+#[test]
+fn error_qualified_sum_type_abi_layout_indexing_and_drop_work_natively() {
+    let source = r#"
+        use std.prelude.*;
+        use std.collections.Vec;
+        use std.mem.AllocErr;
+
+        enum ErrA {
+            Pair(u64, u64),
+        }
+
+        enum ErrB {
+            Pair(u64, u64),
+        }
+
+        enum ErrC {
+            Pair(u64, u64),
+        }
+
+        struct BigOk {
+            a: u64,
+            b: u64,
+            tag: u8,
+        }
+
+        ^attrs.layout.packed
+        struct Packed9Err {
+            head: u64,
+            tail: u8,
+        }
+
+        struct ZeroErr {}
+
+        struct ZeroOk {}
+
+        struct OwnedOk {
+            id: u64,
+        }
+
+        impl Drop for OwnedOk {
+            fn drop(*self) {
+                let _ = std.fmt.println("drop-ok:{}", self.id.*);
+            }
+        }
+
+        struct OwnedErr {
+            code: u8,
+            extra: u64,
+        }
+
+        impl Drop for OwnedErr {
+            fn drop(*self) {
+                let _ = std.fmt.println("drop-err:{}", self.code.*);
+            }
+        }
+
+        fn make_narrow(flag: bool) -> !ErrA u64 {
+            if flag {
+                42
+            } else {
+                error ErrA.Pair(7, 99)
+            }
+        }
+
+        fn widen_row(flag: bool) -> ![ErrA, ErrB, ErrC] u64 {
+            let v = make_narrow(flag)!;
+            if v < 1000 {
+                v + 1
+            } else {
+                v
+            }
+        }
+
+        fn make_owned_result(ok: bool) -> !OwnedErr OwnedOk {
+            if ok {
+                OwnedOk { id: 11 }
+            } else {
+                error OwnedErr { code: 33, extra: 77 }
+            }
+        }
+
+        fn check_vec_sum_elements() -> !AllocErr bool {
+            var items = Vec<!ErrB BigOk>.new();
+            items.push(BigOk { a: 1, b: 2, tag: 3 })!;
+            items.push(error ErrB.Pair(100, 200))!;
+            items.push(BigOk { a: 4, b: 5, tag: 6 })!;
+
+            let third = items.pop() match {
+                found? => found match {
+                    v! => v.a == 4 and v.b == 5 and v.tag == 6,
+                    error _ => false,
+                },
+                null => false,
+            };
+            let second = items.pop() match {
+                found? => found match {
+                    _! => false,
+                    error ErrB.Pair(hi, lo) => hi == 100 and lo == 200,
+                },
+                null => false,
+            };
+            let first = items.pop() match {
+                found? => found match {
+                    v! => v.a == 1 and v.b == 2 and v.tag == 3,
+                    error _ => false,
+                },
+                null => false,
+            };
+            third and second and first
+        }
+
+        fn check_sizes() -> bool {
+            Type.size_of(!u8 u8) == 2
+                and Type.align_of(!u8 u8) == 1
+                and Type.size_of(!u8 u64) == 16
+                and Type.align_of(!u8 u64) == 8
+                and Type.size_of(![ErrA, ErrB, ErrC] BigOk) == 32
+                and Type.align_of(![ErrA, ErrB, ErrC] BigOk) == 8
+                and Type.size_of(!ErrB BigOk) == 32
+                and Type.align_of(!ErrB BigOk) == 8
+                and Type.size_of(!u128 u8) == 32
+                and Type.align_of(!u128 u8) == 16
+                and Type.size_of(!Packed9Err u64) == 24
+                and Type.align_of(!Packed9Err u64) == 8
+                and Type.size_of(!ZeroErr ZeroOk) == 1
+                and Type.align_of(!ZeroErr ZeroOk) == 1
+        }
+
+        fn check_embedding() -> bool {
+            let a = widen_row(true) match {
+                v! => v == 43,
+                error _ => false,
+            };
+            let b = widen_row(false) match {
+                _! => false,
+                error ErrA.Pair(code, detail) => code == 7 and detail == 99,
+                error ErrB.Pair(_, _) => false,
+                error ErrC.Pair(_, _) => false,
+            };
+            a and b
+        }
+
+        fn exercise_drop() {
+            let _ok_val = make_owned_result(true);
+            let _err_val = make_owned_result(false);
+        }
+
+        fn run() -> bool {
+            let sizes_ok = check_sizes();
+            let vec_ok = check_vec_sum_elements() match {
+                v! => v,
+                error _ => false,
+            };
+            let embed_ok = check_embedding();
+            exercise_drop();
+            sizes_ok and vec_ok and embed_ok
+        }
+    "#;
+    for opt in ["0", "3"] {
+        let case = NativeCase::new(source);
+        let build = case.build(opt);
+        assert_success(&build);
+        let output = case.run();
+        assert_success(&output);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("drop-err:33\n")
+                && stdout.contains("drop-ok:11\n")
+                && stdout.ends_with("(bool true)\n"),
+            "opt={opt}: {stdout}"
+        );
+    }
 }

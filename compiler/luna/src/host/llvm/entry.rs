@@ -14,6 +14,7 @@ pub(super) fn product_main(
         checked,
         fuel,
         serial: 0,
+        prologue: String::new(),
         body: String::new(),
         args: Vec::new(),
         globals: String::new(),
@@ -45,16 +46,18 @@ pub(super) fn product_main(
         format!("%value = call {} @{target}()", physical.llvm())
     };
     module.push_str(&format!(
-        "define i32 @main() {{\nentry:\n  {call}\n{}  %status = call i32 @flurry_output_finish()\n  ret i32 %status\n}}\n",
-        printer.body
+        "define i32 @main() {{\nentry:\n{}  {call}\n{}  %status = call i32 @flurry_output_finish()\n  ret i32 %status\n}}\n",
+        printer.prologue, printer.body
     ));
     Ok(module)
 }
+
 struct Printer<'a> {
     graph: &'a iir::Package,
     checked: bool,
     fuel: &'a mut usize,
     serial: usize,
+    prologue: String,
     body: String,
     args: Vec<String>,
     globals: String,
@@ -62,6 +65,7 @@ struct Printer<'a> {
     wide: bool,
     widths: BTreeSet<u32>,
 }
+
 impl Printer<'_> {
     fn print(&mut self, format: &str) -> Result<(), String> {
         use std::fmt::Write;
@@ -89,12 +93,14 @@ impl Printer<'_> {
         ));
         Ok(())
     }
+
     fn instruction(&mut self, code: String) -> String {
         let name = format!("%display{}", self.serial);
         self.serial += 1;
         self.body.push_str(&format!("  {name} = {code}\n"));
         name
     }
+
     fn value(
         &mut self,
         logical: &Term,
@@ -117,25 +123,39 @@ impl Printer<'_> {
             }
             *self.fuel = self
                 .fuel
-                .checked_sub(layout.len())
+                .checked_sub(layout.branches.len())
                 .ok_or("host entry error row budget exhausted")?;
             self.print(&format!("(error-result (type {logical}) ").replace('%', "%%"))?;
+            let tag_bits = layout.tag_bits;
             let tag = self.instruction(format!("extractvalue {} {value}, 0", physical.llvm()));
+            let payload_slot = if layout.payload_size > 0 {
+                let slot = format!("%display_err_slot{}", self.serial);
+                self.serial += 1;
+                self.prologue
+                    .push_str(&format!("  {slot} = alloca {}\n", physical.llvm()));
+                self.body.push_str(&format!(
+                    "  store {} {value}, ptr {slot}\n",
+                    physical.llvm()
+                ));
+                Some(slot)
+            } else {
+                None
+            };
             let base = self.serial;
             self.serial += 1;
             let end = format!("display_error_end{base}");
             let bad = format!("display_error_bad{base}");
             let branches = std::iter::once(result.as_ref())
                 .chain(errors.iter())
-                .zip(layout.iter())
+                .zip(layout.branches.iter())
                 .enumerate()
                 .filter(|(index, (ty, _))| *index != 0 || **ty != Term::Primitive(P::Never))
                 .collect::<Vec<_>>();
             self.body
-                .push_str(&format!("  switch i32 {tag}, label %{bad} ["));
+                .push_str(&format!("  switch i{tag_bits} {tag}, label %{bad} ["));
             for (index, _) in &branches {
                 self.body.push_str(&format!(
-                    " i32 {index}, label %display_error_{base}_{index}"
+                    " i{tag_bits} {index}, label %display_error_{base}_{index}"
                 ));
             }
             self.body.push_str(" ]\n");
@@ -149,12 +169,19 @@ impl Printer<'_> {
                 }
                 let payload = if *field == Ty::Unit {
                     String::new()
+                } else if let Some(slot) = &payload_slot {
+                    let ptr = self.instruction(format!(
+                        "getelementptr {}, ptr {slot}, i32 0, i32 1",
+                        physical.llvm()
+                    ));
+                    let align_suffix = if matches!(field, Ty::PackedRecord(_)) {
+                        ", align 1"
+                    } else {
+                        ""
+                    };
+                    self.instruction(format!("load {}, ptr {ptr}{align_suffix}", field.llvm()))
                 } else {
-                    self.instruction(format!(
-                        "extractvalue {} {value}, {}",
-                        physical.llvm(),
-                        index + 1
-                    ))
+                    "zeroinitializer".into()
                 };
                 self.value(ty, field, &payload, depth + 1)?;
                 self.print("))")?;
@@ -342,6 +369,7 @@ impl Printer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn long_product_names_require_budget_and_recover() {
         let graph = iir::Package::default();
@@ -357,6 +385,7 @@ mod tests {
         );
         assert!(output.contains("extractvalue { i1 } %value, 0"));
     }
+
     #[test]
     fn escaped_product_names_are_data_not_printf_directives() {
         let graph = iir::Package::default();

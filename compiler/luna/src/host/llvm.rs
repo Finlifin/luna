@@ -29,10 +29,39 @@ use nir::{Primitive as P, Sort, Term};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct ErrorResultLayout {
+    branches: Vec<(Option<Term>, Ty)>,
+    tag_bits: u32,
+    payload_size: u64,
+    payload_align: u64,
+}
+
+impl ErrorResultLayout {
+    fn new(branches: Vec<(Option<Term>, Ty)>, pointer_bits: u32) -> Result<Self, String> {
+        let tag_bits = nir::layout::sum_tag_bits(branches.len()).map_err(|e| e.to_string())?;
+        let mut fuel = MAX_LAYOUT_NODES;
+        let mut branch_layouts = Vec::with_capacity(branches.len());
+        for (_, ty) in &branches {
+            branch_layouts.push(ty.storage_layout_at(pointer_bits, 0, &mut fuel)?);
+        }
+        let payload = nir::layout::union_layout(&branch_layouts).map_err(|e| e.to_string())?;
+        if !matches!(payload.align, 1 | 2 | 4 | 8 | 16) || payload.size % payload.align != 0 {
+            return Err("unsupported host error union payload alignment".into());
+        }
+        Ok(Self {
+            branches,
+            tag_bits,
+            payload_size: payload.size,
+            payload_align: payload.align,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
     Unit,
     Optional(std::sync::Arc<Ty>),
-    ErrorResult(std::sync::Arc<Vec<(Option<Term>, Ty)>>),
+    ErrorResult(std::sync::Arc<ErrorResultLayout>),
     Bool,
     String,
     Symbol,
@@ -66,18 +95,15 @@ impl Ty {
                     payload.llvm()
                 }
             ),
-            Self::ErrorResult(fields) => format!(
-                "{{ i32, {} }}",
-                fields
-                    .iter()
-                    .map(|(_, ty)| if *ty == Ty::Unit {
-                        "{}".into()
-                    } else {
-                        ty.llvm()
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            Self::ErrorResult(layout) => {
+                if layout.payload_size == 0 {
+                    format!("{{ i{}, {{}} }}", layout.tag_bits)
+                } else {
+                    let count = layout.payload_size / layout.payload_align;
+                    let element_bits = layout.payload_align * 8;
+                    format!("{{ i{}, [{count} x i{element_bits}] }}", layout.tag_bits)
+                }
+            }
             Self::Enum(layout) if layout.symbols.is_some() => Self::String.llvm(),
             Self::Enum(layout) if layout.aggregate => {
                 let payloads = layout
@@ -138,6 +164,107 @@ impl Ty {
 
     fn signed(&self) -> bool {
         matches!(self, Self::Int(_, true))
+    }
+
+    fn storage_layout_at(
+        &self,
+        pointer_bits: u32,
+        depth: usize,
+        fuel: &mut usize,
+    ) -> Result<nir::TypeLayout, String> {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("host layout computation budget exhausted")?;
+        if depth >= 128 {
+            return Err("host layout computation nesting budget exhausted".into());
+        }
+        match self {
+            Self::Unit => Ok(nir::TypeLayout { size: 0, align: 1 }),
+            Self::Bool => Ok(nir::TypeLayout { size: 1, align: 1 }),
+            Self::Float16 | Self::BFloat16 => Ok(nir::TypeLayout { size: 2, align: 2 }),
+            Self::Float32 => Ok(nir::TypeLayout { size: 4, align: 4 }),
+            Self::Float64 | Self::TemplateIdentity(_) => Ok(nir::TypeLayout { size: 8, align: 8 }),
+            Self::Int(bits, _) => nir::layout::integer_layout(*bits).map_err(|e| e.to_string()),
+            Self::Pointer | Self::FunctionPointer => {
+                nir::layout::integer_layout(pointer_bits).map_err(|e| e.to_string())
+            }
+            Self::String | Self::Symbol => {
+                let ptr = nir::layout::integer_layout(pointer_bits).map_err(|e| e.to_string())?;
+                nir::layout::struct_layout(&[ptr, nir::TypeLayout { size: 8, align: 8 }])
+                    .map_err(|e| e.to_string())
+            }
+            Self::Optional(payload) => {
+                let payload_layout = payload.storage_layout_at(pointer_bits, depth + 1, fuel)?;
+                nir::layout::struct_layout(&[nir::TypeLayout { size: 1, align: 1 }, payload_layout])
+                    .map_err(|e| e.to_string())
+            }
+            Self::ErrorResult(layout) => {
+                let tag =
+                    nir::layout::integer_layout(layout.tag_bits).map_err(|e| e.to_string())?;
+                let payload = nir::TypeLayout {
+                    size: layout.payload_size,
+                    align: layout.payload_align,
+                };
+                nir::layout::struct_layout(&[tag, payload]).map_err(|e| e.to_string())
+            }
+            Self::Record(fields) => {
+                let mut layouts = Vec::with_capacity(fields.len());
+                for field in fields.iter() {
+                    layouts.push(field.storage_layout_at(pointer_bits, depth + 1, fuel)?);
+                }
+                nir::layout::struct_layout(&layouts).map_err(|e| e.to_string())
+            }
+            Self::PackedRecord(fields) => {
+                let mut layouts = Vec::with_capacity(fields.len());
+                for field in fields.iter() {
+                    layouts.push(field.storage_layout_at(pointer_bits, depth + 1, fuel)?);
+                }
+                nir::layout::packed_struct_layout(&layouts).map_err(|e| e.to_string())
+            }
+            Self::Enum(layout) if layout.symbols.is_some() => {
+                let ptr = nir::layout::integer_layout(pointer_bits).map_err(|e| e.to_string())?;
+                nir::layout::struct_layout(&[ptr, nir::TypeLayout { size: 8, align: 8 }])
+                    .map_err(|e| e.to_string())
+            }
+            Self::Enum(layout) if layout.aggregate => {
+                let mut fields = Vec::with_capacity(layout.fields.len() + 1);
+                fields.push(nir::TypeLayout { size: 4, align: 4 });
+                for variant_fields in &layout.fields {
+                    let mut v_layouts = Vec::with_capacity(variant_fields.len());
+                    for (_, field_ty) in variant_fields {
+                        v_layouts.push(field_ty.storage_layout_at(
+                            pointer_bits,
+                            depth + 1,
+                            fuel,
+                        )?);
+                    }
+                    fields.push(nir::layout::struct_layout(&v_layouts).map_err(|e| e.to_string())?);
+                }
+                nir::layout::struct_layout(&fields).map_err(|e| e.to_string())
+            }
+            Self::Enum(layout) => {
+                nir::layout::integer_layout(layout.width).map_err(|e| e.to_string())
+            }
+            Self::Closure(fields) => {
+                let ptr = nir::layout::integer_layout(pointer_bits).map_err(|e| e.to_string())?;
+                let mut env_layouts = Vec::with_capacity(fields.len());
+                for field in fields.iter() {
+                    env_layouts.push(field.storage_layout_at(pointer_bits, depth + 1, fuel)?);
+                }
+                let env = nir::layout::struct_layout(&env_layouts).map_err(|e| e.to_string())?;
+                let state_count = u64::try_from(closures::state_count(fields))
+                    .map_err(|_| "closure state count overflow".to_string())?;
+                nir::layout::struct_layout(&[
+                    ptr,
+                    env,
+                    nir::TypeLayout {
+                        size: state_count,
+                        align: 1,
+                    },
+                ])
+                .map_err(|e| e.to_string())
+            }
+        }
     }
 }
 
@@ -274,7 +401,10 @@ fn repr_at(
                     repr_at(graph, error, depth + 1, checked, remaining)?,
                 ));
             }
-            Ok(Ty::ErrorResult(std::sync::Arc::new(fields)))
+            let pointer_bits = graph.target.map_or(64, |t| t.pointer_bits());
+            Ok(Ty::ErrorResult(std::sync::Arc::new(
+                ErrorResultLayout::new(fields, pointer_bits)?,
+            )))
         }
         Term::Record(fields) => Ok(Ty::Record(std::sync::Arc::new(
             fields

@@ -1,7 +1,7 @@
 //! Target-aware physical storage layout calculation for NIR types.
 //!
-//! Matches host LLVM type lowering (`ptr`, `{ i1, payload }`, `{ i32, fields... }`,
-//! sequential structs, transparent newtypes, fixed-bit/symbol/aggregate enums).
+//! Matches host LLVM type lowering (`ptr`, `{ i1, payload }`, `{ i{8,16,32}, union }`
+//! for error results, sequential structs, transparent newtypes, fixed-bit/symbol/aggregate enums).
 //! Pointers and function pointers do not recurse into pointees or parameter/result
 //! bodies; direct or indirect by-value cycles and comptime-only domains are rejected.
 
@@ -10,6 +10,7 @@ use crate::{DeclarationId, Primitive, Sort, Term};
 use std::fmt;
 
 const MAX_LAYOUT_DEPTH: usize = 128;
+
 const MAX_BIT_WIDTH: u32 = 65_536;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -102,12 +103,17 @@ pub enum NominalLayout {
 
 pub trait LayoutWorld {
     fn target(&self) -> Option<crate::target::TargetData>;
+
     fn is_tuple_head(&self, head: DeclarationId) -> bool;
+
     fn is_list_head(&self, head: DeclarationId) -> bool;
+
     fn is_known_nominal(&self, ty: &Term) -> bool;
+
     fn is_template_identity(&self, _ty: &Term) -> bool {
         false
     }
+
     fn nominal_layout(
         &self,
         ty: &Term,
@@ -149,7 +155,7 @@ fn charge(fuel: &mut usize, amount: usize) -> Result<(), LayoutError> {
     Ok(())
 }
 
-fn align_up(value: u64, align: u64) -> Result<u64, LayoutError> {
+pub fn align_up(value: u64, align: u64) -> Result<u64, LayoutError> {
     debug_assert!(align >= 1 && align.is_power_of_two());
     let remainder = value % align;
     if remainder == 0 {
@@ -161,12 +167,9 @@ fn align_up(value: u64, align: u64) -> Result<u64, LayoutError> {
     }
 }
 
-fn int_layout(bits: u32, ty: &Term) -> Result<TypeLayout, LayoutError> {
+pub fn integer_layout(bits: u32) -> Result<TypeLayout, LayoutError> {
     if bits == 0 {
         return Ok(TypeLayout { size: 0, align: 1 });
-    }
-    if bits > MAX_BIT_WIDTH {
-        return Err(LayoutError::Unsupported(ty.clone()));
     }
     let raw_bytes = u64::from(bits).div_ceil(8);
     let align = raw_bytes
@@ -178,12 +181,19 @@ fn int_layout(bits: u32, ty: &Term) -> Result<TypeLayout, LayoutError> {
     Ok(TypeLayout { size, align })
 }
 
+fn int_layout(bits: u32, ty: &Term) -> Result<TypeLayout, LayoutError> {
+    if bits > MAX_BIT_WIDTH {
+        return Err(LayoutError::Unsupported(ty.clone()));
+    }
+    integer_layout(bits)
+}
+
 fn pointer_layout(world: &impl LayoutWorld, ty: &Term) -> Result<TypeLayout, LayoutError> {
     let target = world.target().ok_or(LayoutError::TargetRequired)?;
     int_layout(target.pointer_bits(), ty)
 }
 
-fn struct_layout(fields: &[TypeLayout]) -> Result<TypeLayout, LayoutError> {
+pub fn struct_layout(fields: &[TypeLayout]) -> Result<TypeLayout, LayoutError> {
     let mut offset = 0u64;
     let mut max_align = 1u64;
     for field in fields {
@@ -198,6 +208,32 @@ fn struct_layout(fields: &[TypeLayout]) -> Result<TypeLayout, LayoutError> {
         size,
         align: max_align,
     })
+}
+
+pub fn union_layout(branches: &[TypeLayout]) -> Result<TypeLayout, LayoutError> {
+    let mut max_size = 0u64;
+    let mut max_align = 1u64;
+    for branch in branches {
+        max_size = max_size.max(branch.size);
+        max_align = max_align.max(branch.align);
+    }
+    let size = align_up(max_size, max_align)?;
+    Ok(TypeLayout {
+        size,
+        align: max_align,
+    })
+}
+
+pub fn sum_tag_bits(branch_count: usize) -> Result<u32, LayoutError> {
+    if branch_count <= 256 {
+        Ok(8)
+    } else if branch_count <= 65_536 {
+        Ok(16)
+    } else if u32::try_from(branch_count.saturating_sub(1)).is_ok() {
+        Ok(32)
+    } else {
+        Err(LayoutError::Overflow)
+    }
 }
 
 fn layout_at(
@@ -272,13 +308,14 @@ fn layout_at(
             } else {
                 layout_at(world, result, depth + 1, visiting, fuel)?
             };
-            let mut fields = Vec::with_capacity(errors.len() + 2);
-            fields.push(TypeLayout { size: 4, align: 4 });
-            fields.push(success_layout);
+            let mut branches = Vec::with_capacity(errors.len() + 1);
+            branches.push(success_layout);
             for err in errors {
-                fields.push(layout_at(world, err, depth + 1, visiting, fuel)?);
+                branches.push(layout_at(world, err, depth + 1, visiting, fuel)?);
             }
-            struct_layout(&fields)
+            let tag = integer_layout(sum_tag_bits(branches.len())?)?;
+            let payload = union_layout(&branches)?;
+            struct_layout(&[tag, payload])
         }
         Term::Tuple(fields) => tuple_fields_layout(world, fields, depth, visiting, fuel),
         Term::Record(fields) => {
@@ -417,7 +454,7 @@ fn tuple_fields_layout(
     struct_layout(&layouts)
 }
 
-fn packed_struct_layout(fields: &[TypeLayout]) -> Result<TypeLayout, LayoutError> {
+pub fn packed_struct_layout(fields: &[TypeLayout]) -> Result<TypeLayout, LayoutError> {
     let mut size = 0u64;
     for field in fields {
         size = size.checked_add(field.size).ok_or(LayoutError::Overflow)?;
@@ -534,15 +571,19 @@ mod tests {
         fn target(&self) -> Option<TargetData> {
             self.target
         }
+
         fn is_tuple_head(&self, head: DeclarationId) -> bool {
             self.tuple_head == Some(head)
         }
+
         fn is_list_head(&self, head: DeclarationId) -> bool {
             self.list_head == Some(head)
         }
+
         fn is_known_nominal(&self, ty: &Term) -> bool {
             self.nominals.iter().any(|(key, _)| key == ty)
         }
+
         fn nominal_layout(
             &self,
             ty: &Term,
@@ -658,7 +699,7 @@ mod tests {
         };
         assert_eq!(
             compute_layout(&world, &err_ty, &mut fuel),
-            Ok(TypeLayout { size: 24, align: 8 })
+            Ok(TypeLayout { size: 16, align: 8 })
         );
 
         // struct Link { value: u32, next: ?*Link }
@@ -732,5 +773,111 @@ mod tests {
             compute_layout(&world, &Term::Primitive(Primitive::U32), &mut tiny),
             Err(LayoutError::BudgetExhausted)
         );
+    }
+
+    #[test]
+    fn error_result_uses_tagged_union_sum_layout() {
+        let mut world = TestWorldVec::new(Some(TargetData::new(64).unwrap()));
+        let mut fuel = 10_000;
+
+        let packed_9b = Term::Nominal {
+            declaration: id(10),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            packed_9b.clone(),
+            NominalLayout::PackedStruct(vec![
+                Term::Primitive(Primitive::U64),
+                Term::Primitive(Primitive::U8),
+            ]),
+        ));
+
+        let empty_struct = Term::Nominal {
+            declaration: id(11),
+            arguments: vec![],
+        };
+        world
+            .nominals
+            .push((empty_struct.clone(), NominalLayout::Struct(vec![])));
+
+        assert_eq!(
+            compute_layout(
+                &world,
+                &Term::ErrorResult {
+                    errors: vec![Term::Primitive(Primitive::U8)],
+                    result: Box::new(Term::Primitive(Primitive::U8)),
+                },
+                &mut fuel,
+            ),
+            Ok(TypeLayout { size: 2, align: 1 })
+        );
+
+        assert_eq!(
+            compute_layout(
+                &world,
+                &Term::ErrorResult {
+                    errors: vec![Term::Primitive(Primitive::U64); 4],
+                    result: Box::new(Term::Primitive(Primitive::U64)),
+                },
+                &mut fuel,
+            ),
+            Ok(TypeLayout { size: 16, align: 8 })
+        );
+
+        assert_eq!(
+            compute_layout(
+                &world,
+                &Term::ErrorResult {
+                    errors: vec![Term::Primitive(Primitive::U128)],
+                    result: Box::new(Term::Primitive(Primitive::U8)),
+                },
+                &mut fuel,
+            ),
+            Ok(TypeLayout {
+                size: 32,
+                align: 16,
+            })
+        );
+
+        assert_eq!(
+            compute_layout(
+                &world,
+                &Term::ErrorResult {
+                    errors: vec![packed_9b],
+                    result: Box::new(Term::Primitive(Primitive::U64)),
+                },
+                &mut fuel,
+            ),
+            Ok(TypeLayout { size: 24, align: 8 })
+        );
+
+        assert_eq!(
+            compute_layout(
+                &world,
+                &Term::ErrorResult {
+                    errors: vec![Term::Primitive(Primitive::Void), empty_struct],
+                    result: Box::new(Term::Primitive(Primitive::Void)),
+                },
+                &mut fuel,
+            ),
+            Ok(TypeLayout { size: 1, align: 1 })
+        );
+
+        assert_eq!(
+            compute_layout(
+                &world,
+                &Term::ErrorResult {
+                    errors: vec![Term::Primitive(Primitive::U8)],
+                    result: Box::new(Term::Primitive(Primitive::Never)),
+                },
+                &mut fuel,
+            ),
+            Ok(TypeLayout { size: 2, align: 1 })
+        );
+
+        assert_eq!(sum_tag_bits(256), Ok(8));
+        assert_eq!(sum_tag_bits(257), Ok(16));
+        assert_eq!(sum_tag_bits(65_536), Ok(16));
+        assert_eq!(sum_tag_bits(65_537), Ok(32));
     }
 }

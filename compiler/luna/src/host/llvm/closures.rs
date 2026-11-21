@@ -907,7 +907,9 @@ mod state_count_tests {
         for (index, path) in expected.iter().enumerate() {
             assert_eq!(state_index(&fields, path, &mut 100).unwrap(), index);
         }
-        let sum = Ty::ErrorResult(Arc::new(vec![(None, Ty::Record(fields.clone()))]));
+        let sum = Ty::ErrorResult(Arc::new(
+            ErrorResultLayout::new(vec![(None, Ty::Record(fields.clone()))], 64).unwrap(),
+        ));
         assert_eq!(state_count(&Arc::new(vec![sum])), 2);
         assert_eq!(state_count(&Arc::new(vec![])), 1);
         let mut nested = Ty::Bool;

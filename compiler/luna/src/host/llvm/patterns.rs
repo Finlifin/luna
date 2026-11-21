@@ -1,5 +1,6 @@
 use super::*;
 use nir::program::{MatchArm, Pattern};
+
 type Receipt = BTreeMap<LocalId, (Value, Value)>;
 
 impl Emitter<'_> {
@@ -85,8 +86,13 @@ impl Emitter<'_> {
             Pattern::ErrorResult { label, inner } => {
                 let index = self.error_index(&value.ty, label.as_ref())?;
                 let tag = self.error_tag(value)?;
-                let condition =
-                    self.instruction(Ty::Bool, format!("icmp eq i32 {}, {index}", tag.text));
+                let Ty::Int(tag_bits, false) = tag.ty else {
+                    return Err("host error tag must be an unsigned integer".into());
+                };
+                let condition = self.instruction(
+                    Ty::Bool,
+                    format!("icmp eq i{tag_bits} {}, {index}", tag.text),
+                );
                 self.accept(condition, failure)?;
                 let payload = self.error_payload(value, index)?;
                 self.pattern(
@@ -615,6 +621,7 @@ impl Emitter<'_> {
         Ok(())
     }
 }
+
 fn child_path(path: &Option<Vec<usize>>, index: usize) -> Option<Vec<usize>> {
     path.as_ref().map(|path| {
         let mut path = path.clone();
@@ -622,6 +629,7 @@ fn child_path(path: &Option<Vec<usize>>, index: usize) -> Option<Vec<usize>> {
         path
     })
 }
+
 impl Emitter<'_> {
     fn receipt_path(&mut self, path: &[usize]) -> Result<u32, String> {
         if let Some(index) = self.receipt_paths.iter().position(|item| item == path) {

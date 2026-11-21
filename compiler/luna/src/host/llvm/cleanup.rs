@@ -713,6 +713,7 @@ impl Emitter<'_> {
             align: None,
         }))
     }
+
     pub(super) fn set_live(
         &mut self,
         binding: LocalId,
@@ -818,6 +819,7 @@ impl Emitter<'_> {
         }
         Ok(())
     }
+
     pub(super) fn cleanup_boundary(
         &mut self,
         source: nir::program::SourceRange,
@@ -901,6 +903,7 @@ impl Emitter<'_> {
         }
         Ok(())
     }
+
     fn cleanup_action(&mut self, action: &iir::cleanup::Action) -> Result<(), String> {
         *self.fuel = self
             .fuel
@@ -1018,6 +1021,7 @@ impl Emitter<'_> {
         }
         Ok(())
     }
+
     fn cleanup_field_slot(&mut self, mut slot: Slot, path: &[usize]) -> Result<Slot, String> {
         for index in path {
             let packed = slot.align == Some(1) || matches!(slot.ty, Ty::PackedRecord(_));
@@ -1047,6 +1051,7 @@ impl Emitter<'_> {
         }
         Ok(slot)
     }
+
     fn cleanup_direct_program(
         &mut self,
         slot: &Slot,
@@ -1062,6 +1067,7 @@ impl Emitter<'_> {
         }
         self.cleanup_steps(slot, &program.steps, &tags, live, Some(&program.ty))
     }
+
     fn cleanup_tagged_slot(
         &mut self,
         mut slot: Slot,
@@ -1112,6 +1118,7 @@ impl Emitter<'_> {
         }
         Ok(slot)
     }
+
     fn cleanup_tag_condition(&mut self, slot: &Slot, tag: usize) -> Result<Value, String> {
         let value = self.load(slot);
         if matches!(value.ty, Ty::Enum(_)) {
@@ -1124,15 +1131,19 @@ impl Emitter<'_> {
             let actual = self.optional_tag(&value)?;
             return Ok(self.instruction(Ty::Bool, format!("icmp eq i1 {}, {tag}", actual.text)));
         }
-        if matches!(value.ty, Ty::ErrorResult(_)) {
+        if let Ty::ErrorResult(layout) = &value.ty {
             let actual = self.instruction(
-                Ty::Int(32, false),
+                Ty::Int(layout.tag_bits, false),
                 format!("extractvalue {} {}, 0", value.ty.llvm(), value.text),
             );
-            return Ok(self.instruction(Ty::Bool, format!("icmp eq i32 {}, {tag}", actual.text)));
+            return Ok(self.instruction(
+                Ty::Bool,
+                format!("icmp eq i{} {}, {tag}", layout.tag_bits, actual.text),
+            ));
         }
         Err("host cleanup tag requires enum, optional or error result".into())
     }
+
     fn cleanup_steps(
         &mut self,
         slot: &Slot,
@@ -1505,14 +1516,16 @@ pub(super) fn has_invoke(steps: &[Step]) -> bool {
     }
     false
 }
+
 fn variant_count(ty: &Ty) -> Option<usize> {
     match ty {
         Ty::Optional(_) => Some(2),
         Ty::Enum(layout) => Some(layout.fields.len()),
-        Ty::ErrorResult(variants) => Some(variants.len()),
+        Ty::ErrorResult(layout) => Some(layout.branches.len()),
         _ => None,
     }
 }
+
 fn field_layout(ty: &Ty, field: usize, tag: Option<usize>) -> Option<(Ty, Vec<usize>)> {
     match ty {
         Ty::Record(fields) | Ty::PackedRecord(fields) => {
@@ -1529,13 +1542,14 @@ fn field_layout(ty: &Ty, field: usize, tag: Option<usize>) -> Option<(Ty, Vec<us
         Ty::Optional(payload) if field == 0 && tag == Some(1) => {
             Some(((**payload).clone(), vec![1]))
         }
-        Ty::ErrorResult(variants) if field == 0 => {
+        Ty::ErrorResult(layout) if field == 0 => {
             let tag = tag?;
-            Some((variants.get(tag)?.1.clone(), vec![tag + 1]))
+            Some((layout.branches.get(tag)?.1.clone(), vec![1]))
         }
         _ => None,
     }
 }
+
 // Cleanup paths describe language ownership, including newtype representation
 // edges. Such an edge consumes a logical field but contributes no LLVM GEP.
 fn cleanup_field_layout(
@@ -1601,6 +1615,7 @@ fn cleanup_field_layout(
     }
     Some((next, ty, indices))
 }
+
 fn cleanup_projection(
     graph: &iir::Package,
     logical: Option<&Term>,
@@ -1623,6 +1638,7 @@ fn cleanup_projection(
     }
     Some((logical, physical))
 }
+
 fn projected_cleanup_type(
     graph: &iir::Package,
     logical: Option<&Term>,
@@ -1632,6 +1648,7 @@ fn projected_cleanup_type(
 ) -> Option<Ty> {
     cleanup_projection(graph, logical, physical, path, tags).map(|(_, physical)| physical)
 }
+
 fn admit_steps(
     graph: &iir::Package,
     ty: &Ty,
@@ -2481,10 +2498,13 @@ mod tests {
     #[test]
     fn conditional_sum_admission_tracks_whole_values_not_payload_fields() {
         let graph = iir::Package::default();
-        let sum = Ty::ErrorResult(std::sync::Arc::new(vec![
-            (None, Ty::Bool),
-            (Some(Term::Primitive(P::Bool)), Ty::Bool),
-        ]));
+        let sum = Ty::ErrorResult(std::sync::Arc::new(
+            ErrorResultLayout::new(
+                vec![(None, Ty::Bool), (Some(Term::Primitive(P::Bool)), Ty::Bool)],
+                64,
+            )
+            .unwrap(),
+        ));
         let record = Ty::Record(std::sync::Arc::new(vec![sum]));
         let tags = Tags::from([(vec![0], 1)]);
         for (path, accepted) in [(vec![], true), (vec![0], true), (vec![0, 0], false)] {
@@ -2541,10 +2561,13 @@ mod tests {
                 terminated: false,
                 fuel: &mut fuel,
             };
-            let ty = Ty::ErrorResult(std::sync::Arc::new(vec![
-                (None, Ty::Bool),
-                (Some(Term::Primitive(P::Bool)), Ty::Bool),
-            ]));
+            let ty = Ty::ErrorResult(std::sync::Arc::new(
+                ErrorResultLayout::new(
+                    vec![(None, Ty::Bool), (Some(Term::Primitive(P::Bool)), Ty::Bool)],
+                    64,
+                )
+                .unwrap(),
+            ));
             let slot = emitter.slot(ty.clone());
             emitter
                 .store(
@@ -2617,6 +2640,7 @@ enum Owner {
     Local { binding: LocalId, path: Vec<usize> },
     Temporary((u32, u32)),
 }
+
 pub(super) fn product_paths(ty: &Ty, prefix: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
     out.push(prefix.clone());
     if let Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) = ty {
@@ -2627,6 +2651,7 @@ pub(super) fn product_paths(ty: &Ty, prefix: &mut Vec<usize>, out: &mut Vec<Vec<
         }
     }
 }
+
 // Products have independent field tokens; sum payloads are opaque to this
 // state model. The sum itself (including a sum stored in a product) has a token.
 fn product_projection<'a>(mut ty: &'a Ty, path: &[usize]) -> Option<&'a Ty> {
@@ -2645,6 +2670,7 @@ pub(super) struct PreparedSlot {
     storage: Slot,
     live: Slot,
 }
+
 impl Emitter<'_> {
     pub(super) fn retain_prepared_field(
         &mut self,
@@ -2681,6 +2707,7 @@ impl Emitter<'_> {
         );
         Ok(())
     }
+
     pub(super) fn finish_prepared_construction(
         &mut self,
         construction: nir::program::SourceRange,
