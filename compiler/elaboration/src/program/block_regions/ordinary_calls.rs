@@ -228,7 +228,7 @@ impl<'h> Root<'h> for CallInputs<'h> {
                     format!("dependent call input is not available: {failure}"),
                 )
             })?;
-            let domain = checker.callable_input_view(&domain, site.source.span)?;
+            let domain = checker.observe_call_type(&domain, &site.source)?;
             input.require_collection_type(checker, &domain, site.source.span)?;
             if let Some(value) = prepared.values[slot].take() {
                 self.arguments.push(n::CallArgument {
@@ -357,7 +357,7 @@ impl Completion<'_> {
                     format!("dependent call result is not available: {e}"),
                 )
             })?;
-            checker.callable_input_view(&result, expr.span)?
+            checker.observe_call_type(&result, expr)?
         };
         if let Some(expected) = &expected {
             checker.require_expression(&ty, expected, expr.span)?;

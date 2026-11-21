@@ -11,6 +11,7 @@ mod contracts;
 
 pub(super) use contracts::CheckedTraits;
 
+mod call_types;
 mod declarations;
 mod discovery;
 mod early_inherent;

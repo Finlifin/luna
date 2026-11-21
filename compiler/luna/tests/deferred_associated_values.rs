@@ -393,3 +393,130 @@ fn computed_associated_type_identities_preserve_normal_form_heads() {
         "{error}"
     );
 }
+
+const COMPUTED_ITEM: &str = r#"
+    typealias Type = .Type'builtin;
+    typealias char = .char'builtin;
+    comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+    trait Source where flag: bool { assoc Item: Type = Selected(flag); }
+    struct Holder where flag: bool {}
+    impl Source<flag> for Holder<flag> where flag: bool {}
+"#;
+
+#[test]
+fn associated_type_programs_in_specialized_signatures_reach_closure_captures() {
+    let source = format!(
+        "{COMPUTED_ITEM}
+        comptime fn keep(value: T.as(Source<flag>).Item) -> T.as(Source<flag>).Item
+        where flag: bool, T :- Source<flag>
+        {{ let read = || value; read() }}
+        comptime fn yes() -> bool {{ keep<true, Holder<true>>(true) }}
+        comptime fn no() -> char {{ keep<false, Holder<false>>('n') }}"
+    );
+    let package = support::compile(&source);
+    for (name, value) in [("yes", Value::Bool(true)), ("no", Value::Char('n'))] {
+        assert_eq!(
+            luna::invocation::invoke(&package, name, 100_000).unwrap(),
+            value
+        );
+    }
+    let wrong = source.replace("Holder<false>>('n')", "Holder<false>>(true)");
+    let error = support::compile_with_protocols(&wrong, &Default::default()).unwrap_err();
+    assert!(
+        error.contains("type mismatch") && error.contains("char"),
+        "{error}"
+    );
+}
+
+#[test]
+fn associated_type_programs_in_nested_domains_and_ordinary_parameter_telescopes() {
+    let source = format!("{COMPUTED_ITEM}
+        struct Boxed where T {{ value: T }}
+        comptime fn unbox(value: Boxed<T.as(Source<flag>).Item>) -> T.as(Source<flag>).Item
+        where flag: bool, T :- Source<flag>
+        {{ value.value }}
+        comptime fn keep(comptime A: Type, value: A.as(Source<true>).Item) -> A.as(Source<true>).Item
+        where requires A :- Source<true>
+        {{ value }}
+        comptime fn run() -> bool {{
+            keep(Holder<true>, unbox<true, Holder<true>>(Boxed<bool>{{ value: true }}))
+        }}");
+    let package = support::compile(&source);
+    assert_eq!(
+        luna::invocation::invoke(&package, "run", 100_000).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn associated_type_invocation_failure_at_a_call_preserves_the_contract_diagnostic() {
+    let source = r#"
+        typealias Type = .Type'builtin;
+        comptime fn Checked(flag: bool) -> Type where requires flag { bool }
+        trait Source where flag: bool { assoc Item: Type = do { assumes flag; Checked(flag) }; }
+        struct Holder where flag: bool {}
+        impl Source<flag> for Holder<flag> where flag: bool {}
+        comptime fn keep(value: T.as(Source<flag>).Item) -> T.as(Source<flag>).Item
+        where flag: bool, T :- Source<flag>
+        { value }
+        comptime fn run() -> bool { keep<false, Holder<false>>(true) }
+    "#;
+    let error = support::compile_with_protocols(source, &Default::default()).unwrap_err();
+    assert!(error.contains("ProgramContractRejected"), "{error}");
+}
+
+#[test]
+fn a_selected_open_associated_type_program_survives_a_generic_call() {
+    let source = format!("{COMPUTED_ITEM}
+        comptime fn keep(value: Holder<flag>.as(Source<flag>).Item) -> Holder<flag>.as(Source<flag>).Item
+        where flag: bool
+        {{ value }}
+        comptime fn via(value: Holder<flag>.as(Source<flag>).Item) -> Holder<flag>.as(Source<flag>).Item
+        where flag: bool
+        {{ keep<flag>(value) }}
+        comptime fn yes() -> bool {{ via<true>(true) }}
+        comptime fn no() -> char {{ via<false>('n') }}");
+    let package = support::compile(&source);
+    for (name, value) in [("yes", Value::Bool(true)), ("no", Value::Char('n'))] {
+        assert_eq!(
+            luna::invocation::invoke(&package, name, 100_000).unwrap(),
+            value
+        );
+    }
+}
+
+#[test]
+fn dispatch_views_retain_selected_type_programs_without_publishing_a_strict_identity() {
+    use type_resolution::dispatch::DeclarationWorld;
+    use type_resolution::ptc::Budget;
+    let source = format!(
+        "{COMPUTED_ITEM}
+        comptime fn keep(value: T.as(Source<flag>).Item) -> T.as(Source<flag>).Item
+        where flag: bool, T :- Source<flag>
+        {{ value }}
+        comptime fn run() -> bool {{ keep<true, Holder<true>>(true) }}"
+    );
+    let package = support::compile(&source);
+    let row = package
+        .dispatch_instances
+        .iter()
+        .find(|row| !row.associated_initializers.is_empty())
+        .unwrap();
+    let key = nir::Term::AssociatedType {
+        origin: Box::new(nir::AssociatedTypeOrigin {
+            interface: row.interface,
+            member: row.associated_initializers[0].0,
+        }),
+        arguments: row.interface_arguments.clone(),
+        subject: Box::new(row.subject.clone()),
+    };
+    let (declarations, _) = DeclarationWorld::new(&package, Budget::default(), None).unwrap();
+    let world = declarations.capabilities();
+    let mut budget = Budget::default();
+    let report = world.dispatch_type_view_metered(&key, &mut budget).unwrap();
+    assert_eq!(report.value, key);
+    assert_eq!(report.initializer_dependencies, [key.clone()]);
+    assert!(report.steps.is_empty());
+    assert!(world.normalize_associated_types(&key, budget).is_err());
+    assert!(budget.steps < Budget::default().steps);
+}

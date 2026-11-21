@@ -276,6 +276,38 @@ impl Checker<'_, '_> {
                 "associated value used as a type does not contain a completed Type",
             ));
         }
+        if let K::AssociatedValue {
+            interface, subject, ..
+        } = &value.kind
+        {
+            let open = nominal_fields::metered(&mut self.required_steps, |fuel| {
+                for input in std::iter::once(subject).chain(&interface.arguments) {
+                    if nir::type_computations::has_rigid_parameters_bounded(input, fuel)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            })
+            .map_err(|failure| error(expr.span, failure.to_string()))?;
+            if open {
+                let K::AssociatedValue {
+                    interface,
+                    subject,
+                    member,
+                } = value.kind
+                else {
+                    unreachable!()
+                };
+                return Ok(CompletedType::Identity(Term::AssociatedType {
+                    origin: Box::new(nir::AssociatedTypeOrigin {
+                        interface: interface.declaration,
+                        member,
+                    }),
+                    arguments: interface.arguments,
+                    subject: Box::new(subject),
+                }));
+            }
+        }
         self.complete_checked_type(expr, value)
     }
 

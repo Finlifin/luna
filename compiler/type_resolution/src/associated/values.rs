@@ -540,17 +540,33 @@ impl<'a, 'world> SelectedAssociatedMember<'a, 'world> {
         )?)
     }
 
-    // A type projection consumes a completed Type template without invoking code.
-    pub(super) fn complete_type(
+    // Selection reports executable Type supplies without invoking their code.
+    pub(super) fn prepare_type(
         self,
-        fuel: &mut usize,
-    ) -> Result<AssociatedTypeResolution, QueryError> {
-        let Some(source) = self.row().associated_source(self.facts.member, fuel)? else {
+        projection: &Term,
+        budget: &mut Budget,
+    ) -> Result<TypeProjection, QueryError> {
+        let Some(source) = self
+            .row()
+            .associated_source(self.facts.member, &mut budget.steps)?
+        else {
             return Err("selected implementation has no associated Type value".into());
         };
         let MemberSource::Value(source) = source else {
-            return Err("selected associated value is not a completed Type template".into());
+            // A dependent result domain is compared after the selected substitution.
+            if source.expression().ty != Term::Primitive(Primitive::Type) {
+                self.member_result(source.expression(), budget)?;
+            }
+            return Ok(TypeProjection::Initializer(SelectedTypeInitializer {
+                open_inputs: nir::type_computations::has_rigid_parameters_bounded(
+                    projection,
+                    &mut budget.steps,
+                )?,
+                evidence: self.facts.evidence,
+                qualification: self.facts.qualification,
+            }));
         };
+        let fuel = &mut budget.steps;
         let completed = self.instantiate(source, fuel)?;
         if completed.ty != Term::Primitive(Primitive::Type) {
             return Err("selected associated value has a non-Type contract".into());
@@ -563,11 +579,11 @@ impl<'a, 'world> SelectedAssociatedMember<'a, 'world> {
         if value.sort() != nir::Sort::Type {
             return Err("selected associated Type template has the wrong sort".into());
         }
-        Ok(AssociatedTypeResolution {
+        Ok(TypeProjection::Ready(AssociatedTypeResolution {
             value,
             evidence: self.facts.evidence,
             qualification: self.facts.qualification,
-        })
+        }))
     }
 }
 

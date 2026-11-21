@@ -475,7 +475,7 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         }
         let retained_callable = self.structural_type(&callee.ty, expr.span)?;
         let callable = self
-            .callable_input_view(&retained_callable, expr.span)?
+            .observe_call_type(&retained_callable, expr)?
             .into_callable_signature();
         let Some(signature) = dependent_inputs::CallSignature::of(&callable) else {
             return Err(error(

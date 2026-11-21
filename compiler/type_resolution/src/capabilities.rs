@@ -70,6 +70,7 @@ impl ResolutionScope {
         self.context == *world.context && self.assumptions == world.assumptions
     }
 }
+#[derive(Clone, Copy)]
 pub struct World<'a> {
     pub index: &'a Index,
     pub implementations: &'a [Implementation],

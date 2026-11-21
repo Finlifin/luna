@@ -3338,21 +3338,49 @@ impl Builder<'_, '_> {
             .map_err(String::from)
     }
 
+    fn dispatch_type_view(&mut self, term: &Term) -> Result<Term, String> {
+        let mut budget = Budget {
+            steps: self.fuel,
+            ..self.budget
+        };
+        let view = self
+            .world
+            .capabilities()
+            .dispatch_type_view_metered(term, &mut budget);
+        self.fuel = budget.steps;
+        Ok(self.retain_type_dependencies(view?))
+    }
+
     fn staging_term_view(&mut self, term: &Term) -> Result<Term, String> {
         let mut budget = Budget {
             steps: self.fuel,
             ..self.budget
         };
-        let view = crate::capabilities::World {
-            index: self.world.index(),
-            implementations: &self.package.implementations,
-            traits: &self.package.traits,
-            assumptions: self.world.assumptions(),
-            context: self.world.context(),
-        }
-        .associated_type_view_cached_metered(term, &mut budget, &mut self.staging_views);
+        let world = self.world.capabilities();
+        let view = if self.instances.is_some() {
+            world.associated_type_view_cached_metered(term, &mut budget, &mut self.staging_views)
+        } else {
+            world.staged_dispatch_type_view_cached_metered(
+                term,
+                &mut budget,
+                &mut self.staging_views,
+            )
+        };
         self.fuel = budget.steps;
-        Ok(view?.value)
+        Ok(self.retain_type_dependencies(view?))
+    }
+
+    fn retain_type_dependencies(
+        &mut self,
+        view: crate::associated::AssociatedTypeNormalization,
+    ) -> Term {
+        self.queue.extend(
+            view.initializer_dependencies
+                .into_iter()
+                .filter(|ty| !self.types.contains(ty))
+                .map(Task::Type),
+        );
+        view.value
     }
 
     fn staging_type_view(&mut self, ty: &Term) -> Result<Term, String> {
@@ -3429,7 +3457,7 @@ impl Builder<'_, '_> {
         if self.instances.is_some() {
             iir::completed_dependencies(&ty, &self.runtime_bindings, &mut self.fuel)?;
         } else if let Term::Nominal { arguments, .. } = &ty {
-            let selected = self.normalized_type(&ty)?;
+            let selected = self.dispatch_type_view(&ty)?;
             if selected != ty {
                 // Keep projection evidence as a dependency, but instantiate
                 // nominal field/formation contracts with the selected inputs.
@@ -3800,16 +3828,16 @@ impl Builder<'_, '_> {
                 if self.instances.is_some() {
                     return Err("IIR requires associated type projection resolution".into());
                 }
-                // Prove the complete projection (including cycle checks), then
-                // retain its originating Type-valued member for reference execution.
-                let normalized = self.normalized_type(&ty)?;
+                let normalized = self.dispatch_type_view(&ty)?;
                 let interface = n::InterfaceInstance {
                     declaration: origin.interface,
                     arguments: arguments.clone(),
                 };
-                let slot = self.interface(interface.clone(), (**subject).clone())?;
+                let slot = self.interface(interface, (**subject).clone())?;
                 self.retain_associated_supply(slot, origin.member, 0, true)?;
-                children.push(normalized);
+                if normalized != ty {
+                    children.push(normalized);
+                }
                 children.extend(arguments.iter().cloned());
                 children.push((**subject).clone());
             }

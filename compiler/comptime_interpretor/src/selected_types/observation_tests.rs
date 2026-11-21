@@ -534,3 +534,35 @@ fn nested_structural_prefix_can_demand_an_initializer_at_its_leaf() {
         assert!(entries(&vm, start).is_empty());
     }
 }
+
+#[test]
+fn source_capture_checks_observe_the_selected_domain_and_preserve_passive_reads() {
+    let package = package();
+    let domain = projection(3);
+    for compiled in [false, true] {
+        let mut vm = Interpreter::for_comptime(&package, Budget::default())
+            .unwrap()
+            .with_associated_resolver(&select);
+        vm.bytecode_enabled = compiled;
+        assert_eq!(
+            vm.check_retained_value(&Value::Bool(true), &domain, Some(SOURCE))
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnmaterializedDispatch
+        );
+        assert!(entries(&vm, 0).is_empty());
+        let failure = vm
+            .check_closure_capture(&Value::Char('x'), &domain, &domain, SOURCE)
+            .unwrap_err();
+        assert_eq!(
+            failure,
+            Error {
+                kind: ErrorKind::Type,
+                source: Some(SOURCE)
+            }
+        );
+        vm.check_closure_capture(&Value::Bool(true), &domain, &domain, SOURCE)
+            .unwrap();
+        assert_eq!(entries(&vm, 0), vec![id(9), id(9)]);
+    }
+}

@@ -26,6 +26,7 @@ use prepared::PreparedRequired;
 /// same source node. Query identity includes the operation, not just its site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum RootKind {
+    AssociatedType,
     Expression,
     CallableInputs,
 }
@@ -1119,7 +1120,11 @@ impl Checker<'_, '_> {
                 return Err(error(expr.span, "duplicate required comptime input"));
             }
         }
-        let entry = entry_call(expr, &mut self.required_steps)?;
+        let entry = if kind == RootKind::AssociatedType {
+            None
+        } else {
+            entry_call(expr, &mut self.required_steps)?
+        };
         let query = (local(expr.hir_id), kind);
         if self.active_required.len() >= 32 || !self.active_required.insert(query) {
             return Err(error(

@@ -18,6 +18,59 @@ pub struct AssociatedTypeResolution {
     pub qualification: Qualification,
 }
 
+/// One step in a selected projection. Only a requesting comptime context
+/// can complete an initializer; passive consumers require a ready identity.
+pub enum TypeProjection {
+    Ready(AssociatedTypeResolution),
+    Initializer(SelectedTypeInitializer),
+}
+
+pub struct SelectedTypeInitializer {
+    open_inputs: bool,
+    evidence: TypeEvidence,
+    qualification: Qualification,
+}
+
+impl SelectedTypeInitializer {
+    pub fn needs_inputs(&self) -> bool {
+        self.open_inputs
+    }
+    pub fn complete(
+        self,
+        value: Term,
+        fuel: &mut usize,
+    ) -> Result<AssociatedTypeResolution, QueryError> {
+        if self.open_inputs {
+            return Err(QueryError::Unresolved(
+                "associated Type initializer requires concrete inputs".into(),
+            ));
+        }
+        charge_projection_copy(&value, fuel)?;
+        value
+            .check_scope(&[])
+            .map_err(|failure| failure.to_string())?;
+        if value.sort() != nir::Sort::Type {
+            return Err("associated Type initializer returned the wrong sort".into());
+        }
+        Ok(AssociatedTypeResolution {
+            value,
+            evidence: self.evidence,
+            qualification: self.qualification,
+        })
+    }
+}
+
+impl TypeProjection {
+    fn ready(self) -> Result<AssociatedTypeResolution, QueryError> {
+        match self {
+            Self::Ready(value) => Ok(value),
+            Self::Initializer(_) => {
+                Err("selected associated value is not a completed Type template".into())
+            }
+        }
+    }
+}
+
 impl World<'_> {
     fn check_associated_formation(
         &self,
@@ -113,7 +166,18 @@ impl World<'_> {
         projection: &Term,
         budget: &mut Budget,
     ) -> Result<(AssociatedTypeResolution, usize), QueryError> {
-        self.resolve_associated_type_using(
+        let value = self
+            .prepare_associated_type_metered(projection, budget)?
+            .ready()?;
+        Ok((value, budget.steps))
+    }
+
+    pub fn prepare_associated_type_metered(
+        &self,
+        projection: &Term,
+        budget: &mut Budget,
+    ) -> Result<TypeProjection, QueryError> {
+        self.prepare_associated_type_using(
             projection,
             budget,
             &mut |interface, subject, allowance| {
@@ -122,7 +186,7 @@ impl World<'_> {
         )
     }
 
-    fn resolve_associated_type_using(
+    fn prepare_associated_type_using(
         &self,
         projection: &Term,
         budget: &mut Budget,
@@ -131,7 +195,7 @@ impl World<'_> {
             &Term,
             &mut Budget,
         ) -> Result<crate::capabilities::Resolution, QueryError>,
-    ) -> Result<(AssociatedTypeResolution, usize), QueryError> {
+    ) -> Result<TypeProjection, QueryError> {
         charge_projection_copy(projection, &mut budget.steps)?;
         projection.check_scope(&[]).map_err(|e| e.to_string())?;
         let Term::AssociatedType {
@@ -154,8 +218,7 @@ impl World<'_> {
             budget,
             resolve,
         )?;
-        let result = selected.complete_type(&mut budget.steps)?;
-        Ok((result, budget.steps))
+        selected.prepare_type(projection, budget)
     }
 }
 
@@ -179,6 +242,8 @@ impl fmt::Display for AssociatedTypeResolution {
 pub struct AssociatedTypeNormalization {
     pub value: Term,
     pub steps: Vec<AssociatedTypeStep>,
+    /// Closed program reads retained for source dispatch in this traversal.
+    pub initializer_dependencies: Vec<Term>,
 }
 #[derive(Clone, Debug)]
 pub struct AssociatedTypeStep {
@@ -189,6 +254,8 @@ pub struct AssociatedTypeStep {
 #[derive(Clone, Copy)]
 enum ProjectionView {
     ConcreteType,
+    DispatchType,
+    DispatchScopedType,
     ScopedType,
     ScopedOperand,
 }
@@ -280,6 +347,34 @@ impl World<'_> {
             .map(|(value, _, _)| value)
     }
 
+    /// Collect declaration dependencies for source invocation. A selected
+    /// initializer remains a projection for the VM to observe with its inputs.
+    pub fn dispatch_type_view_metered(
+        &self,
+        ty: &Term,
+        budget: &mut Budget,
+    ) -> Result<AssociatedTypeNormalization, QueryError> {
+        self.normalize_associated_types_mode(ty, budget, ProjectionView::DispatchType, None, None)
+            .map(|(view, _, _)| view)
+    }
+
+    pub fn staged_dispatch_type_view_cached_metered(
+        &self,
+        ty: &Term,
+        budget: &mut Budget,
+        cache: &mut std::collections::HashMap<Term, Term>,
+    ) -> Result<AssociatedTypeNormalization, QueryError> {
+        let (value, _, completed) = self.normalize_associated_types_mode(
+            ty,
+            budget,
+            ProjectionView::DispatchScopedType,
+            Some(cache),
+            None,
+        )?;
+        cache.extend(completed);
+        Ok(value)
+    }
+
     /// Reuse completed views in one immutable world. Failed queries return
     /// their remaining work but publish none of their newly completed children.
     pub fn associated_type_view_cached_metered(
@@ -357,57 +452,138 @@ impl World<'_> {
         ),
         QueryError,
     > {
-        let preserve_given = !matches!(mode, ProjectionView::ConcreteType);
-        let mut normalizer = Normalizer {
-            world: self,
-            resolve,
-            preserve_given,
-            budget: *budget,
-            remaining: budget.steps,
-            active: std::collections::HashSet::new(),
-            completed: std::collections::HashMap::new(),
-            shared,
-            steps: Vec::new(),
-            frames: if preserve_given {
-                self.context.scope().to_vec()
-            } else {
-                Vec::new()
+        normalize_type_in(
+            &mut PassiveProjectionWorld {
+                world: *self,
+                resolve,
             },
-        };
-        let result = (|| {
-            normalizer.charge_copy(ty)?;
-            ty.check_scope(&normalizer.frames)
-                .map_err(|e| e.to_string())?;
-            if !matches!(mode, ProjectionView::ScopedOperand) && ty.sort() != nir::Sort::Type {
-                return Err("associated normalization requires a Type".into());
-            }
-            let value = normalizer.normalize(ty, 0)?;
-            value
-                .check_scope(&normalizer.frames)
-                .map_err(|e| e.to_string())?;
-            Ok((
-                AssociatedTypeNormalization {
-                    value,
-                    steps: std::mem::take(&mut normalizer.steps),
-                },
-                normalizer.remaining,
-                std::mem::take(&mut normalizer.completed),
-            ))
-        })();
-        budget.steps = normalizer.remaining;
-        result
+            ty,
+            budget,
+            mode,
+            shared,
+        )
     }
 }
 
-struct Normalizer<'a, 'w, 'r> {
-    resolve: Option<
-        &'r mut dyn FnMut(
-            &InterfaceInstance,
-            &Term,
-            &mut Budget,
-        ) -> Result<crate::capabilities::Resolution, QueryError>,
-    >,
-    world: &'a World<'w>,
+/// Supplies the declaration world for each query. The traversal owns its
+/// frames and completed projections while the requesting context services a read.
+pub trait TypeProjectionEnvironment {
+    fn world(&self) -> World<'_>;
+    fn resolve_type(
+        &mut self,
+        projection: &Term,
+        budget: &mut Budget,
+    ) -> Result<TypeProjection, QueryError>;
+}
+
+type InstanceResolver<'a> = dyn FnMut(
+        &InterfaceInstance,
+        &Term,
+        &mut Budget,
+    ) -> Result<crate::capabilities::Resolution, QueryError>
+    + 'a;
+
+struct PassiveProjectionWorld<'w, 'r> {
+    world: World<'w>,
+    resolve: Option<&'r mut InstanceResolver<'r>>,
+}
+
+impl TypeProjectionEnvironment for PassiveProjectionWorld<'_, '_> {
+    fn world(&self) -> World<'_> {
+        self.world
+    }
+    fn resolve_type(
+        &mut self,
+        projection: &Term,
+        budget: &mut Budget,
+    ) -> Result<TypeProjection, QueryError> {
+        if let Some(resolve) = self.resolve.as_deref_mut() {
+            self.world
+                .prepare_associated_type_using(projection, budget, resolve)
+        } else {
+            self.world
+                .prepare_associated_type_metered(projection, budget)
+        }
+    }
+}
+
+pub fn scoped_type_view_in(
+    environment: &mut impl TypeProjectionEnvironment,
+    ty: &Term,
+    budget: &mut Budget,
+) -> Result<AssociatedTypeNormalization, QueryError> {
+    normalize_type_in(environment, ty, budget, ProjectionView::ScopedType, None)
+        .map(|(view, _, _)| view)
+}
+
+fn normalize_type_in(
+    environment: &mut impl TypeProjectionEnvironment,
+    ty: &Term,
+    budget: &mut Budget,
+    mode: ProjectionView,
+    shared: Option<&std::collections::HashMap<Term, Term>>,
+) -> Result<
+    (
+        AssociatedTypeNormalization,
+        usize,
+        std::collections::HashMap<Term, Term>,
+    ),
+    QueryError,
+> {
+    let preserve_given = !matches!(
+        mode,
+        ProjectionView::ConcreteType | ProjectionView::DispatchType
+    );
+    let environment_scope = environment.world().context.scope();
+    let frames = if preserve_given {
+        environment_scope.to_vec()
+    } else {
+        Vec::new()
+    };
+    let mut normalizer = Normalizer {
+        environment,
+        retain_programs: matches!(
+            mode,
+            ProjectionView::DispatchType | ProjectionView::DispatchScopedType
+        ),
+        preserve_given,
+        budget: *budget,
+        remaining: budget.steps,
+        active: std::collections::HashSet::new(),
+        completed: std::collections::HashMap::new(),
+        shared,
+        steps: Vec::new(),
+        initializer_dependencies: Vec::new(),
+        frames,
+    };
+    let result = (|| {
+        normalizer.charge_copy(ty)?;
+        ty.check_scope(&normalizer.frames)
+            .map_err(|e| e.to_string())?;
+        if !matches!(mode, ProjectionView::ScopedOperand) && ty.sort() != nir::Sort::Type {
+            return Err("associated normalization requires a Type".into());
+        }
+        let value = normalizer.normalize(ty, 0)?;
+        value
+            .check_scope(&normalizer.frames)
+            .map_err(|e| e.to_string())?;
+        Ok((
+            AssociatedTypeNormalization {
+                value,
+                steps: std::mem::take(&mut normalizer.steps),
+                initializer_dependencies: std::mem::take(&mut normalizer.initializer_dependencies),
+            },
+            normalizer.remaining,
+            std::mem::take(&mut normalizer.completed),
+        ))
+    })();
+    budget.steps = normalizer.remaining;
+    result
+}
+
+struct Normalizer<'a, E> {
+    environment: &'a mut E,
+    retain_programs: bool,
     preserve_given: bool,
     budget: Budget,
     remaining: usize,
@@ -415,9 +591,10 @@ struct Normalizer<'a, 'w, 'r> {
     completed: std::collections::HashMap<Term, Term>,
     shared: Option<&'a std::collections::HashMap<Term, Term>>,
     steps: Vec<AssociatedTypeStep>,
+    initializer_dependencies: Vec<Term>,
     frames: Vec<Vec<nir::Sort>>,
 }
-impl Normalizer<'_, '_, '_> {
+impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
     fn spend(&mut self, steps: usize) -> Result<(), QueryError> {
         self.remaining = self
             .remaining
@@ -491,7 +668,8 @@ impl Normalizer<'_, '_, '_> {
                         unreachable!()
                     };
                     let contract = self
-                        .world
+                        .environment
+                        .world()
                         .traits
                         .iter()
                         .find(|t| t.declaration == origin.interface)
@@ -506,7 +684,7 @@ impl Normalizer<'_, '_, '_> {
                         .iter()
                         .find(|m| m.declaration == origin.member)
                         .ok_or("associated Type query member does not belong to its interface")?;
-                    self.charge_copy(&member.ty)?;
+                    charge_projection_copy(&member.ty, &mut self.remaining)?;
                     let inputs = std::iter::once(subject.as_ref().clone())
                         .chain(arguments.iter().cloned())
                         .collect::<Vec<_>>();
@@ -539,7 +717,7 @@ impl Normalizer<'_, '_, '_> {
                 }
                 self.charge_copy(&key)?;
                 let mut incomplete_given: Option<String> = None;
-                if self.preserve_given && !self.world.assumptions.is_empty() {
+                if self.preserve_given && !self.environment.world().assumptions.is_empty() {
                     let Term::AssociatedType {
                         origin,
                         subject,
@@ -555,7 +733,7 @@ impl Normalizer<'_, '_, '_> {
                     if closure_budget.steps == 0 {
                         return Err(QueryError::Budget);
                     }
-                    let closed = self.world.closed_inputs_metered(
+                    let closed = self.environment.world().closed_inputs_metered(
                         std::iter::once(subject.as_ref()).chain(arguments),
                         &mut closure_budget,
                     );
@@ -586,7 +764,8 @@ impl Normalizer<'_, '_, '_> {
                         // callable frames belong to the observed type, not to
                         // those premises, so use the world's original context.
                         let found = self
-                            .world
+                            .environment
+                            .world()
                             .given_in_context_metered(&given, &mut given_budget);
                         // A failed premise lookup may consume very little work.
                         // Charging its whole allowance starves nested projections.
@@ -610,7 +789,8 @@ impl Normalizer<'_, '_, '_> {
                     };
                     if preserve {
                         let contract = self
-                            .world
+                            .environment
+                            .world()
                             .traits
                             .iter()
                             .find(|t| t.declaration == origin.interface)
@@ -627,7 +807,7 @@ impl Normalizer<'_, '_, '_> {
                             .ok_or(
                                 "associated Type query member does not belong to its interface",
                             )?;
-                        self.charge_copy(&member.ty)?;
+                        charge_projection_copy(&member.ty, &mut self.remaining)?;
                         let inputs: Vec<_> = std::iter::once(subject.as_ref().clone())
                             .chain(arguments.iter().cloned())
                             .collect();
@@ -662,15 +842,19 @@ impl Normalizer<'_, '_, '_> {
                         steps: self.remaining,
                         ..self.budget
                     };
-                    let resolved = if let Some(resolve) = self.resolve.as_deref_mut() {
-                        self.world
-                            .resolve_associated_type_using(&key, &mut allowance, resolve)
-                    } else {
-                        self.world
-                            .resolve_associated_type_budgeted(&key, &mut allowance)
-                    };
+                    let resolved = self.environment.resolve_type(&key, &mut allowance);
                     self.remaining = allowance.steps;
-                    let (resolution, _) = resolved.map_err(|error| match error {
+                    let resolution = match resolved {
+                        Ok(TypeProjection::Initializer(work)) if self.retain_programs || (self.preserve_given && work.needs_inputs()) => {
+                            if self.retain_programs && !work.needs_inputs() {
+                                self.charge_copy(&key)?;
+                                self.initializer_dependencies.push(key.clone());
+                            }
+                            self.charge_copy(&key)?;
+                            return Ok(key.clone());
+                        }
+                        other => other.and_then(TypeProjection::ready),
+                    }.map_err(|error| match error {
                         QueryError::Budget => QueryError::Budget,
                         QueryError::Invalid(message) => QueryError::Invalid(format!(
                             "associated Type normalization of {key}: {message}"
@@ -883,7 +1067,15 @@ impl fmt::Display for AssociatedTypeNormalization {
         for step in &self.steps {
             write!(f, " {step}")?;
         }
-        f.write_str("))")
+        f.write_str(")")?;
+        if !self.initializer_dependencies.is_empty() {
+            f.write_str(" (initializer-dependencies")?;
+            for key in &self.initializer_dependencies {
+                write!(f, " {key}")?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(")")
     }
 }
 

@@ -63,3 +63,11 @@ VM 在绑定实参前会遍历签名，按节点与载荷扣除预算，并检�
 设 `Selected(enabled)` 根据一个 bool 参数返回 bool 或 char。把它作为 `trait Source where enabled: bool` 中 `assoc Item: Type` 的默认值时，声明处已经知道结果属于 Type，分支选择仍依赖具体的 enabled。在基线 `deabc828`，仅检查这个声明就会尝试解释抽象的 enabled，报 `AbstractValueUnresolved`。现在泛型实现可保存检查并替换过的初始化程序；读取 `Holder<true>.as(Source<true>).Item` 作为局部注解或类型别名时，由该处的 required comptime 求值取得具体结果。若分支返回 `Wrapped<bool>`，交付的身份仍含 Wrapped 的 normal-form 头。[定义与选择](../compiler/elaboration/src/program/interfaces/associated.rs) · [经源码验证的实例](../compiler/luna/tests/deferred_associated_values.rs)
 
 当前的取舍是继续向只读的签名查询提供已完成的闭合 Type。以同一个 Source 为例，若泛型函数的参数为 `T.as(Source<flag>).Item`，调用处提供 `true`、`Holder<true>` 和实参 `true`，签名特化仍会在选中初始化程序时报告 `selected associated value is not a completed Type template`。自举时，选中程序的查询需要把完整接口实例、接收者和成员身份交还给 elaboration；由请求方承担求值的预算、失败与生成定义的发布，再用结果继续检查该次调用。直接在 PTC 内运行初始化程序会使只读类型查询承担这些职责。[当前签名查询](../compiler/elaboration/src/program/interfaces/values.rs) · [只读投影](../compiler/type_resolution/src/associated/values.rs)
+
+## 2026-11-21 · 泛型调用中由谁执行关联类型程序
+
+`keep<false, Holder<false>>('n')` 的参数和返回值可以同为 `T.as(Source<flag>).Item`。在上一个阶段，类型别名能读出 char，同一投影一旦出现在函数签名却会在检查实参前失败。这次将单步选择的结果区分为已完成的类型和持有实现证据的初始化程序。遍历一份签名时，elaboration 遇到输入已齐的程序，借当前源码位置发起 required comptime invocation，再从该投影继续遍历。参数和返回值重复读取同一投影时共享这次遍历的结果。若接收者为 `Holder<flag>`，即使它已经匹配到泛型 impl，初始化器也仍然要等 flag 绑定。显式输入和普通 comptime 参数两种调用路径均有源码用例。[调用端](../compiler/elaboration/src/program/interfaces/call_types.rs) · [闭包捕获与依赖参数用例](../compiler/luna/tests/deferred_associated_values.rs)
+
+源码 VM 还需要能执行这个程序。收集 dispatch 时将闭合投影及其所选程序保留为依赖，闭包构造检查具体捕获值时才向 VM 索取结果。例如同一个泛型闭包分别可以捕获 bool 和 char。闭包的保留值检查与具体 IIR 查询继续只读已交付的证据；缺失证据时不能把尚未执行的程序视为类型等式。[依赖收集](../compiler/materialization/src/lib.rs) · [VM 的捕获检查](../compiler/comptime_interpretor/src/selected_types/observation_tests.rs)
+
+自举时有两笔开销值得处理。请求方交付具体的接口实例、接收者与成员，required VM 会在自己的声明快照里重新验证选择；当前节省了复制整个声明世界，代价是两次选择。逻辑查询使用类型查询预算，程序运行使用调用者的 required comptime 预算。运行时泛型函数的源码检查现在也可以完成，但具体 IIR 冻结仍缺少交付已观察类型的通道：把上例中的 `keep` 和入口改成 runtime 函数，实例化时仍报告 `selected associated value is not a completed Type template`。后续交付须保留完整选择依据、生成定义的身份以及求值失败的来源，避免在只读 IIR 查询中再执行用户代码。

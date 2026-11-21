@@ -212,6 +212,17 @@ impl Interpreter<'_> {
         ty: &Term,
         source: Option<SourceRange>,
     ) -> Result<(), Error> {
+        let observed;
+        let ty = if self.comptime_only
+            && self.graph.is_none()
+            && matches!(ty, Term::AssociatedType { .. })
+            && !matches!(value, Value::AbstractValue { .. })
+        {
+            observed = self.selected_type_view(ty, source)?;
+            &observed
+        } else {
+            ty
+        };
         let mut obligations = Vec::new();
         self.check_value_shape(
             value,
