@@ -11763,3 +11763,50 @@ fn generator_observes_nested_calls_before_reading_the_next_field() {
     "#;
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn factory_exits_join_return_values_and_receiver_snapshots() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Cell { item: Type }
+        struct Pair { old: Type, new_value: Type }
+        impl Cell {
+            comptime fn Exchange(self, early: bool) -> Type {
+                let old = self.item;
+                if early { self.item = After; return old; }
+                self.item = After;
+                old
+            }
+            comptime fn reset(self, early: bool) {
+                if early { self.item = Before; return; }
+                self.item = Before;
+            }
+        }
+        comptime fn describe(early: bool) -> Pair {
+            var cell = Cell { item: After };
+            cell.reset(early);
+            Pair { old: cell.Exchange(early), new_value: cell.item }
+        }
+        comptime fn generate(early: bool) -> <|-bool> {
+            let data = describe(early);
+            let A = data.old;
+            let B = data.new_value;
+            '(A { first: true }.first and B { second: true }.second)
+        }
+        fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let unused = source.replace("~<generate(true)> and ~<generate(false)>", "true");
+    for wrong in [
+        "self.item = Before; return old;",
+        "self.item = After; return After;",
+    ] {
+        let bad = unused.replace("self.item = After; return old;", wrong);
+        let failure = sysroot::compile(&bad).unwrap_err();
+        assert!(
+            failure.contains("identity") || failure.contains("field"),
+            "{failure}"
+        );
+    }
+}

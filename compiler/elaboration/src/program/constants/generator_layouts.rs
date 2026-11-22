@@ -183,7 +183,7 @@ impl Checker<'_, '_> {
             }
             observed
         } else {
-            step.advanced = self.structural_statement(expr, frame, site.span, 0)?;
+            step.advanced = self.structural_value(expr, frame, site.span, 0)?.is_some();
             None
         };
         self.generator_schema_step = Some(step);

@@ -3,6 +3,8 @@
 use super::*;
 use std::sync::Arc;
 
+mod flow;
+
 impl Checker<'_, '_> {
     pub(in crate::program) fn record_generator_initializer(
         &mut self,
@@ -170,24 +172,23 @@ impl Checker<'_, '_> {
             else {
                 return Ok(None);
             };
-            let Some(result) =
-                self.structural_region_result(&function.body, &mut frame, span, depth, true)?
+            let receiver = writeback
+                .as_ref()
+                .map(|(index, _)| function.parameters[*index]);
+            let Some(exit) =
+                self.observe_factory_body(&function.body, &mut frame, receiver, span, depth)?
             else {
                 return Ok(None);
             };
-            if let Some((index, place)) = writeback {
-                let Some(updated) = function
-                    .parameters
-                    .get(index)
-                    .and_then(|id| frame.values.get(id))
-                else {
+            if let Some((_, place)) = writeback {
+                let Some(updated) = exit.receiver else {
                     return Ok(None);
                 };
                 if !self.schema_fuel(span, |this, fuel| {
                     update_place(
                         caller.unwrap(),
                         &place,
-                        updated.clone(),
+                        updated,
                         this.protocols.meta_list,
                         fuel,
                     )
@@ -195,182 +196,12 @@ impl Checker<'_, '_> {
                     return Ok(None);
                 }
             }
-            Ok(Some(result))
+            Ok(Some(exit.value))
         })();
         if !generated {
             self.observing_factory_bodies.remove(&owner.unwrap());
         }
         result
-    }
-
-    pub(super) fn structural_value(
-        &mut self,
-        expr: &n::Expr,
-        scope: &mut ObservationScope,
-        span: Span,
-        depth: usize,
-    ) -> Result<Option<Arc<PartialStagedValue>>, Error> {
-        if depth >= 64 {
-            return Ok(None);
-        }
-        if matches!(expr.kind, K::Block { .. } | K::CallPreparation { .. }) {
-            let mut inner = self.schema_fuel(span, |_, fuel| scope.fork(fuel))?;
-            let result = self.structural_region_result(expr, &mut inner, span, depth + 1, false)?;
-            if result.is_some() {
-                self.schema_fuel(span, |_, fuel| {
-                    inner.retain(|id| scope.values.contains_key(id), fuel)
-                })?;
-                *scope = inner;
-            }
-            return Ok(result);
-        }
-        if let K::If {
-            condition,
-            then_branch,
-            else_branch,
-        } = &expr.kind
-        {
-            return self.structural_if(
-                condition,
-                then_branch,
-                else_branch.as_deref(),
-                scope,
-                span,
-                depth + 1,
-            );
-        }
-        if let K::BuildStruct(packet) = &expr.kind {
-            return self.observe_built_struct(packet, scope, span);
-        }
-        if matches!(expr.kind, K::Call { .. }) {
-            return self.structural_call(expr, Some(scope), span, depth + 1);
-        }
-        if let Some(read) = self.schema_fuel(span, |this, fuel| {
-            if !structural_operand(expr, Some(scope), fuel)? {
-                return Ok(None);
-            }
-            this.partial_staged_value_in(expr, 0, fuel, scope).map(Some)
-        })? {
-            return Ok(Some(read));
-        }
-        let Some((shape, fields)) =
-            self.schema_fuel(span, |this, fuel| this.staged_aggregate_parts(expr, fuel))?
-        else {
-            return Ok(None);
-        };
-        // Field expressions in checked NIR are already in evaluation order.
-        // A nested call can update a receiver used by the following field.
-        let mut observed = Vec::new();
-        for field in fields {
-            let Some(value) = self.structural_value(field, scope, span, depth + 1)? else {
-                return Ok(None);
-            };
-            observed.push(value);
-        }
-        Ok(Some(PartialStagedValue::from_fields(shape, observed)))
-    }
-
-    fn structural_if(
-        &mut self,
-        condition: &n::Expr,
-        yes: &n::Expr,
-        no: Option<&n::Expr>,
-        scope: &mut ObservationScope,
-        span: Span,
-        depth: usize,
-    ) -> Result<Option<Arc<PartialStagedValue>>, Error> {
-        let Some(condition) = self.structural_value(condition, scope, span, depth)? else {
-            return Ok(None);
-        };
-        let otherwise = |this: &mut Self, frame: &mut ObservationScope| match no {
-            Some(no) => this.structural_value(no, frame, span, depth),
-            None => Ok(Some(PartialStagedValue::known(Term::Unit))),
-        };
-        match condition.known_term() {
-            Some(Term::Bool(true)) => return self.structural_value(yes, scope, span, depth),
-            Some(Term::Bool(false)) => return otherwise(self, scope),
-            _ => {}
-        }
-        let mut alternative = self.schema_fuel(span, |_, fuel| scope.fork(fuel))?;
-        let Some(left) = self.structural_value(yes, scope, span, depth)? else {
-            return Ok(None);
-        };
-        let Some(right) = otherwise(self, &mut alternative)? else {
-            return Ok(None);
-        };
-        self.schema_fuel(span, |this, fuel| {
-            scope.join(&alternative, this.protocols.meta_list, fuel)?;
-            PartialStagedValue::common(&left, &right, this.protocols.meta_list, 0, fuel).map(Some)
-        })
-    }
-
-    fn structural_region_result(
-        &mut self,
-        mut expr: &n::Expr,
-        scope: &mut ObservationScope,
-        span: Span,
-        depth: usize,
-        function_tail: bool,
-    ) -> Result<Option<Arc<PartialStagedValue>>, Error> {
-        loop {
-            self.required_steps = self
-                .required_steps
-                .checked_sub(1)
-                .ok_or_else(|| error(span, "structural call observation budget exhausted"))?;
-            match &expr.kind {
-                K::Block { statements, result } | K::CallPreparation { statements, result } => {
-                    for statement in statements {
-                        let statement = match &statement.kind {
-                            K::Discard(value) => value.as_ref(),
-                            _ => statement,
-                        };
-                        if !self.structural_statement(statement, scope, span, depth)? {
-                            return Ok(None);
-                        }
-                    }
-                    let Some(tail) = result else {
-                        return Ok(Some(PartialStagedValue::known(Term::Unit)));
-                    };
-                    expr = tail;
-                }
-                // A return inside a branch exits the whole factory. Only its
-                // outer tail can consume that transfer as a successful value.
-                K::Return(Some(value)) if function_tail => expr = value,
-                K::Assign { .. } => {
-                    return Ok(self
-                        .structural_statement(expr, scope, span, depth)?
-                        .then(|| PartialStagedValue::known(Term::Unit)));
-                }
-                _ => return self.structural_value(expr, scope, span, depth),
-            }
-        }
-    }
-
-    pub(super) fn structural_statement(
-        &mut self,
-        expr: &n::Expr,
-        scope: &mut ObservationScope,
-        span: Span,
-        depth: usize,
-    ) -> Result<bool, Error> {
-        match &expr.kind {
-            K::Let { binding, value } => {
-                let Some(value) = self.structural_value(value, scope, span, depth)? else {
-                    return Ok(false);
-                };
-                self.schema_fuel(span, |_, fuel| scope.insert(*binding, value, fuel))?;
-                Ok(true)
-            }
-            K::Assign { place, value } => {
-                let Some(value) = self.structural_value(value, scope, span, depth)? else {
-                    return Ok(false);
-                };
-                self.schema_fuel(span, |this, fuel| {
-                    update_place(scope, place, value, this.protocols.meta_list, fuel)
-                })
-            }
-            _ => Ok(self.structural_value(expr, scope, span, depth)?.is_some()),
-        }
     }
 }
 
