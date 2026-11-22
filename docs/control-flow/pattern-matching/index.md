@@ -845,7 +845,13 @@ fn same_pair(value: Repeated) -> bool {
 
 驱动通过 `Protocols.list_pattern` 或包限定的 `Selectors.list_pattern` 绑定 trait 身份；sysroot 配置键为 `list-pattern-protocol`。仅将 trait 命名为 ListPatternView 不会自动注册。检查器验证 `Element`、两个方法的引用接收者以及编译期索引参数。完整 sysroot 已提供并默认绑定 `builtin.ListPatternView`，同时经 builtin.prelude 导出；其长度与索引使用 `usize`，主机编译路径提供实际目标宽度。用户只需实现该协议，不必重复声明或传入绑定参数。显式驱动绑定仍可选择替代协议，长度与索引须使用同一个受支持的无符号类型，生成常量时按该类型检查范围；没有目标宽度依据时，不能猜测 `usize` 的布局。
 
-这些方法仍是普通受检调用。资源检查要求候选中的指针输入具有已知来源，调用的内存摘要不能写入调用者内存，也不能包含尚未验证的清理；规格拒绝不能被吞成“模式不匹配”。主体在候选失败后保持可用，成功或退出后按正常规则清理。覆盖检查不会执行用户方法，使用该协议的值匹配通常仍需 `_` 后备臂。
+这些方法仍是普通受检调用。资源检查要求候选中的指针输入具有已知来源，调用的内存摘要不能写入调用者内存，也不能包含尚未验证的清理；规格拒绝不能被吞成“模式不匹配”。主体在候选失败后保持可用，成功或退出后按正常规则清理。对一般不纯（impure）的 `ListPatternView` 实现，覆盖检查不会假设跨候选观察幂等，仍保留每候选重新观察语义，并继续要求 `_` 后备臂。
+
+完整 sysroot 在 `builtin.protocols.patterns` 中同时提供了默认尾部切片能力与稳定性标记协议：
+
+- `builtin.ListPatternView` 定义了带默认值的 `assoc Rest: Type = Self;` 与未实现时发散的默认 `fn list_pattern_view_rest(*self, comptime start: usize) -> Rest`；需要具名 `...rest` 的实现通过覆盖该方法返回尾部视图（仅使用通配符 `..._` 时无需覆盖）。
+- `std.collections.Slice<T>`（同时经 `std.prelude` 导出）与 `std.collections.Vec<T, .A, .allocator>`（包括默认和自定义 allocator 实例）在 `T :- Copy` 下实现 `ListPatternView`，并将 `assoc Rest = Slice<T>`，`list_pattern_view_rest(*self, start)` 返回从 `start` 起的不可变切片。
+- `builtin.StableListPatternView`（`pub trait StableListPatternView :- ListPatternView {}`，sysroot 配置键为 `stable-list-pattern-protocol`，CLI 选项为 `--stable-list-pattern-protocol`）声明该视图的长度观测与元素/尾部提取跨候选臂稳定且无副作用；`Slice<T>` 与 `Vec<T, .A, .allocator>` 默认实现该协议。
 
 使用默认协议的完整示例见 [sysroot-list-patterns.fl](../../../development/examples/sysroot-list-patterns.fl)，
 通过 `python3 -B development/library_check.py --release --stage sysroot-patterns` 执行。
@@ -945,6 +951,17 @@ comptime fn First(types: meta.List<Type>) -> Type {
 
 这些结构可以组合。例如提取结果为 `Tuple<Item, bool>` 时，可用 `[({value: first}, flag)]` 匹配；检查会同时要求外层 Tuple 与内层 Item 的 Copy 依据，并递归检查 Item 的字段。结构检查使用 Tuple 的布局视图，不展开其 normal-form 头。
 
-忽略尾部的 `[first, second, ..._]` 已接通：先检查长度至少为 2，再依次提取前两项；不会提取或构造被忽略的尾部。`[..._]` 只执行长度观察，不提取元素。runtime 与 comptime 使用相同的前缀规则，失败候选仍按上述规则撤销绑定并重试。rest 必须位于列表末尾，且只能出现一次。
+忽略尾部的 `[first, second, ..._]` 与具名 `...rest` 已在编译期与运行时接通：先检查长度满足最小前缀长度，再依次提取前缀项，仅当存在具名 `...rest` 且实现覆盖了 `list_pattern_view_rest` 时提取尾部；未覆盖默认切片方法的实现使用 `..._` 仍可工作，使用具名 `...rest` 则会报告 `"list rest patterns require a slicing protocol"`。runtime 与 comptime 使用相同的前缀与或分支绑定规则，失败候选仍按前述规则撤销绑定并重试。rest 必须位于列表末尾，且只能出现一次。
 
-当前尚未完成 endless 模式、具名 `...rest` 所需的尾部切片协议和拥有资源的提取结果。具名 rest 会保留到 HIR，并明确报告尚缺切片协议。未经过资源检查的解释结果仍不能当成可执行承诺。
+#### 列表/切片模式与 `pattern_automata` 的单次观察与穷尽性分析
+
+`elaboration` 已将匹配检查接入 `pattern_automata` 决策 DAG 编译器，并与 `ListPatternView` 的稳定性分级（A1）保持严格边界：
+
+1. **三类可进行单次观察与 `LenInterval` 穷尽性分析的列表视图**（`nir::match_plan::ListObservationMode`）：
+   - `Comptime`：实现 `meta.ComptimeListPatternView`（含 `meta.List<T>`）的编译期匹配。
+   - `PureMethods`：runtime `ListPatternView` 实现中实际参与匹配的必需方法（`list_pattern_view_get_len`、`list_pattern_view_get_element`，以及使用具名 `...rest` 时的 `list_pattern_view_rest`）全部标记 `pure fn`。
+   - `StableProtocol`：实现了 `builtin.StableListPatternView` 的 runtime 类型（含 `std.collections.Slice<T>`、`std.collections.Vec<T, .A, .allocator>` 及用户显式声明的稳定视图）。
+2. **不纯的通用 `ListPatternView`**：若未实现 `StableListPatternView` 且存在非 `pure fn` 的必需方法，则不纳入 `ListViewOps`，保留逐候选重新观察，并继续要求 `_` 后备臂；同一匹配路径上若混用稳定列表臂与不纯列表臂或结构体记录臂，编译器保守拒绝单次观察特化。
+3. **跨元素分析、反例见证与 `MatchPlans` 导出**：对上述三类稳定视图，编译器无需 `_` 即可基于 `LenInterval` 及内层 Tuple/Optional/ErrorRow/Enum/Bool 构造函数完成联合穷尽性证明（例如 `[]`、`[x]`、`[x, y, ...rest]` 或 `(bool, meta.List<bool>)` / `?meta.List<T>`）；当转换精确且缺少分支时，报错会补充 Flurry 语法反例见证（如 `missing pattern(s): [0]`、`missing pattern(s): [false]`、`missing pattern(s): (false, [])`）；冗余死分支则作为元数据记录在 `MatchPlan.unreachable_arms`，暂不作为编译错误拒绝。编译生成的 `MatchPlan` / `MatchPlans`（带 Lisp S-expression `Display`）随 `nir::program::Package` 经上游增量缓存（`CachedUpstreamFunction`）和 `materialization` 一致交付至 `iir::Package::match_plans`。
+
+当前尚未完成 `host/llvm` 按 `iir::Package::match_plans` 直接生成决策 DAG 的后端降码路径（运行时代码生成当前仍执行原有事务性 NIR 匹配树），以及 endless 模式、拥有资源的非 `Copy` 元素提取、`TuplePatternView`、映射和字符串模式协议。未经过资源检查的解释结果仍不能当成可执行承诺。
