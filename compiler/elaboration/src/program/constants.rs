@@ -534,6 +534,9 @@ impl Checker<'_, '_> {
             if let Some(value) = scope.values.get(&binding) {
                 return Ok(value.clone());
             }
+            if scope.unknown_outer_locals {
+                return Ok(PartialStagedValue::unknown());
+            }
             if self.locals.contains_key(&binding)
                 && let Some(value) = self.input_facts.partial.get(&binding)
             {

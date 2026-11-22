@@ -258,6 +258,10 @@ impl PartialStagedValue {
 /// copied; known terms are supplied only to the existing structural inspector.
 #[derive(Clone, Default)]
 pub(super) struct ObservationScope {
+    // A straight-line fragment may read data from its surrounding generator.
+    // Untracked reads there contribute unknown values. Factory frames are
+    // closed over their explicitly bound parameters and local definitions.
+    pub(super) unknown_outer_locals: bool,
     pub(super) values: BTreeMap<n::LocalId, Arc<PartialStagedValue>>,
     pub(super) known: BTreeMap<n::LocalId, Arc<Term>>,
 }

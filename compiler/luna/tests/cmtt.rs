@@ -11566,3 +11566,18 @@ fn generator_restarts_field_observation_after_control_flow() {
     let failure = sysroot::compile(&stale).unwrap_err();
     assert!(failure.contains("result identity known during definition checking"), "{failure}");
 }
+
+#[test]
+fn generated_struct_layout_is_independent_of_its_supplied_name() {
+    let source = include_str!("../../../development/repros/builder-local-type-in-quote.fl")
+        .replace("fn generate()", "fn generate(name: Symbol)")
+        .replace("(.name = .QuoteLocal)", "(.name = name)")
+        .replace("~<generate()>", "~<generate(.First)> and ~<generate(.Second)>");
+    let package = sysroot::compile(&source).unwrap();
+    let generated = |name| package.structs.iter().find(|s| s.name == name).unwrap().declaration;
+    assert_ne!(generated("First"), generated("Second"));
+    assert_eq!(
+        luna::execution::interpret(&package, "run", 1_000_000).unwrap(),
+        Value::Bool(true)
+    );
+}

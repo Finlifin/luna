@@ -3,9 +3,19 @@
 use super::*;
 use std::sync::Arc;
 
-#[derive(Default)]
 pub(in crate::program) struct SchemaSequence {
     frame: ObservationScope,
+}
+
+impl Default for SchemaSequence {
+    fn default() -> Self {
+        Self {
+            frame: ObservationScope {
+                unknown_outer_locals: true,
+                ..Default::default()
+            },
+        }
+    }
 }
 
 pub(in crate::program) struct SchemaStep {
@@ -143,7 +153,7 @@ impl Checker<'_, '_> {
         else {
             return Ok(None);
         };
-        let description = self.schema_fuel(span, |this, fuel| {
+        let fields = self.schema_fuel(span, |this, fuel| {
             if !super::structural_calls::structural_operand(packet, Some(scope), fuel)? {
                 return Ok(None);
             }
@@ -153,10 +163,7 @@ impl Checker<'_, '_> {
             let Some((PartialStagedShape::Tuple, entries)) = packet.aggregate(head) else {
                 return Ok(None);
             };
-            let [name, labels, types] = entries.as_slice() else {
-                return Ok(None);
-            };
-            let Some(Term::Symbol(name)) = name.known_term() else {
+            let [_name, labels, types] = entries.as_slice() else {
                 return Ok(None);
             };
             let Some((
@@ -197,9 +204,9 @@ impl Checker<'_, '_> {
                 }
                 fields.push((label.to_string(), ty.clone()));
             }
-            Ok(Some((name.to_string(), fields)))
+            Ok(Some(fields))
         })?;
-        let Some((name, fields)) = description else {
+        let Some(fields) = fields else {
             return Ok(None);
         };
         let binder = self.fresh_type_binder(owner, span)?;
@@ -207,7 +214,9 @@ impl Checker<'_, '_> {
             binder.declaration,
             n::Struct {
                 declaration: binder.declaration,
-                name,
+                // A diagnostic label for the scoped descriptor. The public
+                // nominal name comes from the executed construction packet.
+                name: binder.declaration.to_string(),
                 fields,
                 packed: false,
                 type_parameters: vec![],

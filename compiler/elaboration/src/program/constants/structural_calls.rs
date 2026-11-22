@@ -396,7 +396,8 @@ pub(super) fn structural_operand(
     let mut transparent = true;
     nir::visit::expression_pruned(expr, fuel, |node, _| {
         if let K::Local(id) = node.kind
-            && frame.is_some_and(|scope| !scope.values.contains_key(&id))
+            && frame
+                .is_some_and(|scope| !scope.unknown_outer_locals && !scope.values.contains_key(&id))
         {
             transparent = false;
         }
