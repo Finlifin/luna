@@ -19,7 +19,7 @@ pub(super) enum Completion {
 }
 
 impl Completion {
-    fn unit() -> Self {
+    pub(super) fn unit() -> Self {
         Self::Next(PartialStagedValue::known(Term::Unit))
     }
 
@@ -151,14 +151,40 @@ impl Checker<'_, '_> {
                 then_branch,
                 else_branch,
             } => {
-                let test = self.observe_factory_expr(condition, scope, returns, span, depth + 1)?;
-                let Completion::Next(test) = test else {
-                    return Ok(test);
-                };
-                return self.observe_factory_branches(
-                    test.known_term(),
+                return self.observe_factory_if(
+                    condition,
                     then_branch,
                     else_branch.as_deref(),
+                    scope,
+                    returns,
+                    span,
+                    depth + 1,
+                );
+            }
+            _ if super::conditions::logical_operand(expr).is_some() => {
+                return self.observe_boolean_value(expr, scope, returns, span, depth);
+            }
+            K::Not(left) if matches!(left.ty, Term::Primitive(P::BitVec(_))) => {
+                return self.observe_bit_operands(
+                    &expr.kind,
+                    left,
+                    None,
+                    scope,
+                    returns,
+                    span,
+                    depth + 1,
+                );
+            }
+            K::And(left, right)
+            | K::Or(left, right)
+            | K::BitEqual(left, right)
+            | K::BitConcat(left, right)
+                if matches!(left.ty, Term::Primitive(P::BitVec(_))) =>
+            {
+                return self.observe_bit_operands(
+                    &expr.kind,
+                    left,
+                    Some(right),
                     scope,
                     returns,
                     span,
@@ -271,38 +297,6 @@ impl Checker<'_, '_> {
         Ok(Completion::Next(PartialStagedValue::from_fields(
             shape, observed,
         )))
-    }
-
-    fn observe_factory_branches(
-        &mut self,
-        test: Option<&Term>,
-        yes: &n::Expr,
-        no: Option<&n::Expr>,
-        scope: &mut ObservationScope,
-        returns: &mut Option<Returns>,
-        span: Span,
-        depth: usize,
-    ) -> Result<Completion, Error> {
-        let otherwise = |this: &mut Self,
-                         frame: &mut ObservationScope,
-                         returns: &mut Option<Returns>| match no {
-            Some(no) => this.observe_factory_expr(no, frame, returns, span, depth),
-            None => Ok(Completion::unit()),
-        };
-        match test {
-            Some(Term::Bool(true)) => {
-                return self.observe_factory_expr(yes, scope, returns, span, depth);
-            }
-            Some(Term::Bool(false)) => return otherwise(self, scope, returns),
-            _ => {}
-        }
-        let mut alternative = self.schema_fuel(span, |_, fuel| scope.fork(fuel))?;
-        let left = self.observe_factory_expr(yes, scope, returns, span, depth)?;
-        if matches!(left, Completion::Unavailable) {
-            return Ok(left);
-        }
-        let right = otherwise(self, &mut alternative, returns)?;
-        self.merge_factory_paths(scope, left, alternative, right, span)
     }
 
     pub(super) fn merge_factory_paths(

@@ -50,7 +50,7 @@ impl Checker<'_, '_> {
                 // Only failed guards can retry a body with this same pattern.
                 failed_guard.take()
             } else {
-                self.merge_match_scope(&mut missed, failed_guard.take(), span)?;
+                self.merge_observed_scope(&mut missed, failed_guard.take(), span)?;
                 missed.take()
             };
             let Some(input) = input else { continue };
@@ -110,24 +110,6 @@ impl Checker<'_, '_> {
         Ok(first == next)
     }
 
-    fn merge_match_scope(
-        &mut self,
-        destination: &mut Option<ObservationScope>,
-        incoming: Option<ObservationScope>,
-        span: Span,
-    ) -> Result<(), Error> {
-        if let Some(frame) = incoming {
-            if let Some(existing) = destination {
-                self.schema_fuel(span, |this, fuel| {
-                    existing.join(&frame, this.protocols.meta_list, fuel)
-                })?;
-            } else {
-                *destination = Some(frame);
-            }
-        }
-        Ok(())
-    }
-
     fn observe_match_guard(
         &mut self,
         paths: &mut PatternPaths,
@@ -136,24 +118,14 @@ impl Checker<'_, '_> {
         span: Span,
         depth: usize,
     ) -> Result<bool, Error> {
-        let Some(mut matched) = paths.matched.take() else {
+        let Some(matched) = paths.matched.take() else {
             return Ok(true);
         };
-        match self.observe_factory_expr(guard, &mut matched, returns, span, depth)? {
-            Completion::Unavailable => return Ok(false),
-            Completion::Returned => {}
-            Completion::Next(value) => match value.known_term() {
-                Some(Term::Bool(true)) => paths.matched = Some(matched),
-                Some(Term::Bool(false)) => {
-                    self.merge_match_scope(&mut paths.rejected, Some(matched), span)?
-                }
-                _ => {
-                    let rejected = self.schema_fuel(span, |_, fuel| matched.fork(fuel))?;
-                    paths.matched = Some(matched);
-                    self.merge_match_scope(&mut paths.rejected, Some(rejected), span)?;
-                }
-            },
-        }
+        let Some(outcome) = self.observe_condition(guard, matched, returns, span, depth)? else {
+            return Ok(false);
+        };
+        paths.matched = outcome.when_true;
+        self.merge_observed_scope(&mut paths.rejected, outcome.when_false, span)?;
         Ok(true)
     }
 
@@ -216,7 +188,7 @@ impl Checker<'_, '_> {
                                 return Ok(None);
                             };
                             paths.matched = next.matched;
-                            self.merge_match_scope(&mut paths.rejected, next.rejected, span)?;
+                            self.merge_observed_scope(&mut paths.rejected, next.rejected, span)?;
                         }
                     }
                 }
@@ -266,7 +238,7 @@ impl Checker<'_, '_> {
                     else {
                         return Ok(None);
                     };
-                    self.merge_match_scope(&mut paths.matched, next.matched, span)?;
+                    self.merge_observed_scope(&mut paths.matched, next.matched, span)?;
                     if let Some(mut rejected) = next.rejected {
                         self.schema_fuel(span, |_, fuel| {
                             rejected.retain(|id| candidate.values.contains_key(id), fuel)

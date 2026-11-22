@@ -43,7 +43,7 @@ impl Checker<'_, '_> {
                     return Ok(None);
                 };
                 paths.matched = next.matched;
-                self.merge_match_scope(&mut paths.rejected, next.rejected, span)?;
+                self.merge_observed_scope(&mut paths.rejected, next.rejected, span)?;
             }
             return Ok(Some(paths));
         }

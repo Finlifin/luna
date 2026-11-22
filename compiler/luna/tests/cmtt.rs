@@ -12126,3 +12126,177 @@ fn factory_match_preserves_computed_field_writes_across_or_candidates() {
         assert!(error.contains("unknown struct field second"), "{error}");
     }
 }
+
+#[test]
+fn factory_short_circuit_guards_keep_writes_on_their_selected_exit() {
+    let template = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Packet { item: Type }
+        comptime fn describe(flag: bool) -> Packet {
+            var packet = Packet { item: Before };
+            SELECTION
+        }
+        comptime fn generate(flag: bool) -> <|-bool> {
+            let packet = describe(flag);
+            let A = packet.item;
+            '(A { second: true }.second)
+        }
+        fn run() -> bool { ~<generate(false)> and ~<generate(true)> }
+    "#;
+    for selection in [
+        "if flag and do { packet.item = After; true } { packet } else { Packet { item: After } }",
+        "if not (flag or do { packet.item = After; false }) { packet } else { Packet { item: After } }",
+        "if do { let x = flag; if x { do { packet.item = After; true } } else { false } } { packet } else { Packet { item: After } }",
+        "flag match { _ if flag or do { packet.item = After; false } => Packet { item: After }, _ => packet, }",
+    ] {
+        let source = template.replace("SELECTION", selection);
+        assert_eq!(sysroot::run(&source), Value::Bool(true), "{selection}");
+        let invalid = source
+            .replace("~<generate(false)> and ~<generate(true)>", "true")
+            .replace("packet.item = After", "packet.item = Before");
+        let error = sysroot::compile(&invalid).unwrap_err();
+        assert!(
+            error.contains("identity") || error.contains("field"),
+            "{selection}: {error}"
+        );
+    }
+    let deep = template.replace(
+        "SELECTION",
+        &format!("if {}flag and do {{ packet.item = After; true }} {{ packet }} else {{ Packet {{ item: After }} }}", "true and ".repeat(68)),
+    );
+    assert_eq!(sysroot::run(&deep), Value::Bool(true));
+}
+
+#[test]
+fn factory_short_circuit_returns_and_match_guard_fallthrough() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Packet { item: Type }
+        comptime fn describe(flag: bool) -> Packet {
+            var packet = Packet { item: Before };
+            let accepted = flag or do { return Packet { item: After }; false };
+            accepted match {
+                _ if not (accepted and do { packet.item = After; false }) => packet,
+                _ => Packet { item: Before },
+            }
+        }
+        comptime fn generate(flag: bool) -> <|-bool> {
+            let packet = describe(flag);
+            let A = packet.item;
+            '(A { second: true }.second)
+        }
+        fn run() -> bool { ~<generate(false)> and ~<generate(true)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let unused = source.replace("~<generate(false)> and ~<generate(true)>", "true");
+    for invalid in [
+        unused.replace(
+            "return Packet { item: After }",
+            "return Packet { item: Before }",
+        ),
+        unused.replace("packet.item = After; false", "packet.item = After; true"),
+    ] {
+        let error = sysroot::compile(&invalid).unwrap_err();
+        assert!(
+            error.contains("identity") || error.contains("field"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn factory_short_circuit_refines_a_read_place_until_its_next_write() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Packet { item: Type }
+        struct Gate { open: bool }
+        comptime fn describe(flag: bool) -> Packet {
+            var gate = Gate { open: flag };
+            if gate.open and do {
+                if not gate.open { return Packet { item: Before }; }
+                gate.open = false;
+                gate.open
+            } {
+                Packet { item: Before }
+            } else {
+                if gate.open { Packet { item: Before } } else { Packet { item: After } }
+            }
+        }
+        comptime fn generate(flag: bool) -> <|-bool> {
+            let packet = describe(flag);
+            let A = packet.item;
+            '(A { second: true }.second)
+        }
+        fn run() -> bool { ~<generate(false)> and ~<generate(true)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let wrong = source
+        .replace("gate.open = false", "gate.open = true")
+        .replace("~<generate(false)> and ~<generate(true)>", "true");
+    let error = sysroot::compile(&wrong).unwrap_err();
+    assert!(
+        error.contains("identity") || error.contains("field"),
+        "{error}"
+    );
+}
+
+#[test]
+fn factory_bitwise_operations_preserve_eager_effects_and_returns() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Packet { item: Type }
+        comptime fn describe(flag: bool) -> Packet {
+            var packet = Packet { item: Before };
+            let zeros: BitVec<8> = 0;
+            let bits = zeros and do { packet.item = After; not zeros };
+            if bits == zeros { packet } else { Packet { item: Before } }
+        }
+        comptime fn generate(flag: bool) -> <|-bool> {
+            let packet = describe(flag);
+            let A = packet.item;
+            '(A { second: true }.second)
+        }
+        fn run() -> bool { ~<generate(false)> and ~<generate(true)> }
+    "#;
+    let operation = "zeros and do { packet.item = After; not zeros }";
+    let result = "if bits == zeros { packet } else { Packet { item: Before } }";
+    for example in [
+        source.to_owned(),
+        source
+            .replace(
+                operation,
+                "(not zeros) or do { packet.item = After; zeros }",
+            )
+            .replace("bits == zeros", "bits == (not zeros)"),
+        source
+            .replace(
+                operation,
+                "zeros and do { return Packet { item: After }; not zeros }",
+            )
+            .replace(result, "Packet { item: Before }"),
+        source
+            .replace(
+                operation,
+                "(if flag { zeros } else { not zeros }) and do { packet.item = After; zeros }",
+            )
+            .replace(result, "packet"),
+    ] {
+        assert_eq!(sysroot::run(&example), Value::Bool(true));
+        let invalid = example
+            .replace("~<generate(false)> and ~<generate(true)>", "true")
+            .replace("packet.item = After", "packet.item = Before")
+            .replace(
+                "return Packet { item: After }",
+                "return Packet { item: Before }",
+            );
+        let error = sysroot::compile(&invalid).unwrap_err();
+        assert!(
+            error.contains("identity") || error.contains("field"),
+            "{error}"
+        );
+    }
+}

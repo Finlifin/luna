@@ -1546,11 +1546,9 @@ impl Checker<'_, '_> {
                     (Term::Bool(a), Term::Bool(b)) => {
                         Ok(Term::Bool(if conjunction { a && b } else { a || b }))
                     }
-                    (Term::BitVec(a), Term::BitVec(b)) => Ok(Term::BitVec(if conjunction {
-                        a.and(&b, budget)
-                    } else {
-                        a.or(&b, budget)
-                    }?)),
+                    (Term::BitVec(a), Term::BitVec(b)) => {
+                        known_scalars::binary_bits(&expr.kind, &a, &b, budget)
+                    }
                     _ => Err(Failure::Unavailable),
                 }
             }
@@ -1565,15 +1563,7 @@ impl Checker<'_, '_> {
                 else {
                     return Err(Failure::Unavailable);
                 };
-                if matches!(expr.kind, K::BitConcat(..)) {
-                    Ok(Term::BitVec(left.concat(&right, budget)?))
-                } else {
-                    if left.width() != right.width() {
-                        return Err(Failure::Unavailable);
-                    }
-                    budget.consume(left.words().len().saturating_add(1))?;
-                    Ok(Term::Bool(left == right))
-                }
+                known_scalars::binary_bits(&expr.kind, &left, &right, budget)
             }
             K::BitSlice { value, start, end } => {
                 let Term::BitVec(value) =

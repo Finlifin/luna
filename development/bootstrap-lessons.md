@@ -355,3 +355,13 @@ Release 的 `borrowed_aggregate` 在一次外层 invocation 内调用 16 次接�
 `subject match { p if guard => first, p => second, ... }` 有两条不同的路径抵达第二臂。主语第一次未匹配 `p` 时不会执行 guard。主语匹配而 guard 返回 false 时，guard 对外层局部变量和接收者的写入仍然有效。若立即合并这两个存储状态，检查 `second` 时就可能丢失其中唯一能到达它的字段类型。现在定义检查只观察一次主语，分别保存结构匹配失败和 guard 失败的状态。相邻两臂对同一主语使用相同的纯结构模式时，后者可以复用前者的判断。计算模式仍按源顺序执行，`or` 更换候选时撤销先前的模式绑定，保留它对外层的写入。[分支与作用域](../compiler/elaboration/src/program/constants/structural_calls/matching.rs)
 
 这里选择有限的路径信息。遇到不同的结构测试时，观察器先合并能继续的状态；因而相隔数臂或写法不同的等价模式可能失去精度。结构证据不足以定位有副作用的子模式时，定义检查放弃这条观察。VM 始终执行原有匹配程序。自举时可把主语投影、候选绑定的回滚和外层存储的写回显式放进共享的匹配指令，让具体求值与定义检查共用控制顺序。[结构投影](../compiler/elaboration/src/program/constants/structural_calls/matching/structure.rs) · [源码验收](../compiler/luna/tests/cmtt.rs)
+
+### 布尔条件的两个出口
+
+在 `if flag and do { packet.item = After; true } { packet } else { fallback }` 中，进入真分支时已经写入了 `After`。把整个条件先归并成一个未知布尔值，会在真分支也丢掉这项类型信息。定义检查现在分别携带到达真、假出口的局部状态。只有能继续到右操作数的出口才检查右侧；右侧的 `return` 归入当前工厂的返回集合。读取一个已跟踪的布尔局部或字段，会在两个出口分别得到它当时的值，后续赋值照常替换。条件块结束时两个出口各自丢弃块内绑定。[条件观察](../compiler/elaboration/src/program/constants/structural_calls/conditions.rs)
+
+`if` 与匹配 guard 直接消费这两份状态。表达式用作普通数据时，两份状态在交付布尔值的位置汇合。因此把谓词先保存为局部变量，可能丢失其真假与其他字段之间的关系。连续的 `not`、`and` 和 `or` 使用有预算的显式栈，右操作数只在可达的路径上观察一次。自举时需要同时保留按真假分开的控制出口和普通数据交付边界。[源码验收](../compiler/luna/tests/cmtt.rs)
+
+同样的 `and` 与 `or` 用于 `BitVec` 时，右操作数总会求值。即使左边是全零掩码，右边的写入和提前返回也必须在字段检查中可见。两个操作数都交付后，观察器与普通常量折叠共用按位运算及其预算。[按位操作数求值](../compiler/elaboration/src/program/constants/structural_calls/bits.rs)
+
+这里的维护成本来自两处都要描述同一条求值顺序。VM 已经会执行短路，但生成器定义检查面对未知参数，需要同时解释一段已检查的代码在两个出口对存储产生的影响。自举时应由同一个控制流表示给出右操作数、正常出口和提前返回的边；具体求值选择一条边，抽象求值保留可达边并在汇合点合并证据。这样新增运算时可以直接核对两种执行是否沿用了同一组边。

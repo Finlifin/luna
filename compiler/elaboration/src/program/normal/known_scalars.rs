@@ -2,6 +2,24 @@
 use super::observation::Failure;
 use super::*;
 
+pub(in crate::program) fn binary_bits(
+    operator: &K,
+    left: &comptime_runtime::bitvec::BitVec,
+    right: &comptime_runtime::bitvec::BitVec,
+    budget: &mut comptime_runtime::Budget,
+) -> Result<Term, Failure> {
+    match operator {
+        K::And(..) => Ok(Term::BitVec(left.and(right, budget)?)),
+        K::Or(..) => Ok(Term::BitVec(left.or(right, budget)?)),
+        K::BitConcat(..) => Ok(Term::BitVec(left.concat(right, budget)?)),
+        K::BitEqual(..) if left.width() == right.width() => {
+            budget.consume(left.words().len().saturating_add(1))?;
+            Ok(Term::Bool(left == right))
+        }
+        _ => Err(Failure::Unavailable),
+    }
+}
+
 pub(super) fn compare(
     left: &Term,
     right: &Term,
