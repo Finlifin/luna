@@ -7,14 +7,17 @@ pub(in crate::program) struct BindingScopes(BTreeMap<n::LocalId, BindingInputs>)
 
 enum BindingInputs {
     Call(Arc<Inputs>),
-    Annotation(Vec<(Arc<n::Expr>, Input)>),
+    Annotation(Vec<annotations::AnnotationStep>),
 }
 
 impl BindingInputs {
     fn visit(&self, mut f: impl FnMut(&Input)) {
         match self {
             Self::Call(inputs) => inputs.values().for_each(f),
-            Self::Annotation(inputs) => inputs.iter().for_each(|(_, input)| f(input)),
+            Self::Annotation(steps) => steps
+                .iter()
+                .flat_map(|s| s.outputs.iter())
+                .for_each(|(_, input)| f(input)),
         }
     }
 
@@ -30,37 +33,41 @@ impl BindingInputs {
             }
             Self::Annotation(inputs) => inputs,
         };
-        let escaping = checker.term_declaration_inputs(&body.ty, span)?;
-        if inputs
+        let identities = inputs
             .iter()
-            .any(|(_, input)| escaping.contains(&input.binder.declaration))
+            .flat_map(|s| s.outputs.iter().map(|(_, input)| input.binder.declaration))
+            .collect();
+        if !checker
+            .term_declaration_inputs(&body.ty, span)?
+            .is_disjoint(&identities)
         {
             return Err(context_error(
                 span,
                 "dependent result would escape its local type annotation",
             ));
         }
-        let mut schedule = OperandSchedule::new(
-            inputs
-                .iter()
-                .map(|(_, input)| input.binder.declaration)
-                .collect(),
-        );
-        for (value, input) in inputs {
-            let local = if let K::Local(local) = value.kind {
-                local
-            } else {
-                schedule.enter(checker, &value, span)?;
-                let mut value = match Arc::try_unwrap(value) {
+        let mut schedule = OperandSchedule::new(identities);
+        for step in inputs {
+            if let Some(prep) = step.preparation {
+                schedule.enter(checker, &prep, span)?;
+                let expression = match Arc::try_unwrap(prep) {
                     Ok(value) => value,
                     Err(shared) => {
                         constants::charge_copy(&shared, &mut checker.required_steps, span)?;
                         (*shared).clone()
                     }
                 };
-                checker.retain_lexical_operand(&mut value, &mut schedule.current, span)?
-            };
-            schedule.supply(input.binder.declaration, local, input.producer);
+                schedule
+                    .current
+                    .preparations
+                    .push(n::NormalFormPreparation {
+                        before: schedule.current.arguments.len(),
+                        expression,
+                    });
+            }
+            for (local, input) in step.outputs.iter() {
+                schedule.supply(input.binder.declaration, *local, input.producer);
+            }
         }
         schedule.segments.push(schedule.current);
         checker.enclose_operand_segments(body, schedule.segments, span)
@@ -209,8 +216,14 @@ impl BindingScopes {
             };
             if let Some(inputs) = inputs {
                 if let BindingInputs::Annotation(annotation) = &inputs {
-                    for (producer, _) in annotation {
-                        uses.observe(checker, index, producer, span)?;
+                    for step in annotation {
+                        if let Some(prep) = &step.preparation {
+                            uses.observe(checker, index, prep, span)?;
+                        } else {
+                            for (local, _) in step.outputs.iter() {
+                                uses.locals.entry(*local).or_insert(index);
+                            }
+                        }
                     }
                 }
                 inputs.visit(|input| {
@@ -366,8 +379,15 @@ impl std::fmt::Display for BindingScopes {
                     }
                 }
                 BindingInputs::Annotation(inputs) => {
-                    for (local, input) in inputs {
-                        write!(f, " (annotation {local} {})", input.binder)?;
+                    for step in inputs {
+                        f.write_str(" (annotation")?;
+                        if let Some(prep) = &step.preparation {
+                            write!(f, " {prep}")?;
+                        }
+                        for (local, input) in step.outputs.iter() {
+                            write!(f, " (output {local} {})", input.binder)?;
+                        }
+                        f.write_str(")")?;
                     }
                 }
             }

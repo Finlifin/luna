@@ -46,7 +46,13 @@ impl std::fmt::Display for NamedTypes {
 pub(in crate::program) struct Annotation {
     site: hir::HirId,
     forming: bool,
-    pub(super) inputs: Vec<(Arc<n::Expr>, Input)>,
+    pub(super) inputs: Vec<AnnotationStep>,
+}
+
+#[derive(Clone)]
+pub(super) struct AnnotationStep {
+    pub(super) preparation: Option<Arc<n::Expr>>,
+    pub(super) outputs: Arc<[(n::LocalId, Input)]>,
 }
 
 impl Annotation {
@@ -203,10 +209,105 @@ impl Checker<'_, '_> {
             Ok(transfers)
         })?;
         if needs_frame || !self.checked_declaration_inputs(&checked, span)?.is_empty() {
-            self.retain_annotation_type(checked, None, span)
+            self.retain_formed_head(checked, span)
         } else {
             self.complete_checked_type(expr, checked)
         }
+    }
+
+    /// A successful application of a known head exposes its actual arguments.
+    /// Match the completed value once, after every operand and formation check,
+    /// and use those field identities to check the initializer.
+    fn retain_formed_head(&mut self, checked: n::Expr, span: Span) -> Result<CompletedType, Error> {
+        let (head, arguments) = match &checked.kind {
+            K::NormalFormType {
+                head, arguments, ..
+            } => (*head, arguments),
+            K::ApplyNormalForm {
+                callee, arguments, ..
+            } if let K::Function(head) = callee.kind => (head, arguments),
+            _ => return self.retain_annotation_type(checked, None, span),
+        };
+        let count = arguments.len();
+        dependent_inputs::tasks::spend(&mut self.required_steps, count, span)?;
+        let has_type_fields = self
+            .source_declarations
+            .owner(head)
+            .and_then(|owner| self.normal_parameters.get(&owner))
+            .is_some_and(|parameters| {
+                count != 0
+                    && parameters.len() == count
+                    && parameters
+                        .iter()
+                        .all(|(_, _, domain)| *domain == p(P::Type))
+            });
+        if !has_type_fields {
+            return self.retain_annotation_type(checked, None, span);
+        }
+        let mut terms = Vec::with_capacity(count);
+        let mut patterns = Vec::with_capacity(count);
+        let mut outputs = Vec::with_capacity(count);
+        let owner = self.input_facts.annotation.as_ref().unwrap().site.owner;
+        for argument in arguments {
+            let binder = self.fresh_type_binder(owner, span)?;
+            let local = self.spread_binding(span)?;
+            let known = if let Some(expr) = argument.expression()
+                && let K::TypeValue(ty) = &expr.kind
+                && self.checked_declaration_inputs(expr, span)?.is_empty()
+                && ty.check_scope(&[]).is_ok()
+            {
+                Some(declaration_inputs::copy_input_domain(
+                    ty,
+                    &mut self.required_steps,
+                    span,
+                )?)
+            } else {
+                None
+            };
+            terms.push(known.unwrap_or(Term::Rigid {
+                declaration: binder.declaration,
+                sort: binder.sort,
+            }));
+            patterns.push(n::Pattern::Binding {
+                binding: local,
+                inner: Box::new(n::Pattern::Wild),
+            });
+            outputs.push((
+                local,
+                Input {
+                    binder,
+                    producer: checked.source,
+                    stable_local: None,
+                },
+            ));
+        }
+        let preparation = n::Expr {
+            source: checked.source,
+            ty: p(P::Void),
+            kind: K::LetPattern {
+                pattern: n::Pattern::NormalForm {
+                    head,
+                    arguments: patterns,
+                },
+                value: Box::new(checked),
+                guard: None,
+                otherwise: None,
+            },
+        };
+        self.input_facts
+            .annotation
+            .as_mut()
+            .unwrap()
+            .inputs
+            .push(AnnotationStep {
+                preparation: Some(Arc::new(preparation)),
+                outputs: outputs.into(),
+            });
+        Ok(CompletedType::Identity(Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            arguments: terms,
+        }))
     }
 
     fn retain_annotation_type(
@@ -222,12 +323,32 @@ impl Checker<'_, '_> {
             producer: checked.source,
             stable_local: None,
         };
+        let (local, preparation) = match checked.kind {
+            K::Local(local) => (local, None),
+            _ => {
+                let local = self.spread_binding(span)?;
+                (
+                    local,
+                    Some(Arc::new(n::Expr {
+                        source: checked.source,
+                        ty: p(P::Void),
+                        kind: K::Let {
+                            binding: local,
+                            value: Box::new(checked),
+                        },
+                    })),
+                )
+            }
+        };
         self.input_facts
             .annotation
             .as_mut()
             .unwrap()
             .inputs
-            .push((Arc::new(checked), input));
+            .push(AnnotationStep {
+                preparation,
+                outputs: Arc::from([(local, input)]),
+            });
         Ok(CompletedType::Identity(known.unwrap_or(Term::Rigid {
             declaration: binder.declaration,
             sort: binder.sort,
@@ -258,18 +379,22 @@ impl Checker<'_, '_> {
             let owner = self.input_facts.annotation.as_ref().unwrap().site.owner;
             let binder = self.fresh_type_binder(owner, span)?;
             self.input_facts.named_types.bind(binding, binder);
-            self.input_facts.annotation.as_mut().unwrap().inputs.push((
-                Arc::new(n::Expr {
-                    source: producer,
-                    ty: p(P::Type),
-                    kind: K::Local(binding),
-                }),
-                Input {
-                    binder,
-                    producer,
-                    stable_local: None,
-                },
-            ));
+            self.input_facts
+                .annotation
+                .as_mut()
+                .unwrap()
+                .inputs
+                .push(AnnotationStep {
+                    preparation: None,
+                    outputs: Arc::from([(
+                        binding,
+                        Input {
+                            binder,
+                            producer,
+                            stable_local: None,
+                        },
+                    )]),
+                });
             binder
         } else {
             return Ok(None);

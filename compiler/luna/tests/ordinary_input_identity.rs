@@ -2656,3 +2656,51 @@ fn closed_normal_type_computations_still_check_contextual_initializers() {
         &[],
     );
 }
+
+#[test]
+fn open_normal_annotations_expose_the_formed_arguments_to_initializers() {
+    let source = "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn size(values: meta.List<T>) -> Integer where T { values.length() }
+        comptime fn inspect(flag: bool) -> bool {
+            let xs: meta.List<Selected(flag)> = [];
+            size(xs) == 0 and
+                (if flag { xs'type == meta.List<bool> } else { xs'type == meta.List<char> })
+        }
+        comptime fn check() -> bool { inspect(true) and inspect(false) }";
+    check_events(source, &[("Selected", 2), ("size", 2)]);
+    let wrong = source.replace(" = [];", " = [true];");
+    let failure = sysroot::compile(&wrong).unwrap_err();
+    assert!(failure.contains("mismatch"), "{failure}");
+}
+
+#[test]
+fn formed_head_fields_recover_after_a_gradual_argument() {
+    use comptime_interpretor::ErrorKind;
+
+    let package = sysroot::compile(
+        "
+        pure comptime fn Pair<A, B> -> Type { A }
+        comptime fn Selected(gradual: bool, flag: bool) -> Type {
+            if gradual { Any } else { if flag { bool } else { char } }
+        }
+        comptime fn inspect(gradual: bool, flag: bool) -> bool {
+            let value: ?Pair<Selected(gradual, flag), Selected(false, not flag)> = null;
+            if flag { value'type == ?Pair<bool, char> } else { value'type == ?Pair<char, bool> }
+        }",
+    )
+    .unwrap();
+    let inspect = sysroot::source_function(&package, "inspect");
+    for tree in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            let mut run =
+                |gradual, flag| vm.invoke(inspect, vec![Value::Bool(gradual), Value::Bool(flag)]);
+            assert_eq!(
+                run(true, true).unwrap_err().kind,
+                ErrorKind::TypeContractUnresolved
+            );
+            assert_eq!(run(false, true).unwrap(), Value::Bool(true));
+            assert_eq!(run(false, false).unwrap(), Value::Bool(true));
+        });
+    }
+}

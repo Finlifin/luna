@@ -395,8 +395,8 @@ pub struct NormalFormPreparation {
 }
 
 impl NormalFormPreparation {
-    /// Export only the outer binding or the fields unpacked by its tuple
-    /// pattern. Callers discard the collected exports if the plan is invalid.
+    /// Export the outer binding or the flat bindings unpacked from a tuple
+    /// value or a formed normal type. Discard collected exports on failure.
     pub fn visit_bindings<E>(
         &self,
         charge: impl FnOnce(usize) -> Result<(), E>,
@@ -408,7 +408,11 @@ impl NormalFormPreparation {
                 visit(*binding);
             }
             ExprKind::LetPattern {
-                pattern: Pattern::Tuple(fields),
+                pattern:
+                    Pattern::Tuple(fields)
+                    | Pattern::NormalForm {
+                        arguments: fields, ..
+                    },
                 guard: None,
                 otherwise: None,
                 ..
