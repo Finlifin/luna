@@ -84,6 +84,8 @@ struct OperandSchedule {
     current: Segment,
     pending: BTreeSet<DeclarationId>,
     unavailable: BTreeSet<DeclarationId>,
+    deferred_bindings: BTreeSet<n::LocalId>,
+    deferred_statements: Vec<n::Expr>,
 }
 
 impl OperandSchedule {
@@ -103,6 +105,71 @@ impl OperandSchedule {
         if !uses.is_disjoint(&self.pending) {
             self.segments.push(std::mem::take(&mut self.current));
             self.pending.clear();
+        }
+        Ok(())
+    }
+
+    fn reads_deferred(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        expression: &n::Expr,
+        span: Span,
+    ) -> Result<bool, Error> {
+        if self.deferred_bindings.is_empty() {
+            return Ok(false);
+        }
+        checker.with_observation_budget(span, |_, budget| {
+            let reads = nir::free_bindings::collect(expression, &mut budget.steps)?;
+            budget.consume(reads.len())?;
+            Ok(!reads.is_disjoint(&self.deferred_bindings))
+        })
+    }
+
+    fn absorb_preparation(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        statement: n::Expr,
+        witnesses: &mut BTreeMap<n::LocalId, Vec<(DeclarationId, n::SourceRange)>>,
+        span: Span,
+    ) -> Result<(), Error> {
+        let uses = checker.checked_declaration_inputs(&statement, span)?;
+        let deferred = !uses.is_disjoint(&self.unavailable)
+            || self.reads_deferred(checker, &statement, span)?;
+        let mut prep = n::NormalFormPreparation {
+            before: self.current.arguments.len(),
+            expression: statement,
+        };
+        let mut bindings = Vec::new();
+        if !prep.visit_bindings(
+            |n| dependent_inputs::tasks::spend(&mut checker.required_steps, n, span),
+            |id| bindings.push(id),
+        )? {
+            return Err(needs_frame(span, "invalid selector preparation"));
+        }
+        if deferred {
+            let (K::Let { value, .. } | K::LetPattern { value, .. }) = &mut prep.expression.kind
+            else {
+                unreachable!()
+            };
+            checker.prepare_forward_operand(value, self, span)?;
+            for binding in bindings {
+                if witnesses.contains_key(&binding) {
+                    return Err(needs_frame(span, "type producer needs a deferred input"));
+                }
+                self.deferred_bindings.insert(binding);
+            }
+            self.deferred_statements.push(prep.expression);
+        } else {
+            self.enter_uses(&uses, span)?;
+            prep.before = self.current.arguments.len();
+            for binding in bindings {
+                if let Some(inputs) = witnesses.remove(&binding) {
+                    for (binder, source) in inputs {
+                        self.supply(binder, binding, source);
+                    }
+                }
+            }
+            self.current.preparations.push(prep);
         }
         Ok(())
     }
@@ -209,6 +276,8 @@ impl Checker<'_, '_> {
             current: Segment::default(),
             pending: BTreeSet::new(),
             unavailable: identities,
+            deferred_bindings: BTreeSet::new(),
+            deferred_statements: Vec::new(),
         };
         let mut prepared = BTreeMap::<_, Vec<_>>::new();
         if !prefix.is_empty() {
@@ -225,25 +294,10 @@ impl Checker<'_, '_> {
             }
         }
         for statement in prefix {
-            schedule.enter(self, &statement, span)?;
-            let preparation = n::NormalFormPreparation {
-                before: schedule.current.arguments.len(),
-                expression: statement,
-            };
-            let valid = preparation.visit_bindings(
-                |n| dependent_inputs::tasks::spend(&mut self.required_steps, n, span),
-                |binding| {
-                    if let Some(witnesses) = prepared.remove(&binding) {
-                        for (binder, source) in witnesses {
-                            schedule.supply(binder, binding, source);
-                        }
-                    }
-                },
-            )?;
-            if !valid {
-                return Err(needs_frame(span, "invalid selector preparation"));
-            }
-            schedule.current.preparations.push(preparation);
+            schedule.absorb_preparation(self, statement, &mut prepared, span)?;
+        }
+        if schedule.reads_deferred(self, callee, span)? {
+            return Err(needs_frame(span, "callee needs a deferred input"));
         }
         schedule.enter(self, callee, span)?;
         if !schedule.current.parameters.is_empty() || !schedule.unavailable.is_empty() {
@@ -255,11 +309,14 @@ impl Checker<'_, '_> {
             }
             dependent_inputs::tasks::spend(&mut self.required_steps, 1, span)?;
             let uses = self.checked_declaration_inputs(&argument.value, span)?;
-            if argument.passing == n::ArgumentPassing::Value
-                && !uses.is_disjoint(&schedule.unavailable)
-            {
+            let forward = !uses.is_disjoint(&schedule.unavailable)
+                || schedule.reads_deferred(self, &argument.value, span)?;
+            if forward && argument.passing == n::ArgumentPassing::Value {
                 self.prepare_forward_operand(&mut argument.value, &mut schedule, span)?;
                 continue;
+            }
+            if forward {
+                return Err(needs_frame(span, "receiver needs a deferred input"));
             }
             schedule.enter_uses(&uses, span)?;
             if schedule.current.parameters.is_empty() && schedule.unavailable.is_empty() {
@@ -277,37 +334,33 @@ impl Checker<'_, '_> {
         if !schedule.unavailable.is_empty() {
             return Err(needs_frame(span, "missing lexical type operand"));
         }
+        let mut statements = Vec::new();
         if schedule.current.parameters.is_empty() {
-            // All witnesses are in enclosing segments. These final producers
-            // already use their types and remain ordinary call preparation.
-            if !schedule.current.preparations.is_empty() {
-                let statements = schedule
+            statements.extend(
+                schedule
                     .current
                     .preparations
                     .into_iter()
-                    .map(|p| p.expression)
-                    .collect();
-                let source = value.source;
-                let ty = declaration_inputs::copy_input_domain(
+                    .map(|p| p.expression),
+            );
+        } else {
+            schedule.segments.push(schedule.current);
+        }
+        statements.extend(schedule.deferred_statements);
+        if !statements.is_empty() {
+            let call = n::Expr {
+                ty: declaration_inputs::copy_input_domain(
                     &value.ty,
                     &mut self.required_steps,
                     span,
-                )?;
-                let call = std::mem::replace(
-                    value.as_mut(),
-                    n::Expr {
-                        source,
-                        ty,
-                        kind: K::Unit,
-                    },
-                );
-                value.kind = K::CallPreparation {
-                    statements,
-                    result: Some(Box::new(call)),
-                };
-            }
-        } else {
-            schedule.segments.push(schedule.current);
+                )?,
+                source: value.source,
+                kind: std::mem::replace(&mut value.kind, K::Unit),
+            };
+            value.kind = K::CallPreparation {
+                statements,
+                result: Some(Box::new(call)),
+            };
         }
         for segment in schedule.segments.into_iter().rev() {
             let ty =

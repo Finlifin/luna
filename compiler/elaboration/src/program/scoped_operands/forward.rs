@@ -17,7 +17,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<(), Error> {
         let mut captures = Vec::new();
-        self.capture_forward_children(operand, &schedule.unavailable, &mut captures, span, 0)?;
+        self.capture_forward_children(operand, schedule, &mut captures, span, 0)?;
         for Capture { binding, value } in captures {
             schedule.enter(self, &value, span)?;
             schedule
@@ -45,7 +45,7 @@ impl Checker<'_, '_> {
     fn capture_forward_children(
         &mut self,
         operand: &mut n::Expr,
-        unavailable: &BTreeSet<DeclarationId>,
+        schedule: &OperandSchedule,
         captures: &mut Vec<Capture>,
         span: Span,
         depth: usize,
@@ -56,9 +56,13 @@ impl Checker<'_, '_> {
                 "forward operand construction nesting exhausted",
             ));
         }
+        if matches!(operand.kind, K::Local(id) if schedule.deferred_bindings.contains(&id)) {
+            return Ok(());
+        }
         if self
             .checked_declaration_inputs(operand, span)?
-            .is_disjoint(unavailable)
+            .is_disjoint(&schedule.unavailable)
+            && !schedule.reads_deferred(self, operand, span)?
         {
             let binding = self.spread_binding(span)?;
             let read = n::Expr {
@@ -80,11 +84,11 @@ impl Checker<'_, '_> {
         match &mut operand.kind {
             K::OptionalAbsent => Ok(()),
             K::OptionalPresent(inner) => {
-                self.capture_forward_children(inner, unavailable, captures, span, depth + 1)
+                self.capture_forward_children(inner, schedule, captures, span, depth + 1)
             }
             K::Tuple(fields) | K::AnonymousRecord { fields } => {
                 for field in fields {
-                    self.capture_forward_children(field, unavailable, captures, span, depth + 1)?;
+                    self.capture_forward_children(field, schedule, captures, span, depth + 1)?;
                 }
                 Ok(())
             }
@@ -97,13 +101,14 @@ impl Checker<'_, '_> {
                 for statement in statements.iter() {
                     if !self
                         .checked_declaration_inputs(statement, span)?
-                        .is_disjoint(unavailable)
+                        .is_disjoint(&schedule.unavailable)
+                        || schedule.reads_deferred(self, statement, span)?
                     {
                         return Err(needs_frame(span, "statement needs a later type input"));
                     }
                 }
                 let mut children = Vec::new();
-                self.capture_forward_children(result, unavailable, &mut children, span, depth + 1)?;
+                self.capture_forward_children(result, schedule, &mut children, span, depth + 1)?;
                 let source = operand.source;
                 let (binding, payload) = match children.len() {
                     0 => (

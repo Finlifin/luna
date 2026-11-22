@@ -2093,3 +2093,34 @@ fn forward_type_operand_exits_before_an_unavailable_identity_is_required() {
         });
     }
 }
+
+#[test]
+fn forward_type_operand_composes_with_collection_and_spread_preparations() {
+    check_events(
+        "
+        comptime fn Selected(ready: bool, flag: bool) -> Type {
+            assumes ready; if flag { bool } else { char }
+        }
+        comptime fn packet(ready: bool) -> Tuple<bool, bool> { assumes ready; (true, true) }
+        comptime fn empty(comptime .ty: Type = bool, .v: ?ty = null, ...items: Tuple<bool, bool>) -> ?ty {
+            let (x, y) = items; assumes x and y; v
+        }
+        comptime fn inspect(comptime .ty: Type = bool, ...parts: Tuple<?ty, bool>) -> ?ty {
+            let (v, ok) = parts; assumes ok; v
+        }
+        comptime fn relay(flag: bool) -> bool {
+            var ready = false;
+            let first = empty(.v = do { ready = true; null }, ready,
+                .ty = Selected(ready, flag), ready) matches null;
+            ready = false;
+            let second = empty(.v = do { ready = true; null }, ...packet(ready),
+                .ty = Selected(ready, not flag)) matches null;
+            ready = false;
+            first and second and (inspect(do { ready = true; null }, ready,
+                .ty = Selected(ready, flag)) matches null)
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }
+        ",
+        &[("Selected", 6), ("empty", 4), ("packet", 2), ("inspect", 2)],
+    );
+}
