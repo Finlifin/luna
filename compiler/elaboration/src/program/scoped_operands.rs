@@ -2,7 +2,9 @@
 use super::*;
 use std::sync::Arc;
 
+mod bindings;
 mod forward;
+pub(super) use bindings::BindingScopes;
 
 #[derive(Clone, Copy)]
 pub(super) struct Input {
@@ -45,6 +47,27 @@ impl Boundary {
                 Some(inputs) => Self::Consumer { inputs },
                 None => Self::Idle,
             };
+        }
+    }
+
+    pub(super) fn annotate_failure(&self) -> impl FnOnce(Error) -> Error + use<> {
+        let origin = match self {
+            Self::Consumer { inputs } => inputs
+                .first_key_value()
+                .map(|(&slot, &input)| (slot, input)),
+            _ => None,
+        };
+        move |mut failure| {
+            if let Some((slot, input)) = origin {
+                failure.notes.push(DiagnosticNote {
+                    source: input.producer,
+                    message: format!(
+                        "dependent call input needs its original comptime invocation to supply the Type in slot {slot} ({})",
+                        input.binder
+                    ),
+                });
+            }
+            failure
         }
     }
 
@@ -212,6 +235,7 @@ fn needs_frame(span: Span, reason: &str) -> Error {
 pub(super) enum Consumer {
     Call,
     Match,
+    Binding,
 }
 
 impl Checker<'_, '_> {
@@ -240,25 +264,10 @@ impl Checker<'_, '_> {
         boundary.enter(self, expr.hir_id);
         let checked = check(self);
         boundary.leave(self);
-        let origin = match &boundary {
-            Boundary::Consumer { inputs } => inputs
-                .first_key_value()
-                .map(|(&slot, &input)| (slot, input)),
-            _ => None,
-        };
-        checked.and_then(|value| boundary.close(self, value, Consumer::Call, expr.span))
-            .map_err(|mut failure| {
-                if let Some((slot, input)) = origin {
-                    failure.notes.push(DiagnosticNote {
-                        source: input.producer,
-                        message: format!(
-                            "dependent call input needs its original comptime invocation to supply the Type in slot {slot} ({})",
-                            input.binder
-                        ),
-                    });
-                }
-                failure
-            })
+        let annotate = boundary.annotate_failure();
+        checked
+            .and_then(|value| boundary.close(self, value, Consumer::Call, expr.span))
+            .map_err(annotate)
     }
 
     pub(super) fn bind_scoped_operand(
@@ -313,6 +322,19 @@ impl Checker<'_, '_> {
         }
         let value = match consumer {
             Consumer::Call => &mut body,
+            Consumer::Binding => {
+                let K::Block { statements, .. } = &mut body.kind else {
+                    unreachable!()
+                };
+                let Some(n::Expr {
+                    kind: K::Let { value, .. },
+                    ..
+                }) = statements.first_mut()
+                else {
+                    return Err(needs_frame(span, "missing initializer in the block suffix"));
+                };
+                value.as_mut()
+            }
             Consumer::Match => {
                 let K::Match { value, .. } = &mut body.kind else {
                     return Err(needs_frame(span, "expected the original match"));
@@ -437,6 +459,9 @@ impl Checker<'_, '_> {
                 statements,
                 result: Some(Box::new(call)),
             };
+        }
+        if schedule.segments.len() >= nir::copy_budget::MAX_COPY_DEPTH {
+            return Err(error(span, "lexical operand nesting budget exhausted"));
         }
         for segment in schedule.segments.into_iter().rev() {
             let ty =

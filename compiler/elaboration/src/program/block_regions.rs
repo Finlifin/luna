@@ -114,6 +114,7 @@ struct Progress<'h, T> {
     phase: Phase,
     statements: Vec<n::Expr>,
     next_statement: usize,
+    binding_scopes: scoped_operands::BindingScopes,
     staged_patterns: StagedStatements<'h>,
     diverges: bool,
     tail: T,
@@ -126,6 +127,7 @@ impl<'h, T: Tail> Progress<'h, T> {
             phase: Phase::Statements,
             statements: Vec::new(),
             next_statement: 0,
+            binding_scopes: Default::default(),
             staged_patterns: BTreeMap::new(),
             diverges: false,
             tail,
@@ -222,12 +224,14 @@ impl<'h, T: Tail> Progress<'h, T> {
         self.phase = Phase::TailChild;
         Ok(&self.tail)
     }
+}
 
+impl Progress<'_, Destination> {
     fn finish(
         self,
         checker: &mut Checker<'_, '_>,
-        checked: T::Checked,
-    ) -> Result<T::Output, Error> {
+        checked: destinations::CheckedTail,
+    ) -> Result<CheckedBlock, Error> {
         if !matches!(self.phase, Phase::TailChild | Phase::SelectedExit) {
             return Err(error(self.block.span, "block has no pending tail result"));
         }
@@ -235,7 +239,7 @@ impl<'h, T: Tail> Progress<'h, T> {
         let before = fuel;
         let references =
             if checker.block_binding_liveness_needed(&self.statements, &self.staged_patterns) {
-                T::references(&checked, &mut fuel)
+                Destination::references(&checked, &mut fuel)
             } else {
                 Ok(BTreeSet::new())
             };
@@ -249,7 +253,13 @@ impl<'h, T: Tail> Progress<'h, T> {
             &self.block,
             &self.staged_patterns,
         )?;
-        Ok(T::finish(checked, statements, self.block.span))
+        let block = Destination::finish(checked, statements, self.block.span);
+        if self.binding_scopes.is_empty() {
+            return Ok(block);
+        }
+        self.binding_scopes
+            .finish(checker, block.ordinary(self.block.span)?, self.block.span)
+            .map(CheckedBlock::Ordinary)
     }
 }
 
@@ -276,7 +286,7 @@ impl<T: Tail> std::fmt::Display for Progress<'_, T> {
         for (index, (_, inputs)) in &self.staged_patterns {
             write!(f, " (statement {index} {inputs})")?;
         }
-        write!(f, ") (tail {}))", self.tail)
+        write!(f, ") {} (tail {}))", self.binding_scopes, self.tail)
     }
 }
 

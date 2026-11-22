@@ -30,11 +30,41 @@ pub(super) struct PendingChild<'h, R> {
 }
 
 impl<'h, R> PendingChild<'h, R> {
-    pub(super) fn check(self, checker: &mut Checker<'_, '_>) -> Region<'h, R> {
-        let result = self
-            .child
-            .destination
-            .check_expression(checker, &self.child.expr.view());
+    pub(super) fn check(mut self, checker: &mut Checker<'_, '_>) -> Region<'h, R> {
+        let expr = self.child.expr.view();
+        let check =
+            |checker: &mut Checker<'_, '_>| self.child.destination.check_expression(checker, &expr);
+        let result = if let Some(RegionFrame::Block(frame)) = self.parent.frames.last_mut()
+            && matches!(frame.progress.phase, Phase::Child)
+            && matches!(frame.progress.tail, Destination::Ordinary(_))
+            && let H::Let(binding) = expr.kind
+            && !binding.comptime
+            && binding.ty.is_none()
+            && let Some(init) = binding.init
+            && matches!(init.kind, H::Application(..))
+            && checker.uses_lexical_operands()
+        {
+            let mut boundary = scoped_operands::Boundary::default();
+            boundary.enter(checker, init.hir_id);
+            let checked = check(checker);
+            boundary.leave(checker);
+            let annotate = boundary.annotate_failure();
+            checked
+                .and_then(|value| {
+                    let mut statement = value.ordinary(expr.span)?;
+                    frame.progress.binding_scopes.retain(
+                        checker,
+                        boundary,
+                        &mut statement,
+                        &mut frame.progress.statements,
+                        expr.span,
+                    )?;
+                    Ok(CheckedBlock::Ordinary(statement))
+                })
+                .map_err(annotate)
+        } else {
+            check(checker)
+        };
         self.deliver(result)
     }
 

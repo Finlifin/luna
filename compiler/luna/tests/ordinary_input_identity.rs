@@ -2252,3 +2252,41 @@ fn standalone_calls_skip_later_type_producers_after_an_argument_returns() {
         &[("Selected", 1), ("ignore", 1)],
     );
 }
+
+#[test]
+fn local_binding_scopes_keep_distinct_types_through_later_statements() {
+    let source = "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn relay(flag: bool) -> bool {
+            var first = empty(Selected(flag));
+            let second = empty(Selected(not flag));
+            first = first;
+            (first matches null) and (second matches null)
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }";
+    check_events(source, &[("Selected", 4), ("empty", 4)]);
+    let wrong = source.replace("first = first;", "first = second;");
+    let failure = sysroot::compile(&wrong).unwrap_err();
+    assert!(failure.contains("type mismatch"), "{failure}");
+}
+
+#[test]
+fn local_binding_scopes_keep_destructuring_and_early_exit_in_the_caller() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { char } else { bool } }
+        comptime fn pair(comptime ty: Type) -> Tuple<?ty, bool> { (null, ty == char) }
+        comptime fn relay(flag: bool, stop: bool) -> bool {
+            var reached = false;
+            let (value, tag) = pair(Selected(do {
+                if stop { return not reached; };
+                reached = true;
+                flag
+            }));
+            reached and tag == flag and (value matches null)
+        }
+        comptime fn check() -> bool { relay(true, false) and relay(false, false) and relay(true, true) }",
+        &[("Selected", 2), ("pair", 2)],
+    );
+}
