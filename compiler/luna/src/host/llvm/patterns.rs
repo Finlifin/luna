@@ -1,7 +1,7 @@
 use super::*;
 use nir::program::{MatchArm, Pattern};
 
-type Receipt = BTreeMap<LocalId, (Value, Value)>;
+pub(super) type Receipt = BTreeMap<LocalId, (Value, Value)>;
 
 struct PendingThen {
     source: nir::program::SourceRange,
@@ -671,7 +671,7 @@ impl Emitter<'_> {
         Ok(self.temporaries.get(&(source.start, source.end)).cloned())
     }
 
-    fn retain_pattern(
+    pub(super) fn retain_pattern(
         &mut self,
         source: nir::program::SourceRange,
         value: &Value,
@@ -966,7 +966,7 @@ fn child_path(path: &Option<Vec<usize>>, index: usize) -> Option<Vec<usize>> {
 }
 
 impl Emitter<'_> {
-    fn receipt_path(&mut self, path: &[usize]) -> Result<u32, String> {
+    pub(super) fn receipt_path(&mut self, path: &[usize]) -> Result<u32, String> {
         if let Some(index) = self.receipt_paths.iter().position(|item| item == path) {
             return u32::try_from(index).map_err(|_| "host receipt path limit exceeded".into());
         }

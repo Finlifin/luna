@@ -107,3 +107,5 @@ pub use method_identity::{CallableValueRef, TraitMethodIdentity};
 pub mod declaration_fields;
 pub mod match_plan;
 pub mod runtime_fields;
+
+pub use pattern_automata;

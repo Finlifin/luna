@@ -826,7 +826,7 @@ impl Emitter<'_> {
         }
     }
 
-    fn emit_unsigned_ranges_condition(
+    pub(super) fn emit_unsigned_ranges_condition(
         &mut self,
         scalar_text: &str,
         width: u32,

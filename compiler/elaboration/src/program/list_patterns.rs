@@ -62,11 +62,12 @@ impl Checker<'_, '_> {
         };
         let call = |this: &mut Self,
                     location: &hir::pattern::Pattern<'_>,
+                    call_span: Span,
                     name: &str,
                     index: Option<usize>| {
             let site = Expr {
                 hir_id: location.hir_id,
-                span: location.span,
+                span: call_span,
                 kind: H::Unit,
             };
             let method = this
@@ -86,22 +87,31 @@ impl Checker<'_, '_> {
                     &index.to_string(),
                     false,
                     Some(&size),
-                    location.span,
+                    call_span,
                 )?);
             }
             this.finish_call(&site, method, &[], inputs, None, None)
         };
+        let len_call_span = pattern.span.shrink_to_lo();
+        let len_cmp_span = if pattern.span.hi().0 > pattern.span.lo().0 + 1 {
+            pattern
+                .span
+                .with_hi(rustc_span::BytePos(pattern.span.lo().0 + 1))
+        } else {
+            pattern.span
+        };
+        let bridge_span = pattern.span.shrink_to_hi();
         let arity = self.integer_proxy(
             &elements.len().to_string(),
             false,
             Some(&size),
-            pattern.span,
+            len_cmp_span,
         )?;
-        let length = call(self, pattern, contract.length, None)?;
+        let length = call(self, pattern, len_call_span, contract.length, None)?;
         let (value, next) = if rest.is_some() {
             (
                 n::Expr {
-                    source: source(pattern.span),
+                    source: source(len_cmp_span),
                     ty: p(P::Bool),
                     kind: if size == p(P::Integer) {
                         K::IntegerBinary {
@@ -130,7 +140,7 @@ impl Checker<'_, '_> {
         let mut prefix_patterns = Vec::with_capacity(elements.len());
         let mut first_element_ty = None;
         for (index, element) in elements.iter().enumerate() {
-            let value = call(self, element, contract.element, Some(index))?;
+            let value = call(self, element, element.span, contract.element, Some(index))?;
             if first_element_ty.is_none() {
                 first_element_ty = Some(value.ty.clone());
             }
@@ -192,7 +202,13 @@ impl Checker<'_, '_> {
                         ));
                     }
                 }
-                let rest_value = call(self, rest_pat, rest_name, Some(elements.len()))?;
+                let rest_value = call(
+                    self,
+                    rest_pat,
+                    rest_pat.span,
+                    rest_name,
+                    Some(elements.len()),
+                )?;
                 rest_type = Some(rest_value.ty.clone());
                 let rest_next = self.pattern(rest_pat, &rest_value.ty)?;
                 rest_pattern = Some(rest_next.clone());
@@ -240,7 +256,7 @@ impl Checker<'_, '_> {
                     Some(next) => n::Pattern::Then {
                         first: Box::new(first),
                         value: Box::new(n::Expr {
-                            source: source(pattern.span),
+                            source: source(bridge_span),
                             ty: p(P::Void),
                             kind: K::Unit,
                         }),

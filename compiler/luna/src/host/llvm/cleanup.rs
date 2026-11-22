@@ -2730,7 +2730,7 @@ mod tests {
     }
 }
 
-fn has_condition(steps: &[Step]) -> bool {
+pub(super) fn has_condition(steps: &[Step]) -> bool {
     let mut pending: Vec<_> = steps.iter().collect();
     while let Some(step) = pending.pop() {
         match step {

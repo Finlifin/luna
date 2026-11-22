@@ -113,19 +113,31 @@ pub(crate) fn compile_match_plan(
     let mut impure_list_places: BTreeSet<pa::Place> = BTreeSet::new();
     let mut record_places: BTreeSet<pa::Place> = BTreeSet::new();
     let mut exact = true;
+    let mut structural_exact = true;
     let mut arms = Vec::with_capacity(patterns.len());
     for (arm_index, pat) in patterns.iter().enumerate() {
-        let (converted, has_guard) = convert_pattern(
+        let (inner_pat, top_guard) = match *pat {
+            n::Pattern::Guard { pattern, .. } => (pattern.as_ref(), true),
+            other => (other, false),
+        };
+        let mut arm_exact = true;
+        let (converted, inner_guard) = convert_pattern(
             env,
-            pat,
+            inner_pat,
             &pa::Place::root(),
             &mut list_views,
             &mut impure_list_places,
             &mut record_places,
-            &mut exact,
+            &mut arm_exact,
             0,
         );
-        let arm = pa::MatchArm::new(arm_index, converted, has_guard).ok()?;
+        if top_guard || !arm_exact {
+            exact = false;
+        }
+        if inner_guard || !arm_exact {
+            structural_exact = false;
+        }
+        let arm = pa::MatchArm::new(arm_index, converted, top_guard || inner_guard).ok()?;
         arms.push(arm);
     }
 
@@ -172,6 +184,7 @@ pub(crate) fn compile_match_plan(
             is_exhaustive,
             stats,
             exact,
+            structural_exact,
         },
         missing_witnesses: output.missing_witnesses,
     })
@@ -317,6 +330,76 @@ fn convert_literal(lit: &n::Literal) -> Option<pa::Pattern> {
     }
 }
 
+fn rename_pa_pattern_bindings(
+    pat: &mut pa::Pattern,
+    rename_map: &BTreeMap<String, String>,
+    depth: usize,
+    exact: &mut bool,
+) {
+    if depth > 128 {
+        *exact = false;
+        return;
+    }
+    match pat {
+        pa::Pattern::Bind { name, subpattern } => {
+            if let Some(target) = rename_map.get(name.as_str()) {
+                *name = target.clone();
+            }
+            rename_pa_pattern_bindings(subpattern, rename_map, depth + 1, exact);
+        }
+        pa::Pattern::OptionalPresent(inner)
+        | pa::Pattern::ErrorOk(inner)
+        | pa::Pattern::ErrorErr { inner, .. } => {
+            rename_pa_pattern_bindings(inner, rename_map, depth + 1, exact);
+        }
+        pa::Pattern::EnumVariant { payload, .. } => match payload {
+            pa::VariantPayloadPattern::Unit => {}
+            pa::VariantPayloadPattern::Tuple(elems) => {
+                for elem in elems {
+                    rename_pa_pattern_bindings(elem, rename_map, depth + 1, exact);
+                }
+            }
+            pa::VariantPayloadPattern::Record(fields) => {
+                for field in fields.values_mut() {
+                    rename_pa_pattern_bindings(field, rename_map, depth + 1, exact);
+                }
+            }
+        },
+        pa::Pattern::Tuple(elems) | pa::Pattern::Or(elems) => {
+            for elem in elems {
+                rename_pa_pattern_bindings(elem, rename_map, depth + 1, exact);
+            }
+        }
+        pa::Pattern::Record(fields) => {
+            for field in fields.values_mut() {
+                rename_pa_pattern_bindings(field, rename_map, depth + 1, exact);
+            }
+        }
+        pa::Pattern::List { prefix, rest } => {
+            for elem in prefix {
+                rename_pa_pattern_bindings(elem, rename_map, depth + 1, exact);
+            }
+            if let Some(rest_pat) = rest {
+                rename_pa_pattern_bindings(rest_pat, rename_map, depth + 1, exact);
+            }
+        }
+        pa::Pattern::BitVec(bv) => {
+            for seg in &mut bv.segments {
+                if let pa::BitSegmentPattern::Typed { pattern, .. } = seg {
+                    rename_pa_pattern_bindings(pattern, rename_map, depth + 1, exact);
+                }
+            }
+        }
+        pa::Pattern::Wild
+        | pa::Pattern::Bool(_)
+        | pa::Pattern::Char(_)
+        | pa::Pattern::CharRange { .. }
+        | pa::Pattern::Int(_)
+        | pa::Pattern::IntRange { .. }
+        | pa::Pattern::OptionalNull => {}
+    }
+}
+
 fn convert_pattern(
     env: &dyn AutomataEnv,
     pat: &n::Pattern,
@@ -353,16 +436,31 @@ fn convert_pattern(
                 guard,
             )
         }
-        n::Pattern::Remap { pattern, .. } => convert_pattern(
-            env,
-            pattern,
-            place,
-            list_views,
-            impure_list_places,
-            record_places,
-            exact,
-            depth + 1,
-        ),
+        n::Pattern::Remap { pattern, bindings } => {
+            let (mut converted, guard) = convert_pattern(
+                env,
+                pattern,
+                place,
+                list_views,
+                impure_list_places,
+                record_places,
+                exact,
+                depth + 1,
+            );
+            if !bindings.is_empty() {
+                let rename_map: BTreeMap<String, String> = bindings
+                    .iter()
+                    .map(|(from, to)| {
+                        (
+                            format!("_{}_{}", from.owner, from.index),
+                            format!("_{}_{}", to.owner, to.index),
+                        )
+                    })
+                    .collect();
+                rename_pa_pattern_bindings(&mut converted, &rename_map, 0, exact);
+            }
+            (converted, guard)
+        }
         n::Pattern::Literal(lit) => match convert_literal(lit) {
             Some(p) => (p, false),
             None => {

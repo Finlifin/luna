@@ -21,6 +21,7 @@ mod platform;
 use bits::bit_width;
 
 mod decimal;
+mod pattern_dag;
 mod patterns;
 mod pointers;
 mod records;
@@ -1571,9 +1572,20 @@ impl Emitter<'_> {
         let K::Match { value, arms } = &expr.kind else {
             unreachable!()
         };
+        let value_ty = value.ty.clone();
         let value = self.expr(value, depth)?;
         if self.terminated {
             Ok(Value::unit())
+        } else if let Some(result) = self.try_lower_match_dag(
+            expr.source,
+            &value,
+            &value_ty,
+            arms,
+            &expr.ty,
+            depth,
+            selected,
+        )? {
+            Ok(result)
         } else {
             self.match_with_fallback(value, arms, &expr.ty, depth, None, None, selected)
         }

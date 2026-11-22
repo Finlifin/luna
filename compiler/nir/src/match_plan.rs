@@ -90,6 +90,7 @@ pub struct MatchPlan {
     pub is_exhaustive: bool,
     pub stats: pattern_automata::CompileStats,
     pub exact: bool,
+    pub structural_exact: bool,
 }
 
 impl MatchPlan {
@@ -105,8 +106,13 @@ impl fmt::Display for MatchPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "(match-plan {} (scrutinee-type {}) (type-desc {}) (exhaustive {}) (exact {}) (unreachable-arms",
-            self.source, self.scrutinee_type, self.type_desc, self.is_exhaustive, self.exact
+            "(match-plan {} (scrutinee-type {}) (type-desc {}) (exhaustive {}) (exact {}) (structural-exact {}) (unreachable-arms",
+            self.source,
+            self.scrutinee_type,
+            self.type_desc,
+            self.is_exhaustive,
+            self.exact,
+            self.structural_exact
         )?;
         for arm in &self.unreachable_arms {
             write!(f, " {arm}")?;
@@ -247,6 +253,7 @@ mod tests {
                     memo_hits: 0,
                 },
                 exact: true,
+                structural_exact: true,
             },
         );
 
