@@ -2,6 +2,7 @@
 //! the declaration. The checked initializer still reads its original storage.
 use super::*;
 mod collections;
+mod construction;
 use crate::program::normal::observation::{self, Failure};
 
 // Alias roots identify an immutable value, never a mutable slot. Keep these

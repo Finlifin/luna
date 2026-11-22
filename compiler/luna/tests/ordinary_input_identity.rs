@@ -2866,3 +2866,87 @@ fn collected_annotation_fields_preserve_ordinary_data_indices_in_block_spreads()
         &[("marked", 2), ("first", 2), ("Flags", 0)],
     );
 }
+
+#[test]
+fn joined_annotation_fields_check_only_common_returning_shapes() {
+    let source = "
+        comptime fn marked(flag: bool) -> bool { flag }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn inspect(flag: bool) -> bool {
+            let pair: Tuple<.Es = if marked(flag) { [bool, ?Selected(true)] }
+                                   else { [bool, ?char] }> = (true, null);
+            let (first, second) = pair;
+            first and (second matches null) and
+                (if flag { pair'type == Tuple<bool, ?bool> } else { pair'type == Tuple<bool, ?char> })
+        }
+        comptime fn check() -> bool { inspect(true) and inspect(false) }";
+    check_events(source, &[("marked", 2), ("Selected", 1)]);
+    for other in ["[bool, char]", "[bool]"] {
+        let rejected = sysroot::compile(&source.replace("[bool, ?char]", other)).unwrap_err();
+        assert!(
+            rejected.contains("optional") || rejected.contains("tuple"),
+            "{rejected}"
+        );
+    }
+}
+
+#[test]
+fn joined_annotation_fields_follow_match_spreads_and_exiting_paths() {
+    check_events(
+        "
+        pure comptime fn Flags<...bits: meta.List<bool>> -> Type { bool }
+        comptime fn marked(flag: bool) -> bool { flag }
+        comptime fn first(value: ?Flags<false, head, true>) -> bool where head: bool { head }
+        comptime fn inspect(input: ?bool) -> bool {
+            let value: ?Flags<false, ...do { input match {
+                null => { return true; },
+                some? => if some { [marked(true), true] } else { [marked(false), true] },
+            } }> = null;
+            first(value) == (input matches true?)
+        }
+        comptime fn check() -> bool { inspect(null) and inspect(true) and inspect(false) }",
+        &[("marked", 2), ("first", 2), ("Flags", 0)],
+    );
+}
+
+#[test]
+fn joined_annotation_fields_retain_shared_nested_type_components() {
+    check_events(
+        "
+        pure comptime fn Marker<T> -> Type { T }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn Inner(value: ?Marker<?*T>) -> Type where T { T }
+        comptime fn inspect(flag: bool) -> bool {
+            let value: ?Marker<if flag { ?*bool } else { ?*Selected(false) }> = null;
+            Inner(value) == (if flag { bool } else { char })
+        }
+        comptime fn check() -> bool { inspect(true) and inspect(false) }",
+        &[("Selected", 1), ("Inner", 2), ("Marker", 0)],
+    );
+}
+
+#[test]
+fn joined_annotation_fields_compose_independent_spreads() {
+    // Each spread has two possible completions. The initializer only needs
+    // their common width and the optional constructor at each position.
+    let width = 18;
+    let repeated = |field: &str| vec![field; width].join(", ");
+    let inputs = repeated("...do { if marked(flag) { [?bool] } else { [?Selected(false)] } }");
+    let values = repeated("null");
+    let left = repeated("?bool");
+    let right = repeated("?char");
+    check_events(
+        &format!(
+            "
+            comptime fn marked(flag: bool) -> bool {{ flag }}
+            comptime fn Selected(flag: bool) -> Type {{ if flag {{ bool }} else {{ char }} }}
+            comptime fn inspect(flag: bool) -> bool {{
+                let values: Tuple<{inputs}> = ({values});
+                if flag {{ values'type == Tuple<{left}> }}
+                else {{ values'type == Tuple<{right}> }}
+            }}
+            comptime fn check() -> bool {{ inspect(true) and inspect(false) }}"
+        ),
+        &[("marked", 2 * width), ("Selected", width)],
+    );
+}

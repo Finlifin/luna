@@ -1964,7 +1964,7 @@ fn observe_list_concat(
 
 // Callers establish the registered list domain before using this representation
 // reader. Payload encoding does not grant collection authority.
-fn take_known_list_elements(
+pub(super) fn take_known_list_elements(
     value: Term,
     domain: &Term,
     element: &Term,
