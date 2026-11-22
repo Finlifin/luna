@@ -2866,10 +2866,15 @@ fn shared_template_declaration_types_and_instance_names_keep_separate_scopes() {
 
 #[test]
 fn shared_template_body_uses_the_generated_functions_effect_row() {
-    for attribute in ["", effect_fixture!("^attrs.effects.direct_passing ")] {
+    use nir::effects::Abi;
+
+    for (attribute, abi) in [
+        ("", Abi::Direct),
+        ("^attrs.effects.direct_passing ", Abi::DirectPassing),
+    ] {
         for category in ["", "inline ", "quote "] {
             for body in ["read()# and current", "return read()# and current;"] {
-                let source = format!(
+                let source = effect_fixture!(format:
                     "{attribute}effect read()->bool;
                     template fn fixture(value:bool,quote lambda body:<current:bool |- bool>)->#read bool {{
                         let current=value;~<body>
@@ -2882,6 +2887,12 @@ fn shared_template_body_uses_the_generated_functions_effect_row() {
                 else {
                     panic!("expected NIR")
                 };
+                let read = package
+                    .effects
+                    .iter()
+                    .find(|effect| effect.name == "read")
+                    .unwrap();
+                assert_eq!(read.abi, abi);
                 let graph = luna::instantiation::instantiate(&package, "run", 100_000).unwrap();
                 let mut vm =
                     comptime_interpretor::Interpreter::from_iir(&graph, Default::default())
