@@ -157,6 +157,19 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<n::Expr, Error> {
+        self.with_call_operand_scope(expr, |checker| {
+            checker.select_call(expr, callee, args, expected, partial)
+        })
+    }
+
+    fn select_call(
+        &mut self,
+        expr: &Expr<'_>,
+        callee: &Expr<'_>,
+        args: &[Arg<'_>],
+        expected: Option<&Term>,
+        partial: Option<&crate::calls::CallableContext>,
+    ) -> Result<n::Expr, Error> {
         // Direct comptime calls must be checked in their source phase before
         // runtime expected types or spread preparation can affect their inputs.
         let head = if let H::NFApplication(head, _) = callee.kind {

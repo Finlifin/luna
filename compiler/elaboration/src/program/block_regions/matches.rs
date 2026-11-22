@@ -141,9 +141,7 @@ impl<'h> Frame<'h> {
                 }
                 if self.ordinary.is_some()
                     && matches!(selector.kind, H::Application(..))
-                    && !checker.runtime_value_context()
-                    && checker.inline_selection.is_none()
-                    && !checker.in_unselected_inline
+                    && checker.uses_lexical_operands()
                 {
                     self.operand_scope.enter(checker, selector.hir_id);
                 }
@@ -322,7 +320,12 @@ impl<'h> Frame<'h> {
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             let value = ordinary.finish(checker, &self.source, &self.destination, value, arms)?;
-            CheckedBlock::Ordinary(self.operand_scope.close(checker, value, self.source.span)?)
+            CheckedBlock::Ordinary(self.operand_scope.close(
+                checker,
+                value,
+                scoped_operands::Consumer::Match,
+                self.source.span,
+            )?)
         } else {
             let patterns: Vec<_> = self.arms.iter().map(|(pattern, _)| pattern).collect();
             checker.require_match_coverage(&patterns, &value.ty, self.source.span)?;

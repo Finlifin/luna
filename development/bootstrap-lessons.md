@@ -239,3 +239,9 @@ VM 在同一发布器中检查三种定义的形成条件及有限存储。对�
 自举时值得保留这两步的区别。数值范围只依赖载荷，可以共享。是否符合元素类型则取决于本次调用，例如含有 `4294967296` 的列表交给 `meta.List<usize>` 时，64 位目标能接收，32 位目标会拒绝。混合表示和需要进一步解析的整数元素域仍逐项检查。实例化缓存和用户定义的相等性均不参与。[列表表示](../compiler/comptime_interpretor/src/list_values.rs) · [目标宽度与快照回归](../compiler/comptime_interpretor/src/bytecode_lists.rs)
 
 对完整 sysroot 的公开方法执行 128 次 `words = words.concat([word])`，其中 `word: u64 = 281474976710655`，最后核对长度与末项。相同程序在字节码 VM 中从 191458 个预算步降到 78047，树解释器从 184892 降到 71481。首次接收外部构造的列表仍须检查每个值。
+
+### 普通调用也能限定计算所得类型的作用域
+
+`inspect(comptime ty: Type, value: ?ty) -> bool` 允许写 `inspect(Selected(flag), null)`。检查调用表达式时，只要知道第二个实参能在任一 `?ty` 下构造，就足以确定整个调用返回 `bool`。执行抵达这里时，`Selected(flag)` 给出本次具体身份，构造 `null` 和进入 `inspect` 都在同一次调用中完成。倒序书写具名实参时，如果前面的块从调用者返回，后面的类型函数也随之跳过。
+
+宿主实现让调用和外层模式匹配复用同一套词法绑定。当结果本身携带这个身份，模式和分支可以在匹配的作用域内消费它；普通调用只在结果类型能离开作用域时封闭这次绑定。这个表示避免了为不同参数猜测类型或重放用户代码。代价是其他需要消费动态结果身份的表达式仍要建立各自的作用域。给只接受具体类型的实参提供证据也仍是独立问题，例如仅凭 `Selected(flag): Type` 无法在定义处证明布尔字面量具有该类型。[调用检查](../compiler/elaboration/src/program/scoped_operands.rs) · [源码回归](../compiler/luna/tests/ordinary_input_identity.rs)

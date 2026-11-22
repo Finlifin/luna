@@ -268,7 +268,8 @@ impl InputWork {
                 }
                 if project_return
                     && producer.ty == p(P::Type)
-                    && let Some(identity) = checker.bind_scoped_operand(site, slot, call)?
+                    && let Some(identity) =
+                        checker.bind_scoped_operand(site, slot, producer.source, call)?
                 {
                     return Ok(InputReply::Original {
                         slot,

@@ -4,7 +4,13 @@ use std::sync::Arc;
 
 mod forward;
 
-type Inputs = BTreeMap<usize, nir::DeclarationParameter>;
+#[derive(Clone, Copy)]
+pub(super) struct Input {
+    binder: nir::DeclarationParameter,
+    producer: n::SourceRange,
+}
+
+type Inputs = BTreeMap<usize, Input>;
 
 #[derive(Clone)]
 pub(super) struct Scope {
@@ -46,10 +52,13 @@ impl Boundary {
         &mut self,
         checker: &mut Checker<'_, '_>,
         value: n::Expr,
+        consumer: Consumer,
         span: Span,
     ) -> Result<n::Expr, Error> {
         match std::mem::take(self) {
-            Self::Consumer { inputs } => checker.close_operand_consumer(value, &inputs, span),
+            Self::Consumer { inputs } => {
+                checker.close_operand_consumer(value, &inputs, consumer, span)
+            }
             Self::Idle => Ok(value),
             Self::Selector { .. } => unreachable!("selector must complete before its consumer"),
         }
@@ -63,8 +72,12 @@ impl std::fmt::Display for Boundary {
             Self::Selector { .. } => f.write_str("(operand-scope selector)"),
             Self::Consumer { inputs } => {
                 f.write_str("(operand-scope")?;
-                for (slot, binder) in inputs.iter() {
-                    write!(f, " (input (slot {slot}) {binder})")?;
+                for (slot, input) in inputs.iter() {
+                    write!(
+                        f,
+                        " (input (slot {slot}) {} {})",
+                        input.binder, input.producer
+                    )?;
                 }
                 f.write_str(")")
             }
@@ -196,11 +209,63 @@ fn needs_frame(span: Span, reason: &str) -> Error {
     )
 }
 
+pub(super) enum Consumer {
+    Call,
+    Match,
+}
+
 impl Checker<'_, '_> {
+    pub(super) fn uses_lexical_operands(&self) -> bool {
+        !self.runtime_value_context()
+            && self.inline_selection.is_none()
+            && !self.in_unselected_inline
+    }
+
+    /// A match can own its selector's result identity. Otherwise the call
+    /// itself can bind identities used internally by its argument telescope.
+    pub(super) fn with_call_operand_scope(
+        &mut self,
+        expr: &Expr<'_>,
+        check: impl FnOnce(&mut Self) -> Result<n::Expr, Error>,
+    ) -> Result<n::Expr, Error> {
+        if !self.uses_lexical_operands()
+            || self
+                .operand_scope
+                .as_ref()
+                .is_some_and(|scope| scope.site == expr.hir_id)
+        {
+            return check(self);
+        }
+        let mut boundary = Boundary::default();
+        boundary.enter(self, expr.hir_id);
+        let checked = check(self);
+        boundary.leave(self);
+        let origin = match &boundary {
+            Boundary::Consumer { inputs } => inputs
+                .first_key_value()
+                .map(|(&slot, &input)| (slot, input)),
+            _ => None,
+        };
+        checked.and_then(|value| boundary.close(self, value, Consumer::Call, expr.span))
+            .map_err(|mut failure| {
+                if let Some((slot, input)) = origin {
+                    failure.notes.push(DiagnosticNote {
+                        source: input.producer,
+                        message: format!(
+                            "dependent call input needs its original comptime invocation to supply the Type in slot {slot} ({})",
+                            input.binder
+                        ),
+                    });
+                }
+                failure
+            })
+    }
+
     pub(super) fn bind_scoped_operand(
         &mut self,
         site: hir::HirId,
         slot: usize,
+        producer: n::SourceRange,
         span: Span,
     ) -> Result<Option<Term>, Error> {
         let Some(scope) = self
@@ -211,11 +276,12 @@ impl Checker<'_, '_> {
             return Ok(None);
         };
         let binder = match scope.inputs.as_ref().and_then(|inputs| inputs.get(&slot)) {
-            Some(binder) => *binder,
+            Some(input) => input.binder,
             None => {
                 let binder = self.fresh_type_binder(site.owner, span)?;
                 let scope = self.operand_scope.as_mut().unwrap();
-                Arc::make_mut(scope.inputs.get_or_insert_with(Arc::default)).insert(slot, binder);
+                Arc::make_mut(scope.inputs.get_or_insert_with(Arc::default))
+                    .insert(slot, Input { binder, producer });
                 binder
             }
         };
@@ -229,20 +295,30 @@ impl Checker<'_, '_> {
         &mut self,
         mut body: n::Expr,
         inputs: &Inputs,
+        consumer: Consumer,
         span: Span,
     ) -> Result<n::Expr, Error> {
-        let identities: BTreeSet<_> = inputs.values().map(|p| p.declaration).collect();
+        let identities: BTreeSet<_> = inputs
+            .values()
+            .map(|input| input.binder.declaration)
+            .collect();
         if !self
             .term_declaration_inputs(&body.ty, span)?
             .is_disjoint(&identities)
         {
             return Err(context_error(
                 span,
-                "dependent match result would escape its operand scope",
+                "dependent result would escape its operand scope",
             ));
         }
-        let K::Match { value, .. } = &mut body.kind else {
-            return Err(needs_frame(span, "expected the original match"));
+        let value = match consumer {
+            Consumer::Call => &mut body,
+            Consumer::Match => {
+                let K::Match { value, .. } = &mut body.kind else {
+                    return Err(needs_frame(span, "expected the original match"));
+                };
+                value.as_mut()
+            }
         };
         // Routing may already have evaluated the callee, a spread packet, or
         // collected inputs into private locals. Transfer these statements in
@@ -259,17 +335,17 @@ impl Checker<'_, '_> {
                 result.as_mut(),
                 n::Expr {
                     ty: p(P::Void),
-                    source: body.source,
+                    source: value.source,
                     kind: K::Unit,
                 },
             );
-            **value = inner;
+            *value = inner;
         }
         let K::Call {
             callee, arguments, ..
         } = &mut value.kind
         else {
-            return Err(needs_frame(span, "expected the original selector call"));
+            return Err(needs_frame(span, "expected the original call"));
         };
         let mut schedule = OperandSchedule {
             segments: Vec::new(),
@@ -284,12 +360,12 @@ impl Checker<'_, '_> {
             dependent_inputs::tasks::spend(&mut self.required_steps, arguments.len(), span)?;
             for argument in arguments.iter() {
                 if let K::Local(binding) = argument.value.kind
-                    && let Some(binder) = inputs.get(&argument.parameter)
+                    && let Some(input) = inputs.get(&argument.parameter)
                 {
                     prepared
                         .entry(binding)
                         .or_default()
-                        .push((binder.declaration, argument.value.source));
+                        .push((input.binder.declaration, argument.value.source));
                 }
             }
         }
@@ -326,8 +402,8 @@ impl Checker<'_, '_> {
                 arguments::operand_to_prepare(&mut argument.value, argument.passing)
             {
                 let binding = self.retain_lexical_operand(operand, &mut schedule.current, span)?;
-                if let Some(binder) = inputs.get(&argument.parameter) {
-                    schedule.supply(binder.declaration, binding, operand.source);
+                if let Some(input) = inputs.get(&argument.parameter) {
+                    schedule.supply(input.binder.declaration, binding, operand.source);
                 }
             }
         }

@@ -36,9 +36,9 @@ const FLAG: &str = "trait Flag {} impl Flag for bool {}";
 
 #[test]
 fn unobserved_dependencies_do_not_start_an_isolated_invocation() {
-    // These remain valid source-checking requests, not language rejection
-    // cases. Until source/VM continuation exists, fail at the missing boundary
-    // instead of running Selected (which would index past the list) while checking.
+    // Checking a bool literal against the opaque operand identity needs more
+    // evidence. Keep its producer at the original site even when executing
+    // it during definition checking would yield a different diagnostic.
     for (parameters, call) in [
         ("comptime T: Type, value: T", "accept(Selected(), true)"),
         (
@@ -60,7 +60,9 @@ fn unobserved_dependencies_do_not_start_an_isolated_invocation() {
         ))
         .unwrap_err();
         assert!(
-            failure.contains("dependent call input needs its original comptime invocation"),
+            failure.contains("type mismatch")
+                && failure.contains("supply the Type in slot 0")
+                && !failure.contains("IndexOutOfBounds"),
             "{call}: {failure}"
         );
     }
@@ -2212,5 +2214,41 @@ fn forward_choice_keeps_distinct_capture_types_separate() {
         comptime fn check() -> bool { relay(true) and relay(false) }
         ",
         &[("Selected", 2), ("left", 1), ("right", 1), ("inspect", 2)],
+    );
+}
+
+#[test]
+fn standalone_calls_bind_their_computed_input_types_in_the_caller() {
+    check_events(
+        r#"
+        comptime fn Selected(flag: bool) -> Type { if flag { char } else { bool } }
+        comptime fn inspect(comptime .ty: Type = bool, .v: ?ty = null) -> bool {
+            ty == char and (v matches null)
+        }
+        comptime fn positional(comptime ty: Type, v: ?ty) -> bool { v matches null }
+        comptime fn relay(flag: bool) -> bool {
+            var reached = false;
+            let direct = inspect(.v = do { reached = true; null }, .ty = Selected(reached));
+            let target = positional;
+            direct and reached and target(Selected(flag), null)
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }
+        "#,
+        &[("Selected", 4), ("inspect", 2), ("positional", 2)],
+    );
+}
+
+#[test]
+fn standalone_calls_skip_later_type_producers_after_an_argument_returns() {
+    check_events(
+        r#"
+        comptime fn Selected(flag: bool) -> Type { if flag { char } else { bool } }
+        comptime fn ignore(comptime .ty: Type = bool, .v: ?ty = null) -> bool { true }
+        comptime fn relay(flag: bool) -> bool {
+            ignore(.v = do { if flag { return true; }; null }, .ty = Selected(flag))
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }
+        "#,
+        &[("Selected", 1), ("ignore", 1)],
     );
 }
