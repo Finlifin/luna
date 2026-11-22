@@ -2187,3 +2187,30 @@ fn forward_type_operand_keeps_match_guards_bindings_and_returns_at_source() {
         &[("guard", 2), ("selected_arm", 2), ("Selected", 2), ("inspect", 2)],
     );
 }
+
+#[test]
+fn forward_choice_keeps_distinct_capture_types_separate() {
+    check_events(
+        "
+        struct Left { ok: bool }
+        struct Right { ok: bool }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn left() -> Left { Left { ok: true } }
+        comptime fn right() -> Right { Right { ok: true } }
+        comptime fn inspect(comptime .ty: Type = bool,
+            .parts: Tuple<?Tuple<?ty, Left>, ?Tuple<?ty, Right>> = (null, null)) -> ?ty {
+            parts match {
+                ((v, l)?, null) => do { assumes l.ok; v },
+                (null, (v, r)?) => do { assumes r.ok; v },
+                _ => do { assumes false; null },
+            }
+        }
+        comptime fn relay(flag: bool) -> bool {
+            inspect(.parts = if flag { ((null, left()), null) } else { (null, (null, right())) },
+                .ty = Selected(flag)) matches null
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }
+        ",
+        &[("Selected", 2), ("left", 1), ("right", 1), ("inspect", 2)],
+    );
+}

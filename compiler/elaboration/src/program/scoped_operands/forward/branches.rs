@@ -17,33 +17,22 @@ impl Checker<'_, '_> {
         span: Span,
         depth: usize,
     ) -> Result<Capture, Error> {
+        let branches = self.split_forward_branches(operand, schedule, span, depth)?;
+        let pair_type = self.common_forward_packet(&branches, span)?;
         let mut choice = Choice::default();
-        match &mut operand.kind {
-            K::If {
-                then_branch,
-                else_branch: Some(other),
-                ..
-            } => {
-                choice.split_arm(self, then_branch, schedule, span, depth)?;
-                choice.split_arm(self, other, schedule, span, depth)?;
-            }
-            K::Match { arms, .. } => {
-                for arm in arms {
-                    choice.split_arm(self, &mut arm.body, schedule, span, depth)?;
-                }
-            }
-            _ => unreachable!(),
+        for (body, capture) in branches {
+            choice.install_arm(self, body, capture, pair_type.as_ref(), span)?;
         }
-
         let source = operand.source;
         let tag = self.spread_binding(span)?;
+        let ty = pair_type.unwrap_or_else(|| p(P::Integer));
         let selected = n::Expr {
             source,
-            ty: p(P::Integer),
+            ty: declaration_inputs::copy_input_domain(&ty, &mut self.required_steps, span)?,
             kind: std::mem::replace(
                 &mut operand.kind,
                 K::Match {
-                    value: Box::new(local_read(tag, p(P::Integer), source)),
+                    value: Box::new(local_read(tag, ty, source)),
                     arms: choice.arms,
                 },
             ),
@@ -85,40 +74,125 @@ impl Checker<'_, '_> {
             },
         })
     }
-}
 
-impl Choice {
-    fn split_arm(
+    fn split_forward_branches<'b>(
         &mut self,
-        checker: &mut Checker<'_, '_>,
-        body: &mut n::Expr,
+        operand: &'b mut n::Expr,
         schedule: &OperandSchedule,
         span: Span,
         depth: usize,
-    ) -> Result<(), Error> {
-        dependent_inputs::tasks::spend(&mut checker.required_steps, 1, span)?;
-        if is_never(&body.ty) {
-            // This arm transfers in the original frame and cannot yield a tag.
-            return Ok(());
-        }
-        let source = body.source;
-        let mut captures = Vec::new();
-        checker.capture_forward_children(body, schedule, &mut captures, span, depth + 1)?;
-        let payload = match captures.len() {
-            0 => None,
-            1 => captures.pop(),
-            _ => {
-                let (binding, value) = checker.bundle_block_captures(captures, body, span)?;
-                Some(Capture { binding, value })
+    ) -> Result<Vec<(&'b mut n::Expr, Option<Capture>)>, Error> {
+        let mut branches = Vec::new();
+        let mut split = |body: &'b mut n::Expr| -> Result<(), Error> {
+            dependent_inputs::tasks::spend(&mut self.required_steps, 1, span)?;
+            if is_never(&body.ty) {
+                // Transfers stay in the source decision and never return a tag.
+                return Ok(());
             }
+            let mut captures = Vec::new();
+            self.capture_forward_children(body, schedule, &mut captures, span, depth + 1)?;
+            let payload = match captures.len() {
+                0 | 1 => captures.pop(),
+                _ => {
+                    let (binding, value) = self.bundle_block_captures(captures, body, span)?;
+                    Some(Capture { binding, value })
+                }
+            };
+            branches.push((body, payload));
+            Ok(())
         };
+        match &mut operand.kind {
+            K::If {
+                then_branch,
+                else_branch: Some(other),
+                ..
+            } => {
+                split(then_branch)?;
+                split(other)?;
+            }
+            K::Match { arms, .. } => {
+                for arm in arms {
+                    split(&mut arm.body)?;
+                }
+            }
+            _ => unreachable!(),
+        }
+        Ok(branches)
+    }
 
+    // Compare complete types. Equal layouts cannot authorize reusing a value
+    // at a different nominal identity or a distinct invocation-dependent type.
+    fn common_forward_packet(
+        &mut self,
+        branches: &[(&mut n::Expr, Option<Capture>)],
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
+        let Some((_, Some(first))) = branches.first() else {
+            return Ok(None);
+        };
+        let domain = &first.value.ty;
+        let same = self.with_observation_budget(span, |_, budget| {
+            for (_, capture) in &branches[1..] {
+                let Some(capture) = capture else {
+                    return Ok(false);
+                };
+                nir::type_computations::charge_term(&capture.value.ty, &mut budget.steps)?;
+                if capture.value.ty != *domain {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        })?;
+        if !same {
+            return Ok(None);
+        }
+        let payload =
+            declaration_inputs::copy_input_domain(domain, &mut self.required_steps, span)?;
+        self.tuple_value_type(vec![p(P::Integer), payload], span)
+            .map(Some)
+    }
+}
+
+impl Choice {
+    fn install_arm(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        body: &mut n::Expr,
+        payload: Option<Capture>,
+        pair_type: Option<&Term>,
+        span: Span,
+    ) -> Result<(), Error> {
+        let source = body.source;
         let literal = n::Literal::Integer(self.arms.len().to_string());
         let selected = n::Expr {
             source,
             ty: p(P::Integer),
             kind: K::Literal(literal.clone()),
         };
+        if let Some(pair_type) = pair_type {
+            let Capture { binding, value } = payload.expect("uniform payload");
+            let pair = n::Expr {
+                source,
+                ty: declaration_inputs::copy_input_domain(
+                    pair_type,
+                    &mut checker.required_steps,
+                    span,
+                )?,
+                kind: K::Tuple(vec![selected, value]),
+            };
+            self.arms.push(n::MatchArm {
+                pattern: n::Pattern::Tuple(vec![
+                    n::Pattern::Literal(literal),
+                    n::Pattern::Binding {
+                        binding,
+                        inner: Box::new(n::Pattern::Wild),
+                    },
+                ]),
+                guard: None,
+                body: std::mem::replace(body, pair),
+            });
+            return Ok(());
+        }
         let mut residual = std::mem::replace(body, selected);
         if let Some(Capture { binding, value }) = payload {
             let optional = Term::Optional(Box::new(declaration_inputs::copy_input_domain(
