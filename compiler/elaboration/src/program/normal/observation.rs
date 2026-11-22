@@ -4,6 +4,7 @@ use std::fmt;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::program) enum Failure {
     Unavailable,
+    LocalType(nir::program::LocalId, nir::program::SourceRange),
     Steps,
     Depth,
     Size,
@@ -16,6 +17,9 @@ impl fmt::Display for Failure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unavailable => f.write_str("(observation-unavailable)"),
+            Self::LocalType(local, source) => {
+                write!(f, "(observation-local-type {local} {source})")
+            }
             Self::Steps => f.write_str("(observation-limit steps)"),
             Self::Depth => f.write_str("(observation-limit depth)"),
             Self::Size => f.write_str("(observation-limit size)"),
@@ -95,7 +99,7 @@ pub(in crate::program) fn hint<T>(result: Result<T, Failure>) -> Result<Option<T
 pub(in crate::program) fn optional<T>(result: Result<T, Failure>) -> Result<Option<T>, Failure> {
     match result {
         Ok(value) => Ok(Some(value)),
-        Err(Failure::Unavailable) => Ok(None),
+        Err(Failure::Unavailable | Failure::LocalType(..)) => Ok(None),
         Err(failure) => Err(failure),
     }
 }

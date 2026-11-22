@@ -824,7 +824,7 @@ impl Checker<'_, '_> {
         let checked = self.with_staged_input(true, |this| {
             this.normal_type_expression(expr, application, inputs, Some(&p(P::Type)))
         })?;
-        if let Some(ty) = self.checked_normal_input_in(&checked, &BTreeMap::new(), expr.span)?
+        if let Some(ty) = self.observe_annotation_head(&checked, expr.span)?
             && let Term::NormalForm { arguments, .. } = &ty
         {
             self.check_type_application(head, arguments, expr.span)?;
@@ -1749,18 +1749,24 @@ impl Checker<'_, '_> {
                         return copy_observed_term(symbol, budget);
                     }
                 }
-                let parameters = self
-                    .normal_parameters
-                    .get(&self.signature_owner.ok_or(Failure::Unavailable)?)
-                    .ok_or(Failure::Unavailable)?;
-                let (declaration, _, domain) = parameters
-                    .iter()
-                    .find(|(_, local, _)| local == binding)
-                    .ok_or(Failure::Unavailable)?;
-                Ok(Term::Rigid {
-                    declaration: *declaration,
-                    sort: Sort::of_comptime_domain(domain),
-                })
+                if let Some((declaration, _, domain)) = self
+                    .signature_owner
+                    .and_then(|owner| self.normal_parameters.get(&owner))
+                    .and_then(|params| params.iter().find(|(_, local, _)| local == binding))
+                {
+                    return Ok(Term::Rigid {
+                        declaration: *declaration,
+                        sort: Sort::of_comptime_domain(domain),
+                    });
+                }
+                if self.input_facts.observing_annotation_head
+                    && expr.ty == p(P::Type)
+                    && self.immutable.contains(binding)
+                    && self.locals.contains_key(binding)
+                {
+                    return Err(Failure::LocalType(*binding, expr.source));
+                }
+                Err(Failure::Unavailable)
             }
             _ => Err(Failure::Unavailable),
         }

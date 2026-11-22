@@ -1092,6 +1092,14 @@ impl Checker<'_, '_> {
         value: &n::Expr,
         span: Span,
     ) -> Result<(), Error> {
+        if let n::Pattern::Binding { binding, inner } = pattern
+            && matches!(**inner, n::Pattern::Wild)
+            && let K::Local(source) = value.kind
+            && self.immutable.contains(&source)
+            && value.ty == p(P::Type)
+        {
+            self.input_facts.named_types.alias(*binding, source);
+        }
         let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
         let before = fuel;
         let observed = self.partial_staged_value(value, 0, &mut fuel);

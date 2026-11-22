@@ -195,7 +195,7 @@ impl Checker<'_, '_> {
             Ok(false) => return Ok(None),
             Err(failure) => {
                 let message = match failure {
-                    Failure::Unavailable => {
+                    Failure::Unavailable | Failure::LocalType(..) => {
                         "inline pattern selection requires supported immutable pattern evidence"
                             .into()
                     }

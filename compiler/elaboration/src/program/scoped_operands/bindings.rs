@@ -3,7 +3,68 @@
 use super::*;
 
 #[derive(Default)]
-pub(in crate::program) struct BindingScopes(BTreeMap<n::LocalId, Arc<Inputs>>);
+pub(in crate::program) struct BindingScopes(BTreeMap<n::LocalId, BindingInputs>);
+
+enum BindingInputs {
+    Call(Arc<Inputs>),
+    Annotation(Vec<(n::LocalId, Input)>),
+}
+
+impl BindingInputs {
+    fn visit(&self, mut f: impl FnMut(&Input)) {
+        match self {
+            Self::Call(inputs) => inputs.values().for_each(f),
+            Self::Annotation(inputs) => inputs.iter().for_each(|(_, input)| f(input)),
+        }
+    }
+
+    fn close(
+        self,
+        checker: &mut Checker<'_, '_>,
+        body: n::Expr,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        let inputs = match self {
+            Self::Call(inputs) => {
+                return checker.close_operand_consumer(body, &inputs, Consumer::Binding, span);
+            }
+            Self::Annotation(inputs) => inputs,
+        };
+        let escaping = checker.term_declaration_inputs(&body.ty, span)?;
+        if inputs
+            .iter()
+            .any(|(_, input)| escaping.contains(&input.binder.declaration))
+        {
+            return Err(context_error(
+                span,
+                "dependent result would escape its local type annotation",
+            ));
+        }
+        let (parameters, arguments) = inputs
+            .into_iter()
+            .map(|(binding, input)| {
+                (
+                    input.binder.declaration,
+                    n::NormalFormArgument::Value(n::Expr {
+                        source: input.producer,
+                        ty: p(P::Type),
+                        kind: K::Local(binding),
+                    }),
+                )
+            })
+            .unzip();
+        Ok(n::Expr {
+            source: body.source,
+            ty: declaration_inputs::copy_input_domain(&body.ty, &mut checker.required_steps, span)?,
+            kind: K::WithTypeInputs {
+                preparations: Vec::new(),
+                parameters,
+                arguments,
+                body: Box::new(body),
+            },
+        })
+    }
+}
 
 impl BindingScopes {
     pub(in crate::program) fn is_empty(&self) -> bool {
@@ -14,35 +75,57 @@ impl BindingScopes {
         &mut self,
         checker: &mut Checker<'_, '_>,
         boundary: Boundary,
+        annotation: Option<Annotation>,
         statement: &mut n::Expr,
         prefix: &mut Vec<n::Expr>,
         span: Span,
     ) -> Result<(), Error> {
-        let Boundary::Consumer { inputs } = boundary else {
+        if matches!(boundary, Boundary::Idle)
+            && annotation.as_ref().is_none_or(|a| a.inputs.is_empty())
+        {
             return Ok(());
-        };
+        }
         let (local, value) = match &mut statement.kind {
             K::Let { binding, value } => (Some(*binding), value),
             K::LetPattern { value, .. } => (None, value),
             _ => return Err(needs_frame(span, "expected a checked local binding")),
         };
-        let used = checker.term_declaration_inputs(&value.ty, span)?;
-        if !inputs
-            .values()
-            .any(|input| used.contains(&input.binder.declaration))
-        {
-            let source = value.source;
-            let call = std::mem::replace(
-                &mut **value,
-                n::Expr {
-                    source,
-                    ty: p(P::Void),
-                    kind: K::Unit,
-                },
-            );
-            **value = checker.close_operand_consumer(call, &inputs, Consumer::Call, span)?;
-            return Ok(());
-        }
+        let inputs = match (boundary, annotation) {
+            (_, Some(annotation)) if !annotation.inputs.is_empty() => {
+                BindingInputs::Annotation(annotation.inputs)
+            }
+            (Boundary::Consumer { inputs }, _) => {
+                let used = checker.term_declaration_inputs(&value.ty, span)?;
+                if !inputs
+                    .values()
+                    .any(|input| used.contains(&input.binder.declaration))
+                {
+                    let source = value.source;
+                    let call = std::mem::replace(
+                        &mut **value,
+                        n::Expr {
+                            source,
+                            ty: p(P::Void),
+                            kind: K::Unit,
+                        },
+                    );
+                    **value =
+                        checker.close_operand_consumer(call, &inputs, Consumer::Call, span)?;
+                    return Ok(());
+                }
+                // A surviving result may now be referred to through the original
+                // immutable Type name in a later annotation or another call.
+                for input in inputs.values() {
+                    if let Some(binding) = input.stable_local
+                        && used.contains(&input.binder.declaration)
+                    {
+                        checker.input_facts.named_types.bind(binding, input.binder);
+                    }
+                }
+                BindingInputs::Call(inputs)
+            }
+            _ => return Ok(()),
+        };
         let binding = match local {
             Some(binding) => binding,
             None => {
@@ -60,7 +143,11 @@ impl BindingScopes {
                 };
                 prefix.push(n::Expr {
                     source: value.source,
-                    ty: p(P::Void),
+                    ty: p(if is_never(&value.ty) {
+                        P::Never
+                    } else {
+                        P::Void
+                    }),
                     kind: K::Let {
                         binding,
                         value: std::mem::replace(value, Box::new(read)),
@@ -120,12 +207,12 @@ impl BindingScopes {
                 value: statement,
             };
             if let Some(inputs) = inputs {
-                for input in inputs.values() {
+                inputs.visit(|input| {
                     if let Some(&last) = uses.types.get(&input.binder.declaration) {
                         part.through = part.through.max(last);
                     }
-                }
-                part = part.enclose(checker, &inputs, &mut parts, span)?;
+                });
+                part = part.enclose(checker, inputs, &mut parts, span)?;
             }
             parts.push(part);
         }
@@ -154,7 +241,7 @@ impl Part {
     fn enclose(
         mut self,
         checker: &mut Checker<'_, '_>,
-        inputs: &Inputs,
+        inputs: BindingInputs,
         parts: &mut Vec<Self>,
         span: Span,
     ) -> Result<Self, Error> {
@@ -189,7 +276,7 @@ impl Part {
                 result: tail,
             },
         };
-        self.value = checker.close_operand_consumer(body, inputs, Consumer::Binding, span)?;
+        self.value = inputs.close(checker, body, span)?;
         self.depth += 1;
         let mut current = &self.value;
         while let K::WithTypeInputs { body, .. } = &current.kind {
@@ -266,8 +353,17 @@ impl std::fmt::Display for BindingScopes {
         write!(f, "(local-operand-scopes")?;
         for (binding, inputs) in &self.0 {
             write!(f, " (local {binding}")?;
-            for input in inputs.values() {
-                write!(f, " {}", input.binder)?;
+            match inputs {
+                BindingInputs::Call(inputs) => {
+                    for input in inputs.values() {
+                        write!(f, " {}", input.binder)?;
+                    }
+                }
+                BindingInputs::Annotation(inputs) => {
+                    for (local, input) in inputs {
+                        write!(f, " (annotation {local} {})", input.binder)?;
+                    }
+                }
             }
             f.write_str(")")?;
         }

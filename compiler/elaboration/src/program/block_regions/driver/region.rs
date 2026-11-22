@@ -39,15 +39,21 @@ impl<'h, R> PendingChild<'h, R> {
             && matches!(frame.progress.tail, Destination::Ordinary(_))
             && let H::Let(binding) = expr.kind
             && !binding.comptime
-            && binding.ty.is_none()
             && let Some(init) = binding.init
-            && matches!(init.kind, H::Application(..))
+            && (binding.ty.is_some() || matches!(init.kind, H::Application(..)))
             && checker.uses_lexical_operands()
         {
             let mut boundary = scoped_operands::Boundary::default();
-            boundary.enter(checker, init.hir_id);
+            let parent = checker.input_facts.annotation.take();
+            if binding.ty.is_some() {
+                checker.input_facts.annotation =
+                    Some(scoped_operands::Annotation::new(expr.hir_id));
+            } else {
+                boundary.enter(checker, init.hir_id);
+            }
             let checked = check(checker);
             boundary.leave(checker);
+            let annotation = std::mem::replace(&mut checker.input_facts.annotation, parent);
             let annotate = boundary.annotate_failure();
             checked
                 .and_then(|value| {
@@ -55,6 +61,7 @@ impl<'h, R> PendingChild<'h, R> {
                     frame.progress.binding_scopes.retain(
                         checker,
                         boundary,
+                        annotation,
                         &mut statement,
                         &mut frame.progress.statements,
                         expr.span,

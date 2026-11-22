@@ -269,7 +269,7 @@ impl InputWork {
                 if project_return
                     && producer.ty == p(P::Type)
                     && let Some(identity) =
-                        checker.bind_scoped_operand(site, slot, producer.source, call)?
+                        checker.bind_scoped_operand(site, slot, &producer, call)?
                 {
                     return Ok(InputReply::Original {
                         slot,
@@ -888,6 +888,15 @@ impl Checker<'_, '_> {
         }
         if let K::Local(binding) = &value.kind {
             if has_source {
+                if let Some(binder) = self.input_facts.named_types.get(*binding) {
+                    return Ok(Resolution::Known(
+                        value,
+                        Term::Rigid {
+                            declaration: binder.declaration,
+                            sort: binder.sort,
+                        },
+                    ));
+                }
                 let fact = self
                     .input_facts
                     .type_identity(binding)

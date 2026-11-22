@@ -2,6 +2,8 @@
 use super::*;
 use std::sync::Arc;
 
+mod annotations;
+pub(super) use annotations::{Annotation, NamedTypes};
 mod bindings;
 mod forward;
 pub(super) use bindings::BindingScopes;
@@ -10,6 +12,7 @@ pub(super) use bindings::BindingScopes;
 pub(super) struct Input {
     binder: nir::DeclarationParameter,
     producer: n::SourceRange,
+    stable_local: Option<n::LocalId>,
 }
 
 type Inputs = BTreeMap<usize, Input>;
@@ -17,6 +20,7 @@ type Inputs = BTreeMap<usize, Input>;
 #[derive(Clone)]
 pub(super) struct Scope {
     site: hir::HirId,
+    stable: LocalBindings<nir::DeclarationParameter>,
     inputs: Option<Arc<Inputs>>,
 }
 
@@ -36,7 +40,11 @@ pub(super) enum Boundary {
 
 impl Boundary {
     pub(super) fn enter(&mut self, checker: &mut Checker<'_, '_>, site: hir::HirId) {
-        let enclosing = checker.operand_scope.replace(Scope { site, inputs: None });
+        let enclosing = checker.operand_scope.replace(Scope {
+            site,
+            inputs: None,
+            stable: Default::default(),
+        });
         *self = Self::Selector { enclosing };
     }
 
@@ -274,7 +282,7 @@ impl Checker<'_, '_> {
         &mut self,
         site: hir::HirId,
         slot: usize,
-        producer: n::SourceRange,
+        producer: &n::Expr,
         span: Span,
     ) -> Result<Option<Term>, Error> {
         let Some(scope) = self
@@ -287,10 +295,28 @@ impl Checker<'_, '_> {
         let binder = match scope.inputs.as_ref().and_then(|inputs| inputs.get(&slot)) {
             Some(input) => input.binder,
             None => {
-                let binder = self.fresh_type_binder(site.owner, span)?;
+                let stable_local = match producer.kind {
+                    K::Local(id) if self.immutable.contains(&id) => {
+                        Some(self.input_facts.named_types.root(id))
+                    }
+                    _ => None,
+                };
+                let binder = match stable_local.and_then(|id| scope.stable.get(&id)).copied() {
+                    Some(binder) => binder,
+                    None => self.fresh_type_binder(site.owner, span)?,
+                };
                 let scope = self.operand_scope.as_mut().unwrap();
-                Arc::make_mut(scope.inputs.get_or_insert_with(Arc::default))
-                    .insert(slot, Input { binder, producer });
+                if let Some(local) = stable_local {
+                    scope.stable.insert(local, binder);
+                }
+                Arc::make_mut(scope.inputs.get_or_insert_with(Arc::default)).insert(
+                    slot,
+                    Input {
+                        binder,
+                        producer: producer.source,
+                        stable_local,
+                    },
+                );
                 binder
             }
         };

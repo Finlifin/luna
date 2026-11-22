@@ -144,9 +144,13 @@ impl Checker<'_, '_> {
         if let H::ResolvedLocal(_, id) = expr.kind
             && !self.callable_type_inputs.contains_key(&local(id))
             && !self.generator_data.contains_key(&local(id))
-            && let Some(ty) = self.observed_local_type(local(id), expr.span)?
         {
-            return Ok(CompletedType::Identity(ty));
+            if let Some(ty) = self.observed_local_type(local(id), expr.span)? {
+                return Ok(CompletedType::Identity(ty));
+            }
+            if let Some(ty) = self.named_type_identity(local(id), source(expr.span), expr.span)? {
+                return Ok(CompletedType::Identity(ty));
+            }
         }
         if let H::Projection(value, field) = &expr.kind {
             if field.name.as_str() == "Closure"

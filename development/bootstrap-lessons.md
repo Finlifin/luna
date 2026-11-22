@@ -251,3 +251,11 @@ VM 在同一发布器中检查三种定义的形成条件及有限存储。对�
 初版把动态类型的作用域从初始化延续到整个块尾。一段平直的代码依次创建并消费 84 个互相独立的局部值时，宿主因生成的作用域嵌套过深而拒绝了这个程序。
 
 现在只在含这类初始化的块内，从尾部逆序记录局部值和具体类型身份的最后一次使用。若某个作用域中间出现普通声明，编译器也把范围延长到这些名字最后一次被读写或捕获的位置，解构得到的名字同样处理。已经封闭的区域可以整体并入外层，互相独立的区域作为同级语句执行。后面的 `value'type` 即使只在类型项中留下了依赖，也能取得最初的类型身份。宿主为此在 elaboration 阶段多做一次有预算的依赖分析，真正重叠的类型仍可能要求 VM 逐层特化。这个入口目前覆盖普通 comptime 块中由直接调用初始化、且省略类型标注的局部声明。[局部作用域实现](../compiler/elaboration/src/program/scoped_operands/bindings.rs) · [两种解释器的回归用例](../compiler/luna/tests/ordinary_input_identity.rs)
+
+### 标注读取不可变局部 Type
+
+在 `let ty = Selected(flag); let value: ?ty = empty(ty);` 中，标注需要的具体身份由第一次初始化产生。检查器保留 `ty` 的存储，用一个刚性参数检查标注、调用签名和后续局部使用；VM 执行到标注时再从这个存储取得身份。`let alias = ty` 可以共享这一依据，两次独立调用仍各有自己的结果。闭包只在标注里使用外部 Type 时也需要记录这一依赖。包含 `Any` 的值可以先传递，执行路径真正要求具体身份时才可能得到 `TypeContractUnresolved`。
+
+范式头的实参也可能包含这些局部值。检查 `Key<if false { ty } else { bool }>` 时，收集语法上出现的所有名字会提前要求 `ty` 给出身份。宿主改为沿着已经检查过的 NIR 观察所选分支，每遇到一个实际需要的局部 Type，就取得符号依据并重新观察。这个过程计入 elaboration 预算，较宽的实参可能重复遍历；自举时可让结构观察在缺少输入的位置挂起并继续。结果始终保留原范式头。检查器把这些词法依据和可冻结的 comptime 值分开存放，块退出时恢复父层依据。[标注处理](../compiler/elaboration/src/program/scoped_operands/annotations.rs) · [源码回归](../compiler/luna/tests/ordinary_input_identity.rs)
+
+直接写 `let value: ?Selected(flag) = null` 还会尝试在独立 invocation 中取得 `flag`。这里需要把产生 Type 的调用连同它的控制流保留在原位置。具名局部读取本身没有这种求值效果，因此这次的接线首先覆盖已经存入局部变量的结果。

@@ -58,9 +58,14 @@ pub(super) struct State {
     pub values: BTreeMap<n::LocalId, (Term, Term)>,
     pub derived: BTreeSet<n::LocalId>,
     pub supplied: required::inputs::Scope,
+    // These rigid identities exist inside executable lexical scopes only.
+    pub named_types: scoped_operands::NamedTypes,
+    pub annotation: Option<scoped_operands::Annotation>,
+    pub observing_annotation_head: bool,
 }
 
 pub(super) struct LexicalBoundary {
+    named_types: scoped_operands::NamedTypes,
     specialized: BTreeSet<n::LocalId>,
     types: BTreeSet<n::LocalId>,
     partial: BTreeSet<n::LocalId>,
@@ -124,6 +129,8 @@ impl State {
             && self.values.is_empty()
             && self.derived.is_empty()
             && self.supplied.is_empty()
+            && self.named_types.is_empty()
+            && self.annotation.is_none()
     }
 
     /// Open bodies inherit lexical Type/value evidence and supplied input
@@ -139,6 +146,7 @@ impl State {
 
     pub fn lexical_boundary(&self) -> LexicalBoundary {
         LexicalBoundary {
+            named_types: self.named_types.clone(),
             specialized: self.specialized.iter().map(|(id, _, _)| *id).collect(),
             types: self.types.keys().copied().collect(),
             partial: self.partial.keys().copied().collect(),
@@ -148,6 +156,7 @@ impl State {
     }
 
     pub fn leave_lexical(&mut self, boundary: &LexicalBoundary) {
+        self.named_types = boundary.named_types.clone();
         self.specialized
             .retain(|(id, _, _)| boundary.specialized.contains(id));
         self.types.retain(|id, _| boundary.types.contains(id));
@@ -206,7 +215,7 @@ impl std::fmt::Display for State {
         for (binding, value) in &self.types {
             write!(f, " (input {binding} {value})")?;
         }
-        f.write_str(") (values")?;
+        write!(f, ") {} (values", self.named_types)?;
         for (binding, (value, domain)) in &self.values {
             write!(f, " (input {binding} {domain} {value})")?;
         }

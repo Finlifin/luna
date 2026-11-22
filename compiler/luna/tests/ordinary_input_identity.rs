@@ -2385,3 +2385,152 @@ fn local_binding_scopes_cover_later_type_observations() {
         &[("Selected", 2), ("empty", 2)],
     );
 }
+
+#[test]
+fn named_type_annotations_share_immutable_aliases_with_inferred_calls() {
+    let source = "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn pair(comptime a: Type, comptime b: Type) -> Tuple<?a, ?b> { (null, null) }
+        comptime fn relay(flag: bool) -> bool {
+            let ty = Selected(flag);
+            let alias = ty;
+            let (left, right) = pair(ty, alias);
+            var first: ?alias = left;
+            first = right;
+            let second: ?ty = empty(alias);
+            (first matches null) and (second matches null) and ((first'type == ?bool) == flag)
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }";
+    check_events(source, &[("Selected", 2), ("pair", 2), ("empty", 2)]);
+    let different = source.replace("let alias = ty;", "let alias = Selected(not flag);");
+    let error = sysroot::compile(&different).expect_err("distinct immutable locals were equated");
+    assert!(error.contains("type mismatch"), "{error}");
+}
+
+#[test]
+fn named_type_annotations_acquire_multiple_locals_and_preserve_their_scope() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn relay(flag: bool) -> bool {
+            let (a, b) = (Selected(flag), Selected(not flag));
+            let (left, right): Tuple<?a, ?b> = (empty(a), null);
+            let first: ?a = left;
+            var ok = first matches null;
+            if flag {
+                let a = b;
+                let second: ?a = right;
+                ok = ok and (second matches null);
+            };
+            ok and ((first'type == ?bool) == flag)
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }",
+        &[("Selected", 4), ("empty", 2)],
+    );
+}
+
+#[test]
+fn named_type_annotations_demand_gradual_identity_only_on_the_selected_path() {
+    let package = sysroot::compile(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { Any } else { bool } }
+        comptime fn relay(gradual: bool, use_it: bool) -> bool {
+            let ty = Selected(gradual);
+            if use_it { let value: ?ty = null; return value matches null; };
+            true
+        }",
+    )
+    .unwrap();
+    let relay = sysroot::source_function(&package, "relay");
+    for tree in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            let mut run =
+                |gradual, use_it| vm.invoke(relay, vec![Value::Bool(gradual), Value::Bool(use_it)]);
+            assert_eq!(run(true, false).unwrap(), Value::Bool(true));
+            assert_eq!(
+                run(true, true).unwrap_err().kind,
+                comptime_interpretor::ErrorKind::TypeContractUnresolved
+            );
+            assert_eq!(run(false, true).unwrap(), Value::Bool(true));
+        });
+    }
+}
+
+#[test]
+fn named_type_annotations_capture_the_type_used_only_inside_a_closure() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn relay(flag: bool) -> bool {
+            let ty = Selected(flag);
+            let read: %{ty: Type} comptime fn() -> Type = || {
+                let value: ?ty = null;
+                value'type
+            };
+            let prior: ?ty = null;
+            let read_again: %{ty: Type} comptime fn() -> Type = || {
+                let value: ?ty = null;
+                value'type
+            };
+            (prior matches null) and read() == read_again() and ((read_again() == ?bool) == flag)
+        }
+        comptime fn check() -> bool { relay(false) and relay(true) }",
+        &[("Selected", 2)],
+    );
+}
+
+#[test]
+fn named_type_annotations_preserve_opaque_heads_and_skip_unselected_inputs() {
+    use nir::{Primitive, Sort, Term};
+
+    let package = sysroot::compile(
+        "
+        pure comptime fn Key<T> -> Type { T }
+        comptime fn Selected(flag: bool) -> Type { if flag { Any } else { char } }
+        comptime fn Inspect(flag: bool) -> Type {
+            let ty = Selected(flag);
+            let skipped: ?Key<if false { ty } else { bool }> = null;
+            if flag { return skipped'type; };
+            let observed: ?Key<ty> = null;
+            observed'type
+        }",
+    )
+    .unwrap();
+    let head = sysroot::source_function(&package, "Key");
+    let inspect = sysroot::source_function(&package, "Inspect");
+    for tree in [true, false] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            for (flag, element) in [(false, Primitive::Char), (true, Primitive::Bool)] {
+                let result = vm.invoke(inspect, vec![Value::Bool(flag)]).unwrap();
+                let expected = Term::NormalForm {
+                    head,
+                    sort: Sort::Type,
+                    arguments: vec![Term::Primitive(element)],
+                };
+                assert_eq!(result, Value::Type(Term::Optional(Box::new(expected))));
+            }
+        });
+    }
+}
+
+#[test]
+fn named_type_annotations_do_not_equate_unproven_domains_or_mutable_slots() {
+    let source = "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn relay(flag: bool) -> bool {
+            let ty = Selected(flag);
+            let value: ty = true;
+            true
+        }";
+    let failure = sysroot::compile(source).unwrap_err();
+    assert!(failure.contains("type mismatch"), "{failure}");
+    let mutable = source
+        .replace("let ty =", "var ty =")
+        .replace("value: ty = true", "value: ?ty = null");
+    assert!(
+        sysroot::compile(&mutable).is_err(),
+        "mutable Type was used as a stable identity"
+    );
+}

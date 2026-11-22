@@ -122,7 +122,9 @@ impl Checker<'_, '_> {
                     || decl.ty.is_some_and(|ty|matches!(ty.kind,H::ContextualExprType(..)))) {
                     return self.code_declaration(decl, expected);
                 }
-                let annotation = decl.ty.map(|x| self.type_expr(x)).transpose()?;
+                let annotation = decl.ty
+                    .map(|ty| self.local_binding_annotation(expr.hir_id, ty))
+                    .transpose()?;
                 let init = decl.init.ok_or_else(|| {
                     error(
                         decl.span,
