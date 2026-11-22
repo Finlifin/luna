@@ -11706,3 +11706,60 @@ fn checked_factory_branches_preserve_receivers_and_returned_field_descriptions()
         assert!(failure.contains("result identity known during definition checking"), "{failure}");
     }
 }
+
+#[test]
+fn generator_observes_factory_calls_in_record_initializers() {
+    let source = r#"
+        struct Edit { draft: meta.StructBuilder }
+        impl Edit {
+            comptime fn choose(self, choice: bool) {
+                if choice {
+                    self.draft.add_field(.active, bool);
+                } else {
+                    self.draft.add_field(.active, bool);
+                }
+            }
+        }
+        comptime fn generate(choice: bool) -> <|-bool> {
+            var edit = Edit { draft: meta.StructBuilder.new(.name = .Composed) };
+            edit.choose(choice);
+            let T = edit.draft.Build();
+            '(T { active: true }.active)
+        }
+        fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let unused = source.replace("~<generate(true)> and ~<generate(false)>", "true");
+    let invalid = unused.replace("active: true", "absent: true");
+    let failure = sysroot::compile(&invalid).unwrap_err();
+    assert!(failure.contains("unknown struct field absent"), "{failure}");
+}
+
+#[test]
+fn generator_observes_nested_calls_before_reading_the_next_field() {
+    let source = r#"
+        struct Before { old: bool }
+        struct After { new_value: bool }
+        struct Cell { item: Type }
+        struct Pair { first: Type, second: Type }
+        impl Cell {
+            comptime fn Exchange(self, next: Type) -> Type {
+                let previous = self.item;
+                self.item = next;
+                previous
+            }
+        }
+        comptime fn describe() -> Pair {
+            var cell = Cell { item: Before };
+            Pair { first: cell.Exchange(After), second: cell.item }
+        }
+        comptime fn generate() -> <|-bool> {
+            let pair = describe();
+            let A = pair.first;
+            let B = pair.second;
+            '(A { old: true }.old and B { new_value: true }.new_value)
+        }
+        fn run() -> bool { ~<generate()> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}

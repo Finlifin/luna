@@ -245,12 +245,29 @@ impl Checker<'_, '_> {
         if matches!(expr.kind, K::Call { .. }) {
             return self.structural_call(expr, Some(scope), span, depth + 1);
         }
-        self.schema_fuel(span, |this, fuel| {
+        if let Some(read) = self.schema_fuel(span, |this, fuel| {
             if !structural_operand(expr, Some(scope), fuel)? {
                 return Ok(None);
             }
             this.partial_staged_value_in(expr, 0, fuel, scope).map(Some)
-        })
+        })? {
+            return Ok(Some(read));
+        }
+        let Some((shape, fields)) =
+            self.schema_fuel(span, |this, fuel| this.staged_aggregate_parts(expr, fuel))?
+        else {
+            return Ok(None);
+        };
+        // Field expressions in checked NIR are already in evaluation order.
+        // A nested call can update a receiver used by the following field.
+        let mut observed = Vec::new();
+        for field in fields {
+            let Some(value) = self.structural_value(field, scope, span, depth + 1)? else {
+                return Ok(None);
+            };
+            observed.push(value);
+        }
+        Ok(Some(PartialStagedValue::from_fields(shape, observed)))
     }
 
     fn structural_if(

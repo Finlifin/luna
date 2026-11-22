@@ -82,6 +82,24 @@ impl PartialStagedValue {
         })
     }
 
+    fn from_fields(
+        shape: PartialStagedShape,
+        fields: Vec<std::sync::Arc<Self>>,
+    ) -> std::sync::Arc<Self> {
+        let depth = fields
+            .iter()
+            .map(|field| field.depth + 1)
+            .max()
+            .unwrap_or(1);
+        if depth >= 128 {
+            return Self::unknown();
+        }
+        std::sync::Arc::new(Self {
+            depth,
+            data: PartialStagedData::Aggregate(shape, fields),
+        })
+    }
+
     fn known_term(&self) -> Option<&Term> {
         match &self.data {
             PartialStagedData::Known(term) => Some(term.as_ref()),
@@ -801,6 +819,21 @@ impl Checker<'_, '_> {
             }
             _ => {}
         }
+        let Some((shape, fields)) = self.staged_aggregate_parts(value, fuel)? else {
+            return Ok(PartialStagedValue::unknown());
+        };
+        let mut children = Vec::new();
+        for field in fields {
+            children.push(self.partial_staged_value_in(field, depth + 1, fuel, scope)?);
+        }
+        Ok(PartialStagedValue::from_fields(shape, children))
+    }
+
+    fn staged_aggregate_parts<'a>(
+        &self,
+        value: &'a n::Expr,
+        fuel: &mut usize,
+    ) -> Result<Option<(PartialStagedShape, &'a [n::Expr])>, String> {
         let (shape, fields) = match (&value.kind, &value.ty) {
             (K::Tuple(fields), _) => (PartialStagedShape::Tuple, fields),
             (K::TypeList(fields), ty) if self.list_element_type(ty).is_some() => {
@@ -846,22 +879,9 @@ impl Checker<'_, '_> {
                 }
                 (PartialStagedShape::AnonymousRecord(names), fields)
             }
-            _ => return Ok(PartialStagedValue::unknown()),
+            _ => return Ok(None),
         };
-        let mut children = Vec::new();
-        let mut height = 1;
-        for field in fields {
-            let child = self.partial_staged_value_in(field, depth + 1, fuel, scope)?;
-            height = height.max(child.depth + 1);
-            children.push(child);
-        }
-        if height >= 128 {
-            return Ok(PartialStagedValue::unknown());
-        }
-        Ok(std::sync::Arc::new(PartialStagedValue {
-            depth: height,
-            data: PartialStagedData::Aggregate(shape, children),
-        }))
+        Ok(Some((shape, fields)))
     }
 
     /// Keep possibility separate from binding evidence. A failed structural
