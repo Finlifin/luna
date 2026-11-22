@@ -565,20 +565,27 @@ impl Interpreter<'_> {
                         .admit(|fuel| self.admitted_collection_domain(ty, fuel))
                         .flatten()
                         .is_some_and(|element| {
-                            // The summary stores only identical scalar discriminants.
-                            // Resolve and check the current element domain normally;
-                            // no equality, head formation or target decision is cached.
-                            if values
-                                .summary()
-                                .is_some_and(|summary| summary.uniform_scalar.is_some())
-                            {
-                                values.first().is_some_and(|value| {
+                            // Check leaf admission in this world, including target-sized
+                            // integers. Nonprimitive integer domains use the full walk.
+                            match (values.summary().and_then(|s| s.scalars), &element) {
+                                (
+                                    Some(list_values::ScalarShape::Machine { signed, bits }),
+                                    Term::Primitive(p),
+                                ) => {
+                                    values.first().is_some_and(|value| {
+                                        self.has_type_at(value, &element, depth + 1, checks)
+                                    }) && self
+                                        .integer_layout(*p)
+                                        .is_some_and(|(s, w)| s == signed && w >= bits)
+                                }
+                                (Some(list_values::ScalarShape::Uniform(_)), _) => {
+                                    values.first().is_some_and(|value| {
+                                        self.has_type_at(value, &element, depth + 1, checks)
+                                    })
+                                }
+                                _ => values.iter().all(|value| {
                                     self.has_type_at(value, &element, depth + 1, checks)
-                                })
-                            } else {
-                                values.iter().all(|value| {
-                                    self.has_type_at(value, &element, depth + 1, checks)
-                                })
+                                }),
                             }
                         })
             }

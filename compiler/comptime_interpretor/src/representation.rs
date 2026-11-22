@@ -144,24 +144,23 @@ impl Inspection<'_> {
                     summary.height
                 } else {
                     self.reserve_children(siblings.saturating_add(values.len()))?;
-                    let mut uniform_scalar = values.first().and_then(list_values::scalar_tag);
+                    let mut scalars = values.first().and_then(list_values::scalar_shape);
                     let mut height = 0;
                     for (remaining, child) in values.iter().enumerate().rev() {
                         height = height.max(self.visit(child, depth + 1, siblings + remaining)?);
-                        if uniform_scalar != list_values::scalar_tag(child) {
-                            uniform_scalar = None;
-                        }
+                        scalars =
+                            scalars.and_then(|seen| seen.join(list_values::scalar_shape(child)?));
                     }
                     if (self.parameters.is_empty()
                         && self.value_parameters.is_empty()
                         && self.runtime_domains.is_empty())
                         || values.is_empty()
-                        || uniform_scalar.is_some()
+                        || scalars.is_some()
                     {
                         values.remember(list_values::Summary {
                             work: self.expanded - before,
                             height,
-                            uniform_scalar,
+                            scalars,
                         });
                     }
                     height

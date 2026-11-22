@@ -169,7 +169,7 @@ impl Interpreter<'_> {
                 self.check_comptime_domain(ty, source)?;
                 if values
                     .summary()
-                    .is_some_and(|summary| summary.uniform_scalar.is_some())
+                    .is_some_and(|summary| summary.scalars.is_some())
                 {
                     // Uniform primitive leaves carry no mutable identities or
                     // domains. Still check the child depth in this invocation.

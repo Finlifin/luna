@@ -1448,3 +1448,85 @@ fn divergent_concat_operands_cannot_return_a_list_value() {
         }
     }
 }
+
+#[test]
+fn machine_list_admission_keeps_signed_ranges_and_target_widths() {
+    let warm = |element, fields: Vec<Value>| {
+        let value = Value::List {
+            ty: list(element),
+            values: fields.into(),
+        };
+        value.immutable_copy_work().unwrap();
+        value
+    };
+    let mut package = package();
+    let native = warm(
+        Primitive::Usize,
+        vec![Value::UnsignedInteger(0), Value::UnsignedInteger(1 << 32)],
+    );
+    for (width, fits) in [(64, true), (32, false), (64, true)] {
+        package.target = Some(nir::target::TargetData::new(width).unwrap());
+        let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+        let result = vm.validate_immutable_input(&native, &list(Primitive::Usize));
+        if fits {
+            result.unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+        }
+    }
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    for (domain, edge, fits) in [
+        (Primitive::I8, -128, true),
+        (Primitive::I8, 127, true),
+        (Primitive::I8, -129, false),
+        (Primitive::I8, 128, false),
+        (Primitive::I128, i128::MIN, true),
+        (Primitive::I128, i128::MAX, true),
+        (Primitive::U128, 1, false),
+    ] {
+        let value = warm(
+            domain,
+            vec![Value::SignedInteger(0), Value::SignedInteger(edge)],
+        );
+        let result = vm.validate_immutable_input(&value, &list(domain));
+        if fits {
+            result.unwrap();
+        } else {
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Type);
+        }
+    }
+    let ty = list(Primitive::U8);
+    let mut prefix = warm(Primitive::U8, vec![Value::UnsignedInteger(0); 128]);
+    let snapshot = prefix.clone();
+    let suffix = warm(Primitive::U8, vec![Value::UnsignedInteger(u128::MAX)]);
+    memory::append_list_checked(&mut prefix, suffix, |_, _| Ok(())).unwrap();
+    assert_eq!(
+        vm.validate_immutable_input(&prefix, &ty).unwrap_err().kind,
+        ErrorKind::Type
+    );
+    vm.validate_immutable_input(&snapshot, &ty).unwrap();
+    let Value::List { values, .. } = &mut prefix else {
+        unreachable!()
+    };
+    values[128] = Value::UnsignedInteger(255);
+    vm.validate_immutable_input(&prefix, &ty).unwrap();
+}
+
+#[test]
+fn warmed_machine_list_admission_is_independent_of_prefix_length() {
+    let package = package();
+    let ty = list(Primitive::U64);
+    let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
+    let mut costs = Vec::new();
+    for length in [16, 4096] {
+        let value = Value::List {
+            ty: ty.clone(),
+            values: (0..length).map(Value::UnsignedInteger).collect(),
+        };
+        vm.validate_immutable_input(&value, &ty).unwrap();
+        let before = vm.remaining_steps();
+        vm.validate_immutable_input(&value, &ty).unwrap();
+        costs.push(before - vm.remaining_steps());
+    }
+    assert_eq!(costs[0], costs[1]);
+}

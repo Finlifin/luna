@@ -13,15 +13,53 @@ pub(super) struct Summary {
     pub work: usize,
     /// Maximum element subtree height; zero for an empty payload.
     pub height: usize,
-    /// A uniform, content-independent scalar carrier. This records value
-    /// discriminants only, not an expected type or a successful admission.
-    pub uniform_scalar: Option<std::mem::Discriminant<Value>>,
+    /// Payload facts independent of the declared domain and target.
+    pub scalars: Option<ScalarShape>,
 }
 
-/// Only these leaf carriers have type membership independent of their payload.
-/// Machine integers, BitVec, Type values and aggregates require their ordinary
-/// value-specific checks and cannot use a representative scalar observation.
-pub(super) fn scalar_tag(value: &Value) -> Option<std::mem::Discriminant<Value>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ScalarShape {
+    Uniform(std::mem::Discriminant<Value>),
+    Machine { signed: bool, bits: u32 },
+}
+
+impl ScalarShape {
+    pub(super) fn join(self, other: Self) -> Option<Self> {
+        match (self, other) {
+            (
+                Self::Machine { signed, bits },
+                Self::Machine {
+                    signed: rhs,
+                    bits: width,
+                },
+            ) if signed == rhs => Some(Self::Machine {
+                signed,
+                bits: bits.max(width),
+            }),
+            _ if self == other => Some(self),
+            _ => None,
+        }
+    }
+}
+
+pub(super) fn scalar_shape(value: &Value) -> Option<ScalarShape> {
+    match value {
+        Value::UnsignedInteger(n) => {
+            return Some(ScalarShape::Machine {
+                signed: false,
+                bits: u128::BITS - n.leading_zeros(),
+            });
+        }
+        Value::SignedInteger(n) => {
+            // Count the non-sign bits, then retain one bit for the sign.
+            let non_sign_bits = if *n < 0 { !n } else { *n };
+            return Some(ScalarShape::Machine {
+                signed: true,
+                bits: 1 + (i128::BITS - non_sign_bits.leading_zeros()),
+            });
+        }
+        _ => {}
+    }
     matches!(
         value,
         Value::Float(_)
@@ -36,11 +74,11 @@ pub(super) fn scalar_tag(value: &Value) -> Option<std::mem::Discriminant<Value>>
             | Value::String(_)
             | Value::Symbol(_)
     )
-    .then(|| std::mem::discriminant(value))
+    .then(|| ScalarShape::Uniform(std::mem::discriminant(value)))
 }
 
 /// List payload storage. The summary describes closed representation work and
-/// scalar discriminants, never nominal admission, assumptions or type equality.
+/// scalar ranges, never nominal admission, assumptions or type equality.
 #[derive(Clone)]
 pub struct ListValues {
     values: storage::Storage,
@@ -54,7 +92,7 @@ impl ListValues {
         self.flat_checkpoint.get().is_some()
             || self
                 .summary()
-                .is_some_and(|summary| summary.uniform_scalar.is_some())
+                .is_some_and(|summary| summary.scalars.is_some())
     }
     pub(super) fn remember_flat_checkpoint(&self) {
         let _ = self.flat_checkpoint.set(());
@@ -71,12 +109,12 @@ impl ListValues {
                 Some(Summary {
                     work: left.work.checked_add(right.work)?,
                     height: left.height.max(right.height),
-                    uniform_scalar: if self.is_empty() {
-                        right.uniform_scalar
-                    } else if other.is_empty() || left.uniform_scalar == right.uniform_scalar {
-                        left.uniform_scalar
+                    scalars: if self.is_empty() {
+                        right.scalars
+                    } else if other.is_empty() {
+                        left.scalars
                     } else {
-                        None
+                        left.scalars.zip(right.scalars).and_then(|(a, b)| a.join(b))
                     },
                 })
             });
@@ -324,28 +362,22 @@ mod tests {
         let suffix = make(vec![Value::Bool(true), Value::Bool(false)]);
         crate::memory::append_list_checked(&mut value, suffix, |_, _| Ok(())).unwrap();
         assert_eq!(
-            payload(&value).summary().unwrap().uniform_scalar,
-            scalar_tag(&Value::Bool(false))
+            payload(&value).summary().unwrap().scalars,
+            scalar_shape(&Value::Bool(false))
         );
         crate::memory::append_list_checked(&mut value, make(vec![]), |_, _| Ok(())).unwrap();
-        assert!(payload(&value).summary().unwrap().uniform_scalar.is_some());
+        assert!(payload(&value).summary().unwrap().scalars.is_some());
         let saved = value.clone();
         crate::memory::append_list_checked(&mut value, make(vec![Value::Char('x')]), |_, _| Ok(()))
             .unwrap();
-        assert!(payload(&value).summary().unwrap().uniform_scalar.is_none());
-        assert!(payload(&saved).summary().unwrap().uniform_scalar.is_some());
+        assert!(payload(&value).summary().unwrap().scalars.is_none());
+        assert!(payload(&saved).summary().unwrap().scalars.is_some());
         let Value::List { values, .. } = &mut value else {
             unreachable!()
         };
         values[0] = Value::UnsignedInteger(256);
         assert!(values.summary().is_none());
-        for value in [
-            Value::UnsignedInteger(1),
-            Value::SignedInteger(1),
-            Value::Type(Term::Primitive(Primitive::Bool)),
-        ] {
-            assert!(scalar_tag(&value).is_none());
-        }
+        assert!(scalar_shape(&Value::Type(Term::Primitive(Primitive::Bool))).is_none());
     }
 
     fn measure(

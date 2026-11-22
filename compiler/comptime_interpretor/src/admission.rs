@@ -305,21 +305,18 @@ impl Interpreter<'_> {
                 // The list's own formation was still checked in the current world.
                 if values
                     .summary()
-                    .is_some_and(|summary| summary.uniform_scalar.is_some())
+                    .is_some_and(|summary| summary.scalars.is_some())
                 {
+                    if let Some(first) = values.first() {
+                        self.admit_value_types(first, depth + 1)?;
+                    }
                     return Ok(());
                 }
                 let mut flat = true;
                 for value in values {
                     self.admit_value_types(value, depth + 1)?;
-                    flat &= list_values::scalar_tag(value).is_some()
-                        || matches!(
-                            value,
-                            Value::SignedInteger(_)
-                                | Value::UnsignedInteger(_)
-                                | Value::BitVec(_)
-                                | Value::Type(Term::Primitive(_))
-                        );
+                    flat &= list_values::scalar_shape(value).is_some()
+                        || matches!(value, Value::BitVec(_) | Value::Type(Term::Primitive(_)));
                 }
                 if flat {
                     values.remember_flat_checkpoint();
