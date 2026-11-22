@@ -793,6 +793,7 @@ impl Emitter<'_> {
             declarations: self.declarations,
             text_constants: self.text_constants,
             attr_table: self.attr_table.as_deref_mut(),
+            bitvec_cache: self.bitvec_cache.as_deref_mut(),
             serial: 0,
             terminated: false,
             fuel: self.fuel,

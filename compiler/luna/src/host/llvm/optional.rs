@@ -612,6 +612,7 @@ mod tests {
                 declarations: &mut declarations,
                 text_constants: &mut strings::TextConstants::default(),
                 attr_table: None,
+                bitvec_cache: None,
                 serial: 0,
                 terminated: false,
                 fuel: &mut fuel,

@@ -1,6 +1,7 @@
 mod attributes;
 mod bfloat;
 mod bits;
+mod bitvec_opt_bridge;
 mod callables;
 mod cleanup;
 mod closures;
@@ -789,6 +790,7 @@ struct Emitter<'a> {
     declarations: &'a mut BTreeSet<String>,
     text_constants: &'a mut strings::TextConstants,
     attr_table: Option<&'a mut attributes::AttributeTable>,
+    bitvec_cache: Option<&'a mut bitvec_opt::SynthesisCache>,
     serial: usize,
     terminated: bool,
     fuel: &'a mut usize,
@@ -2246,6 +2248,11 @@ impl Emitter<'_> {
 
     #[inline(never)]
     fn inner_logic(&mut self, expr: &Expr, depth: usize) -> Result<Value, String> {
+        if matches!(expr.ty, Term::Primitive(P::BitVec(_)))
+            && let Some(value) = self.try_lower_bitvec_expr(expr, depth)?
+        {
+            return Ok(value);
+        }
         match &expr.kind {
             K::And(left, right) | K::Or(left, right) => {
                 let left = self.expr(left, depth)?;
@@ -2608,6 +2615,9 @@ impl Emitter<'_> {
                 }
             }
             K::BitEqual(a, b) | K::BitConcat(a, b) => {
+                if let Some(value) = self.try_lower_bitvec_expr(expr, depth)? {
+                    return Ok(value);
+                }
                 let a = self.expr(a, depth)?;
                 let b = self.expr(b, depth)?;
                 if self.terminated {
@@ -2619,6 +2629,9 @@ impl Emitter<'_> {
                 }
             }
             K::BitSlice { value, start, end } => {
+                if let Some(result) = self.try_lower_bitvec_expr(expr, depth)? {
+                    return Ok(result);
+                }
                 let value = self.expr(value, depth)?;
                 if self.terminated {
                     Ok(Value::unit())
@@ -2648,6 +2661,12 @@ impl Emitter<'_> {
                 }
             }
             K::BitConvert(e) => {
+                if matches!(e.ty, Term::Primitive(P::BitVec(_)))
+                    && matches!(expr.ty, Term::Primitive(P::BitVec(_)))
+                    && let Some(value) = self.try_lower_bitvec_expr(expr, depth)?
+                {
+                    return Ok(value);
+                }
                 let value = self.expr(e, depth)?;
                 if self.terminated {
                     Ok(Value::unit())
@@ -2887,6 +2906,7 @@ pub(super) fn emit_with_result_output(
     let mut declarations = BTreeSet::new();
     let mut text_constants = strings::TextConstants::default();
     let mut attr_table = attributes::AttributeTable::default();
+    let mut bitvec_cache = bitvec_opt::SynthesisCache::new();
     let mut functions = String::new();
     let mut lambdas = BTreeMap::new();
     let mut closure_nodes = Vec::new();
@@ -3047,6 +3067,7 @@ pub(super) fn emit_with_result_output(
             declarations: &mut declarations,
             text_constants: &mut text_constants,
             attr_table: Some(&mut attr_table),
+            bitvec_cache: Some(&mut bitvec_cache),
             serial: 0,
             terminated: false,
             fuel: &mut fuel,

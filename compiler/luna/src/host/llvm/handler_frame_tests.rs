@@ -286,6 +286,7 @@ fn handler_arm_cleanup_restores_suspended_storage_on_value_and_resume() {
             declarations: &mut declarations,
             text_constants: &mut strings::TextConstants::default(),
             attr_table: None,
+            bitvec_cache: None,
             serial: 0,
             terminated: false,
             fuel: &mut fuel,

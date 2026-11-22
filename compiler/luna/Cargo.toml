@@ -21,6 +21,7 @@ rustc_span = { workspace = true }
 elaboration = { path = "../elaboration" }
 nir = { path = "../nir" }
 iir = { path = "../iir" }
+bitvec_opt = { path = "../bitvec_opt" }
 
 comptime_interpretor = { path = "../comptime_interpretor" }
 
