@@ -542,3 +542,55 @@ fn lexical_type_inputs_shadow_substitution_only_inside_the_body() {
     assert_eq!(arguments, [A::Value(read(p(Primitive::Bool)))]);
     assert_eq!(*body, read(Term::Tuple(vec![outer, p(Primitive::Char)])));
 }
+
+#[test]
+fn lexical_snapshot_domains_use_the_new_binders_before_body_specialization() {
+    use nir::program::{Expr, ExprKind as K, LocalId, NormalFormArgument as A, SourceRange};
+    let source = SourceRange { start: 2, end: 5 };
+    let local = LocalId { owner: 3, index: 8 };
+    let inner_type = rigid(1, Sort::Type);
+    let outside_type = rigid(2, Sort::Type);
+    let scope = Expr {
+        source,
+        ty: p(Primitive::Bool),
+        kind: K::WithTypeInputs {
+            preparations: vec![],
+            parameters: vec![id(1), id(3)],
+            arguments: vec![
+                A::Value(Expr {
+                    source,
+                    ty: p(Primitive::Type),
+                    kind: K::TypeValue(outside_type),
+                }),
+                A::Value(Expr {
+                    source,
+                    ty: inner_type.clone(),
+                    kind: K::Local(local),
+                }),
+            ],
+            body: Box::new(Expr {
+                source,
+                ty: p(Primitive::Bool),
+                kind: K::Literal(nir::program::Literal::Bool(true)),
+            }),
+        },
+    };
+    assert_eq!(
+        nir::copy_budget::expression_declaration_inputs(&scope, &mut 1000).unwrap(),
+        [id(2)].into_iter().collect()
+    );
+    let args = [p(Primitive::Bool), p(Primitive::Char)];
+    let substitution =
+        nir::DeclarationSubstitution::bounded(&[id(1), id(2)], &[], &args, &[], &mut 200).unwrap();
+    let actual = substitution
+        .instantiate_expression_bounded(&scope, &mut 1000)
+        .unwrap();
+    let K::WithTypeInputs { arguments, .. } = actual.kind else {
+        panic!()
+    };
+    assert_eq!(
+        arguments[0].expression().unwrap().kind,
+        K::TypeValue(p(Primitive::Char))
+    );
+    assert_eq!(arguments[1].expression().unwrap().ty, inner_type);
+}

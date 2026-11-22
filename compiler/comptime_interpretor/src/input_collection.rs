@@ -86,7 +86,7 @@ pub(super) trait Source: fmt::Display {
     fn input(&self, slot: usize) -> &Argument {
         &self.inputs().0[slot]
     }
-    fn substitutions(&self) -> Option<&input_bindings::Bindings>;
+    fn substitutions(&self, slot: usize) -> Option<&input_bindings::Bindings>;
 
     // Specialize executable code for its source position. Waking the input
     // later only observes domain annotations from the original template.
@@ -96,7 +96,7 @@ pub(super) trait Source: fmt::Display {
         slot: usize,
     ) -> Result<std::borrow::Cow<'_, Argument>, Error> {
         let template = self.input(slot);
-        match self.substitutions() {
+        match self.substitutions(slot) {
             Some(bindings) => bindings
                 .specialized(vm, template)
                 .map(std::borrow::Cow::Owned),
@@ -332,7 +332,7 @@ impl<S: Source> Frame<S> {
     ) -> Result<(), Error> {
         let expected = self.source.expected(vm, slot)?;
         let operand = self.source.input(slot);
-        let bindings = self.source.substitutions();
+        let bindings = self.source.substitutions(slot);
         self.source
             .check_input(vm, slot, operand, bindings, Some(&expected))?;
         let checked =

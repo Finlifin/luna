@@ -40,8 +40,8 @@ impl<S: Source> Source for Observed<S> {
         self.inner.plan()
     }
 
-    fn substitutions(&self) -> Option<&input_bindings::Bindings> {
-        self.inner.substitutions()
+    fn substitutions(&self, slot: usize) -> Option<&input_bindings::Bindings> {
+        self.inner.substitutions(slot)
     }
 
     fn pending_inputs(

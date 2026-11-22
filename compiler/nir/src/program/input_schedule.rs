@@ -204,8 +204,9 @@ impl ExprKind {
     }
 }
 
-/// Lexical witnesses are concrete Type inputs. Their identities are private
-/// to the body; independently typed caller results may mention other binders.
+/// Each lexical input gets its domain from its checked operand. A domain may
+/// reference another slot in the telescope. The body can use these private
+/// identities, but the caller-visible result must be independent of them.
 pub fn check_lexical_type_inputs(
     parameters: &[crate::DeclarationId],
     arguments: &[NormalFormArgument],
@@ -213,22 +214,31 @@ pub fn check_lexical_type_inputs(
     body_result: &crate::Term,
     fuel: &mut usize,
 ) -> Result<bool, crate::type_computations::Error> {
-    use crate::{Primitive, Term, type_computations as types};
+    use crate::{Sort, type_computations as types};
     if parameters.is_empty() || parameters.len() != arguments.len() {
         return Ok(false);
     }
     *fuel = fuel
         .checked_sub(parameters.len())
         .ok_or(types::Error::Budget)?;
-    if arguments.iter().any(|argument| {
-        !matches!(argument, NormalFormArgument::Value(value)
-        if value.ty == Term::Primitive(Primitive::Type))
-    }) {
-        return Ok(false);
-    }
     let bound: BTreeSet<_> = parameters.iter().copied().collect();
     if bound.len() != parameters.len() {
         return Ok(false);
+    }
+    for argument in arguments {
+        let NormalFormArgument::Value(value) = argument else {
+            return Ok(false);
+        };
+        if value.ty.sort() != Sort::Type || Sort::of_comptime_domain(&value.ty) == Sort::Runtime {
+            return Ok(false);
+        }
+        if !argument.is_lexical_snapshot() {
+            let mut uses = BTreeSet::new();
+            types::rigid_declarations_bounded(&value.ty, fuel, &mut uses)?;
+            if !bound.is_disjoint(&uses) {
+                return Ok(false);
+            }
+        }
     }
     let mut escaping = BTreeSet::new();
     types::rigid_declarations_bounded(result, fuel, &mut escaping)?;

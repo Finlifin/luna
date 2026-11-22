@@ -559,6 +559,18 @@ impl fmt::Display for NormalMatchArm {
 }
 
 impl NormalFormArgument {
+    /// A snapshot reads caller storage, but its annotation belongs to the
+    /// lexical telescope. Other operand expressions run in the caller scope.
+    pub fn is_lexical_snapshot(&self) -> bool {
+        matches!(
+            self,
+            Self::Value(Expr {
+                kind: ExprKind::Local(_),
+                ..
+            })
+        )
+    }
+
     pub fn integer(source: SourceRange, spelling: String, negative: bool) -> Self {
         Self::Literal {
             source,
@@ -1443,8 +1455,9 @@ pub enum ExprKind {
         declaration: DeclarationId,
         arguments: Vec<NormalFormArgument>,
     },
-    /// Evaluate the Type operands, specialize the lexical body, and resume it in
-    /// the caller's environment. The scope owns fresh declaration identities.
+    /// Bind the ordinary comptime inputs of a type, specialize the lexical body,
+    /// and resume in the caller's environment. Each Value operand carries its
+    /// declaration domain, including dependencies on other fresh slots.
     WithTypeInputs {
         preparations: Vec<NormalFormPreparation>,
         parameters: Vec<DeclarationId>,
@@ -4703,7 +4716,7 @@ impl Expr {
                 for preparation in preparations {
                     preparation.expression.rewrite_with(rewriter)?;
                 }
-                for argument in arguments {
+                for argument in arguments.iter_mut().filter(|a| !a.is_lexical_snapshot()) {
                     for pattern in argument.patterns_mut() {
                         pattern.rewrite_with(rewriter)?;
                     }
@@ -4711,7 +4724,14 @@ impl Expr {
                         expression.rewrite_with(rewriter)?;
                     }
                 }
-                rewriter.lexical_body(parameters, body)?;
+                rewriter.with_lexical_scope(parameters, |rewriter| {
+                    for argument in arguments.iter_mut().filter(|a| a.is_lexical_snapshot()) {
+                        for local in argument.expressions_mut() {
+                            local.rewrite_with(rewriter)?;
+                        }
+                    }
+                    body.rewrite_with(rewriter)
+                })?;
             }
             ExprKind::CheckTypeAlias {
                 arguments,
@@ -5131,17 +5151,17 @@ pub trait Rewriter {
         Ok(true)
     }
 
-    /// Preparations and arguments are in the enclosing scope. Only the body
-    /// sees the new declarations, including when an inline copy reuses IDs.
-    fn lexical_body(
+    /// Snapshot annotations and the body share the fresh declarations. Run
+    /// preparations and ordinary operand expressions in the enclosing scope.
+    fn with_lexical_scope(
         &mut self,
         _parameters: &[DeclarationId],
-        body: &mut Expr,
+        rewrite: impl FnOnce(&mut Self) -> Result<(), Self::Error>,
     ) -> Result<(), Self::Error>
     where
         Self: Sized,
     {
-        body.rewrite_with(self)
+        rewrite(self)
     }
 
     fn pattern(&mut self, _pattern: &mut Pattern) -> Result<(), Self::Error> {

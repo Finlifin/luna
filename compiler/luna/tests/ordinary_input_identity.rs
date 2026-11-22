@@ -2704,3 +2704,61 @@ fn formed_head_fields_recover_after_a_gradual_argument() {
         });
     }
 }
+
+#[test]
+fn mixed_head_fields_supply_value_indices_to_a_generic_consumer() {
+    check_events(
+        "
+        pure comptime fn Shape<T, width: u8> -> Type { T }
+        comptime fn marked(n: u8) -> u8 { n }
+        comptime fn width_of(value: ?Shape<T, width>) -> u8 where T, width: u8 { width }
+        comptime fn size(n: u8) -> u8 {
+            let value: ?Shape<bool, marked(n)> = null;
+            width_of(value)
+        }
+        comptime fn check() -> bool { size(7) == 7 and size(9) == 9 }",
+        &[("marked", 2), ("width_of", 2), ("Shape", 0)],
+    );
+}
+
+#[test]
+fn mixed_head_fields_follow_the_formed_dependent_domain() {
+    check_events(
+        "
+        pure comptime fn Tagged<T, tag: T> -> Type { T }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn marked(flag: bool) -> bool { flag }
+        comptime fn inspect(flag: bool) -> bool {
+            let a: ?Tagged<bool, marked(flag)> = null;
+            let b: ?Tagged<Type, Selected(flag)> = null;
+            if flag {
+                a'type == ?Tagged<bool, true> and b'type == ?Tagged<Type, bool>
+            } else {
+                a'type == ?Tagged<bool, false> and b'type == ?Tagged<Type, char>
+            }
+        }
+        comptime fn check() -> bool { inspect(true) and inspect(false) }",
+        &[("marked", 2), ("Selected", 2), ("Tagged", 0)],
+    );
+}
+
+#[test]
+fn mixed_head_fields_deliver_a_collector_as_one_ordinary_value() {
+    check_events(
+        "
+        pure comptime fn Packet<...items: meta.List<Type>> -> Type { bool }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn elements(value: ?Packet<.items = items>) -> meta.List<Type>
+        where items: meta.List<Type>
+        {
+            items
+        }
+        comptime fn inspect(flag: bool) -> bool {
+            let p: ?Packet<Selected(flag), u8> = null;
+            let xs = elements(p);
+            xs.length() == 2 and xs[1] == u8 and xs[0] == (if flag { bool } else { char })
+        }
+        comptime fn check() -> bool { inspect(true) and inspect(false) }",
+        &[("Selected", 2), ("Packet", 0), ("elements", 2)],
+    );
+}

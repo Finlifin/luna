@@ -162,7 +162,7 @@ impl input_collection::Source for Source<'_> {
     fn plan(&self) -> &input_collection::Plan<'_> {
         &self.plan
     }
-    fn substitutions(&self) -> Option<&input_bindings::Bindings> {
+    fn substitutions(&self, _slot: usize) -> Option<&input_bindings::Bindings> {
         Some(&self.bindings)
     }
     fn check_input(

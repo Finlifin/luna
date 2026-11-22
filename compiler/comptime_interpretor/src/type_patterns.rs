@@ -5,7 +5,7 @@ use nir::pattern_structure::TypeStructure as S;
 pub(super) struct TypePattern {
     shape: S,
     next: usize,
-    binders: Vec<nir::DeclarationParameter>,
+    positions: BTreeMap<DeclarationId, usize>,
 }
 
 impl fmt::Display for TypePattern {
@@ -15,8 +15,8 @@ impl fmt::Display for TypePattern {
             "(type-pattern {} (next {}) (binders",
             self.shape, self.next
         )?;
-        for binder in &self.binders {
-            write!(f, " {binder}")?;
+        for (id, slot) in &self.positions {
+            write!(f, " (slot {slot} {id})")?;
         }
         write!(f, "))")
     }
@@ -87,7 +87,7 @@ impl<'a> Interpreter<'a> {
         if input.lacks_pattern_shape() {
             return Err(self.failure(ErrorKind::TypeContractUnresolved, None));
         }
-        let binders = match shape {
+        let positions = match shape {
             S::Tuple { fields } => {
                 let Some(types) = self.type_pattern_tuple(input)? else {
                     return Ok(None);
@@ -95,7 +95,7 @@ impl<'a> Interpreter<'a> {
                 if types.len() != fields {
                     return Ok(None);
                 };
-                vec![]
+                BTreeMap::new()
             }
             S::Nominal {
                 declaration,
@@ -121,6 +121,10 @@ impl<'a> Interpreter<'a> {
                 self.check_type_description(ty, None)?;
                 self.effect_charge(binders.len(), None)?;
                 binders
+                    .into_iter()
+                    .enumerate()
+                    .map(|(slot, p)| (p.declaration, slot))
+                    .collect()
             }
             S::Normal { head, fields } => {
                 let metadata = self
@@ -152,36 +156,35 @@ impl<'a> Interpreter<'a> {
                 metadata
                     .parameters
                     .iter()
-                    .map(|p| nir::DeclarationParameter {
-                        declaration: p.declaration,
-                        sort: if p.kind == nir::normal_forms::Kind::Type {
-                            nir::Sort::Type
-                        } else {
-                            nir::Sort::ComptimeValue
-                        },
-                    })
+                    .enumerate()
+                    .map(|(slot, p)| (p.declaration, slot))
                     .collect()
             }
         };
         Ok(Some(TypePattern {
             shape,
             next: 0,
-            binders,
+            positions,
         }))
     }
 
-    fn type_pattern_domain(
+    fn type_pattern_domain<'d>(
         &mut self,
         domain: &Term,
-        binders: &[nir::DeclarationParameter],
-        arguments: &[Term],
+        state: &TypePattern,
+        arguments: &'d [Term],
+        domain_at: impl Fn(usize) -> &'d Term,
     ) -> Result<Term, Error> {
         let before = usize::try_from(self.budget.steps).unwrap_or(usize::MAX);
         let mut fuel = before;
-        let result = nir::type_computations::instantiate_parameters_bounded(
+        // The type has already formed. Domain dependencies may point in
+        // either direction, independent of the pattern's binding order.
+        let result = nir::instantiate_observed_domain(
             domain,
-            binders,
-            arguments,
+            |id| {
+                let &slot = state.positions.get(&id)?;
+                Some((domain_at(slot), arguments.get(slot)?))
+            },
             &[],
             &mut fuel,
         );
@@ -244,7 +247,11 @@ impl<'a> Interpreter<'a> {
                     let domain = domains
                         .get(index)
                         .unwrap_or(&Term::Primitive(Primitive::Type));
-                    let domain = self.type_pattern_domain(domain, &state.binders, arguments)?;
+                    let domain = self.type_pattern_domain(domain, state, arguments, |slot| {
+                        domains
+                            .get(slot)
+                            .unwrap_or(&Term::Primitive(Primitive::Type))
+                    })?;
                     let argument = arguments
                         .get(index)
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
@@ -263,15 +270,13 @@ impl<'a> Interpreter<'a> {
                     .parameters
                     .get(index)
                     .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                let prefix = arguments
-                    .get(..index)
-                    .ok_or_else(|| self.failure(ErrorKind::Type, None))?;
-                let domain =
-                    self.type_pattern_domain(&parameter.ty, &state.binders[..index], prefix)?;
-                // A normal-form wildcard keeps the original opaque-input rule.
                 if wild {
                     None
                 } else {
+                    let domain =
+                        self.type_pattern_domain(&parameter.ty, state, arguments, |slot| {
+                            &metadata.parameters[slot].ty
+                        })?;
                     let argument = arguments
                         .get(index)
                         .ok_or_else(|| self.failure(ErrorKind::Type, None))?;

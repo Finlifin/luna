@@ -122,14 +122,17 @@ impl<'a, 'e> Frame<'a, 'e> {
                     return Err(vm.failure(ErrorKind::InvalidCallPlan, Some(view.source)));
                 }
                 vm.effect_charge(parameters.len(), Some(view.source))?;
-                let binders = parameters
+                let borrowed: Vec<_> = view
+                    .arguments
                     .iter()
-                    .map(|&declaration| nir::DeclarationParameter {
-                        declaration,
-                        sort: nir::Sort::Type,
-                    })
+                    .map(|input| &input.expression().expect("checked lexical operand").ty)
                     .collect();
-                (Receiver::Lexical, binders, Vec::new(), Default::default())
+                let (domains, referenced) = vm.query_admission(Some(view.source), |_, fuel| {
+                    copy_domains(view, &borrowed, fuel)
+                })?;
+                let binders = nir::declaration_parameters(parameters, &domains)
+                    .map_err(|_| vm.failure(ErrorKind::Type, Some(view.source)))?;
+                (Receiver::Lexical, binders, domains, referenced)
             }
             Target::Alias { .. } | Target::Nominal(_) => {
                 let contract = Contract::open(vm, view, plan.inputs_diverge())?;
@@ -335,7 +338,7 @@ impl Frame<'_, '_> {
             }
             let (receiver, inputs) = self.inputs.take().expect("completed declaration inputs");
             let view = self.plan.view();
-            let types = inputs.finish().ok_or_else(|| {
+            let (domains, types) = inputs.finish().ok_or_else(|| {
                 let kind = match receiver {
                     Receiver::Lexical => ErrorKind::TypeContractUnresolved,
                     _ => ErrorKind::Type,
@@ -347,7 +350,20 @@ impl Frame<'_, '_> {
                     let Target::Lexical { parameters, body } = view.target else {
                         unreachable!()
                     };
-                    let body = vm.specialize_function_expression(body, parameters, &types, &[])?;
+                    let substitution = vm.query_admission(Some(view.source), |vm, fuel| {
+                        vm.with_admission_queries(|queries| {
+                            nir::admit_declaration_arguments_with_queries_in(
+                                parameters, &domains, &types, fuel, queries,
+                            )
+                            .map(nir::AdmittedArguments::into_substitution)
+                        })
+                    })?;
+                    let before = usize::try_from(vm.budget.steps).unwrap_or(usize::MAX);
+                    let mut fuel = before;
+                    let result =
+                        dynamic_instances::instantiate_code(&substitution, body, &mut fuel);
+                    vm.budget.steps -= (before - fuel) as u64;
+                    let body = result.map_err(|kind| vm.failure(kind, Some(body.source)))?;
                     Admitted::Body(Arc::new(body))
                 }
                 Receiver::Type(contract) => contract.finish(vm, view, types)?,

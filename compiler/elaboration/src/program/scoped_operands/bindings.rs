@@ -17,7 +17,7 @@ impl BindingInputs {
             Self::Annotation(steps) => steps
                 .iter()
                 .flat_map(|s| s.outputs.iter())
-                .for_each(|(_, input)| f(input)),
+                .for_each(|(_, input, _)| f(input)),
         }
     }
 
@@ -35,7 +35,11 @@ impl BindingInputs {
         };
         let identities = inputs
             .iter()
-            .flat_map(|s| s.outputs.iter().map(|(_, input)| input.binder.declaration))
+            .flat_map(|s| {
+                s.outputs
+                    .iter()
+                    .map(|(_, input, _)| input.binder.declaration)
+            })
             .collect();
         if !checker
             .term_declaration_inputs(&body.ty, span)?
@@ -65,8 +69,13 @@ impl BindingInputs {
                         expression,
                     });
             }
-            for (local, input) in step.outputs.iter() {
-                schedule.supply(input.binder.declaration, *local, input.producer);
+            for (local, input, domain) in step.outputs.iter() {
+                let domain = declaration_inputs::copy_input_domain(
+                    domain,
+                    &mut checker.required_steps,
+                    span,
+                )?;
+                schedule.supply_in(input.binder.declaration, *local, input.producer, domain);
             }
         }
         schedule.segments.push(schedule.current);
@@ -220,7 +229,7 @@ impl BindingScopes {
                         if let Some(prep) = &step.preparation {
                             uses.observe(checker, index, prep, span)?;
                         } else {
-                            for (local, _) in step.outputs.iter() {
+                            for (local, _, _) in step.outputs.iter() {
                                 uses.locals.entry(*local).or_insert(index);
                             }
                         }
@@ -384,8 +393,8 @@ impl std::fmt::Display for BindingScopes {
                         if let Some(prep) = &step.preparation {
                             write!(f, " {prep}")?;
                         }
-                        for (local, input) in step.outputs.iter() {
-                            write!(f, " (output {local} {})", input.binder)?;
+                        for (local, input, domain) in step.outputs.iter() {
+                            write!(f, " (output {local} {} {domain})", input.binder)?;
                         }
                         f.write_str(")")?;
                     }

@@ -2536,7 +2536,14 @@ fn lexical_type_input_scopes_enforce_phase_distinctness_and_result_scope() {
         "invalid lexical Type input scope"
     );
     package.functions[0].phase = Phase::Comptime;
+    let mut lifted = scope(vec![binder], Term::Primitive(Primitive::Bool));
+    let K::WithTypeInputs { arguments, .. } = &mut lifted.kind else {
+        unreachable!()
+    };
+    arguments[0].expression_mut().unwrap().ty =
+        Term::Lift(Box::new(Term::Primitive(Primitive::Bool)));
     for body in [
+        lifted,
         scope(vec![binder, binder], Term::Primitive(Primitive::Bool)),
         scope(
             vec![binder],

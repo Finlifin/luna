@@ -39,17 +39,17 @@ impl<T: Borrow<Term>> crate::program::Rewriter for ExpressionSubstitution<'_, T>
         Ok(())
     }
 
-    fn lexical_body(
+    fn with_lexical_scope(
         &mut self,
         ids: &[DeclarationId],
-        body: &mut crate::program::Expr,
+        rewrite: impl FnOnce(&mut Self) -> Result<(), TypeError>,
     ) -> Result<(), TypeError> {
         let hidden: Vec<_> = ids
             .iter()
             .copied()
             .filter(|id| self.binders.positions.contains_key(id) && self.shadowed.insert(*id))
             .collect();
-        let result = body.rewrite_with(self);
+        let result = rewrite(self);
         for id in hidden {
             self.shadowed.remove(&id);
         }

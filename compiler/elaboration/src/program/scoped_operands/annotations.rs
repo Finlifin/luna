@@ -52,7 +52,7 @@ pub(in crate::program) struct Annotation {
 #[derive(Clone)]
 pub(super) struct AnnotationStep {
     pub(super) preparation: Option<Arc<n::Expr>>,
-    pub(super) outputs: Arc<[(n::LocalId, Input)]>,
+    pub(super) outputs: Arc<[(n::LocalId, Input, Term)]>,
 }
 
 impl Annotation {
@@ -230,44 +230,79 @@ impl Checker<'_, '_> {
         };
         let count = arguments.len();
         dependent_inputs::tasks::spend(&mut self.required_steps, count, span)?;
-        let has_type_fields = self
+        let Some(parameters) = self
             .source_declarations
             .owner(head)
             .and_then(|owner| self.normal_parameters.get(&owner))
-            .is_some_and(|parameters| {
-                count != 0
-                    && parameters.len() == count
-                    && parameters
-                        .iter()
-                        .all(|(_, _, domain)| *domain == p(P::Type))
-            });
-        if !has_type_fields {
+            .filter(|parameters| count != 0 && parameters.len() == count)
+        else {
+            return self.retain_annotation_type(checked, None, span);
+        };
+        // A lifted input carries runtime environment evidence. Keep the
+        // formed identity intact at this purely comptime boundary.
+        if parameters
+            .iter()
+            .any(|(_, _, domain)| Sort::of_comptime_domain(domain) == Sort::Runtime)
+        {
             return self.retain_annotation_type(checked, None, span);
         }
+        let signature = parameters
+            .iter()
+            .map(|(id, _, domain)| {
+                declaration_inputs::copy_input_domain(domain, &mut self.required_steps, span)
+                    .map(|domain| (*id, domain))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let owner = self.input_facts.annotation.as_ref().unwrap().site.owner;
+        let mut fields = Vec::with_capacity(count);
+        for (_, domain) in &signature {
+            let binder = if *domain == p(P::Type) {
+                self.fresh_type_binder(owner, span)?
+            } else {
+                self.fresh_value_binder(owner, span)?
+            };
+            fields.push((
+                binder,
+                Term::Rigid {
+                    declaration: binder.declaration,
+                    sort: binder.sort,
+                },
+            ));
+        }
+        // Rebind the declaration's entire telescope at this application. Keep
+        // its domain dependencies even when some result arguments are known.
+        let replacements: BTreeMap<_, _> = signature
+            .iter()
+            .zip(&fields)
+            .map(|((id, domain), (_, rigid))| (*id, (domain, rigid)))
+            .collect();
         let mut terms = Vec::with_capacity(count);
         let mut patterns = Vec::with_capacity(count);
         let mut outputs = Vec::with_capacity(count);
-        let owner = self.input_facts.annotation.as_ref().unwrap().site.owner;
-        for argument in arguments {
-            let binder = self.fresh_type_binder(owner, span)?;
+        for ((argument, (_, domain)), (binder, rigid)) in
+            arguments.iter().zip(&signature).zip(&fields)
+        {
+            let domain = self.with_observation_budget(span, |_, budget| {
+                Ok(nir::instantiate_observed_domain(
+                    domain,
+                    |id| replacements.get(&id).copied(),
+                    &[],
+                    &mut budget.steps,
+                )?)
+            })?;
             let local = self.spread_binding(span)?;
             let known = if let Some(expr) = argument.expression()
-                && let K::TypeValue(ty) = &expr.kind
+                && matches!(expr.kind, K::TypeValue(_) | K::Literal(_))
                 && self.checked_declaration_inputs(expr, span)?.is_empty()
-                && ty.check_scope(&[]).is_ok()
             {
-                Some(declaration_inputs::copy_input_domain(
-                    ty,
-                    &mut self.required_steps,
-                    span,
-                )?)
+                self.with_observation_budget(span, |checker, budget| {
+                    checker.normal_input_hint(expr, budget)
+                })?
+                .filter(|ty| ty.check_scope(&[]).is_ok())
             } else {
                 None
             };
-            terms.push(known.unwrap_or(Term::Rigid {
-                declaration: binder.declaration,
-                sort: binder.sort,
-            }));
+            terms.push(known.unwrap_or_else(|| rigid.clone()));
             patterns.push(n::Pattern::Binding {
                 binding: local,
                 inner: Box::new(n::Pattern::Wild),
@@ -275,10 +310,11 @@ impl Checker<'_, '_> {
             outputs.push((
                 local,
                 Input {
-                    binder,
+                    binder: *binder,
                     producer: checked.source,
                     stable_local: None,
                 },
+                domain,
             ));
         }
         let preparation = n::Expr {
@@ -347,7 +383,7 @@ impl Checker<'_, '_> {
             .inputs
             .push(AnnotationStep {
                 preparation,
-                outputs: Arc::from([(local, input)]),
+                outputs: Arc::from([(local, input, p(P::Type))]),
             });
         Ok(CompletedType::Identity(known.unwrap_or(Term::Rigid {
             declaration: binder.declaration,
@@ -393,6 +429,7 @@ impl Checker<'_, '_> {
                             producer,
                             stable_local: None,
                         },
+                        p(P::Type),
                     )]),
                 });
             binder

@@ -35,8 +35,8 @@ impl<'e> Frame<'e> {
         Self::from_source(Source::new(plan, parameters, domains, specialize, locals))
     }
 
-    pub fn finish(self) -> Option<Vec<Term>> {
-        self.source.completed.finish()
+    pub fn finish(self) -> Option<(Vec<Term>, Vec<Term>)> {
+        Some((self.source.domains, self.source.completed.finish()?))
     }
 }
 
@@ -82,8 +82,18 @@ impl input_collection::Source for Source<'_> {
         &self.plan
     }
 
-    fn substitutions(&self) -> Option<&input_bindings::Bindings> {
-        self.specialize.then_some(&self.completed)
+    fn substitutions(&self, slot: usize) -> Option<&input_bindings::Bindings> {
+        if !self.specialize {
+            return None;
+        }
+        if matches!(
+            self.plan.view().target,
+            input_collection::Target::Lexical { .. }
+        ) && !self.input(slot).is_lexical_snapshot()
+        {
+            return None;
+        }
+        Some(&self.completed)
     }
 
     fn pending_inputs(
@@ -161,6 +171,66 @@ impl input_collection::Source for Source<'_> {
 mod tests {
     use super::*;
     use input_collection::InputPlan;
+
+    #[test]
+    fn lexical_snapshot_waits_for_its_domain_and_rejects_mismatched_data() {
+        let package = Package::default();
+        let source = SourceRange { start: 4, end: 9 };
+        let id = |local| DeclarationId { package: 72, local };
+        let snapshot = LocalId { owner: 8, index: 0 };
+        let boolean = Term::Primitive(Primitive::Bool);
+        let expression = Expr {
+            source,
+            ty: boolean.clone(),
+            kind: K::WithTypeInputs {
+                preparations: vec![],
+                parameters: vec![id(0), id(1)],
+                arguments: vec![
+                    A::Value(Expr {
+                        source,
+                        ty: Term::Rigid {
+                            declaration: id(1),
+                            sort: nir::Sort::Type,
+                        },
+                        kind: K::Local(snapshot),
+                    }),
+                    A::Value(Expr {
+                        source,
+                        ty: Term::Primitive(Primitive::Type),
+                        kind: K::TypeValue(boolean.clone()),
+                    }),
+                ],
+                body: Box::new(Expr {
+                    source,
+                    ty: boolean,
+                    kind: K::ComptimeValue(Term::Rigid {
+                        declaration: id(0),
+                        sort: nir::Sort::ComptimeValue,
+                    }),
+                }),
+            },
+        };
+        for tree in [false, true] {
+            let mut vm = if tree {
+                Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+            } else {
+                Interpreter::for_comptime(&package, Budget::default()).unwrap()
+            };
+            let mut env = Environment::from([(snapshot, Value::Char('x'))]);
+            assert!(matches!(
+                vm.eval(&expression, &mut env),
+                Err(Error {
+                    kind: ErrorKind::Type,
+                    ..
+                })
+            ));
+            env.insert(snapshot, Value::Bool(true));
+            assert!(matches!(
+                vm.eval(&expression, &mut env).unwrap(),
+                Flow::Value(Value::Bool(true))
+            ));
+        }
+    }
 
     #[test]
     fn transitive_pending_domains_drain_in_both_engines_and_fail_terminally() {
@@ -261,7 +331,7 @@ mod tests {
                 );
                 if spelling == "17" {
                     assert_eq!(
-                        frame.finish().unwrap(),
+                        frame.finish().unwrap().1,
                         vec![
                             Term::Integer(comptime_runtime::Integer::from_u128(17)),
                             Term::Primitive(Primitive::U8),
@@ -366,7 +436,7 @@ mod tests {
             ErrorKind::InvalidControlFlow
         );
         assert_eq!(
-            frame.finish().unwrap(),
+            frame.finish().unwrap().1,
             vec![
                 Term::Integer(comptime_runtime::Integer::from_u128(17)),
                 Term::Primitive(Primitive::U8)
@@ -469,7 +539,7 @@ mod tests {
             if valid {
                 assert_eq!(result.unwrap(), Term::Primitive(Primitive::U8));
                 assert_eq!(
-                    frame.finish().unwrap(),
+                    frame.finish().unwrap().1,
                     vec![
                         ty.clone(),
                         Term::Primitive(Primitive::U8),

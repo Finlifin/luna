@@ -1030,9 +1030,21 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                                 .map(|p| (Node::Expr(&p.expression), depth + 1)),
                         );
                         charge_width(steps, arguments.len())?;
-                        work.extend(arguments.iter().map(|e| (Node::Argument(e), depth + 1)));
+                        let scoped = |e: &&n::NormalFormArgument| e.is_lexical_snapshot();
+                        work.extend(
+                            arguments
+                                .iter()
+                                .filter(|e| !scoped(e))
+                                .map(|e| (Node::Argument(e), depth + 1)),
+                        );
                         work.push((Node::LeaveLexical(parameters), depth));
                         work.push((Node::Expr(body), depth + 1));
+                        work.extend(
+                            arguments
+                                .iter()
+                                .filter(scoped)
+                                .map(|e| (Node::Argument(e), depth + 1)),
+                        );
                         work.push((Node::EnterLexical(parameters), depth));
                         parameters.len()
                     }

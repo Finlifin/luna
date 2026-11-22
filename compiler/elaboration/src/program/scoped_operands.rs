@@ -230,6 +230,16 @@ impl OperandSchedule {
     }
 
     fn supply(&mut self, binder: DeclarationId, binding: n::LocalId, source: n::SourceRange) {
+        self.supply_in(binder, binding, source, p(P::Type));
+    }
+
+    fn supply_in(
+        &mut self,
+        binder: DeclarationId,
+        binding: n::LocalId,
+        source: n::SourceRange,
+        domain: Term,
+    ) {
         if self.unavailable.remove(&binder) {
             self.pending.insert(binder);
             self.current.parameters.push(binder);
@@ -237,7 +247,7 @@ impl OperandSchedule {
                 .arguments
                 .push(n::NormalFormArgument::Value(n::Expr {
                     source,
-                    ty: p(P::Type),
+                    ty: domain,
                     kind: K::Local(binding),
                 }));
         }
