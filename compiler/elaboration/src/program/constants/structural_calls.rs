@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 mod arguments;
 mod flow;
+mod instances;
 use flow::{Completion, FactoryExit};
 
 impl Checker<'_, '_> {
@@ -19,7 +20,7 @@ impl Checker<'_, '_> {
             &value.ty,
             Term::Nominal { .. } | Term::NormalForm { .. } | Term::Record(_) | Term::Tuple(_)
         ) && let Completion::Next(observed) =
-            self.observe_direct_call(value, None, &mut None, span, 0)?
+            self.observe_factory_call(value, None, &mut None, span, 0)?
         {
             self.record_observed_pattern(pattern, &observed, span)?;
         }
@@ -88,26 +89,7 @@ impl Checker<'_, '_> {
             }
             if !indices.is_empty() {
                 function = self.schema_fuel(span, |this, fuel| {
-                    let mut domains = Vec::new();
-                    for parameter in &function.type_parameters {
-                        let domain = this
-                            .observe_input_domain(*parameter, || {
-                                *fuel = fuel
-                                    .checked_sub(1)
-                                    .ok_or(nir::type_computations::Error::Budget)?;
-                                Ok(())
-                            })
-                            .map_err(|e| e.to_string())?;
-                        domains.push(
-                            nir::copy_budget::clone_term(
-                                domain.unwrap_or(&Term::Primitive(P::Type)),
-                                fuel,
-                            )
-                            .map_err(|_| {
-                                "structural declaration domain budget exhausted".to_string()
-                            })?,
-                        );
-                    }
+                    let domains = this.factory_input_domains(&function.type_parameters, fuel)?;
                     function
                         .instantiate_declaration_parameters(&domains, indices, fuel)
                         .map_err(|e| e.to_string())
@@ -240,6 +222,8 @@ pub(super) fn structural_operand(
         transparent &= matches!(
             node.kind,
             K::Local(_)
+                | K::Function(_)
+                | K::FunctionInstance { .. }
                 | K::Literal(_)
                 | K::Unit
                 | K::TypeValue(_)

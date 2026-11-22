@@ -222,8 +222,21 @@ impl Checker<'_, '_> {
                     self.observe_built_struct(packet, scope, span)?,
                 ));
             }
+            K::ComptimeFunctionInstance {
+                declaration,
+                inputs,
+            } => {
+                return self.observe_factory_instance(
+                    *declaration,
+                    inputs,
+                    scope,
+                    returns,
+                    span,
+                    depth + 1,
+                );
+            }
             K::Call { .. } => {
-                return self.observe_direct_call(expr, Some(scope), returns, span, depth + 1);
+                return self.observe_factory_call(expr, Some(scope), returns, span, depth + 1);
             }
             _ => {}
         }

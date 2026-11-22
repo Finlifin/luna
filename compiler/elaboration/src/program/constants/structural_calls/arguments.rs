@@ -4,7 +4,7 @@ use super::flow::Returns;
 use super::*;
 
 impl Checker<'_, '_> {
-    pub(super) fn observe_direct_call(
+    pub(super) fn observe_factory_call(
         &mut self,
         expr: &n::Expr,
         mut caller: Option<&mut ObservationScope>,
@@ -24,13 +24,32 @@ impl Checker<'_, '_> {
         if depth >= 32 || !env_arguments.is_empty() {
             return Ok(Completion::Unavailable);
         }
-        let (id, indices) = match &callee.kind {
-            K::Function(id) => (*id, &[][..]),
+        let observed_target;
+        let target = match &callee.kind {
+            K::Function(id) => Some((*id, &[][..], false)),
             K::FunctionInstance {
                 declaration,
                 arguments,
-            } => (*declaration, arguments.as_slice()),
-            _ => return Ok(Completion::Unavailable),
+            } => Some((*declaration, arguments.as_slice(), false)),
+            _ => {
+                observed_target = match self.observe_call_operand(
+                    callee,
+                    caller.as_deref_mut(),
+                    returns,
+                    span,
+                    depth + 1,
+                )? {
+                    Completion::Next(target) => target,
+                    transfer => return Ok(transfer),
+                };
+                match observed_target.known_term() {
+                    Some(Term::FunctionValue {
+                        declaration,
+                        arguments,
+                    }) => Some((*declaration, arguments.as_slice(), true)),
+                    _ => None,
+                }
+            }
         };
         let mut remaining = arguments.as_slice();
         let mut inputs = BTreeMap::new();
@@ -58,26 +77,24 @@ impl Checker<'_, '_> {
                 // A computed receiver owns temporary storage. Its writes can
                 // affect the result but there is no place to update on return.
             }
-            let value = if let Some(frame) = caller.as_deref_mut() {
-                match self.observe_factory_expr(operand, frame, returns, span, depth + 1)? {
-                    Completion::Next(value) => value,
-                    transfer => return Ok(transfer),
-                }
-            } else {
-                let Some(value) = self.schema_fuel(span, |this, fuel| {
-                    if !structural_operand(operand, None, fuel)? {
-                        return Ok(None);
-                    }
-                    this.partial_staged_value(operand, 0, fuel).map(Some)
-                })?
-                else {
-                    return Ok(Completion::Unavailable);
-                };
-                value
+            let value = match self.observe_call_operand(
+                operand,
+                caller.as_deref_mut(),
+                returns,
+                span,
+                depth + 1,
+            )? {
+                Completion::Next(value) => value,
+                transfer => return Ok(transfer),
             };
             inputs.insert(argument.parameter, value);
         }
 
+        // An explicit operand can return from its caller before invoking an
+        // otherwise unknown target.
+        let Some((id, indices, dynamic)) = target else {
+            return Ok(Completion::Unavailable);
+        };
         if let Some((argument, place)) = &receiver {
             let Some(frame) = caller.as_deref() else {
                 return Ok(Completion::Unavailable);
@@ -91,17 +108,29 @@ impl Checker<'_, '_> {
             inputs.insert(argument.parameter, value);
         }
 
-        if !remaining.is_empty()
-            && !self.observe_default_inputs(
+        if !remaining.is_empty() {
+            let substitution = if dynamic && !indices.is_empty() {
+                let Some(substitution) = self.schema_fuel(span, |this, fuel| {
+                    this.instance_default_substitution(id, indices, fuel)
+                })?
+                else {
+                    return Ok(Completion::Unavailable);
+                };
+                Some(substitution)
+            } else {
+                None
+            };
+            if !self.observe_default_inputs(
                 remaining,
                 parameter_bindings,
+                substitution.as_ref(),
                 reference_slot,
                 &mut inputs,
                 span,
                 depth,
-            )?
-        {
-            return Ok(Completion::Unavailable);
+            )? {
+                return Ok(Completion::Unavailable);
+            }
         }
         let slot = receiver.as_ref().map(|(argument, _)| argument.parameter);
         let Some(exit) = self.invoke_observed_factory(id, indices, &inputs, slot, span, depth)?
@@ -120,10 +149,33 @@ impl Checker<'_, '_> {
         }
         Ok(Completion::Next(exit.value))
     }
+
+    fn observe_call_operand(
+        &mut self,
+        expr: &n::Expr,
+        caller: Option<&mut ObservationScope>,
+        returns: &mut Option<Returns>,
+        span: Span,
+        depth: usize,
+    ) -> Result<Completion, Error> {
+        if let Some(frame) = caller {
+            return self.observe_factory_expr(expr, frame, returns, span, depth);
+        }
+        self.schema_fuel(span, |this, fuel| {
+            if structural_operand(expr, None, fuel)? {
+                this.partial_staged_value(expr, 0, fuel)
+                    .map(Completion::Next)
+            } else {
+                Ok(Completion::Unavailable)
+            }
+        })
+    }
+
     fn observe_default_inputs(
         &mut self,
         defaults: &[n::CallArgument],
         bindings: &[n::LocalId],
+        substitution: Option<&nir::DeclarationSubstitution<'_>>,
         reference_slot: Option<usize>,
         inputs: &mut BTreeMap<usize, Arc<PartialStagedValue>>,
         span: Span,
@@ -142,8 +194,19 @@ impl Checker<'_, '_> {
             if !argument.is_default || argument.passing != n::ArgumentPassing::Value {
                 return Ok(false);
             }
+            let specialized;
+            let expr = if let Some(substitution) = substitution {
+                specialized = self.schema_fuel(span, |_, fuel| {
+                    substitution
+                        .instantiate_expression_bounded(&argument.value, fuel)
+                        .map_err(|error| error.to_string())
+                })?;
+                &specialized
+            } else {
+                &argument.value
+            };
             let Completion::Next(value) =
-                self.observe_factory_expr(&argument.value, &mut frame, &mut None, span, depth + 1)?
+                self.observe_factory_expr(expr, &mut frame, &mut None, span, depth + 1)?
             else {
                 return Ok(false);
             };

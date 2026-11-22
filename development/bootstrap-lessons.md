@@ -343,3 +343,9 @@ VM 进入函数时需要确定每个参数域，离开参数绑定后还要检�
 现在宿主在借用期间完成值形状检查，收集名义类型、可调用值等需要继续验证的条件，同时保留后续确实要检查的类型描述、列表载荷和 Object 条目的域。释放借用后，先完成形状产生的条件，再按字段顺序完成嵌套类型的准入。两项实际检查之间的普通数据节点可以合并计数；回放时在原位置扣除预算，仍能区分哪次检查最先失败。方法体收到原位置。这个实现仍要遍历嵌套值，也要暂存会触发验证的元数据；对于依赖普通输入身份的签名，入口时刻的具体值另由身份形成路径取得。[接收者准入](../compiler/comptime_interpretor/src/admission/embedded.rs)
 
 Release 的 `borrowed_aggregate` 在一次外层 invocation 内调用 16 次接收者方法。宽度为 1024、每项含四个布尔值时，同机三轮中位耗时从 4.539 ms 降至 3.546 ms，每次外层调用减少 16,400 次分配，仍消耗 609,747 个 VM 步。对应的按值调用两版均约 6.46 ms，分配次数和步数一致。这里仍包括参数域处理、调用方构造和其余执行成本。[基准输入](../compiler/comptime_interpretor/benches/borrowed_aggregate.rs)
+
+### 高阶 comptime 调用中的函数身份与默认实参
+
+生成器可以先把具名工厂存入 record，再通过字段调用它，最后在 quote 中使用工厂返回的类型。检查 `choice.make(t)` 时，函数签名只给出了结果的类型。要判断这个结果里的 `item: Type` 是否有某个字段，还要知道到达调用点的函数声明和这次实例的子句实参。现在定义检查按调用顺序先观察 callee，保存此时的身份，再观察显式实参。实参可以改写 `choice.make`，也可以从调用者提前返回。两条分支都交付同一实例时，可以继续检查其函数体；两条分支交付不同实例时，当前观察器会失去确切的目标。[调用顺序](../compiler/elaboration/src/program/constants/structural_calls/arguments.rs)
+
+例如 `wrap<Pick(flag)>()` 的可选参数声明为 `.item: Type = T`。即使 `flag` 在定义检查时未知，若 `Pick` 的两个出口都返回 `Before`，便能知道默认值是 `Before`。检查器依次观察子句准备语句和各槽位的操作数，将实参代入调用点已有的默认表达式，并保留普通参数的绑定层。VM 在实际调用时仍求值并检查这些操作数。自举要保留这两层的对应关系。当前的代价是定义检查另有一份处理词法作用域、写回和提前返回的代码。捕获闭包需要环境身份，trait 成员需要分派证据，两者都超出了只保存声明与子句实参的表示。[实例观察](../compiler/elaboration/src/program/constants/structural_calls/instances.rs) · [VM 默认参数](../compiler/comptime_interpretor/src/dynamic_instances.rs) · [源码验收](../compiler/luna/tests/cmtt.rs)

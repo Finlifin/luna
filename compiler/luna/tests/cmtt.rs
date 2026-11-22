@@ -11939,3 +11939,91 @@ fn factory_projects_a_returned_snapshot_after_receiver_writeback() {
         "{failure}"
     );
 }
+
+#[test]
+fn factory_calls_a_known_function_forwarded_through_a_record() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Packet { item: Type }
+        struct Choice { make: comptime fn(Type) -> Packet }
+        comptime fn wrap(t: Type) -> Packet { Packet { item: t } }
+        comptime fn observe(choice: Choice, t: Type) -> Packet { choice.make(t) }
+        comptime fn describe(flag: bool) -> Packet {
+            let action = if flag { wrap } else { wrap };
+            observe(Choice { make: action }, Before)
+        }
+        comptime fn generate(flag: bool) -> <|-bool> {
+            let packet = describe(flag);
+            let A = packet.item;
+            '(A { first: true }.first)
+        }
+        fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let unused = source.replace("~<generate(true)> and ~<generate(false)>", "true");
+    let wrong = unused.replace("make: action }, Before", "make: action }, After");
+    let failure = sysroot::compile(&wrong).unwrap_err();
+    assert!(failure.contains("unknown struct field first"), "{failure}");
+    let mixed = unused
+        .replace("comptime fn observe", "comptime fn alternate(t: Type) -> Packet { Packet { item: After } } comptime fn observe")
+        .replace("else { wrap }", "else { alternate }");
+    let failure = sysroot::compile(&mixed).unwrap_err();
+    assert!(failure.contains("identity"), "{failure}");
+}
+
+#[test]
+fn factory_call_snapshots_the_callee_before_argument_writes() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Packet { item: Type }
+        struct Choice { make: comptime fn(Type) -> Packet }
+        comptime fn wrap(t: Type) -> Packet { Packet { item: t } }
+        comptime fn alternate(t: Type) -> Packet { Packet { item: After } }
+        comptime fn describe(early: bool) -> Packet {
+            var choice = Choice { make: wrap };
+            (do {
+                if early { return Packet { item: Before }; }
+                choice.make
+            })(do { choice.make = alternate; Before })
+        }
+        comptime fn generate(early: bool) -> <|-bool> {
+            let packet = describe(early);
+            let A = packet.item;
+            '(A { first: true }.first)
+        }
+        fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
+fn factory_call_specializes_the_forwarded_instances_default() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Packet { item: Type }
+        comptime fn wrap(.item: Type = T) -> Packet
+        where T
+        {
+            Packet { item: item }
+        }
+        comptime fn Pick(flag: bool) -> Type { if flag { Before } else { Before } }
+        comptime fn describe(flag: bool) -> Packet {
+            wrap<Pick(flag)>()
+        }
+        comptime fn generate(flag: bool) -> <|-bool> {
+            let packet = describe(flag);
+            let A = packet.item;
+            '(A { first: true }.first)
+        }
+        fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let wrong = source
+        .replace("{ Before }", "{ After }")
+        .replace("~<generate(true)> and ~<generate(false)>", "true");
+    let failure = sysroot::compile(&wrong).unwrap_err();
+    assert!(failure.contains("unknown struct field first"), "{failure}");
+}
