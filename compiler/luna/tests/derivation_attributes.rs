@@ -1,4 +1,7 @@
 //! Attribute inspection precedes strategy selection and publishes no executable.
+#[path = "support/primitive_bindings.rs"]
+mod primitive_bindings;
+
 use luna::cli::{Emit, Options};
 use luna::frontend::{self, Artifact};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,7 +14,7 @@ fn compile(source: &str, emit: Emit) -> Result<Artifact, String> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::write(&path, source).unwrap();
+    primitive_bindings::write_fixture(&path, source).unwrap();
     let result = frontend::compile(&Options {
         dispatch_fuel: None,
         comptime_intrinsics: Vec::new(),
@@ -62,7 +65,10 @@ fn default_request_metadata_is_available_before_selection() {
     let error = compile(&source, Emit::Nir)
         .err()
         .expect("expected compilation failure");
-    assert!(error.contains("default strategy selection"), "{error}");
+    assert!(
+        error.contains("no applicable default derivation strategy found"),
+        "{error}"
+    );
 }
 
 #[test]
