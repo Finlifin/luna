@@ -186,6 +186,7 @@ impl LexicalCheckpoint {
 /// blocks keep their synthetic dependency table, runtime origins/deliveries,
 /// and type-use stability obligations.
 struct RetainedCheckpoint {
+    checking_constructor_operands: Option<(OwnerId, SourceBindings<()>)>,
     operand_scope: Option<scoped_operands::Scope>,
     abstract_code_dependencies: BTreeMap<n::LocalId, BTreeSet<n::LocalId>>,
     local_runtime_origins: runtime_origins::LocalOrigins,
@@ -200,6 +201,7 @@ struct RetainedCheckpoint {
 impl RetainedCheckpoint {
     fn capture(checker: &Checker<'_, '_>) -> Self {
         Self {
+            checking_constructor_operands: checker.checking_constructor_operands.clone(),
             operand_scope: checker.operand_scope.clone(),
             abstract_code_dependencies: checker.abstract_code_dependencies.clone(),
             local_runtime_origins: checker.local_runtime_origins.clone(),
@@ -213,6 +215,7 @@ impl RetainedCheckpoint {
     }
 
     fn restore(self, checker: &mut Checker<'_, '_>) {
+        checker.checking_constructor_operands = self.checking_constructor_operands;
         checker.operand_scope = self.operand_scope;
         checker
             .pending_refinements
@@ -375,7 +378,15 @@ impl std::fmt::Display for LexicalCheckpoint {
 
 impl std::fmt::Display for RetainedCheckpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("(checking-retained (abstract-code-dependencies")?;
+        f.write_str("(checking-retained")?;
+        if let Some((owner, sites)) = &self.checking_constructor_operands {
+            write!(f, " (constructor-type-operands {owner}")?;
+            for (site, ()) in sites {
+                write!(f, " {}", local(*site))?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(" (abstract-code-dependencies")?;
         for (binding, deps) in &self.abstract_code_dependencies {
             write!(f, " (binding {binding}")?;
             for dep in deps {
@@ -474,6 +485,7 @@ mod tests {
             pending_len: Some(7),
         };
         let retained = RetainedCheckpoint {
+            checking_constructor_operands: None,
             operand_scope: None,
             abstract_code_dependencies: BTreeMap::new(),
             local_runtime_origins: Default::default(),

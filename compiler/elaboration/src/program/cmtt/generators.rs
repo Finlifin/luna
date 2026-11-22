@@ -33,7 +33,7 @@ pub(in crate::program) struct Generator<O = Interface> {
     pub(super) defaults: Vec<(usize, hir::HirId)>,
     pub(super) variadics: Vec<usize>,
     pub(super) body: Option<hir::BodyId>,
-    pub(super) checked: bool,
+    pub(super) checked_operands: Option<SourceBindings<()>>,
 }
 
 impl<O> Generator<O> {
@@ -128,7 +128,13 @@ impl<O: fmt::Display> fmt::Display for Generator<O> {
             Some(body) => write!(f, "{}", local(body.hir_id))?,
             None => f.write_str("declaration")?,
         }
-        write!(f, ") (checked {}))", self.checked)
+        if let Some(sites) = self.checked_operands.as_ref().filter(|sites| !sites.is_empty()) {
+            f.write_str(") (constructor-type-operands")?;
+            for (site, ()) in sites {
+                write!(f, " {}", local(*site))?;
+            }
+        }
+        write!(f, ") (checked {}))", self.checked_operands.is_some())
     }
 }
 
@@ -407,7 +413,7 @@ impl Checker<'_, '_> {
                     })
                     .collect(),
                 body,
-                checked: false,
+                checked_operands: None,
             })
         })();
         self.locals = saved;
@@ -519,7 +525,7 @@ impl Checker<'_, '_> {
 
     pub(in crate::program) fn check_code_generator(&mut self, owner: OwnerId) -> Result<(), Error> {
         let definition = self.copy_code_generator(owner, self.package.item(owner).unwrap().span)?;
-        if definition.checked {
+        if definition.checked_operands.is_some() {
             return Ok(());
         }
         // Even an unused identity generator must not admit comptime-only
@@ -571,15 +577,12 @@ impl Checker<'_, '_> {
                 })
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let checking = std::mem::replace(&mut self.checking_code_generator, true);
-        let result = self.generator_frame(owner, |this| {
+        let operands = self.check_generator_body(owner, |this| {
             this.install_generator_captures(&definition, this.package.item(owner).unwrap().span)?;
             this.check_generator_clause_defaults(owner, &definition)?;
             this.run_code_generator(&definition, arguments)
-        });
-        self.checking_code_generator = checking;
-        result?;
-        self.code_generators.get_mut(&owner).unwrap().checked = true;
+        })?;
+        self.code_generators.get_mut(&owner).unwrap().checked_operands = Some(operands);
         Ok(())
     }
 
@@ -2819,6 +2822,10 @@ impl Checker<'_, '_> {
     ) -> Result<Option<n::Expr>, Error> {
         let known = self
             .with_observation_budget(span, |this, budget| this.normal_input_hint(value, budget))?;
+        let known = match known {
+            None if value.ty == p(P::Type) => self.generator_type_result_evidence(value, span)?,
+            known => known,
+        };
         let kind = match known {
             Some(ty) if value.ty == p(P::Type) && ty.sort() == Sort::Type => K::TypeValue(ty),
             // An immutable schema may retain its checked structural value so

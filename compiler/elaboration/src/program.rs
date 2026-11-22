@@ -794,6 +794,7 @@ fn elaborate_in_mode(
         pattern_quote_pending: None,
         pattern_generators: BTreeMap::new(),
         code_generators: BTreeMap::new(),
+        checking_constructor_operands: None,
         data_consumers: BTreeMap::new(),
         data_consumer_depth: 0,
         code_method_captures: BTreeMap::new(),
@@ -2812,6 +2813,7 @@ struct Checker<'a, 'h> {
     pattern_quote_pending: Option<bool>,
     pattern_generators: BTreeMap<OwnerId, cmtt::patterns::PatternGenerator>,
     code_generators: BTreeMap<OwnerId, cmtt::Generator>,
+    checking_constructor_operands: Option<(OwnerId, SourceBindings<()>)>,
     data_consumers: BTreeMap<OwnerId, cmtt::Generator<Term>>,
     data_consumer_depth: usize,
     // Invocation-local environments; recursive calls restore the previous entry.

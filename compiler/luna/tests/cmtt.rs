@@ -10746,7 +10746,7 @@ fn contextual_type_clauses_execute_live_updates_once_before_property_inputs() {
     let source =
         include_str!("../../../development/repros/contextual-property-live-type-clause.fl");
     assert_eq!(run(source, "run", vec![]), Value::Bool(true));
-    let ordinary = source.replace("{ code, enabled: flag }", "(code, .props=SAMPLE)");
+    let ordinary = source.replace("{ code, enabled: flag }", "(code, .props=SAMPLE);");
     assert_eq!(run(&ordinary, "run", vec![]), Value::Bool(true));
 }
 
@@ -11298,5 +11298,76 @@ fn quoted_source_fields_require_splice_even_when_the_domains_match() {
         fn run() -> bool { ~<build()> }";
     let failure = support::compile_with_protocols(source, &Default::default()).unwrap_err();
     assert!(failure.contains("bound Splice protocol"), "{failure}");
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
+fn quoted_constructors_use_the_generators_observed_type() {
+    let source = "
+        comptime fn Schema() -> Type {
+            let draft = meta.StructBuilder.new(.name = .Published);
+            draft.add_field(.flag, bool);
+            draft.Build()
+        }
+        typealias Row = Schema();
+        comptime fn Same(flag: bool, ty: Type) -> Type {
+            if flag { ty } else { ty }
+        }
+        comptime fn emit(flag: bool) -> < |- bool > {
+            let T = Same(flag, Row);
+            '(T { flag: true }.flag)
+        }
+        fn run() -> bool { ~<emit(false)> and ~<emit(true)> }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let invalid = source
+        .replace("flag: true", "missing: true")
+        .replace("~<emit(false)> and ~<emit(true)>", "true");
+    let failure = sysroot::compile(&invalid).unwrap_err();
+    assert!(failure.contains("field"), "{failure}");
+}
+
+#[test]
+fn quoted_constructors_join_type_branches_without_invoking_unchosen_producers() {
+    let source = "
+        struct Packet { flag: bool }
+        comptime fn Same(ty: Type) -> Type { ty }
+        comptime fn emit(flag: bool) -> < |- bool > {
+            let T = flag match { true => do { assumes flag; Packet }, false => Packet };
+            let U = Same(T);
+            '(U { flag: true }.flag)
+        }
+        fn run() -> bool { ~<emit(false)> and ~<emit(true)> }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
+
+#[test]
+fn quoted_constructors_commit_updates_from_the_type_operand_before_later_code() {
+    let source = "
+        struct Packet { flag: bool }
+        comptime fn emit() -> < |- bool > {
+            var state = false;
+            let code: < |- bool > = '((do {
+                state = not state;
+                state = not state;
+                Packet
+            }) { flag: true }.flag);
+            if state { '(false) } else { code }
+        }
+        fn run() -> bool { ~<emit()> }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let one = source.replacen("state = not state;", "", 1);
+    assert_eq!(sysroot::run(&one), Value::Bool(false));
+}
+
+#[test]
+fn quoted_constructors_in_data_consumers_preserve_the_type_operands_frame() {
+    let source = "
+        struct Packet { flag: bool }
+        comptime fn inspect(code: < |- bool >) -> bool {
+            var seen = false;
+            let generated: < |- bool > = '((do { seen = not seen; Packet }) { flag: true }.flag);
+            seen
+        }
+        fn run() -> bool { const changed = inspect('(false)); changed }";
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }

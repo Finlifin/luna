@@ -1,7 +1,69 @@
 //! Required Type computations share generator storage and its failure recovery.
 use super::*;
+use crate::program::normal::observation::Failure;
 
 impl Checker<'_, '_> {
+    /// Only a successfully checked definition supplies phase routing to its
+    /// invocations. Layouts, local values and caller storage remain per call.
+    pub(in crate::program::cmtt) fn check_generator_body<T>(
+        &mut self,
+        owner: OwnerId,
+        check: impl FnOnce(&mut Self) -> Result<T, Error>,
+    ) -> Result<SourceBindings<()>, Error> {
+        let checking = std::mem::replace(&mut self.checking_code_generator, true);
+        let parent = self
+            .checking_constructor_operands
+            .replace((owner, Default::default()));
+        let result = self.generator_frame(owner, check);
+        let (_, operands) =
+            std::mem::replace(&mut self.checking_constructor_operands, parent).unwrap();
+        self.checking_code_generator = checking;
+        result?;
+        Ok(operands)
+    }
+
+    pub(in crate::program) fn generator_constructed_type(
+        &mut self,
+        callee: &Expr<'_>,
+    ) -> Result<Option<Term>, Error> {
+        let owner = callee.hir_id.owner;
+        if self.checking_code_generator
+            || !self.in_code_body
+            || !self.runtime_value_context()
+            || self.signature_owner != Some(owner)
+        {
+            return Ok(None);
+        }
+        let operands = if let Some(definition) = self.code_generators.get(&owner) {
+            if definition.checked_operands.is_none() {
+                self.check_code_generator(owner)?;
+            }
+            &self.code_generators[&owner].checked_operands
+        } else if let Some(definition) = self.data_consumers.get(&owner) {
+            if definition.checked_operands.is_none() {
+                self.check_data_consumer(owner)?;
+            }
+            &self.data_consumers[&owner].checked_operands
+        } else if let Some(definition) = self.pattern_generators.get(&owner) {
+            if definition.checked_operands.is_none() {
+                self.check_pattern_generator(owner)?;
+            }
+            &self.pattern_generators[&owner].checked_operands
+        } else {
+            return Ok(None);
+        };
+        if operands
+            .as_ref()
+            .is_some_and(|sites| sites.contains_key(&callee.hir_id))
+        {
+            return self
+                .generator_type_data(callee)?
+                .identity(callee.span)
+                .map(Some);
+        }
+        Ok(None)
+    }
+
     pub(in crate::program) fn generator_type_data(
         &mut self,
         value: &Expr<'_>,
@@ -12,9 +74,19 @@ impl Checker<'_, '_> {
             let (completed, _) = self.generator_data_expression(value, Some(&p(P::Type)))?;
             return CompletedType::from_value(completed, value.span);
         }
+        self.generator_type_data_with(value, |this| this.expr(value, Some(&p(P::Type))))
+    }
+
+    // Callee routing may already have checked this producer to distinguish
+    // a Type from a callable. Keep the same producer and generator storage.
+    pub(in crate::program) fn generator_type_data_with(
+        &mut self,
+        value: &Expr<'_>,
+        check: impl FnOnce(&mut Self) -> Result<n::Expr, Error>,
+    ) -> Result<CompletedType, Error> {
         let mut evidence = None;
         let completed = self.generator_data_frame_with(value, |this| {
-            let checked = this.expr(value, Some(&p(P::Type)))?;
+            let checked = check(this)?;
             if this.checking_code_generator {
                 evidence = this
                     .generator_type_result_evidence(&checked, value.span)?
@@ -44,7 +116,7 @@ impl Checker<'_, '_> {
             "contextual Type computation requires a result identity known during definition checking"))
     }
 
-    fn generator_type_result_evidence(
+    pub(super) fn generator_type_result_evidence(
         &mut self,
         value: &n::Expr,
         span: Span,
@@ -52,34 +124,33 @@ impl Checker<'_, '_> {
         if let Some(ty) = self.observed_expression_type(value, span)? {
             return Ok(Some(ty));
         }
-        let K::Block {
-            statements,
-            result: Some(result),
-        } = &value.kind
-        else {
-            return Ok(None);
-        };
-        let mut fuel = usize::try_from(self.required_steps).unwrap_or(usize::MAX);
-        let checked = (|| {
-            // A closed tail identity is unaffected by earlier data writes, but
-            // a transfer could bypass it and deliver a different result.
-            for statement in statements {
-                let mut transfer = false;
-                nir::visit::expression(statement, &mut fuel, |node, _| {
-                    transfer |= matches!(node.kind, K::Return(_) | K::Break(_) | K::Continue(_));
-                    Ok::<_, String>(())
-                })?;
-                if transfer {
-                    return Ok(false);
-                }
-            }
-            Ok(nir::free_bindings::collect(result, &mut fuel)?.is_empty())
-        })();
-        self.required_steps = fuel as u64;
-        if !checked.map_err(|message: String| error(span, message))? {
-            return Ok(None);
+        if matches!(value.kind, K::Call { .. }) {
+            return self.projected_type_return(value, span);
         }
-        self.observed_expression_type(result, span)
+        if matches!(
+            value.kind,
+            K::Block { .. } | K::CallPreparation { .. } | K::If { .. } | K::Match { .. }
+        ) {
+            // A required data frame can return early. A fact about its normal
+            // tail alone is insufficient to describe such an invocation.
+            let transfers = self.with_observation_budget(span, |_, budget| {
+                let mut exits = false;
+                nir::visit::expression_in_closure_environment(
+                    value,
+                    &mut budget.steps,
+                    |node, _| {
+                        exits |= matches!(node.kind, K::Return(_) | K::Break(_) | K::Continue(_));
+                        Ok(())
+                    },
+                )
+                .map_err(Failure::Invalid)?;
+                Ok(exits)
+            })?;
+            if !transfers {
+                return self.preserved_input_identity(value, |_, _| Ok(None), span);
+            }
+        }
+        Ok(None)
     }
 }
 

@@ -67,7 +67,7 @@ impl Checker<'_, '_> {
     pub(in crate::program) fn check_data_consumer(&mut self, owner: OwnerId) -> Result<(), Error> {
         let span = self.package.item(owner).unwrap().span;
         let definition = &self.data_consumers[&owner];
-        if definition.checked {
+        if definition.checked_operands.is_some() {
             return Ok(());
         }
         Self::charge_code_generator(definition, &mut self.required_steps, span)?;
@@ -107,15 +107,12 @@ impl Checker<'_, '_> {
                 }))
             })
             .collect::<Result<Vec<_>, Error>>()?;
-        let checking = std::mem::replace(&mut self.checking_code_generator, true);
-        let result = self.generator_frame(owner, |this| {
+        let operands = self.check_generator_body(owner, |this| {
             this.install_generator_capture_values(&definition.captures, span)?;
             this.check_generator_clause_value_defaults(owner, &definition.types)?;
             this.run_data_consumer(&definition, arguments)
-        });
-        self.checking_code_generator = checking;
-        result?;
-        self.data_consumers.get_mut(&owner).unwrap().checked = true;
+        })?;
+        self.data_consumers.get_mut(&owner).unwrap().checked_operands = Some(operands);
         Ok(())
     }
 

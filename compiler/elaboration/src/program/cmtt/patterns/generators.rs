@@ -33,7 +33,7 @@ pub(in crate::program) struct PatternGenerator {
     input_values: BTreeMap<usize, Term>,
     interface: PatternInterface,
     body: Option<hir::BodyId>,
-    checked: bool,
+    pub(in crate::program::cmtt) checked_operands: Option<SourceBindings<()>>,
 }
 
 pub(in crate::program) use nir::code_interfaces::PatternCodeInterface as PatternInterface;
@@ -202,7 +202,13 @@ impl fmt::Display for PatternGenerator {
         for (name, ty) in &self.outputs {
             write!(f, " (output {name:?} {ty})")?;
         }
-        write!(f, ") (checked {}))", self.checked)
+        if let Some(sites) = self.checked_operands.as_ref().filter(|sites| !sites.is_empty()) {
+            f.write_str(") (constructor-type-operands")?;
+            for (site, ()) in sites {
+                write!(f, " {}", local(*site))?;
+            }
+        }
+        write!(f, ") (checked {}))", self.checked_operands.is_some())
     }
 }
 
@@ -539,7 +545,7 @@ impl Checker<'_, '_> {
                 input_values: BTreeMap::new(),
                 interface: PatternInterface { subject, outputs },
                 body,
-                checked: false,
+                checked_operands: None,
             })
         });
         self.active_signatures.remove(&owner);
@@ -554,11 +560,10 @@ impl Checker<'_, '_> {
         let span = self.package.item(owner).unwrap().span;
         self.ensure_pattern_generator(owner, span)?;
         let definition = self.copy_pattern_generator(owner, span)?;
-        if definition.checked {
+        if definition.checked_operands.is_some() {
             return Ok(());
         }
-        let checking = std::mem::replace(&mut self.checking_code_generator, true);
-        let result = self.generator_frame(owner, |this| {
+        let operands = self.check_generator_body(owner, |this| {
             this.install_generator_capture_values(&definition.captures, span)?;
             this.check_generator_clause_value_defaults(owner, &definition.types)?;
             this.alias_substitution.extend(
@@ -608,10 +613,8 @@ impl Checker<'_, '_> {
                 }
             }
             this.run_pattern_generator_body(owner, &definition, span)
-        });
-        self.checking_code_generator = checking;
-        result?;
-        self.pattern_generators.get_mut(&owner).unwrap().checked = true;
+        })?;
+        self.pattern_generators.get_mut(&owner).unwrap().checked_operands = Some(operands);
         Ok(())
     }
 
@@ -961,7 +964,7 @@ impl Checker<'_, '_> {
                     })
                     .collect(),
                 body: template.body,
-                checked: template.checked,
+                checked_operands: template.checked_operands.clone(),
             };
             let site = Expr {
                 hir_id: callee.hir_id,
