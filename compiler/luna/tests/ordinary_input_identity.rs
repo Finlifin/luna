@@ -2584,3 +2584,75 @@ fn computed_annotations_keep_locals_read_only_by_a_later_annotation() {
         &[("Selected", 6)],
     );
 }
+
+#[test]
+fn local_annotations_form_opaque_heads_with_the_original_call_inputs() {
+    check_events(
+        "
+        pure comptime fn Key<T> -> Type { T }
+        pure comptime fn Other<T> -> Type { T }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn Inspect(flag: bool) -> Type {
+            let value: ?Key<Selected(flag)> = null;
+            value'type
+        }
+        comptime fn Apply(factory: pure comptime fn<Type> -> Type, flag: bool) -> Type {
+            let value: ?factory<Selected(flag)> = null;
+            value'type
+        }
+        comptime fn check() -> bool {
+            Inspect(true) == ?Key<bool> and Inspect(false) == ?Key<char>
+                and Apply(Other, true) == ?Other<bool>
+                and Apply(Key, false) == ?Key<char>
+        }",
+        &[("Selected", 4), ("Key", 0), ("Other", 0)],
+    );
+}
+
+#[test]
+fn local_head_annotations_keep_written_order_for_value_arguments() {
+    check_events(
+        "
+        pure comptime fn Key<.left: bool = false, .right: bool = false> -> Type { char }
+        comptime fn mark(value: bool) -> bool { value }
+        comptime fn Check(flag: bool) -> Type {
+            var seen = false;
+            let value: ?Key<.right = do { seen = flag; mark(seen) }, .left = mark(not seen)> = null;
+            value'type
+        }
+        comptime fn check() -> bool {
+            Check(true) == ?Key<.left = false, .right = true>
+                and Check(false) == ?Key<.left = true, .right = false>
+        }",
+        &[("mark", 4), ("Key", 0)],
+    );
+}
+
+#[test]
+fn unfinished_head_observation_leaves_gradual_arguments_in_the_plan() {
+    check_events(
+        "
+        pure comptime fn Key<A, B> -> Type { A }
+        comptime fn Selected(flag: bool) -> Type { if flag { Any } else { bool } }
+        comptime fn relay(flag: bool) -> bool {
+            let ty = Selected(flag);
+            let value: ?Key<ty, do { if flag { return true; }; char }> = null;
+            value'type == ?Key<bool, char>
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }",
+        &[("Selected", 2), ("Key", 0)],
+    );
+}
+
+#[test]
+fn closed_normal_type_computations_still_check_contextual_initializers() {
+    check_events(
+        "
+        comptime fn Element() -> Type { let types: meta.List<Type> = [bool]; types[0] }
+        comptime fn check() -> bool {
+            let data: meta.List<Element()> = [true];
+            data[0]
+        }",
+        &[],
+    );
+}

@@ -482,6 +482,9 @@ impl Checker<'_, '_> {
             }
         }
         let H::ResolvedDef { def_id, .. } = head.kind else {
+            if self.collecting_named_types() {
+                return self.computed_annotation_type(expr);
+            }
             return CompletedType::from_value(self.required_value(expr, P::Type)?, expr.span);
         };
         let owner = self

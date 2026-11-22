@@ -70,6 +70,35 @@ impl Checker<'_, '_> {
         if !self.collecting_named_types() && self.input_facts.named_types.witnesses.is_empty() {
             return self.checked_normal_input_in(checked, &BTreeMap::new(), span);
         }
+        // If a later operand needs execution, the VM will run the entire
+        // plan. Demands from an abandoned partial observation must not run
+        // before that plan (a later argument may return from the caller).
+        let checkpoint = self
+            .input_facts
+            .annotation
+            .as_ref()
+            .filter(|a| a.forming)
+            .map(|a| (self.input_facts.named_types.clone(), a.inputs.len()));
+        let result = self.observe_head_with_named_inputs(checked, span);
+        if !matches!(result, Ok(Some(_)))
+            && let Some((named, count)) = checkpoint
+        {
+            self.input_facts.named_types = named;
+            self.input_facts
+                .annotation
+                .as_mut()
+                .unwrap()
+                .inputs
+                .truncate(count);
+        }
+        result
+    }
+
+    fn observe_head_with_named_inputs(
+        &mut self,
+        checked: &n::Expr,
+        span: Span,
+    ) -> Result<Option<Term>, Error> {
         let mut bindings = BTreeMap::new();
         loop {
             self.input_facts.observing_annotation_head = true;
@@ -130,7 +159,6 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
     ) -> Result<CompletedType, Error> {
         let annotation = self.input_facts.annotation.take().unwrap();
-        let owner = annotation.site.owner;
         let checked = self.expr(expr, Some(&p(P::Type)));
         self.input_facts.annotation = Some(annotation);
         let checked = checked?;
@@ -140,11 +168,55 @@ impl Checker<'_, '_> {
             }
             _ => {}
         }
+        if matches!(expr.kind, H::NFApplication(..)) {
+            return self.complete_annotation_head(expr, checked);
+        }
         let known = match self.preserved_input_identity(&checked, |_, _| Ok(None), expr.span)? {
             Some(known) => Some(known),
             None => self.projected_type_return(&checked, expr.span)?,
         };
-        let binder = self.fresh_type_binder(owner, expr.span)?;
+        self.retain_annotation_type(checked, known, expr.span)
+    }
+
+    /// A self-contained head can still form a concrete domain for checking its
+    /// initializer. Open plans and caller control transfers need this frame.
+    pub(in crate::program) fn complete_annotation_head(
+        &mut self,
+        expr: &Expr<'_>,
+        checked: n::Expr,
+    ) -> Result<CompletedType, Error> {
+        let span = expr.span;
+        let needs_frame = self.with_observation_budget(span, |_, budget| {
+            if !nir::free_bindings::collect(&checked, &mut budget.steps)?.is_empty() {
+                return Ok(true);
+            }
+            let mut transfers = false;
+            nir::visit::expression_in_closure_environment(
+                &checked,
+                &mut budget.steps,
+                |node, _| {
+                    transfers |= matches!(node.kind, K::Return(_) | K::Break(_) | K::Continue(_));
+                    Ok(())
+                },
+            )
+            .map_err(Failure::Invalid)?;
+            Ok(transfers)
+        })?;
+        if needs_frame || !self.checked_declaration_inputs(&checked, span)?.is_empty() {
+            self.retain_annotation_type(checked, None, span)
+        } else {
+            self.complete_checked_type(expr, checked)
+        }
+    }
+
+    fn retain_annotation_type(
+        &mut self,
+        checked: n::Expr,
+        known: Option<Term>,
+        span: Span,
+    ) -> Result<CompletedType, Error> {
+        let owner = self.input_facts.annotation.as_ref().unwrap().site.owner;
+        let binder = self.fresh_type_binder(owner, span)?;
         let input = Input {
             binder,
             producer: checked.source,

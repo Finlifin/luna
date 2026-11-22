@@ -830,6 +830,9 @@ impl Checker<'_, '_> {
             self.check_type_application(head, arguments, expr.span)?;
             return Ok(CompletedType::Identity(ty));
         }
+        if self.collecting_named_types() {
+            return self.complete_annotation_head(expr, checked);
+        }
         // The input plan owns its lexical prefix. Its fields may be gradual
         // descriptions even when a sibling contains a bound function input.
         self.complete_checked_type(expr, checked)
