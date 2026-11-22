@@ -900,6 +900,7 @@ impl<'a, 'h> Reads<'a, 'h> {
             | H::TakeOld(value)
             | H::TakeBitVec(value)
             | H::TakeTagName(value)
+            | H::TakeAttribute(value)
             | H::TakeIntrinsic(value)
             | H::TakeTupleEnumerate(value)
             | H::TypeOf(value)

@@ -99,7 +99,7 @@ configuration 通过键名和编译时值给所属定义提供属性。结构体
 
 同一目标同时具有 configuration 和前缀属性时，先应用 configuration，再按从内到外的顺序应用前缀属性。因此，前缀属性可以覆盖内部 configuration 提供的同名键。
 
-`meta.attrs_of` 读取目标的属性 Object。读取某个键后如何解释其值，属于该键的使用者；通用属性机制不替代相应功能对值的检查。
+`target'attribute` 在 comptime 中产生目标声明的属性 Object。对于范式类型实例，查询沿其头部声明读取属性，并保留实例的类型身份。读取某个键后如何解释其值，属于该键的使用者；通用属性机制不替代相应功能对值的检查。
 
 与数据定义一起执行的 comptime 代码遵循 [normalization 与 instantiation](./normalization-and-instantiation.md) 的规则。属性计算、读取与其他编译时操作不能绕过已有的依赖和阶段约束。
 
@@ -127,7 +127,7 @@ fn identity(value: u32) -> u32 {
 fn example() {}
 
 comptime {
-    let attributes = meta.attrs_of(example);
+    let attributes = example'attribute;
     let value = attributes.get(.some_attr, bool);
 }
 ```

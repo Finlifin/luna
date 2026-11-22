@@ -849,17 +849,17 @@ fn transparent_aliases_preserve_the_type_receiver_and_the_named_member_source() 
         struct OtherCatalog { pub typealias Entry = AlsoNamed; }
         typealias SecondCatalog = OtherCatalog;
         comptime fn inspect() -> bool {
-            let inherited = AnotherWord.attrs().get<meta.Object>(.metadata) match {
+            let inherited = AnotherWord'attribute.get<meta.Object>(.metadata) match {
                 data? => data.get<str>(.version) matches "1.0"?,
                 null => false,
             };
             inherited and Named<bool>.attrs() and AlsoNamed.attrs()
-                and TaggedWord<u32>.attrs().has_key(.metadata)
-                and Produced.attrs().has_key(.metadata)
-                and Catalog<u32>.Entry.attrs().has_key(.metadata)
-                and ConcreteCatalog.Entry.attrs().has_key(.metadata)
+                and TaggedWord<u32>'attribute.has_key(.metadata)
+                and Produced'attribute.has_key(.metadata)
+                and Catalog<u32>.Entry'attribute.has_key(.metadata)
+                and ConcreteCatalog.Entry'attribute.has_key(.metadata)
                 and SecondCatalog.Entry.attrs()
-                and not meta.attrs_of(u32).has_key(.metadata)
+                and not u32'attribute.has_key(.metadata)
         }
     "#;
     let package = sysroot::compile(source).unwrap();

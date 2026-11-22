@@ -1846,6 +1846,7 @@ impl<'a> IndexBuilder<'a> {
             | ExprKind::TakeOld(inner)
             | ExprKind::TakeBitVec(inner)
             | ExprKind::TakeTagName(inner)
+            | ExprKind::TakeAttribute(inner)
             | ExprKind::TakeIntrinsic(inner)
             | ExprKind::TakeTupleEnumerate(inner)
             | ExprKind::TypeOf(inner)

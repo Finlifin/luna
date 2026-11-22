@@ -1930,6 +1930,7 @@ pub(super) fn mentions_value_parameter(
         | H::MultiDeref(value)
         | H::TakeBitVec(value)
         | H::TakeTagName(value)
+        | H::TakeAttribute(value)
         | H::TakeIntrinsic(value)
         | H::TakeTupleEnumerate(value)
         | H::Defer(value)

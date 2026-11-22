@@ -1420,6 +1420,7 @@ impl Checker<'_, '_> {
                 | H::TakeOld(value)
                 | H::TakeBitVec(value)
                 | H::TakeTagName(value)
+                | H::TakeAttribute(value)
                 | H::TakeIntrinsic(value)
                 | H::TakeTupleEnumerate(value)
                 | H::TypeOf(value)
@@ -3403,6 +3404,15 @@ impl Checker<'_, '_> {
                     expr.span,
                     "intrinsic view requires a direct positional call; target input protocols for other call forms are not implemented",
                 ));
+            }
+            H::TakeAttribute(value) => {
+                if self.runtime_value_context() || self.in_code_body {
+                    return Err(error(expr.span, "attribute view requires comptime invocation"));
+                }
+                match self.describe_open_expression(value, locals, returns, None, depth + 1)? {
+                    D::Known(ty) if is_never(&ty) => D::Known(ty),
+                    _ => D::Known(p(P::Object)),
+                }
             }
             H::TakeBitVec(value) | H::TakeTagName(value) | H::Deref(value) => {
                 let description =

@@ -3,7 +3,7 @@
 //! - packed struct layout consumer (`.packed` / `attrs.layout.packed`), LLVM `<{...}>` / align 1,
 //!   native execution at O0 and O3 (including `Vec<Packed>`), and aligned field pointer rejection
 //! - `attrs.effects.direct_passing` ABI lowering, aliases/overrides, and invalid target checks
-//! - `attrs.metadata`, `meta.attrs_of`, `Type.attrs`, `Type.is_packed`, cycle rejection, and C ABI metadata
+//! - `attrs.metadata`, `target'attribute`, `Type.is_packed`, cycle rejection, and C ABI metadata
 //! - `meta.Object.{is_empty, has_key, keys, merge}` and `Symbol.{byte_length, byte}`
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
@@ -601,7 +601,7 @@ fn direct_passing_effect_attribute_aliases_overrides_and_validation() {
 }
 
 #[test]
-fn metadata_attrs_of_reflection_cycle_and_c_abi() {
+fn metadata_attribute_view_reflection_cycle_and_c_abi() {
     let source = r#"
         ^attrs.metadata({ version: 2, author: .luna })
         ^attrs.layout.packed
@@ -615,13 +615,14 @@ fn metadata_attrs_of_reflection_cycle_and_c_abi() {
             11
         }
 
+        typealias RecordAlias = Record;
         struct Plain {}
 
         comptime fn run() -> bool {
-            let record_attrs = Record.attrs();
-            let direct_attrs = meta.attrs_of(Record);
-            let fn_attrs = meta.attrs_of(annotated_fn);
-            let plain_attrs = Plain.attrs();
+            let record_attrs = Record'attribute;
+            let direct_attrs = RecordAlias'attribute;
+            let fn_attrs = annotated_fn'attribute;
+            let plain_attrs = Plain'attribute;
 
             let packed_ok = Record.is_packed()
                 and not Plain.is_packed()
@@ -643,11 +644,11 @@ fn metadata_attrs_of_reflection_cycle_and_c_abi() {
     assert_eq!(support::invoke(source, "run").unwrap(), Value::Bool(true));
 
     let cycle = r#"
-        ^{ tag: meta.attrs_of(SelfReferential) }
+        ^{ tag: SelfReferential'attribute }
         struct SelfReferential {}
 
         comptime fn run() -> bool {
-            SelfReferential.attrs().is_empty()
+            SelfReferential'attribute.is_empty()
         }
     "#;
     assert!(
@@ -728,14 +729,14 @@ fn meta_object_and_symbol_helpers() {
 fn attribute_suppliers_can_inspect_independent_unannotated_declarations() {
     let source = r#"
         ^attrs.metadata({
-            plain_type: meta.attrs_of(Plain).is_empty(),
-            plain_fn: meta.attrs_of(plain_fn).is_empty(),
+            plain_type: Plain'attribute.is_empty(),
+            plain_fn: plain_fn'attribute.is_empty(),
         })
         struct Decorated {}
         struct Plain {}
         fn plain_fn() -> bool { true }
         comptime fn run() -> bool {
-            Decorated.attrs().get<meta.Object>(.metadata) match {
+            Decorated'attribute.get<meta.Object>(.metadata) match {
                 data? => (data.get<bool>(.plain_type) matches true?)
                     and (data.get<bool>(.plain_fn) matches true?),
                 null => false,
@@ -750,18 +751,18 @@ fn attribute_suppliers_follow_demand_and_reject_cycles() {
     let source = r#"
         ^attrs.metadata({ left: has_packed(middle), right: has_packed(middle) })
         struct First {}
-        ^attrs.metadata({ inherited: meta.attrs_of(Last).has_key(.packed) })
+        ^attrs.metadata({ inherited: Last'attribute.has_key(.packed) })
         fn middle() -> bool { true }
         ^attrs.layout.packed
         struct Last { tag: u8 }
         comptime fn has_packed(f: fn() -> bool) -> bool {
-            meta.attrs_of(f).get<meta.Object>(.metadata) match {
+            f'attribute.get<meta.Object>(.metadata) match {
                 data? => data.get<bool>(.inherited) matches true?,
                 null => false,
             }
         }
         comptime fn run() -> bool {
-            First.attrs().get<meta.Object>(.metadata) match {
+            First'attribute.get<meta.Object>(.metadata) match {
                 data? => (data.get<bool>(.left) matches true?)
                     and (data.get<bool>(.right) matches true?),
                 null => false,
@@ -770,10 +771,10 @@ fn attribute_suppliers_follow_demand_and_reject_cycles() {
     "#;
     assert_eq!(support::invoke(source, "run").unwrap(), Value::Bool(true));
     for (source, cycle) in [
-        ("^attrs.metadata(meta.attrs_of(A)) struct A {}", "A -> A"),
+        ("^attrs.metadata(A'attribute) struct A {}", "A -> A"),
         (
-            "^attrs.metadata(meta.attrs_of(B)) struct A {}
-          ^attrs.metadata(meta.attrs_of(A)) struct B {}",
+            "^attrs.metadata(B'attribute) struct A {}
+          ^attrs.metadata(A'attribute) struct B {}",
             "A -> B -> A",
         ),
     ] {
@@ -788,7 +789,7 @@ fn attribute_suppliers_follow_demand_and_reject_cycles() {
 #[test]
 fn early_and_published_attribute_reads_agree_on_overrides_and_empty_objects() {
     let source = r#"
-        ^attrs.metadata({ disabled: meta.attrs_of(Target).get<bool>(.packed) matches false?, empty: meta.attrs_of(Empty).is_empty() })
+        ^attrs.metadata({ disabled: Target'attribute.get<bool>(.packed) matches false?, empty: Empty'attribute.is_empty() })
         struct Reader {}
 
         ^attrs.layout.packed_layout(.enabled = false)
@@ -802,11 +803,11 @@ fn early_and_published_attribute_reads_agree_on_overrides_and_empty_objects() {
         struct Empty {}
 
         comptime fn run() -> bool {
-            Reader.attrs().get<meta.Object>(.metadata) match {
+            Reader'attribute.get<meta.Object>(.metadata) match {
                 data? => (data.get<bool>(.disabled) matches true?)
-                    and (Target.attrs().get<bool>(.packed) matches false?)
+                    and (Target'attribute.get<bool>(.packed) matches false?)
                     and (data.get<bool>(.empty) matches true?)
-                    and Empty.attrs().is_empty(),
+                    and Empty'attribute.is_empty(),
                 null => false,
             }
         }
@@ -817,7 +818,7 @@ fn early_and_published_attribute_reads_agree_on_overrides_and_empty_objects() {
 #[test]
 fn early_attribute_reads_still_require_the_final_consumer_to_accept_the_target() {
     let source = r#"
-        ^attrs.metadata(meta.attrs_of(late))
+        ^attrs.metadata(late'attribute)
         struct Reader {}
         ^attrs.layout.packed
         fn late() -> bool { true }
@@ -829,7 +830,7 @@ fn early_attribute_reads_still_require_the_final_consumer_to_accept_the_target()
     );
 
     let source = r#"
-        ^attrs.metadata(meta.attrs_of(Late))
+        ^attrs.metadata(Late'attribute)
         struct Reader {}
         ^{ metadata: false }
         struct Late {}
@@ -847,7 +848,7 @@ fn attribute_supplier_depth_exhaustion_is_distinct_from_a_cycle() {
         let mut source = String::new();
         for i in 0..edges {
             source.push_str(&format!(
-                "^attrs.metadata({{ has_next: meta.attrs_of(D{}).has_key(.metadata) }}) struct D{i} {{}}\n", i + 1
+                "^attrs.metadata({{ has_next: D{}'attribute.has_key(.metadata) }}) struct D{i} {{}}\n", i + 1
             ));
         }
         source.push_str(&format!(
@@ -869,8 +870,8 @@ fn attribute_suppliers_build_each_generated_declaration_once() {
         r#"
         comptime fn outer() -> meta.Object {
             let witness = meta.StructBuilder.new(.name = .BeforeAttributeRead).Build();
-            let left = meta.attrs_of(Inner);
-            let right = meta.attrs_of(Inner);
+            let left = Inner'attribute;
+            let right = Inner'attribute;
             let data: meta.Object = { generated: witness == witness, left: left.has_key(.metadata), right: right.has_key(.metadata) };
             data
         }
@@ -903,7 +904,7 @@ fn attribute_suppliers_build_each_generated_declaration_once() {
 fn nested_attribute_values_deliver_generated_layouts_to_reflection_and_builders() {
     let source = r#"
         comptime fn Generated(subject: Type) -> Type {
-            meta.attrs_of(subject).get<meta.Object>(.metadata) match {
+            subject'attribute.get<meta.Object>(.metadata) match {
                 data? => data.get<Type>(.generated) match { ty? => ty, null => bool },
                 null => bool,
             }
@@ -934,7 +935,7 @@ fn nested_attribute_values_deliver_generated_layouts_to_reflection_and_builders(
         ^attrs.metadata(inner())
         struct Inner {}
         comptime fn run() -> bool {
-            let correct = meta.attrs_of(Outer).get<meta.Object>(.metadata) match {
+            let correct = Outer'attribute.get<meta.Object>(.metadata) match {
                 data? => data.get<bool>(.correct) matches true?, null => false,
             };
             correct and Generated(Outer).struct_field_types()[0] == Generated(Inner)

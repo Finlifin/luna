@@ -31,7 +31,6 @@ fn operation(name: &str) -> bool {
             | "object_remove"
             | "object_slice"
             | "newtype_representation"
-            | "attrs_of"
             | "struct_field_types"
             | "struct_field_names"
             | "enum_group_paths"

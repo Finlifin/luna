@@ -371,3 +371,7 @@ Release 的 `borrowed_aggregate` 在一次外层 invocation 内调用 16 次接�
 当 `packet.changed(flag)` 的方法体是 `flag and do { self.item = After; true }`，调用方进入 `if packet.changed(flag)` 的真分支时，`packet.item` 一定是 `After`。定义检查原先在方法出口分别合并返回值和接收者，因而丢失了这条关系。调用方直接消费谓词时，现在按真假分别收集能够正常返回的接收者快照。每个出口只传出调用方可见的接收者；方法自己的局部变量留在帧内。同一真假出口有多条返回路径时，接收者只保留它们共同的字段证据。方法尾式、显式返回以及另一层谓词调用都走同一个返回目的地。[方法返回](../compiler/elaboration/src/program/constants/structural_calls/returns.rs)
 
 显式实参和默认参数仍按原有顺序交付一次。调用对字段接收者的写回使用实参求值后调用方的存储状态，保留期间对兄弟字段的更新。实参提前返回时，控制直接回到所属工厂的返回目的地。把布尔值存入普通局部后，真假与接收者之间的关联仍可能丢失。当前只在直接消费谓词时付出分别保留两个出口的代价。自举实现可以把普通值交付与条件跳转作为调用的两种续体，让同一套调用准备和返回协议为两者供应证据。[调用交付](../compiler/elaboration/src/program/constants/structural_calls/arguments.rs)
+
+### 属性视图与声明身份
+
+`T'attribute` 与 `f'attribute` 在 elaboration 后使用同一个 NIR 声明属性查询。读取一个正在形成的属性供应者时，查询保留该声明的依赖，求值层可以据此继续准备或报告环；已冻结的声明则直接交付属性对象。范式实例沿自己的头部声明查找，因此别名和多次实例化都不会使头部属性消失。自举时可沿用这条查询边界，使语法视图、属性供应者和 VM 共享声明身份与循环诊断。[属性查询](../compiler/comptime_interpretor/src/observations.rs)

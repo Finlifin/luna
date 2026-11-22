@@ -918,6 +918,7 @@ impl Display for ExprKind<'_> {
             Self::Builtin(name) => form!(f, "builtin", "name" => Quoted(name)),
             Self::TakeOld(value) => form!(f, "take-old", "value" => value),
             Self::TakeIntrinsic(value) => form!(f, "take-intrinsic", "tag" => value),
+            Self::TakeAttribute(value) => form!(f, "take-attribute", "value" => value),
             Self::TakeTagName(value) => form!(f, "take-tag-name", "value" => value),
             Self::TakeTupleEnumerate(value) => form!(f, "take-tuple-enumerate", "value" => value),
             Self::TakeBitVec(value) => form!(f, "take-bit-vec", "value" => value),

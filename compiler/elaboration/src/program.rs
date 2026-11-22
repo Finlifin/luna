@@ -7639,9 +7639,7 @@ impl Checker<'_, '_> {
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "struct_field_types" | "struct_field_names")) => {
                     self.struct_reflection_builtin(expr, callee, args, expected)
                 }
-                H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if name.as_str() == "attrs_of") => {
-                    self.attrs_of_reflection_builtin(expr, args, expected)
-                }
+
                 H::Application(callee, args) if matches!(&callee.kind, H::Builtin(name) if matches!(name.as_str(), "list_length" | "list_concat")) => {
                     self.list_builtin(expr, callee, args, expected)
                 }

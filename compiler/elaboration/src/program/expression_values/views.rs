@@ -181,6 +181,18 @@ impl Checker<'_, '_> {
                     "intrinsic view requires a direct positional call; target input protocols for other call forms are not implemented",
                 ));
             }
+            H::TakeAttribute(value) => {
+                if self.runtime_value_context() || self.in_code_body {
+                    return Err(error(expr.span, "attribute view requires comptime invocation"));
+                }
+                let target = self.expr(value, None)?;
+                let ty = if is_never(&target.ty) {
+                    p(P::Never)
+                } else {
+                    p(P::Object)
+                };
+                (ty, K::DefinitionAttributes(Box::new(target)))
+            }
             H::TakeTagName(value) => {
                 let value = self.expr(value, None)?;
                 let source_ty = self.structural_type(&value.ty, expr.span)?;

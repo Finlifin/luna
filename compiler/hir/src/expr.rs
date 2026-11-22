@@ -240,6 +240,7 @@ pub enum ExprKind<'hir> {
     TakeOld(&'hir Expr<'hir>),
     TakeBitVec(&'hir Expr<'hir>),
     TakeTagName(&'hir Expr<'hir>),
+    TakeAttribute(&'hir Expr<'hir>),
     /// Target-defined operation tag; operands and explicit output stay in Call/As.
     TakeIntrinsic(&'hir Expr<'hir>),
     /// Structural enumeration keeps runtime elements distinct from comptime shape.

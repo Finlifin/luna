@@ -98,7 +98,7 @@ enum、primitive 和 opaque normal-form 头不能冒充 newtype。
 
 ## 定义属性反射与 Object / Symbol 辅助方法
 
-- `meta.attrs_of(target)` 与 `Type.attrs(self) -> Object` 返回目标声明经由
+- `target'attribute` 返回目标声明经由
   attribute merge 后冻结的 `Object`（无属性或非定义值返回空 `{}`；属性仍在
   求值期间发生环引用或目标未完成时诊断拒绝）。
 - `Type.packed_mode(self) -> ?Symbol` 查询合并后的紧凑布局模式：优先读取 `__flurry_packed_mode`（`.byte` 或 `.bit`），过渡期兼容旧 `.packed: true` 返回 `.byte`，未启用返回 `null`。

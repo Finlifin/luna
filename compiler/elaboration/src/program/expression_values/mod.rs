@@ -68,6 +68,7 @@ impl Checker<'_, '_> {
             | H::TakeTupleEnumerate(_)
             | H::TakeIntrinsic(_)
             | H::TakeTagName(_)
+            | H::TakeAttribute(_)
             | H::TakeBitVec(_) => self.views_value_expression(expr, expected, partial),
             _ => {
                 return Err(error(

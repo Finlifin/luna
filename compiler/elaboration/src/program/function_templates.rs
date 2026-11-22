@@ -780,6 +780,7 @@ impl<'h> Rebind<'_, 'h> {
             E::TakeOld(a) => E::TakeOld(self.expr(a, depth)?),
             E::TakeBitVec(a) => E::TakeBitVec(self.expr(a, depth)?),
             E::TakeIntrinsic(a) => E::TakeIntrinsic(self.expr(a, depth)?),
+            E::TakeAttribute(a) => E::TakeAttribute(self.expr(a, depth)?),
             E::TakeTagName(a) => E::TakeTagName(self.expr(a, depth)?),
             E::TakeTupleEnumerate(a) => E::TakeTupleEnumerate(self.expr(a, depth)?),
             E::MultiDeref(a) => E::MultiDeref(self.expr(a, depth)?),

@@ -8,7 +8,6 @@ use builtin.{Integer, Symbol, Type, bool}
     neither field access nor layout permission and does not unfold opaque heads.
     Enum paths consist of Symbol segments, not encoded discriminants.
 -}
-pub use bindings.attrs_of;
 pub use bindings.enum_bit_base_type;
 pub use bindings.enum_bit_masks;
 pub use bindings.enum_bit_offsets;
@@ -120,14 +119,9 @@ impl Type {
         bindings.enum_variant_field_types(self)
     }
 
-    {- Read the frozen definition attributes of this nominal type. -}
-    pub pure comptime fn attrs(self) -> Object {
-        bindings.attrs_of(self)
-    }
-
     {- Report the merged packed layout mode (`.byte` or `.bit`), or `null` for default layout. -}
     pub pure comptime fn packed_mode(self) -> ?Symbol {
-        self.attrs().get<Symbol>(.__flurry_packed_mode) match {
+        self'attribute.get<Symbol>(.__flurry_packed_mode) match {
             mode? => {
                 if mode == .byte or mode == .bit {
                     mode
@@ -136,7 +130,7 @@ impl Type {
                 }
             },
             null => {
-                self.attrs().get<bool>(.packed) match {
+                self'attribute.get<bool>(.packed) match {
                     value? => {
                         if value { .byte } else { null }
                     },
