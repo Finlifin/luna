@@ -6,12 +6,19 @@ use crate::calls::InputContext as Input;
 mod inputs;
 mod layout;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ProducerRole {
+    TuplePacket,
+    SingleOperand,
+    Receiver,
+}
+
 pub(super) struct PendingPacket {
     origin: (hir::HirId, Span),
     bindings: Vec<n::LocalId>,
     value: n::Expr,
     staged: bool,
-    tuple: bool,
+    role: ProducerRole,
     frozen: Option<(n::Expr, comptime_interpretor::Value)>,
 }
 
@@ -253,6 +260,31 @@ impl Checker<'_, '_> {
         Ok(Some((key, index)))
     }
 
+    /// A peer checked during generic inference still belongs to its written
+    /// operand. Once routing selects it as the receiver, return its checked
+    /// place to the call and retire the provisional value preparation.
+    pub(super) fn restore_spread_receiver(&mut self, value: &mut n::Expr) {
+        let K::Local(binding) = value.kind else {
+            return;
+        };
+        let Some(input) = self.pending_spread_inputs.get_mut(&binding) else {
+            return;
+        };
+        if input.role == ProducerRole::TuplePacket {
+            // An unpacked field belongs to the evaluated tuple.
+            return;
+        }
+        input.role = ProducerRole::Receiver;
+        let stable_place = matches!(
+            arguments::reference_base(&mut input.value).kind,
+            K::Local(_)
+        );
+        *value = match &input.frozen {
+            Some((frozen, _)) if !stable_place => frozen.clone(),
+            _ => input.value.clone(),
+        };
+    }
+
     pub(super) fn completed_packet_key(&self, binding: n::LocalId) -> Option<n::LocalId> {
         self.pending_spread_inputs.iter().find_map(|(key, packet)| {
             (packet.frozen.is_some() && packet.bindings.contains(&binding)).then_some(*key)
@@ -290,7 +322,7 @@ impl Checker<'_, '_> {
         };
         let packet = &self.pending_spread_inputs[&key];
         let (_, completed) = packet.frozen.as_ref().unwrap();
-        let selected = if packet.tuple {
+        let selected = if packet.role == ProducerRole::TuplePacket {
             let comptime_interpretor::Value::Tuple(fields) = completed else {
                 return Err(error(
                     source.span,
@@ -546,7 +578,7 @@ impl Checker<'_, '_> {
                     // but let the caller discard only its result expectation.
                     let diverges = spreads.iter().any(|(_, statement)| is_never(&statement.ty));
                     let call = build(this, inputs, diverges)?;
-                    for (_, statement) in &mut spreads {
+                    spreads.retain_mut(|(_, statement)| {
                         let (key, value) = match &mut statement.kind {
                             K::Let { binding, value } => (*binding, value),
                             K::LetPattern {
@@ -556,20 +588,22 @@ impl Checker<'_, '_> {
                             } => {
                                 let Some(n::Pattern::Binding { binding, .. }) = fields.first()
                                 else {
-                                    continue;
+                                    return true;
                                 };
                                 (*binding, value)
                             }
-                            _ => continue,
+                            _ => return true,
                         };
-                        if let Some((frozen, _)) = this
-                            .pending_spread_inputs
-                            .get(&key)
-                            .and_then(|packet| packet.frozen.as_ref())
-                        {
-                            **value = frozen.clone();
+                        if let Some(packet) = this.pending_spread_inputs.get(&key) {
+                            if packet.role == ProducerRole::Receiver {
+                                return false;
+                            }
+                            if let Some((frozen, _)) = &packet.frozen {
+                                **value = frozen.clone();
+                            }
                         }
-                    }
+                        true
+                    });
                     if spreads.is_empty() {
                         return Ok(call);
                     }
@@ -713,7 +747,7 @@ impl Checker<'_, '_> {
                                     bindings: packet_bindings,
                                     value: value.clone(),
                                     staged: packet_stages[argument_index],
-                                    tuple: true,
+                                    role: ProducerRole::TuplePacket,
                                     frozen: None,
                                 },
                             );
@@ -769,7 +803,7 @@ impl Checker<'_, '_> {
                             bindings: vec![binding],
                             value: value.clone(),
                             staged: true,
-                            tuple: false,
+                            role: ProducerRole::SingleOperand,
                             frozen: None,
                         },
                     );
@@ -941,6 +975,7 @@ impl Checker<'_, '_> {
                             .collect(),
                         type_parameters: remaining.len(),
                         signature: signature
+                            .callable_signature()
                             .abstract_parameters(&self.input_binders(remaining))
                             .map_err(|cause| error(span, cause.to_string()))?,
                     };

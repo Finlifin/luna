@@ -245,3 +245,59 @@ fn packet_and_property_inputs_preserve_receiver_storage_and_order() {
         );
     }
 }
+
+#[test]
+fn generic_method_packets_infer_the_domain_without_copying_the_receiver() {
+    let package = sysroot::compile(
+        "
+        struct Cell { value: bool }
+        struct Pair { left: Cell, right: Cell }
+        comptime fn schema(...props: T) -> T where T { props }
+        const SAMPLE = schema { flag: true };
+        typealias Options = SAMPLE'type;
+        impl Cell {
+            comptime fn put(self, a: T, b: T) where T { self = Cell { value: true }; }
+            comptime fn mix(self, ...items: Tuple<T, T>, ...props: Options) where T {
+                self.value = props.flag;
+            }
+            comptime fn make(self) -> Cell { self.value = not self.value; Cell { value: false } }
+        }
+        comptime fn packet() -> Tuple<bool, bool> { (true, true) }
+        comptime fn with_receiver(cell: Cell) -> Tuple<Cell, bool, bool> { (cell, true, true) }
+        comptime fn check() -> bool {
+            var cell = Cell { value: false };
+            cell.put(...packet());
+            if not cell.value { return false; };
+            cell.value = false;
+            Cell.put(cell, ...packet());
+            if not cell.value { return false; };
+            cell.value = false;
+            let pair = Pair { left: cell, right: cell };
+            Cell.put(pair.left, ...packet());
+            if not pair.left.value or pair.right.value { return false; };
+            Cell.put(cell.make(), ...do { assumes cell.value; packet() });
+            if not cell.value { return false; };
+            cell.mix { flag: false, ...packet() };
+            if cell.value { return false; };
+            Cell.put(...with_receiver(cell));
+            not cell.value
+        }
+        comptime fn forbidden() {
+            let cell = Cell { value: false };
+            Cell.put(cell, ...packet());
+        }
+    ",
+    )
+    .unwrap();
+    let check = sysroot::source_function(&package, "check");
+    let forbidden = sysroot::source_function(&package, "forbidden");
+    for tree in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            assert_eq!(vm.invoke(check, vec![]).unwrap(), Value::Bool(true));
+            assert_eq!(
+                vm.invoke(forbidden, vec![]).unwrap_err().kind,
+                comptime_interpretor::ErrorKind::InvalidValueReference
+            );
+        });
+    }
+}

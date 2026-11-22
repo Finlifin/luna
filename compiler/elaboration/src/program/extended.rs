@@ -525,6 +525,7 @@ impl Checker<'_, '_> {
                     .collect(),
                 type_parameters: remaining.len(),
                 signature: signature
+                    .callable_signature()
                     .abstract_parameters(&self.input_binders(remaining))
                     .map_err(|cause| error(span, cause.to_string()))?,
             };
@@ -552,14 +553,16 @@ impl Checker<'_, '_> {
         };
         let mut candidates = Vec::new();
         for &(name, index) in collectors {
-            let ty = if let Some(inferred) = &inferred {
-                inferred
-                    .parameter_type(index)
-                    .map_err(|cause| call_inference_error(span, cause))?
-            } else {
-                Some(parameters[index].ty.clone())
-            };
-            candidates.push((name, index, ty));
+            let inferred_type = inferred
+                .as_ref()
+                .map(|candidate| candidate.parameter_type(index))
+                .transpose()
+                .map_err(|cause| call_inference_error(span, cause))?
+                .flatten();
+            // The element types may still be open while the declared
+            // collection already supplies an unambiguous outer shape.
+            let ty = inferred_type.unwrap_or_else(|| parameters[index].ty.clone());
+            candidates.push((name, index, Some(ty)));
         }
         self.select_property_collector(candidates, span)
     }

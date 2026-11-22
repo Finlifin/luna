@@ -5669,7 +5669,7 @@ impl Checker<'_, '_> {
     /// Receiver transport follows declaration syntax, including explicit UFCS.
     /// An ordinary first parameter remains a value even when named similarly.
     fn comptime_receiver_arguments(
-        &self,
+        &mut self,
         owner: Option<OwnerId>,
         arguments: &mut [n::CallArgument],
     ) {
@@ -5678,6 +5678,7 @@ impl Checker<'_, '_> {
         }
         for argument in arguments {
             if argument.parameter == 0 && !argument.is_default {
+                self.restore_spread_receiver(&mut argument.value);
                 argument.passing = if matches!(argument.value.kind, K::Local(id) if self.immutable.contains(&id))
                 {
                     n::ArgumentPassing::ComptimeReferenceNoRebind
