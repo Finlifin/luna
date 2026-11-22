@@ -667,72 +667,7 @@ impl Checker<'_, '_> {
         // never a pointer or a replay of the initializer that produced it.
         if let K::Field { value: base, .. } | K::AnonymousField { value: base, .. } = &value.kind {
             let base = self.partial_staged_value_in(base, depth + 1, fuel, scope)?;
-            let known = match (&value.kind, &base.data, base.known_term()) {
-                (
-                    K::Field {
-                        declaration, index, ..
-                    },
-                    PartialStagedData::Aggregate(PartialStagedShape::Record(actual), fields),
-                    _,
-                ) if declaration == actual => {
-                    return Ok(fields
-                        .get(*index)
-                        .cloned()
-                        .unwrap_or_else(PartialStagedValue::unknown));
-                }
-                (
-                    K::AnonymousField { name, index, .. },
-                    PartialStagedData::Aggregate(
-                        PartialStagedShape::AnonymousRecord(names),
-                        fields,
-                    ),
-                    _,
-                ) => {
-                    if let Some(actual) = names.get(*index) {
-                        *fuel = fuel
-                            .checked_sub(name.len().saturating_add(actual.len()))
-                            .ok_or("partial field observation budget exhausted")?;
-                        if name == actual {
-                            return Ok(fields
-                                .get(*index)
-                                .cloned()
-                                .unwrap_or_else(PartialStagedValue::unknown));
-                        }
-                    }
-                    None
-                }
-                (
-                    K::Field {
-                        declaration, index, ..
-                    },
-                    _,
-                    Some(Term::NominalValue {
-                        ty,
-                        variant: None,
-                        fields,
-                    }),
-                ) if matches!(ty.as_ref(), Term::Nominal { declaration: actual, .. } if declaration == actual) => {
-                    fields.get(*index)
-                }
-                (K::AnonymousField { name, index, .. }, _, Some(Term::RecordValue(fields))) => {
-                    if let Some((actual, value)) = fields.get(*index) {
-                        *fuel = fuel
-                            .checked_sub(name.len().saturating_add(actual.len()))
-                            .ok_or("partial field observation budget exhausted")?;
-                        (name == actual).then_some(value)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
-            return match known {
-                Some(value) => {
-                    nir::type_computations::charge_term(value, fuel).map_err(|e| e.to_string())?;
-                    Ok(PartialStagedValue::known(value.clone()))
-                }
-                None => Ok(PartialStagedValue::unknown()),
-            };
+            return base.project_field(&value.kind, fuel);
         }
         let mut budget = comptime_runtime::Budget {
             steps: *fuel,

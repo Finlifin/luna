@@ -3,6 +3,74 @@ use super::*;
 use std::sync::Arc;
 
 impl PartialStagedValue {
+    /// Project an already evaluated nominal or anonymous field. The producer
+    /// can have written a receiver or transferred control before this read.
+    pub(super) fn project_field(&self, field: &K, fuel: &mut usize) -> Result<Arc<Self>, String> {
+        let known = match (field, &self.data, self.known_term()) {
+            (
+                K::Field {
+                    declaration, index, ..
+                },
+                PartialStagedData::Aggregate(PartialStagedShape::Record(actual), fields),
+                _,
+            ) if declaration == actual => {
+                return Ok(fields
+                    .get(*index)
+                    .cloned()
+                    .unwrap_or_else(PartialStagedValue::unknown));
+            }
+            (
+                K::AnonymousField { name, index, .. },
+                PartialStagedData::Aggregate(PartialStagedShape::AnonymousRecord(names), fields),
+                _,
+            ) => {
+                if let Some(actual) = names.get(*index) {
+                    *fuel = fuel
+                        .checked_sub(name.len().saturating_add(actual.len()))
+                        .ok_or("partial field observation budget exhausted")?;
+                    if name == actual {
+                        return Ok(fields
+                            .get(*index)
+                            .cloned()
+                            .unwrap_or_else(PartialStagedValue::unknown));
+                    }
+                }
+                None
+            }
+            (
+                K::Field {
+                    declaration, index, ..
+                },
+                _,
+                Some(Term::NominalValue {
+                    ty,
+                    variant: None,
+                    fields,
+                }),
+            ) if matches!(ty.as_ref(), Term::Nominal { declaration: actual, .. } if declaration == actual) => {
+                fields.get(*index)
+            }
+            (K::AnonymousField { name, index, .. }, _, Some(Term::RecordValue(fields))) => {
+                if let Some((actual, value)) = fields.get(*index) {
+                    *fuel = fuel
+                        .checked_sub(name.len().saturating_add(actual.len()))
+                        .ok_or("partial field observation budget exhausted")?;
+                    (name == actual).then_some(value)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        match known {
+            Some(value) => {
+                nir::type_computations::charge_term(value, fuel).map_err(|e| e.to_string())?;
+                Ok(PartialStagedValue::known(value.clone()))
+            }
+            None => Ok(PartialStagedValue::unknown()),
+        }
+    }
+
     /// Update one checked place in the observation store. Ancestors get new
     /// field vectors; siblings and earlier snapshots retain their evidence.
     pub(super) fn with_field_at(

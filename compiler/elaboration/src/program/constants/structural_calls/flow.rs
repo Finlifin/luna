@@ -194,6 +194,29 @@ impl Checker<'_, '_> {
                     other => other,
                 });
             }
+            K::Field { .. } | K::AnonymousField { .. } => {
+                // Keep a long projection chain off the host stack and evaluate
+                // its producer once, even when it returns from this factory.
+                let mut base = expr;
+                let mut fields = Vec::new();
+                while let K::Field { value, .. } | K::AnonymousField { value, .. } = &base.kind {
+                    self.required_steps = self.required_steps.checked_sub(1).ok_or_else(|| {
+                        error(span, "structural field observation budget exhausted")
+                    })?;
+                    fields.push(&base.kind);
+                    base = value;
+                }
+                let producer = self.observe_factory_expr(base, scope, returns, span, depth + 1)?;
+                let Completion::Next(mut value) = producer else {
+                    return Ok(producer);
+                };
+                return self.schema_fuel(span, |_, fuel| {
+                    for field in fields.into_iter().rev() {
+                        value = value.project_field(field, fuel)?;
+                    }
+                    Ok(Completion::Next(value))
+                });
+            }
             K::BuildStruct(packet) => {
                 return Ok(Completion::observed(
                     self.observe_built_struct(packet, scope, span)?,

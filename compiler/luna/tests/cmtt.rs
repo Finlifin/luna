@@ -11897,3 +11897,45 @@ fn factory_call_defaults_read_the_delivered_arguments() {
     );
     assert_eq!(sysroot::run(&temporary), Value::Bool(true));
 }
+
+#[test]
+fn factory_projects_a_returned_snapshot_after_receiver_writeback() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Cell { item: Type }
+        struct Saved { snapshot: Cell }
+        struct Pair { old: Type, current: Type }
+        impl Cell {
+            comptime fn exchange(self, next: Type) -> Saved {
+                let old = Cell { item: self.item };
+                self.item = next;
+                Saved { snapshot: old }
+            }
+        }
+        comptime fn describe(early: bool) -> Pair {
+            var c = Cell { item: Before };
+            let old = do {
+                if early { return Pair { old: Before, current: After }; }
+                c.exchange(After)
+            }.snapshot.item;
+            Pair { old: old, current: c.item }
+        }
+        comptime fn generate(early: bool) -> <|-bool> {
+            let data = describe(early);
+            let A = data.old;
+            let B = data.current;
+            '(A { first: true }.first and B { second: true }.second)
+        }
+        fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let invalid = source
+        .replace("~<generate(true)> and ~<generate(false)>", "true")
+        .replace("Saved { snapshot: old }", "Saved { snapshot: self }");
+    let failure = sysroot::compile(&invalid).unwrap_err();
+    assert!(
+        failure.contains("identity") || failure.contains("field"),
+        "{failure}"
+    );
+}
