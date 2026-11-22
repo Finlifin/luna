@@ -87,6 +87,7 @@ impl Walker<'_> {
         self.record(expr, state, PointKind::BitWindow, lower.range.as_ref())?;
         Ok(())
     }
+
     pub(super) fn bit_index(
         &mut self,
         expr: &Expr,
@@ -129,6 +130,7 @@ impl Walker<'_> {
 
         Ok(())
     }
+
     pub(super) fn bit_selections(
         &mut self,
         expr: &Expr,
@@ -137,11 +139,24 @@ impl Walker<'_> {
         state: &mut State,
         depth: usize,
     ) -> Result<(), Reason> {
-        let mut width = match self.scalar_type_view(storage)? {
-            Term::Primitive(nir::Primitive::BitVec(width)) => width,
+        let view = self.scalar_type_view(storage)?;
+        let mut width = match &view {
+            Term::Primitive(nir::Primitive::BitVec(width)) => *width,
             Term::Primitive(p) => p
                 .unrestricted_scalar_width_in(self.target())
                 .ok_or(Reason::Unsupported)? as usize,
+            Term::Nominal { .. } => {
+                let package = self.package.ok_or(Reason::Unsupported)?;
+                let mut fuel = self.limits.arithmetic.steps;
+                let width = nir::program::bit_writeback_width_with_world(
+                    &nir::PackageLayoutWorld(package),
+                    &view,
+                    &mut fuel,
+                );
+                let used = self.limits.arithmetic.steps.saturating_sub(fuel);
+                self.limits.step(used.max(1))?;
+                width.ok_or(Reason::Unsupported)?
+            }
             _ => return Err(Reason::Unsupported),
         };
         for selection in selections {

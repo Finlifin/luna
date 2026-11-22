@@ -1125,13 +1125,21 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                     .fuel
                     .checked_sub(selections.len())
                     .ok_or_else(|| error(source, "bit selection ownership budget exhausted"))?;
-                if let Some(reason) = nir::program::bit_update_error_in(
-                    storage,
-                    selections,
-                    &value.ty,
-                    &expr.ty,
-                    self.package.and_then(|package| package.target),
-                ) {
+                let reason = if let Some(package) = self.package {
+                    nir::program::bit_update_error_with_world(
+                        &nir::PackageLayoutWorld(package),
+                        storage,
+                        selections,
+                        &value.ty,
+                        &expr.ty,
+                        &mut self.fuel,
+                    )
+                } else {
+                    nir::program::bit_update_error_in(
+                        storage, selections, &value.ty, &expr.ty, None,
+                    )
+                };
+                if let Some(reason) = reason {
                     return Err(error(source, reason));
                 }
                 self.in_temporary_scope(
@@ -1191,25 +1199,50 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 ..
             } => {
                 let reason = match &expr.kind {
-                    K::BitAssign { start, end, .. } => nir::program::bit_writeback_error_in(
-                        storage_type,
-                        *start,
-                        *end,
-                        &value.ty,
-                        &expr.ty,
-                        self.package.and_then(|package| package.target),
-                    ),
+                    K::BitAssign { start, end, .. } => {
+                        if let Some(package) = self.package {
+                            nir::program::bit_writeback_error_with_world(
+                                &nir::PackageLayoutWorld(package),
+                                storage_type,
+                                *start,
+                                *end,
+                                &value.ty,
+                                &expr.ty,
+                                &mut self.fuel,
+                            )
+                        } else {
+                            nir::program::bit_writeback_error_in(
+                                storage_type,
+                                *start,
+                                *end,
+                                &value.ty,
+                                &expr.ty,
+                                None,
+                            )
+                        }
+                    }
                     K::BitUpdate { selections, .. } => {
                         self.fuel = self.fuel.checked_sub(selections.len()).ok_or_else(|| {
                             error(source, "bit selection ownership budget exhausted")
                         })?;
-                        nir::program::bit_update_error_in(
-                            storage_type,
-                            selections,
-                            &value.ty,
-                            &expr.ty,
-                            self.package.and_then(|package| package.target),
-                        )
+                        if let Some(package) = self.package {
+                            nir::program::bit_update_error_with_world(
+                                &nir::PackageLayoutWorld(package),
+                                storage_type,
+                                selections,
+                                &value.ty,
+                                &expr.ty,
+                                &mut self.fuel,
+                            )
+                        } else {
+                            nir::program::bit_update_error_in(
+                                storage_type,
+                                selections,
+                                &value.ty,
+                                &expr.ty,
+                                None,
+                            )
+                        }
                     }
                     _ => unreachable!(),
                 };

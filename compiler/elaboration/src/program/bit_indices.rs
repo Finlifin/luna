@@ -23,8 +23,95 @@ impl Checker<'_, '_> {
             let mut statements = Vec::new();
             // A local place needs no address value. Preserve it structurally;
             // only an actual runtime pointer operand is evaluated up front.
+            // When the pointer targets a packed struct field, bind only the
+            // base pointer and re-wrap field projections so alignment and
+            // bit-field metadata stay intact on both read and write sides.
             let operand = if place.is_some() {
                 operand
+            } else if self.pointer_targets_packed_field(&operand) {
+                enum PeeledPointerStep {
+                    Nominal {
+                        ty: Term,
+                        source: n::SourceRange,
+                        declaration: DeclarationId,
+                        index: usize,
+                    },
+                    Anonymous {
+                        ty: Term,
+                        source: n::SourceRange,
+                        name: String,
+                        index: usize,
+                    },
+                }
+
+                let mut cursor = &operand;
+                let mut steps = Vec::new();
+                while self.pointer_targets_packed_field(cursor) {
+                    match &cursor.kind {
+                        K::PointerField {
+                            pointer,
+                            declaration,
+                            index,
+                        } => {
+                            steps.push(PeeledPointerStep::Nominal {
+                                ty: cursor.ty.clone(),
+                                source: cursor.source,
+                                declaration: *declaration,
+                                index: *index,
+                            });
+                            cursor = pointer;
+                        }
+                        K::PointerAnonymousField {
+                            pointer,
+                            name,
+                            index,
+                        } => {
+                            steps.push(PeeledPointerStep::Anonymous {
+                                ty: cursor.ty.clone(),
+                                source: cursor.source,
+                                name: name.clone(),
+                                index: *index,
+                            });
+                            cursor = pointer;
+                        }
+                        _ => break,
+                    }
+                }
+                let mut prepared =
+                    self.prepare_bit_operand(cursor.clone(), &mut statements, expr.span)?;
+                for step in steps.into_iter().rev() {
+                    prepared = match step {
+                        PeeledPointerStep::Nominal {
+                            ty,
+                            source,
+                            declaration,
+                            index,
+                        } => n::Expr {
+                            ty,
+                            source,
+                            kind: K::PointerField {
+                                pointer: Box::new(prepared),
+                                declaration,
+                                index,
+                            },
+                        },
+                        PeeledPointerStep::Anonymous {
+                            ty,
+                            source,
+                            name,
+                            index,
+                        } => n::Expr {
+                            ty,
+                            source,
+                            kind: K::PointerAnonymousField {
+                                pointer: Box::new(prepared),
+                                name,
+                                index,
+                            },
+                        },
+                    };
+                }
+                prepared
             } else {
                 self.prepare_bit_operand(operand, &mut statements, expr.span)?
             };
@@ -345,6 +432,7 @@ impl Checker<'_, '_> {
             kind,
         })
     }
+
     fn bit_writeback_plan(
         &mut self,
         expr: &Expr<'_>,
@@ -463,6 +551,7 @@ impl Checker<'_, '_> {
 
         Ok((selections, width, value, ty))
     }
+
     pub(super) fn bit_pointer_writeback(
         &mut self,
         expr: &Expr<'_>,

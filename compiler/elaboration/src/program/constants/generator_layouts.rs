@@ -267,7 +267,7 @@ impl Checker<'_, '_> {
                 // nominal name comes from the executed construction packet.
                 name: binder.declaration.to_string(),
                 fields,
-                packed: false,
+                packed: n::PackedMode::None,
                 type_parameters: vec![],
                 parameter_types: vec![],
                 requirements: vec![],

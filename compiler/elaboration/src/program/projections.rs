@@ -1567,10 +1567,10 @@ impl Checker<'_, '_> {
                 }
             }
             let (value, is_source) = {
-                let prev = std::mem::replace(
-                    &mut self.allow_packed_pointer_projection,
-                    allow_packed_projection,
-                );
+                let allow_nested = allow_packed_projection
+                    || expected.is_some_and(|e| self.intrinsic_pointer_input(e));
+                let prev =
+                    std::mem::replace(&mut self.allow_packed_pointer_projection, allow_nested);
                 let result = self.field_operand(value);
                 self.allow_packed_pointer_projection = prev;
                 result?

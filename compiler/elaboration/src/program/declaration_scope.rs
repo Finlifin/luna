@@ -85,6 +85,7 @@ impl Checker<'_, '_> {
         let saved_unselected = std::mem::replace(&mut self.in_unselected_inline, false);
         let saved_locals = std::mem::take(&mut self.locals);
         let saved_code = std::mem::take(&mut self.in_code_body);
+        let saved_unsafe = std::mem::replace(&mut self.unsafe_depth, 0);
         let saved_holes = std::mem::take(&mut self.quote_holes);
         let pattern_quote = self.pattern_quote_pending.take();
         let checking_generator = std::mem::take(&mut self.checking_code_generator);
@@ -149,6 +150,7 @@ impl Checker<'_, '_> {
         self.checking_code_generator = checking_generator;
         self.pattern_quote_pending = pattern_quote;
         self.quote_holes = saved_holes;
+        self.unsafe_depth = saved_unsafe;
         self.in_code_body = saved_code;
         self.open_staged_locals = saved_staged_locals;
         self.open_member_locals = saved_staged_locals_members;

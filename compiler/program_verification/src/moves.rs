@@ -8679,10 +8679,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return result;
         }
         let mut result_code = None;
-        if let Some(message) = nir::program::pointer_operation_error_in(
-            expr,
-            self.package.and_then(|package| package.target),
-        ) {
+        let ptr_error = if let Some(package) = self.package {
+            nir::program::pointer_operation_error_with_world(
+                &nir::PackageLayoutWorld(package),
+                expr,
+                &mut self.fuel,
+            )
+        } else {
+            nir::program::pointer_operation_error_in(expr, None)
+        };
+        if let Some(message) = ptr_error {
             return Err(error(source, message));
         }
         match &expr.kind {
@@ -14207,10 +14213,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             return Err(error(expr.source, "pointer evaluation budget exhausted"));
         }
         self.fuel -= 1;
-        if let Some(message) = nir::program::pointer_operation_error_in(
-            expr,
-            self.package.and_then(|package| package.target),
-        ) {
+        let ptr_error = if let Some(package) = self.package {
+            nir::program::pointer_operation_error_with_world(
+                &nir::PackageLayoutWorld(package),
+                expr,
+                &mut self.fuel,
+            )
+        } else {
+            nir::program::pointer_operation_error_in(expr, None)
+        };
+        if let Some(message) = ptr_error {
             return Err(error(expr.source, message));
         }
         if self
@@ -14896,10 +14908,16 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         }
         self.fuel -= 1;
         let source = expr.source;
-        if let Some(message) = nir::program::pointer_operation_error_in(
-            expr,
-            self.package.and_then(|package| package.target),
-        ) {
+        let ptr_error = if let Some(package) = self.package {
+            nir::program::pointer_operation_error_with_world(
+                &nir::PackageLayoutWorld(package),
+                expr,
+                &mut self.fuel,
+            )
+        } else {
+            nir::program::pointer_operation_error_in(expr, None)
+        };
+        if let Some(message) = ptr_error {
             return Err(error(source, message));
         }
         // Keep recursive lexical/control nodes off the large operation match

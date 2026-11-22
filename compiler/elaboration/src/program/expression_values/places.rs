@@ -217,12 +217,11 @@ impl Checker<'_, '_> {
                             unreachable!()
                         };
                         let storage_type = self.structural_type(ty, target.span)?;
-                        let width = match &storage_type {
-                            Term::Primitive(P::BitVec(width))=>*width,
-                            Term::Primitive(primitive) if take_bits => primitive.unrestricted_scalar_width_in(self.target).map(|width|width as usize)
-                                .ok_or_else(||error(target.span,"bit writeback requires an unrestricted scalar representation"))?,
-                            _=>return Err(error(target.span,"bit writeback requires a direct bit view or a BitVec place")),
-                        };
+                        let width = self.bit_writeback_storage_width(
+                            &storage_type,
+                            take_bits,
+                            target.span,
+                        )?;
                         pointer.ty = Term::Pointer(Box::new(storage_type));
                         return self.bit_pointer_writeback(
                             expr,
@@ -346,12 +345,8 @@ impl Checker<'_, '_> {
                 *version = version.saturating_add(1);
                 if bit_assignment {
                     let storage_type = self.structural_type(&ty, target.span)?;
-                    let width = match storage_type {
-                        Term::Primitive(P::BitVec(width)) => width,
-                        Term::Primitive(primitive) if take_bits => primitive.unrestricted_scalar_width_in(self.target).map(|width| width as usize)
-                            .ok_or_else(|| error(target.span,"bit writeback requires a supported scalar or BitVec representation with no invalid bit patterns"))?,
-                        _ => return Err(error(target.span,"bit writeback requires a direct bit view or a BitVec place")),
-                    };
+                    let width =
+                        self.bit_writeback_storage_width(&storage_type, take_bits, target.span)?;
                     return self.bit_writeback(
                         expr,
                         n::Place {

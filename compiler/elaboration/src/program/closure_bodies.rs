@@ -109,6 +109,7 @@ impl Checker<'_, '_> {
         // A callback infers its own result from both its tail and explicit
         // returns, even when the callback value is being probed by a parent.
         let saved_branch_probe = std::mem::replace(&mut self.probing_optional_branch, false);
+        let saved_unsafe = std::mem::replace(&mut self.unsafe_depth, 0);
         if tactic {
             self.tactic_frame = Some((
                 source(body.span),
@@ -259,6 +260,7 @@ impl Checker<'_, '_> {
         let used = self.tactic_frame.as_ref().is_some_and(|(_, _, used)| *used);
         self.tactic_frame = saved_tactic;
         self.probing_optional_branch = saved_branch_probe;
+        self.unsafe_depth = saved_unsafe;
         checked.map(|value| (value, used)).map_err(|mut failure| {
             if !tactic {
                 failure.needs_tactic = false;

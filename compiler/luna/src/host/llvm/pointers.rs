@@ -202,14 +202,28 @@ impl Emitter<'_> {
                 .cloned()
                 .ok_or_else(|| "host constant initializer references unbound local".into()),
             K::Field { value, index, .. } | K::AnonymousField { value, index, .. } => {
-                let ConstValue::Record { fields, .. } = self.const_eval(value, env, depth + 1)?
-                else {
-                    return Err("host constant field projection requires a record value".into());
-                };
-                fields
-                    .get(*index)
-                    .cloned()
-                    .ok_or_else(|| "host constant field index out of range".into())
+                let base = self.const_eval(value, env, depth + 1)?;
+                match base {
+                    ConstValue::Record { fields, .. } => fields
+                        .get(*index)
+                        .cloned()
+                        .ok_or_else(|| "host constant field index out of range".into()),
+                    other => {
+                        if let Ty::BitPackedRecord(layout) = other.ty().clone() {
+                            let field = layout
+                                .fields
+                                .get(*index)
+                                .ok_or("host constant bit-packed field index out of range")?;
+                            if field.ty == Ty::Unit {
+                                return Ok(ConstValue::Unit);
+                            }
+                            let words = const_value_to_bit_words(&other, layout.total_bits)?;
+                            let sliced = slice_bits_from(&words, field.bit_offset, field.bit_width);
+                            return const_value_from_bit_words(&field.ty, &sliced);
+                        }
+                        Err("host constant field projection requires a record value".into())
+                    }
+                }
             }
             K::Block {
                 statements,
@@ -313,6 +327,28 @@ impl Emitter<'_> {
                 if ty == Ty::Unit && fields.is_empty() {
                     return Ok(ConstValue::Unit);
                 }
+                if let Ty::BitPackedRecord(layout) = &ty {
+                    if fields.len() != layout.fields.len() {
+                        return Err("host constant bit-packed record field count mismatch".into());
+                    }
+                    let mut total_words = vec![0u32; layout.total_bits.div_ceil(32) as usize];
+                    for (field, expected) in fields.iter().zip(layout.fields.iter()) {
+                        if repr(self.graph, &field.ty, self.checked)? != expected.ty {
+                            return Err(
+                                "host constant bit-packed field representation mismatch".into()
+                            );
+                        }
+                        let val = self.const_eval(field, env, depth + 1)?;
+                        let f_words = const_value_to_bit_words(&val, expected.bit_width)?;
+                        pack_bits_into(
+                            &mut total_words,
+                            &f_words,
+                            expected.bit_offset,
+                            expected.bit_width,
+                        );
+                    }
+                    return const_value_from_bit_words(&ty, &total_words);
+                }
                 let (Ty::Record(layout) | Ty::PackedRecord(layout)) = &ty else {
                     return Err("host constant record lacks a record layout".into());
                 };
@@ -332,6 +368,51 @@ impl Emitter<'_> {
                     ty,
                     fields: evaluated,
                 })
+            }
+            K::TakeBits(inner) | K::BitConvert(inner) => {
+                let src = self.const_eval(inner, env, depth + 1)?;
+                let src_w = bits::bit_width(src.ty())
+                    .ok_or("host constant bit conversion source has no width")?;
+                let dst_w = bits::bit_width(&ty)
+                    .ok_or("host constant bit conversion target has no width")?;
+                if matches!(expr.kind, K::TakeBits(_)) {
+                    if src_w != dst_w {
+                        return Err("host constant take-bits changes width".into());
+                    }
+                } else if dst_w < src_w || (dst_w > src_w && !matches!(ty, Ty::Int(_, false))) {
+                    return Err("host constant bit conversion width mismatch".into());
+                }
+                let mut words = const_value_to_bit_words(&src, src_w)?;
+                words.resize(dst_w.div_ceil(32) as usize, 0);
+                const_value_from_bit_words(&ty, &words)
+            }
+            K::BitSlice { value, start, end } => {
+                let src = self.const_eval(value, env, depth + 1)?;
+                let src_w = bits::bit_width(src.ty())
+                    .ok_or("host constant bit slice source has no width")?;
+                if *start > *end || *end > src_w as usize {
+                    return Err("host constant bit slice out of bounds".into());
+                }
+                let words = const_value_to_bit_words(&src, src_w)?;
+                let sliced = slice_bits_from(&words, *start as u32, (*end - *start) as u32);
+                const_value_from_bit_words(&ty, &sliced)
+            }
+            K::BitConcat(high, low) => {
+                let hi = self.const_eval(high, env, depth + 1)?;
+                let lo = self.const_eval(low, env, depth + 1)?;
+                let hi_w = bits::bit_width(hi.ty())
+                    .ok_or("host constant bit concat operand has no width")?;
+                let lo_w = bits::bit_width(lo.ty())
+                    .ok_or("host constant bit concat operand has no width")?;
+                let total_w = hi_w
+                    .checked_add(lo_w)
+                    .ok_or("host constant bit concat width overflow")?;
+                let hi_words = const_value_to_bit_words(&hi, hi_w)?;
+                let lo_words = const_value_to_bit_words(&lo, lo_w)?;
+                let mut out = vec![0u32; total_w.div_ceil(32) as usize];
+                pack_bits_into(&mut out, &lo_words, 0, lo_w);
+                pack_bits_into(&mut out, &hi_words, lo_w, hi_w);
+                const_value_from_bit_words(&ty, &out)
             }
             K::OptionalAbsent => {
                 let Ty::Optional(opt) = ty.clone() else {
@@ -1011,6 +1092,23 @@ fn const_zero_value(ty: &Ty) -> Result<ConstValue, String> {
                 fields: zeroed,
             })
         }
+        Ty::BitPackedRecord(layout) => {
+            if layout.total_bits == 0 {
+                Ok(ConstValue::Atom {
+                    ty: ty.clone(),
+                    llvm_ty: "{}".into(),
+                    llvm_init: "zeroinitializer".into(),
+                    zero_sized: true,
+                })
+            } else {
+                Ok(ConstValue::Atom {
+                    ty: ty.clone(),
+                    llvm_ty: ty.llvm(),
+                    llvm_init: "0".into(),
+                    zero_sized: false,
+                })
+            }
+        }
         Ty::Optional(opt) => {
             if opt.niche.is_some() {
                 Ok(ConstValue::NicheCarrier {
@@ -1057,6 +1155,235 @@ fn const_zero_value(ty: &Ty) -> Result<ConstValue, String> {
                 fields: Vec::new(),
             }),
         },
+    }
+}
+
+fn parse_decimal_to_words(decimal: &str, width: u32) -> Result<Vec<u32>, String> {
+    if width == 0 {
+        return Ok(Vec::new());
+    }
+    let word_count = width.div_ceil(32) as usize;
+    let trimmed = decimal.trim();
+    let (negative, digits) = if let Some(rest) = trimmed.strip_prefix('-') {
+        (true, rest)
+    } else {
+        (false, trimmed)
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "host constant bit initializer is not an integer: `{trimmed}`"
+        ));
+    }
+    let mut words = vec![0u32; word_count];
+    for byte in digits.bytes() {
+        let mut carry = u64::from(byte - b'0');
+        for word in &mut words {
+            let val = u64::from(*word) * 10 + carry;
+            *word = val as u32;
+            carry = val >> 32;
+        }
+    }
+    if negative {
+        let mut carry = 1u64;
+        for word in &mut words {
+            let val = u64::from(!*word) + carry;
+            *word = val as u32;
+            carry = val >> 32;
+        }
+    }
+    let rem = width % 32;
+    if rem != 0
+        && let Some(last) = words.last_mut()
+    {
+        *last &= (1u32 << rem) - 1;
+    }
+    Ok(words)
+}
+
+fn pack_bits_into(dst: &mut [u32], src: &[u32], bit_offset: u32, bit_width: u32) {
+    for bit in 0..bit_width {
+        let word_idx = (bit / 32) as usize;
+        let bit_val = (src.get(word_idx).copied().unwrap_or(0) >> (bit % 32)) & 1;
+        if bit_val != 0 {
+            let dst_bit = bit_offset + bit;
+            dst[(dst_bit / 32) as usize] |= 1u32 << (dst_bit % 32);
+        }
+    }
+}
+
+fn slice_bits_from(src: &[u32], bit_offset: u32, bit_width: u32) -> Vec<u32> {
+    if bit_width == 0 {
+        return Vec::new();
+    }
+    let mut dst = vec![0u32; bit_width.div_ceil(32) as usize];
+    for bit in 0..bit_width {
+        let src_bit = bit_offset + bit;
+        let bit_val =
+            (src.get((src_bit / 32) as usize).copied().unwrap_or(0) >> (src_bit % 32)) & 1;
+        if bit_val != 0 {
+            dst[(bit / 32) as usize] |= 1u32 << (bit % 32);
+        }
+    }
+    dst
+}
+
+fn const_value_to_bit_words(val: &ConstValue, width: u32) -> Result<Vec<u32>, String> {
+    if width == 0 {
+        return Ok(Vec::new());
+    }
+    match val {
+        ConstValue::Unit => Err("host constant unit value has 0 bit width".into()),
+        ConstValue::Atom {
+            ty,
+            llvm_init,
+            zero_sized,
+            ..
+        } => {
+            if *zero_sized {
+                return Ok(vec![0u32; width.div_ceil(32) as usize]);
+            }
+            match ty {
+                Ty::Bool => {
+                    let v = match llvm_init.as_str() {
+                        "true" => 1u32,
+                        "false" => 0u32,
+                        _ => return Err("host constant bool initializer invalid".into()),
+                    };
+                    Ok(vec![v])
+                }
+                Ty::Float16 | Ty::Float32 | Ty::Float64 => {
+                    if llvm_init == "0.0" {
+                        return Ok(vec![0u32; width.div_ceil(32) as usize]);
+                    }
+                    let rest = llvm_init
+                        .strip_prefix("bitcast (")
+                        .and_then(|s| s.split_once(' '))
+                        .map(|(_, r)| r)
+                        .and_then(|r| r.split_once(" to "))
+                        .map(|(num, _)| num)
+                        .ok_or("host constant float initializer format unsupported")?;
+                    parse_decimal_to_words(rest, width)
+                }
+                Ty::Int(..) | Ty::BFloat16 | Ty::BitPackedRecord(_) => {
+                    parse_decimal_to_words(llvm_init, width)
+                }
+                _ => Err("host constant atom has no bit-packed representation".into()),
+            }
+        }
+        ConstValue::Enum { llvm_init, .. } => parse_decimal_to_words(llvm_init, width),
+        ConstValue::NicheCarrier { inner, .. } => const_value_to_bit_words(inner, width),
+        _ => Err("host constant aggregate has no bit-packed representation".into()),
+    }
+}
+
+fn const_value_from_bit_words(ty: &Ty, words: &[u32]) -> Result<ConstValue, String> {
+    let width = bits::bit_width(ty).ok_or("host constant target has no bit width")?;
+    let mut normalized = words.to_vec();
+    normalized.resize(width.div_ceil(32) as usize, 0);
+    let rem = width % 32;
+    if rem != 0
+        && let Some(last) = normalized.last_mut()
+    {
+        *last &= (1u32 << rem) - 1;
+    }
+    match ty {
+        Ty::Unit => Ok(ConstValue::Unit),
+        Ty::Bool => Ok(ConstValue::Atom {
+            ty: ty.clone(),
+            llvm_ty: "i1".into(),
+            llvm_init: if (normalized.first().copied().unwrap_or(0) & 1) != 0 {
+                "true"
+            } else {
+                "false"
+            }
+            .into(),
+            zero_sized: false,
+        }),
+        Ty::Int(0, _) => Ok(ConstValue::Atom {
+            ty: ty.clone(),
+            llvm_ty: "{}".into(),
+            llvm_init: "zeroinitializer".into(),
+            zero_sized: true,
+        }),
+        Ty::Int(..) => Ok(ConstValue::Atom {
+            ty: ty.clone(),
+            llvm_ty: ty.llvm(),
+            llvm_init: bits::decimal_words(&normalized),
+            zero_sized: false,
+        }),
+        Ty::BFloat16 => Ok(ConstValue::Atom {
+            ty: ty.clone(),
+            llvm_ty: "i16".into(),
+            llvm_init: (normalized.first().copied().unwrap_or(0) & 0xFFFF).to_string(),
+            zero_sized: false,
+        }),
+        Ty::Float16 => Ok(ConstValue::Atom {
+            ty: ty.clone(),
+            llvm_ty: "half".into(),
+            llvm_init: format!(
+                "bitcast (i16 {} to half)",
+                normalized.first().copied().unwrap_or(0) & 0xFFFF
+            ),
+            zero_sized: false,
+        }),
+        Ty::Float32 => Ok(ConstValue::Atom {
+            ty: ty.clone(),
+            llvm_ty: "float".into(),
+            llvm_init: format!(
+                "bitcast (i32 {} to float)",
+                normalized.first().copied().unwrap_or(0)
+            ),
+            zero_sized: false,
+        }),
+        Ty::Float64 => {
+            let lo = u64::from(normalized.first().copied().unwrap_or(0));
+            let hi = u64::from(normalized.get(1).copied().unwrap_or(0));
+            let combined = lo | (hi << 32);
+            Ok(ConstValue::Atom {
+                ty: ty.clone(),
+                llvm_ty: "double".into(),
+                llvm_init: format!("bitcast (i64 {combined} to double)"),
+                zero_sized: false,
+            })
+        }
+        Ty::BitPackedRecord(layout) => {
+            if layout.total_bits == 0 {
+                Ok(ConstValue::Atom {
+                    ty: ty.clone(),
+                    llvm_ty: "{}".into(),
+                    llvm_init: "zeroinitializer".into(),
+                    zero_sized: true,
+                })
+            } else {
+                Ok(ConstValue::Atom {
+                    ty: ty.clone(),
+                    llvm_ty: ty.llvm(),
+                    llvm_init: bits::decimal_words(&normalized),
+                    zero_sized: false,
+                })
+            }
+        }
+        Ty::Enum(layout)
+            if matches!(
+                layout.repr,
+                enums::EnumRepr::FixedBits { .. } | enums::EnumRepr::Unit { .. }
+            ) =>
+        {
+            if width == 0 {
+                Ok(ConstValue::Enum {
+                    ty: ty.clone(),
+                    llvm_ty: "{}".into(),
+                    llvm_init: "zeroinitializer".into(),
+                })
+            } else {
+                Ok(ConstValue::Enum {
+                    ty: ty.clone(),
+                    llvm_ty: ty.llvm(),
+                    llvm_init: bits::decimal_words(&normalized),
+                })
+            }
+        }
+        _ => Err("host constant bit conversion target is unsupported".into()),
     }
 }
 

@@ -51,10 +51,12 @@ impl Emitter<'_> {
             Pattern::Tuple(fields)
             | Pattern::AnonymousRecord { fields, .. }
             | Pattern::Record { fields, .. } => {
-                let (Ty::Record(layout) | Ty::PackedRecord(layout)) = &value.ty else {
-                    return Err("host record pattern subject has no record layout".into());
+                let field_count = match &value.ty {
+                    Ty::Record(layout) | Ty::PackedRecord(layout) => layout.len(),
+                    Ty::BitPackedRecord(layout) => layout.fields.len(),
+                    _ => return Err("host record pattern subject has no record layout".into()),
                 };
-                if fields.len() != layout.len() {
+                if fields.len() != field_count {
                     return Err("host record pattern field count mismatch".into());
                 }
                 for (index, pattern) in fields.iter().enumerate() {

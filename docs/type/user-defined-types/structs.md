@@ -85,8 +85,8 @@ property -> id: expr
 #### 3. 当前实现现状
 
 - `library/attrs` 已提供 `^attrs.packed.byte` 与 `^attrs.packed.bit`（生成 `{ __flurry_packed_mode: .byte | .bit }`），`library/meta` 已提供 `Type.packed_mode() -> ?Symbol` 与 `Type.is_packed() -> bool`。
-- **已接通的字节级紧凑链路**：编译器当前通过过渡键 `attrs.layout.packed`（`{ packed: bool }`）完整支持字节级紧凑布局检查、禁用字段对齐指针及 LLVM `<{ ... }>` (`align 1`) 代码生成。
-- **待接通的编译器工作**：`elaboration` / `nir` 消费 `__flurry_packed_mode`（`PackedMode` 替换 `packed: bool`）、`attrs.packed.bit` 的字段可位表示校验与到 `BitVec<W>` / `bitvec_opt` 的直接降码，以及超过 256 位时的 `Level::Warning` 诊断通道。
+- **字节级紧凑链路（`^attrs.packed.byte`）**：`elaboration` / `nir` / `comptime_interpretor` / `host/llvm` 已全面消费 `PackedMode::Byte`（兼容过渡键 `.packed`），支持字节级紧凑布局计算、禁止字段取对齐指针、LLVM `<{ ... }>` (`align 1`) 代码生成与读写回写。
+- **位级紧凑链路（`^attrs.packed.bit`）**：`elaboration` / `nir` / `materialization` / `program_verification` / `comptime_interpretor`（树解释器与字节码 VM）与 `host/llvm` 已全面消费 `PackedMode::Bit`，完成字段位可表示与 POD/`Drop`/环/指针校验、超过 256 位非致命编译警告（`[W_PACKED_BIT_WIDTH]`，按单态实例去重）、`s'bitvec` 与 safe/`unsafe` `bits.as(S)`、`BitVec<W>`/`iW` 降码、`bitvec_opt` 共享代数/CEGIS 合成管线（如 4 字节位打包反转合成 `bswap`）、非原子静态掩码 RMW 字段写回及常量全局求值。
 
 ## 常见示例
 
@@ -152,9 +152,9 @@ let unknown = Window { width: 1, depth: 2 }
 
 三者分别缺少必填字段、重复提供同一字段、提供不存在的字段。
 
-### 紧凑布局示意（设计示例）
+### 紧凑布局示意
 
-> 以下示例展示 `attrs.packed.byte` 与 `attrs.packed.bit` 的目标设计语义；编译器当前仍在将下游布局消费者从过渡键 `.packed` 迁至 `__flurry_packed_mode` 与 `BitVec<W>`/`bitvec_opt` 降码。
+> 以下示例展示 `attrs.packed.byte` 与 `attrs.packed.bit` 的位/字节紧凑布局行为；上述两者均已通过 `PackedMode::{Byte, Bit}` 与 `BitVec<W>`/`bitvec_opt` 管线端到端接通。
 
 ~~~flurry
 ^attrs.packed.byte

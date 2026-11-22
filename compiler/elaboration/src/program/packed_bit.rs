@@ -37,6 +37,79 @@ fn bit_packed_instance_label(name: &str, arguments: &[Term]) -> String {
 }
 
 impl Checker<'_, '_> {
+    pub(in crate::program) fn in_unsafe_context(&self) -> bool {
+        self.unsafe_depth > 0
+    }
+
+    pub(in crate::program) fn bit_packed_representation_width(
+        &self,
+        ty: &Term,
+        action: &str,
+        span: Span,
+    ) -> Result<(usize, bool), Error> {
+        let mut fuel = 100_000usize;
+        match nir::bit_packed_field_info(self, ty, &mut fuel) {
+            Ok((total_bits, restricted)) => Ok((total_bits as usize, restricted)),
+            Err(BitPackedError::Layout(LayoutError::TargetRequired)) => Err(error(
+                span,
+                format!(
+                    "{action} on target-dependent attrs.packed.bit struct requires an explicit target"
+                ),
+            )),
+            Err(BitPackedError::Layout(LayoutError::Unresolved(_))) => Err(error(
+                span,
+                format!(
+                    "{action} on generic attrs.packed.bit struct requires concrete type arguments"
+                ),
+            )),
+            Err(err) => Err(error(
+                span,
+                format!("{action} on attrs.packed.bit struct failed: {err}"),
+            )),
+        }
+    }
+
+    pub(in crate::program) fn bit_writeback_storage_width(
+        &self,
+        storage_type: &Term,
+        take_bits: bool,
+        span: Span,
+    ) -> Result<usize, Error> {
+        match storage_type {
+            Term::Primitive(P::BitVec(width)) => Ok(*width),
+            Term::Primitive(primitive) if take_bits => primitive
+                .unrestricted_scalar_width_in(self.target)
+                .map(|width| width as usize)
+                .ok_or_else(|| {
+                    error(
+                        span,
+                        "bit writeback requires a supported scalar or BitVec representation",
+                    )
+                }),
+            Term::Nominal { declaration, .. }
+                if take_bits
+                    && self
+                        .structs
+                        .get(declaration)
+                        .is_some_and(|def| def.packed == PackedMode::Bit) =>
+            {
+                let (width, restricted) =
+                    self.bit_packed_representation_width(storage_type, "bit writeback", span)?;
+                if restricted {
+                    return Err(error(
+                        span,
+                        "bit writeback requires an unrestricted attrs.packed.bit representation without invalid field bit patterns",
+                    ));
+                }
+                Ok(width)
+            }
+            _ => Err(error(
+                span,
+                "bit writeback requires a direct bit view or a BitVec place",
+            )),
+        }
+    }
+
     fn term_has_drop_impl(
         &self,
         context: &crate::ptc::Context,

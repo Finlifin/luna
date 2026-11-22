@@ -3931,14 +3931,9 @@ impl<'a> Interpreter<'a> {
         selections: &[nir::program::BitSelection],
         environment: &mut Environment,
     ) -> Result<SelectedBitRange, Error> {
-        let mut width = match storage_type {
-            Term::Primitive(Primitive::BitVec(width)) => *width,
-            Term::Primitive(p) => p
-                .unrestricted_scalar_width_in(self.target)
-                .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?
-                as usize,
-            _ => return Err(self.failure(ErrorKind::Type, Some(expr.source))),
-        };
+        let mut width = self
+            .unrestricted_bit_storage_width(storage_type, expr.source)?
+            .ok_or_else(|| self.failure(ErrorKind::Type, Some(expr.source)))?;
         let position = |value: Value| {
             match value {
                 Value::Integer(n) => n.to_u128().ok(),
@@ -4073,6 +4068,18 @@ impl<'a> Interpreter<'a> {
                     Value::UnsignedInteger(raw)
                 }
             }
+            Value::Record { .. } => {
+                if self
+                    .unrestricted_bit_storage_width(storage_type, source)?
+                    .is_none()
+                {
+                    return Err(self.failure(ErrorKind::Type, Some(source)));
+                }
+                let bits = self.encode_bit_packed_value(target, storage_type, source)?;
+                let updated =
+                    self.bit_operation(source, |budget| bits.replaced(start, rhs, budget))?;
+                self.decode_bit_packed_value(&updated, storage_type, source)?
+            }
             _ => return Err(self.failure(ErrorKind::Type, Some(source))),
         })
     }
@@ -4098,17 +4105,13 @@ impl<'a> Interpreter<'a> {
             return Err(self.failure(ErrorKind::Type, Some(expr.source)));
         };
         self.charge_preparation(selections.len())?;
-        if nir::program::bit_update_error_in(
+        self.check_bit_update_selections(
             storage_type,
             selections,
             &value.ty,
             &expr.ty,
-            self.target,
-        )
-        .is_some()
-        {
-            return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-        }
+            expr.source,
+        )?;
         let target_value = value!(self.eval(pointer, environment));
         self.check_retained_value(&target_value, &pointer.ty, Some(expr.source))?;
         let Value::Pointer(target) = target_value else {
@@ -4162,17 +4165,13 @@ impl<'a> Interpreter<'a> {
                     return Err(self.failure(ErrorKind::MissingBinding, Some(expr.source)));
                 }
                 self.charge_preparation(selections.len())?;
-                if nir::program::bit_update_error_in(
+                self.check_bit_update_selections(
                     storage_type,
                     selections,
                     &value.ty,
                     &expr.ty,
-                    self.target,
-                )
-                .is_some()
-                {
-                    return Err(self.failure(ErrorKind::Type, Some(expr.source)));
-                }
+                    expr.source,
+                )?;
                 let (start, end) =
                     match self.eval_bit_selections(expr, storage_type, selections, environment)? {
                         SelectedBitRange::Range(start, end) => (start, end),

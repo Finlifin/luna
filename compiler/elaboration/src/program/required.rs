@@ -1139,6 +1139,7 @@ impl Checker<'_, '_> {
         let saved_control = std::mem::take(&mut self.control);
         let saved_captures = std::mem::take(&mut self.captures);
         let saved_code = std::mem::replace(&mut self.in_code_body, false);
+        let saved_unsafe = std::mem::replace(&mut self.unsafe_depth, 0);
         let saved_mode = std::mem::replace(&mut self.in_required_comptime, true);
         let saved_numeric = std::mem::replace(&mut self.numeric_defaults, true);
         let saved_pending = self.pending_type_uses.replace(Vec::new());
@@ -1792,6 +1793,7 @@ impl Checker<'_, '_> {
         self.control = saved_control;
         self.captures = saved_captures;
         self.in_code_body = saved_code;
+        self.unsafe_depth = saved_unsafe;
         self.in_required_comptime = saved_mode;
         self.numeric_defaults = saved_numeric;
         self.required_entry_call = saved_entry;

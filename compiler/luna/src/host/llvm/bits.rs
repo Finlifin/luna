@@ -26,10 +26,13 @@ pub(super) fn decimal_words(words: &[u32]) -> String {
 
 pub(super) fn bit_width(ty: &Ty) -> Option<u32> {
     match ty {
+        Ty::Unit => Some(0),
+        Ty::Bool => Some(1),
         Ty::Int(width, _) => Some(*width),
         Ty::Float16 | Ty::BFloat16 => Some(16),
         Ty::Float32 => Some(32),
         Ty::Float64 => Some(64),
+        Ty::BitPackedRecord(layout) => Some(layout.total_bits),
         Ty::Enum(layout) => match &layout.repr {
             enums::EnumRepr::FixedBits { width, .. } | enums::EnumRepr::Unit { width } => {
                 Some(*width)
@@ -40,10 +43,33 @@ pub(super) fn bit_width(ty: &Ty) -> Option<u32> {
     }
 }
 
+pub(super) fn clear_mask_decimal(total_bits: u32, bit_offset: u32, bit_width: u32) -> String {
+    if total_bits == 0 {
+        return "0".into();
+    }
+    let word_count = total_bits.div_ceil(32) as usize;
+    let mut words = vec![u32::MAX; word_count];
+    let rem = total_bits % 32;
+    if rem != 0
+        && let Some(last) = words.last_mut()
+    {
+        *last &= (1u32 << rem) - 1;
+    }
+    for bit in bit_offset..bit_offset.saturating_add(bit_width) {
+        if bit < total_bits {
+            words[(bit / 32) as usize] &= !(1u32 << (bit % 32));
+        }
+    }
+    decimal_words(&words)
+}
+
 impl Emitter<'_> {
     pub(super) fn to_bits(&mut self, value: Value) -> Result<Value, String> {
         let width = bit_width(&value.ty)
             .ok_or("host bit view is not implemented for this representation")?;
+        if value.ty == Ty::Unit || width == 0 {
+            return Ok(empty_bits());
+        }
         if matches!(value.ty, Ty::Float16 | Ty::Float32 | Ty::Float64) {
             Ok(self.instruction(
                 Ty::Int(width, false),
@@ -62,6 +88,15 @@ impl Emitter<'_> {
         let target_width = bit_width(&target).ok_or("host bit conversion target has no width")?;
         if width != target_width {
             return Err("host reinterpretation changes width".into());
+        }
+        if target == Ty::Unit {
+            return Ok(Value::unit());
+        }
+        if width == 0 {
+            return Ok(Value {
+                ty: target,
+                text: "zeroinitializer".into(),
+            });
         }
         if matches!(target, Ty::Float16 | Ty::Float32 | Ty::Float64) {
             Ok(self.instruction(
@@ -371,6 +406,60 @@ impl Emitter<'_> {
         let result = self.from_bits(result, slot.ty.clone())?;
         self.store(&slot, &result)?;
         Ok(Value::unit())
+    }
+
+    pub(super) fn bit_rmw_static(
+        &mut self,
+        slot: &Slot,
+        bit_offset: u32,
+        field_width: u32,
+        new_bits: Value,
+    ) -> Result<(), String> {
+        if slot.volatile {
+            return Err("volatile bit-vector write is unsupported".into());
+        }
+        let total_bits =
+            bit_width(&slot.ty).ok_or("host bit-field write storage has no bit representation")?;
+        let end = bit_offset
+            .checked_add(field_width)
+            .ok_or("host bit-field write range overflow")?;
+        if end > total_bits {
+            return Err("host bit-field write range exceeds storage width".into());
+        }
+        if new_bits.ty != Ty::Int(field_width, false) {
+            return Err("host bit-field write width mismatch".into());
+        }
+        if field_width == 0 {
+            return Ok(());
+        }
+        if bit_offset == 0 && field_width == total_bits {
+            let value = self.from_bits(new_bits, slot.ty.clone())?;
+            self.store(slot, &value)?;
+            return Ok(());
+        }
+        let old = self.load(slot);
+        let old_bits = self.to_bits(old)?;
+        let clear_mask = clear_mask_decimal(total_bits, bit_offset, field_width);
+        let cleared = self.instruction(
+            Ty::Int(total_bits, false),
+            format!("and i{total_bits} {}, {clear_mask}", old_bits.text),
+        );
+        let ext = self.instruction(
+            Ty::Int(total_bits, false),
+            format!("zext i{field_width} {} to i{total_bits}", new_bits.text),
+        );
+        let shifted = if bit_offset == 0 {
+            ext
+        } else {
+            self.instruction(
+                Ty::Int(total_bits, false),
+                format!("shl i{total_bits} {}, {bit_offset}", ext.text),
+            )
+        };
+        let merged = self.bit_binary("or", cleared, shifted)?;
+        let stored = self.from_bits(merged, slot.ty.clone())?;
+        self.store(slot, &stored)?;
+        Ok(())
     }
 }
 

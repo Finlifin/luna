@@ -6291,10 +6291,16 @@ impl<'a> Infer<'a, '_> {
     fn walk_inner(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         self.step(depth)?;
         self.note_owned_cleanup(&expr.ty)?;
-        if let Some(error) = nir::program::pointer_operation_error_in(
-            expr,
-            self.package.and_then(|package| package.target),
-        ) {
+        let ptr_error = if let Some(package) = self.package {
+            nir::program::pointer_operation_error_with_world(
+                &nir::PackageLayoutWorld(package),
+                expr,
+                self.fuel,
+            )
+        } else {
+            nir::program::pointer_operation_error_in(expr, None)
+        };
+        if let Some(error) = ptr_error {
             return Err(error.into());
         }
         match &expr.kind {
@@ -6820,13 +6826,25 @@ impl<'a> Infer<'a, '_> {
                     .fuel
                     .checked_sub(selections.len())
                     .ok_or("bit selection memory budget exhausted")?;
-                if let Some(reason) = nir::program::bit_update_error_in(
-                    &storage,
-                    selections,
-                    &self.ty(&value.ty)?,
-                    &self.ty(&expr.ty)?,
-                    self.package.and_then(|package| package.target),
-                ) {
+                let reason = if let Some(package) = self.package {
+                    nir::program::bit_update_error_with_world(
+                        &nir::PackageLayoutWorld(package),
+                        &storage,
+                        selections,
+                        &self.ty(&value.ty)?,
+                        &self.ty(&expr.ty)?,
+                        self.fuel,
+                    )
+                } else {
+                    nir::program::bit_update_error_in(
+                        &storage,
+                        selections,
+                        &self.ty(&value.ty)?,
+                        &self.ty(&expr.ty)?,
+                        None,
+                    )
+                };
+                if let Some(reason) = reason {
                     return Err(reason.into());
                 }
                 self.walk(pointer, depth + 1)?;
@@ -7592,26 +7610,42 @@ impl<'a> Infer<'a, '_> {
                 let value_ty = self.ty(&value.ty)?;
                 let result_ty = self.ty(&expr.ty)?;
                 let reason = match &expr.kind {
-                    K::BitAssign { start, end, .. } => nir::program::bit_writeback_error_in(
-                        &storage,
-                        *start,
-                        *end,
-                        &value_ty,
-                        &result_ty,
-                        self.package.and_then(|package| package.target),
-                    ),
+                    K::BitAssign { start, end, .. } => {
+                        if let Some(package) = self.package {
+                            nir::program::bit_writeback_error_with_world(
+                                &nir::PackageLayoutWorld(package),
+                                &storage,
+                                *start,
+                                *end,
+                                &value_ty,
+                                &result_ty,
+                                self.fuel,
+                            )
+                        } else {
+                            nir::program::bit_writeback_error_in(
+                                &storage, *start, *end, &value_ty, &result_ty, None,
+                            )
+                        }
+                    }
                     K::BitUpdate { selections, .. } => {
                         *self.fuel = self
                             .fuel
                             .checked_sub(selections.len())
                             .ok_or("bit selection memory budget exhausted")?;
-                        nir::program::bit_update_error_in(
-                            &storage,
-                            selections,
-                            &value_ty,
-                            &result_ty,
-                            self.package.and_then(|package| package.target),
-                        )
+                        if let Some(package) = self.package {
+                            nir::program::bit_update_error_with_world(
+                                &nir::PackageLayoutWorld(package),
+                                &storage,
+                                selections,
+                                &value_ty,
+                                &result_ty,
+                                self.fuel,
+                            )
+                        } else {
+                            nir::program::bit_update_error_in(
+                                &storage, selections, &value_ty, &result_ty, None,
+                            )
+                        }
                     }
                     _ => unreachable!(),
                 };

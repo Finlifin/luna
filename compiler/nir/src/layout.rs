@@ -1123,6 +1123,133 @@ fn closure_field_state_count(
     }
 }
 
+/// [`LayoutWorld`] backed by an elaborated NIR [`Package`](crate::program::Package).
+pub struct PackageLayoutWorld<'a>(pub &'a crate::program::Package);
+
+impl LayoutWorld for PackageLayoutWorld<'_> {
+    fn target(&self) -> Option<crate::target::TargetData> {
+        self.0.target
+    }
+
+    fn is_tuple_head(&self, head: DeclarationId) -> bool {
+        self.0
+            .normal_forms
+            .iter()
+            .any(|nf| nf.declaration == head && nf.role == crate::normal_forms::Role::Tuple)
+    }
+
+    fn is_list_head(&self, head: DeclarationId) -> bool {
+        self.0
+            .normal_forms
+            .iter()
+            .any(|nf| nf.declaration == head && nf.role == crate::normal_forms::Role::TypeList)
+    }
+
+    fn nominal_kind(&self, ty: &Term) -> Option<crate::NominalKind> {
+        let Term::Nominal { declaration, .. } = ty else {
+            return None;
+        };
+        if self.0.structs.iter().any(|s| s.declaration == *declaration) {
+            Some(crate::NominalKind::Struct)
+        } else if self.0.enums.iter().any(|e| e.declaration == *declaration) {
+            Some(crate::NominalKind::Enum)
+        } else if self
+            .0
+            .newtypes
+            .iter()
+            .any(|n| n.declaration == *declaration)
+        {
+            Some(crate::NominalKind::Newtype)
+        } else {
+            None
+        }
+    }
+
+    fn nominal_layout(
+        &self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<NominalLayout>, LayoutError> {
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return Ok(None);
+        };
+        let admission_err = |err: crate::NominalAdmissionError| match err {
+            crate::NominalAdmissionError::Budget => LayoutError::BudgetExhausted,
+            crate::NominalAdmissionError::Unresolved(_) => LayoutError::Unresolved(ty.clone()),
+            crate::NominalAdmissionError::Invalid(_) => LayoutError::Unsupported(ty.clone()),
+        };
+        if let Some(def) = self
+            .0
+            .structs
+            .iter()
+            .find(|s| s.declaration == *declaration)
+        {
+            let fields = crate::normal_forms::instantiate_value_fields_checked(
+                &def.type_parameters,
+                &def.parameter_types,
+                arguments,
+                def.fields.iter().map(|(_, t)| t),
+                fuel,
+            )
+            .map_err(admission_err)?;
+            return Ok(Some(match def.packed {
+                crate::program::PackedMode::None => NominalLayout::Struct(fields),
+                crate::program::PackedMode::Byte => NominalLayout::PackedStruct(fields),
+                crate::program::PackedMode::Bit => NominalLayout::BitPackedStruct(fields),
+            }));
+        }
+        if let Some(def) = self
+            .0
+            .newtypes
+            .iter()
+            .find(|n| n.declaration == *declaration)
+        {
+            let repr =
+                def.representation_budgeted(arguments, &[], fuel)
+                    .map_err(|err| match err {
+                        crate::newtypes::ConversionError::Budget => LayoutError::BudgetExhausted,
+                        _ => LayoutError::Unsupported(ty.clone()),
+                    })?;
+            return Ok(Some(NominalLayout::Newtype(repr)));
+        }
+        if let Some(def) = self.0.enums.iter().find(|e| e.declaration == *declaration) {
+            if def.symbol_encoding.is_some() {
+                return Ok(Some(NominalLayout::EnumSymbol));
+            }
+            if let Some(encoding) = &def.encoding {
+                let bits = u32::try_from(encoding.width())
+                    .map_err(|_| LayoutError::Unsupported(ty.clone()))?;
+                return Ok(Some(NominalLayout::EnumFixedBits {
+                    width: bits,
+                    niche: encoding.layout.contiguous_niche(),
+                    exhaustive: encoding.layout.is_exhaustive(),
+                }));
+            }
+            if def.variants.iter().all(|v| v.fields.is_empty()) {
+                return Ok(Some(NominalLayout::EnumUnit(def.variants.len())));
+            }
+            let mut variants = Vec::with_capacity(def.variants.len());
+            for variant in &def.variants {
+                let fields = crate::normal_forms::instantiate_value_fields_checked(
+                    &def.type_parameters,
+                    &def.parameter_types,
+                    arguments,
+                    variant.fields.iter(),
+                    fuel,
+                )
+                .map_err(admission_err)?;
+                variants.push(fields);
+            }
+            return Ok(Some(NominalLayout::EnumAggregate(variants)));
+        }
+        Ok(None)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

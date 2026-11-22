@@ -787,6 +787,7 @@ fn elaborate_in_mode(
         definition_attributes,
         attribute_demands,
         allow_packed_pointer_projection: false,
+        unsafe_depth: 0,
         active_early_inherent: BTreeSet::new(),
         checking_method_contract: false,
         pending_contract_projections: Vec::new(),
@@ -2857,6 +2858,7 @@ struct Checker<'a, 'h> {
     definition_attributes: n::DefinitionAttributes,
     attribute_demands: attributes::Demands,
     allow_packed_pointer_projection: bool,
+    unsafe_depth: usize,
     active_early_inherent: BTreeSet<String>,
     checking_method_contract: bool,
     pending_contract_projections: Vec<interfaces::PendingProjection>,
@@ -7715,9 +7717,16 @@ impl Checker<'_, '_> {
                     if saved == Some(expr.hir_id) {
                         self.comptime_callee_result = block.expr.map(|tail| tail.hir_id);
                     }
+                    let is_unsafe = matches!(expr.kind, H::UnsafeBlock(_));
+                    if is_unsafe {
+                        self.unsafe_depth = self.unsafe_depth.saturating_add(1);
+                    }
                     let result = self.block_context(block, expected, partial);
+                    if is_unsafe {
+                        self.unsafe_depth = self.unsafe_depth.saturating_sub(1);
+                    }
                     self.comptime_callee_result = saved;
-                    if matches!(expr.kind, H::UnsafeBlock(_)) {
+                    if is_unsafe {
                         result.map(|body| n::Expr {
                             source: source(expr.span),
                             ty: body.ty.clone(),

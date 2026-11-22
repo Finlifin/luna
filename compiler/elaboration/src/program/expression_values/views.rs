@@ -136,6 +136,25 @@ impl Checker<'_, '_> {
                             "BitVec conversion requires an unrestricted scalar or BitVec target; other representations need unsafe construction support"))? as usize,
                         self.integer_layout(primitive).is_some_and(|(signed, _)| !signed),
                     ),
+                    Term::Nominal { declaration, .. }
+                        if self
+                            .structs
+                            .get(&declaration)
+                            .is_some_and(|def| def.packed == n::PackedMode::Bit) =>
+                    {
+                        let (target_width, restricted) = self.bit_packed_representation_width(
+                            &shape,
+                            "BitVec conversion",
+                            expr.span,
+                        )?;
+                        if restricted && !self.in_unsafe_context() {
+                            return Err(error(
+                                expr.span,
+                                "BitVec conversion to attrs.packed.bit struct with restricted field representations requires an unsafe block",
+                            ));
+                        }
+                        (target_width, false)
+                    }
                     _ => return Err(error(expr.span, "BitVec conversion target is not implemented")),
                 };
                 if !widening && target_width != width {
@@ -227,17 +246,32 @@ impl Checker<'_, '_> {
                 self.ensure_nominal_type(&source_ty, expr.span)?;
                 let width = match source_ty {
                     Term::Primitive(P::BitVec(width)) => width,
-                    Term::Nominal { declaration, .. } => self
-                        .enums
-                        .get(&declaration)
-                        .and_then(|definition| definition.encoding.as_ref())
-                        .map(|encoding| encoding.width())
-                        .ok_or_else(|| {
-                            error(
+                    Term::Nominal { declaration, .. } => {
+                        if let Some(definition) = self.enums.get(&declaration) {
+                            definition
+                                .encoding
+                                .as_ref()
+                                .map(|encoding| encoding.width())
+                                .ok_or_else(|| {
+                                    error(
+                                        expr.span,
+                                        "enum bit view requires a checked fixed-width encoding",
+                                    )
+                                })?
+                        } else if self
+                            .structs
+                            .get(&declaration)
+                            .is_some_and(|def| def.packed == n::PackedMode::Bit)
+                        {
+                            self.bit_packed_representation_width(&source_ty, "bit view", expr.span)?
+                                .0
+                        } else {
+                            return Err(error(
                                 expr.span,
-                                "enum bit view requires a checked fixed-width encoding",
-                            )
-                        })?,
+                                "bit view requires a supported fixed-width representation",
+                            ));
+                        }
+                    }
                     Term::Primitive(primitive) => primitive
                         .readable_scalar_width_in(self.target)
                         .map(|width| width as usize)

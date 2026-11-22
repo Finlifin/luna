@@ -173,7 +173,7 @@ impl<'a> Interpreter<'a> {
         // This request describes an ordinary struct. Packing would change its
         // alignment and field offsets even if every field matched.
         if definition.name != request.name
-            || definition.packed
+            || definition.packed.is_packed()
             || !definition.type_parameters.is_empty()
             || !definition.parameter_types.is_empty()
             || !definition.requirements.is_empty()

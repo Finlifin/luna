@@ -87,6 +87,29 @@ struct OptionalLayout {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+struct BitPackedField {
+    bit_offset: u32,
+    bit_width: u32,
+    ty: Ty,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BitPackedLayout {
+    total_bits: u32,
+    fields: Vec<BitPackedField>,
+}
+
+struct BitPackedPointerChain<'a> {
+    base_pointer: &'a Expr,
+    base_pointee_ty: &'a Term,
+    bit_offset: u32,
+    bit_width: u32,
+    field_ty: Ty,
+    unaligned: bool,
+    volatile: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Ty {
     Unit,
     Optional(std::sync::Arc<OptionalLayout>),
@@ -111,6 +134,7 @@ enum Ty {
     Pointer,
     Record(std::sync::Arc<Vec<Ty>>),
     PackedRecord(std::sync::Arc<Vec<Ty>>),
+    BitPackedRecord(std::sync::Arc<BitPackedLayout>),
 }
 
 impl Ty {
@@ -183,6 +207,13 @@ impl Ty {
                     }
                 } else {
                     format!("{{ {inner} }}")
+                }
+            }
+            Self::BitPackedRecord(layout) => {
+                if layout.total_bits == 0 {
+                    "{}".into()
+                } else {
+                    format!("i{}", layout.total_bits)
                 }
             }
             Self::Pointer | Self::FunctionPointer => "ptr".into(),
@@ -267,6 +298,9 @@ impl Ty {
                     layouts.push(field.storage_layout_at(pointer_bits, depth + 1, fuel)?);
                 }
                 nir::layout::packed_struct_layout(&layouts).map_err(|e| e.to_string())
+            }
+            Self::BitPackedRecord(layout) => {
+                nir::layout::integer_layout(layout.total_bits).map_err(|e| e.to_string())
             }
             Self::Enum(layout) => match &layout.repr {
                 enums::EnumRepr::Symbol(_) => {
@@ -637,19 +671,46 @@ fn repr_at(
                     )?)));
                 }
             };
-            let fields = std::sync::Arc::new(
-                definition
-                    .fields
-                    .iter()
-                    .map(|(_, ty)| repr_at(graph, ty, depth + 1, checked, remaining))
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
+            let fields = definition
+                .fields
+                .iter()
+                .map(|(_, ty)| repr_at(graph, ty, depth + 1, checked, remaining))
+                .collect::<Result<Vec<_>, _>>()?;
             match definition.packed {
-                nir::program::PackedMode::None => Ok(Ty::Record(fields)),
-                nir::program::PackedMode::Byte => Ok(Ty::PackedRecord(fields)),
-                nir::program::PackedMode::Bit => Err(
-                    "host LLVM lowering for attrs.packed.bit structs is not yet implemented".into(),
-                ),
+                nir::program::PackedMode::None => Ok(Ty::Record(std::sync::Arc::new(fields))),
+                nir::program::PackedMode::Byte => Ok(Ty::PackedRecord(std::sync::Arc::new(fields))),
+                nir::program::PackedMode::Bit => {
+                    let field_terms: Vec<Term> =
+                        definition.fields.iter().map(|(_, t)| t.clone()).collect();
+                    let world = HostLayoutWorld {
+                        graph,
+                        pointer_fallback: None,
+                    };
+                    let bp = nir::bit_packed_struct_layout(&world, &field_terms, remaining)
+                        .map_err(|e| e.to_string())?;
+                    if bp.total_bits > bits::MAX_BIT_WIDTH {
+                        return Err(
+                            "host attrs.packed.bit struct exceeds the host width budget".into()
+                        );
+                    }
+                    if bp.fields.len() != fields.len() {
+                        return Err("host attrs.packed.bit field count mismatch".into());
+                    }
+                    let packed_fields = bp
+                        .fields
+                        .into_iter()
+                        .zip(fields)
+                        .map(|(layout, ty)| BitPackedField {
+                            bit_offset: layout.bit_offset,
+                            bit_width: layout.bit_width,
+                            ty,
+                        })
+                        .collect();
+                    Ok(Ty::BitPackedRecord(std::sync::Arc::new(BitPackedLayout {
+                        total_bits: bp.total_bits,
+                        fields: packed_fields,
+                    })))
+                }
             }
         }
         Term::Closure {
@@ -955,7 +1016,17 @@ impl Emitter<'_> {
             matches!(
                 &instance.definition,
                 iir::NominalDefinition::Struct(def)
-                    if def.declaration == *declaration && def.packed.is_packed()
+                    if def.declaration == *declaration && def.packed.is_byte()
+            )
+        }))
+    }
+
+    pub(super) fn is_bit_packed_type(&self, ty: &Term) -> bool {
+        matches!(ty, Term::Nominal { declaration, .. } if self.graph.nominals.iter().any(|instance| {
+            matches!(
+                &instance.definition,
+                iir::NominalDefinition::Struct(def)
+                    if def.declaration == *declaration && def.packed.is_bit()
             )
         }))
     }
@@ -971,7 +1042,7 @@ impl Emitter<'_> {
                     matches!(
                         &instance.definition,
                         iir::NominalDefinition::Struct(def)
-                            if def.declaration == *declaration && def.packed.is_packed()
+                            if def.declaration == *declaration && def.packed.is_byte()
                     )
                 });
                 packed || self.is_packed_pointer_field(pointer)
@@ -979,6 +1050,67 @@ impl Emitter<'_> {
             K::PointerAnonymousField { pointer, .. } => self.is_packed_pointer_field(pointer),
             _ => false,
         }
+    }
+
+    fn resolve_bit_packed_pointer_chain<'b>(
+        &mut self,
+        pointer: &'b Expr,
+        target_pointee_ty: &Term,
+    ) -> Result<Option<BitPackedPointerChain<'b>>, String> {
+        let mut cursor = pointer;
+        let mut steps = Vec::new();
+        loop {
+            let (inner, index) = match &cursor.kind {
+                K::PointerField {
+                    pointer: inner,
+                    index,
+                    ..
+                }
+                | K::PointerAnonymousField {
+                    pointer: inner,
+                    index,
+                    ..
+                } => (inner.as_ref(), *index),
+                _ => break,
+            };
+            let inner_pointee = pointers::pointee(&inner.ty)?;
+            if let Ty::BitPackedRecord(layout) = repr(self.graph, inner_pointee, self.checked)? {
+                steps.push((layout, index));
+                cursor = inner;
+            } else {
+                break;
+            }
+        }
+        if steps.is_empty() {
+            return Ok(None);
+        }
+        let base_pointee_ty = pointers::pointee(&cursor.ty)?;
+        let mut bit_offset = 0u32;
+        let mut bit_width = 0u32;
+        let mut field_ty = Ty::Unit;
+        for (layout, index) in steps.into_iter().rev() {
+            let field = layout
+                .fields
+                .get(index)
+                .ok_or("host bit-packed pointer field index out of range")?;
+            bit_offset = bit_offset
+                .checked_add(field.bit_offset)
+                .ok_or("host bit-packed pointer offset overflow")?;
+            bit_width = field.bit_width;
+            field_ty = field.ty.clone();
+        }
+        let unaligned = self.is_packed_pointer_field(cursor);
+        let volatile = self.is_volatile_pointer_field(pointer, target_pointee_ty)
+            || self.is_volatile_type(base_pointee_ty);
+        Ok(Some(BitPackedPointerChain {
+            base_pointer: cursor,
+            base_pointee_ty,
+            bit_offset,
+            bit_width,
+            field_ty,
+            unaligned,
+            volatile,
+        }))
     }
 
     fn bind(&mut self, id: LocalId, value: &Value) -> Result<(), String> {
@@ -1426,6 +1558,12 @@ impl Emitter<'_> {
                 self.variant(expr.source, *index, fields, &expr.ty, depth)
             }
             K::Tuple(fields) | K::AnonymousRecord { fields } | K::Record { fields, .. } => {
+                if matches!(expr.kind, K::Record { .. })
+                    && self.is_bit_packed_type(&expr.ty)
+                    && let Some(value) = self.try_lower_bitvec_expr(expr, depth)?
+                {
+                    return Ok(value);
+                }
                 self.record(expr.source, fields, &expr.ty, depth)
             }
             K::AddressOf(place) => self.address(place, depth),
@@ -2088,6 +2226,45 @@ impl Emitter<'_> {
                 Ok(self.load(&slot))
             }
             K::ReadPointer(pointer) => {
+                if let Some(chain) = self.resolve_bit_packed_pointer_chain(pointer, &expr.ty)? {
+                    let base = self.expr(chain.base_pointer, depth)?;
+                    return if self.terminated {
+                        Ok(Value::unit())
+                    } else if chain.field_ty == Ty::Unit {
+                        let mut slot = self.pointer_slot(&base, chain.base_pointee_ty)?;
+                        if chain.unaligned {
+                            slot.align = Some(1);
+                        }
+                        slot.volatile = chain.volatile;
+                        if slot.volatile {
+                            let _ = self.load(&slot);
+                        }
+                        Ok(Value::unit())
+                    } else {
+                        let mut slot = self.pointer_slot(&base, chain.base_pointee_ty)?;
+                        if chain.unaligned {
+                            slot.align = Some(1);
+                        }
+                        slot.volatile = chain.volatile;
+                        let whole = self.load(&slot);
+                        if chain.bit_width == 0 {
+                            return self.from_bits(
+                                Value {
+                                    ty: Ty::Int(0, false),
+                                    text: "zeroinitializer".into(),
+                                },
+                                chain.field_ty,
+                            );
+                        }
+                        let raw = self.to_bits(whole)?;
+                        let sliced = self.bit_slice(
+                            raw,
+                            chain.bit_offset as usize,
+                            (chain.bit_offset + chain.bit_width) as usize,
+                        )?;
+                        self.from_bits(sliced, chain.field_ty)
+                    };
+                }
                 let unaligned = self.is_packed_pointer_field(pointer);
                 let volatile = self.is_volatile_pointer_field(pointer, &expr.ty);
                 let pointer = self.expr(pointer, depth)?;
@@ -2113,9 +2290,27 @@ impl Emitter<'_> {
                 }
             }
             K::WritePointer { pointer, value } => {
+                let pointee_ty = pointers::pointee(&pointer.ty)?;
+                if let Some(chain) = self.resolve_bit_packed_pointer_chain(pointer, pointee_ty)? {
+                    let base = self.expr(chain.base_pointer, depth)?;
+                    let value = self.expr(value, depth)?;
+                    if !self.terminated {
+                        if value.ty != chain.field_ty {
+                            return Err(
+                                "host bit-packed pointer write representation mismatch".into()
+                            );
+                        }
+                        let mut slot = self.pointer_slot(&base, chain.base_pointee_ty)?;
+                        if chain.unaligned {
+                            slot.align = Some(1);
+                        }
+                        slot.volatile = chain.volatile;
+                        let new_bits = self.to_bits(value)?;
+                        self.bit_rmw_static(&slot, chain.bit_offset, chain.bit_width, new_bits)?;
+                    }
+                    return Ok(Value::unit());
+                }
                 let unaligned = self.is_packed_pointer_field(pointer);
-                let pointer_type = &pointer.ty;
-                let pointee_ty = pointers::pointee(pointer_type)?;
                 let volatile = self.is_volatile_pointer_field(pointer, pointee_ty);
                 let pointer = self.expr(pointer, depth)?;
                 let value = self.expr(value, depth)?;
@@ -2139,6 +2334,7 @@ impl Emitter<'_> {
                 }) || self.is_volatile_type(&expr.ty);
                 if (volatile_field || self.is_volatile_type(&value.ty))
                     && self.checked
+                    && !self.is_bit_packed_type(&value.ty)
                     && matches!(
                         &value.kind,
                         K::Local(_)
@@ -2159,6 +2355,14 @@ impl Emitter<'_> {
                     slot.volatile = volatile_field;
                     return Ok(self.load(&slot));
                 }
+                if matches!(expr.kind, K::Field { .. })
+                    && self.is_bit_packed_type(&value.ty)
+                    && !volatile_field
+                    && !self.is_volatile_type(&value.ty)
+                    && let Some(projected) = self.try_lower_bitvec_expr(expr, depth)?
+                {
+                    return Ok(projected);
+                }
                 let value = self.expr(value, depth)?;
                 if self.terminated {
                     Ok(Value::unit())
@@ -2171,18 +2375,46 @@ impl Emitter<'_> {
                 let value = self.expr(value, depth)?;
                 if !self.terminated {
                     self.cleanup_boundary(expr.source, iir::cleanup::Boundary::Replacement)?;
-                    let mut slot = self.assignment_slot(place)?;
-                    slot.volatile |= self.is_volatile_type(assigned_ty);
-                    self.store(&slot, &value)?;
-                    self.set_live(
-                        place.root,
-                        &place
-                            .fields
-                            .iter()
-                            .map(|(_, index)| *index)
-                            .collect::<Vec<_>>(),
-                        true,
-                    )?;
+                    match self.resolve_assignment_target(place)? {
+                        records::AssignmentTarget::Direct(mut slot) => {
+                            slot.volatile |= self.is_volatile_type(assigned_ty);
+                            self.store(&slot, &value)?;
+                            self.set_live(
+                                place.root,
+                                &place
+                                    .fields
+                                    .iter()
+                                    .map(|(_, index)| *index)
+                                    .collect::<Vec<_>>(),
+                                true,
+                            )?;
+                        }
+                        records::AssignmentTarget::BitField {
+                            mut slot,
+                            bit_offset,
+                            bit_width,
+                            field_ty,
+                        } => {
+                            if value.ty != field_ty {
+                                return Err(
+                                    "host bit-packed field assignment representation mismatch"
+                                        .into(),
+                                );
+                            }
+                            slot.volatile |= self.is_volatile_type(assigned_ty);
+                            let new_bits = self.to_bits(value)?;
+                            self.bit_rmw_static(&slot, bit_offset, bit_width, new_bits)?;
+                            self.set_live(
+                                place.root,
+                                &place
+                                    .fields
+                                    .iter()
+                                    .map(|(_, index)| *index)
+                                    .collect::<Vec<_>>(),
+                                true,
+                            )?;
+                        }
+                    }
                 }
                 Ok(Value::unit())
             }
@@ -2501,9 +2733,8 @@ impl Emitter<'_> {
                 end,
                 value,
                 ..
-            } => {
-                let slot = self.assignment_slot(place)?;
-                self.bit_write(
+            } => match self.resolve_assignment_target(place)? {
+                records::AssignmentTarget::Direct(slot) => self.bit_write(
                     slot,
                     &[nir::program::BitSelection::Static {
                         start: *start,
@@ -2511,25 +2742,77 @@ impl Emitter<'_> {
                     }],
                     value,
                     depth,
-                )
-            }
+                ),
+                records::AssignmentTarget::BitField {
+                    slot,
+                    bit_offset,
+                    bit_width,
+                    ..
+                } => self.bit_write(
+                    slot,
+                    &[
+                        nir::program::BitSelection::Static {
+                            start: bit_offset as usize,
+                            end: (bit_offset + bit_width) as usize,
+                        },
+                        nir::program::BitSelection::Static {
+                            start: *start,
+                            end: *end,
+                        },
+                    ],
+                    value,
+                    depth,
+                ),
+            },
             K::BitUpdate {
                 place,
                 selections,
                 value,
                 ..
-            } => {
-                let slot = self.assignment_slot(place)?;
-                self.bit_write(slot, selections, value, depth)
-            }
+            } => match self.resolve_assignment_target(place)? {
+                records::AssignmentTarget::Direct(slot) => {
+                    self.bit_write(slot, selections, value, depth)
+                }
+                records::AssignmentTarget::BitField {
+                    slot,
+                    bit_offset,
+                    bit_width,
+                    ..
+                } => {
+                    let mut combined = Vec::with_capacity(1 + selections.len());
+                    combined.push(nir::program::BitSelection::Static {
+                        start: bit_offset as usize,
+                        end: (bit_offset + bit_width) as usize,
+                    });
+                    combined.extend(selections.iter().cloned());
+                    self.bit_write(slot, &combined, value, depth)
+                }
+            },
             K::BitWritePointer {
                 pointer,
                 selections,
                 value,
             } => {
+                let pointee_ty = pointers::pointee(&pointer.ty)?;
+                if let Some(chain) = self.resolve_bit_packed_pointer_chain(pointer, pointee_ty)? {
+                    let base = self.expr(chain.base_pointer, depth)?;
+                    if self.terminated {
+                        return Ok(Value::unit());
+                    }
+                    let mut slot = self.pointer_slot(&base, chain.base_pointee_ty)?;
+                    if chain.unaligned {
+                        slot.align = Some(1);
+                    }
+                    slot.volatile = chain.volatile;
+                    let mut combined = Vec::with_capacity(1 + selections.len());
+                    combined.push(nir::program::BitSelection::Static {
+                        start: chain.bit_offset as usize,
+                        end: (chain.bit_offset + chain.bit_width) as usize,
+                    });
+                    combined.extend(selections.iter().cloned());
+                    return self.bit_write(slot, &combined, value, depth);
+                }
                 let unaligned = self.is_packed_pointer_field(pointer);
-                let pointer_type = &pointer.ty;
-                let pointee_ty = pointers::pointee(pointer_type)?;
                 let volatile = self.is_volatile_pointer_field(pointer, pointee_ty);
                 let pointer = self.expr(pointer, depth)?;
                 if self.terminated {
@@ -2624,6 +2907,9 @@ impl Emitter<'_> {
                 }
             }
             K::TakeBits(e) => {
+                if let Some(value) = self.try_lower_bitvec_expr(expr, depth)? {
+                    return Ok(value);
+                }
                 let value = self.expr(e, depth)?;
                 if self.terminated {
                     Ok(Value::unit())
@@ -2678,10 +2964,7 @@ impl Emitter<'_> {
                 }
             }
             K::BitConvert(e) => {
-                if matches!(e.ty, Term::Primitive(P::BitVec(_)))
-                    && matches!(expr.ty, Term::Primitive(P::BitVec(_)))
-                    && let Some(value) = self.try_lower_bitvec_expr(expr, depth)?
-                {
+                if let Some(value) = self.try_lower_bitvec_expr(expr, depth)? {
                     return Ok(value);
                 }
                 let value = self.expr(e, depth)?;

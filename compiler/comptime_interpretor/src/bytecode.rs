@@ -5,10 +5,13 @@ use comptime_compiler::{
     Op, Program,
     declaration_inputs::{BoundExports, PreparationSite},
 };
+
 mod bindings;
+
 #[path = "bytecode_interface.rs"]
 mod interface;
 mod preparation;
+
 pub(super) use preparation::{MethodContinuation, MethodWait, Preparation};
 
 /// Stack-local output of one driver poll. The instruction supplies this
@@ -74,9 +77,11 @@ impl Frame {
             .expect("compiled preparation slot");
         self.prepared_types[slot] = Some(ty);
     }
+
     fn prepared_type(&self, register: usize) -> Option<&Term> {
         self.prepared_types[self.code.prepared_type_slot(register)?].as_ref()
     }
+
     fn take_type(&mut self, register: usize) -> Option<Term> {
         self.prepared_types[self.code.prepared_type_slot(register)?].take()
     }
@@ -387,15 +392,18 @@ pub(super) struct InputFrame {
     pub code: Frame,
     pub finish: InputFinish,
 }
+
 pub(super) enum InputFinish {
     Ready,
     Staged { depth: usize, source: SourceRange },
 }
+
 pub(super) struct InputResult {
     pub flow: Result<Flow, Error>,
     pub environment: Environment,
     pub staged: Option<normal_inputs::StagedNormalInput>,
 }
+
 impl fmt::Display for InputFinish {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -408,11 +416,13 @@ impl fmt::Display for InputFinish {
         }
     }
 }
+
 impl fmt::Display for InputFrame {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(input-frame {} {})", self.finish, self.code)
     }
 }
+
 impl InputFinish {
     pub fn complete(
         self,
@@ -603,12 +613,15 @@ pub(super) struct BorrowedCodeCache<'a> {
 
 #[derive(Clone, Copy)]
 struct BorrowedBody<'a>(&'a Expr);
+
 impl PartialEq for BorrowedBody<'_> {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self.0, other.0)
     }
 }
+
 impl Eq for BorrowedBody<'_> {}
+
 impl std::hash::Hash for BorrowedBody<'_> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::ptr::hash(self.0, state);
@@ -1319,25 +1332,13 @@ impl<'a> Interpreter<'a> {
                 Op::BeginBitUpdate { identity, plan } => {
                     frame.slots[plan.local].as_ref().ok_or_else(missing)?;
                     self.charge_preparation(plan.selections.len())?;
-                    if nir::program::bit_update_layout_error_in(
+                    let width = self.check_bit_update_plan_layouts(
                         &plan.storage,
                         plan.layouts(),
                         &plan.value,
                         &plan.output,
-                        self.target,
-                    )
-                    .is_some()
-                    {
-                        return Err(self.failure(ErrorKind::Type, Some(source)));
-                    }
-                    let width = match &plan.storage {
-                        Term::Primitive(Primitive::BitVec(width)) => *width,
-                        Term::Primitive(p) => {
-                            p.unrestricted_scalar_width_in(self.target)
-                                .ok_or_else(missing)? as usize
-                        }
-                        _ => return Err(missing()),
-                    };
+                        source,
+                    )?;
                     frame
                         .bit_updates
                         .insert(*identity, (plan.clone(), 0, width));

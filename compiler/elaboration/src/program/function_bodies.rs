@@ -152,6 +152,7 @@ impl Checker<'_, '_> {
         let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
             return Err(error(span, "source declaration needs a function signature"));
         };
+        self.unsafe_depth = usize::from(sig.modifiers.is_unsafe);
         let Term::Function { parameters, result } = &signature else {
             return Err(error(span, "source function needs a callable signature"));
         };

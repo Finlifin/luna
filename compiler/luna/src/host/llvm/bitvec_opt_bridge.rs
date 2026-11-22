@@ -149,10 +149,11 @@ impl BitVecExtractor {
                     .map_err(|e| format!("host BitVec not region error: {e}"))
             }
             K::BitConvert(inner)
-                if bitvec_width(&expr.ty).is_some() && bitvec_width(&inner.ty).is_some() =>
+                if bit_carrier_width(emitter, &expr.ty).is_some()
+                    && bit_carrier_width(emitter, &inner.ty).is_some() =>
             {
-                let dst_w = bitvec_width(&expr.ty).expect("checked BitVec width");
-                let src_w = bitvec_width(&inner.ty).expect("checked BitVec width");
+                let dst_w = bit_carrier_width(emitter, &expr.ty).expect("checked carrier width");
+                let src_w = bit_carrier_width(emitter, &inner.ty).expect("checked carrier width");
                 let Some(in_id) = self.extract(emitter, inner, depth, dag_depth + 1)? else {
                     return Ok(None);
                 };
@@ -165,12 +166,67 @@ impl BitVecExtractor {
                         .map_err(|e| format!("host BitVec zero-extend region error: {e}"))
                 }
             }
-            K::Literal(Literal::BitVec { width, words })
-                if u32::try_from(*width).is_ok_and(|w| w <= bits::MAX_BIT_WIDTH) =>
+            K::Record { fields, .. }
+                if !fields.iter().any(|f| emitter.has_cleanup_hook(f.source))
+                    && matches!(
+                        repr(emitter.graph, &expr.ty, emitter.checked),
+                        Ok(Ty::BitPackedRecord(_))
+                    ) =>
             {
-                let w = *width as u32;
-                let bits = bitvalue_from_u32_words(w, words)?;
-                Ok(Some(self.builder.constant(bits)))
+                let mut node_ids = Vec::with_capacity(fields.len());
+                for field in fields {
+                    let Some(id) = self.extract(emitter, field, depth, dag_depth + 1)? else {
+                        return Ok(None);
+                    };
+                    node_ids.push(id);
+                }
+                if node_ids.is_empty() {
+                    Ok(Some(self.builder.constant(BitValue::empty())))
+                } else {
+                    let mut acc = node_ids[0];
+                    for &next_id in &node_ids[1..] {
+                        acc = self
+                            .builder
+                            .concat(next_id, acc)
+                            .map_err(|e| format!("host BitVec record concat region error: {e}"))?;
+                    }
+                    Ok(Some(acc))
+                }
+            }
+            K::Field { value, index, .. }
+                if matches!(
+                    repr(emitter.graph, &value.ty, emitter.checked),
+                    Ok(Ty::BitPackedRecord(_))
+                ) =>
+            {
+                let Ok(Ty::BitPackedRecord(layout)) =
+                    repr(emitter.graph, &value.ty, emitter.checked)
+                else {
+                    unreachable!()
+                };
+                let fl = layout
+                    .fields
+                    .get(*index)
+                    .ok_or("host BitVec packed field index out of range")?;
+                let Some(in_id) = self.extract(emitter, value, depth, dag_depth + 1)? else {
+                    return Ok(None);
+                };
+                self.builder
+                    .extract_const(in_id, fl.bit_offset, fl.bit_width)
+                    .map(Some)
+                    .map_err(|e| format!("host BitVec packed field extract error: {e}"))
+            }
+            K::TakeBits(inner) => self.extract(emitter, inner, depth, dag_depth + 1),
+            K::NewtypeConvert(inner) => self.extract(emitter, inner, depth, dag_depth + 1),
+            K::Unit => Ok(Some(self.builder.constant(BitValue::empty()))),
+            K::Literal(literal) => {
+                if let Some(w) = bit_carrier_width(emitter, &expr.ty)
+                    && let Some(bits) = literal_to_bitvalue(literal, w)
+                {
+                    Ok(Some(self.builder.constant(bits)))
+                } else {
+                    self.extract_leaf(emitter, expr, depth, dag_depth)
+                }
             }
             _ => self.extract_leaf(emitter, expr, depth, dag_depth),
         }
@@ -183,7 +239,7 @@ impl BitVecExtractor {
         depth: usize,
         dag_depth: usize,
     ) -> Result<Option<bitvec_opt::NodeId>, String> {
-        let width = bitvec_width(&expr.ty)
+        let width = bit_carrier_width(emitter, &expr.ty)
             .ok_or("host BitVec DAG leaf must have a bounded BitVec representation")?;
         if let Some(key) = try_dedup_leaf_key(emitter, expr) {
             if let Some(&existing_node) = self.pure_leaf_map.get(&(key, self.memory_version)) {
@@ -193,6 +249,7 @@ impl BitVecExtractor {
             if emitter.terminated {
                 return Ok(None);
             }
+            let bits_val = emitter.to_bits(val)?;
             let place_id = match key {
                 LeafKey::Local(id) | LeafKey::TakeBitsLocal(id) => {
                     (u64::from(id.owner) << 32) | u64::from(id.index)
@@ -203,7 +260,7 @@ impl BitVecExtractor {
                 .builder
                 .input_with_effect(identity.clone(), width, InputEffect::PureValue)
                 .map_err(|e| format!("host BitVec pure leaf error: {e}"))?;
-            self.leaf_values.insert(identity, val);
+            self.leaf_values.insert(identity, bits_val);
             self.pure_leaf_map
                 .insert((key, self.memory_version), node_id);
             Ok(Some(node_id))
@@ -212,6 +269,7 @@ impl BitVecExtractor {
             if emitter.terminated {
                 return Ok(None);
             }
+            let bits_val = emitter.to_bits(val)?;
             let identity = self.alloc_identity(u64::MAX);
             let call_id = u64::from(identity.eval_order);
             let node_id = self
@@ -225,7 +283,7 @@ impl BitVecExtractor {
                     },
                 )
                 .map_err(|e| format!("host BitVec side-effect leaf error: {e}"))?;
-            self.leaf_values.insert(identity, val);
+            self.leaf_values.insert(identity, bits_val);
             // Any non-pure leaf may observe or mutate storage, so subsequent pure reads
             // must not alias pre-effect reads.
             self.memory_version = self.memory_version.saturating_add(1);
@@ -242,11 +300,21 @@ fn bitvec_width(ty: &Term) -> Option<u32> {
     (w <= bits::MAX_BIT_WIDTH).then_some(w)
 }
 
+fn bit_carrier_width(emitter: &Emitter<'_>, ty: &Term) -> Option<u32> {
+    if let Some(w) = bitvec_width(ty) {
+        return Some(w);
+    }
+    let ty = repr(emitter.graph, ty, emitter.checked).ok()?;
+    bits::bit_width(&ty).filter(|&w| w <= bits::MAX_BIT_WIDTH)
+}
+
 fn is_copy_bit_primitive(ty: &Term) -> bool {
     matches!(
         ty,
         Term::Primitive(
             P::BitVec(_)
+                | P::Bool
+                | P::Void
                 | P::Char
                 | P::I8
                 | P::I16
@@ -268,13 +336,17 @@ fn is_copy_bit_primitive(ty: &Term) -> bool {
     )
 }
 
+fn is_copy_bit_carrier(emitter: &Emitter<'_>, ty: &Term) -> bool {
+    is_copy_bit_primitive(ty) || emitter.is_bit_packed_type(ty)
+}
+
 fn try_dedup_leaf_key(emitter: &mut Emitter<'_>, expr: &Expr) -> Option<LeafKey> {
     if emitter.has_cleanup_hook(expr.source) || emitter.is_volatile_type(&expr.ty) {
         return None;
     }
     match &expr.kind {
         K::Local(id)
-            if is_copy_bit_primitive(&expr.ty)
+            if is_copy_bit_carrier(emitter, &expr.ty)
                 && emitter.locals.get(id).is_some_and(|slot| !slot.volatile) =>
         {
             Some(LeafKey::Local(*id))
@@ -286,7 +358,7 @@ fn try_dedup_leaf_key(emitter: &mut Emitter<'_>, expr: &Expr) -> Option<LeafKey>
             if emitter.has_cleanup_hook(inner.source) || emitter.is_volatile_type(&inner.ty) {
                 return None;
             }
-            if is_copy_bit_primitive(&inner.ty)
+            if is_copy_bit_carrier(emitter, &inner.ty)
                 && emitter.locals.get(id).is_some_and(|slot| !slot.volatile)
             {
                 Some(LeafKey::TakeBitsLocal(*id))
@@ -294,6 +366,84 @@ fn try_dedup_leaf_key(emitter: &mut Emitter<'_>, expr: &Expr) -> Option<LeafKey>
                 None
             }
         }
+        _ => None,
+    }
+}
+
+fn bitvalue_from_i128(width: u32, value: i128) -> Result<BitValue, String> {
+    if width == 0 {
+        return Ok(BitValue::empty());
+    }
+    if width > 128 {
+        return Err("host signed literal bit width exceeds 128".into());
+    }
+    let unsigned = value as u128;
+    let mask = if width == 128 {
+        u128::MAX
+    } else {
+        (1u128 << width) - 1
+    };
+    let masked = unsigned & mask;
+    let words = if width <= 64 {
+        vec![masked as u64]
+    } else {
+        vec![masked as u64, (masked >> 64) as u64]
+    };
+    BitValue::from_words(width, words).map_err(|e| format!("host BitVec constant error: {e}"))
+}
+
+fn bitvalue_from_u128(width: u32, value: u128) -> Result<BitValue, String> {
+    if width == 0 {
+        return Ok(BitValue::empty());
+    }
+    let word_count = width.div_ceil(64) as usize;
+    let mut words = vec![0u64; word_count];
+    if let Some(w0) = words.get_mut(0) {
+        *w0 = value as u64;
+    }
+    if let Some(w1) = words.get_mut(1) {
+        *w1 = (value >> 64) as u64;
+    }
+    if let Some(last) = words.last_mut() {
+        *last &= bitvec_opt::top_word_mask(width);
+    }
+    BitValue::from_words(width, words).map_err(|e| format!("host BitVec constant error: {e}"))
+}
+
+fn literal_to_bitvalue(literal: &Literal, width: u32) -> Option<BitValue> {
+    match literal {
+        Literal::BitVec {
+            width: lit_w,
+            words,
+        } if *lit_w == width as usize && words.len() == lit_w.div_ceil(32) => {
+            bitvalue_from_u32_words(width, words).ok()
+        }
+        Literal::Bool(b) if width == 1 => BitValue::from_u64(1, u64::from(*b)).ok(),
+        Literal::Char(c) if width == 32 => BitValue::from_u64(32, u64::from(*c as u32)).ok(),
+        Literal::UnsignedInteger(n) => {
+            if width < 128 && (*n >> width) != 0 {
+                return None;
+            }
+            bitvalue_from_u128(width, *n).ok()
+        }
+        Literal::SignedInteger(n) => {
+            if !(1..=128).contains(&width) {
+                return None;
+            }
+            if width < 128 {
+                let min = -(1i128 << (width - 1));
+                let max = (1i128 << (width - 1)) - 1;
+                if *n < min || *n > max {
+                    return None;
+                }
+            }
+            bitvalue_from_i128(width, *n).ok()
+        }
+        Literal::Float16(bits) | Literal::BFloat16(bits) if width == 16 => {
+            BitValue::from_u64(16, u64::from(*bits)).ok()
+        }
+        Literal::Float32(bits) if width == 32 => BitValue::from_u64(32, u64::from(*bits)).ok(),
+        Literal::Float64(bits) if width == 64 => BitValue::from_u64(64, *bits).ok(),
         _ => None,
     }
 }
@@ -413,7 +563,16 @@ impl Emitter<'_> {
         // and emits no runtime action or ownership transfer.
         cleanup.transfers.iter().any(|t| t.source == source)
             || cleanup.pattern_transfers.iter().any(|t| t.source == source)
-            || cleanup.sites.iter().any(|s| s.source == source)
+            || cleanup.sites.iter().any(|s| {
+                s.source == source
+                    || s.actions.iter().any(|a| {
+                        matches!(
+                            a.target,
+                            iir::cleanup::Target::Prepared { construction, .. }
+                                if construction == source
+                        )
+                    })
+            })
             || cleanup
                 .discards
                 .iter()
@@ -421,12 +580,12 @@ impl Emitter<'_> {
             || cleanup.pattern_orders.iter().any(|o| o.source == source)
     }
 
-    fn can_extract_bitvec_expr(&self, expr: &Expr, dag_depth: usize, is_root: bool) -> bool {
-        if !is_root && self.has_cleanup_hook(expr.source) {
-            return bitvec_width(&expr.ty).is_some();
+    fn can_extract_bitvec_expr(&mut self, expr: &Expr, dag_depth: usize, is_root: bool) -> bool {
+        if self.has_cleanup_hook(expr.source) {
+            return !is_root && bit_carrier_width(self, &expr.ty).is_some();
         }
         if dag_depth >= MAX_DAG_DEPTH {
-            return !is_root && bitvec_width(&expr.ty).is_some();
+            return !is_root && bit_carrier_width(self, &expr.ty).is_some();
         }
         match &expr.kind {
             K::BitConcat(high, low) => {
@@ -483,19 +642,77 @@ impl Emitter<'_> {
                     && self.can_extract_bitvec_expr(inner, dag_depth + 1, false)
             }
             K::BitConvert(inner) => {
+                let Some(dst_w) = bit_carrier_width(self, &expr.ty) else {
+                    return false;
+                };
+                let Some(src_w) = bit_carrier_width(self, &inner.ty) else {
+                    return false;
+                };
+                (dst_w == src_w
+                    || (dst_w > src_w && matches!(expr.ty, Term::Primitive(P::BitVec(_)))))
+                    && self.can_extract_bitvec_expr(inner, dag_depth + 1, false)
+            }
+            K::Record { fields, .. } => {
+                if fields.iter().any(|f| self.has_cleanup_hook(f.source)) {
+                    return !is_root && bit_carrier_width(self, &expr.ty).is_some();
+                }
+                let Ok(Ty::BitPackedRecord(layout)) = repr(self.graph, &expr.ty, self.checked)
+                else {
+                    return false;
+                };
+                layout.total_bits <= bits::MAX_BIT_WIDTH
+                    && fields.len() == layout.fields.len()
+                    && fields.iter().zip(layout.fields.iter()).all(|(field, fl)| {
+                        bit_carrier_width(self, &field.ty) == Some(fl.bit_width)
+                            && self.can_extract_bitvec_expr(field, dag_depth + 1, false)
+                    })
+            }
+            K::Field {
+                value,
+                declaration,
+                index,
+            } => {
+                if self.is_volatile_type(&value.ty)
+                    || self.is_volatile_type(&expr.ty)
+                    || self
+                        .graph
+                        .volatile_storage
+                        .is_field_volatile(*declaration, *index)
+                {
+                    return false;
+                }
+                let Ok(Ty::BitPackedRecord(layout)) = repr(self.graph, &value.ty, self.checked)
+                else {
+                    return !is_root && bit_carrier_width(self, &expr.ty).is_some();
+                };
+                layout
+                    .fields
+                    .get(*index)
+                    .is_some_and(|fl| bit_carrier_width(self, &expr.ty) == Some(fl.bit_width))
+                    && self.can_extract_bitvec_expr(value, dag_depth + 1, false)
+            }
+            K::TakeBits(inner) => {
                 let Some(dst_w) = bitvec_width(&expr.ty) else {
                     return false;
                 };
-                let Some(src_w) = bitvec_width(&inner.ty) else {
+                bit_carrier_width(self, &inner.ty) == Some(dst_w)
+                    && self.can_extract_bitvec_expr(inner, dag_depth + 1, false)
+            }
+            K::NewtypeConvert(inner) if !is_root => {
+                let Some(dst_w) = bit_carrier_width(self, &expr.ty) else {
                     return false;
                 };
-                dst_w >= src_w && self.can_extract_bitvec_expr(inner, dag_depth + 1, false)
+                bit_carrier_width(self, &inner.ty) == Some(dst_w)
+                    && self.can_extract_bitvec_expr(inner, dag_depth + 1, false)
             }
-            K::Literal(Literal::BitVec { width, words }) if !is_root => {
-                bitvec_width(&expr.ty).is_some_and(|w| w as usize == *width)
-                    && words.len() == width.div_ceil(32)
+            K::Unit if !is_root => bit_carrier_width(self, &expr.ty) == Some(0),
+            K::Literal(literal) if !is_root => {
+                let Some(w) = bit_carrier_width(self, &expr.ty) else {
+                    return false;
+                };
+                literal_to_bitvalue(literal, w).is_some()
             }
-            _ => !is_root && bitvec_width(&expr.ty).is_some(),
+            _ => !is_root && bit_carrier_width(self, &expr.ty).is_some(),
         }
     }
 
@@ -522,8 +739,16 @@ impl Emitter<'_> {
                 .build(root_id)
                 .map_err(|e| format!("host BitVec region error: {e}"))?
         };
-        self.optimize_and_lower_region(&region, &extractor.leaf_values)
-            .map(Some)
+        let raw = self.optimize_and_lower_region(&region, &extractor.leaf_values)?;
+        if matches!(expr.kind, K::BitEqual(..)) {
+            return Ok(Some(raw));
+        }
+        let target_ty = repr(self.graph, &expr.ty, self.checked)?;
+        if raw.ty == target_ty {
+            Ok(Some(raw))
+        } else {
+            self.from_bits(raw, target_ty).map(Some)
+        }
     }
 
     fn optimize_and_lower_region(

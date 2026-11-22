@@ -188,46 +188,14 @@ impl Interpreter<'_> {
                 });
             }
             B::Convert => {
-                return Ok(match *output {
+                return Ok(match output {
                     Term::Primitive(Primitive::BitVec(width)) => Value::BitVec(
-                        self.bit_operation(source, |budget| bits.widen(width, budget))?,
+                        self.bit_operation(source, |budget| bits.widen(*width, budget))?,
                     ),
                     Term::Primitive(primitive) => {
-                        let Some(width) = primitive.unrestricted_scalar_width_in(self.target)
-                        else {
-                            return Err(self.failure(ErrorKind::Type, Some(source)));
-                        };
-                        let widening = self
-                            .integer_layout(primitive)
-                            .is_some_and(|(signed, _)| !signed);
-                        if (width as usize) < bits.width()
-                            || (!widening && width as usize != bits.width())
-                        {
-                            return Err(self.failure(ErrorKind::Type, Some(source)));
-                        }
-                        let value = self.bit_operation(source, |budget| {
-                            budget.consume(bits.words().len().saturating_add(1))?;
-                            Ok(bits
-                                .words()
-                                .iter()
-                                .rev()
-                                .fold(0u128, |acc, word| (acc << 32) | u128::from(*word)))
-                        })?;
-                        match primitive {
-                            Primitive::F16 => Value::Float16(value as u16),
-                            Primitive::Bf16 => Value::BFloat16(value as u16),
-                            Primitive::F32 => Value::Float32(value as u32),
-                            Primitive::F64 => Value::Float64(value as u64),
-                            _ if self
-                                .integer_layout(primitive)
-                                .is_some_and(|(signed, _)| signed) =>
-                            {
-                                let shift = 128 - width;
-                                Value::SignedInteger(((value << shift) as i128) >> shift)
-                            }
-                            _ => Value::UnsignedInteger(value),
-                        }
+                        self.decode_unrestricted_scalar(&bits, *primitive, true, source)?
                     }
+                    Term::Nominal { .. } => self.decode_bit_packed_value(&bits, output, source)?,
                     _ => return Err(self.failure(ErrorKind::Type, Some(source))),
                 });
             }

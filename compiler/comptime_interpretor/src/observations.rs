@@ -599,7 +599,7 @@ impl Interpreter<'_> {
     }
 }
 
-struct InterpreterLayoutWorld<'a, 'b>(&'a Interpreter<'b>);
+pub(super) struct InterpreterLayoutWorld<'a, 'b>(pub(super) &'a Interpreter<'b>);
 
 impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
     fn target(&self) -> Option<nir::target::TargetData> {

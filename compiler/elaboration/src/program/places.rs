@@ -359,24 +359,7 @@ impl Checker<'_, '_> {
                 ty
             };
             let shape = self.structural_type(ty, target.span)?;
-            let width = match shape {
-                Term::Primitive(P::BitVec(width)) => width,
-                Term::Primitive(primitive) if take_bits => primitive
-                    .unrestricted_scalar_width_in(self.target)
-                    .map(|width| width as usize)
-                    .ok_or_else(|| {
-                        error(
-                            target.span,
-                            "bit writeback requires an unrestricted scalar representation",
-                        )
-                    })?,
-                _ => {
-                    return Err(error(
-                        target.span,
-                        "bit writeback requires a direct bit view or a BitVec place",
-                    ));
-                }
-            };
+            let width = self.bit_writeback_storage_width(&shape, take_bits, target.span)?;
             return self.bit_compound_writeback(
                 expression, op, operand, place, width, &indices, value, expected,
             );
@@ -410,6 +393,46 @@ impl Checker<'_, '_> {
             };
             return self.expr(&assign, expected);
         };
+        let mut base_pointer = &pointer;
+        let mut field_idents = Vec::new();
+        while self.pointer_targets_packed_field(base_pointer) {
+            match &base_pointer.kind {
+                K::PointerField {
+                    pointer: inner,
+                    declaration,
+                    index,
+                } => {
+                    let name = self
+                        .structs
+                        .get(declaration)
+                        .and_then(|def| def.fields.get(*index))
+                        .map(|(name, _)| name.as_str())
+                        .ok_or_else(|| {
+                            error(
+                                target.span,
+                                "compound assignment missing packed struct field",
+                            )
+                        })?;
+                    field_idents.push(hir::common::Ident::new(
+                        hir::Symbol::intern(name),
+                        target.span,
+                    ));
+                    base_pointer = inner;
+                }
+                K::PointerAnonymousField {
+                    pointer: inner,
+                    name,
+                    ..
+                } => {
+                    field_idents.push(hir::common::Ident::new(
+                        hir::Symbol::intern(name),
+                        target.span,
+                    ));
+                    base_pointer = inner;
+                }
+                _ => break,
+            }
+        }
         let binding = self.spread_binding(target.span)?;
         let id = hir::HirId::new(hir::OwnerId::INVALID, hir::ItemLocalId::new(binding.index));
         let local_expr = Expr {
@@ -417,21 +440,38 @@ impl Checker<'_, '_> {
             kind: H::ResolvedLocal(hir::Symbol::invalid(), id),
             span: target.span,
         };
-        let prepared_target = Expr {
+        let prepared_base = Expr {
             kind: H::Deref(&local_expr),
             ..target.clone()
         };
-        let binary = Expr {
-            kind: H::Binary(*op, &prepared_target, value),
-            ..expression.clone()
+        let (prepare_value, checked) = if !field_idents.is_empty() {
+            field_idents.reverse();
+            let base_value = base_pointer.clone();
+            self.locals.insert(binding, base_value.ty.clone());
+            let checked = self.check_projected_compound_assign(
+                &prepared_base,
+                &field_idents,
+                op,
+                expression,
+                value,
+                expected,
+            );
+            self.locals.remove(&binding);
+            (base_value, checked)
+        } else {
+            let binary = Expr {
+                kind: H::Binary(*op, &prepared_base, value),
+                ..expression.clone()
+            };
+            let assign = Expr {
+                kind: H::Assign(&prepared_base, &binary),
+                ..expression.clone()
+            };
+            self.locals.insert(binding, pointer.ty.clone());
+            let checked = self.expr(&assign, expected);
+            self.locals.remove(&binding);
+            (pointer, checked)
         };
-        let assign = Expr {
-            kind: H::Assign(&prepared_target, &binary),
-            ..expression.clone()
-        };
-        self.locals.insert(binding, pointer.ty.clone());
-        let checked = self.expr(&assign, expected);
-        self.locals.remove(&binding);
         let mut checked = checked?;
         let original = source(expression.span);
         let mut generated = || -> Result<n::SourceRange, Error> {
@@ -453,7 +493,7 @@ impl Checker<'_, '_> {
             source: generated()?,
             kind: K::Let {
                 binding,
-                value: Box::new(pointer),
+                value: Box::new(prepare_value),
             },
         };
         Ok(n::Expr {
@@ -464,5 +504,35 @@ impl Checker<'_, '_> {
                 result: Some(Box::new(checked)),
             },
         })
+    }
+
+    fn check_projected_compound_assign<'hir>(
+        &mut self,
+        current: &Expr<'hir>,
+        remaining: &[hir::common::Ident],
+        op: &BinOp,
+        expression: &Expr<'hir>,
+        value: &Expr<'hir>,
+        expected: Option<&Term>,
+    ) -> Result<n::Expr, Error> {
+        if let Some((first, rest)) = remaining.split_first() {
+            let projected = Expr {
+                kind: H::Projection(current, *first),
+                span: expression.span,
+                ..current.clone()
+            };
+            return self.check_projected_compound_assign(
+                &projected, rest, op, expression, value, expected,
+            );
+        }
+        let binary = Expr {
+            kind: H::Binary(*op, current, value),
+            ..expression.clone()
+        };
+        let assign = Expr {
+            kind: H::Assign(current, &binary),
+            ..expression.clone()
+        };
+        self.expr(&assign, expected)
     }
 }

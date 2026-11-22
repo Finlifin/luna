@@ -5451,6 +5451,25 @@ pub fn pointer_operation_error_in(
     expr: &Expr,
     target: Option<crate::target::TargetData>,
 ) -> Option<&'static str> {
+    pointer_operation_error_core(expr, |inner| {
+        bit_writeback_width_in(inner, target).is_some()
+    })
+}
+
+pub fn pointer_operation_error_with_world(
+    world: &impl crate::LayoutWorld,
+    expr: &Expr,
+    fuel: &mut usize,
+) -> Option<&'static str> {
+    pointer_operation_error_core(expr, |inner| {
+        bit_writeback_width_with_world(world, inner, fuel).is_some()
+    })
+}
+
+fn pointer_operation_error_core(
+    expr: &Expr,
+    bit_write_storage_allowed: impl FnOnce(&Term) -> bool,
+) -> Option<&'static str> {
     use ExprKind as K;
     match &expr.kind {
         K::ConstAddress { value, .. } => {
@@ -5514,12 +5533,7 @@ pub fn pointer_operation_error_in(
             }
         }
         K::BitWritePointer { pointer, .. } => match &pointer.ty {
-            Term::Pointer(inner)
-                if matches!(inner.as_ref(),Term::Primitive(p)
-                if matches!(p,crate::Primitive::BitVec(_)) || p.unrestricted_scalar_width_in(target).is_some()) =>
-            {
-                ()
-            }
+            Term::Pointer(inner) if bit_write_storage_allowed(inner) => (),
             _ => {
                 return Some(
                     "bit writeback pointer requires an unrestricted scalar representation",
@@ -5544,6 +5558,63 @@ pub fn pointer_operation_error_in(
 /// Structural representation rules for normalized bit-position updates. This
 /// checks widths/types only; availability and evaluation order belong to the
 /// resource and execution layers.
+fn bit_writeback_width_in(
+    storage: &Term,
+    target: Option<crate::target::TargetData>,
+) -> Option<usize> {
+    match storage {
+        Term::Primitive(crate::Primitive::BitVec(width)) => Some(*width),
+        Term::Primitive(primitive) => primitive
+            .unrestricted_scalar_width_in(target)
+            .map(|n| n as usize),
+        _ => None,
+    }
+}
+
+pub fn bit_writeback_width_with_world(
+    world: &impl crate::LayoutWorld,
+    storage: &Term,
+    fuel: &mut usize,
+) -> Option<usize> {
+    if let Some(width) = bit_writeback_width_in(storage, world.target()) {
+        return Some(width);
+    }
+    let Term::Nominal { .. } = storage else {
+        return None;
+    };
+    let Ok(Some(crate::NominalLayout::BitPackedStruct(fields))) =
+        world.nominal_layout(storage, fuel)
+    else {
+        return None;
+    };
+    let Ok(layout) = crate::bit_packed_struct_layout(world, &fields, fuel) else {
+        return None;
+    };
+    (!layout.restricted).then_some(layout.total_bits as usize)
+}
+
+fn bit_writeback_width_check(
+    width: Option<usize>,
+    start: usize,
+    end: usize,
+    value: &Term,
+    result: &Term,
+) -> Option<&'static str> {
+    use crate::Primitive;
+    let Some(width) = width else {
+        return Some("bit writeback requires an unrestricted scalar representation");
+    };
+    let never = Term::Primitive(Primitive::Never);
+    if start > end
+        || end > width
+        || (*result != Term::Primitive(Primitive::Void) && !(*result == never && *value == never))
+        || (*value != never && *value != Term::Primitive(Primitive::BitVec(end - start)))
+    {
+        return Some("bit writeback width or result type mismatch");
+    }
+    None
+}
+
 pub fn bit_writeback_error(
     storage: &Term,
     start: usize,
@@ -5562,26 +5633,31 @@ pub fn bit_writeback_error_in(
     result: &Term,
     target: Option<crate::target::TargetData>,
 ) -> Option<&'static str> {
-    use crate::Primitive;
-    let width = match storage {
-        Term::Primitive(Primitive::BitVec(width)) => Some(*width),
-        Term::Primitive(primitive) => primitive
-            .unrestricted_scalar_width_in(target)
-            .map(|n| n as usize),
-        _ => None,
-    };
-    let Some(width) = width else {
-        return Some("bit writeback requires an unrestricted scalar representation");
-    };
-    let never = Term::Primitive(Primitive::Never);
-    if start > end
-        || end > width
-        || (*result != Term::Primitive(Primitive::Void) && !(*result == never && *value == never))
-        || (*value != never && *value != Term::Primitive(Primitive::BitVec(end - start)))
-    {
-        return Some("bit writeback width or result type mismatch");
-    }
-    None
+    bit_writeback_width_check(
+        bit_writeback_width_in(storage, target),
+        start,
+        end,
+        value,
+        result,
+    )
+}
+
+pub fn bit_writeback_error_with_world(
+    world: &impl crate::LayoutWorld,
+    storage: &Term,
+    start: usize,
+    end: usize,
+    value: &Term,
+    result: &Term,
+    fuel: &mut usize,
+) -> Option<&'static str> {
+    bit_writeback_width_check(
+        bit_writeback_width_with_world(world, storage, fuel),
+        start,
+        end,
+        value,
+        result,
+    )
 }
 
 /// Current pointer interpreter subset: representation reads/writes whose Copy
@@ -5674,21 +5750,35 @@ pub fn bit_update_error_in(
     )
 }
 
-pub fn bit_update_layout_error_in<'a>(
+pub fn bit_update_error_with_world(
+    world: &impl crate::LayoutWorld,
     storage: &Term,
+    selections: &[BitSelection],
+    value: &Term,
+    result: &Term,
+    fuel: &mut usize,
+) -> Option<&'static str> {
+    bit_update_layout_error_with_world(
+        world,
+        storage,
+        selections.iter().map(BitSelection::layout),
+        value,
+        result,
+        fuel,
+    )
+}
+
+fn bit_update_layout_width_check<'a>(
+    total_width: Option<usize>,
     selections: impl IntoIterator<Item = BitSelectionLayout<&'a Term>>,
     value: &Term,
     result: &Term,
     target: Option<crate::target::TargetData>,
 ) -> Option<&'static str> {
-    let width = match storage {
-        Term::Primitive(crate::Primitive::BitVec(width)) => Some(*width),
-        Term::Primitive(p) => p.unrestricted_scalar_width_in(target).map(|n| n as usize),
-        _ => None,
-    };
-    let Some(mut width) = width else {
+    let Some(total_width) = total_width else {
         return Some("bit writeback requires an unrestricted scalar representation");
     };
+    let mut width = total_width;
     let mut divergent = false;
     for selection in selections {
         let Some(next) = selection.output_width(width) else {
@@ -5714,5 +5804,38 @@ pub fn bit_update_layout_error_in<'a>(
         }
         return None;
     }
-    bit_writeback_error_in(storage, 0, width, value, result, target)
+    bit_writeback_width_check(Some(total_width), 0, width, value, result)
+}
+
+pub fn bit_update_layout_error_in<'a>(
+    storage: &Term,
+    selections: impl IntoIterator<Item = BitSelectionLayout<&'a Term>>,
+    value: &Term,
+    result: &Term,
+    target: Option<crate::target::TargetData>,
+) -> Option<&'static str> {
+    bit_update_layout_width_check(
+        bit_writeback_width_in(storage, target),
+        selections,
+        value,
+        result,
+        target,
+    )
+}
+
+pub fn bit_update_layout_error_with_world<'a>(
+    world: &impl crate::LayoutWorld,
+    storage: &Term,
+    selections: impl IntoIterator<Item = BitSelectionLayout<&'a Term>>,
+    value: &Term,
+    result: &Term,
+    fuel: &mut usize,
+) -> Option<&'static str> {
+    bit_update_layout_width_check(
+        bit_writeback_width_with_world(world, storage, fuel),
+        selections,
+        value,
+        result,
+        world.target(),
+    )
 }

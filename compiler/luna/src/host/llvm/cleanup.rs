@@ -712,6 +712,14 @@ impl Emitter<'_> {
                         .get(field)
                         .ok_or("host capture product field missing")?;
                 }
+                Ty::BitPackedRecord(layout) => {
+                    indices.push(field);
+                    ty = &layout
+                        .fields
+                        .get(field)
+                        .ok_or("host capture bit-packed product field missing")?
+                        .ty;
+                }
                 _ => return Ok(None),
             }
         }
@@ -1510,6 +1518,34 @@ impl Emitter<'_> {
                 self.record_field(&base, *index)
             }
             K::ReadPointer(pointer) => {
+                if let Some(chain) = self.resolve_bit_packed_pointer_chain(pointer, &expr.ty)? {
+                    let base = self.eval_cleanup_env(chain.base_pointer, depth + 1)?;
+                    if chain.field_ty == Ty::Unit {
+                        return Ok(Value::unit());
+                    }
+                    let mut slot = self.pointer_slot(&base, chain.base_pointee_ty)?;
+                    if chain.unaligned {
+                        slot.align = Some(1);
+                    }
+                    slot.volatile = chain.volatile;
+                    let whole = self.load(&slot);
+                    if chain.bit_width == 0 {
+                        return self.from_bits(
+                            Value {
+                                ty: Ty::Int(0, false),
+                                text: "zeroinitializer".into(),
+                            },
+                            chain.field_ty,
+                        );
+                    }
+                    let raw = self.to_bits(whole)?;
+                    let sliced = self.bit_slice(
+                        raw,
+                        chain.bit_offset as usize,
+                        (chain.bit_offset + chain.bit_width) as usize,
+                    )?;
+                    return self.from_bits(sliced, chain.field_ty);
+                }
                 let unaligned = self.is_packed_pointer_field(pointer);
                 let ptr = self.eval_cleanup_env(pointer, depth + 1)?;
                 let mut slot = self.pointer_slot(&ptr, &expr.ty)?;
@@ -2750,12 +2786,22 @@ enum Owner {
 
 pub(super) fn product_paths(ty: &Ty, prefix: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
     out.push(prefix.clone());
-    if let Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) = ty {
-        for (index, field) in fields.iter().enumerate() {
-            prefix.push(index);
-            product_paths(field, prefix, out);
-            prefix.pop();
+    match ty {
+        Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) => {
+            for (index, field) in fields.iter().enumerate() {
+                prefix.push(index);
+                product_paths(field, prefix, out);
+                prefix.pop();
+            }
         }
+        Ty::BitPackedRecord(layout) => {
+            for (index, field) in layout.fields.iter().enumerate() {
+                prefix.push(index);
+                product_paths(&field.ty, prefix, out);
+                prefix.pop();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2763,10 +2809,13 @@ pub(super) fn product_paths(ty: &Ty, prefix: &mut Vec<usize>, out: &mut Vec<Vec<
 // state model. The sum itself (including a sum stored in a product) has a token.
 fn product_projection<'a>(mut ty: &'a Ty, path: &[usize]) -> Option<&'a Ty> {
     for index in path {
-        let (Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields)) = ty else {
-            return None;
+        ty = match ty {
+            Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) => {
+                fields.get(*index)?
+            }
+            Ty::BitPackedRecord(layout) => &layout.fields.get(*index)?.ty,
+            _ => return None,
         };
-        ty = fields.get(*index)?;
     }
     Some(ty)
 }

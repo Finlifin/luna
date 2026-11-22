@@ -621,6 +621,14 @@ impl<'a> InstantiationSession<'a> {
             callable_identities,
             statics: package.statics.clone(),
         };
+        validate_materialized_bit_convert_safety(
+            &output,
+            published_source
+                .as_ref()
+                .map(|s| s.package().as_ref())
+                .unwrap_or(package),
+            &mut publication_fuel,
+        )?;
         output.validate(&mut publication_fuel)?;
         budget.steps = publication_fuel;
         Ok(output)
@@ -849,6 +857,7 @@ impl<'a> InstantiationSession<'a> {
             callable_identities: builder.callable_identities.clone(),
             statics: package.statics.clone(),
         };
+        validate_materialized_bit_convert_safety(&output, source_pkg, &mut publication_fuel)?;
         output.validate(&mut publication_fuel)?;
         self.incremental = Some(IncrementalIir {
             roots: roots.to_vec(),
@@ -4937,4 +4946,86 @@ fn validate_materialized_bit_packed_struct(
             definition.name
         )),
     }
+}
+
+fn validate_materialized_bit_convert_safety(
+    output: &iir::Package,
+    package: &n::Package,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    let world = MaterializationLayoutWorld {
+        package,
+        nominals: &output.nominals,
+    };
+    let mut pending: Vec<(&n::Expr, bool)> = Vec::new();
+    for instance in &output.functions {
+        let is_unsafe = instance.function.interface.is_unsafe;
+        pending.push((&instance.function.body, is_unsafe));
+        for pre in &instance.function.interface.preconditions {
+            pending.push((pre, is_unsafe));
+        }
+        for post in &instance.function.interface.postconditions {
+            pending.push((post, is_unsafe));
+        }
+        for (_, default) in &instance.function.interface.defaults {
+            pending.push((default, is_unsafe));
+        }
+        for expr in instance.function.runtime_deliveries.values() {
+            pending.push((expr, is_unsafe));
+        }
+    }
+    for expr in output.global_runtime_deliveries.values() {
+        pending.push((expr, false));
+    }
+    for interface in &output.interfaces {
+        for method in &interface.methods {
+            let is_unsafe = method.is_unsafe;
+            for pre in &method.program.preconditions {
+                pending.push((pre, is_unsafe));
+            }
+            for post in &method.program.postconditions {
+                pending.push((post, is_unsafe));
+            }
+        }
+    }
+    while let Some((root, unsafe_permitted)) = pending.pop() {
+        nir::visit::expression_pruned_checked(root, fuel, |expr, fuel| -> Result<bool, String> {
+            match &expr.kind {
+                n::ExprKind::UnsafeScope(body) => {
+                    pending.push((body, true));
+                    Ok(false)
+                }
+                n::ExprKind::Closure { body, .. } => {
+                    pending.push((body, false));
+                    Ok(false)
+                }
+                n::ExprKind::BitConvert(inner) if matches!(expr.ty, Term::Nominal { .. }) => {
+                    if let Some(instance) = output.nominals.iter().find(|n| n.ty == expr.ty)
+                        && let iir::NominalDefinition::Struct(def) = &instance.definition
+                        && def.packed == n::PackedMode::Bit
+                    {
+                        let (total_bits, restricted) =
+                            nir::bit_packed_field_info(&world, &expr.ty, fuel).map_err(|err| {
+                                format!("attrs.packed.bit BitConvert check failed: {err}")
+                            })?;
+                        if inner.ty != Term::Primitive(nir::Primitive::BitVec(total_bits as usize))
+                        {
+                            return Err(format!(
+                                "BitVec conversion to attrs.packed.bit struct `{}` expects BitVec<{total_bits}>, found {}",
+                                def.name, inner.ty
+                            ));
+                        }
+                        if restricted && !unsafe_permitted {
+                            return Err(
+                                "BitVec conversion to attrs.packed.bit struct with restricted field representations requires an unsafe boundary".into(),
+                            );
+                        }
+                    }
+                    Ok(true)
+                }
+                _ => Ok(true),
+            }
+        })?;
+    }
+    Ok(())
 }

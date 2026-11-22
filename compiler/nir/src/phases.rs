@@ -753,9 +753,11 @@ impl<'a> PhaseContext<'a> {
                             "pointer operations cannot execute at comptime; use value-reference self",
                         ));
                     }
-                    if let Some(message) =
-                        crate::program::pointer_operation_error_in(expr, package.target)
-                    {
+                    if let Some(message) = crate::program::pointer_operation_error_with_world(
+                        &crate::PackageLayoutWorld(package),
+                        expr,
+                        inspection_fuel,
+                    ) {
                         return Err(error(message));
                     }
                     if let K::UnsafeScope(body) = &expr.kind {
@@ -1826,12 +1828,13 @@ impl<'a> PhaseContext<'a> {
                             let Term::Pointer(storage) = &pointer.ty else {
                                 return Err(error("bit writeback requires a pointer"));
                             };
-                            if let Some(message) = crate::program::bit_update_error_in(
+                            if let Some(message) = crate::program::bit_update_error_with_world(
+                                &crate::PackageLayoutWorld(package),
                                 storage,
                                 selections,
                                 &value.ty,
                                 &expr.ty,
-                                package.target,
+                                inspection_fuel,
                             ) {
                                 return Err(error(message));
                             }
@@ -1858,12 +1861,13 @@ impl<'a> PhaseContext<'a> {
                                         "bit selection validation budget exhausted",
                                     )
                                 })?;
-                            if let Some(message) = crate::program::bit_update_error_in(
+                            if let Some(message) = crate::program::bit_update_error_with_world(
+                                &crate::PackageLayoutWorld(package),
                                 storage_type,
                                 selections,
                                 &value.ty,
                                 &expr.ty,
-                                package.target,
+                                inspection_fuel,
                             ) {
                                 return Err(error(message));
                             }

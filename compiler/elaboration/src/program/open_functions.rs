@@ -2097,6 +2097,7 @@ impl Checker<'_, '_> {
                 ItemKind::FnDeclaration(sig) if sig.modifiers.is_function_template => (sig, None),
                 _ => unreachable!(),
             };
+            this.unsafe_depth = usize::from(sig.modifiers.is_unsafe);
             let metadata = n::Package {
                 target: this.target,
                 structs: this.structs.values().cloned().collect(),
@@ -3125,8 +3126,15 @@ impl Checker<'_, '_> {
                 depth + 1,
                 false,
             )?,
-            H::Block(block) | H::UnsafeBlock(block) => {
+            H::Block(block) => {
                 return self.describe_open_block(block, locals, returns, expected, depth + 1);
+            }
+            H::UnsafeBlock(block) => {
+                let saved = self.unsafe_depth;
+                self.unsafe_depth = self.unsafe_depth.saturating_add(1);
+                let result = self.describe_open_block(block, locals, returns, expected, depth + 1);
+                self.unsafe_depth = saved;
+                return result;
             }
             H::Semi(inner) => {
                 let ty = self.describe_open_expression(inner, locals, returns, None, depth + 1)?;
@@ -8488,6 +8496,7 @@ impl Checker<'_, '_> {
             let (ItemKind::Fn(sig, body) | ItemKind::Case(sig, body)) = &item.kind else {
                 unreachable!()
             };
+            this.unsafe_depth = usize::from(sig.modifiers.is_unsafe);
             if sig.modifiers.is_comptime && !local_runtime_ids.is_empty() {
                 return Err(error(
                     span,

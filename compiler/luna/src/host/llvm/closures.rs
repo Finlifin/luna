@@ -9,6 +9,9 @@ pub(super) fn state_count(fields: &std::sync::Arc<Vec<Ty>>) -> usize {
             Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) => {
                 state_count(fields)
             }
+            Ty::BitPackedRecord(layout) => {
+                1 + layout.fields.iter().map(|f| count(&f.ty)).sum::<usize>()
+            }
             _ => 1,
         }
     }
@@ -24,6 +27,39 @@ pub(super) fn state_index(
     path: &[usize],
     fuel: &mut usize,
 ) -> Result<usize, String> {
+    fn product_child(ty: &Ty, index: usize) -> Option<&Ty> {
+        match ty {
+            Ty::Record(children) | Ty::PackedRecord(children) | Ty::Closure(children) => {
+                children.get(index)
+            }
+            Ty::BitPackedRecord(layout) => layout.fields.get(index).map(|f| &f.ty),
+            _ => None,
+        }
+    }
+
+    fn extend_pending<'a>(
+        ty: &'a Ty,
+        pending: &mut Vec<&'a Ty>,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        match ty {
+            Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) => {
+                *fuel = fuel
+                    .checked_sub(fields.len())
+                    .ok_or("host capture state index budget exhausted")?;
+                pending.extend(fields.iter());
+            }
+            Ty::BitPackedRecord(layout) => {
+                *fuel = fuel
+                    .checked_sub(layout.fields.len())
+                    .ok_or("host capture state index budget exhausted")?;
+                pending.extend(layout.fields.iter().map(|f| &f.ty));
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     let root = Ty::Record(fields.clone());
     let mut current = &root;
     let mut index = 0usize;
@@ -31,28 +67,29 @@ pub(super) fn state_index(
         *fuel = fuel
             .checked_sub(1)
             .ok_or("host capture state index budget exhausted")?;
-        let (Ty::Record(children) | Ty::PackedRecord(children) | Ty::Closure(children)) = current
-        else {
+        if !matches!(
+            current,
+            Ty::Record(_) | Ty::PackedRecord(_) | Ty::Closure(_) | Ty::BitPackedRecord(_)
+        ) {
             return Err("host capture state path is not a product".into());
-        };
-        current = children
-            .get(*field)
-            .ok_or("host capture state field missing")?;
+        }
+        let next = product_child(current, *field).ok_or("host capture state field missing")?;
         *fuel = fuel
             .checked_sub(*field)
             .ok_or("host capture state index budget exhausted")?;
-        let mut pending = children[..*field].iter().collect::<Vec<_>>();
+        let mut pending = Vec::new();
+        for preceding in 0..*field {
+            if let Some(child) = product_child(current, preceding) {
+                pending.push(child);
+            }
+        }
         while let Some(node) = pending.pop() {
             index = index
                 .checked_add(1)
                 .ok_or("host capture state index overflow")?;
-            if let Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) = node {
-                *fuel = fuel
-                    .checked_sub(fields.len())
-                    .ok_or("host capture state index budget exhausted")?;
-                pending.extend(fields.iter());
-            }
+            extend_pending(node, &mut pending, fuel)?;
         }
+        current = next;
         index = index
             .checked_add(1)
             .ok_or("host capture state index overflow")?;

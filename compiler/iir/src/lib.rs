@@ -239,6 +239,86 @@ pub struct Package {
     pub statics: Vec<nir::program::Static>,
 }
 
+struct IirLayoutWorld<'a>(&'a Package);
+
+impl nir::LayoutWorld for IirLayoutWorld<'_> {
+    fn target(&self) -> Option<nir::target::TargetData> {
+        self.0.target
+    }
+
+    fn is_tuple_head(&self, head: DeclarationId) -> bool {
+        self.0
+            .normal_forms
+            .iter()
+            .any(|nf| nf.declaration == head && nf.role == nir::normal_forms::Role::Tuple)
+    }
+
+    fn is_list_head(&self, head: DeclarationId) -> bool {
+        self.0
+            .normal_forms
+            .iter()
+            .any(|nf| nf.declaration == head && nf.role == nir::normal_forms::Role::TypeList)
+    }
+
+    fn nominal_kind(&self, ty: &Term) -> Option<nir::NominalKind> {
+        let instance = self.0.nominals.iter().find(|entry| entry.ty == *ty)?;
+        Some(match &instance.definition {
+            NominalDefinition::Struct(_) => nir::NominalKind::Struct,
+            NominalDefinition::Enum(_) => nir::NominalKind::Enum,
+            NominalDefinition::Newtype(_) => nir::NominalKind::Newtype,
+        })
+    }
+
+    fn is_template_identity(&self, ty: &Term) -> bool {
+        self.0
+            .templates
+            .iter()
+            .any(|table| table.logical_type() == ty)
+    }
+
+    fn nominal_layout(
+        &self,
+        ty: &Term,
+        _fuel: &mut usize,
+    ) -> Result<Option<nir::NominalLayout>, nir::LayoutError> {
+        let Some(instance) = self.0.nominals.iter().find(|instance| instance.ty == *ty) else {
+            return Ok(None);
+        };
+        Ok(Some(match &instance.definition {
+            NominalDefinition::Struct(def) => {
+                let fields = def.fields.iter().map(|(_, t)| t.clone()).collect();
+                match def.packed {
+                    nir::program::PackedMode::None => nir::NominalLayout::Struct(fields),
+                    nir::program::PackedMode::Byte => nir::NominalLayout::PackedStruct(fields),
+                    nir::program::PackedMode::Bit => nir::NominalLayout::BitPackedStruct(fields),
+                }
+            }
+            NominalDefinition::Newtype(def) => {
+                nir::NominalLayout::Newtype(def.representation.clone())
+            }
+            NominalDefinition::Enum(def) => {
+                if def.symbol_encoding.is_some() {
+                    nir::NominalLayout::EnumSymbol
+                } else if let Some(encoding) = &def.encoding {
+                    let bits = u32::try_from(encoding.width())
+                        .map_err(|_| nir::LayoutError::Unsupported(ty.clone()))?;
+                    nir::NominalLayout::EnumFixedBits {
+                        width: bits,
+                        niche: encoding.layout.contiguous_niche(),
+                        exhaustive: encoding.layout.is_exhaustive(),
+                    }
+                } else if def.variants.iter().all(|v| v.fields.is_empty()) {
+                    nir::NominalLayout::EnumUnit(def.variants.len())
+                } else {
+                    nir::NominalLayout::EnumAggregate(
+                        def.variants.iter().map(|v| v.fields.clone()).collect(),
+                    )
+                }
+            }
+        }))
+    }
+}
+
 impl Package {
     pub fn template_method_type(
         &self,
@@ -480,7 +560,9 @@ impl Package {
                     }
                 }
             }
-            if let Some(message) = nir::program::pointer_operation_error_in(expr, self.target) {
+            if let Some(message) =
+                nir::program::pointer_operation_error_with_world(&IirLayoutWorld(self), expr, fuel)
+            {
                 return Err(message.into());
             }
             if let K::Call { callee, .. } = &expr.kind {
