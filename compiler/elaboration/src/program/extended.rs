@@ -29,6 +29,8 @@ impl Checker<'_, '_> {
                 ));
             }
         }
+        let type_field = matches!(callee.kind, H::Projection(..))
+            && self.local_field_domain(callee)? == Some(p(P::Type));
         let callable = match &head.kind {
             H::ResolvedDef { .. } if self.associated_reference_owner(head).is_some() => {
                 let owner = self.associated_reference_owner(head).unwrap();
@@ -46,6 +48,7 @@ impl Checker<'_, '_> {
                 } else { false }
             }
             H::Closure(..) => true,
+            H::Projection(..) if type_field => false,
             H::Projection(base, name) => {
                 !self.is_type_head(base)
                     || self.static_method(base, name.name.as_str(), callee.span, callee.hir_id)?.is_some()
@@ -82,7 +85,20 @@ impl Checker<'_, '_> {
             // Definition checking determines which source operands form Types.
             // Acquire them in generator storage before reading any mutable
             // operand. The layout itself still belongs to this invocation.
-            if let Some(ty) = self.generator_constructed_type(callee)? {
+            // A Type field supplies the constructor at comptime. Looking up
+            // its record as runtime data here would require a spurious Splice.
+            let constructed = if type_field
+                && self.checking_code_generator
+                && self.in_code_body
+                && self.runtime_value_context()
+            {
+                let ty = self.generator_type_data(callee)?.identity(callee.span)?;
+                self.record_generator_constructor_operand(callee);
+                Some(ty)
+            } else {
+                self.generator_constructed_type(callee)?
+            };
+            if let Some(ty) = constructed {
                 return self
                     .with_constructor_inputs(callee, ty, expr.span, |this, ty| {
                         this.construct_typed(expr, ty, args, expected)
@@ -92,12 +108,9 @@ impl Checker<'_, '_> {
             let value = self.invocation_callee(callee)?;
             let ty = self.structural_type(&value.ty, callee.span)?;
             if ty == p(P::Type) {
-                if self.checking_code_generator && self.in_code_body && self.runtime_value_context() {
-                    if let Some((owner, operands)) = &mut self.checking_constructor_operands
-                        && *owner == callee.hir_id.owner
-                    {
-                        operands.insert(callee.hir_id, ());
-                    }
+                if self.checking_code_generator && self.in_code_body && self.runtime_value_context()
+                {
+                    self.record_generator_constructor_operand(callee);
                     let ty = self
                         .generator_type_data_with(callee, |_| Ok(value))?
                         .identity(callee.span)?;

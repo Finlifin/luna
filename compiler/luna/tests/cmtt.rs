@@ -11371,3 +11371,33 @@ fn quoted_constructors_in_data_consumers_preserve_the_type_operands_frame() {
         fn run() -> bool { const changed = inspect('(false)); changed }";
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn consecutive_quoted_constructors_reuse_immutable_schema_projections() {
+    let source = "typealias Type = .Type'builtin;
+        struct Flag { value: bool }
+        struct Schema { kind: Type }
+        comptime fn generate() -> < |- bool > {
+            let schema = Schema { kind: Flag };
+            let first = '(schema.kind { value: false }.value);
+            '(schema.kind { value: true }.value)
+        }
+        fn run() -> bool { ~<generate()> }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let invalid = source.replace("value: true", "missing: true");
+    let failure = support::compile_with_protocols(&invalid, &Default::default()).unwrap_err();
+    assert!(failure.contains("field"), "{failure}");
+    // The first quote observed Flag. A write between quotes must invalidate
+    // that observation even when the second quote is never invoked.
+    let changed = source
+        .replace(
+            "struct Schema",
+            "struct Other { other: bool } struct Schema",
+        )
+        .replace(
+            "'(schema.kind { value: true",
+            "schema.kind = Other; '(schema.kind { value: true",
+        )
+        .replace("~<generate()>", "true");
+    assert!(support::compile_with_protocols(&changed, &Default::default()).is_err());
+}

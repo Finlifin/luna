@@ -26,6 +26,7 @@ struct StorageCheckpoint {
     behavior_inputs: LocalBindings<Term>,
     behavior_values: LocalBindings<n::Expr>,
     data: BTreeMap<n::LocalId, Option<n::Expr>>,
+    schema_invalidated: bool,
     cells: BTreeMap<n::LocalId, (n::Expr, GeneratorCell)>,
     graph: Option<comptime_interpretor::OwnedGraphCheckpoint>,
 }
@@ -72,6 +73,7 @@ impl StorageCheckpoint {
             behavior_inputs: checker.ordinary_behavior_inputs.clone(),
             behavior_values: checker.definition_refinements.behavior_values.clone(),
             data: checker.generator_data.clone(),
+            schema_invalidated: checker.generator_schema_invalidated,
             cells: checker.generator_cells.clone(),
             graph,
         })
@@ -82,6 +84,7 @@ impl StorageCheckpoint {
         checker.ordinary_behavior_inputs = self.behavior_inputs;
         checker.definition_refinements.behavior_values = self.behavior_values;
         checker.generator_data = self.data;
+        checker.generator_schema_invalidated = self.schema_invalidated;
         checker.generator_cells = self.cells;
         restored.map_err(|failure| {
             error(
@@ -102,7 +105,11 @@ impl std::fmt::Display for StorageCheckpoint {
             }
             f.write_str(")")?;
         }
-        f.write_str(") (behavior-inputs")?;
+        write!(
+            f,
+            ") (schema-invalidated {}) (behavior-inputs",
+            self.schema_invalidated
+        )?;
         for (binding, ty) in &self.behavior_inputs {
             write!(f, " (binding {binding} {ty})")?;
         }

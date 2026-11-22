@@ -510,6 +510,7 @@ impl Checker<'_, '_> {
             .map(|(id, value)| (*id, value.take()))
             .collect::<BTreeMap<_, _>>();
         let mode = std::mem::replace(&mut self.in_required_comptime, true);
+        let outer_invalidation = std::mem::take(&mut self.generator_schema_invalidated);
         let mut checkpoint = None;
         let result = (|| {
             if !self.checking_code_generator {
@@ -690,9 +691,10 @@ impl Checker<'_, '_> {
             self.input_facts.partial.clear();
         }
         self.generator_data = previous;
-        if self.checking_code_generator {
-            // Restoring a symbolic update frame must not resurrect schema
-            // snapshots invalidated by its calls or writes.
+        let invalidated = self.generator_schema_invalidated;
+        self.generator_schema_invalidated |= outer_invalidation;
+        if self.checking_code_generator && invalidated {
+            // A nested write invalidates the suspended snapshots as well.
             self.forget_generator_schema_evidence(value.span)?;
         }
         // Publish only after every output is frozen successfully. Failed

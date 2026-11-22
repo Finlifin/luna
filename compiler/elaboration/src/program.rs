@@ -804,6 +804,7 @@ fn elaborate_in_mode(
         generator_data: BTreeMap::new(),
         generator_cells: BTreeMap::new(),
         checking_code_generator: false,
+        generator_schema_invalidated: false,
         abstract_code_dependencies: BTreeMap::new(),
         in_code_body: false,
         inline_selection: None,
@@ -2825,6 +2826,9 @@ struct Checker<'a, 'h> {
     generator_data: BTreeMap<n::LocalId, Option<n::Expr>>,
     generator_cells: BTreeMap<n::LocalId, (n::Expr, GeneratorCell)>,
     checking_code_generator: bool,
+    // Propagates a potential write through nested symbolic data frames while
+    // their original snapshots are temporarily outside the active local map.
+    generator_schema_invalidated: bool,
     abstract_code_dependencies: BTreeMap<n::LocalId, BTreeSet<n::LocalId>>,
     in_code_body: bool,
     inline_selection: Option<(hir::HirId, usize)>,

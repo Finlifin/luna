@@ -3,6 +3,14 @@ use super::*;
 use crate::program::normal::observation::Failure;
 
 impl Checker<'_, '_> {
+    pub(in crate::program) fn record_generator_constructor_operand(&mut self, callee: &Expr<'_>) {
+        if let Some((owner, operands)) = &mut self.checking_constructor_operands
+            && *owner == callee.hir_id.owner
+        {
+            operands.insert(callee.hir_id, ());
+        }
+    }
+
     /// Only a successfully checked definition supplies phase routing to its
     /// invocations. Layouts, local values and caller storage remain per call.
     pub(in crate::program::cmtt) fn check_generator_body<T>(

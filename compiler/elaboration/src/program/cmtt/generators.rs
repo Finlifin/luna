@@ -2345,6 +2345,10 @@ impl Checker<'_, '_> {
                         K::AddressOf(_)
                             | K::ConstAddress { .. }
                             | K::Assign { .. }
+                            | K::BitAssign { .. }
+                            | K::BitUpdate { .. }
+                            | K::WritePointer { .. }
+                            | K::BitWritePointer { .. }
                             | K::Call { .. }
                     );
                     if let K::Call {
@@ -2412,6 +2416,7 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(span, "generator schema invalidation budget exhausted"))?;
         // Structural observations carry no alias proof. Invalidate them with
         // the materialized schema snapshots at writes, calls and escapes.
+        self.generator_schema_invalidated = true;
         self.input_facts.partial.clear();
         for value in self.generator_data.values_mut() {
             if value.as_ref().is_some_and(|value| {
