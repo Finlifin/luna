@@ -20,6 +20,7 @@ pub enum BorrowedRoot {
         pointee: Term,
     },
 }
+
 impl fmt::Display for BorrowedRoot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -60,12 +61,14 @@ impl fmt::Display for BorrowedRoot {
         }
     }
 }
+
 fn charge(fuel: &mut usize, cost: usize) -> Result<(), String> {
     *fuel = fuel
         .checked_sub(cost)
         .ok_or("cleanup memory export budget exhausted")?;
     Ok(())
 }
+
 pub(super) fn project_origin(
     report: &Report,
     package: &Package,
@@ -75,6 +78,7 @@ pub(super) fn project_origin(
 ) -> Result<Option<(memory::ParameterPlace, Term)>, String> {
     project_origin_guarded(report, package, place, &[], fuel, depth)
 }
+
 fn project_origin_guarded(
     report: &Report,
     package: &Package,
@@ -185,6 +189,7 @@ fn project_origin_guarded(
     ty = projection.ty;
     Ok(Some((target, ty)))
 }
+
 impl Report {
     /// Export only the acquired cleanup accesses in this report's own frame.
     /// Nested reports need their own context; this is not a complete body summary.
@@ -357,6 +362,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     | Term::UnsafeFunction(_)
             )
         {
+            return Ok(());
+        }
+        if !self.plan_cleanup {
             return Ok(());
         }
         let Some(policy) = self.cleanup.as_deref_mut() else {

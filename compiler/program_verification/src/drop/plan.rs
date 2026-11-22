@@ -1300,6 +1300,10 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
 }
 
 impl crate::moves::CleanupPolicy for CleanupSession<'_, '_> {
+    fn has_provisional_dependencies(&self) -> bool {
+        !self.missing_runtime_instances.is_empty()
+    }
+
     fn is_trivial(&mut self, ty: &Term, fuel: &mut usize) -> Result<bool, String> {
         crate::memory::bound_type(ty, fuel)?;
         if let Some(trivial) = self.trivial_layouts.get(ty) {

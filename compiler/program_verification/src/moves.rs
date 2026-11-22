@@ -2047,6 +2047,12 @@ pub trait CleanupPolicy {
         Ok(true)
     }
 
+    /// True when any query in this session observed a missing runtime
+    /// destructor instance and fell back to a provisional answer.
+    fn has_provisional_dependencies(&self) -> bool {
+        false
+    }
+
     fn plan(
         &mut self,
         ty: &Term,
@@ -2209,6 +2215,7 @@ struct ReturnResultKey {
     provenance: super::memory::TextProvenance,
     declaration: nir::DeclarationId,
     arguments: Vec<Term>,
+    with_cleanup: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -2371,6 +2378,7 @@ struct Analyzer<'a, F, G> {
     // Captured in this analysis's immutable cleanup world; never grants Copy.
     trivial_cleanup_types: std::collections::HashSet<Term>,
     cleanup: Option<&'a mut dyn CleanupPolicy>,
+    plan_cleanup: bool,
     package: Option<&'a Package>,
     function_env_parameters: &'a [nir::program::RuntimeEnvParameter],
     function_runtime_deliveries: &'a BTreeMap<nir::RuntimeId, Expr>,
@@ -2889,9 +2897,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
 
     fn acquire_cleanup(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
         if let Some(policy) = self.cleanup.as_mut() {
-            policy
-                .acquire(ty, &mut self.fuel)
-                .map_err(|e| error(source, e))?;
+            if self.plan_cleanup || self.observation_region {
+                policy
+                    .acquire(ty, &mut self.fuel)
+                    .map_err(|e| error(source, e))?;
+            }
             if self.observation_region {
                 self.check_observation_cleanup(ty, source)?;
             }
@@ -3463,7 +3473,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 source,
             )?);
         }
-        if self.cleanup.is_none() {
+        if !self.plan_cleanup || self.cleanup.is_none() {
             return Ok(CleanupAction::Alternatives(actions));
         }
         let mut candidates = vec![];
@@ -3556,7 +3566,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             },
             fields: vec![],
         };
-        if self.cleanup.is_none() {
+        if !self.plan_cleanup || self.cleanup.is_none() {
             return Ok(candidate);
         }
         // Retained ownership is relative to the canonical temporary root;
@@ -3742,7 +3752,11 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             ty: ty.clone(),
             remaining,
         };
-        let Some(policy) = self.cleanup.as_mut() else {
+        let Some(policy) = self
+            .plan_cleanup
+            .then_some(())
+            .and_then(|_| self.cleanup.as_mut())
+        else {
             return Ok(Some(candidate));
         };
         let plan = policy
@@ -3932,7 +3946,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     source,
                 )?,
             };
-            if self.cleanup.is_some() {
+            if self.plan_cleanup && self.cleanup.is_some() {
                 if let CleanupAction::Prepared { value, .. } = &action {
                     let ty = value.ty.clone();
                     let shape = (self.shape)(&ty).map_err(|e| error(source, e))?;
@@ -5584,6 +5598,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             provenance: self.text_provenance,
             declaration,
             arguments: arguments.to_vec(),
+            with_cleanup: self.cleanup.is_some(),
         });
         if let Some(cache_key) = &cache_key {
             if let Some(cached) = self.return_results.as_mut().entries.get(cache_key) {
@@ -5722,7 +5737,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             &mut self.delivery as &mut dyn FnMut(&Term) -> Result<Delivery, String>,
             &mut self.shape as &mut dyn FnMut(&Term) -> Result<Shape, String>,
             self.fuel,
-            None,
+            self.cleanup
+                .as_mut()
+                .map(|policy| &mut **policy as &mut dyn CleanupPolicy),
+            false,
             &borrows,
             inputs,
             enum_inputs,
@@ -5748,8 +5766,12 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             .checked_sub(report.entry_steps_used)
             .ok_or_else(|| error(source, "callable result analysis budget exhausted"))?;
         self.return_cycle_hit |= child_cycle_hit;
+        let provisional_cleanup = self
+            .cleanup
+            .as_deref()
+            .is_some_and(CleanupPolicy::has_provisional_dependencies);
         if !report.deferred_calls.is_empty() {
-            if !child_cycle_hit {
+            if !child_cycle_hit && !provisional_cleanup {
                 if let Some(cache_key) = cache_key {
                     self.return_results.as_mut().entries.insert(
                         cache_key,
@@ -5768,7 +5790,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         (*result_fields, *result_variants) =
             callable_aggregate_return_summary(&report, &mut self.fuel, source)?;
         let returned = callable_return_summary(&report, &mut self.fuel, source)?;
-        if !child_cycle_hit {
+        if !child_cycle_hit && !provisional_cleanup {
             if let Some(cache_key) = cache_key {
                 self.return_results.as_mut().entries.insert(
                     cache_key,
@@ -7551,7 +7573,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 "closure pointer snapshots disagree with exit states",
             ));
         }
-        if self.cleanup.is_some() {
+        if self.plan_cleanup && self.cleanup.is_some() {
             let package = self
                 .package
                 .ok_or_else(|| error(source, "closure cleanup footprint needs a package"))?;
@@ -14770,6 +14792,7 @@ fn analyze_with_shapes<'a>(
         shape,
         fuel,
         cleanup,
+        true,
         borrowed_parameters,
         callable_parameters,
         enum_parameters,
@@ -14800,6 +14823,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
     shape: impl FnMut(&Term) -> Result<Shape, String>,
     fuel: usize,
     cleanup: Option<&'a mut dyn CleanupPolicy>,
+    plan_cleanup: bool,
     borrowed_parameters: &[(usize, Term)],
     callable_parameters: &[CallableParameter],
     enum_parameters: &[EnumParameter],
@@ -14848,6 +14872,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
     let mut analyzer = Box::new(Analyzer {
         trivial_cleanup_types: trivial_cleanup_types.clone(),
         cleanup,
+        plan_cleanup,
         package,
         function_env_parameters: &function.env_parameters,
         function_runtime_deliveries: &function.runtime_deliveries,
@@ -15501,6 +15526,7 @@ pub fn analyze_in_package_with_borrowed_code_and_text_context<'a>(
         |ty| ownership_shape(package, ty, &mut shape_fuel, 0),
         fuel,
         cleanup,
+        true,
         borrowed_parameters,
         callable_parameters,
         enum_parameters,
@@ -15548,6 +15574,7 @@ pub fn analyze_in_package_with_session<'a, 's>(
         |ty| ownership_shapes.shape(package, ty, &mut shape_fuel),
         fuel,
         cleanup,
+        true,
         borrowed_parameters,
         callable_parameters,
         enum_parameters,
@@ -15599,6 +15626,7 @@ pub(crate) fn analyze_with_declarations<'a>(
         |ty| ownership_shape(package, ty, &mut shape_fuel, 0),
         fuel,
         cleanup,
+        true,
         borrowed_parameters,
         callable_parameters,
         enum_parameters,
@@ -19062,6 +19090,564 @@ mod return_result_cache_tests {
         .unwrap();
         assert!(rec_session.return_results.is_empty());
     }
+
+    #[test]
+    fn return_result_forwards_cleanup_policy_without_planning_discarded_callee_cleanup() {
+        use nir::{
+            DeclarationId, Parameter, Primitive, Sort,
+            code_interfaces::MethodSignature,
+            contracts::ProgramContract,
+            program::{
+                ArgumentPassing, CallArgument, FunctionDeclaration, Implementation, Literal,
+                MatchArm, MethodContract, Struct, Trait, TraitPhase,
+            },
+        };
+
+        struct MockPolicy {
+            usize_opt_inert: bool,
+            provisional: bool,
+            is_memory_inert_calls: usize,
+            planned_types: Vec<Term>,
+        }
+
+        impl CleanupPolicy for MockPolicy {
+            fn has_provisional_dependencies(&self) -> bool {
+                self.provisional
+            }
+
+            fn acquire(&mut self, _ty: &Term, _fuel: &mut usize) -> Result<(), String> {
+                Ok(())
+            }
+
+            fn is_trivial(&mut self, ty: &Term, _fuel: &mut usize) -> Result<bool, String> {
+                Ok(matches!(ty, Term::Primitive(_)))
+            }
+
+            fn is_memory_inert(&mut self, ty: &Term, _fuel: &mut usize) -> Result<bool, String> {
+                self.is_memory_inert_calls += 1;
+                Ok(match ty {
+                    Term::Primitive(_) => true,
+                    Term::Optional(inner) if **inner == Term::Primitive(Primitive::Usize) => {
+                        self.usize_opt_inert
+                    }
+                    _ => false,
+                })
+            }
+
+            fn cleanup_reads(
+                &mut self,
+                ty: &Term,
+                _fuel: &mut usize,
+            ) -> Result<Option<Vec<super::super::memory::Access>>, String> {
+                if matches!(ty, Term::Optional(inner) if **inner == Term::Primitive(Primitive::Usize))
+                    && self.usize_opt_inert
+                {
+                    Ok(Some(vec![]))
+                } else {
+                    Ok(None)
+                }
+            }
+
+            fn may_reject(&mut self, _ty: &Term, _fuel: &mut usize) -> Result<bool, String> {
+                Ok(false)
+            }
+
+            fn plan(
+                &mut self,
+                ty: &Term,
+                _state: &State,
+                place: &Place,
+                _variants: &[VariantSelection],
+                _fuel: &mut usize,
+            ) -> Result<super::super::drop::CleanupPlan, String> {
+                self.planned_types.push(ty.clone());
+                Ok(super::super::drop::CleanupPlan {
+                    receiver: place.clone(),
+                    initial: None,
+                    variants: vec![],
+                    steps: vec![],
+                })
+            }
+        }
+
+        let source = SourceRange { start: 10, end: 20 };
+        let decl = |local| DeclarationId { package: 1, local };
+        let drop_trait = decl(1);
+        let self_param = decl(2);
+        let drop_member = decl(3);
+        let owned_struct = decl(4);
+        let drop_impl = decl(5);
+        let drop_body = decl(6);
+        let helper_decl = decl(7);
+        let callee_decl = decl(8);
+        let caller_decl = decl(9);
+
+        let void = Term::Primitive(Primitive::Void);
+        let boolean = Term::Primitive(Primitive::Bool);
+        let i64_ty = Term::Primitive(Primitive::I64);
+        let usize_ty = Term::Primitive(Primitive::Usize);
+        let ptr_i64 = Term::Pointer(Box::new(i64_ty.clone()));
+        let opt_i64 = Term::Optional(Box::new(i64_ty.clone()));
+        let opt_usize = Term::Optional(Box::new(usize_ty.clone()));
+        let owned_ty = Term::Nominal {
+            declaration: owned_struct,
+            arguments: vec![],
+        };
+        let self_ptr = Term::Pointer(Box::new(Term::Rigid {
+            declaration: self_param,
+            sort: Sort::Type,
+        }));
+
+        let local_drop = LocalId { owner: 1, index: 0 };
+        let local_ptr = LocalId { owner: 2, index: 0 };
+        let local_tmp = LocalId { owner: 2, index: 1 };
+        let local_arg = LocalId { owner: 3, index: 0 };
+        let local_obs = LocalId { owner: 3, index: 1 };
+        let local_res = LocalId { owner: 3, index: 2 };
+        let local_discarded = LocalId { owner: 3, index: 3 };
+
+        let make_fn = |declaration,
+                       name: &str,
+                       parameters: Vec<LocalId>,
+                       param_tys: Vec<Term>,
+                       result: Term,
+                       body: Expr| Function {
+            interface: FunctionDeclaration {
+                source,
+                phase: FunctionPhase::Runtime,
+                inline: false,
+                pure: false,
+                is_unsafe: false,
+                preconditions: vec![],
+                postconditions: vec![],
+                result_binding: None,
+                result_type_binder: None,
+                result_guarantees: vec![],
+                entry_snapshots: vec![],
+                capabilities: vec![],
+                requirements: vec![],
+                type_parameters: vec![],
+                declaration,
+                name: name.into(),
+                parameters,
+                env_parameters: vec![],
+                defaults: vec![],
+                signature: Term::Function {
+                    parameters: param_tys
+                        .into_iter()
+                        .map(|ty| Parameter {
+                            sort: Sort::Runtime,
+                            ty,
+                        })
+                        .collect(),
+                    result: Box::new(result),
+                },
+            },
+            body,
+            runtime_deliveries: Default::default(),
+        };
+
+        let drop_fn = make_fn(
+            drop_body,
+            "drop",
+            vec![local_drop],
+            vec![Term::Pointer(Box::new(owned_ty.clone()))],
+            void.clone(),
+            Expr {
+                source,
+                ty: void.clone(),
+                kind: K::Unit,
+            },
+        );
+
+        let helper_fn = make_fn(
+            helper_decl,
+            "guard_helper",
+            vec![local_ptr],
+            vec![ptr_i64.clone()],
+            i64_ty.clone(),
+            Expr {
+                source,
+                ty: i64_ty.clone(),
+                kind: K::Block {
+                    statements: vec![Expr {
+                        source,
+                        ty: void.clone(),
+                        kind: K::Let {
+                            binding: local_tmp,
+                            value: Box::new(Expr {
+                                source,
+                                ty: opt_usize.clone(),
+                                kind: K::OptionalPresent(Box::new(Expr {
+                                    source,
+                                    ty: usize_ty.clone(),
+                                    kind: K::Literal(Literal::UnsignedInteger(1)),
+                                })),
+                            }),
+                        },
+                    }],
+                    result: Some(Box::new(Expr {
+                        source,
+                        ty: i64_ty.clone(),
+                        kind: K::ReadPointer(Box::new(Expr {
+                            source,
+                            ty: ptr_i64.clone(),
+                            kind: K::Local(local_ptr),
+                        })),
+                    })),
+                },
+            },
+        );
+
+        let guard_call = Expr {
+            source,
+            ty: i64_ty.clone(),
+            kind: K::Call {
+                callee: Box::new(Expr {
+                    source,
+                    ty: Term::Function {
+                        parameters: vec![Parameter {
+                            sort: Sort::Runtime,
+                            ty: ptr_i64.clone(),
+                        }],
+                        result: Box::new(i64_ty.clone()),
+                    },
+                    kind: K::Function(helper_decl),
+                }),
+                arguments: vec![CallArgument {
+                    passing: ArgumentPassing::Value,
+                    parameter: 0,
+                    value: Expr {
+                        source,
+                        ty: ptr_i64.clone(),
+                        kind: K::AddressOf(Box::new(Expr {
+                            source,
+                            ty: i64_ty.clone(),
+                            kind: K::Local(local_obs),
+                        })),
+                    },
+                    is_default: false,
+                }],
+                env_arguments: vec![],
+                parameter_bindings: vec![local_ptr],
+            },
+        };
+
+        let callee_fn = make_fn(
+            callee_decl,
+            "callee",
+            vec![local_arg],
+            vec![i64_ty.clone()],
+            opt_i64.clone(),
+            Expr {
+                source,
+                ty: opt_i64.clone(),
+                kind: K::Block {
+                    statements: vec![Expr {
+                        source,
+                        ty: void.clone(),
+                        kind: K::Let {
+                            binding: local_discarded,
+                            value: Box::new(Expr {
+                                source,
+                                ty: opt_usize.clone(),
+                                kind: K::OptionalPresent(Box::new(Expr {
+                                    source,
+                                    ty: usize_ty,
+                                    kind: K::Literal(Literal::UnsignedInteger(2)),
+                                })),
+                            }),
+                        },
+                    }],
+                    result: Some(Box::new(Expr {
+                        source,
+                        ty: opt_i64.clone(),
+                        kind: K::Match {
+                            value: Box::new(Expr {
+                                source,
+                                ty: i64_ty.clone(),
+                                kind: K::Local(local_arg),
+                            }),
+                            arms: vec![MatchArm {
+                                pattern: Pattern::Observe {
+                                    binding: local_obs,
+                                    inner: Box::new(Pattern::Then {
+                                        first: Box::new(Pattern::Wild),
+                                        value: Box::new(guard_call),
+                                        next: Box::new(Pattern::Binding {
+                                            binding: local_res,
+                                            inner: Box::new(Pattern::Wild),
+                                        }),
+                                    }),
+                                },
+                                guard: None,
+                                body: Expr {
+                                    source,
+                                    ty: opt_i64.clone(),
+                                    kind: K::OptionalPresent(Box::new(Expr {
+                                        source,
+                                        ty: i64_ty.clone(),
+                                        kind: K::Local(local_res),
+                                    })),
+                                },
+                            }],
+                        },
+                    })),
+                },
+            },
+        );
+
+        let caller_fn = make_fn(
+            caller_decl,
+            "caller",
+            vec![],
+            vec![],
+            boolean.clone(),
+            Expr {
+                source,
+                ty: boolean.clone(),
+                kind: K::Match {
+                    value: Box::new(Expr {
+                        source,
+                        ty: opt_i64.clone(),
+                        kind: K::Call {
+                            callee: Box::new(Expr {
+                                source,
+                                ty: Term::Function {
+                                    parameters: vec![Parameter {
+                                        sort: Sort::Runtime,
+                                        ty: i64_ty.clone(),
+                                    }],
+                                    result: Box::new(opt_i64.clone()),
+                                },
+                                kind: K::Function(callee_decl),
+                            }),
+                            arguments: vec![CallArgument {
+                                passing: ArgumentPassing::Value,
+                                parameter: 0,
+                                value: Expr {
+                                    source,
+                                    ty: i64_ty,
+                                    kind: K::Literal(Literal::SignedInteger(7)),
+                                },
+                                is_default: false,
+                            }],
+                            env_arguments: vec![],
+                            parameter_bindings: vec![local_arg],
+                        },
+                    }),
+                    arms: vec![
+                        MatchArm {
+                            pattern: Pattern::OptionalPresent(Box::new(Pattern::Wild)),
+                            guard: None,
+                            body: Expr {
+                                source,
+                                ty: boolean.clone(),
+                                kind: K::Literal(Literal::Bool(true)),
+                            },
+                        },
+                        MatchArm {
+                            pattern: Pattern::OptionalAbsent,
+                            guard: None,
+                            body: Expr {
+                                source,
+                                ty: boolean.clone(),
+                                kind: K::Literal(Literal::Bool(false)),
+                            },
+                        },
+                    ],
+                },
+            },
+        );
+
+        let mut pkg = Package {
+            structs: vec![Struct {
+                capabilities: vec![],
+                packed: false,
+                declaration: owned_struct,
+                name: "Owned".into(),
+                type_parameters: vec![],
+                parameter_types: vec![],
+                fields: vec![],
+                requirements: vec![],
+            }],
+            traits: vec![Trait {
+                comptime_only: false,
+                parameter_types: vec![],
+                associated: vec![],
+                requirements: vec![],
+                capabilities: vec![],
+                type_parameters: vec![],
+                declaration: drop_trait,
+                parents: vec![],
+                self_parameter: self_param,
+                name: "Drop".into(),
+                methods: vec![MethodContract {
+                    source,
+                    phase: TraitPhase::Runtime,
+                    is_quote: false,
+                    pure: false,
+                    is_unsafe: false,
+                    type_arguments: vec![],
+                    type_parameters: vec![],
+                    capabilities: vec![],
+                    program: ProgramContract::default(),
+                    parameter_bindings: vec![local_drop],
+                    by_value_receiver: false,
+                    by_reference_receiver: true,
+                    declaration: drop_member,
+                    name: "drop".into(),
+                    signature: MethodSignature::Callable(Term::Function {
+                        parameters: vec![Parameter {
+                            sort: Sort::Runtime,
+                            ty: self_ptr,
+                        }],
+                        result: Box::new(void),
+                    }),
+                    requirements: vec![],
+                    default: None,
+                }],
+            }],
+            implementations: vec![Implementation {
+                phases: Default::default(),
+                parameter_types: vec![],
+                associated: vec![],
+                associated_initializers: vec![],
+                interface_arguments: vec![],
+                capabilities: vec![],
+                type_parameters: vec![],
+                requirements: vec![],
+                declaration: drop_impl,
+                subject: owned_ty,
+                interface: Some(drop_trait),
+                methods: vec![("drop".into(), drop_body)],
+            }],
+            functions: vec![drop_fn, helper_fn, callee_fn, caller_fn],
+            ..Default::default()
+        };
+        pkg.runtime_instances = pkg
+            .functions
+            .iter()
+            .map(|function| nir::program::RuntimeInstance {
+                declaration: function.declaration,
+                arguments: vec![],
+                function: function.clone(),
+                cleanup_accesses: vec![],
+            })
+            .collect();
+
+        // 1. Memory-inert CleanupPolicy succeeds, checks inertness, skips callee plan(),
+        // and populates ReturnResultCache keyed by `with_cleanup: true`.
+        let mut session = crate::PackageSession::new(&pkg);
+        let mut inert_policy = MockPolicy {
+            usize_opt_inert: true,
+            provisional: false,
+            is_memory_inert_calls: 0,
+            planned_types: vec![],
+        };
+        analyze_in_package_with_session(
+            &mut session,
+            &pkg.functions[3],
+            |_| Ok(Delivery::Copy),
+            50_000,
+            Some(&mut inert_policy),
+            &[],
+            &[],
+            &[],
+            vec![],
+            &[],
+            &[],
+            super::super::memory::TextProvenance::Unchecked,
+        )
+        .unwrap();
+        assert!(inert_policy.is_memory_inert_calls > 0);
+        assert!(
+            !inert_policy.planned_types.contains(&opt_usize),
+            "named_callable_result must not plan discarded callee locals: {:?}",
+            inert_policy.planned_types
+        );
+        assert!(!session.return_results.is_empty());
+
+        // 2. Same session with cleanup = None must miss `with_cleanup: true` and reject.
+        let no_policy_err = analyze_in_package_with_session(
+            &mut session,
+            &pkg.functions[3],
+            |_| Ok(Delivery::Copy),
+            50_000,
+            None,
+            &[],
+            &[],
+            &[],
+            vec![],
+            &[],
+            &[],
+            super::super::memory::TextProvenance::Unchecked,
+        )
+        .unwrap_err();
+        assert!(
+            no_policy_err.reason.contains(
+                "guard pointer observation cannot write caller memory or run unverified cleanup"
+            ),
+            "unexpected error: {}",
+            no_policy_err.reason
+        );
+
+        // 3. Policy reporting non-inert cleanup still rejects cleanly.
+        let mut non_inert_session = crate::PackageSession::new(&pkg);
+        let mut non_inert_policy = MockPolicy {
+            usize_opt_inert: false,
+            provisional: false,
+            is_memory_inert_calls: 0,
+            planned_types: vec![],
+        };
+        let non_inert_err = analyze_in_package_with_session(
+            &mut non_inert_session,
+            &pkg.functions[3],
+            |_| Ok(Delivery::Copy),
+            50_000,
+            Some(&mut non_inert_policy),
+            &[],
+            &[],
+            &[],
+            vec![],
+            &[],
+            &[],
+            super::super::memory::TextProvenance::Unchecked,
+        )
+        .unwrap_err();
+        assert!(
+            non_inert_err.reason.contains(
+                "guard pointer observation cannot write caller memory or run unverified cleanup"
+            ),
+            "unexpected error: {}",
+            non_inert_err.reason
+        );
+
+        // 4. Provisional CleanupPolicy dependencies must suppress ReturnResultCache insertion.
+        let mut provisional_session = crate::PackageSession::new(&pkg);
+        let mut provisional_policy = MockPolicy {
+            usize_opt_inert: true,
+            provisional: true,
+            is_memory_inert_calls: 0,
+            planned_types: vec![],
+        };
+        analyze_in_package_with_session(
+            &mut provisional_session,
+            &pkg.functions[3],
+            |_| Ok(Delivery::Copy),
+            50_000,
+            Some(&mut provisional_policy),
+            &[],
+            &[],
+            &[],
+            vec![],
+            &[],
+            &[],
+            super::super::memory::TextProvenance::Unchecked,
+        )
+        .unwrap();
+        assert!(provisional_session.return_results.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -19085,6 +19671,7 @@ mod env_parameter_frame_tests {
         Analyzer {
             trivial_cleanup_types: Default::default(),
             cleanup: None,
+            plan_cleanup: true,
             package: None,
             function_env_parameters: env_parameters,
             function_runtime_deliveries: deliveries,

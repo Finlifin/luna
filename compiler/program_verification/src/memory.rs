@@ -1945,6 +1945,7 @@ pub(crate) fn readable_representation_for(
         true,
         false,
         provenance == TextProvenance::VerifiedByRegionAnalysis,
+        false,
     )
 }
 
@@ -1976,7 +1977,7 @@ pub fn data_representation(
     ty: &Term,
     fuel: &mut usize,
 ) -> Result<bool, String> {
-    storage_representation(package, ty, fuel, false, false, false, false)
+    storage_representation(package, ty, fuel, false, false, false, false, false)
 }
 
 pub(crate) fn copy_readable_representation(
@@ -2001,6 +2002,7 @@ pub(crate) fn copy_readable_representation_for(
         true,
         true,
         provenance == TextProvenance::VerifiedByRegionAnalysis,
+        false,
     )
 }
 
@@ -2012,6 +2014,7 @@ fn storage_representation(
     code: bool,
     nested_pointers: bool,
     allow_text: bool,
+    reject_runtime_deps: bool,
 ) -> Result<bool, String> {
     fn walk(
         package: Option<&Package>,
@@ -2022,11 +2025,15 @@ fn storage_representation(
         code: bool,
         nested_pointers: bool,
         allow_text: bool,
+        reject_runtime_deps: bool,
     ) -> Result<bool, String> {
         if depth >= 128 {
             return Err("read representation depth exhausted".into());
         }
         bound_type(ty, fuel)?;
+        if reject_runtime_deps && !ty.runtime_dependencies().is_empty() {
+            return Ok(false);
+        }
         if intrinsic_pointer_value(ty) {
             return Ok(pointer || !matches!(ty, Term::Pointer(_)));
         }
@@ -2044,6 +2051,7 @@ fn storage_representation(
                     code,
                     nested_pointers,
                     allow_text,
+                    reject_runtime_deps,
                 )? {
                     return Ok(false);
                 }
@@ -2087,6 +2095,7 @@ fn storage_representation(
                         code,
                         nested_pointers,
                         allow_text,
+                        reject_runtime_deps,
                     );
                 }
                 if let Some(definition) = package
@@ -2119,6 +2128,7 @@ fn storage_representation(
                 code,
                 nested_pointers,
                 allow_text,
+                reject_runtime_deps,
             )? {
                 return Ok(false);
             }
@@ -2134,6 +2144,7 @@ fn storage_representation(
         code,
         nested_pointers,
         allow_text,
+        reject_runtime_deps,
     )
 }
 
@@ -4339,6 +4350,7 @@ impl<'a> Infer<'a, '_> {
                 let computed = self.ty(&value.ty)?;
                 if !Self::guard_value_type_for(self.package, &computed, self.round.text_provenance)
                     && !matches!(computed, Term::Pointer(_))
+                    && !self.pure_data_observation_type(&computed)?
                 {
                     return Err(
                         "computed memory pattern needs independent result provenance".into(),
@@ -5450,6 +5462,19 @@ impl<'a> Infer<'a, '_> {
                 && *ty == Term::Primitive(Primitive::Str))
     }
 
+    pub(super) fn pure_data_observation_type(&mut self, ty: &Term) -> Result<bool, String> {
+        storage_representation(
+            self.package,
+            ty,
+            self.fuel,
+            false,
+            false,
+            false,
+            self.round.text_provenance == TextProvenance::VerifiedByRegionAnalysis,
+            true,
+        )
+    }
+
     fn walk_guard(&mut self, expr: &'a Expr, depth: usize) -> Result<(), String> {
         // Validation does not execute or install code evidence. The normal
         // walk owns evaluation order, callable results and memory footprints.
@@ -5485,7 +5510,9 @@ impl<'a> Infer<'a, '_> {
             Pattern::Then { first, value, next } => {
                 self.check_guard_pattern(first, bindings, depth + 1)?;
                 let ty = self.ty(&value.ty)?;
-                if !Self::guard_value_type_for(self.package, &ty, self.round.text_provenance) {
+                if !Self::guard_value_type_for(self.package, &ty, self.round.text_provenance)
+                    && !self.pure_data_observation_type(&ty)?
+                {
                     return Err("memory computed observation needs scalar or code result".into());
                 }
                 self.check_guard(value, depth + 1)?;

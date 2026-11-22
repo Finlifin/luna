@@ -157,6 +157,8 @@ impl Checker<'_, '_> {
             Term::Primitive(
                 P::Bool
                 | P::Char
+                | P::Usize
+                | P::Isize
                 | P::I8
                 | P::I16
                 | P::I32

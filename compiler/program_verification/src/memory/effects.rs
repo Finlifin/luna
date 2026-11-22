@@ -551,6 +551,7 @@ impl<'a> Infer<'a, '_> {
                         &computed_ty,
                         self.round.text_provenance,
                     )
+                    && !self.pure_data_observation_type(&computed_ty)?
                 {
                     return Err(
                         "computed memory pattern needs independent result provenance".into(),
