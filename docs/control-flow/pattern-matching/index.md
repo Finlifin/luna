@@ -723,7 +723,7 @@ struct Student {
     age: usize,
 
     pub case adult(*self) -> ?Tuple<str, usize> {
-        if self.age >= 18 {
+        if self.age.* >= 18 {
             (self.name, self.age)
         } else {
             null

@@ -13,7 +13,7 @@ impl Checker<'_, '_> {
             members.iter().any(|member| {
                 self.package.item(*member).is_some_and(|item| {
                     item.ident.name.as_str() == name
-                        && matches!(item.kind, ItemKind::Fn(..) | ItemKind::FnDeclaration(_))
+                        && matches!(item.kind, ItemKind::Fn(..) | ItemKind::Case(..) | ItemKind::FnDeclaration(_))
                 })
             })
         })
@@ -98,7 +98,7 @@ impl Checker<'_, '_> {
                 .filter(|member| {
                     self.package.item(*member).is_some_and(|item| {
                         item.ident.name.as_str() == name
-                            && matches!(item.kind, ItemKind::Fn(..) | ItemKind::FnDeclaration(_))
+                            && matches!(item.kind, ItemKind::Fn(..) | ItemKind::Case(..) | ItemKind::FnDeclaration(_))
                     })
                 })
                 .collect::<Vec<_>>();

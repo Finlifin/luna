@@ -1,9 +1,11 @@
 //! Semantic declaration lookup bound to one immutable source package view.
 use super::*;
+use std::collections::HashSet;
 
 pub(super) struct SourceDeclarations<'a, 'h> {
     package: &'a hir::Package<'h>,
     owners: BTreeMap<DeclarationId, OwnerId>,
+    case_names: HashSet<hir::common::Symbol>,
     pub(super) nominal_context: crate::ptc::Context,
 }
 
@@ -31,9 +33,13 @@ impl<'a, 'h> SourceDeclarations<'a, 'h> {
             )
         })?;
         let mut owners = BTreeMap::new();
+        let mut case_names = HashSet::new();
         let mut nominal_context = crate::ptc::Context::default();
         for (owner, info) in package.owners() {
             let item = info.node.expect_item();
+            if matches!(item.kind, ItemKind::Case(..)) {
+                case_names.insert(item.ident.name);
+            }
             // Imports have syntax owners, not a new declaration identity. Their
             // dense indices can coincide with resolver declaration indices.
             if matches!(item.kind, ItemKind::Use(_)) {
@@ -53,8 +59,13 @@ impl<'a, 'h> SourceDeclarations<'a, 'h> {
         Ok(Self {
             package,
             owners,
+            case_names,
             nominal_context,
         })
+    }
+
+    pub(super) fn has_case_name(&self, name: hir::common::Symbol) -> bool {
+        self.case_names.contains(&name)
     }
 
     pub(super) fn owner(&self, identity: DeclarationId) -> Option<OwnerId> {

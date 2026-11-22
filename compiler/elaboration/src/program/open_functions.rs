@@ -275,7 +275,7 @@ impl Checker<'_, '_> {
             return Ok(None);
         };
         if !matches!(self.package.item(owner).map(|item| &item.kind),
-            Some(ItemKind::Fn(sig, _)) if !sig.modifiers.is_normal_form_head)
+            Some(ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) if !sig.modifiers.is_normal_form_head)
         {
             return Ok(None);
         }
@@ -285,7 +285,7 @@ impl Checker<'_, '_> {
         }
         self.check_open_interface_dependency(owner)?;
         self.ensure_contract(owner, expr.span)?;
-        let ItemKind::Fn(sig, _) = &self.package.item(owner).unwrap().kind else {
+        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &self.package.item(owner).unwrap().kind else {
             unreachable!()
         };
         arguments::require_function_value_parameters(sig.params, expr.span)?;
@@ -502,7 +502,7 @@ impl Checker<'_, '_> {
         }
         let result = (|| {
             let definition = self.open_functions[&owner].clone();
-            let ItemKind::Fn(sig, _) = &self.package.item(owner).unwrap().kind else {
+            let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &self.package.item(owner).unwrap().kind else {
                 unreachable!()
             };
             arguments::require_function_value_parameters(sig.params, expr.span)?;
@@ -630,7 +630,7 @@ impl Checker<'_, '_> {
     }
 
     pub(super) fn has_staged_body_work(&mut self, owner: OwnerId) -> Result<bool, Error> {
-        let Some(ItemKind::Fn(sig, body)) = self.package.item(owner).map(|item| &item.kind) else {
+        let Some(ItemKind::Fn(sig, body) | ItemKind::Case(sig, body)) = self.package.item(owner).map(|item| &item.kind) else {
             return Ok(false);
         };
         let Some(body) = self.package.body(*body) else {
@@ -1521,7 +1521,7 @@ impl Checker<'_, '_> {
         let H::ResolvedDef { def_id, .. } = head.kind else {
             return false;
         };
-        let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = self
+        let Some(ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) = self
             .package
             .definition_owner(def_id)
             .and_then(|owner| self.package.item(owner))
@@ -1583,7 +1583,7 @@ impl Checker<'_, '_> {
             {
                 continue;
             }
-            let Some(ItemKind::Fn(sig, body)) = self.package.item(owner).map(|item| &item.kind)
+            let Some(ItemKind::Fn(sig, body) | ItemKind::Case(sig, body)) = self.package.item(owner).map(|item| &item.kind)
             else {
                 continue;
             };
@@ -1670,7 +1670,7 @@ impl Checker<'_, '_> {
                 // Only forwarding into a staged slot postpones type formation.
                 // Supplying a known staged value as an ordinary runtime input
                 // must not turn an otherwise closed function into a template.
-                if let Some(ItemKind::Fn(target_sig, _) | ItemKind::FnDeclaration(target_sig)) =
+                if let Some(ItemKind::Fn(target_sig, _) | ItemKind::Case(target_sig, _) | ItemKind::FnDeclaration(target_sig)) =
                     self.package.item(target).map(|item| &item.kind)
                 {
                     // Colon properties belong to the collection entrance, not
@@ -1936,7 +1936,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<(), Error> {
         let sig = match self.package.item(owner).map(|item| &item.kind) {
-            Some(ItemKind::Fn(sig, _)) => sig,
+            Some(ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) => sig,
             Some(ItemKind::FnDeclaration(sig)) if sig.modifiers.is_function_template => sig,
             _ => {
                 return Err(error(
@@ -5004,7 +5004,7 @@ impl Checker<'_, '_> {
         let Some(owner) = self.package.definition_owner(def_id) else {
             return self.describe_known_region(expr, expected);
         };
-        if !matches!(self.package.item(owner).map(|item| &item.kind), Some(ItemKind::Fn(signature, _)) if !signature.modifiers.is_normal_form_head)
+        if !matches!(self.package.item(owner).map(|item| &item.kind), Some(ItemKind::Fn(signature, _) | ItemKind::Case(signature, _)) if !signature.modifiers.is_normal_form_head)
         {
             return self.describe_known_region(expr, expected);
         }
@@ -5025,7 +5025,7 @@ impl Checker<'_, '_> {
                 });
             }
         }
-        let Some(ItemKind::Fn(signature, _)) = self.package.item(owner).map(|item| &item.kind)
+        let Some(ItemKind::Fn(signature, _) | ItemKind::Case(signature, _)) = self.package.item(owner).map(|item| &item.kind)
         else {
             return self.describe_known_region(expr, expected);
         };
@@ -5172,7 +5172,7 @@ impl Checker<'_, '_> {
         }
         self.ensure_signature(owner, callee.span)?;
         self.ensure_contract(owner, callee.span)?;
-        let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+        let Some(ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) =
             self.package.item(owner).map(|item| &item.kind)
         else {
             return Err(error(
@@ -5416,7 +5416,7 @@ impl Checker<'_, '_> {
             }
             Err(failure) => return Err(call_inference_error(span, failure)),
         };
-        let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+        let Some(ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) =
             self.package.item(owner).map(|item| &item.kind)
         else {
             unreachable!()
@@ -6338,7 +6338,7 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         let term = self.in_open_function_scope(owner, None, |this| {
-            let ItemKind::Fn(sig, _) = &this.package.item(owner).unwrap().kind else {
+            let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &this.package.item(owner).unwrap().kind else {
                 unreachable!()
             };
             let TyParamKind::Optional(_, _, default) = sig.params[slot].ty.kind else {
@@ -6656,7 +6656,7 @@ impl Checker<'_, '_> {
     ) -> Result<OpenClauseInference<'src>, Error> {
         self.check_open_interface_dependency(owner)?;
         let mut definition = self.open_functions[&owner].clone();
-        let ItemKind::Fn(sig, _) = &self.package.item(owner).unwrap().kind else {
+        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &self.package.item(owner).unwrap().kind else {
             unreachable!()
         };
         let (routes, assigned) =
@@ -7758,7 +7758,7 @@ impl Checker<'_, '_> {
             }
         }
         let item = self.package.item(owner).unwrap();
-        let ItemKind::Fn(sig, _) = &item.kind else {
+        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &item.kind else {
             unreachable!()
         };
         let (routes, assigned) =
@@ -8485,7 +8485,7 @@ impl Checker<'_, '_> {
         let body = self.in_open_function_scope(owner, Some(Arc::clone(&instance)), |this| {
             let signature = &instance.signature;
             let item = this.package.item(owner).unwrap();
-            let ItemKind::Fn(sig, body) = &item.kind else {
+            let (ItemKind::Fn(sig, body) | ItemKind::Case(sig, body)) = &item.kind else {
                 unreachable!()
             };
             if sig.modifiers.is_comptime && !local_runtime_ids.is_empty() {

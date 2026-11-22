@@ -40,7 +40,7 @@ impl Checker<'_, '_> {
             return Ok(());
         }
         let item = self.package.item(owner).unwrap();
-        let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
+        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
             return Err(error(
                 span,
                 "default preparation needs a function declaration",
@@ -291,7 +291,7 @@ impl Checker<'_, '_> {
         self.ensure_contract(owner, span)?;
         self.context = self.definition_context(owner);
         let item = self.package.item(owner).unwrap();
-        let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
+        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
             return Err(error(
                 span,
                 "default preparation needs a function declaration",
@@ -458,7 +458,7 @@ impl Checker<'_, '_> {
                     ));
                 scope.requirements = self.definition_requirements(owner);
                 scope.input_scope = self.lexical_input_domains().map(|(sort, _)| sort).collect();
-                if let Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) =
+                if let Some(ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) =
                     self.package.item(owner).map(|item| &item.kind)
                 {
                     // signature_domains is a temporary signature-building

@@ -85,7 +85,7 @@ impl Checker<'_, '_> {
                     .collect();
             }
             let item = this.package.item(owner).unwrap();
-            let ItemKind::Fn(sig, body_id) = &item.kind else {
+            let (ItemKind::Fn(sig, body_id) | ItemKind::Case(sig, body_id)) = &item.kind else {
                 return Err(error(span, "source function needs a body"));
             };
             let body = this
@@ -149,7 +149,7 @@ impl Checker<'_, '_> {
             .package
             .item(owner)
             .ok_or_else(|| error(span, "missing source function declaration"))?;
-        let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
+        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
             return Err(error(span, "source declaration needs a function signature"));
         };
         let Term::Function { parameters, result } = &signature else {

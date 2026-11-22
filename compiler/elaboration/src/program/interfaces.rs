@@ -146,7 +146,7 @@ impl Checker<'_, '_> {
         self.validate_comptime_receiver(owner)?;
         let item = self.package.item(owner).unwrap();
         let (signature, default) = match &item.kind {
-            ItemKind::Fn(sig, _) => (
+            ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) => (
                 sig,
                 Some(declaration(self.package, &self.package_identities, owner)),
             ),
@@ -481,7 +481,7 @@ impl Checker<'_, '_> {
                         .filter(|member| {
                             matches!(
                                 self.package.item(*member).map(|item| &item.kind),
-                                Some(ItemKind::Fn(..) | ItemKind::FnDeclaration(_))
+                                Some(ItemKind::Fn(..) | ItemKind::Case(..) | ItemKind::FnDeclaration(_))
                             )
                         })
                         .collect();
@@ -2030,7 +2030,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<(), Error> {
         if matches!(self.package.item(owner).map(|item| &item.kind),
-            Some(ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) if sig.modifiers.is_function_template)
+            Some(ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) if sig.modifiers.is_function_template)
         {
             return Err(error(
                 span,
@@ -2244,6 +2244,7 @@ impl Checker<'_, '_> {
                             self.package.item(*member).map(|item| &item.kind),
                             Some(
                                 ItemKind::Fn(..)
+                                    | ItemKind::Case(..)
                                     | ItemKind::FnDeclaration(_)
                                     | ItemKind::TypeAlias(..)
                                     | ItemKind::Newtype(..)
@@ -2583,7 +2584,7 @@ impl Checker<'_, '_> {
                 declaration: body, ..
             } => {
                 let owner = self.source_declarations.owner(*body).unwrap();
-                let ItemKind::Fn(sig, _) = &self.package.item(owner).unwrap().kind else {
+                let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &self.package.item(owner).unwrap().kind else {
                     unreachable!()
                 };
                 sig.params

@@ -14,7 +14,7 @@ impl Checker<'_, '_> {
                 self.in_required_comptime
                     || self.in_staged_input
                     || self.signature_owner.and_then(|owner| self.package.item(owner)).is_some_and(
-                        |item| matches!(&item.kind, ItemKind::Fn(sig, _) if sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head),
+                        |item| matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) if sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head),
                     )
             });
         if staged {

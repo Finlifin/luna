@@ -1,0 +1,13 @@
+struct Student {
+    age: u32,
+    pub case adult(*self) -> ?Tuple<u32, bool> {
+        if self.age.* >= 18 { (self.age, true) } else { null }
+    }
+}
+fn classify(person: Student) -> bool {
+    person match {
+        .adult(age, true) => age == 21,
+        _ => person.age < 18,
+    }
+}
+fn run() -> bool { classify(Student { age: 21 }) and classify(Student { age: 12 }) }

@@ -1021,7 +1021,7 @@ fn elaborate_candidate<'a, 'h>(
                             | ItemKind::EffectGroup(_)
                     ) || matches!(
                         &info.node.expect_item().kind,
-                        ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                        ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)
                             if sig.return_ty.is_some_and(|ty| matches!(ty.kind, H::ContextualExprType(..) | H::ContextualPatternType(..)))
                     ) || checker.is_data_consumer(owner) =>
                 {
@@ -1259,7 +1259,7 @@ fn elaborate_candidate<'a, 'h>(
         if checker.self_types.contains_key(&owner) || checker.self_containers.contains_key(&owner) {
             if matches!(
                 info.node.expect_item().kind,
-                ItemKind::Fn(..) | ItemKind::FnDeclaration(_)
+                ItemKind::Fn(..) | ItemKind::Case(..) | ItemKind::FnDeclaration(_)
             ) {
                 if checker.is_data_consumer(owner) {
                     checker.ensure_data_consumer(owner, info.node.expect_item().span)?;
@@ -1431,13 +1431,7 @@ fn elaborate_candidate<'a, 'h>(
         match &item.kind {
             ItemKind::TestTemplateInstance { .. } => continue,
             ItemKind::Fn(sig, _) if sig.modifiers.is_test_template => continue,
-            ItemKind::Case(..) => {
-                return Err(error(
-                    item.span,
-                    "elaboration is not implemented for case definition",
-                ));
-            }
-            ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => {
+            ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) => {
                 if checker.is_data_consumer(owner) {
                     checker.ensure_data_consumer(owner, item.span)?;
                     continue;
@@ -1469,7 +1463,7 @@ fn elaborate_candidate<'a, 'h>(
                 }
                 checker.ensure_signature(owner, item.span)?;
                 checker.check_type_defaults(owner)?;
-                if let ItemKind::Fn(..) = item.kind {
+                if matches!(item.kind, ItemKind::Fn(..) | ItemKind::Case(..)) {
                     functions.push((owner, item, sig));
                 }
             }
@@ -1534,6 +1528,7 @@ fn elaborate_candidate<'a, 'h>(
         if !matches!(
             info.node.expect_item().kind,
             ItemKind::Fn(..)
+                | ItemKind::Case(..)
                 | ItemKind::TypeAlias(..)
                 | ItemKind::Newtype(..)
                 | ItemKind::FnDeclaration(_)
@@ -1658,7 +1653,7 @@ fn elaborate_candidate<'a, 'h>(
         }
         if !matches!(
             info.node.expect_item().kind,
-            ItemKind::Fn(..) | ItemKind::FnDeclaration(_)
+            ItemKind::Fn(..) | ItemKind::Case(..) | ItemKind::FnDeclaration(_)
         ) {
             continue;
         }
@@ -3084,7 +3079,7 @@ impl Checker<'_, '_> {
     /// signatures. Recursive value bodies do not require recursive signatures;
     /// cycles through type observations are diagnosed explicitly.
     fn validate_comptime_receiver(&self, owner: OwnerId) -> Result<(), Error> {
-        let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
+        let Some(ItemKind::Fn(signature, _) | ItemKind::Case(signature, _) | ItemKind::FnDeclaration(signature)) =
             self.package.item(owner).map(|item| &item.kind)
         else {
             return Ok(());
@@ -3169,7 +3164,7 @@ impl Checker<'_, '_> {
             let item = package
                 .item(owner)
                 .ok_or_else(|| error(span, "missing function declaration"))?;
-            let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _)) =
+            let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _)) =
                 &item.kind
             else {
                 return Err(error(span, "declaration is not a supported callable"));
@@ -4802,7 +4797,7 @@ impl Checker<'_, '_> {
                         .package
                         .item(id.owner)
                         .is_some_and(|item| match &item.kind {
-                            ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => {
+                            ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) => {
                                 sig.params.iter().any(|p| p.hir_id == *id)
                             }
                             _ => false,
@@ -5730,7 +5725,7 @@ impl Checker<'_, '_> {
         owner
             .and_then(|owner| self.package.item(owner))
             .is_some_and(|item| {
-                matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)
                 if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head
                     && sig.params.first().is_some_and(|param|
                         matches!(param.ty.kind, TyParamKind::Itself { is_ref: false })))
@@ -5762,11 +5757,11 @@ impl Checker<'_, '_> {
 
     fn callable_type(&self, owner: OwnerId, signature: Term) -> Term {
         let comptime = self.package.item(owner).is_some_and(|item| {
-            matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+            matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)
                 if sig.modifiers.is_comptime && !sig.modifiers.is_normal_form_head)
         });
         let is_unsafe = self.package.item(owner).is_some_and(|item| {
-            matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+            matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)
                 if sig.modifiers.is_unsafe)
         });
         signature
@@ -5806,7 +5801,7 @@ impl Checker<'_, '_> {
                     "functions with quote runtime dependencies cannot be taken as bare function values",
                 ));
             }
-            if let Some(ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) =
+            if let Some(ItemKind::Fn(signature, _) | ItemKind::Case(signature, _) | ItemKind::FnDeclaration(signature)) =
                 self.package.item(owner).map(|item| &item.kind)
             {
                 arguments::require_function_value_parameters(signature.params, expr.span)?;
@@ -6348,7 +6343,7 @@ impl Checker<'_, '_> {
             &template,
             expr.span,
         )?;
-        let Some(ItemKind::Fn(declaration_sig, _) | ItemKind::FnDeclaration(declaration_sig)) =
+        let Some(ItemKind::Fn(declaration_sig, _) | ItemKind::Case(declaration_sig, _) | ItemKind::FnDeclaration(declaration_sig)) =
             self.package.item(owner).map(|item| &item.kind)
         else {
             unreachable!()
@@ -7246,7 +7241,7 @@ impl Checker<'_, '_> {
             Some(ty) => self.structural_type(ty, span)?,
             None if self.numeric_defaults => p(if self.in_required_comptime || self.signature_owner
                 .and_then(|owner| self.package.item(owner))
-                .is_some_and(|item| matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if sig.modifiers.is_comptime)) {
+                .is_some_and(|item| matches!(&item.kind, ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) if sig.modifiers.is_comptime)) {
                     P::Integer
                 } else { P::I32 }),
             None => {

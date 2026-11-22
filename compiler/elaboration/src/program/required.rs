@@ -373,7 +373,7 @@ impl Checker<'_, '_> {
             })
             .or_else(|| self.signature_domains.get(&owner).cloned());
         if let Some(domains) = domains {
-            if let ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) =
+            if let ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) =
                 &self.package.item(owner).unwrap().kind
             {
                 for (index, (parameter, (sort, domain))) in
@@ -454,7 +454,7 @@ impl Checker<'_, '_> {
             }
             self.ready_signature_capabilities(owner, &mut pending_capabilities, true)?;
             let type_result_binding = match &self.package.item(owner).unwrap().kind {
-                ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)
+                ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)
                     if !sig.modifiers.is_normal_form_head =>
                 {
                     sig.return_binding.and_then(|binding| {
@@ -485,7 +485,7 @@ impl Checker<'_, '_> {
             let clause_result = (|| -> Result<(), Error> {
                 for clause in clauses {
                     if let hir::clause::ClauseConstraintKind::Ensures(value) = &clause.kind {
-                        if matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if !sig.modifiers.is_normal_form_head)
+                        if matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) if !sig.modifiers.is_normal_form_head)
                         {
                             if let Some((ret_hir, ret_span)) = type_result_binding {
                                 let ret_local = local(ret_hir);
@@ -519,7 +519,7 @@ impl Checker<'_, '_> {
                         ));
                     };
                     if self.program_requirement(value)? {
-                        if !matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) if !sig.modifiers.is_normal_form_head)
+                        if !matches!(&self.package.item(owner).unwrap().kind, ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) if !sig.modifiers.is_normal_form_head)
                         {
                             return Err(error(
                                 clause.span,
@@ -1495,7 +1495,7 @@ impl Checker<'_, '_> {
                                 .package
                                 .item(scope)
                                 .is_some_and(|item| match &item.kind {
-                                    ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => {
+                                    ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) => {
                                         let ready =
                                             self.signature_domains.get(&scope).map_or(0, Vec::len);
                                         sig.params
@@ -1804,7 +1804,7 @@ impl Checker<'_, '_> {
         span: Span,
     ) -> Result<n::Function, Error> {
         let item = self.package.item(owner).unwrap();
-        let ItemKind::Fn(sig, _) = &item.kind else {
+        let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _)) = &item.kind else {
             return Err(error(span, "required comptime call needs a function body"));
         };
         if !sig.modifiers.is_comptime || sig.modifiers.is_normal_form_head {

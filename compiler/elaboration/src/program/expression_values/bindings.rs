@@ -15,7 +15,7 @@ impl Checker<'_, '_> {
                     .package
                     .item(expr.hir_id.owner)
                     .ok_or_else(|| error(expr.span, "self requires a method receiver"))?;
-                let (ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
+                let (ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig)) = &item.kind else {
                     return Err(error(expr.span, "self requires a method receiver"));
                 };
                 let param = sig

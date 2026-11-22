@@ -2,6 +2,7 @@
 //! Resource delivery remains the responsibility of program verification.
 use super::*;
 
+mod cases;
 mod errors;
 mod evidence;
 mod matches;
@@ -806,6 +807,9 @@ impl Checker<'_, '_> {
                         "enum payload pattern requires a variant name",
                     ));
                 };
+                if let Some(view) = self.case_pattern(pattern, callee, Some(fields), ty)? {
+                    return Ok(view);
+                }
                 let Some((variant_type, index)) = self.variant_target(callee, Some(ty))? else {
                     return Err(error(
                         pattern.span,
@@ -849,6 +853,9 @@ impl Checker<'_, '_> {
                 })
             }
             HP::Const(value) => {
+                if let Some(view) = self.case_pattern(pattern, value, None, ty)? {
+                    return Ok(view);
+                }
                 // The parser represents the empty tuple pattern as a unit
                 // constant. In a Type subject it observes the tuple view,
                 // just as HP::Tuple does; it does not construct a Type value.

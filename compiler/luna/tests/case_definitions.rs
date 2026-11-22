@@ -136,7 +136,7 @@ case annotated(student: Student) -> ?u32 { student.age }
 }
 
 #[test]
-fn non_attribute_case_definitions_leave_no_pending_semantics_and_fail_cleanly_in_elaboration() {
+fn case_definitions_publish_checked_signatures_and_bodies() {
     let source = r#"
 typealias bool = .bool'builtin;
 typealias i32 = .i32'builtin;
@@ -157,13 +157,12 @@ case top(x: i32) -> ?i32 = x;
         dump.contains("(pending-semantics))"),
         "expected empty pending-semantics for CaseDef HIR:\n{dump}"
     );
-    let err = compile(source, Emit::Nir)
-        .err()
-        .expect("elaboration should report unimplemented CaseDef cleanly");
-    assert!(
-        err.contains("elaboration is not implemented for case definition"),
-        "{err}"
-    );
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected checked NIR")
+    };
+    assert!(package.functions.iter().any(|f| f.name == "top"));
+    let invalid = source.replace("= x;", "= true;");
+    assert!(compile(&invalid, Emit::Nir).is_err());
 }
 
 #[test]
@@ -187,4 +186,48 @@ fn invalid_case_definitions_diagnose_cleanly() {
             .unwrap_or_else(|| panic!("expected HIR diagnostic for `{source}`"));
         assert!(err.contains(expected), "expected `{expected}` in `{err}`");
     }
+}
+
+#[path = "support/sysroot_execution.rs"]
+mod sysroot;
+
+#[test]
+fn case_view_destructures_the_present_tuple_and_skips_absent_subjects() {
+    let source = include_str!("../../../development/repros/case-view-option-payload.fl");
+    let package = sysroot::compile(source).unwrap();
+    let entry = sysroot::source_function(&package, "run");
+    let mut reference =
+        comptime_interpretor::Interpreter::new(&package, sysroot::COMPTIME_BUDGET).unwrap();
+    assert_eq!(
+        reference.invoke(entry, vec![]).unwrap(),
+        comptime_interpretor::Value::Bool(true)
+    );
+    let wrong = source.replace(".adult(age, true)", ".adult(age)");
+    let error = sysroot::compile(&wrong).unwrap_err();
+    assert!(error.contains("case pattern payload arity"), "{error}");
+}
+
+#[test]
+fn comptime_case_views_bind_nested_patterns_and_allow_a_presence_test() {
+    let source = r#"
+        struct Entry { number: u32 }
+        impl Entry {
+            comptime case pair(self) -> ?Tuple<u32, bool> {
+                if self.number == 0 { null } else { (self.number, true) }
+            }
+        }
+        comptime fn eligible(value: Entry) -> bool {
+            value match {
+                .pair(x, true) if x == 5 => true,
+                .pair => false,
+                _ => value.number == 0,
+            }
+        }
+        const accepted = eligible(Entry { number: 5 }) and eligible(Entry { number: 0 }) and not eligible(Entry { number: 1 });
+        fn run() -> bool { accepted }
+    "#;
+    assert_eq!(
+        sysroot::run(source),
+        comptime_interpretor::Value::Bool(true)
+    );
 }
