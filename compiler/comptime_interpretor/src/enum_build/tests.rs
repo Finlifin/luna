@@ -502,7 +502,7 @@ fn ordinary_struct_builder_rejects_host_added_metadata_before_commit() {
                                 subject: p(Primitive::Bool),
                                 interface: id(21),
                             }),
-                        4 => definition.packed = true,
+                        4 => definition.packed = nir::program::PackedMode::Byte,
                         _ => unreachable!(),
                     }
                 }

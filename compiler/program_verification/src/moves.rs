@@ -19711,7 +19711,7 @@ mod return_result_cache_tests {
         let mut pkg = Package {
             structs: vec![Struct {
                 capabilities: vec![],
-                packed: false,
+                packed: nir::program::PackedMode::None,
                 declaration: owned_struct,
                 name: "Owned".into(),
                 type_parameters: vec![],
