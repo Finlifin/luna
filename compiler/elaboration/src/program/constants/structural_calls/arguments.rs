@@ -1,6 +1,6 @@
 //! Use the checked call's source order to collect inputs. A reference slot
 //! names caller storage while subsequent explicit arguments are evaluated.
-use super::flow::Returns;
+use super::conditions::ConditionPaths;
 use super::*;
 
 impl Checker<'_, '_> {
@@ -12,6 +12,104 @@ impl Checker<'_, '_> {
         span: Span,
         depth: usize,
     ) -> Result<Completion, Error> {
+        let outcome = self.observe_call_exits(
+            expr,
+            caller.as_deref_mut(),
+            returns,
+            ReturnValues::Value(None),
+            span,
+            depth,
+        )?;
+        let (exits, place) = match outcome {
+            Completion::Next(delivery) => delivery,
+            Completion::Returned => return Ok(Completion::Returned),
+            Completion::Unavailable => return Ok(Completion::Unavailable),
+        };
+        let ReturnValues::Value(Some(exit)) = exits else {
+            return Ok(Completion::Unavailable);
+        };
+        if !self.deliver_factory_receiver(caller, place.as_ref(), &exit, span)? {
+            return Ok(Completion::Unavailable);
+        }
+        Ok(Completion::Next(exit.value))
+    }
+
+    pub(super) fn observe_call_condition(
+        &mut self,
+        expr: &n::Expr,
+        mut caller: ObservationScope,
+        returns: &mut Option<Returns>,
+        span: Span,
+        depth: usize,
+    ) -> Result<Option<ConditionPaths>, Error> {
+        let demand = ReturnValues::Predicate {
+            when_true: None,
+            when_false: None,
+        };
+        let (exits, place) =
+            match self.observe_call_exits(expr, Some(&mut caller), returns, demand, span, depth)? {
+                Completion::Next(outcome) => outcome,
+                Completion::Returned => return Ok(Some(ConditionPaths::default())),
+                Completion::Unavailable => return Ok(None),
+            };
+        let ReturnValues::Predicate {
+            when_true,
+            when_false,
+        } = exits
+        else {
+            unreachable!()
+        };
+        let mut paths = ConditionPaths::default();
+        let fork_true = when_false.is_some();
+        for (exit, target, fork) in [
+            (when_true, &mut paths.when_true, fork_true),
+            (when_false, &mut paths.when_false, false),
+        ] {
+            let Some(exit) = exit else { continue };
+            let mut frame = if fork {
+                self.schema_fuel(span, |_, fuel| caller.fork(fuel))?
+            } else {
+                std::mem::take(&mut caller)
+            };
+            if !self.deliver_factory_receiver(Some(&mut frame), place.as_ref(), &exit, span)? {
+                return Ok(None);
+            }
+            *target = Some(frame);
+        }
+        Ok(Some(paths))
+    }
+
+    fn deliver_factory_receiver(
+        &mut self,
+        caller: Option<&mut ObservationScope>,
+        place: Option<&n::Place>,
+        exit: &FactoryExit,
+        span: Span,
+    ) -> Result<bool, Error> {
+        let Some(place) = place else { return Ok(true) };
+        let (Some(frame), Some(updated)) = (caller, &exit.receiver) else {
+            return Ok(false);
+        };
+        self.schema_fuel(span, |this, fuel| {
+            update_place(
+                frame,
+                place,
+                updated.clone(),
+                this.protocols.meta_list,
+                fuel,
+            )
+        })
+    }
+
+    fn observe_call_exits(
+        &mut self,
+        expr: &n::Expr,
+        mut caller: Option<&mut ObservationScope>,
+        returns: &mut Option<Returns>,
+        demand: ReturnValues,
+        span: Span,
+        depth: usize,
+    ) -> Result<Completion<(ReturnValues, Option<n::Place>)>, Error> {
         let K::Call {
             callee,
             arguments,
@@ -40,7 +138,8 @@ impl Checker<'_, '_> {
                     depth + 1,
                 )? {
                     Completion::Next(target) => target,
-                    transfer => return Ok(transfer),
+                    Completion::Unavailable => return Ok(Completion::Unavailable),
+                    Completion::Returned => return Ok(Completion::Returned),
                 };
                 match observed_target.known_term() {
                     Some(Term::FunctionValue {
@@ -85,7 +184,8 @@ impl Checker<'_, '_> {
                 depth + 1,
             )? {
                 Completion::Next(value) => value,
-                transfer => return Ok(transfer),
+                Completion::Unavailable => return Ok(Completion::Unavailable),
+                Completion::Returned => return Ok(Completion::Returned),
             };
             inputs.insert(argument.parameter, value);
         }
@@ -133,21 +233,12 @@ impl Checker<'_, '_> {
             }
         }
         let slot = receiver.as_ref().map(|(argument, _)| argument.parameter);
-        let Some(exit) = self.invoke_observed_factory(id, indices, &inputs, slot, span, depth)?
+        let Some(exits) =
+            self.invoke_observed_factory(id, indices, &inputs, slot, demand, span, depth)?
         else {
             return Ok(Completion::Unavailable);
         };
-        if let Some((_, place)) = receiver {
-            let (Some(frame), Some(updated)) = (caller, exit.receiver) else {
-                return Ok(Completion::Unavailable);
-            };
-            if !self.schema_fuel(span, |this, fuel| {
-                update_place(frame, &place, updated, this.protocols.meta_list, fuel)
-            })? {
-                return Ok(Completion::Unavailable);
-            }
-        }
-        Ok(Completion::Next(exit.value))
+        Ok(Completion::Next((exits, receiver.map(|(_, place)| place))))
     }
 
     fn observe_call_operand(

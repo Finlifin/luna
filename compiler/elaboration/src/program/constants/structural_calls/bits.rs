@@ -1,5 +1,4 @@
 //! Bit-vector logical operations evaluate both operands in the caller's store.
-use super::flow::Returns;
 use super::*;
 
 impl Checker<'_, '_> {

@@ -1,5 +1,4 @@
 //! Observe a named function instance in its clause preparation scope.
-use super::flow::Returns;
 use super::*;
 
 impl Checker<'_, '_> {

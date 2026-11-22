@@ -9,7 +9,9 @@ mod conditions;
 mod flow;
 mod instances;
 mod matching;
-use flow::{Completion, FactoryExit};
+mod returns;
+use flow::Completion;
+use returns::{FactoryExit, ReturnValues, Returns};
 
 impl Checker<'_, '_> {
     pub(in crate::program) fn record_generator_initializer(
@@ -48,9 +50,10 @@ impl Checker<'_, '_> {
         indices: &[Term],
         inputs: &BTreeMap<usize, Arc<PartialStagedValue>>,
         receiver: Option<usize>,
+        demand: ReturnValues,
         span: Span,
         depth: usize,
-    ) -> Result<Option<FactoryExit>, Error> {
+    ) -> Result<Option<ReturnValues>, Error> {
         // Compiler-provided operations also have checked bodies. Dispatch
         // through that body so wrappers and user methods share the same rules.
         let owner = self.source_declarations.owner(id);
@@ -104,7 +107,7 @@ impl Checker<'_, '_> {
                 return Ok(None);
             };
             let receiver = receiver.and_then(|slot| function.parameters.get(slot).copied());
-            self.observe_factory_body(&function.body, &mut frame, receiver, span, depth)
+            self.observe_factory_body(&function.body, &mut frame, receiver, demand, span, depth)
         })();
         if !generated {
             self.observing_factory_bodies.remove(&owner.unwrap());

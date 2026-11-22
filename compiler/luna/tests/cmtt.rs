@@ -12300,3 +12300,107 @@ fn factory_bitwise_operations_preserve_eager_effects_and_returns() {
         );
     }
 }
+
+#[test]
+fn factory_predicate_calls_write_back_the_receiver_for_each_return() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Packet { item: Type }
+        struct Boxed { packet: Packet, sibling: Type }
+        impl Packet {
+            comptime fn changed(self, flag: bool) -> bool {
+                flag and do { self.item = After; true }
+            }
+            comptime fn unchanged(self, flag: bool) -> bool {
+                return not self.changed(flag);
+            }
+        }
+        impl Boxed {
+            comptime fn select(self, flag: bool) -> bool {
+                flag match {
+                    true => self.packet.changed(flag),
+                    _ => not self.packet.unchanged(flag),
+                }
+            }
+        }
+        comptime fn describe(flag: bool) -> Boxed {
+            var box = Boxed { packet: Packet { item: Before }, sibling: Before };
+            if box.select(do { box.sibling = After; flag }) {
+                box
+            } else {
+                Boxed { packet: Packet { item: After }, sibling: box.sibling }
+            }
+        }
+        comptime fn generate(flag: bool) -> <|-bool> {
+            let box = describe(flag);
+            let A = box.packet.item;
+            let B = box.sibling;
+            '(A { second: true }.second and B { second: true }.second)
+        }
+        fn run() -> bool { ~<generate(false)> and ~<generate(true)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let unused = source.replace("~<generate(false)> and ~<generate(true)>", "true");
+    for invalid in [
+        unused.replace("self.item = After", "self.item = Before"),
+        unused.replace("box.sibling = After", "box.sibling = Before"),
+        unused.replace("_ => not self.packet.unchanged(flag)", "_ => true"),
+        unused.replace(
+            "if box.select(do { box.sibling = After; flag })",
+            "let selected = box.select(do { box.sibling = After; flag }); if true",
+        ),
+    ] {
+        let error = sysroot::compile(&invalid).unwrap_err();
+        assert!(
+            error.contains("identity") || error.contains("field"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn factory_predicate_returns_include_early_exits_in_call_operands() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Packet { item: Type }
+        impl Packet {
+            comptime fn clear(self, result: bool) -> bool {
+                self.item = Before;
+                result
+            }
+            comptime fn choose(self, flag: bool) -> bool {
+                self.clear(do {
+                    if flag { self.item = After; return true; }
+                    false
+                })
+            }
+        }
+        comptime fn describe(flag: bool) -> Packet {
+            var packet = Packet { item: Before };
+            flag match {
+                _ if packet.choose(flag) => packet,
+                _ => Packet { item: After },
+            }
+        }
+        comptime fn generate(flag: bool) -> <|-bool> {
+            let packet = describe(flag);
+            let A = packet.item;
+            '(A { second: true }.second)
+        }
+        fn run() -> bool { ~<generate(false)> and ~<generate(true)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let invalid = source
+        .replace("~<generate(false)> and ~<generate(true)>", "true")
+        .replace(
+            "if flag { self.item = After; return true; }",
+            "if flag { return true; }",
+        );
+    let error = sysroot::compile(&invalid).unwrap_err();
+    assert!(
+        error.contains("identity") || error.contains("field"),
+        "{error}"
+    );
+}

@@ -1,6 +1,6 @@
 //! Ordered match observation. A rejected guard leaves its outer writes visible
 //! to later arms, while pattern bindings belong only to the selected candidate.
-use super::flow::Returns;
+use super::conditions::ConditionPaths;
 use super::*;
 
 mod structure;
@@ -15,13 +15,91 @@ impl Checker<'_, '_> {
         span: Span,
         depth: usize,
     ) -> Result<Completion, Error> {
+        let mut joined = ObservationScope::default();
+        let mut completion = Completion::Returned;
+        let observed = self.visit_factory_arms(
+            subject,
+            arms,
+            scope,
+            returns,
+            span,
+            depth,
+            |this, body, mut frame, returns| {
+                let exit = this.observe_factory_expr(body, &mut frame, returns, span, depth)?;
+                this.schema_fuel(span, |_, fuel| {
+                    frame.retain(|id| scope.values.contains_key(id), fuel)
+                })?;
+                completion = this.merge_factory_paths(
+                    &mut joined,
+                    std::mem::replace(&mut completion, Completion::Returned),
+                    frame,
+                    exit,
+                    span,
+                )?;
+                Ok(!matches!(completion, Completion::Unavailable))
+            },
+        )?;
+        if !observed {
+            return Ok(Completion::Unavailable);
+        }
+        if matches!(completion, Completion::Next(_)) {
+            *scope = joined;
+        }
+        Ok(completion)
+    }
+
+    pub(super) fn observe_predicate_match(
+        &mut self,
+        subject: &Arc<PartialStagedValue>,
+        arms: &[n::MatchArm],
+        scope: &ObservationScope,
+        returns: &mut Option<Returns>,
+        span: Span,
+        depth: usize,
+    ) -> Result<Option<ConditionPaths>, Error> {
+        let mut paths = ConditionPaths::default();
+        let observed = self.visit_factory_arms(
+            subject,
+            arms,
+            scope,
+            returns,
+            span,
+            depth,
+            |this, body, frame, returns| {
+                let Some(mut arm) = this.observe_condition(body, frame, returns, span, depth)?
+                else {
+                    return Ok(false);
+                };
+                this.schema_fuel(span, |_, fuel| arm.leave_scope(scope, fuel))?;
+                this.merge_observed_scope(&mut paths.when_true, arm.when_true, span)?;
+                this.merge_observed_scope(&mut paths.when_false, arm.when_false, span)?;
+                Ok(true)
+            },
+        )?;
+        Ok(observed.then_some(paths))
+    }
+
+    fn visit_factory_arms(
+        &mut self,
+        subject: &Arc<PartialStagedValue>,
+        arms: &[n::MatchArm],
+        scope: &ObservationScope,
+        returns: &mut Option<Returns>,
+        span: Span,
+        depth: usize,
+        mut visit: impl FnMut(
+            &mut Self,
+            &n::Expr,
+            ObservationScope,
+            &mut Option<Returns>,
+        ) -> Result<bool, Error>,
+    ) -> Result<bool, Error> {
         // Keep a structural miss separate from a successful test followed by
         // a rejected guard. The same test on the saved subject has the same
         // verdict, even if the guard changed the original scrutinee's place.
         let mut missed = Some(self.schema_fuel(span, |_, fuel| scope.fork(fuel))?);
         let mut failed_guard = None;
         let mut previous = None;
-        let mut result = Completion::Returned;
         for arm in arms {
             if missed.is_none() && failed_guard.is_none() {
                 break;
@@ -57,7 +135,7 @@ impl Checker<'_, '_> {
             let Some(mut paths) =
                 self.observe_candidate(pattern, subject, input, returns, span, depth)?
             else {
-                return Ok(Completion::Unavailable);
+                return Ok(false);
             };
             if !repeated {
                 missed = paths.rejected.take();
@@ -65,7 +143,7 @@ impl Checker<'_, '_> {
             paths.rejected = None;
             for guard in guards.into_iter().rev().chain(arm.guard.as_ref()) {
                 if !self.observe_match_guard(&mut paths, guard, returns, span, depth)? {
-                    return Ok(Completion::Unavailable);
+                    return Ok(false);
                 }
             }
             failed_guard = paths.rejected;
@@ -74,19 +152,13 @@ impl Checker<'_, '_> {
                     rejected.retain(|id| scope.values.contains_key(id), fuel)
                 })?;
             }
-            if let Some(mut frame) = paths.matched {
-                let body =
-                    self.observe_factory_expr(&arm.body, &mut frame, returns, span, depth)?;
-                self.schema_fuel(span, |_, fuel| {
-                    frame.retain(|id| scope.values.contains_key(id), fuel)
-                })?;
-                result = self.merge_factory_paths(scope, result, frame, body, span)?;
-                if matches!(result, Completion::Unavailable) {
-                    return Ok(result);
-                }
+            if let Some(frame) = paths.matched
+                && !visit(self, &arm.body, frame, returns)?
+            {
+                return Ok(false);
             }
         }
-        Ok(result)
+        Ok(true)
     }
 
     fn same_structural_test(

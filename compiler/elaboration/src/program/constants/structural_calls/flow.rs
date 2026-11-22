@@ -1,19 +1,8 @@
-//! Abstract control within one checked factory invocation. Only the return
-//! value and its reference receiver can be observed by the calling frame.
+//! Abstract control and local writes within a checked factory invocation.
 use super::*;
 
-pub(super) struct FactoryExit {
-    pub(super) value: Arc<PartialStagedValue>,
-    pub(super) receiver: Option<Arc<PartialStagedValue>>,
-}
-
-pub(super) struct Returns {
-    receiver: Option<n::LocalId>,
-    exit: Option<FactoryExit>,
-}
-
-pub(super) enum Completion {
-    Next(Arc<PartialStagedValue>),
+pub(super) enum Completion<T = Arc<PartialStagedValue>> {
+    Next(T),
     Returned,
     Unavailable,
 }
@@ -28,59 +17,7 @@ impl Completion {
     }
 }
 
-impl Returns {
-    fn record(
-        &mut self,
-        value: Arc<PartialStagedValue>,
-        scope: &ObservationScope,
-        meta_list: Option<DeclarationId>,
-        fuel: &mut usize,
-    ) -> Result<(), String> {
-        let receiver = self.receiver.map(|id| {
-            scope
-                .values
-                .get(&id)
-                .cloned()
-                .unwrap_or_else(PartialStagedValue::unknown)
-        });
-        if let Some(exit) = &mut self.exit {
-            exit.value = PartialStagedValue::common(&exit.value, &value, meta_list, 0, fuel)?;
-            if let (Some(previous), Some(current)) = (&mut exit.receiver, receiver) {
-                *previous = PartialStagedValue::common(previous, &current, meta_list, 0, fuel)?;
-            }
-        } else {
-            self.exit = Some(FactoryExit { value, receiver });
-        }
-        Ok(())
-    }
-}
-
 impl Checker<'_, '_> {
-    pub(super) fn observe_factory_body(
-        &mut self,
-        body: &n::Expr,
-        frame: &mut ObservationScope,
-        receiver: Option<n::LocalId>,
-        span: Span,
-        depth: usize,
-    ) -> Result<Option<FactoryExit>, Error> {
-        let mut returns = Some(Returns {
-            receiver,
-            exit: None,
-        });
-        match self.observe_region(body, frame, &mut returns, span, depth)? {
-            Completion::Next(value) => self.schema_fuel(span, |this, fuel| {
-                returns
-                    .as_mut()
-                    .unwrap()
-                    .record(value, frame, this.protocols.meta_list, fuel)
-            })?,
-            Completion::Returned => {}
-            Completion::Unavailable => return Ok(None),
-        }
-        Ok(returns.and_then(|returns| returns.exit))
-    }
-
     pub(in crate::program::constants) fn structural_value(
         &mut self,
         expr: &n::Expr,
@@ -124,27 +61,13 @@ impl Checker<'_, '_> {
                 return Ok(result);
             }
             K::Return(result) => {
-                if returns.is_none() {
-                    return Ok(Completion::Unavailable);
-                }
-                let result = match result {
-                    Some(expr) => {
-                        self.observe_factory_expr(expr, scope, returns, span, depth + 1)?
-                    }
-                    None => Completion::unit(),
-                };
-                if let Completion::Next(value) = result {
-                    self.schema_fuel(span, |this, fuel| {
-                        returns.as_mut().unwrap().record(
-                            value,
-                            scope,
-                            this.protocols.meta_list,
-                            fuel,
-                        )
-                    })?;
-                    return Ok(Completion::Returned);
-                }
-                return Ok(result);
+                return self.observe_return_value(
+                    result.as_deref(),
+                    scope,
+                    returns,
+                    span,
+                    depth + 1,
+                );
             }
             K::If {
                 condition,
@@ -326,7 +249,7 @@ impl Checker<'_, '_> {
         }
     }
 
-    fn observe_region(
+    pub(super) fn observe_region(
         &mut self,
         mut expr: &n::Expr,
         scope: &mut ObservationScope,

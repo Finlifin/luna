@@ -1,5 +1,4 @@
 //! Track the store on each normal exit of a checked boolean expression.
-use super::flow::Returns;
 use super::*;
 
 #[derive(Default)]
@@ -9,6 +8,17 @@ pub(super) struct ConditionPaths {
 }
 
 impl ConditionPaths {
+    pub(super) fn leave_scope(
+        &mut self,
+        outer: &ObservationScope,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        for exit in self.when_true.iter_mut().chain(self.when_false.iter_mut()) {
+            exit.retain(|id| outer.values.contains_key(id), fuel)?;
+        }
+        Ok(())
+    }
+
     fn path(&mut self, value: bool) -> &mut Option<ObservationScope> {
         if value {
             &mut self.when_true
@@ -197,6 +207,21 @@ impl Checker<'_, '_> {
         depth: usize,
     ) -> Result<Option<ConditionPaths>, Error> {
         match &expr.kind {
+            K::Match { value, arms } => {
+                match self.observe_factory_expr(value, &mut frame, returns, span, depth + 1)? {
+                    Completion::Next(subject) => self.observe_predicate_match(
+                        &subject,
+                        arms,
+                        &frame,
+                        returns,
+                        span,
+                        depth + 1,
+                    ),
+                    Completion::Returned => Ok(Some(ConditionPaths::default())),
+                    Completion::Unavailable => Ok(None),
+                }
+            }
+            K::Call { .. } => self.observe_call_condition(expr, frame, returns, span, depth + 1),
             K::Block { statements, result } | K::CallPreparation { statements, result } => {
                 let mut inner = self.schema_fuel(span, |_, fuel| frame.fork(fuel))?;
                 for statement in statements {
@@ -218,15 +243,7 @@ impl Checker<'_, '_> {
                 else {
                     return Ok(None);
                 };
-                for exit in paths
-                    .when_true
-                    .iter_mut()
-                    .chain(paths.when_false.iter_mut())
-                {
-                    self.schema_fuel(span, |_, fuel| {
-                        exit.retain(|id| frame.values.contains_key(id), fuel)
-                    })?;
-                }
+                self.schema_fuel(span, |_, fuel| paths.leave_scope(&frame, fuel))?;
                 Ok(Some(paths))
             }
             K::If {
