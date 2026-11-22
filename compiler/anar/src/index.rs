@@ -795,7 +795,7 @@ impl<'a> IndexBuilder<'a> {
 
             if !is_synthetic_file_mod
                 && !matches!(item.kind, ItemKind::Impl(..) | ItemKind::Derive(..))
-                && !raw_name.starts_with("$test$")
+                && !decode_test_label(raw_name).is_some_and(str::is_empty)
                 && selection_span.1 > selection_span.0
             {
                 self.record_occurrence(file.clone(), selection_span, key, true, false);
@@ -1255,8 +1255,47 @@ impl<'a> IndexBuilder<'a> {
                         self.walk_body(&ctx, b);
                     }
                 }
-                ItemKind::TestTemplateInstance { template, body, .. } => {
+                ItemKind::TestTemplateInstance {
+                    template,
+                    ports,
+                    body,
+                    ..
+                } => {
                     self.walk_expr(&ctx, template, false);
+                    for port in ports {
+                        let pname = port.name.name.as_str();
+                        if pname.is_empty() || pname == "<invalid>" || pname == "_" {
+                            continue;
+                        }
+                        if let Some((file, sel_span)) =
+                            span_to_file_offsets(self.source_map, port.name.span)
+                        {
+                            let key = SymbolKey::Local {
+                                pkg: ctx.pkg.pkg_id,
+                                hir_id: port.binding,
+                            };
+                            self.index.symbols.insert(
+                                key,
+                                SymbolInfo {
+                                    key,
+                                    name: pname.to_owned(),
+                                    kind: lsp_symbol_kind::VARIABLE,
+                                    completion_kind: lsp_completion_kind::VARIABLE,
+                                    detail: format!("context {pname}"),
+                                    doc: None,
+                                    container_name: None,
+                                    file: file.clone(),
+                                    full_span: sel_span,
+                                    selection_span: sel_span,
+                                    children: Vec::new(),
+                                    params: Vec::new(),
+                                    is_user_pkg: ctx.pkg.is_user_pkg,
+                                    is_mutable: false,
+                                },
+                            );
+                            self.record_occurrence(file, sel_span, key, true, false);
+                        }
+                    }
                     if let Some(b) = pkg.hir_pkg.body(*body) {
                         self.walk_body(&ctx, b);
                     }
@@ -2835,8 +2874,7 @@ impl<'a> IndexBuilder<'a> {
     }
 
     fn item_display_name(&self, _hir_pkg: &Package<'_>, item: &Item<'_>, raw_name: &str) -> String {
-        if let Some(rest) = raw_name.strip_prefix("$test$") {
-            let label = rest.split('$').nth(2).unwrap_or("");
+        if let Some(label) = decode_test_label(raw_name) {
             if label.is_empty() {
                 return String::from("test");
             }
@@ -2968,10 +3006,14 @@ pub fn format_item_signature(
             format!("fn {name} : {}", format_expr_compact(template, source_map)),
             Vec::new(),
         ),
-        ItemKind::TestTemplateInstance { template, .. } => (
-            format!("test ({})", format_expr_compact(template, source_map)),
-            Vec::new(),
-        ),
+        ItemKind::TestTemplateInstance { template, .. } => {
+            let tpl = format_expr_compact(template, source_map);
+            let formatted = match decode_test_label(name) {
+                Some(label) if !label.is_empty() => format!("test \"{label}\" use {tpl}"),
+                _ => format!("test use {tpl}"),
+            };
+            (formatted, Vec::new())
+        }
         ItemKind::Struct(sdef) => {
             let clauses = format_clause_list(sdef.clause_params, source_map);
             (format!("struct {name}{clauses}"), Vec::new())
@@ -3072,15 +3114,18 @@ pub fn format_item_signature(
     }
 }
 
+fn decode_test_label(raw_name: &str) -> Option<&str> {
+    let rest = raw_name.strip_prefix("$test$")?;
+    Some(rest.splitn(3, '$').nth(2).unwrap_or(""))
+}
+
 fn format_fn_item_sig(
     name: &str,
     sig: &FnSig<'_>,
     source_map: &SourceMap,
     kw: &str,
 ) -> (String, Vec<ParamDoc>) {
-    if name.starts_with("$test$") {
-        let rest = name.strip_prefix("$test$").unwrap_or("");
-        let label = rest.split('$').nth(2).unwrap_or("");
+    if let Some(label) = decode_test_label(name) {
         if label.is_empty() {
             return (String::from("test"), Vec::new());
         }

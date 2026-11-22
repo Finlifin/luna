@@ -1399,7 +1399,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 | NodeKind::CaseDef
                 | NodeKind::NewtypeDef
                 | NodeKind::ConstDef
-                | NodeKind::TestDef => {
+                | NodeKind::TestDef
+                | NodeKind::TestTemplateDef
+                | NodeKind::TestTemplateInstance => {
                     let owner_id = self.lower_item_in_block(stmt_node);
                     let stmt_span = self.ast.get_span(stmt_node).unwrap_or(span);
                     stmts.push(Expr {
@@ -1483,6 +1485,8 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                 | NodeKind::NewtypeDef
                                 | NodeKind::ConstDef
                                 | NodeKind::TestDef
+                                | NodeKind::TestTemplateDef
+                                | NodeKind::TestTemplateInstance
                         )
                     ) {
                         // Classify through wrappers, but lower the original chain so

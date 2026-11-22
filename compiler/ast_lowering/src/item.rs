@@ -161,18 +161,13 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     ..Default::default()
                 },
             ),
-            NodeKind::TestTemplateDef => {
-                self.package
-                    .pending_semantics
-                    .push((span, "test template CMTT expansion".into()));
-                self.lower_function(
-                    node,
-                    FnModifiers {
-                        is_test_template: true,
-                        ..Default::default()
-                    },
-                )
-            }
+            NodeKind::TestTemplateDef => self.lower_function(
+                node,
+                FnModifiers {
+                    is_test_template: true,
+                    ..Default::default()
+                },
+            ),
             NodeKind::TestTemplateInstance => self.lower_test_template_instance(node),
             NodeKind::AlgebraicEffect => self.lower_callable(
                 node,
@@ -538,13 +533,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             self.current_owner = previous_owner;
             return self.make_error_item(span);
         };
+        let label = (children[0] != 0).then(|| self.node_to_ident(children[0]));
         let ident = Ident::new(
-            resolve::test_definition_name(
-                self.file_id,
-                node,
-                Some(self.node_to_ident(children[0]).name),
-            ),
-            span,
+            resolve::test_definition_name(self.file_id, node, label.map(|id| id.name)),
+            label.map(|id| id.span).unwrap_or(span),
         );
         if let Ok(binding) = self.resolve_declared(ident) {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {
@@ -552,7 +544,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
             }
         } else {
             self.emit_malformed(
-                "test template instance requires a scanned declaration scope",
+                "test template instance requires a scanned declaration scope; tests inside runtime blocks are not supported",
                 span,
             );
         }
@@ -599,9 +591,6 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 nodes: OwnerNodes::new(),
             },
         );
-        self.package
-            .pending_semantics
-            .push((span, "test template CMTT expansion".into()));
         self.current_owner = previous_owner;
         owner_id
     }
@@ -666,25 +655,22 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
 
         // Identifier
         let ident = if modifiers.is_test {
+            let label = (id_node != 0).then(|| self.node_to_ident(id_node));
             Ident {
-                name: resolve::test_definition_name(
-                    self.file_id,
-                    node,
-                    if id_node == 0 {
-                        None
-                    } else {
-                        Some(self.node_to_ident(id_node).name)
-                    },
-                ),
-                span,
+                name: resolve::test_definition_name(self.file_id, node, label.map(|id| id.name)),
+                span: label.map(|id| id.span).unwrap_or(span),
             }
         } else {
             self.node_to_ident(id_node)
         };
         let previous_scope = self.file_scope;
         let resolved = self.resolve_declared(ident);
-        if modifiers.is_test && resolved.is_err() {
-            self.emit_malformed("test declaration requires a scanned declaration scope; tests inside runtime blocks are not supported", span);
+        if resolved.is_err() {
+            if modifiers.is_test {
+                self.emit_malformed("test declaration requires a scanned declaration scope; tests inside runtime blocks are not supported", span);
+            } else if modifiers.is_test_template {
+                self.emit_malformed("test template declaration requires a scanned declaration scope; test templates inside runtime blocks are not supported", span);
+            }
         }
         if let Ok(binding) = resolved {
             if let resolve::BindingKind::Definition(definition, _) = binding.kind {

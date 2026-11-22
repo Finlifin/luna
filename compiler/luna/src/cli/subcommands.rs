@@ -3,15 +3,28 @@ use super::{Command, OsString};
 
 use super::help::help;
 
-fn value(args: &[OsString], index: &mut usize, flag: &str) -> Result<OsString, String> {
+fn value_with_empty(
+    args: &[OsString],
+    index: &mut usize,
+    flag: &str,
+    allow_empty: bool,
+) -> Result<OsString, String> {
     *index += 1;
     let value = args
         .get(*index)
         .ok_or_else(|| format!("{flag} requires a value"))?;
-    if value.is_empty() || value.to_string_lossy().starts_with('-') {
+    if (!allow_empty && value.is_empty()) || value.to_string_lossy().starts_with('-') {
         return Err(format!("{flag} requires a value"));
     }
     Ok(value.clone())
+}
+
+fn value(args: &[OsString], index: &mut usize, flag: &str) -> Result<OsString, String> {
+    value_with_empty(args, index, flag, false)
+}
+
+fn value_allow_empty(args: &[OsString], index: &mut usize, flag: &str) -> Result<OsString, String> {
+    value_with_empty(args, index, flag, true)
 }
 
 fn once(slot: &mut Option<OsString>, value: OsString, flag: &str) -> Result<(), String> {
@@ -188,7 +201,11 @@ pub fn parse(args: Vec<OsString>) -> Result<Command, String> {
                     }
                     .into(),
                 );
-                forwarded.push(value(&args, &mut index, flag)?);
+                forwarded.push(if flag == "--filter" {
+                    value_allow_empty(&args, &mut index, flag)?
+                } else {
+                    value(&args, &mut index, flag)?
+                });
             }
             "-o" | "--output" => {
                 if command == "check" {

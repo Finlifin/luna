@@ -3182,3 +3182,71 @@ fn test_templates_collect_ordinary_list_values_without_type_only_rules() {
         assert!(compile(&source).is_err(), "accepted {args}");
     }
 }
+
+#[test]
+fn test_templates_and_instances_leave_no_pending_semantics_in_hir() {
+    let source = "typealias V = .void'builtin;
+        template test fixture where body: < |- V > { ~<body>; }
+        test sample use fixture { assumes true; }";
+    let Artifact::Hir(dump) = compile(source, Emit::Hir).unwrap() else {
+        panic!("expected HIR")
+    };
+    assert!(
+        dump.contains("(pending-semantics))"),
+        "expected empty pending-semantics in HIR:\n{dump}"
+    );
+    assert!(
+        !dump.contains("test template CMTT expansion"),
+        "stale pending marker remained:\n{dump}"
+    );
+}
+
+#[test]
+fn block_local_tests_and_test_templates_diagnose_scanned_scope() {
+    for (source, expected) in [
+        (
+            "fn main() { test { assumes true; } }",
+            "test declaration requires a scanned declaration scope; tests inside runtime blocks are not supported",
+        ),
+        (
+            "typealias V = .void'builtin; fn main() { template test inner where body: < |- V > { ~<body>; } }",
+            "test template declaration requires a scanned declaration scope; test templates inside runtime blocks are not supported",
+        ),
+        (
+            "typealias V = .void'builtin; template test fixture where body: < |- V > { ~<body>; } fn main() { test inner use fixture { assumes true; } }",
+            "test template instance requires a scanned declaration scope; tests inside runtime blocks are not supported",
+        ),
+    ] {
+        let error = compile(source, Emit::Hir)
+            .err()
+            .unwrap_or_else(|| panic!("expected scope diagnostic for `{source}`"));
+        assert!(
+            error.contains(expected),
+            "expected `{expected}` in `{error}`"
+        );
+        assert!(
+            !error.contains("unsupported expression"),
+            "unexpected unsupported-expression fallback: `{error}`"
+        );
+    }
+}
+
+#[test]
+fn nested_module_anonymous_named_and_template_tests_execute() {
+    let source = "typealias V = .void'builtin;
+        template test fixture where body: < |- V > { ~<body>; }
+        mod suite {
+            use .fixture;
+            test { assumes true; }
+            test named { assumes true; }
+            test templated use fixture { assumes true; }
+        }";
+    let Artifact::Nir(package) = compile(source, Emit::Nir).unwrap() else {
+        panic!("expected NIR")
+    };
+    let report = luna::testing::run_report(&package, 0, 100_000, false, None).unwrap();
+    assert_eq!(report.results.len(), 3, "{report}");
+    assert!(report.is_success(), "{report}");
+    let names: Vec<_> = report.results.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["anonymous", "named", "templated"]);
+}

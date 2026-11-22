@@ -1,11 +1,14 @@
 //! Public command routing, rejection boundaries and executable behavior.
 use luna::cli::{self, Command, Emit, HostOutput};
 use std::{ffi::OsString, process::Command as Process};
+
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
+
 fn parse(args: &[&str]) -> Result<Command, String> {
     cli::parse(args.iter().map(OsString::from))
 }
+
 #[test]
 fn command_defaults_select_distinct_pipelines() {
     assert!(matches!(
@@ -40,6 +43,7 @@ fn command_defaults_select_distinct_pipelines() {
         matches!(parse(&["comptime", "input.fl", "--entry", "inspect"]).unwrap(), Command::Invoke {entry,..} if entry == "inspect")
     );
 }
+
 #[test]
 fn formats_and_analysis_routes_preserve_options() {
     for (format, expected) in [
@@ -85,6 +89,7 @@ fn formats_and_analysis_routes_preserve_options() {
         Command::AnalyzeResources { .. }
     ));
 }
+
 #[test]
 fn misplaced_duplicate_and_conflicting_actions_are_rejected() {
     for args in [
@@ -119,6 +124,7 @@ fn misplaced_duplicate_and_conflicting_actions_are_rejected() {
         assert!(parse(&args).is_err(), "accepted {args:?}");
     }
 }
+
 #[test]
 fn package_and_stream_commands_keep_versioned_input_contracts() {
     assert!(matches!(
@@ -167,6 +173,7 @@ fn package_and_stream_commands_keep_versioned_input_contracts() {
         if text == format!("luna {}\n", env!("CARGO_PKG_VERSION")))
     );
 }
+
 #[cfg(unix)]
 #[test]
 fn non_utf8_paths_and_dash_prefixed_inputs_are_preserved() {
@@ -178,6 +185,7 @@ fn non_utf8_paths_and_dash_prefixed_inputs_are_preserved() {
     };
     assert_eq!(options.input.as_os_str(), path);
 }
+
 #[test]
 fn executable_subcommands_check_dump_invoke_interpret_and_test() {
     let directory = std::env::temp_dir().join(format!("luna-subcommands-{}", std::process::id()));
@@ -332,4 +340,212 @@ fn help_and_errors_use_pipeline_specific_public_options() {
             assert!(!message.contains(legacy), "{message}");
         }
     }
+}
+
+#[test]
+fn test_subcommand_accepts_empty_filter_and_rejects_missing_or_flag_values() {
+    assert!(matches!(
+        parse(&["test", "input.fl", "--filter", ""]).unwrap(),
+        Command::Test { filter: Some(ref f), .. } if f.is_empty()
+    ));
+    assert!(matches!(
+        parse(&[
+            "packages",
+            "test",
+            "--package",
+            "1",
+            "101",
+            "app",
+            "input.fl",
+            "--primary",
+            "1",
+            "--filter",
+            "",
+        ])
+        .unwrap(),
+        Command::Packages(_)
+    ));
+    assert!(parse(&["test", "input.fl", "--filter"]).is_err());
+    assert!(parse(&["test", "input.fl", "--filter", "--list"]).is_err());
+}
+
+#[test]
+fn executable_test_and_packages_test_filter_list_engines_and_failure_reporting() {
+    let directory = std::env::temp_dir().join(format!("luna-test-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let input = directory.join("suite.fl");
+    let report_path = directory.join("failure-report.sexp");
+    primitive_bindings::write_fixture(
+        &input,
+        "typealias V = .void'builtin;
+template test fixture where body: < |- V > { ~<body>; }
+test { assumes true; }
+test passing { assumes true; }
+test templated use fixture { assumes true; }
+test failing { assumes false; }
+",
+    )
+    .unwrap();
+
+    let luna = env!("CARGO_BIN_EXE_luna");
+    let list_out = Process::new(luna)
+        .args(["test", "--list"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        list_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list_out.stderr)
+    );
+    let list_stdout = String::from_utf8_lossy(&list_out.stdout);
+    for expected in [
+        "\"anonymous\"",
+        "\"passing\"",
+        "\"templated\"",
+        "\"failing\"",
+    ] {
+        assert!(list_stdout.contains(expected), "{list_stdout}");
+    }
+
+    let empty_filter = Process::new(luna)
+        .args(["test", "--list", "--filter", ""])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(empty_filter.status.success());
+    assert_eq!(empty_filter.stdout, list_out.stdout);
+
+    let anon_list = Process::new(luna)
+        .args(["test", "--list", "--filter", "anonymous"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(anon_list.status.success());
+    let anon_stdout = String::from_utf8_lossy(&anon_list.stdout);
+    assert!(anon_stdout.contains("\"anonymous\""), "{anon_stdout}");
+    assert!(!anon_stdout.contains("\"passing\""), "{anon_stdout}");
+
+    let absent_list = Process::new(luna)
+        .args(["test", "--list", "--filter", "absent"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(absent_list.status.success());
+    let absent_stdout = String::from_utf8_lossy(&absent_list.stdout);
+    assert!(
+        absent_stdout.contains("(test-inventory (count 0) (filtered-out 4))"),
+        "{absent_stdout}"
+    );
+    assert!(!absent_stdout.contains("\"passing\""), "{absent_stdout}");
+
+    let saved_pass = Process::new(luna)
+        .args(["test", "--engine", "reference", "--filter", "passing", "-o"])
+        .arg(&report_path)
+        .arg(&input)
+        .output()
+        .unwrap();
+    assert!(
+        saved_pass.status.success(),
+        "{}",
+        String::from_utf8_lossy(&saved_pass.stderr)
+    );
+    assert!(saved_pass.stdout.is_empty());
+    let initial_report = std::fs::read_to_string(&report_path).unwrap();
+    assert!(
+        initial_report.contains("(test-results ") && initial_report.contains("\"passing\""),
+        "{initial_report}"
+    );
+
+    for engine in ["reference", "native"] {
+        for filter in ["templated", "passing", "anonymous"] {
+            let out = Process::new(luna)
+                .args(["test", "--engine", engine, "--filter", filter])
+                .arg(&input)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{engine}/{filter}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(
+                stdout.contains("(test-results ") && stdout.contains(&format!("\"{filter}\"")),
+                "{engine}/{filter}: {stdout}"
+            );
+        }
+
+        let mut cmd = Process::new(luna);
+        cmd.args(["test", "--engine", engine, "--filter", "failing"]);
+        if engine == "reference" {
+            cmd.arg("-o").arg(&report_path);
+        }
+        let fail_out = cmd.arg(&input).output().unwrap();
+        assert_eq!(fail_out.status.code(), Some(1), "{engine}: {fail_out:?}");
+        assert!(
+            fail_out.stdout.is_empty(),
+            "{engine}: {:?}",
+            fail_out.stdout
+        );
+        let stderr = String::from_utf8_lossy(&fail_out.stderr);
+        assert!(
+            stderr.contains("(test-results ") && stderr.contains("\"failing\""),
+            "{engine}: {stderr}"
+        );
+    }
+    let saved_report = std::fs::read_to_string(&report_path).unwrap();
+    assert_eq!(
+        saved_report, initial_report,
+        "failing test run must preserve pre-existing --output report"
+    );
+
+    let pkg_list = Process::new(luna)
+        .args(["packages", "test", "--package", "1", "101", "app"])
+        .arg(&input)
+        .args(["--primary", "1", "--list", "--filter", ""])
+        .output()
+        .unwrap();
+    assert!(
+        pkg_list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pkg_list.stderr)
+    );
+    let pkg_list_stdout = String::from_utf8_lossy(&pkg_list.stdout);
+    for expected in [
+        "\"anonymous\"",
+        "\"passing\"",
+        "\"templated\"",
+        "\"failing\"",
+    ] {
+        assert!(pkg_list_stdout.contains(expected), "{pkg_list_stdout}");
+    }
+
+    for engine in ["reference", "native"] {
+        let pkg_run = Process::new(luna)
+            .args(["packages", "test", "--package", "1", "101", "app"])
+            .arg(&input)
+            .args([
+                "--primary",
+                "1",
+                "--engine",
+                engine,
+                "--filter",
+                "templated",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            pkg_run.status.success(),
+            "packages {engine}: {}",
+            String::from_utf8_lossy(&pkg_run.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&pkg_run.stdout);
+        assert!(
+            stdout.contains("(test-results ") && stdout.contains("\"templated\""),
+            "packages {engine}: {stdout}"
+        );
+    }
+
+    std::fs::remove_dir_all(directory).unwrap();
 }

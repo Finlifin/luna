@@ -651,3 +651,79 @@ fn classify(student: Student) -> ?Value {
         "expected lexical fallback case symbol: {fallback_syms:?}"
     );
 }
+
+#[test]
+fn lsp_test_template_instance_hover_and_context_port_navigation() {
+    let tmp = TempDir::new("test_template_lsp");
+    let src = "\
+struct Value {}
+struct Void {}
+template test fixture where body: < ctx: Value |- Void > {
+    let ctx = Value {};
+    ~<body>;
+}
+test smoke use fixture {
+    let seen = ctx;
+}
+";
+    let path = tmp.write("tests.fl", src);
+    let uri = path_to_uri(&path);
+
+    let mut analyzer = anar::WorkspaceAnalyzer::new(None);
+    analyzer.open_document(&uri, 1, src.to_owned());
+    assert!(
+        analyzer.diagnostics_for(&path).is_empty(),
+        "valid test template fixture should have 0 diagnostics: {:?}",
+        analyzer.diagnostics_for(&path)
+    );
+
+    let symbols = analyzer.document_symbols(&path);
+    assert!(
+        symbols
+            .iter()
+            .any(|s| s.get_str("name") == Some("test \"smoke\"")),
+        "expected `test \"smoke\"` in document outline: {symbols:?}"
+    );
+
+    // Line 6: `test smoke use fixture {` -> col 6 is inside `smoke`.
+    let smoke_hover = analyzer
+        .hover(&path, anar::LspPosition::new(6, 6))
+        .expect("hover on `smoke`");
+    let smoke_md = smoke_hover
+        .get("contents")
+        .unwrap()
+        .get_str("value")
+        .unwrap();
+    assert!(
+        smoke_md.contains("test \"smoke\" use fixture"),
+        "unexpected test instance hover signature: {smoke_md}"
+    );
+
+    // Line 7: `    let seen = ctx;` -> col 16 is inside `ctx`.
+    let defs = analyzer.goto_definition(&path, anar::LspPosition::new(7, 16));
+    assert_eq!(
+        defs.len(),
+        1,
+        "goto_definition on context port `ctx`: {defs:?}"
+    );
+    let def_line = defs[0]
+        .get("range")
+        .unwrap()
+        .get("start")
+        .unwrap()
+        .get_u32("line");
+    assert_eq!(
+        def_line,
+        Some(2),
+        "expected context port definition on `template test` line 2: {defs:?}"
+    );
+
+    let ctx_hover = analyzer
+        .hover(&path, anar::LspPosition::new(7, 16))
+        .expect("hover on context port `ctx`");
+    let ctx_md = ctx_hover.get("contents").unwrap().get_str("value").unwrap();
+    assert!(
+        ctx_md.contains("context ctx"),
+        "unexpected context port hover: {ctx_md}"
+    );
+}

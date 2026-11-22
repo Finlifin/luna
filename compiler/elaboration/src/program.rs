@@ -630,8 +630,7 @@ fn elaborate_in_mode(
     }
     let allow_derivation_pending = !matches!(mode, ElaborationMode::Full);
     if let Some((span, feature)) = package.pending_semantics.iter().find(|(_, feature)| {
-        feature != "test template CMTT expansion"
-            && !(allow_derivation_pending && feature == "derivation expansion")
+        !(allow_derivation_pending && feature == "derivation expansion")
             && !matches!(
                 feature.as_str(),
                 "definition attribute" | "definition configuration" | "struct member attribute"
