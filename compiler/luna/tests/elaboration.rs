@@ -1,3 +1,7 @@
+#[macro_use]
+#[path = "support/effect_fixture.rs"]
+mod effect_fixture;
+
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
 use std::fs;
@@ -6437,42 +6441,42 @@ fn effect_results_keep_machine_arithmetic_checks_and_allow_post_request_guards()
 #[test]
 fn direct_passing_declarations_reject_arguments_async_and_missing_outer_supply() {
     rejected(
-        "^attrs.effects.direct_passing effect bad(value:bool)->bool;",
+        effect_fixture!("^attrs.effects.direct_passing effect bad(value:bool)->bool;"),
         "direct passing effects must be synchronous and have no parameters",
     );
     rejected(
-        "^attrs.effects.direct_passing async effect bad()->bool;",
+        effect_fixture!("^attrs.effects.direct_passing async effect bad()->bool;"),
         "direct passing effects must be synchronous and have no parameters",
     );
     rejected(
-        "effect enum Config {^attrs.effects.direct_passing bad(value:bool)->bool,}",
+        effect_fixture!("effect enum Config {^attrs.effects.direct_passing bad(value:bool)->bool,}"),
         "direct passing effects must be synchronous and have no parameters",
     );
     rejected(
-        "^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting() if false=>true,}}",
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting() if false=>true,}}"),
         "partial effect handler requires an outer entry",
     );
     rejected(
-        "^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting()=>setting()#,}}",
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting()=>setting()#,}}"),
         "explicit allowed effect row",
     );
     rejected(
-        "^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting()=>'x',}}",
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool; fn run()->bool {setting()# {setting()=>'x',}}"),
         "type",
     );
     accepted(
-        "^attrs.effects.direct_passing inline effect setting()->bool; fn run()->bool {setting()# {setting()=>true,}}",
+        effect_fixture!("^attrs.effects.direct_passing inline effect setting()->bool; fn run()->bool {setting()# {setting()=>true,}}"),
     );
 }
 
 #[test]
 fn direct_passing_installation_invalidates_captured_arithmetic_facts_before_subject() {
     rejected(
-        "typealias Byte=.u8'builtin; ^attrs.effects.direct_passing effect setting()->bool; fn run()->Byte {var value:Byte=0; do {value + 1}# {setting()=>{value=255;true},}}",
+        effect_fixture!("typealias Byte=.u8'builtin; ^attrs.effects.direct_passing effect setting()->bool; fn run()->Byte {var value:Byte=0; do {value + 1}# {setting()=>{value=255;true},}}"),
         "machine arithmetic range is not proven",
     );
     accepted(
-        "typealias Byte=.u8'builtin; ^attrs.effects.direct_passing effect setting()->bool; fn run()->Byte {var value:Byte=0; do {if value < 255 {value + 1} else {0}}# {setting()=>{value=255;true},}}",
+        effect_fixture!("typealias Byte=.u8'builtin; ^attrs.effects.direct_passing effect setting()->bool; fn run()->Byte {var value:Byte=0; do {if value < 255 {value + 1} else {0}}# {setting()=>{value=255;true},}}"),
     );
 }
 

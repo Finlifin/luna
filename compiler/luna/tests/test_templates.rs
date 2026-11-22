@@ -1,3 +1,7 @@
+#[macro_use]
+#[path = "support/effect_fixture.rs"]
+mod effect_fixture;
+
 use luna::{
     cli::{Emit, Options},
     frontend::{self, Artifact},
@@ -2861,7 +2865,7 @@ fn shared_template_declaration_types_and_instance_names_keep_separate_scopes() {
 
 #[test]
 fn shared_template_body_uses_the_generated_functions_effect_row() {
-    for attribute in ["", "^attrs.effects.direct_passing "] {
+    for attribute in ["", effect_fixture!("^attrs.effects.direct_passing ")] {
         for category in ["", "inline ", "quote "] {
             for body in ["read()# and current", "return read()# and current;"] {
                 let source = format!(

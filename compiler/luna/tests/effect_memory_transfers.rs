@@ -1,4 +1,8 @@
 //! Pointer origins across effect computation and installation boundaries.
+#[macro_use]
+#[path = "support/effect_fixture.rs"]
+mod effect_fixture;
+
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
@@ -4653,8 +4657,8 @@ fn indirect_enum_load_preserves_conditions_on_each_loaded_root() {
 fn scalar_passing_request_footprint_is_independent_of_provider_storage() {
     use elaboration::verification::memory;
     let package = support::compile(
-        "^attrs.effects.direct_passing effect value()->T where T;
-         fn subject()->#value<T> T where T {value<T>()#}",
+        effect_fixture!("^attrs.effects.direct_passing effect value()->T where T;
+         fn subject()->#value<T> T where T {value<T>()#}"),
     );
     for primitive in [
         nir::Primitive::Bool,
@@ -4679,11 +4683,11 @@ fn scalar_passing_request_footprint_is_independent_of_provider_storage() {
 fn scalar_passing_request_rule_does_not_erase_provider_access_or_rejection() {
     use elaboration::verification::memory;
     let package = support::compile(
-        "^attrs.effects.direct_passing effect ready()->bool;
+        effect_fixture!("^attrs.effects.direct_passing effect ready()->bool;
          fn subject()->#ready bool {ready()#}
          fn install(target:*bool)->bool {
              subject()# {ready()=>do {assumes target.*; target.* = false; true},}
-         }",
+         }"),
     );
     let summary =
         memory::infer_in_package(&package, support::id(&package, "install"), &[], &mut 200000)
@@ -4702,7 +4706,7 @@ fn scalar_passing_request_rule_does_not_erase_provider_access_or_rejection() {
 #[test]
 fn scalar_passing_request_rule_rejects_direct_pointer_and_forged_abi() {
     use elaboration::verification::memory;
-    for (attribute, result) in [("", "bool"), ("^attrs.effects.direct_passing", "*bool")] {
+    for (attribute, result) in [("", "bool"), (effect_fixture!("^attrs.effects.direct_passing"), "*bool")] {
         let package = support::compile(&format!(
             "{attribute} effect ready()->{result}; fn subject()->#ready {result} {{ready()#}}"
         ));
@@ -4715,7 +4719,7 @@ fn scalar_passing_request_rule_rejects_direct_pointer_and_forged_abi() {
         );
     }
     let mut package = support::compile(
-        "^attrs.effects.direct_passing effect ready()->bool; fn subject()->#ready bool {ready()#}",
+        effect_fixture!("^attrs.effects.direct_passing effect ready()->bool; fn subject()->#ready bool {ready()#}"),
     );
     let id = support::id(&package, "subject");
     for function in &mut package.functions {
@@ -4738,7 +4742,7 @@ fn scalar_passing_request_rule_rejects_direct_pointer_and_forged_abi() {
 fn passing_newtype_memory_summary_inspects_representation_without_copy_assumptions() {
     use elaboration::verification::memory;
     for (payload, accepted) in [("bool", true), ("*bool", false), ("fn()->bool", false)] {
-        let package = support::compile(&format!(
+        let package = support::compile(&effect_fixture!(format:
             "newtype Wrapper<T> = T;
             ^attrs.effects.direct_passing effect value()->Wrapper<{payload}>;
             fn subject()->#value Wrapper<{payload}> {{value()#}}"
@@ -4766,7 +4770,7 @@ fn passing_error_result_memory_checks_success_and_all_error_payloads() {
         ("!Payload *bool", false),
         ("![Payload,Borrowed] bool", false),
     ] {
-        let package = support::compile(&format!(
+        let package = support::compile(&effect_fixture!(format:
             "struct Payload {{flag:bool}} struct Borrowed {{target:*bool}}
             ^attrs.effects.direct_passing effect answer()->{result};
             fn subject()->#answer {result} {{answer()#}}"

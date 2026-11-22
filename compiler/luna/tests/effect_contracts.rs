@@ -1,15 +1,19 @@
 //! Concrete ABI metadata used when lowering effectful machine-call boundaries.
+#[macro_use]
+#[path = "support/effect_fixture.rs"]
+mod effect_fixture;
+
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
 
 fn graph() -> iir::Package {
-    let package = support::compile(
+    let package = support::compile(effect_fixture!(
         "^attrs.effects.direct_passing effect setting()->bool;
          effect invert(value:bool)->bool;
          fn request()->#[setting,invert] bool {invert(setting()#)#}
-         fn run()->bool {request()# {setting()=>true,invert(value)=>not value,}}",
-    );
+         fn run()->bool {request()# {setting()=>true,invert(value)=>not value,}}"
+    ));
     luna::instantiation::instantiate(&package, "run", 100000).unwrap()
 }
 
@@ -136,10 +140,10 @@ fn generic_operation_instances_keep_distinct_concrete_signatures() {
 
 #[test]
 fn unused_generic_rows_retain_concrete_declared_contracts_without_occurrences() {
-    let source = support::compile(
+    let source = support::compile(effect_fixture!(
         "^attrs.effects.direct_passing effect setting()->T where T;
-         fn advertised()->#setting<T> bool where T {true}",
-    );
+         fn advertised()->#setting<T> bool where T {true}"
+    ));
     let roots = [nir::Primitive::Bool, nir::Primitive::U128].map(|primitive| iir::InstanceKey {
         declaration: support::id(&source, "advertised"),
         arguments: (vec![nir::Term::Primitive(primitive)]).into(),
@@ -230,7 +234,7 @@ fn unused_effect_contract_materializes_its_result_layout() {
 
 #[test]
 fn passing_data_layout_checks_nested_variants_and_rejects_hidden_dependencies() {
-    let source = support::compile(
+    let source = support::compile(effect_fixture!(
         "struct Payload {flag:bool}
         enum Choice {empty,full(Payload),}
         struct Borrowed {target:*bool}
@@ -239,8 +243,8 @@ fn passing_data_layout_checks_nested_variants_and_rejects_hidden_dependencies() 
         ^attrs.effects.direct_passing effect good()->Wrapper<Choice>;
         ^attrs.effects.direct_passing effect pointer()->Wrapper<Borrowed>;
         ^attrs.effects.direct_passing effect callable()->Wrapper<Callback>;
-        fn advertised()->#[good,pointer,callable] bool {true}",
-    );
+        fn advertised()->#[good,pointer,callable] bool {true}"
+    ));
     let graph = luna::instantiation::instantiate(&source, "advertised", 100000).unwrap();
     let contracts = iir::effects::Contracts::acquire(&graph, &mut 100000).unwrap();
     let nir::Term::Function { result, .. } = &graph
@@ -316,4 +320,25 @@ fn passing_error_result_layout_checks_all_inhabited_alternatives() {
             accepted
         );
     }
+}
+
+#[test]
+fn direct_passing_attribute_uses_its_lexical_scope() {
+    let shadowed = "mod attrs { pub mod effects { pub const direct_passing = 7; } }
+        ^attrs.effects.direct_passing effect read() -> bool;";
+    let error = support::compile_with_protocols(shadowed, &Default::default()).unwrap_err();
+    assert!(error.contains("Object"), "{error}");
+
+    let package = support::compile(effect_fixture!(
+        "^attrs.effects.direct_passing effect read() -> bool;"
+    ));
+    let effect = package.effects.iter().find(|e| e.name == "read").unwrap();
+    assert_eq!(effect.abi, nir::effects::Abi::DirectPassing);
+    assert!(
+        package
+            .definition_attributes
+            .lookup(effect.declaration)
+            .unwrap()
+            .is_some()
+    );
 }

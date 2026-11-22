@@ -225,44 +225,13 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     self.package.insert_owner(owner, info);
                     return owner;
                 }
-                // Recognize the supported phase modifiers and the built-in
-                // direct-passing attribute. Unknown attributes stay pending.
+                // Keyword modifiers are syntax. Attribute expressions retain
+                // their lexical owner and go through ordinary evaluation below.
                 let mut cursor = node;
                 let mut modifiers = FnModifiers::default();
                 let mut effect_modifiers = EffectModifiers::default();
-                while let Some((
-                    kind @ (NodeKind::AttributeSetTrue | NodeKind::Attribute),
-                    _,
-                    parts,
-                )) = self.ast.get_node(cursor)
+                while let Some((NodeKind::AttributeSetTrue, _, parts)) = self.ast.get_node(cursor)
                 {
-                    if kind == NodeKind::Attribute {
-                        let mut path = parts[0];
-                        let mut matches = true;
-                        for name in ["direct_passing", "effects"] {
-                            if self.ast.get_node_kind(path) != Some(NodeKind::Projection) {
-                                matches = false;
-                                break;
-                            }
-                            let fields = self.ast.get_children(path);
-                            if self.ast.get_node_kind(fields[1]) != Some(NodeKind::Id)
-                                || self.node_to_ident(fields[1]).name.as_str() != name
-                            {
-                                matches = false;
-                                break;
-                            }
-                            path = fields[0];
-                        }
-                        if !matches
-                            || self.ast.get_node_kind(path) != Some(NodeKind::Id)
-                            || self.node_to_ident(path).name.as_str() != "attrs"
-                        {
-                            break;
-                        }
-                        effect_modifiers.is_direct_passing = true;
-                        cursor = parts[1];
-                        continue;
-                    }
                     if self.ast.get_node_kind(parts[0]) != Some(NodeKind::Id) {
                         break;
                     }
@@ -284,7 +253,6 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     && !modifiers.is_unsafe
                     && !effect_modifiers.is_async
                     && !effect_modifiers.is_inline
-                    && !effect_modifiers.is_direct_passing
                 {
                     match self.ast.get_node_kind(cursor) {
                         Some(NodeKind::DeriveDef) => {
@@ -319,7 +287,6 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     || modifiers.is_unsafe
                     || effect_modifiers.is_inline)
                     && !effect_modifiers.is_async
-                    && !effect_modifiers.is_direct_passing
                     && matches!(
                         self.ast.get_node_kind(cursor),
                         Some(

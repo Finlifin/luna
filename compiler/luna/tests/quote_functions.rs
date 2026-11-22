@@ -1,3 +1,7 @@
+#[macro_use]
+#[path = "support/effect_fixture.rs"]
+mod effect_fixture;
+
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
 
@@ -1554,11 +1558,11 @@ fn effectful_staged_and_trait_quotes_keep_computation_rows() {
 
 #[test]
 fn effectful_quote_direct_passing_keeps_installation_before_argument_evaluation() {
-    let source = "^attrs.effects.direct_passing effect setting()->bool;
+    let source = effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;
         fn argument()->bool {true}
         fn provide()->bool {true}
         quote fn subject(value:bool)->#setting bool {value and (setting()#) and (setting()#)}
-        fn run()->bool {subject(argument())# {setting()=>provide(),}}";
+        fn run()->bool {subject(argument())# {setting()=>provide(),}}");
     let (value, calls) = execute(source, vec![]);
     assert_eq!(value, comptime_interpretor::Value::Bool(true));
     assert_eq!(calls, ["run", "provide", "argument"]);
@@ -1566,8 +1570,8 @@ fn effectful_quote_direct_passing_keeps_installation_before_argument_evaluation(
 
 #[test]
 fn effectful_quote_affine_direct_passing_slots_keep_request_counts() {
-    let prefix = "trait Duplicate {} trait Retire {fn drop(*self);} struct Token {}
-        ^attrs.effects.direct_passing effect token()->Token;";
+    let prefix = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} struct Token {}
+        ^attrs.effects.direct_passing effect token()->Token;");
     for (body, allowed) in [
         ("if flag {return token()#;}token()#", true),
         ("let ignored=token()#;token()#", false),

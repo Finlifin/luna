@@ -1,4 +1,8 @@
 //! Real LLVM assembly, native object emission, linking and execution.
+#[macro_use]
+#[path = "support/effect_fixture.rs"]
+mod effect_fixture;
+
 #[path = "support/primitive_bindings.rs"]
 mod primitive_bindings;
 
@@ -6087,8 +6091,8 @@ fn native_checked_direct_handler_cleanup_matches_reference() {
         "fn run()->bool {(get()# {get()=>do {let watch=Watch {valid:true};get()#},})# {get()=>do {return true;},};false}",
         "fn run()->bool {(get()# {get() if false=>false,})# {get()=>do {let watch=Watch {valid:true};resume true;},}}",
         "effect consume(value:Watch)->bool;fn run()->bool {consume(Watch {valid:true})# {consume(value)=>true,}}",
-        "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {(setting()# and setting()#)# {setting()=>do {let watch=Watch {valid:true};resume true;},}}",
-        "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {setting()# {setting()=>do {let watch=Watch {valid:true};return true;},};false}",
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {(setting()# and setting()#)# {setting()=>do {let watch=Watch {valid:true};resume true;},}}"),
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {setting()# {setting()=>do {let watch=Watch {valid:true};return true;},};false}"),
         "fn run()->bool {get()# {get()=>do {let watch=Watch {valid:true};resume true;},}}",
         "fn run()->bool {get()# {get()=>do {let watch=Watch {valid:true};return true;},};false}",
         "fn run()->bool {while true {get()# {get()=>do {let watch=Watch {valid:true};break;},};}true}",
@@ -6151,7 +6155,7 @@ fn native_checked_direct_handler_cleanup_matches_reference() {
 
 #[test]
 fn direct_passing_preserves_only_stable_installation_facts() {
-    let header = "trait Duplicate {} trait Retire {fn drop(*self);}impl Duplicate for bool {} ^attrs.effects.direct_passing effect setting()->bool;";
+    let header = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}impl Duplicate for bool {} ^attrs.effects.direct_passing effect setting()->bool;");
     for computation in ["setting()#", "false and setting()#"] {
         let w = Work::new(&format!(
             "{header}fn keep(flag:bool)->result:bool where requires flag, ensures result {{let ignored=({computation})# {{setting()=>true,}};flag}}fn run()->bool {{keep(true)}}"
@@ -6841,15 +6845,15 @@ fn native_direct_handler_preserves_lexical_control_targets() {
 fn native_direct_passing_installs_once_before_computation() {
     for source in [
         include_str!("../../../development/examples/host-direct-passing.fl"),
-        "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var flag=true;do {flag=false;setting()#}# {setting()=>flag,}}",
-        "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {do {let first=setting()#;let second=setting()# {setting()=>false,};let third=setting()#;first and not second and third}# {setting()=>true,}}",
-        "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;var active=true;var phase=false;while active {setting()# {setting()=>do {seen=not seen;true},};if phase {active=false;}phase=true;}not seen}",
-        "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {(setting()# {setting() if false=>false,})# {setting()=>true,}}",
-        "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {setting()# {setting()=>true,}}",
-        "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;let result=(setting()# and setting()#)# {setting()=>do {seen=not seen;true},};result and seen}",
-        "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;let result=(false and setting()#)# {setting()=>do {seen=true;true},};not result and seen}",
-        "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {(setting()# {setting()=>not setting()#,})# {setting()=>false,}}",
-        "^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;(setting()# {setting()=>do {return true;seen=true;false},});false}",
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var flag=true;do {flag=false;setting()#}# {setting()=>flag,}}"),
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {do {let first=setting()#;let second=setting()# {setting()=>false,};let third=setting()#;first and not second and third}# {setting()=>true,}}"),
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;var active=true;var phase=false;while active {setting()# {setting()=>do {seen=not seen;true},};if phase {active=false;}phase=true;}not seen}"),
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {(setting()# {setting() if false=>false,})# {setting()=>true,}}"),
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {setting()# {setting()=>true,}}"),
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;let result=(setting()# and setting()#)# {setting()=>do {seen=not seen;true},};result and seen}"),
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;let result=(false and setting()#)# {setting()=>do {seen=true;true},};not result and seen}"),
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {(setting()# {setting()=>not setting()#,})# {setting()=>false,}}"),
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;fn run()->bool {var seen=false;(setting()# {setting()=>do {return true;seen=true;false},});false}"),
     ] {
         let w = Work::new(source);
         let reference = w.command().args(["--interpret", "run"]).output().unwrap();
@@ -6879,7 +6883,7 @@ fn native_direct_passing_installs_once_before_computation() {
 #[test]
 fn native_direct_passing_rejects_unimplemented_slot_layouts() {
     let w = Work::new(
-        "^attrs.effects.direct_passing effect callback()->fn()->bool;fn run()->bool {(callback()# {callback()=>||true,})()}",
+        effect_fixture!("^attrs.effects.direct_passing effect callback()->fn()->bool;fn run()->bool {(callback()# {callback()=>||true,})()}"),
     );
     fs::write(w.0.join("native program"), b"previous").unwrap();
     let out = w.build();
@@ -10587,7 +10591,7 @@ fn native_direct_passing_cross_function_calls_preserve_caller_arguments() {
 
 #[test]
 fn native_direct_passing_routes_branches_and_overrides() {
-    let source = "trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
+    let source = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
         ^attrs.effects.direct_passing effect enabled()->bool;
         ^attrs.effects.direct_passing effect ready()->bool;
         fn read(value:bool)->#ready bool {value and ready()#}
@@ -10611,7 +10615,7 @@ fn native_direct_passing_routes_branches_and_overrides() {
             let f = matched(false);
             not c and d and not e and f and reversed() and overridden()
         }
-        fn run()->bool {subject()# {enabled()=>true,ready()=>false,}}";
+        fn run()->bool {subject()# {enabled()=>true,ready()=>false,}}");
     let w = Work::new(source);
     let reference = w
         .command()
@@ -10653,7 +10657,7 @@ fn native_direct_passing_routes_branches_and_overrides() {
 
 #[test]
 fn native_direct_passing_indirect_abi_with_resource_admission() {
-    let source = "trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
+    let source = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
         ^attrs.effects.direct_passing effect enabled()->bool;
         ^attrs.effects.direct_passing effect ready()->bool;
         fn read(value:bool)->#ready bool {value and ready()#}
@@ -10665,7 +10669,7 @@ fn native_direct_passing_indirect_abi_with_resource_admission() {
             let a = indirect(true)# {enabled()=>true,ready()=>false,};
             let b = indirect(false)# {enabled()=>true,ready()=>false,};
             not a and b
-        }";
+        }");
     let w = Work::new(source);
     let reference = w.command().args(["--interpret", "run"]).output().unwrap();
     success(&reference);
@@ -10729,7 +10733,7 @@ fn native_direct_passing_indirect_abi_with_resource_admission() {
 #[test]
 fn native_direct_passing_calls_keep_owned_parameter_cleanup() {
     let w = Work::new(
-        "trait Duplicate {} trait Retire {fn drop(*self);}
+        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
         impl Duplicate for bool {} impl Duplicate for *T where T {}
         struct Watch {target:*bool}
         impl Retire for Watch {fn drop(*self) {self.target.*.* = not self.target.*.*;}}
@@ -10739,7 +10743,7 @@ fn native_direct_passing_calls_keep_owned_parameter_cleanup() {
             let seen = false; let target = seen.ref;
             let result = release(Watch {target:target})# {ready()=>true,};
             result and seen
-        }",
+        }"),
     );
     let reference = w
         .command()
@@ -10782,7 +10786,7 @@ fn native_direct_passing_calls_keep_owned_parameter_cleanup() {
 #[test]
 fn native_direct_passing_machine_parameters_keep_wide_float_and_void_layouts() {
     let w = Work::new(
-        "trait Duplicate {} trait Retire {fn drop(*self);}
+        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
         typealias U=.u128'builtin; typealias F=.f64'builtin;
         impl Duplicate for bool {} impl Duplicate for U {} impl Duplicate for F {}
         ^attrs.effects.direct_passing effect signal();
@@ -10800,7 +10804,7 @@ fn native_direct_passing_machine_parameters_keep_wide_float_and_void_layouts() {
                 real()=>3.5,
             };
             result and installed
-        }",
+        }"),
     );
     let reference = w
         .command()
@@ -10861,7 +10865,7 @@ fn native_direct_passing_machine_parameters_keep_wide_float_and_void_layouts() {
 #[test]
 fn native_direct_passing_closure_environment_and_parameters_remain_distinct() {
     let w = Work::new(
-        "trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
+        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);} impl Duplicate for bool {}
         ^attrs.effects.direct_passing effect ready()->bool;
         typealias Action=%{flag:bool} fn(bool)->#ready bool;
         fn make(flag:bool)->Action {|value| flag and value and ready()#}
@@ -10874,7 +10878,7 @@ fn native_direct_passing_closure_environment_and_parameters_remain_distinct() {
             let other = make(false);
             let d = apply(other,true)# {ready()=>true,};
             a and not b and not c and not d
-        }",
+        }"),
     );
     let reference = w
         .command()
@@ -10917,7 +10921,7 @@ fn native_direct_passing_closure_environment_and_parameters_remain_distinct() {
 #[test]
 fn native_direct_passing_generic_operation_instances_keep_abi_identity() {
     let w = Work::new(
-        "trait Duplicate {} trait Retire {fn drop(*self);}
+        effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
         typealias U=.u128'builtin;
         impl Duplicate for bool {} impl Duplicate for U {}
         ^attrs.effects.direct_passing effect setting()->T where T;
@@ -10930,7 +10934,7 @@ fn native_direct_passing_generic_operation_instances_keep_abi_identity() {
         fn run()->bool {combine()# {
             setting<bool>()=>true,
             setting<U>()=>170141183460469231731687303715884105729,
-        }}",
+        }}"),
     );
     let reference = w
         .command()
@@ -10972,7 +10976,7 @@ fn native_direct_passing_generic_operation_instances_keep_abi_identity() {
 
 #[test]
 fn native_direct_passing_owned_closure_cleans_invoked_and_uninvoked_captures() {
-    let w = Work::new("trait Duplicate {} trait Retire {fn drop(*self);}
+    let w = Work::new(effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
         impl Duplicate for bool {} impl Duplicate for *T where T {}
         struct Watch {target:*bool}
         impl Retire for Watch {fn drop(*self) {self.target.*.* = not self.target.*.*;}}
@@ -10989,7 +10993,7 @@ fn native_direct_passing_owned_closure_cleans_invoked_and_uninvoked_captures() {
             };
             seen
         }
-        fn run()->bool {scope(true) and scope(false)}");
+        fn run()->bool {scope(true) and scope(false)}"));
     let reference = w
         .command()
         .args([
@@ -11100,16 +11104,16 @@ fn native_direct_passing_owned_closure_cleans_invoked_and_uninvoked_captures() {
 #[test]
 fn native_unused_direct_passing_row_retains_declared_operation_abi() {
     native(
-        "^attrs.effects.direct_passing effect setting()->bool;
+        effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;
         fn advertised()->#setting bool {true}
-        fn run()->bool {let action=advertised; true}",
+        fn run()->bool {let action=advertised; true}"),
         "(bool true)\n",
     );
 }
 
 #[test]
 fn native_direct_passing_copy_aggregate_crosses_calls_and_overrides() {
-    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+    let source = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
         impl Duplicate for bool {} impl Duplicate for .u128'builtin {}
         struct Config {enabled:bool, mask:.u128'builtin}
         impl Duplicate for Config {}
@@ -11129,7 +11133,7 @@ fn native_direct_passing_copy_aggregate_crosses_calls_and_overrides() {
             let answer=nested()# {config()=>{assumes not installed;installed=true;
                 Config {enabled:true,mask:340282366920938463463374607431768211455}},};
             answer and installed
-        }";
+        }");
     let w = Work::new(source);
     let reference = w
         .command()
@@ -11196,7 +11200,7 @@ fn native_direct_passing_copy_aggregate_crosses_calls_and_overrides() {
 
 #[test]
 fn native_direct_passing_copy_enum_preserves_variants_and_payloads() {
-    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+    let source = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
         impl Duplicate for bool {} impl Duplicate for .u128'builtin {}
         enum Choice {none,some(bool,.u128'builtin),}
         impl Duplicate for Choice {}
@@ -11210,7 +11214,7 @@ fn native_direct_passing_copy_enum_preserves_variants_and_payloads() {
             let yes=inspect()# {choice()=>Choice.some(true,340282366920938463463374607431768211455),};
             let no=inspect()# {choice()=>Choice.none,};
             yes and not no
-        }";
+        }");
     let w = Work::new(source);
     let reference = w
         .command()
@@ -11252,7 +11256,7 @@ fn native_direct_passing_copy_enum_preserves_variants_and_payloads() {
 
 #[test]
 fn native_direct_passing_copy_newtypes_preserve_nominal_delivery() {
-    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+    let source = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
         impl Duplicate for bool {} impl Duplicate for .u128'builtin {}
         struct Pair {flag:bool,word:.u128'builtin}
         impl Duplicate for Pair {}
@@ -11269,7 +11273,7 @@ fn native_direct_passing_copy_newtypes_preserve_nominal_delivery() {
         fn forward()->#config bool {read()}
         fn run()->bool {
             forward()# {config()=>Pair {flag:true,word:340282366920938463463374607431768211455}.as(Wrapped<Pair>).as(Outer),}
-        }";
+        }");
     let w = Work::new(source);
     let reference = w
         .command()
@@ -11380,7 +11384,7 @@ fn native_direct_passing_generic_aggregates_keep_identity_through_higher_order_c
 
 #[test]
 fn native_direct_passing_error_results_preserve_success_and_error_payloads() {
-    let source = "trait Duplicate {} trait Retire {fn drop(*self);}
+    let source = effect_fixture!("trait Duplicate {} trait Retire {fn drop(*self);}
         impl Duplicate for bool {} impl Duplicate for .u128'builtin {}
         enum Failure {bad(.u128'builtin),}
         impl Duplicate for Failure {}
@@ -11400,7 +11404,7 @@ fn native_direct_passing_error_results_preserve_success_and_error_payloads() {
             let success=forward()# {answer()=>true,};
             let no=forward()# {answer()=>false,};
             failed and success and not no and installed
-        }";
+        }");
     let w = Work::new(source);
     let reference = w
         .command()
@@ -11478,7 +11482,7 @@ fn native_cross_function_direct_handlers_outline_scalar_captures() {
 #[test]
 fn native_cross_function_direct_handlers_preserve_outer_entries_and_fallback() {
     let w = Work::new(
-        "trait Duplicate {}trait Retire {fn drop(*self);}impl Duplicate for bool {}
+        effect_fixture!("trait Duplicate {}trait Retire {fn drop(*self);}impl Duplicate for bool {}
         effect read()->bool;
         ^attrs.effects.direct_passing effect bias()->bool;
         fn subject()->#read bool {read()#}
@@ -11488,7 +11492,7 @@ fn native_cross_function_direct_handlers_preserve_outer_entries_and_fallback() {
             let a=inner()# {read()=>true,bias()=>true,};
             let b=via_outer()# {read()=>true,bias()=>true,};
             a and b
-        }",
+        }"),
     );
     let reference = w
         .command()

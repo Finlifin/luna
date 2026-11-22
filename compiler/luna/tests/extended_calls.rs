@@ -1,4 +1,8 @@
 //! Extended property collection and positional expansion share one call plan.
+#[macro_use]
+#[path = "support/effect_fixture.rs"]
+mod effect_fixture;
+
 use comptime_interpretor::{Budget, Interpreter, Value};
 #[path = "support/execution.rs"]
 mod execution_support;
@@ -641,12 +645,12 @@ fn explicit_open_factory_packets_reject_conflicting_types_and_stage_inputs() {
 
 #[test]
 fn open_callee_factories_keep_effect_handling_before_callback_inputs() {
-    let source = "^attrs.effects.direct_passing effect setting()->bool;
+    let source = effect_fixture!("^attrs.effects.direct_passing effect setting()->bool;
         fn positive(value:bool)->bool {value} fn negative(value:bool)->bool {not value}
         typealias Action=fn(bool)->bool; fn factory(comptime flag:bool)->#setting Action {let observed=setting()#;inline if flag {positive} else {negative}}
         fn handler()->bool {true} fn input()->bool {true}
         fn choose(comptime flag:bool)->bool {(do {factory(flag)# {setting()=>handler(),}})(input())}
-        fn run()->bool {choose(true) and not choose(false)}";
+        fn run()->bool {choose(true) and not choose(false)}");
     run(
         source,
         Value::Bool(true),
