@@ -512,6 +512,7 @@ mod tests {
                 behavior_inputs: LocalBindings::default(),
                 behavior_values: LocalBindings::default(),
                 data: BTreeMap::new(),
+                schema_invalidated: true,
                 cells: BTreeMap::new(),
                 graph: None,
             },
@@ -531,6 +532,7 @@ mod tests {
             "(checking-lexical ",
             "(checking-retained ",
             "(checking-storage ",
+            "(schema-invalidated true)",
             "parent\\\"\\n",
         ] {
             assert!(dump.contains(expected), "missing {expected}: {dump}");
