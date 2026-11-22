@@ -107,5 +107,5 @@ pub fn llvm_ir_discarding_result(
     owned.functions.push(wrapper);
     let prepared =
         prepare_declaration_with_protocols(&owned, declaration, fuel, protocols.0, protocols.1)?;
-    llvm_ir_prepared_with_output(&prepared, fuel, false)
+    llvm_ir_prepared_with_entry_mode(&prepared, fuel, llvm::EntryMode::Silent)
 }

@@ -1,5 +1,6 @@
 #[path = "support/execution.rs"]
 mod support;
+
 use luna::testing::run_report;
 
 #[test]
@@ -424,9 +425,56 @@ fn native_source_test_invalid_result_does_not_prevent_valid_identity_execution()
     .unwrap();
     assert_eq!(
         report.results[0].failure.as_deref(),
-        Some("test must return void")
+        Some("test must return void or !E void")
     );
     assert!(report.results[1].failure.is_none(), "{report}");
+
+    let mut error_bool = support::compile("test invalid {} test valid {}");
+    let first = error_bool.tests[0];
+    let function = error_bool
+        .functions
+        .iter_mut()
+        .find(|f| f.declaration == first)
+        .unwrap();
+    function.signature = nir::Term::Function {
+        parameters: vec![],
+        result: Box::new(nir::Term::ErrorResult {
+            errors: vec![nir::Term::Primitive(nir::Primitive::Bool)],
+            result: Box::new(nir::Term::Primitive(nir::Primitive::Bool)),
+        }),
+    };
+    function.body.ty = nir::Term::ErrorResult {
+        errors: vec![nir::Term::Primitive(nir::Primitive::Bool)],
+        result: Box::new(nir::Term::Primitive(nir::Primitive::Bool)),
+    };
+    function.body.kind = nir::program::ExprKind::Literal(nir::program::Literal::Bool(true));
+    let interp_report = run_report(&error_bool, 0, 10_000, false, None).unwrap();
+    assert_eq!(
+        interp_report.results[0].failure.as_deref(),
+        Some("test must return void or !E void")
+    );
+    assert!(
+        interp_report.results[1].failure.is_none(),
+        "{interp_report}"
+    );
+    let native_report = luna::testing::run_native_report_filtered(
+        &error_bool,
+        0,
+        100_000,
+        None,
+        None,
+        &Default::default(),
+        std::time::Duration::from_secs(2),
+    )
+    .unwrap();
+    assert_eq!(
+        native_report.results[0].failure.as_deref(),
+        Some("test must return void or !E void")
+    );
+    assert!(
+        native_report.results[1].failure.is_none(),
+        "{native_report}"
+    );
 }
 
 #[test]
@@ -566,4 +614,537 @@ fn native_inline_preparation_failure_preserves_source_and_recovers() {
         .unwrap_err()
         .contains("Copy and Drop")
     );
+}
+
+#[test]
+fn error_result_tests_execute_across_interpreter_and_native_modes() {
+    let mut package = support::compile(
+        r#"
+        typealias void = .void'builtin;
+        trait Duplicate {}
+        trait Retire { fn drop(*self); }
+        enum IoErr { NotFound, Denied, }
+        enum ParseErr { Invalid, }
+
+        fn check_ok() -> !IoErr void {}
+        fn check_single_err() -> !IoErr void { error IoErr.Denied }
+        fn check_empty_ok() -> ![] void {}
+        fn helper() -> !IoErr void { error IoErr.NotFound }
+        fn check_propagated() -> ![IoErr, ParseErr] void {
+            helper()!;
+        }
+        fn check_second_err() -> ![IoErr, ParseErr] void {
+            if false { error IoErr.NotFound } else { error ParseErr.Invalid }
+        }
+    "#,
+    );
+    let protocols = elaboration::program::Protocols {
+        copy: Some(
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == "Duplicate")
+                .unwrap()
+                .declaration,
+        ),
+        drop: Some(
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration,
+        ),
+        ..Default::default()
+    };
+    let names = [
+        "check_ok",
+        "check_single_err",
+        "check_empty_ok",
+        "check_propagated",
+        "check_second_err",
+    ];
+    package.tests.clear();
+    for name in names {
+        let decl = package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration;
+        package.tests.push(decl);
+    }
+
+    for (inline, bindings) in [
+        (false, None),
+        (false, Some(&protocols)),
+        (true, Some(&protocols)),
+    ] {
+        let report = run_report(&package, 0, 100_000, inline, bindings).unwrap();
+        assert_eq!(report.results.len(), 5, "{report}");
+        assert_eq!(report.failures(), 3, "{report}");
+        assert!(report.results[0].failure.is_none(), "{report}");
+        let single_err = report.results[1].failure.as_ref().unwrap();
+        assert!(
+            single_err.contains("(branch (error 0))")
+                && single_err.contains("(error-type (string \"IoErr\"))"),
+            "{single_err}"
+        );
+        assert!(report.results[2].failure.is_none(), "{report}");
+        let prop_err = report.results[3].failure.as_ref().unwrap();
+        assert!(
+            prop_err.contains("(branch (error 0))")
+                && prop_err.contains("(error-type (string \"IoErr\"))"),
+            "{prop_err}"
+        );
+        let second_err = report.results[4].failure.as_ref().unwrap();
+        assert!(
+            second_err.contains("(branch (error 1))")
+                && second_err.contains("(error-type (string \"ParseErr\"))"),
+            "{second_err}"
+        );
+    }
+
+    for optimization in [
+        luna::host::OptimizationLevel::O0,
+        luna::host::OptimizationLevel::O3,
+    ] {
+        let toolchain = luna::host::Toolchain {
+            optimization,
+            ..Default::default()
+        };
+        // Unchecked native lowering rejects nominal error storage cleanly per
+        // identity without preventing independent non-nominal `![] void` tests.
+        let unchecked = luna::testing::run_native_report_filtered(
+            &package,
+            0,
+            100_000,
+            None,
+            None,
+            &toolchain,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(unchecked.results.len(), 5, "{unchecked}");
+        assert!(unchecked.results[2].failure.is_none(), "{unchecked}");
+        for nominal_index in [0usize, 1, 3, 4] {
+            let reason = unchecked.results[nominal_index].failure.as_deref().unwrap();
+            assert!(
+                reason.contains("Copy/Drop resource verification"),
+                "{reason}"
+            );
+        }
+
+        for inline in [false, true] {
+            let report = luna::testing::run_native_report_filtered_with_inlining(
+                &package,
+                0,
+                100_000,
+                Some(&protocols),
+                None,
+                &toolchain,
+                std::time::Duration::from_secs(5),
+                inline,
+            )
+            .unwrap();
+            assert_eq!(report.results.len(), 5, "{report}");
+            assert_eq!(report.failures(), 3, "{report}");
+            assert!(report.results[0].failure.is_none(), "{report}");
+            let single_err = report.results[1].failure.as_ref().unwrap();
+            assert!(
+                single_err.contains("exit status: 104")
+                    && single_err.contains(
+                        r#"(test-failure (reason error-result) (branch (error 0)) (error-type (string \"IoErr\"))"#,
+                    ),
+                "{single_err}"
+            );
+            assert!(report.results[2].failure.is_none(), "{report}");
+            let prop_err = report.results[3].failure.as_ref().unwrap();
+            assert!(
+                prop_err.contains("exit status: 104")
+                    && prop_err.contains(
+                        r#"(test-failure (reason error-result) (branch (error 0)) (error-type (string \"IoErr\"))"#,
+                    ),
+                "{prop_err}"
+            );
+            let second_err = report.results[4].failure.as_ref().unwrap();
+            assert!(
+                second_err.contains("exit status: 104")
+                    && second_err.contains(
+                        r#"(test-failure (reason error-result) (branch (error 1)) (error-type (string \"ParseErr\"))"#,
+                    ),
+                "{second_err}"
+            );
+        }
+    }
+
+    // Structural primitive `!bool void` tests work in both unchecked and checked
+    // native modes without requiring nominal Copy/Drop bindings.
+    let mut primitive_pkg = support::compile(
+        r#"
+        typealias void = .void'builtin;
+        fn bool_ok() -> !bool void {}
+        fn bool_err() -> !bool void { error true }
+    "#,
+    );
+    primitive_pkg.tests = ["bool_ok", "bool_err"]
+        .into_iter()
+        .map(|name| {
+            primitive_pkg
+                .functions
+                .iter()
+                .find(|f| f.name == name)
+                .unwrap()
+                .declaration
+        })
+        .collect();
+    for optimization in [
+        luna::host::OptimizationLevel::O0,
+        luna::host::OptimizationLevel::O3,
+    ] {
+        let toolchain = luna::host::Toolchain {
+            optimization,
+            ..Default::default()
+        };
+        let report = luna::testing::run_native_report_filtered(
+            &primitive_pkg,
+            0,
+            100_000,
+            None,
+            None,
+            &toolchain,
+            std::time::Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(report.failures(), 1, "{report}");
+        assert!(report.results[0].failure.is_none(), "{report}");
+        let err = report.results[1].failure.as_ref().unwrap();
+        assert!(
+            err.contains("exit status: 104")
+                && err.contains("(test-failure (reason error-result) (branch (error 0)) (type (primitive bool)))"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn error_result_tests_run_drop_cleanup_on_returned_error_payloads() {
+    let mut package = support::compile(
+        r#"
+        typealias void = .void'builtin;
+        trait Duplicate {}
+        trait Retire { fn drop(*self); }
+        impl Duplicate for bool {}
+        struct OwnedErr { valid: bool }
+        impl Retire for OwnedErr {
+            fn drop(*self) { assumes self.valid.*; }
+        }
+
+        fn owned_ok() -> !OwnedErr void {}
+        fn owned_err_valid() -> !OwnedErr void {
+            error OwnedErr { valid: true }
+        }
+        fn owned_err_invalid_drop() -> !OwnedErr void {
+            error OwnedErr { valid: false }
+        }
+    "#,
+    );
+    let protocols = elaboration::program::Protocols {
+        copy: Some(
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == "Duplicate")
+                .unwrap()
+                .declaration,
+        ),
+        drop: Some(
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration,
+        ),
+        ..Default::default()
+    };
+    package.tests.clear();
+    for name in ["owned_ok", "owned_err_valid", "owned_err_invalid_drop"] {
+        let decl = package
+            .functions
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .declaration;
+        package.tests.push(decl);
+    }
+
+    for inline in [false, true] {
+        let report = run_report(&package, 0, 100_000, inline, Some(&protocols)).unwrap();
+        assert_eq!(report.failures(), 2, "{report}");
+        assert!(report.results[0].failure.is_none(), "{report}");
+        let valid_err = report.results[1].failure.as_ref().unwrap();
+        assert!(
+            valid_err.contains("(branch (error 0))")
+                && valid_err.contains("(error-type (string \"OwnedErr\"))"),
+            "{valid_err}"
+        );
+        let invalid_drop = report.results[2].failure.as_ref().unwrap();
+        assert!(
+            !invalid_drop.contains("(branch (error 0))")
+                && invalid_drop.contains("ProgramContractRejected"),
+            "{invalid_drop}"
+        );
+    }
+
+    for optimization in [
+        luna::host::OptimizationLevel::O0,
+        luna::host::OptimizationLevel::O3,
+    ] {
+        let toolchain = luna::host::Toolchain {
+            optimization,
+            ..Default::default()
+        };
+        for inline in [false, true] {
+            let report = luna::testing::run_native_report_filtered_with_inlining(
+                &package,
+                0,
+                100_000,
+                Some(&protocols),
+                None,
+                &toolchain,
+                std::time::Duration::from_secs(5),
+                inline,
+            )
+            .unwrap();
+            assert_eq!(report.failures(), 2, "{report}");
+            assert!(report.results[0].failure.is_none(), "{report}");
+            let valid_err = report.results[1].failure.as_ref().unwrap();
+            assert!(
+                valid_err.contains("exit status: 104")
+                    && valid_err.contains(
+                        r#"(test-failure (reason error-result) (branch (error 0)) (error-type (string \"OwnedErr\"))"#,
+                    ),
+                "{valid_err}"
+            );
+            let invalid_drop = report.results[2].failure.as_ref().unwrap();
+            // A predicate failure inside Drop traps rather than returning control
+            // to the interrupted cleanup caller (exit status 104 / 101).
+            assert!(
+                invalid_drop.contains("native test failed")
+                    && invalid_drop.contains("(runtime-check-failure")
+                    && !invalid_drop.contains("error-result")
+                    && !invalid_drop.contains("exit status: 104"),
+                "{invalid_drop}"
+            );
+        }
+    }
+}
+
+#[test]
+fn checked_native_void_test_reports_structured_failure_and_runs_drop_cleanup() {
+    let package = support::compile(
+        r#"
+        trait Duplicate {}
+        trait Retire { fn drop(*self); }
+        impl Duplicate for bool {}
+        struct Ticket { ready: bool }
+        impl Retire for Ticket {
+            fn drop(*self) { assumes self.ready.*; }
+        }
+
+        test void_ok {
+            let ticket = Ticket { ready: true };
+        }
+        test void_body_fail {
+            let ticket = Ticket { ready: true };
+            assumes false;
+        }
+        test void_drop_fail {
+            let ticket = Ticket { ready: false };
+            return;
+        }
+    "#,
+    );
+    let protocols = elaboration::program::Protocols {
+        copy: Some(
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == "Duplicate")
+                .unwrap()
+                .declaration,
+        ),
+        drop: Some(
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration,
+        ),
+        ..Default::default()
+    };
+
+    for optimization in [
+        luna::host::OptimizationLevel::O0,
+        luna::host::OptimizationLevel::O3,
+    ] {
+        let toolchain = luna::host::Toolchain {
+            optimization,
+            ..Default::default()
+        };
+        for inline in [false, true] {
+            let report = luna::testing::run_native_report_filtered_with_inlining(
+                &package,
+                0,
+                100_000,
+                Some(&protocols),
+                None,
+                &toolchain,
+                std::time::Duration::from_secs(5),
+                inline,
+            )
+            .unwrap();
+            assert_eq!(report.failures(), 2, "{report}");
+            assert!(report.results[0].failure.is_none(), "{report}");
+            let body_fail = report.results[1].failure.as_ref().unwrap();
+            assert!(
+                body_fail.contains("exit status: 101")
+                    && body_fail.contains("(runtime-check-failure")
+                    && body_fail.contains("(test-failure (reason runtime-failure))"),
+                "void_body_fail: {body_fail}"
+            );
+            let drop_fail = report.results[2].failure.as_ref().unwrap();
+            assert!(
+                drop_fail.contains("native test failed")
+                    && drop_fail.contains("(runtime-check-failure"),
+                "void_drop_fail: {drop_fail}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_template_instances_execute_natively_with_cleanup_contracts_and_filtering() {
+    let package = support::compile(
+        r#"
+        typealias void = .void'builtin;
+        trait Duplicate {}
+        trait Retire { fn drop(*self); }
+        impl Duplicate for bool {}
+        impl Duplicate for *Ticket {}
+        struct Ticket { ready: bool }
+        impl Retire for Ticket {
+            fn drop(*self) { assumes self.ready.*; }
+        }
+
+        template test with_ticket
+        where body: < ticket: *Ticket |- void >,
+            .expected_ready: bool = true,
+            requires expected_ready
+        {
+            var guard = Ticket { ready: false };
+            let ticket = guard.ref;
+            ~<body>;
+        }
+
+        test templ_ok use with_ticket {
+            ticket.ready.* = true;
+        }
+        test templ_early_return_drop_fail use with_ticket {
+            return;
+        }
+        test templ_body_fail use with_ticket {
+            ticket.ready.* = true;
+            assumes false;
+        }
+    "#,
+    );
+    let protocols = elaboration::program::Protocols {
+        copy: Some(
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == "Duplicate")
+                .unwrap()
+                .declaration,
+        ),
+        drop: Some(
+            package
+                .traits
+                .iter()
+                .find(|t| t.name == "Retire")
+                .unwrap()
+                .declaration,
+        ),
+        ..Default::default()
+    };
+
+    let inventory = luna::testing::discover(&package, 0, None).unwrap();
+    assert_eq!(
+        inventory
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "templ_ok",
+            "templ_early_return_drop_fail",
+            "templ_body_fail"
+        ]
+    );
+
+    for optimization in [
+        luna::host::OptimizationLevel::O0,
+        luna::host::OptimizationLevel::O3,
+    ] {
+        let toolchain = luna::host::Toolchain {
+            optimization,
+            ..Default::default()
+        };
+        for inline in [false, true] {
+            let filtered = luna::testing::run_native_report_filtered_with_inlining(
+                &package,
+                0,
+                100_000,
+                Some(&protocols),
+                Some("templ_ok"),
+                &toolchain,
+                std::time::Duration::from_secs(5),
+                inline,
+            )
+            .unwrap();
+            assert!(filtered.is_success(), "{filtered}");
+            assert_eq!(filtered.filtered_out, 2);
+
+            let report = luna::testing::run_native_report_filtered_with_inlining(
+                &package,
+                0,
+                100_000,
+                Some(&protocols),
+                None,
+                &toolchain,
+                std::time::Duration::from_secs(5),
+                inline,
+            )
+            .unwrap();
+            assert_eq!(report.results.len(), 3, "{report}");
+            assert_eq!(report.failures(), 2, "{report}");
+            assert!(report.results[0].failure.is_none(), "{report}");
+            let drop_fail = report.results[1].failure.as_ref().unwrap();
+            assert!(
+                drop_fail.contains("native test failed")
+                    && drop_fail.contains("(runtime-check-failure"),
+                "templ_early_return_drop_fail: {drop_fail}"
+            );
+            let body_fail = report.results[2].failure.as_ref().unwrap();
+            assert!(
+                body_fail.contains("exit status: 101")
+                    && body_fail.contains("(runtime-check-failure")
+                    && body_fail.contains("(test-failure (reason runtime-failure))"),
+                "templ_body_fail: {body_fail}"
+            );
+        }
+    }
 }

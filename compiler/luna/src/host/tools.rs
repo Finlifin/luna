@@ -13,6 +13,7 @@ pub enum OptimizationLevel {
     O2,
     O3,
 }
+
 impl OptimizationLevel {
     fn name(self) -> &'static str {
         match self {
@@ -39,6 +40,7 @@ pub struct TargetLayout {
     /// Storage width of an ordinary address-space-zero pointer, in bits.
     pub pointer_bits: u32,
 }
+
 impl TargetLayout {
     /// Checked semantic facts for front-end invocation configuration. Do not
     /// infer them from the compiler process or change primitive type identity.
@@ -46,6 +48,7 @@ impl TargetLayout {
         nir::target::TargetData::new(self.pointer_bits).map_err(str::to_owned)
     }
 }
+
 impl std::fmt::Display for TargetLayout {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -94,6 +97,7 @@ fn check_semantic_target(module: &str, pointer_bits: u32) -> Result<(), String> 
     }
     Ok(())
 }
+
 impl Default for Toolchain {
     fn default() -> Self {
         Self {
@@ -107,6 +111,7 @@ impl Default for Toolchain {
         }
     }
 }
+
 fn run(program: &std::path::Path, args: &[OsString]) -> Result<Vec<u8>, String> {
     run_with_timeout(program, args, std::time::Duration::from_secs(120))
 }
@@ -186,6 +191,7 @@ fn run_with_limits(
     })?;
     Ok(stdout.bytes)
 }
+
 // A successful direct child does not end the deadline: inherited output
 // descriptors may still be written by descendants. Never turn a partial module
 // collected at the deadline into successful compiler output.
@@ -230,12 +236,14 @@ fn spawn_native(command: &mut Command) -> Result<std::process::Child, String> {
     // launch phase separately from execution, which starts after spawn succeeds.
     spawn_native_with_timeout(command, std::time::Duration::from_secs(1))
 }
+
 fn spawn_native_with_timeout(
     command: &mut Command,
     timeout: std::time::Duration,
 ) -> Result<std::process::Child, String> {
     spawn_with_timeout(command, timeout, "native test")
 }
+
 fn spawn_with_timeout(
     command: &mut Command,
     timeout: std::time::Duration,
@@ -259,6 +267,7 @@ fn spawn_with_timeout(
         }
     }
 }
+
 /// Only accepts children created by spawn_with_timeout, which establishes
 /// their private process group. Descendants that deliberately leave the group
 /// are outside this bounded runner's process ownership model.
@@ -289,6 +298,7 @@ struct Capture {
     eof: bool,
     limit: usize,
 }
+
 impl Capture {
     const LIMIT: usize = 16 * 1024;
 
@@ -356,11 +366,13 @@ impl Capture {
         }
     }
 }
+
 struct NativeOutput {
     status: std::process::ExitStatus,
     stdout: Capture,
     stderr: Capture,
 }
+
 impl NativeOutput {
     fn diagnostic(&self, mut failure: String) -> String {
         self.stdout.append("stdout", &mut failure);
@@ -368,6 +380,7 @@ impl NativeOutput {
         failure
     }
 }
+
 impl Toolchain {
     /// Execute a fresh native test process. The deadline bounds execution,
     /// not compilation; each compiler tool has its own 120-second deadline.
@@ -483,6 +496,7 @@ impl Toolchain {
         }
         Ok(directory)
     }
+
     pub fn target_layout(&self) -> Result<TargetLayout, String> {
         let directory = self.directory()?;
         self.target_layout_in(&directory)
@@ -598,6 +612,7 @@ impl Toolchain {
         run(&directory.join("opt"), &args)?;
         validate_artifact(output, "optimized LLVM")
     }
+
     pub fn optimized_ir(&self, ir: &str) -> Result<String, String> {
         let directory = self.directory()?;
         let work = Workspace::new()?;
@@ -615,6 +630,7 @@ impl Toolchain {
             .map(|line| format!("{line}\n"))
             .collect())
     }
+
     fn compile_bitcode_in(
         &self,
         directory: &std::path::Path,
@@ -654,22 +670,25 @@ impl Toolchain {
         let directory = self.directory()?;
         let optimized = self.compile_bitcode_in(&directory, ir, work)?;
         let object = work.0.join(if assembly { "module.s" } else { "module.o" });
-        run(
-            &directory.join("llc"),
-            &[
-                if assembly {
-                    "-filetype=asm"
-                } else {
-                    "-filetype=obj"
-                }
-                .into(),
-                "-relocation-model=pic".into(),
-                optimized.into_os_string(),
-                format!("-{}", self.optimization.name()).into(),
-                "-o".into(),
-                object.clone().into_os_string(),
-            ],
-        )?;
+        let mut args: Vec<OsString> = vec![
+            if assembly {
+                "-filetype=asm"
+            } else {
+                "-filetype=obj"
+            }
+            .into(),
+            "-relocation-model=pic".into(),
+            optimized.into_os_string(),
+            format!("-{}", self.optimization.name()).into(),
+        ];
+        // LLVM's FastISel at -O0 drops unused/void calls to non-willreturn
+        // readnone/readonly functions; SelectionDAG preserves non-termination.
+        if self.optimization == OptimizationLevel::O0 {
+            args.push("-fast-isel=0".into());
+        }
+        args.push("-o".into());
+        args.push(object.clone().into_os_string());
+        run(&directory.join("llc"), &args)?;
         validate_artifact(
             &object,
             if assembly {
@@ -713,6 +732,7 @@ impl Toolchain {
         std::fs::read(executable).map_err(|e| format!("cannot read linked executable: {e}"))
     }
 }
+
 /// A successful process exit does not establish artifact delivery. Check before
 /// another tool consumes the path or the caller reads/publishes its contents.
 /// This is a delivery check, not object-format or executable-ABI validation.
@@ -729,6 +749,7 @@ fn validate_artifact(path: &std::path::Path, description: &str) -> Result<(), St
 }
 
 struct Workspace(PathBuf);
+
 impl Workspace {
     fn new() -> Result<Self, String> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -747,6 +768,7 @@ impl Workspace {
         Err("cannot reserve a host workspace".into())
     }
 }
+
 impl Drop for Workspace {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);

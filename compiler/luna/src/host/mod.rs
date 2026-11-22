@@ -3,8 +3,12 @@
 mod discard;
 pub mod intrinsic;
 mod llvm;
+mod test_entry;
 
 pub use discard::llvm_ir_discarding_result;
+pub(crate) use test_entry::{
+    describe_error_branch, llvm_ir_test_declaration, synthesize_error_test_adapter,
+};
 
 mod tools;
 
@@ -150,25 +154,25 @@ fn prepare_declaration_with_protocols(
 /// Lower exactly the graph/schedule pair produced by checked preparation.
 /// Preserve the schedule until admission; never discard Invoke responsibilities.
 pub fn llvm_ir_prepared(prepared: &Prepared, fuel: u64) -> Result<String, String> {
-    llvm_ir_prepared_with_output(prepared, fuel, true)
+    llvm_ir_prepared_with_entry_mode(prepared, fuel, llvm::EntryMode::Display)
 }
 
-fn llvm_ir_prepared_with_output(
+fn llvm_ir_prepared_with_entry_mode(
     prepared: &Prepared,
     fuel: u64,
-    display_result: bool,
+    mode: llvm::EntryMode,
 ) -> Result<String, String> {
     let executable = &prepared.executable;
     let mut steps = host_budget(fuel)?;
     executable.graph.validate(&mut steps)?;
     llvm::validate_cleanup(&executable.graph, &executable.schedule, &mut steps)?;
-    llvm::emit_with_result_output(
+    llvm::emit_with_entry_mode(
         &executable.graph,
         steps,
         true,
         Some(&executable.schedule),
         Some(&executable.entry),
-        display_result,
+        mode,
         &prepared.attributes,
     )
 }
@@ -203,9 +207,25 @@ pub(crate) fn llvm_ir_declaration(
     fuel: u64,
     protocols: Option<(nir::DeclarationId, nir::DeclarationId)>,
 ) -> Result<String, String> {
+    llvm_ir_declaration_with_entry_mode(
+        package,
+        declaration,
+        fuel,
+        protocols,
+        llvm::EntryMode::Display,
+    )
+}
+
+fn llvm_ir_declaration_with_entry_mode(
+    package: &Package,
+    declaration: nir::DeclarationId,
+    fuel: u64,
+    protocols: Option<(nir::DeclarationId, nir::DeclarationId)>,
+    mode: llvm::EntryMode,
+) -> Result<String, String> {
     if let Some((copy, drop)) = protocols {
         let prepared = prepare_declaration_with_protocols(package, declaration, fuel, copy, drop)?;
-        return llvm_ir_prepared(&prepared, fuel);
+        return llvm_ir_prepared_with_entry_mode(&prepared, fuel, mode);
     }
     let steps = host_budget(fuel)?;
     let mut graph = elaboration::materialization::instantiate(
@@ -224,13 +244,13 @@ pub(crate) fn llvm_ir_declaration(
     graph.validate(&mut validation_steps)?;
     let mut cert_fuel = steps.max(250_000).min(2_000_000);
     elaboration::verification::behavior::certify_iir_package(&mut graph, None, &mut cert_fuel);
-    llvm::emit_with_result_output(
+    llvm::emit_with_entry_mode(
         &graph,
         steps,
         false,
         None,
         None,
-        true,
+        mode,
         &package.definition_attributes,
     )
 }

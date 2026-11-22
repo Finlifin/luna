@@ -66,23 +66,162 @@ struct Printer<'a> {
     widths: BTreeSet<u32>,
 }
 
+fn append_escaped_c_string(globals: &mut String, name: &str, text: &str) {
+    use std::fmt::Write;
+    let mut escaped = String::new();
+    for byte in text.bytes() {
+        write!(&mut escaped, "\\{byte:02X}").expect("writing to a String cannot fail");
+    }
+    globals.push_str(&format!(
+        "@{name} = private constant [{} x i8] c\"{escaped}\\00\"\n",
+        text.len() + 1
+    ));
+}
+
+fn append_dprintf_constant(
+    globals: &mut String,
+    name: &str,
+    raw: &str,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    let format = raw.replace('%', "%%");
+    *fuel = fuel
+        .checked_sub(format.len().saturating_add(1))
+        .ok_or("host test entry diagnostic budget exhausted")?;
+    append_escaped_c_string(globals, name, &format);
+    Ok(())
+}
+
+/// Emit `@main` for native `void` or `!E void` source tests, surfacing
+/// structured diagnostics on stderr before exiting non-zero on failure.
+pub(super) fn test_main(
+    root: usize,
+    result: &Ty,
+    checked: bool,
+    error_descriptions: Option<&[String]>,
+    fuel: &mut usize,
+) -> Result<String, String> {
+    match error_descriptions {
+        None if *result != Ty::Unit => {
+            return Err("host void test entry requires a unit result".into());
+        }
+        Some(_) if *result != Ty::Int(32, false) => {
+            return Err("host error test entry requires a u32 tag result".into());
+        }
+        _ => {}
+    }
+
+    let mut module = String::new();
+    if checked {
+        append_dprintf_constant(
+            &mut module,
+            "flurry_test_msg_failure",
+            "(test-failure (reason runtime-failure))\n",
+            fuel,
+        )?;
+        append_dprintf_constant(
+            &mut module,
+            "flurry_test_msg_cancelled",
+            "(test-failure (reason cancelled))\n",
+            fuel,
+        )?;
+        append_dprintf_constant(
+            &mut module,
+            "flurry_test_msg_effect",
+            "(test-failure (reason unhandled-effect))\n",
+            fuel,
+        )?;
+    }
+    if let Some(descriptions) = error_descriptions {
+        for (index, desc) in descriptions.iter().enumerate() {
+            append_dprintf_constant(
+                &mut module,
+                &format!("flurry_test_err_{index}"),
+                &format!("(test-failure (reason error-result) (branch (error {index})) {desc})\n"),
+                fuel,
+            )?;
+        }
+    }
+
+    module.push_str("define i32 @main() {\nentry:\n");
+    if checked {
+        let packet = control::packet(result).llvm();
+        module.push_str("  %task = alloca %flurry.task\n");
+        module.push_str("  call void @flurry_task_init(ptr %task, ptr null)\n");
+        module.push_str(&format!(
+            "  %result = call {packet} @flurry_task_entry(ptr %task)\n"
+        ));
+        module.push_str(&format!("  %ctrl = extractvalue {packet} %result, 1\n"));
+        module.push_str("  %ok = icmp eq ptr %ctrl, null\n");
+        module.push_str(&format!(
+            "  br i1 %ok, label %complete, label %abnormal, {}\n",
+            control::LIKELY
+        ));
+        module.push_str(&format!(
+            "abnormal:\n  %failed = icmp eq ptr %ctrl, {}\n  br i1 %failed, label %runtime_failure, label %check_cancel\n",
+            control::FAILURE
+        ));
+        module.push_str(
+            "check_cancel:\n  %cancelled = icmp eq ptr %ctrl, %task\n  br i1 %cancelled, label %task_cancelled, label %unhandled_effect\n",
+        );
+        module.push_str(
+            "runtime_failure:\n  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @flurry_test_msg_failure)\n  call i32 @fflush(ptr null)\n  ret i32 101\n",
+        );
+        module.push_str(
+            "task_cancelled:\n  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @flurry_test_msg_cancelled)\n  call i32 @fflush(ptr null)\n  ret i32 102\n",
+        );
+        module.push_str(
+            "unhandled_effect:\n  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @flurry_test_msg_effect)\n  call i32 @fflush(ptr null)\n  ret i32 103\n",
+        );
+        module.push_str("complete:\n");
+        if error_descriptions.is_some() {
+            module.push_str(&format!(
+                "  %tag = extractvalue {packet} %result, 0\n  br label %check_tag\n"
+            ));
+        } else {
+            module.push_str("  %status = call i32 @flurry_output_finish()\n  ret i32 %status\n");
+        }
+    } else if error_descriptions.is_some() {
+        module.push_str(&format!(
+            "  %tag = call i32 @flurry_{root}()\n  br label %check_tag\n"
+        ));
+    } else {
+        module.push_str(&format!(
+            "  call void @flurry_{root}()\n  %status = call i32 @flurry_output_finish()\n  ret i32 %status\n"
+        ));
+    }
+
+    if let Some(descriptions) = error_descriptions {
+        module.push_str("check_tag:\n  switch i32 %tag, label %bad_tag [ i32 0, label %passed");
+        for index in 0..descriptions.len() {
+            let tag = index + 1;
+            module.push_str(&format!(" i32 {tag}, label %err_{index}"));
+        }
+        module.push_str(" ]\n");
+        module.push_str(
+            "passed:\n  %pass_status = call i32 @flurry_output_finish()\n  ret i32 %pass_status\n",
+        );
+        for index in 0..descriptions.len() {
+            module.push_str(&format!(
+                "err_{index}:\n  call i32 (i32, ptr, ...) @dprintf(i32 2, ptr @flurry_test_err_{index})\n  call i32 @fflush(ptr null)\n  ret i32 104\n"
+            ));
+        }
+        module.push_str("bad_tag:\n  call void @llvm.trap()\n  unreachable\n");
+    }
+
+    module.push_str("}\n");
+    Ok(module)
+}
+
 impl Printer<'_> {
     fn print(&mut self, format: &str) -> Result<(), String> {
-        use std::fmt::Write;
         *self.fuel = self
             .fuel
             .checked_sub(format.len().saturating_add(1))
             .ok_or("host entry format budget exhausted")?;
         let name = format!("flurry_display_format{}", self.serial);
         self.serial += 1;
-        let mut escaped = String::new();
-        for byte in format.bytes() {
-            write!(&mut escaped, "\\{byte:02X}").expect("writing to a String cannot fail");
-        }
-        self.globals.push_str(&format!(
-            "@{name} = private constant [{} x i8] c\"{escaped}\\00\"\n",
-            format.len() + 1
-        ));
+        append_escaped_c_string(&mut self.globals, &name, format);
         let args = std::mem::take(&mut self.args)
             .into_iter()
             .map(|a| format!(", {a}"))
@@ -395,5 +534,37 @@ mod tests {
         assert!(output.contains("\\25\\25\\73"));
         assert!(output.contains("\\5C\\6E"));
         assert!(output.contains("\\E4\\B8\\AD"));
+    }
+
+    #[test]
+    fn test_main_escapes_dprintf_directives_and_checks_budget() {
+        let descriptions = vec!["(error-type \"Pct%sErr\")".to_owned()];
+        let err =
+            test_main(0, &Ty::Int(32, false), true, Some(&descriptions), &mut 50).unwrap_err();
+        assert_eq!(err, "host test entry diagnostic budget exhausted");
+
+        let checked_err = test_main(
+            0,
+            &Ty::Int(32, false),
+            true,
+            Some(&descriptions),
+            &mut 10_000,
+        )
+        .unwrap();
+        assert!(checked_err.contains("\\25\\25\\73"));
+        assert!(checked_err.contains("call { i32, ptr } @flurry_task_entry(ptr %task)"));
+        assert!(checked_err.contains("ret i32 101"));
+        assert!(checked_err.contains("ret i32 102"));
+        assert!(checked_err.contains("ret i32 103"));
+        assert!(checked_err.contains("ret i32 104"));
+
+        let unchecked_void = test_main(3, &Ty::Unit, false, None, &mut 10_000).unwrap();
+        assert!(unchecked_void.contains("call void @flurry_3()"));
+        assert!(unchecked_void.contains("call i32 @flurry_output_finish()"));
+
+        let checked_void = test_main(2, &Ty::Unit, true, None, &mut 10_000).unwrap();
+        assert!(checked_void.contains("call { {}, ptr } @flurry_task_entry(ptr %task)"));
+        assert!(checked_void.contains("@flurry_test_msg_failure"));
+        assert!(!checked_void.contains("ret i32 104"));
     }
 }

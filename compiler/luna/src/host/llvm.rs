@@ -2866,6 +2866,13 @@ impl Emitter<'_> {
     }
 }
 
+pub(super) enum EntryMode {
+    Display,
+    Silent,
+    TestVoid,
+    TestErrorTag { error_descriptions: Vec<String> },
+}
+
 #[cfg(test)]
 pub(super) fn emit(
     graph: &iir::Package,
@@ -2874,24 +2881,24 @@ pub(super) fn emit(
     schedule: Option<&iir::cleanup::Schedule>,
     entry: Option<&iir::InstanceKey>,
 ) -> Result<String, String> {
-    emit_with_result_output(
+    emit_with_entry_mode(
         graph,
         fuel,
         checked,
         schedule,
         entry,
-        true,
+        EntryMode::Display,
         &Default::default(),
     )
 }
 
-pub(super) fn emit_with_result_output(
+pub(super) fn emit_with_entry_mode(
     graph: &iir::Package,
     mut fuel: usize,
     checked: bool,
     schedule: Option<&iir::cleanup::Schedule>,
     entry: Option<&iir::InstanceKey>,
-    display_result: bool,
+    mode: EntryMode,
     attributes: &nir::program::DefinitionAttributes,
 ) -> Result<String, String> {
     if graph.roots.is_empty() {
@@ -3358,6 +3365,11 @@ pub(super) fn emit_with_result_output(
     if matches!(logical_result.as_ref(), Term::Nominal { .. }) {
         return Err("owned nominal values need an entry cleanup adapter; use --discard-result with Copy/Drop protocols".into());
     }
+    if matches!(mode, EntryMode::TestErrorTag { .. })
+        || (checked && matches!(mode, EntryMode::TestVoid))
+    {
+        declarations.insert("declare i32 @dprintf(i32, ptr, ...)".into());
+    }
     let mut module = String::from(
         "; Flurry native host module\nsource_filename = \"flurry-host\"\ndeclare void @llvm.trap()\ndeclare i32 @printf(ptr, ...)\n",
     );
@@ -3371,26 +3383,31 @@ pub(super) fn emit_with_result_output(
     if checked {
         module.push_str(include_str!("llvm/task_context.ll"));
         let packet = control::packet(&result).llvm();
-        let ret = if never_returns {
-            "unreachable".into()
-        } else if result == Ty::Unit {
-            "ret void".into()
-        } else {
-            format!(
-                "%value = extractvalue {packet} %result, 0\n  ret {} %value",
-                result.llvm()
-            )
-        };
         // Scheduling is a cancellation point before the root owns arguments or locals.
         module.push_str(&format!(
             "define {packet} @flurry_task_entry(ptr nonnull %task) {{\nentry:\n  %ctrl = call ptr @flurry_task_poll(ptr %task)\n  %ready = icmp eq ptr %ctrl, null\n  br i1 %ready, label %start, label %cancel, {}\ncancel:\n  %stopped = insertvalue {packet} zeroinitializer, ptr %ctrl, 1\n  ret {packet} %stopped\nstart:\n  %result = call {packet} @flurry_{root}(ptr %task)\n  ret {packet} %result\n}}\n\n",
             control::LIKELY
         ));
-        module.push_str(&format!("define internal {} @flurry_entry() {{\nentry:\n  %task = alloca %flurry.task\n  call void @flurry_task_init(ptr %task, ptr null)\n  %result = call {packet} @flurry_task_entry(ptr %task)\n  %ctrl = extractvalue {packet} %result, 1\n  %ok = icmp eq ptr %ctrl, null\n  br i1 %ok, label %complete, label %unhandled, {}\nunhandled:\n  call void @llvm.trap()\n  unreachable\ncomplete:\n  {ret}\n}}\n\n", result.llvm(), control::LIKELY));
+        if matches!(mode, EntryMode::Display | EntryMode::Silent) {
+            let ret = if never_returns {
+                "unreachable".into()
+            } else if result == Ty::Unit {
+                "ret void".into()
+            } else {
+                format!(
+                    "%value = extractvalue {packet} %result, 0\n  ret {} %value",
+                    result.llvm()
+                )
+            };
+            module.push_str(&format!("define internal {} @flurry_entry() {{\nentry:\n  %task = alloca %flurry.task\n  call void @flurry_task_init(ptr %task, ptr null)\n  %result = call {packet} @flurry_task_entry(ptr %task)\n  %ctrl = extractvalue {packet} %result, 1\n  %ok = icmp eq ptr %ctrl, null\n  br i1 %ok, label %complete, label %unhandled, {}\nunhandled:\n  call void @llvm.trap()\n  unreachable\ncomplete:\n  {ret}\n}}\n\n", result.llvm(), control::LIKELY));
+        }
     }
     for declaration in declarations {
         module.push_str(&declaration);
         module.push('\n');
+    }
+    if never_returns && matches!(mode, EntryMode::TestVoid | EntryMode::TestErrorTag { .. }) {
+        return Err("host test entry cannot return Never".into());
     }
     if never_returns {
         module.push_str(&functions);
@@ -3404,15 +3421,34 @@ pub(super) fn emit_with_result_output(
         ));
         return finish_module(module, &mut fuel);
     }
-    if !display_result {
-        if !checked || result != Ty::Unit {
-            return Err("silent host entry requires a checked void adapter".into());
+    match mode {
+        EntryMode::TestVoid => {
+            module.push_str(&functions);
+            module.push_str(&entry::test_main(root, &result, checked, None, &mut fuel)?);
+            return finish_module(module, &mut fuel);
         }
-        module.push_str(&functions);
-        module.push_str(
-            "define i32 @main() {\nentry:\n  call void @flurry_entry()\n  ret i32 0\n}\n",
-        );
-        return finish_module(module, &mut fuel);
+        EntryMode::TestErrorTag { error_descriptions } => {
+            module.push_str(&functions);
+            module.push_str(&entry::test_main(
+                root,
+                &result,
+                checked,
+                Some(&error_descriptions),
+                &mut fuel,
+            )?);
+            return finish_module(module, &mut fuel);
+        }
+        EntryMode::Silent => {
+            if !checked || result != Ty::Unit {
+                return Err("silent host entry requires a checked void adapter".into());
+            }
+            module.push_str(&functions);
+            module.push_str(
+                "define i32 @main() {\nentry:\n  call void @flurry_entry()\n  ret i32 0\n}\n",
+            );
+            return finish_module(module, &mut fuel);
+        }
+        EntryMode::Display => {}
     }
     if matches!(
         result,

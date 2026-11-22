@@ -15,6 +15,7 @@ pub struct TestReport {
     pub results: Vec<TestResult>,
     pub filtered_out: usize,
 }
+
 impl TestReport {
     pub fn failures(&self) -> usize {
         self.results
@@ -22,10 +23,12 @@ impl TestReport {
             .filter(|result| result.failure.is_some())
             .count()
     }
+
     pub fn is_success(&self) -> bool {
         self.failures() == 0
     }
 }
+
 impl fmt::Display for TestReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use nir::program::Literal;
@@ -97,6 +100,30 @@ pub fn run_report(
     run_report_filtered(package, identity, fuel, inline, protocols, None)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestReturnKind {
+    Void,
+    ErrorResultVoid,
+}
+
+fn classify_test_return(function: &nir::program::Function) -> Option<TestReturnKind> {
+    let nir::Term::Function { parameters, result } = function.signature.callable_signature() else {
+        return None;
+    };
+    if !parameters.is_empty() {
+        return None;
+    }
+    match result.as_ref() {
+        nir::Term::Primitive(nir::Primitive::Void) => Some(TestReturnKind::Void),
+        nir::Term::ErrorResult { result: ok, .. }
+            if **ok == nir::Term::Primitive(nir::Primitive::Void) =>
+        {
+            Some(TestReturnKind::ErrorResultVoid)
+        }
+        _ => None,
+    }
+}
+
 pub fn run_report_filtered(
     package: &Package,
     identity: u64,
@@ -121,41 +148,126 @@ pub fn run_report_filtered(
         .transpose()?;
     let functions = test_functions(package, identity)?;
     let mut report = TestReport::default();
-    let mut checked = None;
-    let mut reference = None;
+    let mut selected_functions = Vec::new();
     for function in functions {
         let label = test_label(function);
         if filter.is_some_and(|text| !label.contains(text)) {
             report.filtered_out += 1;
             continue;
         }
-        let result = if let Some((copy, drop)) = selected {
+        selected_functions.push((function, label));
+    }
+    let (adapted_package, error_adapters) = if selected.is_some()
+        && selected_functions.iter().any(|(function, _)| {
+            classify_test_return(function) == Some(TestReturnKind::ErrorResultVoid)
+        }) {
+        let mut adapted = package.clone();
+        let mut adapters = std::collections::BTreeMap::new();
+        for (function, _) in &selected_functions {
+            if classify_test_return(function) == Some(TestReturnKind::ErrorResultVoid) {
+                let entry =
+                    crate::host::synthesize_error_test_adapter(&mut adapted, function.declaration)?;
+                adapters.insert(function.declaration, entry);
+            }
+        }
+        (std::borrow::Cow::Owned(adapted), adapters)
+    } else {
+        (
+            std::borrow::Cow::Borrowed(package),
+            std::collections::BTreeMap::new(),
+        )
+    };
+    let mut pending_adapted = Some(adapted_package);
+    let mut checked = None;
+    let mut reference = None;
+    for (function, label) in selected_functions {
+        let Some(kind) = classify_test_return(function) else {
+            report.results.push(TestResult {
+                declaration: function.declaration,
+                name: label.to_owned(),
+                failure: Some("test must return void or !E void".into()),
+            });
+            continue;
+        };
+        let failure = if let Some((copy, drop)) = selected {
             let session = checked.get_or_insert_with(|| {
+                let input = pending_adapted
+                    .take()
+                    .expect("adapted test package available for checked session");
                 crate::execution::CheckedSession::new(
-                    std::borrow::Cow::Borrowed(package),
+                    input,
                     crate::resources::Selection::Identity(copy),
                     crate::resources::Selection::Identity(drop),
                     fuel,
                     inline,
                 )
             });
-            match session {
-                Ok(session) => session.invoke(function.declaration, &function.name),
-                Err(error) => Err(error.clone()),
+            match (session, kind) {
+                (Ok(session), TestReturnKind::Void) => {
+                    match session.invoke(function.declaration, &function.name) {
+                        Ok(comptime_interpretor::Value::Unit) => None,
+                        Ok(_) => Some("test must return void or !E void".into()),
+                        Err(error) => Some(error),
+                    }
+                }
+                (Ok(session), TestReturnKind::ErrorResultVoid) => {
+                    let (adapter, error_descriptions) = &error_adapters[&function.declaration];
+                    match session.invoke(*adapter, &function.name) {
+                        Ok(comptime_interpretor::Value::UnsignedInteger(0)) => None,
+                        Ok(comptime_interpretor::Value::UnsignedInteger(tag)) => {
+                            let branch = usize::try_from(tag)
+                                .ok()
+                                .and_then(|value| value.checked_sub(1))
+                                .and_then(|index| {
+                                    error_descriptions
+                                        .get(index)
+                                        .map(|desc| (index, desc.as_str()))
+                                });
+                            match branch {
+                                Some((index, desc)) => Some(format!(
+                                    "test returned error (branch (error {index})) {desc}"
+                                )),
+                                None => Some(format!("unexpected error test tag: {tag}")),
+                            }
+                        }
+                        Ok(other) => Some(format!("unexpected error test adapter result: {other}")),
+                        Err(error) => Some(error),
+                    }
+                }
+                (Err(error), _) => Some(error.clone()),
             }
         } else {
             let session = reference.get_or_insert_with(|| {
                 crate::execution::ReferenceSession::new(std::borrow::Cow::Borrowed(package), fuel)
             });
-            match session {
+            let result = match session {
                 Ok(session) => session.invoke(function.declaration, &function.name),
                 Err(error) => Err(error.clone()),
+            };
+            match (result, kind) {
+                (Ok(comptime_interpretor::Value::Unit), TestReturnKind::Void) => None,
+                (
+                    Ok(comptime_interpretor::Value::ErrorResult {
+                        error: None, value, ..
+                    }),
+                    TestReturnKind::ErrorResultVoid,
+                ) if *value == comptime_interpretor::Value::Unit => None,
+                (
+                    Ok(comptime_interpretor::Value::ErrorResult {
+                        ty,
+                        error: Some(index),
+                        value,
+                    }),
+                    TestReturnKind::ErrorResultVoid,
+                ) => {
+                    let desc = crate::host::describe_error_branch(package, &ty, index);
+                    Some(format!(
+                        "test returned error (branch (error {index})) {desc} (value {value})"
+                    ))
+                }
+                (Ok(_), _) => Some("test must return void or !E void".into()),
+                (Err(error), _) => Some(error),
             }
-        };
-        let failure = match result {
-            Ok(comptime_interpretor::Value::Unit) => None,
-            Ok(_) => Some("test must return void".into()),
-            Err(error) => Some(error),
         };
         report.results.push(TestResult {
             declaration: function.declaration,
@@ -195,6 +307,7 @@ fn test_functions(
             if function.phase != nir::program::FunctionPhase::Runtime
                 || !function.type_parameters.is_empty()
                 || !function.parameters.is_empty()
+                || !function.env_parameters.is_empty()
             {
                 return Err("test must be a non-generic zero-argument runtime function".into());
             }
@@ -208,11 +321,13 @@ pub struct TestEntry {
     pub declaration: DeclarationId,
     pub name: String,
 }
+
 #[derive(Debug, Default)]
 pub struct TestInventory {
     pub entries: Vec<TestEntry>,
     pub filtered_out: usize,
 }
+
 impl fmt::Display for TestInventory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(test-inventory")?;
@@ -317,9 +432,7 @@ pub fn run_native_report_filtered_with_inlining(
             report.filtered_out += 1;
             continue;
         }
-        let result = if matches!(function.signature.callable_signature(), nir::Term::Function { result, .. }
-            if **result == nir::Term::Primitive(nir::Primitive::Void))
-        {
+        let result = if classify_test_return(function).is_some() {
             let input = if inline {
                 expanded
                     .get_or_insert_with(|| crate::host::inline_package(package, fuel))
@@ -330,11 +443,16 @@ pub fn run_native_report_filtered_with_inlining(
             };
             input
                 .and_then(|input| {
-                    crate::host::llvm_ir_declaration(input, function.declaration, fuel, selected)
+                    crate::host::llvm_ir_test_declaration(
+                        input,
+                        function.declaration,
+                        fuel,
+                        selected,
+                    )
                 })
                 .and_then(|ir| toolchain.execute_test(&ir, timeout))
         } else {
-            Err("test must return void".into())
+            Err("test must return void or !E void".into())
         };
         report.results.push(TestResult {
             declaration: function.declaration,
