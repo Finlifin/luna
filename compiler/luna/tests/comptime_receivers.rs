@@ -85,7 +85,7 @@ fn ordinary_parameters_still_have_value_semantics() {
 fn trait_receivers_write_back_to_the_selected_subject() {
     let package = support::compile(
         "struct Cell {value:bool}
-        trait Set { ^{comptime_phase:true} comptime fn set(self); }
+        trait Set { ^{__flurry_comptime_phase:true} comptime fn set(self); }
         comptime impl Set for Cell { comptime fn set(self) {self.value=true;} }
         comptime fn run()->bool {let cell=Cell{value:false};cell.as(Set).set();cell.value}",
     );

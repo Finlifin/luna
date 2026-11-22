@@ -7,7 +7,7 @@ use comptime_interpretor::Value;
 fn source(implementation: &str, body: &str) -> String {
     format!(
         r#"
-        const staged={{comptime_phase:true}};
+        const staged={{__flurry_comptime_phase:true}};
         trait Choose {{
             ^staged comptime fn choose(.value:bool=flag)->bool where flag:bool;
         }}

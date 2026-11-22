@@ -70,7 +70,7 @@ pub fn member_phases(
         budget
             .consume(1)
             .map_err(|e| failure(location, e.to_string()))?;
-        let Some(selected) = target.get("comptime_phase") else {
+        let Some(selected) = target.get("__flurry_comptime_phase") else {
             continue;
         };
         let location = selected.origin.source;

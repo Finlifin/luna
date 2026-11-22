@@ -1,0 +1,14 @@
+use bindings.{Object, bool, str};
+
+pub pure comptime fn ast(variadic: bool) -> Object {
+    let descriptor = { __flurry_macro_kind: .ast, __flurry_macro_variadic: variadic };
+    descriptor
+}
+
+pub pure comptime fn peg(grammar: str) -> Object {
+    let descriptor = { __flurry_macro_kind: .peg, __flurry_macro_grammar: grammar };
+    descriptor
+}
+
+pub const macro3: Object = { __flurry_macro_kind: .tokens };
+pub const macro4: Object = { __flurry_macro_kind: .source };

@@ -1,6 +1,6 @@
 use bindings.Object;
 
 pub pure comptime fn metadata(data: Object) -> Object {
-    let wrapper = { metadata: data }
+    let wrapper = { __flurry_metadata: data }
     wrapper
 }

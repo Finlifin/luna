@@ -237,9 +237,8 @@ pub const alternatives = @define_macro1 {
     let expanded = expand_builtins(src).expect("valid @define_macro1 forms");
     assert!(expanded.expanded);
     let out = expanded.source_text.as_deref().unwrap();
-    assert!(out.contains("flurry_macro_kind: .ast"), "{out}");
-    assert!(out.contains("flurry_macro_variadic: false"), "{out}");
-    assert!(out.contains("flurry_macro_variadic: true"), "{out}");
+    assert!(out.contains("attrs.macros.ast(false)"), "{out}");
+    assert!(out.contains("attrs.macros.ast(true)"), "{out}");
     assert!(out.contains("comptime fn zero"), "{out}");
     assert!(out.contains("pub comptime fn single"), "{out}");
     assert!(out.contains("private comptime fn with_opt"), "{out}");

@@ -33,7 +33,7 @@ pub fn metadata_entries(
             source: location,
             message: e.to_string(),
         })?;
-        let Some(selected) = target.get("metadata") else {
+        let Some(selected) = target.get("__flurry_metadata") else {
             continue;
         };
         let location = selected.origin.source;

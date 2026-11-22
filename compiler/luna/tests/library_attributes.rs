@@ -202,7 +202,7 @@ fn comptime_phase_prelude_value_preserves_boolean_metadata() {
         panic!("expected Object")
     };
     assert_eq!(object.entries().len(), 1);
-    assert_eq!(object.entries()[0].key(), Some("comptime_phase"));
+    assert_eq!(object.entries()[0].key(), Some("__flurry_comptime_phase"));
     assert_eq!(
         object.entries()[0].value().ty,
         Term::Primitive(Primitive::Bool)
@@ -375,9 +375,12 @@ fn repository_attribute_package_inspects_stable_since_without_claiming_abi_stabi
 
     let mut ordinary = arguments;
     *ordinary.last_mut().unwrap() = "nir";
-    let rejected = run(&ordinary);
-    assert_eq!(rejected.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("attribute"));
+    let admitted = run(&ordinary);
+    assert!(
+        admitted.status.success(),
+        "{}",
+        String::from_utf8_lossy(&admitted.stderr)
+    );
     std::fs::remove_dir_all(directory).unwrap();
 }
 

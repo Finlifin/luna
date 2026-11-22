@@ -234,8 +234,8 @@ fn memoized_type_storage_requires_no_runtime_resource_authority() {
 
 #[test]
 fn memoized_keys_use_value_snapshots_without_runtime_resources() {
-    let source = "const eq_key_phase={comptime_phase:true}; trait Eq {^eq_key_phase comptime fn eq(self,other:Self)->bool;}
-        const hash_key_phase={comptime_phase:true}; trait Hash {^hash_key_phase comptime fn hash(self)->.u8'builtin;}
+    let source = "const eq_key_phase={__flurry_comptime_phase:true}; trait Eq {^eq_key_phase comptime fn eq(self,other:Self)->bool;}
+        const hash_key_phase={__flurry_comptime_phase:true}; trait Hash {^hash_key_phase comptime fn hash(self)->.u8'builtin;}
         trait Duplicate {}trait Retire {fn drop(*self);}
         struct Packet {flag:bool}impl Duplicate for Packet {}
         comptime impl Eq for bool {comptime fn eq(self,other:bool)->bool {

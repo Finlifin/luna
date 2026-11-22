@@ -132,8 +132,8 @@ fn source_comptime_contribution_executes_and_retains_phase_metadata() {
 #[test]
 fn phase_attributes_use_ordinary_comptime_evaluation_and_override_order() {
     let source = "
-        comptime fn metadata() -> .Object'builtin {let value={comptime_phase: false}; value}
-        const staged={comptime_phase:true};
+        comptime fn metadata() -> .Object'builtin {let value={__flurry_comptime_phase: false}; value}
+        const staged={__flurry_comptime_phase:true};
         trait Code { ^metadata() ^staged comptime fn value()->bool; }
         struct Subject {}
         impl Code for Subject {comptime fn value()->bool {true}}
@@ -176,11 +176,11 @@ fn runtime_contribution_does_not_need_comptime_members() {
 fn source_phase_metadata_rejects_wrong_targets_domains_and_unknown_keys() {
     for (source, expected) in [
         (
-            "const staged={comptime_phase:true}; ^staged fn run()->bool {true}",
+            "const staged={__flurry_comptime_phase:true}; ^staged fn run()->bool {true}",
             "requires a trait method",
         ),
         (
-            "const staged={comptime_phase:9}; trait Code {^staged fn value()->bool;}",
+            "const staged={__flurry_comptime_phase:9}; trait Code {^staged fn value()->bool;}",
             "requires a completed Bool",
         ),
         (
@@ -248,7 +248,7 @@ fn metadata_inspection_accepts_the_same_comptime_contribution_as_execution() {
 #[test]
 fn explicitly_opposite_member_phase_is_rejected() {
     let source = phase_source(
-        "\n        const ordinary={comptime_phase:false};\n        trait Code { ^staged comptime fn value()->bool; }\n        struct Subject {}\n        comptime impl Code for Subject { ^ordinary comptime fn value()->bool {true} }\n    ",
+        "\n        const ordinary={__flurry_comptime_phase:false};\n        trait Code { ^staged comptime fn value()->bool; }\n        struct Subject {}\n        comptime impl Code for Subject { ^ordinary comptime fn value()->bool {true} }\n    ",
     );
     let diagnostic = support::compile_with_protocols(&source, &Default::default()).unwrap_err();
     assert!(
@@ -448,7 +448,7 @@ fn associated_phase_checks_required_values_and_explicit_annotations() {
     ] {
         let source = phase_source(&format!(
             r#"
-            const ordinary = {{comptime_phase:false}};
+            const ordinary = {{__flurry_comptime_phase:false}};
             trait Code {{ ^staged assoc enabled: bool; }}
             struct Subject {{}}
             {implementation}
@@ -635,7 +635,7 @@ fn complementary_generic_scalar_initializers_preserve_value_inputs() {
 
 #[test]
 fn member_prefix_attributes_can_use_the_enclosing_impl_self() {
-    let source = "typealias Type=.Type'builtin; comptime fn metadata(T:Type)->.Object'builtin {let value={comptime_phase:T == Subject};value} trait Flag {^{comptime_phase:true} comptime fn flag()->bool;} struct Subject {} comptime impl Flag for Subject {^metadata(Self) comptime fn flag()->bool {true}} comptime fn run()->bool {Subject.as(Flag).flag()}";
+    let source = "typealias Type=.Type'builtin; comptime fn metadata(T:Type)->.Object'builtin {let value={__flurry_comptime_phase:T == Subject};value} trait Flag {^{__flurry_comptime_phase:true} comptime fn flag()->bool;} struct Subject {} comptime impl Flag for Subject {^metadata(Self) comptime fn flag()->bool {true}} comptime fn run()->bool {Subject.as(Flag).flag()}";
     let package = support::compile(source);
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
@@ -735,7 +735,7 @@ fn comptime_only_trait_member_attributes_are_idempotent_but_cannot_disable_phase
     let package = support::compile(&source);
     assert!(package.traits.iter().any(|t| t.comptime_only));
     let source = phase_source(
-        "pure comptime trait Code { ^{comptime_phase: false} comptime fn value()->bool; }",
+        "pure comptime trait Code { ^{__flurry_comptime_phase: false} comptime fn value()->bool; }",
     );
     let failure = compile(&source, Emit::Nir).err().expect("invalid override");
     assert!(

@@ -36,7 +36,7 @@ pub fn default_strategy_markers(
             source: location,
             message: e.to_string(),
         })?;
-        let Some(selected) = target.get("derivation_default") else {
+        let Some(selected) = target.get("__flurry_derivation_default") else {
             continue;
         };
         let location = selected.origin.source;

@@ -2100,7 +2100,7 @@ impl Checker<'_, '_> {
                         .package
                         .item(owner)
                         .is_some_and(|item| matches!(item.kind, ItemKind::Deriver(_)))
-                        && target.iter().all(|(key, _)| key == "derivation_default")
+                        && target.iter().all(|(key, _)| key == "__flurry_derivation_default")
                     {
                         validated_deriver_attrs.insert(owner);
                     }

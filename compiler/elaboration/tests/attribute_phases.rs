@@ -68,7 +68,7 @@ fn metadata(target: u32, enabled: bool, offset: u32) -> EvaluatedAttribute {
             start: offset,
             end: offset + 1,
         },
-        configuration_key: Some("comptime_phase".into()),
+        configuration_key: Some("__flurry_comptime_phase".into()),
         value: NExpr {
             source: SourceRange {
                 start: offset,
@@ -189,7 +189,7 @@ fn default_markers_validate_both_payload_and_domain_without_partial_results() {
         },
     );
     let mut valid = metadata(3, true, 40);
-    valid.configuration_key = Some("derivation_default".into());
+    valid.configuration_key = Some("__flurry_derivation_default".into());
     for invalid in 0..3 {
         let mut bad = valid.clone();
         match invalid {

@@ -108,7 +108,7 @@ fn assert_success(output: &Output) {
 #[test]
 fn default_derivation_selection_visibility_parametric_and_coherence() {
     let source = r#"
-        const default_marker = { derivation_default: true }
+        const default_marker = { __flurry_derivation_default: true }
 
         trait Flag {
             fn value() -> u64;
@@ -193,7 +193,7 @@ fn default_derivation_selection_visibility_parametric_and_coherence() {
     assert_eq!(out.stdout, b"(bool true)\n");
 
     let unmatched_parametric = r#"
-        const default_marker = { derivation_default: true }
+        const default_marker = { __flurry_derivation_default: true }
         trait FormatLabel where format: Symbol {
             fn label() -> u64;
         }
@@ -211,11 +211,11 @@ fn default_derivation_selection_visibility_parametric_and_coherence() {
     );
 
     let disabled = r#"
-        const default_marker = { derivation_default: true }
+        const default_marker = { __flurry_derivation_default: true }
         trait Flag {
             fn value() -> u64;
         }
-        ^{ derivation_default: false }
+        ^{ __flurry_derivation_default: false }
         ^default_marker
         derive fn flag_default for Flag {
             fn value() -> u64 { 1 }
@@ -234,7 +234,7 @@ fn default_derivation_selection_visibility_parametric_and_coherence() {
             mod service {
                 private mod hidden {
                     use ..Flag;
-                    const secret = { derivation_default: true }
+                    const secret = { __flurry_derivation_default: true }
                     ^secret
                     derive fn hidden_default for Flag {
                         fn value() -> u64 { 2 }
@@ -250,7 +250,7 @@ fn default_derivation_selection_visibility_parametric_and_coherence() {
         r#"
             mod inner {
                 use .Flag;
-                const secret = { derivation_default: true }
+                const secret = { __flurry_derivation_default: true }
                 ^secret
                 private derive fn hidden_default for Flag {
                     fn value() -> u64 { 2 }
@@ -271,7 +271,7 @@ fn default_derivation_selection_visibility_parametric_and_coherence() {
     }
 
     let ambiguous = r#"
-        const default_marker = { derivation_default: true }
+        const default_marker = { __flurry_derivation_default: true }
         trait Flag {
             fn value() -> u64;
         }
@@ -305,7 +305,7 @@ fn default_derivation_selection_visibility_parametric_and_coherence() {
         dir.join("app.fl"),
         r#"
             use base.ForeignFlag;
-            const marker = { derivation_default: true }
+            const marker = { __flurry_derivation_default: true }
             ^marker
             derive fn bad_orphan for ForeignFlag {}
             struct Subject {}
@@ -519,7 +519,7 @@ fn direct_passing_effect_attribute_aliases_overrides_and_validation() {
         ^dp
         effect tock() -> u64;
 
-        ^{ direct_passing: false }
+        ^{ __flurry_direct_passing: false }
         ^attrs.effects.direct_passing
         effect overridden() -> u64;
 
@@ -628,13 +628,13 @@ fn metadata_attribute_view_reflection_cycle_and_c_abi() {
                 and not Plain.is_packed()
                 and (Record.packed_mode() matches .byte?)
                 and (Plain.packed_mode() matches null);
-            let struct_meta_ok = record_attrs.get<meta.Object>(.metadata) match {
+            let struct_meta_ok = record_attrs.get<meta.Object>(.__flurry_metadata) match {
                 m? => (m.get<Integer>(.version) matches 2?)
                     and (m.get<Symbol>(.author) matches .luna?),
                 null => false,
             };
             let direct_ok = direct_attrs.get<bool>(.packed) matches true?;
-            let fn_meta_ok = fn_attrs.get<meta.Object>(.metadata) match {
+            let fn_meta_ok = fn_attrs.get<meta.Object>(.__flurry_metadata) match {
                 m? => m.get<Symbol>(.role) matches .entry?,
                 null => false,
             };
@@ -736,7 +736,7 @@ fn attribute_suppliers_can_inspect_independent_unannotated_declarations() {
         struct Plain {}
         fn plain_fn() -> bool { true }
         comptime fn run() -> bool {
-            Decorated'attribute.get<meta.Object>(.metadata) match {
+            Decorated'attribute.get<meta.Object>(.__flurry_metadata) match {
                 data? => (data.get<bool>(.plain_type) matches true?)
                     and (data.get<bool>(.plain_fn) matches true?),
                 null => false,
@@ -756,13 +756,13 @@ fn attribute_suppliers_follow_demand_and_reject_cycles() {
         ^attrs.layout.packed
         struct Last { tag: u8 }
         comptime fn has_packed(f: fn() -> bool) -> bool {
-            f'attribute.get<meta.Object>(.metadata) match {
+            f'attribute.get<meta.Object>(.__flurry_metadata) match {
                 data? => data.get<bool>(.inherited) matches true?,
                 null => false,
             }
         }
         comptime fn run() -> bool {
-            First'attribute.get<meta.Object>(.metadata) match {
+            First'attribute.get<meta.Object>(.__flurry_metadata) match {
                 data? => (data.get<bool>(.left) matches true?)
                     and (data.get<bool>(.right) matches true?),
                 null => false,
@@ -803,7 +803,7 @@ fn early_and_published_attribute_reads_agree_on_overrides_and_empty_objects() {
         struct Empty {}
 
         comptime fn run() -> bool {
-            Reader'attribute.get<meta.Object>(.metadata) match {
+            Reader'attribute.get<meta.Object>(.__flurry_metadata) match {
                 data? => (data.get<bool>(.disabled) matches true?)
                     and (Target'attribute.get<bool>(.packed) matches false?)
                     and (data.get<bool>(.empty) matches true?)
@@ -832,7 +832,7 @@ fn early_attribute_reads_still_require_the_final_consumer_to_accept_the_target()
     let source = r#"
         ^attrs.metadata(Late'attribute)
         struct Reader {}
-        ^{ metadata: false }
+        ^{ __flurry_metadata: false }
         struct Late {}
     "#;
     let failure = support::compile(source).unwrap_err();
@@ -848,7 +848,7 @@ fn attribute_supplier_depth_exhaustion_is_distinct_from_a_cycle() {
         let mut source = String::new();
         for i in 0..edges {
             source.push_str(&format!(
-                "^attrs.metadata({{ has_next: D{}'attribute.has_key(.metadata) }}) struct D{i} {{}}\n", i + 1
+                "^attrs.metadata({{ has_next: D{}'attribute.has_key(.__flurry_metadata) }}) struct D{i} {{}}\n", i + 1
             ));
         }
         source.push_str(&format!(
@@ -872,7 +872,7 @@ fn attribute_suppliers_build_each_generated_declaration_once() {
             let witness = meta.StructBuilder.new(.name = .BeforeAttributeRead).Build();
             let left = Inner'attribute;
             let right = Inner'attribute;
-            let data: meta.Object = { generated: witness == witness, left: left.has_key(.metadata), right: right.has_key(.metadata) };
+            let data: meta.Object = { generated: witness == witness, left: left.has_key(.__flurry_metadata), right: right.has_key(.__flurry_metadata) };
             data
         }
         ^attrs.metadata(outer())
@@ -904,7 +904,7 @@ fn attribute_suppliers_build_each_generated_declaration_once() {
 fn nested_attribute_values_deliver_generated_layouts_to_reflection_and_builders() {
     let source = r#"
         comptime fn Generated(subject: Type) -> Type {
-            subject'attribute.get<meta.Object>(.metadata) match {
+            subject'attribute.get<meta.Object>(.__flurry_metadata) match {
                 data? => data.get<Type>(.generated) match { ty? => ty, null => bool },
                 null => bool,
             }
@@ -935,11 +935,27 @@ fn nested_attribute_values_deliver_generated_layouts_to_reflection_and_builders(
         ^attrs.metadata(inner())
         struct Inner {}
         comptime fn run() -> bool {
-            let correct = Outer'attribute.get<meta.Object>(.metadata) match {
+            let correct = Outer'attribute.get<meta.Object>(.__flurry_metadata) match {
                 data? => data.get<bool>(.correct) matches true?, null => false,
             };
             correct and Generated(Outer).struct_field_types()[0] == Generated(Inner)
         }
     "#;
     assert_eq!(support::invoke(source, "run").unwrap(), Value::Bool(true));
+}
+
+#[test]
+fn normal_form_instances_read_the_head_version_through_aliases() {
+    let source = r#"
+        ^attrs.stable_since("1.2.3")
+        pure comptime fn Tagged<T> -> Type { T }
+        typealias Wrapped = Tagged<u32>;
+        comptime fn check() -> bool {
+            let version = Wrapped'attribute.get<str>(.__flurry_stable_since);
+            (version matches "1.2.3"?) and not u32'attribute.has_key(.__flurry_stable_since)
+        }
+        const result = check();
+        fn run() -> bool { result }
+    "#;
+    assert_eq!(support::run(source), Value::Bool(true));
 }

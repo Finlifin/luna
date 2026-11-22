@@ -123,13 +123,28 @@ impl Checker<'_, '_> {
                             });
                         }
                     }
-                    if !inspect_only
+                    let domain = match key {
+                        "__flurry_macro_kind" => Some(P::Symbol),
+                        "__flurry_macro_variadic" => Some(P::Bool),
+                        "__flurry_macro_grammar" | "__flurry_stable_since" => Some(P::Str),
+                        _ => None,
+                    };
+                    if let Some(domain) = domain
+                        && value.value.ty != p(domain)
+                    {
+                        return Err(MergeFailure {
+                            source: value.origin.source,
+                            message: format!("{key} requires the {domain:?} domain"),
+                        });
+                    }
+                    if domain.is_none()
+                        && !inspect_only
                         && !matches!(
                             key,
-                            "comptime_phase"
+                            "__flurry_comptime_phase"
                                 | "packed"
-                                | "direct_passing"
-                                | "metadata"
+                                | "__flurry_direct_passing"
+                                | "__flurry_metadata"
                                 | "__flurry_volatile"
                                 | "__flurry_abi"
                         )

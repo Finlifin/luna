@@ -140,7 +140,7 @@ fn missing_strategy_metadata_does_not_produce_an_executable_artifact() {
 
 #[test]
 fn merged_default_marker_consumes_values_not_helper_names() {
-    let source = "const arbitrary_name={derivation_default:true};trait Flag {} ^arbitrary_name derive fn configured for Flag {} struct Subject {} derive Flag for Subject;";
+    let source = "const arbitrary_name={__flurry_derivation_default:true};trait Flag {} ^arbitrary_name derive fn configured for Flag {} struct Subject {} derive Flag for Subject;";
     let report = compile(source, Emit::MergedAttributes).unwrap().to_string();
     assert!(
         report.contains("(default-strategy-marker") && report.contains("(enabled true)"),
@@ -148,7 +148,7 @@ fn merged_default_marker_consumes_values_not_helper_names() {
     );
     let disabled = source.replace(
         "^arbitrary_name",
-        "^{derivation_default:false} ^arbitrary_name",
+        "^{__flurry_derivation_default:false} ^arbitrary_name",
     );
     let report = compile(&disabled, Emit::MergedAttributes)
         .unwrap()
@@ -173,9 +173,9 @@ fn merged_default_marker_consumes_values_not_helper_names() {
 #[test]
 fn default_marker_rejects_wrong_targets_and_non_boolean_values() {
     for source in [
-        "^{derivation_default:true} fn ordinary() {}",
-        "trait Flag {} struct Subject {} ^{derivation_default:true} derive Flag for Subject;",
-        "trait Flag {} ^{derivation_default:7} derive fn configured for Flag {}",
+        "^{__flurry_derivation_default:true} fn ordinary() {}",
+        "trait Flag {} struct Subject {} ^{__flurry_derivation_default:true} derive Flag for Subject;",
+        "trait Flag {} ^{__flurry_derivation_default:7} derive fn configured for Flag {}",
     ] {
         assert!(matches!(
             compile(source, Emit::Attributes).unwrap(),
@@ -190,7 +190,7 @@ fn default_marker_rejects_wrong_targets_and_non_boolean_values() {
 
 #[test]
 fn selected_default_marker_overrides_a_non_boolean_inner_value() {
-    let source = "trait Flag {} ^{derivation_default:true} ^{derivation_default:7} derive fn configured for Flag {}";
+    let source = "trait Flag {} ^{__flurry_derivation_default:true} ^{__flurry_derivation_default:7} derive fn configured for Flag {}";
     let report = compile(source, Emit::MergedAttributes).unwrap().to_string();
     assert!(report.contains("(enabled true)"), "{report}");
 }
@@ -205,7 +205,7 @@ fn imported_default_metadata_uses_the_same_multi_package_consumer() {
     std::fs::create_dir_all(&directory).unwrap();
     std::fs::write(
         directory.join("marks.fl"),
-        "pub const marker={derivation_default:true};",
+        "pub const marker={__flurry_derivation_default:true};",
     )
     .unwrap();
     std::fs::write(directory.join("app.fl"),"use marks.marker as selected; trait Flag {} ^selected derive fn configured for Flag {} struct Subject {} derive Flag for Subject;").unwrap();

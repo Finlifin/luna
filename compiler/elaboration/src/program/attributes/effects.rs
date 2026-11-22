@@ -34,7 +34,7 @@ pub fn direct_passing_effects(
             source: location,
             message: e.to_string(),
         })?;
-        let Some(selected) = target.get("direct_passing") else {
+        let Some(selected) = target.get("__flurry_direct_passing") else {
             continue;
         };
         let location = selected.origin.source;

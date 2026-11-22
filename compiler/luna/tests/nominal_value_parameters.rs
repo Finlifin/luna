@@ -295,8 +295,8 @@ fn effect_value_parameters_forward_through_generic_installers() {
 
 #[test]
 fn memoized_value_indexed_keys_keep_declaration_and_value_arguments() {
-    let package=support::compile("const eq_key_phase={comptime_phase:true}; trait Eq {^eq_key_phase comptime fn eq(self,other:Self)->bool;}
-        const hash_key_phase={comptime_phase:true}; trait Hash {^hash_key_phase comptime fn hash(self)->.u8'builtin;}
+    let package=support::compile("const eq_key_phase={__flurry_comptime_phase:true}; trait Eq {^eq_key_phase comptime fn eq(self,other:Self)->bool;}
+        const hash_key_phase={__flurry_comptime_phase:true}; trait Hash {^hash_key_phase comptime fn hash(self)->.u8'builtin;}
         comptime impl Eq for bool {comptime fn eq(self,other:bool)->bool {self == other}}
         comptime impl Hash for bool {comptime fn hash(self)->.u8'builtin {0}}
         struct Key where tag:bool {value:bool}

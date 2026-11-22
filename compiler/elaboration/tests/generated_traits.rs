@@ -241,7 +241,7 @@ fn generated_phase_publication_after_repair(phase: ImplementationPhase) {
             lexical_owner: contract,
             expression: "generated phase metadata".into(),
             value: &flag,
-            configuration_key: Some("comptime_phase".into()),
+            configuration_key: Some("__flurry_comptime_phase".into()),
             span: DUMMY_SP,
         }]);
         let complement = batch.reserve().unwrap();

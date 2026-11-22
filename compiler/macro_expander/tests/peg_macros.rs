@@ -251,8 +251,7 @@ private const opt_expr = @define_macro2 {
     let expanded = expand_builtins(src).expect("valid @define_macro2 forms");
     assert!(expanded.expanded);
     let out = expanded.source_text.as_deref().unwrap();
-    assert!(out.contains("flurry_macro_kind: .peg"), "{out}");
-    assert!(out.contains("flurry_macro_grammar:"), "{out}");
+    assert!(out.contains("attrs.macros.peg("), "{out}");
     assert!(out.contains("comptime fn statements"), "{out}");
     assert!(out.contains("pub comptime fn dsl"), "{out}");
     assert!(out.contains("private comptime fn opt_expr"), "{out}");

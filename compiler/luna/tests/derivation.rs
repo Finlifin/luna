@@ -174,7 +174,7 @@ fn generated_associated_self_types_remain_distinct_between_subjects() {
 #[test]
 fn generated_prefix_attributes_evaluate_in_the_impl_self_context() {
     let source = format!(
-        "mod attrs {{{}}} use attrs.comptime_phase as staged; typealias Type=.Type'builtin; comptime fn metadata(T:Type)->.Object'builtin {{let value={{comptime_phase:T == Subject}};value}} trait Flag {{^staged comptime fn flag()->bool;}} derive fn enabled for Flag {{^metadata(Self) comptime fn flag()->bool {{true}}}} struct Subject {{}} comptime derive Flag.use(enabled) for Subject; comptime fn run()->bool {{Subject.as(Flag).flag()}}",
+        "mod attrs {{{}}} use attrs.comptime_phase as staged; typealias Type=.Type'builtin; comptime fn metadata(T:Type)->.Object'builtin {{let value={{__flurry_comptime_phase:T == Subject}};value}} trait Flag {{^staged comptime fn flag()->bool;}} derive fn enabled for Flag {{^metadata(Self) comptime fn flag()->bool {{true}}}} struct Subject {{}} comptime derive Flag.use(enabled) for Subject; comptime fn run()->bool {{Subject.as(Flag).flag()}}",
         include!("support/attrs_source.rs")
     );
     let package = support::compile(&source);
@@ -187,7 +187,7 @@ fn generated_prefix_attributes_evaluate_in_the_impl_self_context() {
 
 #[test]
 fn generated_prefix_attributes_preserve_override_order() {
-    let source = "const staged={comptime_phase:true}; const ordinary={comptime_phase:false}; trait Flag {comptime fn flag()->bool;} derive fn enabled for Flag {^ordinary ^staged comptime fn flag()->bool {true}} struct Subject {} derive Flag.use(enabled) for Subject; comptime fn run()->bool {Subject.as(Flag).flag()}";
+    let source = "const staged={__flurry_comptime_phase:true}; const ordinary={__flurry_comptime_phase:false}; trait Flag {comptime fn flag()->bool;} derive fn enabled for Flag {^ordinary ^staged comptime fn flag()->bool {true}} struct Subject {} derive Flag.use(enabled) for Subject; comptime fn run()->bool {Subject.as(Flag).flag()}";
     let package = support::compile(source);
     assert!(package.implementations[0].phases.runtime);
     assert!(!package.implementations[0].phases.comptime);
@@ -257,7 +257,7 @@ fn value_parameterized_requests_preserve_subject_identity() {
 
 #[test]
 fn generic_requests_preserve_comptime_implementation_phase() {
-    let source = "trait Flag {^{comptime_phase:true} comptime fn flag()->bool;} derive fn enabled for Flag {comptime fn flag()->bool {true}} struct Subject where T {} comptime derive Flag.use(enabled) for Subject<T> where T; comptime fn run()->bool {Subject<bool>.as(Flag).flag()}";
+    let source = "trait Flag {^{__flurry_comptime_phase:true} comptime fn flag()->bool;} derive fn enabled for Flag {comptime fn flag()->bool {true}} struct Subject where T {} comptime derive Flag.use(enabled) for Subject<T> where T; comptime fn run()->bool {Subject<bool>.as(Flag).flag()}";
     let package = support::compile(source);
     assert!(package.implementations[0].phases.comptime);
     assert!(!package.implementations[0].phases.runtime);
@@ -347,7 +347,7 @@ fn generated_borrowed_receivers_write_the_original_subject() {
 #[test]
 fn generated_comptime_methods_can_return_their_receiver() {
     let package = support::compile(
-        "trait Keep {^{comptime_phase:true} comptime fn keep(self)->Self;} derive fn keeping for Keep {comptime fn keep(self)->Self {self}} struct Subject {value:bool} comptime derive Keep.use(keeping) for Subject; comptime fn run()->bool {Subject{value:true}.as(Keep).keep().value}",
+        "trait Keep {^{__flurry_comptime_phase:true} comptime fn keep(self)->Self;} derive fn keeping for Keep {comptime fn keep(self)->Self {self}} struct Subject {value:bool} comptime derive Keep.use(keeping) for Subject; comptime fn run()->bool {Subject{value:true}.as(Keep).keep().value}",
     );
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
@@ -416,7 +416,7 @@ fn strategy_input_parameters_can_depend_on_preceding_type_inputs() {
 
 #[test]
 fn strategy_inputs_are_available_to_prefix_attributes_and_comptime_methods() {
-    let source = "trait Flag {^{comptime_phase:true} comptime fn flag()->bool;} derive fn configured(staged:bool,value:bool) for Flag {^{comptime_phase:staged} comptime fn flag()->bool {value}} struct Subject {} comptime derive Flag.use(configured(true,true)) for Subject; comptime fn run()->bool {Subject.as(Flag).flag()}";
+    let source = "trait Flag {^{__flurry_comptime_phase:true} comptime fn flag()->bool;} derive fn configured(staged:bool,value:bool) for Flag {^{__flurry_comptime_phase:staged} comptime fn flag()->bool {value}} struct Subject {} comptime derive Flag.use(configured(true,true)) for Subject; comptime fn run()->bool {Subject.as(Flag).flag()}";
     let package = support::compile(source);
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),
@@ -508,7 +508,7 @@ fn strategy_local_values_compute_in_order_and_are_captured_by_methods() {
 
 #[test]
 fn zero_input_strategy_locals_supply_associated_types_and_attributes() {
-    let source = "typealias Type=.Type'builtin; trait Flag {assoc Item:Type;^{comptime_phase:true} comptime fn flag()->Item;} derive fn configured for Flag {const T:Type=bool; let staged=true; let result=not false; assoc Item:Type=T; ^{comptime_phase:staged} comptime fn flag()->Item {result}} struct Subject {} comptime derive Flag.use(configured) for Subject; comptime fn run()->bool {Subject.as(Flag).flag()}";
+    let source = "typealias Type=.Type'builtin; trait Flag {assoc Item:Type;^{__flurry_comptime_phase:true} comptime fn flag()->Item;} derive fn configured for Flag {const T:Type=bool; let staged=true; let result=not false; assoc Item:Type=T; ^{__flurry_comptime_phase:staged} comptime fn flag()->Item {result}} struct Subject {} comptime derive Flag.use(configured) for Subject; comptime fn run()->bool {Subject.as(Flag).flag()}";
     let package = support::compile(source);
     assert_eq!(
         luna::invocation::invoke(&package, "run", 100_000).unwrap(),

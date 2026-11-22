@@ -1,1 +1,1 @@
-pub const direct_passing = { direct_passing: true }
+pub const direct_passing = { __flurry_direct_passing: true }

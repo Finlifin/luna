@@ -613,63 +613,28 @@ pub(crate) fn try_expand_define_macro(
     }
 
     let head_span = macro_name_tok.span;
+    let (constructor, arg_kind, argument) = if let Some(grammar) = peg_grammar {
+        (
+            "peg",
+            TokenKind::Str,
+            crate::raw_source::encode_flurry_string_literal(&grammar.to_source()),
+        )
+    } else if is_variadic {
+        ("ast", TokenKind::True, "true".into())
+    } else {
+        ("ast", TokenKind::False, "false".into())
+    };
     let mut out = vec![
         make_syn(TokenKind::Caret, "^", head_span, TokenSpacing::Joint),
-        make_syn(TokenKind::LBrace, "{", head_span, TokenSpacing::Alone),
-        make_syn(TokenKind::Id, "metadata", head_span, TokenSpacing::Joint),
-        make_syn(TokenKind::Colon, ":", head_span, TokenSpacing::Alone),
-        make_syn(TokenKind::LBrace, "{", head_span, TokenSpacing::Alone),
-        make_syn(
-            TokenKind::Id,
-            "flurry_macro_kind",
-            head_span,
-            TokenSpacing::Joint,
-        ),
-        make_syn(TokenKind::Colon, ":", head_span, TokenSpacing::Alone),
+        make_syn(TokenKind::Id, "attrs", head_span, TokenSpacing::Joint),
         make_syn(TokenKind::Dot, ".", head_span, TokenSpacing::Joint),
-        make_syn(
-            TokenKind::Id,
-            if is_macro2 { "peg" } else { "ast" },
-            head_span,
-            TokenSpacing::Joint,
-        ),
-        make_syn(TokenKind::Comma, ",", head_span, TokenSpacing::Alone),
+        make_syn(TokenKind::Id, "macros", head_span, TokenSpacing::Joint),
+        make_syn(TokenKind::Dot, ".", head_span, TokenSpacing::Joint),
+        make_syn(TokenKind::Id, constructor, head_span, TokenSpacing::Joint),
+        make_syn(TokenKind::LParen, "(", head_span, TokenSpacing::Joint),
+        make_syn(arg_kind, argument, head_span, TokenSpacing::Joint),
+        make_syn(TokenKind::RParen, ")", head_span, TokenSpacing::Newline),
     ];
-
-    if let Some(grammar) = peg_grammar {
-        let grammar_lit = crate::raw_source::encode_flurry_string_literal(&grammar.to_source());
-        out.extend([
-            make_syn(
-                TokenKind::Id,
-                "flurry_macro_grammar",
-                head_span,
-                TokenSpacing::Joint,
-            ),
-            make_syn(TokenKind::Colon, ":", head_span, TokenSpacing::Alone),
-            make_syn(TokenKind::Str, grammar_lit, head_span, TokenSpacing::Alone),
-        ]);
-    } else {
-        let variadic_tok = if is_variadic {
-            make_syn(TokenKind::True, "true", head_span, TokenSpacing::Alone)
-        } else {
-            make_syn(TokenKind::False, "false", head_span, TokenSpacing::Alone)
-        };
-        out.extend([
-            make_syn(
-                TokenKind::Id,
-                "flurry_macro_variadic",
-                head_span,
-                TokenSpacing::Joint,
-            ),
-            make_syn(TokenKind::Colon, ":", head_span, TokenSpacing::Alone),
-            variadic_tok,
-        ]);
-    }
-
-    out.extend([
-        make_syn(TokenKind::RBrace, "}", head_span, TokenSpacing::Alone),
-        make_syn(TokenKind::RBrace, "}", head_span, TokenSpacing::Newline),
-    ]);
 
     if let Some(vis) = vis_tok {
         let mut vis = vis;

@@ -1435,79 +1435,64 @@ fn decode_macro_kind_attribute(
         return Ok(None);
     }
 
-    for entry in fields {
-        let Some((key, domain, value)) = entry_parts(entry) else {
+    let mut kind_term: Option<&Term> = None;
+    let mut variadic: Option<bool> = None;
+    let mut grammar_source: Option<String> = None;
+    for meta_entry in fields {
+        let Some((mkey, _, mval)) = entry_parts(meta_entry) else {
             continue;
         };
-        if key != Some("metadata") || *domain != Term::Primitive(Primitive::Object) {
-            continue;
-        }
-        let Term::NominalValue {
-            fields: meta_fields,
-            ..
-        } = value
-        else {
-            continue;
-        };
-        let mut kind_term: Option<&Term> = None;
-        let mut variadic: Option<bool> = None;
-        let mut grammar_source: Option<String> = None;
-        for meta_entry in meta_fields {
-            let Some((mkey, _, mval)) = entry_parts(meta_entry) else {
-                continue;
-            };
-            match mkey {
-                Some("flurry_macro_kind") => {
-                    kind_term = Some(mval);
-                }
-                Some("flurry_macro_variadic") => match mval {
-                    Term::Bool(b) => {
-                        variadic = Some(*b);
-                    }
-                    other => {
-                        return Err(format!(
-                            "invalid `flurry_macro_variadic` metadata value {other}; expected bool"
-                        ));
-                    }
-                },
-                Some("flurry_macro_grammar") => match mval {
-                    Term::String(s) => {
-                        grammar_source = Some(s.as_ref().to_string());
-                    }
-                    other => {
-                        return Err(format!(
-                            "invalid `flurry_macro_grammar` metadata value {other}; expected str"
-                        ));
-                    }
-                },
-                _ => {}
+        match mkey {
+            Some("__flurry_macro_kind") => {
+                kind_term = Some(mval);
             }
-        }
-        if let Some(mval) = kind_term {
-            match mval {
-                Term::Symbol(s) if s.as_ref() == "tokens" => {
-                    return Ok(Some(DecodedMacroKind::Tokens));
-                }
-                Term::Symbol(s) if s.as_ref() == "source" => {
-                    return Ok(Some(DecodedMacroKind::RawSource));
-                }
-                Term::Symbol(s) if s.as_ref() == "ast" => {
-                    return Ok(Some(DecodedMacroKind::Ast {
-                        variadic: variadic.unwrap_or(false),
-                    }));
-                }
-                Term::Symbol(s) if s.as_ref() == "peg" => {
-                    let grammar_source = grammar_source.ok_or_else(|| {
-                        "missing `flurry_macro_grammar` string metadata for `.peg` macro"
-                            .to_string()
-                    })?;
-                    return Ok(Some(DecodedMacroKind::Peg { grammar_source }));
+            Some("__flurry_macro_variadic") => match mval {
+                Term::Bool(b) => {
+                    variadic = Some(*b);
                 }
                 other => {
                     return Err(format!(
-                        "unsupported `flurry_macro_kind` metadata value {other}"
+                        "invalid `__flurry_macro_variadic` metadata value {other}; expected bool"
                     ));
                 }
+            },
+            Some("__flurry_macro_grammar") => match mval {
+                Term::String(s) => {
+                    grammar_source = Some(s.as_ref().to_string());
+                }
+                other => {
+                    return Err(format!(
+                        "invalid `__flurry_macro_grammar` metadata value {other}; expected str"
+                    ));
+                }
+            },
+            _ => {}
+        }
+    }
+    if let Some(mval) = kind_term {
+        match mval {
+            Term::Symbol(s) if s.as_ref() == "tokens" => {
+                return Ok(Some(DecodedMacroKind::Tokens));
+            }
+            Term::Symbol(s) if s.as_ref() == "source" => {
+                return Ok(Some(DecodedMacroKind::RawSource));
+            }
+            Term::Symbol(s) if s.as_ref() == "ast" => {
+                return Ok(Some(DecodedMacroKind::Ast {
+                    variadic: variadic.unwrap_or(false),
+                }));
+            }
+            Term::Symbol(s) if s.as_ref() == "peg" => {
+                let grammar_source = grammar_source.ok_or_else(|| {
+                    "missing `__flurry_macro_grammar` string metadata for `.peg` macro"
+                        .to_string()
+                })?;
+                return Ok(Some(DecodedMacroKind::Peg { grammar_source }));
+            }
+            other => {
+                return Err(format!(
+                    "unsupported `__flurry_macro_kind` metadata value {other}"
+                ));
             }
         }
     }

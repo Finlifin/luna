@@ -4,8 +4,8 @@
 
 `abi(name: Symbol) -> Object` 是普通的 `pure comptime fn`，返回含 `__flurry_abi`
 属性的 Object，并保留 Symbol 值及其类型。`comptime_phase` 是包含
-`comptime_phase: true` 的 Object 常量，条目保留 Bool 类型。
-`metadata(data: Object) -> Object` 将用户自定义元数据包装为 `{ metadata: data }`。
+`__flurry_comptime_phase: true` 的 Object 常量，条目保留 Bool 类型。
+`metadata(data: Object) -> Object` 将用户自定义元数据包装为 `{ __flurry_metadata: data }`。
 `stable_since(version: str) -> Object`（不稳定）将版本锚点包装为
 `{ __flurry_stable_since: version }`，用于后续 ABI `type_id` 的规范版本固定。
 `attrs.prelude` 导出 `abi`、`comptime_phase`、`metadata` 和 `stable_since`。
@@ -14,8 +14,9 @@
 - `attrs.packed.byte` 与 `attrs.packed.bit`：分别产生 `{ __flurry_packed_mode: .byte }` 与 `{ __flurry_packed_mode: .bit }`，对应字节级紧凑布局（`align = 1`）与直接翻译为 `BitVec<W>` 并复用 `bitvec_opt` 的位级紧凑布局（`attrs.packed.bit` 总位宽超过 256 位时发出非致命编译警告）。
 - `attrs.mem.volatile`（及 `attrs.volatile`）：产生 `{ __flurry_volatile: true }`，标示易失内存／MMIO 结构体、newtype 或结构体字段；LLVM 后端对对应访问发射 `load volatile` / `store volatile`，程序纯度分析归入 P0（禁止 `memory(none)`/`speculatable`/`nosync`/`readonly`）。不允许以裸 key 或 definition configuration 形式附着，且不能与 `packed` 混用。
 - `attrs.layout.{packed, packed_layout}`：过渡期旧入口，产生 `{ packed: bool }`，供当前结构体字节级紧凑布局检查与降码消费（随 `__flurry_packed_mode` 消费者接通后统一收口）。
-- `attrs.effects.direct_passing`：产生 `{ direct_passing: true }`，供直接传递效应声明检查消费。
-- `attrs.derivation`：编译器已消费 `{ derivation_default: bool }`；`attrs.derivation.default` 导出仍待 `default` 成员声明语法决定（见 `derivation/README.md`）。
+- `attrs.macros.ast(variadic)`、`attrs.macros.peg(grammar)`、`attrs.macros.macro3` 与 `attrs.macros.macro4` 声明宏处理器的输入模式，展开器读取顶层的 `__flurry_macro_kind` 及对应参数。
+- `attrs.effects.direct_passing`：产生 `{ __flurry_direct_passing: true }`，供直接传递效应声明检查消费。
+- `attrs.derivation`：编译器已消费 `{ __flurry_derivation_default: bool }`；`attrs.derivation.default` 导出仍待 `default` 成员声明语法决定（见 `derivation/README.md`）。
 
 Object 通过 `meta.Object` 导入，attrs 不重复建立原始 builtin 绑定。
 meta 的基础域绑定与集合操作分开；属性消费者仍通过普通包依赖取得同一域。
@@ -45,9 +46,7 @@ python3 -B development/cargo.py run -p luna -- \
 按属性规则选中的原始条目位置，不重新构造或丢失条目的类型信息。
 不合法的合并输入会报错；使用 `--output` 时，检查失败不会覆盖已有输出。
 
-此入口只交付属性检查结果。ABI 消费者尚未接线，普通 NIR 编译仍拒绝尚未
-应用的 ABI 属性；不能将检查成功解释为已经生成 C ABI 函数。这里加载完整
-sysroot；格式化、分配和 I/O 接口仍有独立阻塞。
+检查属性对象可使用上述两个入口。普通 NIR 编译会将 `attrs.abi(.c)` 应用于 runtime 函数，host 在支持的签名上生成 C 入口。
 
 trait 成员可以使用普通属性值及别名：
 
@@ -78,4 +77,5 @@ comptime fn run() -> bool {
 单个 comptime 实现、泛型主体及该相可用的默认方法已有源码调用路径。
 同一关系的普通与 comptime 源码实现支持方法和关联项的合并，包括泛型参数改名。
 关联项按成员 phase 检查；共享值必须一致，泛型初始化程序目前要求替换参数后的
-结构一致。`derivation_default`、`packed`、`direct_passing` 与 `metadata` 已接通对应编译器消费者。`attrs.abi(.c)` 指定 runtime 函数的 C 调用约定，host 对支持的签名生成入口，并在控制字越过边界时 trap。`__flurry_packed_mode`（`attrs.packed.{byte, bit}`）与 `stable_since`（`__flurry_stable_since`）消费者仍未接通，普通 NIR 编译会明确拒绝 `__flurry_packed_mode`、`__flurry_stable_since` 及其他未消费属性。
+结构一致。默认派生标记、紧凑布局、直接传递效应和用户元数据分别由相应的编译阶段消费。
+`attrs.stable_since(version)` 把版本字符串附到声明。对范式实例求 `'attribute` 会读到其头声明上的版本。

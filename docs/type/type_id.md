@@ -90,7 +90,7 @@ std@"1.0.0".collections.Vec<u32, .A = DefaultAllocator, .allocator = DefaultAllo
 
 ## 常见示例
 
-> 示例仅展示设计意图；目前 `attrs.stable_since("...")` 仅可构造并检查 `__flurry_stable_since` 属性对象，编译器尚未接通 `__flurry_stable_since` 消费者与通用 normal-form 属性传递执行，请勿当作当前可运行特性。
+> 当前编译器接收版本字符串。对具体实例或其透明别名求 `'attribute` 会读到其范式头声明上的合并属性。下文跨包版本固定与 128 位 Merkle 标识属于 ABI 设计，仍待实现。
 
 ### 跨版本锚定与布局安全兜底
 
