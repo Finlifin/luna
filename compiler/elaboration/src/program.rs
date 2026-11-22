@@ -805,6 +805,8 @@ fn elaborate_in_mode(
         generator_cells: BTreeMap::new(),
         checking_code_generator: false,
         observing_factory_bodies: BTreeSet::new(),
+        generator_schema_step: None,
+        generator_layouts: None,
         generator_schema_invalidated: false,
         abstract_code_dependencies: BTreeMap::new(),
         in_code_body: false,
@@ -2830,6 +2832,8 @@ struct Checker<'a, 'h> {
     // Active source-body queries. Nested generator checking can request the
     // same declaration before its first structural observation is ready.
     observing_factory_bodies: BTreeSet<OwnerId>,
+    generator_schema_step: Option<constants::SchemaStep>,
+    generator_layouts: Option<BTreeMap<DeclarationId, n::Struct>>,
     // Propagates a potential write through nested symbolic data frames while
     // their original snapshots are temporarily outside the active local map.
     generator_schema_invalidated: bool,
@@ -4327,11 +4331,7 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
     ) -> Result<n::Expr, Error> {
         self.ensure_nominal_type(&ty, expr.span)?;
-        let Term::Nominal {
-            declaration: id,
-            arguments,
-        } = &ty
-        else {
+        let Some((id, arguments)) = self.struct_layout_head(&ty) else {
             return Err(error(
                 expr.span,
                 "construction requires a supported struct type",
@@ -4342,6 +4342,7 @@ impl Checker<'_, '_> {
         let def = self
             .structs
             .get(id)
+            .or_else(|| self.generator_layouts.as_ref()?.get(id))
             .ok_or_else(|| error(expr.span, "missing struct descriptor"))?;
         let (instantiated_fields, type_parameters, parameter_types) =
             nominal_fields::constructor_fields(def, arguments, &frames, &mut self.required_steps)

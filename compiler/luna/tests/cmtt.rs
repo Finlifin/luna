@@ -11524,3 +11524,45 @@ fn generator_observes_public_add_field_and_generic_list_receiver_writeback() {
         fn run() -> bool { ~<generate()> }";
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn generator_checks_construction_from_a_locally_built_nominal() {
+    let source = include_str!("../../../development/repros/builder-local-type-in-quote.fl");
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let unused = source.replace("~<generate()>", "true");
+    let package = sysroot::compile(&unused).unwrap();
+    assert!(package.structs.iter().all(|s| s.name != "QuoteLocal"));
+    let extended = unused.replace(
+        "let T = builder.Build();",
+        "let T = builder.Build(); builder.add_field(.later, bool); let U = builder.Build();",
+    );
+    let stale = extended.replace("flag: true", "later: true");
+    let failure = sysroot::compile(&stale).unwrap_err();
+    assert!(failure.contains("unknown struct field later"), "{failure}");
+    let missing = unused.replace("flag: true", "absent: true");
+    let failure = sysroot::compile(&missing).unwrap_err();
+    assert!(failure.contains("unknown struct field absent"), "{failure}");
+    assert!(sysroot::compile(&unused.replace("flag: true", "flag: 'x'")).is_err());
+}
+
+#[test]
+fn generator_restarts_field_observation_after_control_flow() {
+    let source = include_str!("../../../development/repros/builder-local-type-in-quote.fl");
+    let source = source
+        .replace("fn generate()", "fn generate(flag: bool)")
+        .replace("~<generate()>", "~<generate(false)>");
+    let restarted = source.replace(
+        "    var builder",
+        "    if flag { return '(false); }\n    var builder",
+    );
+    assert_eq!(sysroot::run(&restarted), Value::Bool(true));
+
+    let stale = source
+        .replace(
+            "    let T",
+            "    if flag { builder = meta.StructBuilder.new(.name = .Empty); }\n    let T",
+        )
+        .replace("~<generate(false)>", "true");
+    let failure = sysroot::compile(&stale).unwrap_err();
+    assert!(failure.contains("result identity known during definition checking"), "{failure}");
+}

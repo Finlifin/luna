@@ -128,7 +128,11 @@ impl<O: fmt::Display> fmt::Display for Generator<O> {
             Some(body) => write!(f, "{}", local(body.hir_id))?,
             None => f.write_str("declaration")?,
         }
-        if let Some(sites) = self.checked_operands.as_ref().filter(|sites| !sites.is_empty()) {
+        if let Some(sites) = self
+            .checked_operands
+            .as_ref()
+            .filter(|sites| !sites.is_empty())
+        {
             f.write_str(") (constructor-type-operands")?;
             for (site, ()) in sites {
                 write!(f, " {}", local(*site))?;
@@ -456,6 +460,7 @@ impl Checker<'_, '_> {
         let clause_bindings = std::mem::take(&mut self.normal_default_bindings);
         self.default_input_scope = (!caller_scope.is_empty()).then_some(caller_scope);
         self.context = self.definition_context(owner);
+        let saved_schema_step = self.generator_schema_step.take();
         let saved_cells = std::mem::take(&mut self.generator_cells);
         let saved_patterns = std::mem::take(&mut self.pattern_codes);
         let saved_pattern_quote = self.pattern_quote_pending.take();
@@ -477,6 +482,7 @@ impl Checker<'_, '_> {
         self.in_required_comptime = false;
         self.in_staged_input = false;
         let mut result = check(self);
+        self.generator_schema_step = saved_schema_step;
         self.generator_cells = saved_cells;
         self.pattern_codes = saved_patterns;
         self.pattern_quote_pending = saved_pattern_quote;
@@ -582,7 +588,10 @@ impl Checker<'_, '_> {
             this.check_generator_clause_defaults(owner, &definition)?;
             this.run_code_generator(&definition, arguments)
         })?;
-        self.code_generators.get_mut(&owner).unwrap().checked_operands = Some(operands);
+        self.code_generators
+            .get_mut(&owner)
+            .unwrap()
+            .checked_operands = Some(operands);
         Ok(())
     }
 
@@ -1699,8 +1708,11 @@ impl Checker<'_, '_> {
         self.generator_scope(block.span, |this| {
             let mut loops = Vec::new();
             let mut control = Control::Next;
+            let mut sequence = constants::SchemaSequence::default();
             for statement in block.stmts {
-                let next = this.generator_statement(statement, interface, result_context, depth + 1, &mut loops)?;
+                let next = this.with_schema_statement(&mut sequence, statement, |this| {
+                    this.generator_statement(statement, interface, result_context, depth + 1, &mut loops)
+                })?;
                 if this.checking_code_generator {
                     control = this.sequence_generator_control(control, next, statement.span)?;
                 } else {
@@ -2718,14 +2730,45 @@ impl Checker<'_, '_> {
                 "refutable generator let pattern requires a diverging else branch",
             ));
         }
+        let observed = if self.checking_code_generator
+            && let Some(init) = decl.init
+        {
+            self.observe_schema_step(init, &value, Some(&pattern))?
+        } else {
+            None
+        };
         let mut known_types = if self.checking_code_generator && !decl.mutable {
-            self.record_generator_initializer(&pattern, &value, decl.span)?;
+            if let Some(observed) = observed {
+                self.record_observed_initializer(&pattern, &value, decl.span)?;
+                self.record_observed_pattern(&pattern, &observed, decl.span)?;
+            } else {
+                self.record_generator_initializer(&pattern, &value, decl.span)?;
+            }
             self.known_pattern_types(&pattern, &value, decl.span)?
         } else {
             BTreeMap::new()
         };
         if let n::Pattern::Binding { binding, inner } = &pattern {
             if matches!(**inner, n::Pattern::Wild) {
+                if self.checking_code_generator
+                    && !decl.mutable
+                    && ty == p(P::Type)
+                    && let Some(t @ Term::Rigid { declaration, .. }) =
+                        self.observed_local_type(*binding, decl.span)?
+                    && self
+                        .generator_layouts
+                        .as_ref()
+                        .is_some_and(|layouts| layouts.contains_key(&declaration))
+                {
+                    known_types.insert(
+                        *binding,
+                        n::Expr {
+                            source: value.source,
+                            ty: p(P::Type),
+                            kind: K::TypeValue(t),
+                        },
+                    );
+                }
                 self.generator_data.insert(
                     *binding,
                     if self.checking_code_generator {

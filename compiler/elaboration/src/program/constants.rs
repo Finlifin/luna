@@ -3,6 +3,8 @@
 use super::*;
 use comptime_interpretor::Value;
 
+mod generator_layouts;
+pub(super) use generator_layouts::{SchemaSequence, SchemaStep};
 mod initializers;
 mod materialization;
 

@@ -457,6 +457,7 @@ impl Checker<'_, '_> {
                 if self.checking_code_generator {
                     let checked = self.expr(value, None)?;
                     self.validate_generator_data(&checked, value.span)?;
+                    self.observe_schema_step(value, &checked, None)?;
                 } else {
                     self.generator_data_expression(value, None)?;
                 }

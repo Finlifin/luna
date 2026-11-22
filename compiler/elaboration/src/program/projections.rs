@@ -1634,11 +1634,7 @@ impl Checker<'_, '_> {
                 }
                 return Ok(splicing::Operand::projected(projected, is_source));
             }
-            let Term::Nominal {
-                declaration,
-                arguments,
-            } = &shape
-            else {
+            let Some((declaration, arguments)) = self.struct_layout_head(&shape) else {
                 return Err(error(
                     expr.span,
                     "field projection requires a supported struct",
@@ -1647,6 +1643,7 @@ impl Checker<'_, '_> {
             let def = self
                 .structs
                 .get(declaration)
+                .or_else(|| self.generator_layouts.as_ref()?.get(declaration))
                 .ok_or_else(|| error(expr.span, "missing struct descriptor"))?;
             let index = def
                 .fields

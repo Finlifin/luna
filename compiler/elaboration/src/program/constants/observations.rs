@@ -199,7 +199,7 @@ impl PartialStagedValue {
 
     // The caller charges the complete evidence before cloning. Decompose only
     // for observation: fully known constants retain their normal representation.
-    fn aggregate(
+    pub(super) fn aggregate(
         &self,
         meta_list: Option<DeclarationId>,
     ) -> Option<(PartialStagedShape, Vec<Arc<Self>>)> {

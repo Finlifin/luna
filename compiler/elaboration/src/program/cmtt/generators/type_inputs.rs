@@ -22,7 +22,9 @@ impl Checker<'_, '_> {
         let parent = self
             .checking_constructor_operands
             .replace((owner, Default::default()));
+        let outer_layouts = self.generator_layouts.replace(BTreeMap::new());
         let result = self.generator_frame(owner, check);
+        self.generator_layouts = outer_layouts;
         let (_, operands) =
             std::mem::replace(&mut self.checking_constructor_operands, parent).unwrap();
         self.checking_code_generator = checking;

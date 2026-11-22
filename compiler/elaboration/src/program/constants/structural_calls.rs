@@ -21,7 +21,7 @@ impl Checker<'_, '_> {
         Ok(())
     }
 
-    fn schema_fuel<T>(
+    pub(super) fn schema_fuel<T>(
         &mut self,
         span: Span,
         inspect: impl FnOnce(&Self, &mut usize) -> Result<T, String>,
@@ -203,13 +203,16 @@ impl Checker<'_, '_> {
         result
     }
 
-    fn structural_value(
+    pub(super) fn structural_value(
         &mut self,
         expr: &n::Expr,
         scope: &mut ObservationScope,
         span: Span,
         depth: usize,
     ) -> Result<Option<Arc<PartialStagedValue>>, Error> {
+        if let K::BuildStruct(packet) = &expr.kind {
+            return self.observe_built_struct(packet, scope, span);
+        }
         if matches!(expr.kind, K::Call { .. }) {
             return self.structural_call(expr, Some(scope), span, depth + 1);
         }
@@ -260,7 +263,7 @@ impl Checker<'_, '_> {
         }
     }
 
-    fn structural_statement(
+    pub(super) fn structural_statement(
         &mut self,
         expr: &n::Expr,
         scope: &mut ObservationScope,
@@ -385,7 +388,7 @@ fn bind_inputs(
 
 // These NIR operations only read operands. Unsupported operations in a
 // discarded statement can still write a receiver or leave the function.
-fn structural_operand(
+pub(super) fn structural_operand(
     expr: &n::Expr,
     frame: Option<&ObservationScope>,
     fuel: &mut usize,
