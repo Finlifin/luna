@@ -11671,3 +11671,38 @@ fn contextual_pattern_and_data_bodies_share_branch_field_evidence() {
         assert!(failure.contains("unknown struct field other"), "{failure}");
     }
 }
+
+#[test]
+fn checked_factory_branches_preserve_receivers_and_returned_field_descriptions() {
+    let source = r#"
+        comptime fn describe(choice: bool) -> meta.StructBuilder {
+            var draft = meta.StructBuilder.new(.name = .FromFactory);
+            if choice {
+                let label: Symbol = .active;
+                draft.add_field(label, bool);
+            } else {
+                draft.add_field(.active, bool);
+            }
+            if choice { draft } else { draft }
+        }
+        comptime fn generate(choice: bool) -> <|-bool> {
+            let draft = describe(choice);
+            let T = draft.Build();
+            '(T { active: true }.active)
+        }
+        fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let different = source.replace("draft.add_field(.active, bool);", "draft.add_field(.other, char);");
+    let selected = different.replace("let draft = describe(choice);", "let draft = describe(true);");
+    assert_eq!(sysroot::run(&selected), Value::Bool(true));
+
+    for invalid in [
+        different,
+        source.replace("draft.add_field(.active, bool);", "return draft;"),
+    ] {
+        let unused = invalid.replace("~<generate(true)> and ~<generate(false)>", "true");
+        let failure = sysroot::compile(&unused).unwrap_err();
+        assert!(failure.contains("result identity known during definition checking"), "{failure}");
+    }
+}

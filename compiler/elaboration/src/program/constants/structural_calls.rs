@@ -171,7 +171,7 @@ impl Checker<'_, '_> {
                 return Ok(None);
             };
             let Some(result) =
-                self.structural_body_result(&function.body, &mut frame, span, depth)?
+                self.structural_region_result(&function.body, &mut frame, span, depth, true)?
             else {
                 return Ok(None);
             };
@@ -210,6 +210,35 @@ impl Checker<'_, '_> {
         span: Span,
         depth: usize,
     ) -> Result<Option<Arc<PartialStagedValue>>, Error> {
+        if depth >= 64 {
+            return Ok(None);
+        }
+        if matches!(expr.kind, K::Block { .. } | K::CallPreparation { .. }) {
+            let mut inner = self.schema_fuel(span, |_, fuel| scope.fork(fuel))?;
+            let result = self.structural_region_result(expr, &mut inner, span, depth + 1, false)?;
+            if result.is_some() {
+                self.schema_fuel(span, |_, fuel| {
+                    inner.retain(|id| scope.values.contains_key(id), fuel)
+                })?;
+                *scope = inner;
+            }
+            return Ok(result);
+        }
+        if let K::If {
+            condition,
+            then_branch,
+            else_branch,
+        } = &expr.kind
+        {
+            return self.structural_if(
+                condition,
+                then_branch,
+                else_branch.as_deref(),
+                scope,
+                span,
+                depth + 1,
+            );
+        }
         if let K::BuildStruct(packet) = &expr.kind {
             return self.observe_built_struct(packet, scope, span);
         }
@@ -224,12 +253,47 @@ impl Checker<'_, '_> {
         })
     }
 
-    fn structural_body_result(
+    fn structural_if(
+        &mut self,
+        condition: &n::Expr,
+        yes: &n::Expr,
+        no: Option<&n::Expr>,
+        scope: &mut ObservationScope,
+        span: Span,
+        depth: usize,
+    ) -> Result<Option<Arc<PartialStagedValue>>, Error> {
+        let Some(condition) = self.structural_value(condition, scope, span, depth)? else {
+            return Ok(None);
+        };
+        let otherwise = |this: &mut Self, frame: &mut ObservationScope| match no {
+            Some(no) => this.structural_value(no, frame, span, depth),
+            None => Ok(Some(PartialStagedValue::known(Term::Unit))),
+        };
+        match condition.known_term() {
+            Some(Term::Bool(true)) => return self.structural_value(yes, scope, span, depth),
+            Some(Term::Bool(false)) => return otherwise(self, scope),
+            _ => {}
+        }
+        let mut alternative = self.schema_fuel(span, |_, fuel| scope.fork(fuel))?;
+        let Some(left) = self.structural_value(yes, scope, span, depth)? else {
+            return Ok(None);
+        };
+        let Some(right) = otherwise(self, &mut alternative)? else {
+            return Ok(None);
+        };
+        self.schema_fuel(span, |this, fuel| {
+            scope.join(&alternative, this.protocols.meta_list, fuel)?;
+            PartialStagedValue::common(&left, &right, this.protocols.meta_list, 0, fuel).map(Some)
+        })
+    }
+
+    fn structural_region_result(
         &mut self,
         mut expr: &n::Expr,
         scope: &mut ObservationScope,
         span: Span,
         depth: usize,
+        function_tail: bool,
     ) -> Result<Option<Arc<PartialStagedValue>>, Error> {
         loop {
             self.required_steps = self
@@ -252,7 +316,9 @@ impl Checker<'_, '_> {
                     };
                     expr = tail;
                 }
-                K::Return(Some(value)) => expr = value,
+                // A return inside a branch exits the whole factory. Only its
+                // outer tail can consume that transfer as a successful value.
+                K::Return(Some(value)) if function_tail => expr = value,
                 K::Assign { .. } => {
                     return Ok(self
                         .structural_statement(expr, scope, span, depth)?
@@ -286,8 +352,7 @@ impl Checker<'_, '_> {
                     update_place(scope, place, value, this.protocols.meta_list, fuel)
                 })
             }
-            K::Call { .. } => Ok(self.structural_value(expr, scope, span, depth)?.is_some()),
-            _ => Ok(false),
+            _ => Ok(self.structural_value(expr, scope, span, depth)?.is_some()),
         }
     }
 }

@@ -273,6 +273,46 @@ impl ObservationScope {
         Ok(self.clone())
     }
 
+    pub(super) fn join(
+        &mut self,
+        other: &Self,
+        meta_list: Option<DeclarationId>,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        let mut joined = Self {
+            unknown_outer_locals: self.unknown_outer_locals,
+            ..Default::default()
+        };
+        for (binding, value) in &self.values {
+            *fuel = fuel
+                .checked_sub(1)
+                .ok_or("branch observation budget exhausted")?;
+            if let Some(right) = other.values.get(binding) {
+                let value = if Arc::ptr_eq(value, right) {
+                    value.clone()
+                } else {
+                    PartialStagedValue::common(value, right, meta_list, 0, fuel)?
+                };
+                joined.insert(*binding, value, fuel)?;
+            }
+        }
+        *self = joined;
+        Ok(())
+    }
+
+    pub(super) fn retain(
+        &mut self,
+        visible: impl Fn(&n::LocalId) -> bool,
+        fuel: &mut usize,
+    ) -> Result<(), String> {
+        *fuel = fuel
+            .checked_sub(self.values.len().saturating_add(self.known.len()))
+            .ok_or("lexical observation budget exhausted")?;
+        self.values.retain(|id, _| visible(id));
+        self.known.retain(|id, _| visible(id));
+        Ok(())
+    }
+
     pub(super) fn insert(
         &mut self,
         binding: n::LocalId,

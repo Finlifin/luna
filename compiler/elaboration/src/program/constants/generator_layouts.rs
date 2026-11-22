@@ -134,27 +134,7 @@ impl Checker<'_, '_> {
             (false, true) => *yes = no,
             (false, false) => *yes = SchemaSequence::default(),
             (true, true) => self.schema_fuel(span, |this, fuel| {
-                let left = std::mem::take(yes);
-                for (binding, value) in left.frame.values {
-                    *fuel = fuel
-                        .checked_sub(1)
-                        .ok_or("generator schema join budget exhausted")?;
-                    if let Some(other) = no.frame.values.get(&binding) {
-                        let common = if Arc::ptr_eq(&value, other) {
-                            value
-                        } else {
-                            PartialStagedValue::common(
-                                &value,
-                                other,
-                                this.protocols.meta_list,
-                                0,
-                                fuel,
-                            )?
-                        };
-                        yes.frame.insert(binding, common, fuel)?;
-                    }
-                }
-                Ok(())
+                yes.frame.join(&no.frame, this.protocols.meta_list, fuel)
             })?,
         }
         Ok(())
@@ -167,16 +147,7 @@ impl Checker<'_, '_> {
     ) -> Result<(), Error> {
         let frame = &mut sequence.frame;
         self.schema_fuel(span, |this, fuel| {
-            *fuel = fuel
-                .checked_sub(frame.values.len().saturating_add(frame.known.len()))
-                .ok_or("generator schema scope budget exhausted")?;
-            frame
-                .values
-                .retain(|id, _| this.generator_data.contains_key(id));
-            frame
-                .known
-                .retain(|id, _| this.generator_data.contains_key(id));
-            Ok(())
+            frame.retain(|id| this.generator_data.contains_key(id), fuel)
         })
     }
 
