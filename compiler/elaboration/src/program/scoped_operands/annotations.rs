@@ -46,7 +46,7 @@ impl std::fmt::Display for NamedTypes {
 pub(in crate::program) struct Annotation {
     site: hir::HirId,
     forming: bool,
-    pub(super) inputs: Vec<(n::LocalId, Input)>,
+    pub(super) inputs: Vec<(Arc<n::Expr>, Input)>,
 }
 
 impl Annotation {
@@ -122,6 +122,46 @@ impl Checker<'_, '_> {
             .is_some_and(|a| a.forming)
     }
 
+    /// Keep a computed annotation in the invocation that owns its lexical reads
+    /// and control transfers. Structural evidence can narrow the initializer's
+    /// expected domain, but the original producer must still execute.
+    pub(in crate::program) fn computed_annotation_type(
+        &mut self,
+        expr: &Expr<'_>,
+    ) -> Result<CompletedType, Error> {
+        let annotation = self.input_facts.annotation.take().unwrap();
+        let owner = annotation.site.owner;
+        let checked = self.expr(expr, Some(&p(P::Type)));
+        self.input_facts.annotation = Some(annotation);
+        let checked = checked?;
+        match checked.kind {
+            K::TypeValue(_) | K::Literal(n::Literal::Description(_)) => {
+                return self.complete_checked_type(expr, checked);
+            }
+            _ => {}
+        }
+        let known = match self.preserved_input_identity(&checked, |_, _| Ok(None), expr.span)? {
+            Some(known) => Some(known),
+            None => self.projected_type_return(&checked, expr.span)?,
+        };
+        let binder = self.fresh_type_binder(owner, expr.span)?;
+        let input = Input {
+            binder,
+            producer: checked.source,
+            stable_local: None,
+        };
+        self.input_facts
+            .annotation
+            .as_mut()
+            .unwrap()
+            .inputs
+            .push((Arc::new(checked), input));
+        Ok(CompletedType::Identity(known.unwrap_or(Term::Rigid {
+            declaration: binder.declaration,
+            sort: binder.sort,
+        })))
+    }
+
     pub(in crate::program) fn named_type_identity(
         &mut self,
         binding: n::LocalId,
@@ -147,7 +187,11 @@ impl Checker<'_, '_> {
             let binder = self.fresh_type_binder(owner, span)?;
             self.input_facts.named_types.bind(binding, binder);
             self.input_facts.annotation.as_mut().unwrap().inputs.push((
-                binding,
+                Arc::new(n::Expr {
+                    source: producer,
+                    ty: p(P::Type),
+                    kind: K::Local(binding),
+                }),
                 Input {
                     binder,
                     producer,

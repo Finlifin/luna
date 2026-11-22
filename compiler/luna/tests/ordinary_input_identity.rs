@@ -2534,3 +2534,53 @@ fn named_type_annotations_do_not_equate_unproven_domains_or_mutable_slots() {
         "mutable Type was used as a stable identity"
     );
 }
+
+#[test]
+fn computed_local_annotations_execute_once_before_the_initializer() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn relay(flag: bool) -> bool {
+            var ready = false;
+            let value: ?Selected(do { ready = true; flag }) = do {
+                if not ready { return false; };
+                null
+            };
+            (value matches null) and ((value'type == ?bool) == flag)
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }",
+        &[("Selected", 2)],
+    );
+}
+
+#[test]
+fn computed_annotation_control_flow_stays_in_its_invocation() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { Any } }
+        comptime fn relay(skip: bool) -> bool {
+            let value: ?Selected(do { if skip { return true; }; true }) = null;
+            (value matches null) and value'type == ?bool
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }",
+        &[("Selected", 1)],
+    );
+}
+
+#[test]
+fn computed_annotations_keep_locals_read_only_by_a_later_annotation() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn relay(flag: bool) -> bool {
+            let first: ?Selected(flag) = null;
+            let later = not flag;
+            let ready = first matches null;
+            let second: ?Selected(later) = null;
+            let known: Selected(true) = true;
+            known and ready and ((second'type == ?bool) != flag)
+        }
+        comptime fn check() -> bool { relay(true) and relay(false) }",
+        &[("Selected", 6)],
+    );
+}

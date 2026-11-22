@@ -133,6 +133,17 @@ struct OperandSchedule {
 }
 
 impl OperandSchedule {
+    fn new(unavailable: BTreeSet<DeclarationId>) -> Self {
+        Self {
+            segments: Vec::new(),
+            current: Segment::default(),
+            pending: BTreeSet::new(),
+            unavailable,
+            deferred_bindings: BTreeSet::new(),
+            deferred_statements: Vec::new(),
+        }
+    }
+
     fn enter(
         &mut self,
         checker: &mut Checker<'_, '_>,
@@ -395,14 +406,7 @@ impl Checker<'_, '_> {
         else {
             return Err(needs_frame(span, "expected the original call"));
         };
-        let mut schedule = OperandSchedule {
-            segments: Vec::new(),
-            current: Segment::default(),
-            pending: BTreeSet::new(),
-            unavailable: identities,
-            deferred_bindings: BTreeSet::new(),
-            deferred_statements: Vec::new(),
-        };
+        let mut schedule = OperandSchedule::new(identities);
         let mut prepared = BTreeMap::<_, Vec<_>>::new();
         if !prefix.is_empty() {
             dependent_inputs::tasks::spend(&mut self.required_steps, arguments.len(), span)?;
@@ -486,10 +490,19 @@ impl Checker<'_, '_> {
                 result: Some(Box::new(call)),
             };
         }
-        if schedule.segments.len() >= nir::copy_budget::MAX_COPY_DEPTH {
+        self.enclose_operand_segments(body, schedule.segments, span)
+    }
+
+    fn enclose_operand_segments(
+        &mut self,
+        mut body: n::Expr,
+        segments: Vec<Segment>,
+        span: Span,
+    ) -> Result<n::Expr, Error> {
+        if segments.len() >= nir::copy_budget::MAX_COPY_DEPTH {
             return Err(error(span, "lexical operand nesting budget exhausted"));
         }
-        for segment in schedule.segments.into_iter().rev() {
+        for segment in segments.into_iter().rev() {
             let ty =
                 declaration_inputs::copy_input_domain(&body.ty, &mut self.required_steps, span)?;
             let source = body.source;

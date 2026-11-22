@@ -7,7 +7,7 @@ pub(in crate::program) struct BindingScopes(BTreeMap<n::LocalId, BindingInputs>)
 
 enum BindingInputs {
     Call(Arc<Inputs>),
-    Annotation(Vec<(n::LocalId, Input)>),
+    Annotation(Vec<(Arc<n::Expr>, Input)>),
 }
 
 impl BindingInputs {
@@ -40,29 +40,30 @@ impl BindingInputs {
                 "dependent result would escape its local type annotation",
             ));
         }
-        let (parameters, arguments) = inputs
-            .into_iter()
-            .map(|(binding, input)| {
-                (
-                    input.binder.declaration,
-                    n::NormalFormArgument::Value(n::Expr {
-                        source: input.producer,
-                        ty: p(P::Type),
-                        kind: K::Local(binding),
-                    }),
-                )
-            })
-            .unzip();
-        Ok(n::Expr {
-            source: body.source,
-            ty: declaration_inputs::copy_input_domain(&body.ty, &mut checker.required_steps, span)?,
-            kind: K::WithTypeInputs {
-                preparations: Vec::new(),
-                parameters,
-                arguments,
-                body: Box::new(body),
-            },
-        })
+        let mut schedule = OperandSchedule::new(
+            inputs
+                .iter()
+                .map(|(_, input)| input.binder.declaration)
+                .collect(),
+        );
+        for (value, input) in inputs {
+            let local = if let K::Local(local) = value.kind {
+                local
+            } else {
+                schedule.enter(checker, &value, span)?;
+                let mut value = match Arc::try_unwrap(value) {
+                    Ok(value) => value,
+                    Err(shared) => {
+                        constants::charge_copy(&shared, &mut checker.required_steps, span)?;
+                        (*shared).clone()
+                    }
+                };
+                checker.retain_lexical_operand(&mut value, &mut schedule.current, span)?
+            };
+            schedule.supply(input.binder.declaration, local, input.producer);
+        }
+        schedule.segments.push(schedule.current);
+        checker.enclose_operand_segments(body, schedule.segments, span)
     }
 }
 
@@ -207,6 +208,11 @@ impl BindingScopes {
                 value: statement,
             };
             if let Some(inputs) = inputs {
+                if let BindingInputs::Annotation(annotation) = &inputs {
+                    for (producer, _) in annotation {
+                        uses.observe(checker, index, producer, span)?;
+                    }
+                }
                 inputs.visit(|input| {
                     if let Some(&last) = uses.types.get(&input.binder.declaration) {
                         part.through = part.through.max(last);

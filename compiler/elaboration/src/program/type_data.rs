@@ -261,6 +261,9 @@ impl Checker<'_, '_> {
                     }
                     return self.complete_checked_type(expr, checked);
                 }
+                if self.collecting_named_types() && self.data_consumer_call(expr)?.is_none() {
+                    return self.computed_annotation_type(expr);
+                }
                 let value = self.required_value(expr, P::Type)?;
                 CompletedType::from_value(value, expr.span)
             }
