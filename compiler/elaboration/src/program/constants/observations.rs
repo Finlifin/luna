@@ -3,6 +3,71 @@ use super::*;
 use std::sync::Arc;
 
 impl PartialStagedValue {
+    /// Update one checked place in the observation store. Ancestors get new
+    /// field vectors; siblings and earlier snapshots retain their evidence.
+    pub(super) fn with_field_at(
+        self: &Arc<Self>,
+        path: &[(n::FieldOwner, usize)],
+        value: Arc<Self>,
+        meta_list: Option<DeclarationId>,
+        fuel: &mut usize,
+    ) -> Result<Option<Arc<Self>>, String> {
+        if path.len() >= 128 {
+            return Ok(None);
+        }
+        let Some(((owner, index), rest)) = path.split_first() else {
+            return Ok(Some(value));
+        };
+        // Already decomposed evidence owns a vector of shared children.
+        // Copying a parent never copies an untouched child's term graph.
+        match &self.data {
+            PartialStagedData::Aggregate(PartialStagedShape::Record(_), fields) => {
+                *fuel = fuel
+                    .checked_sub(fields.len().saturating_add(1))
+                    .ok_or("structural field update budget exhausted")?;
+            }
+            PartialStagedData::Aggregate(PartialStagedShape::AnonymousRecord(names), fields) => {
+                *fuel = fuel
+                    .checked_sub(fields.len().saturating_add(1))
+                    .ok_or("structural field update budget exhausted")?;
+                for name in names {
+                    *fuel = fuel
+                        .checked_sub(name.len().saturating_add(1))
+                        .ok_or("structural field update budget exhausted")?;
+                }
+            }
+            PartialStagedData::Known(_) => self.charge(fuel)?,
+            _ => return Ok(None),
+        }
+        let Some((shape, mut fields)) = self.aggregate(meta_list) else {
+            return Ok(None);
+        };
+        match (owner, &shape) {
+            (n::FieldOwner::Nominal(expected), PartialStagedShape::Record(actual))
+                if expected == actual => {}
+            (n::FieldOwner::Anonymous, PartialStagedShape::AnonymousRecord(_)) => {}
+            _ => return Ok(None),
+        }
+        let Some(field) = fields.get_mut(*index) else {
+            return Ok(None);
+        };
+        let Some(updated) = field.with_field_at(rest, value, meta_list, fuel)? else {
+            return Ok(None);
+        };
+        *field = updated;
+        let depth = fields
+            .iter()
+            .map(|field| field.depth + 1)
+            .max()
+            .unwrap_or(1);
+        Ok((depth < 128).then(|| {
+            Arc::new(Self {
+                depth,
+                data: PartialStagedData::Aggregate(shape, fields),
+            })
+        }))
+    }
+
     pub(super) fn common(
         left: &Arc<Self>,
         right: &Arc<Self>,
@@ -333,6 +398,47 @@ impl Checker<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacing_a_field_shares_unmodified_siblings_even_when_they_are_deep() {
+        let id = DeclarationId {
+            package: 1,
+            local: 9,
+        };
+        let record = |fields: Vec<Arc<PartialStagedValue>>| {
+            Arc::new(PartialStagedValue {
+                depth: fields.iter().map(|f| f.depth + 1).max().unwrap_or(1),
+                data: PartialStagedData::Aggregate(PartialStagedShape::Record(id), fields),
+            })
+        };
+        let mut sibling = PartialStagedValue::known(Term::Bool(false));
+        for _ in 0..50 {
+            sibling = record(vec![sibling]);
+        }
+        let old_field = PartialStagedValue::known(Term::Bool(false));
+        let new_field = PartialStagedValue::known(Term::Bool(true));
+        let original = record(vec![sibling.clone(), old_field.clone()]);
+        let path = [(n::FieldOwner::Nominal(id), 1)];
+        let mut fuel = 3;
+        let updated = original
+            .with_field_at(&path, new_field.clone(), None, &mut fuel)
+            .unwrap()
+            .unwrap();
+        let PartialStagedData::Aggregate(_, after) = &updated.data else {
+            panic!()
+        };
+        let PartialStagedData::Aggregate(_, before) = &original.data else {
+            panic!()
+        };
+        assert!(Arc::ptr_eq(&after[0], &sibling));
+        assert!(Arc::ptr_eq(&after[1], &new_field));
+        assert!(Arc::ptr_eq(&before[1], &old_field));
+        assert!(
+            original
+                .with_field_at(&path, new_field, None, &mut 0)
+                .is_err()
+        );
+    }
 
     #[test]
     fn list_observation_budget_exhaustion_does_not_mutate_or_poison_evidence() {

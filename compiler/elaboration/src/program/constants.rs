@@ -10,6 +10,7 @@ use materialization::Materialization;
 
 mod observations;
 mod prepared_observations;
+mod structural_calls;
 
 use observations::ObservationScope;
 pub(super) use prepared_observations::PreparedObservations;

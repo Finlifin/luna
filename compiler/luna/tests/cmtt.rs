@@ -11401,3 +11401,73 @@ fn consecutive_quoted_constructors_reuse_immutable_schema_projections() {
         .replace("~<generate()>", "true");
     assert!(support::compile_with_protocols(&changed, &Default::default()).is_err());
 }
+
+#[test]
+fn generator_observes_factory_field_writes_without_changing_saved_values() {
+    let source = "typealias Type = .Type'builtin;
+        struct Flag { value: bool }
+        struct Ignored { other: bool }
+        struct Pair { a: Type, b: Type }
+        struct Draft { pair: Pair, saved: Pair }
+        comptime fn generate() -> < |- bool > {
+            let schema = draft(Ignored, Flag);
+            '(schema.pair.a { value: true }.value and
+              schema.pair.b { other: true }.other and
+              schema.saved.a { other: true }.other)
+        }
+        comptime fn draft(first: Type, last: Type) -> Draft {
+            let original = Pair { a: first, b: first };
+            var state = Draft { pair: original, saved: original };
+            state.pair.a = last;
+            state
+        }
+        fn run() -> bool { ~<generate()> }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let staged = source.replace(
+        "first: Type, last: Type",
+        "comptime first: Type, comptime last: Type",
+    );
+    assert_eq!(run(&staged, "run", vec![]), Value::Bool(true));
+    let defaults = source
+        .replace(
+            "first: Type, last: Type",
+            ".selected: Type = Ignored, .first: Type = Ignored, .last: Type = selected",
+        )
+        .replace("draft(Ignored, Flag)", "draft(.selected = Flag)");
+    assert_eq!(run(&defaults, "run", vec![]), Value::Bool(true));
+    let wrong = source
+        .replace(
+            "schema.pair.a { value: true }.value",
+            "schema.pair.a { other: true }.other",
+        )
+        .replace("~<generate()>", "true");
+    let failure = support::compile_with_protocols(&wrong, &Default::default()).unwrap_err();
+    assert!(failure.contains("field"), "{failure}");
+}
+
+#[test]
+fn generator_observes_replaced_type_list_in_a_standard_builder_draft() {
+    let source = "struct Flag { active: bool }
+        struct Old { obsolete: bool }
+        comptime fn replace_type(previous: Type, replacement: Type) -> meta.StructBuilder {
+            var draft = meta.StructBuilder {
+                name: .Row, field_names: [.active], field_types: [previous],
+            };
+            draft.field_types = [replacement];
+            draft
+        }
+        comptime fn types(first: Type, second: Type) -> meta.List<Type> {
+            var values: meta.List<Type> = [first];
+            values = [second];
+            values
+        }
+        comptime fn generate() -> < |- bool > {
+            let draft = replace_type(Old, Flag);
+            let T = draft.field_types[0];
+            let fields = types(Flag, Old);
+            let U = fields[0];
+            '(T { active: true }.active and U { obsolete: true }.obsolete)
+        }
+        fn run() -> bool { ~<generate()> }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}

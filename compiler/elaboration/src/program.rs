@@ -804,6 +804,7 @@ fn elaborate_in_mode(
         generator_data: BTreeMap::new(),
         generator_cells: BTreeMap::new(),
         checking_code_generator: false,
+        observing_factory_bodies: BTreeSet::new(),
         generator_schema_invalidated: false,
         abstract_code_dependencies: BTreeMap::new(),
         in_code_body: false,
@@ -2826,6 +2827,9 @@ struct Checker<'a, 'h> {
     generator_data: BTreeMap<n::LocalId, Option<n::Expr>>,
     generator_cells: BTreeMap<n::LocalId, (n::Expr, GeneratorCell)>,
     checking_code_generator: bool,
+    // Active source-body queries. Nested generator checking can request the
+    // same declaration before its first structural observation is ready.
+    observing_factory_bodies: BTreeSet<OwnerId>,
     // Propagates a potential write through nested symbolic data frames while
     // their original snapshots are temporarily outside the active local map.
     generator_schema_invalidated: bool,

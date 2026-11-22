@@ -2719,7 +2719,7 @@ impl Checker<'_, '_> {
             ));
         }
         let mut known_types = if self.checking_code_generator && !decl.mutable {
-            self.record_observed_initializer(&pattern, &value, decl.span)?;
+            self.record_generator_initializer(&pattern, &value, decl.span)?;
             self.known_pattern_types(&pattern, &value, decl.span)?
         } else {
             BTreeMap::new()
