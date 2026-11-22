@@ -481,6 +481,7 @@ version = "0.1.0"
 dependencies = [
  "anar",
  "ast_lowering",
+ "bitvec_opt",
  "comptime_executor",
  "comptime_interpretor",
  "comptime_runtime",
