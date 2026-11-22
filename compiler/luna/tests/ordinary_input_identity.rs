@@ -2290,3 +2290,98 @@ fn local_binding_scopes_keep_destructuring_and_early_exit_in_the_caller() {
         &[("Selected", 2), ("pair", 2)],
     );
 }
+
+#[test]
+fn local_binding_scopes_for_independent_values_stay_at_constant_depth() {
+    let mut source = String::from(
+        "comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+         comptime fn empty(comptime ty: Type) -> ?ty { null }",
+    );
+    for count in [21, 84] {
+        source.push_str(&format!(
+            "comptime fn run{count}(flag: bool) -> bool {{ var ok = true;"
+        ));
+        for i in 0..count {
+            source.push_str(&format!(
+                "let v{i} = empty(Selected(flag)); ok = ok and (v{i} matches null);\n"
+            ));
+        }
+        source.push_str("ok }");
+    }
+    let package = sysroot::compile(&source).unwrap();
+    let selected = sysroot::source_function(&package, "Selected");
+    let empty = sysroot::source_function(&package, "empty");
+    for tree in [false, true] {
+        let mut costs = Vec::new();
+        for count in [21, 84] {
+            let run = sysroot::source_function(&package, &format!("run{count}"));
+            sysroot::with_comptime(
+                &package,
+                Budget {
+                    steps: 1_000_000,
+                    depth: 128,
+                },
+                tree,
+                |vm| {
+                    let before = vm.remaining_steps();
+                    assert_eq!(
+                        vm.invoke(run, vec![Value::Bool(false)]).unwrap(),
+                        Value::Bool(true)
+                    );
+                    costs.push(before - vm.remaining_steps());
+                    for expected in [selected, empty] {
+                        assert_eq!(
+                            vm.events()
+                                .iter()
+                                .filter(|event| matches!(event,
+                        Event::EnterFunction(declaration) if *declaration == expected))
+                                .count(),
+                            count
+                        );
+                    }
+                },
+            );
+        }
+        // Four times as many disjoint scopes should not re-specialize each suffix.
+        eprintln!("disjoint local scopes, tree={tree}, steps={costs:?}");
+        assert!(costs[1] <= costs[0] * 5, "tree={tree}, steps={costs:?}");
+    }
+}
+
+#[test]
+fn local_binding_scopes_keep_transitive_uses_of_intervening_locals() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn relay(flag: bool) -> bool {
+            let first = empty(Selected(flag));
+            let (saved, other) = (flag, not flag);
+            let ready = first matches null;
+            let second = empty(Selected(other));
+            var answer = second matches null;
+            answer = answer and ready;
+            answer and saved != other
+        }
+        comptime fn check() -> bool { relay(false) and relay(true) }",
+        &[("Selected", 4), ("empty", 4)],
+    );
+}
+
+#[test]
+fn local_binding_scopes_cover_later_type_observations() {
+    check_events(
+        "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn empty(comptime ty: Type) -> ?ty { null }
+        comptime fn relay(flag: bool) -> bool {
+            let value = empty(Selected(flag));
+            let ok = value matches null;
+            var touched = false;
+            if flag { touched = true; };
+            ok and ((value'type == ?bool) == touched)
+        }
+        comptime fn check() -> bool { relay(false) and relay(true) }",
+        &[("Selected", 2), ("empty", 2)],
+    );
+}

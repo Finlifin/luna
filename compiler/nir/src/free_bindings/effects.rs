@@ -29,6 +29,18 @@ pub fn remove_pattern_bindings<T>(
     bindings: &mut BTreeMap<n::LocalId, T>,
     fuel: &mut usize,
 ) -> Result<(), crate::visit::Error> {
+    visit_possible_pattern_bindings(pattern, fuel, |id| {
+        bindings.remove(&id);
+    })
+}
+
+/// Includes bindings from all alternatives and both sides of remaps. A caller
+/// computing lifetimes may conservatively retain those that are path-local.
+pub fn visit_possible_pattern_bindings(
+    pattern: &n::Pattern,
+    fuel: &mut usize,
+    mut visit: impl FnMut(n::LocalId),
+) -> Result<(), crate::visit::Error> {
     let mut pending = vec![pattern];
     while let Some(pattern) = pending.pop() {
         *fuel = fuel.checked_sub(1).ok_or(crate::visit::Error::Budget(
@@ -36,7 +48,7 @@ pub fn remove_pattern_bindings<T>(
         ))?;
         match pattern {
             n::Pattern::Binding { binding, inner } => {
-                bindings.remove(binding);
+                visit(*binding);
                 pending.push(inner);
             }
             n::Pattern::Remap {
@@ -49,7 +61,7 @@ pub fn remove_pattern_bindings<T>(
                         "binding invalidation budget exhausted",
                     ))?;
                 for (_, to) in remap {
-                    bindings.remove(to);
+                    visit(*to);
                 }
                 pending.push(pattern);
             }

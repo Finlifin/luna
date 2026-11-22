@@ -82,63 +82,182 @@ impl BindingScopes {
         let K::Block { statements, result } = &mut block.kind else {
             unreachable!()
         };
-        let source = block.source;
-        let mut tail = result.take();
-        let mut suffix = Vec::new();
-        let mut diverges = false;
-        let mut depth = 0;
-        for statement in std::mem::take(statements).into_iter().rev() {
-            dependent_inputs::tasks::spend(&mut checker.required_steps, 1, span)?;
+        // Descending source order makes the first observed use the last use.
+        // A generated block must also enclose every later read of any ordinary
+        // local it encloses, even if that local's type is independent.
+        let mut uses = LastUses::default();
+        let mut parts = Vec::new();
+        if let Some(tail) = result.take() {
+            let index = statements.len();
+            uses.observe(checker, index, &tail, span)?;
+            parts.push(Part {
+                index,
+                through: index,
+                depth: 0,
+                is_result: true,
+                value: *tail,
+            });
+        }
+        while !self.0.is_empty() {
+            let Some(statement) = statements.pop() else {
+                return Err(needs_frame(
+                    span,
+                    "local type initializer was lost during block completion",
+                ));
+            };
+            let index = statements.len();
+            let through = uses.local_extent(checker, index, &statement, span)?;
             let inputs = match statement.kind {
                 K::Let { binding, .. } => self.0.remove(&binding),
                 _ => None,
             };
-            diverges |= is_never(&statement.ty);
-            suffix.push(statement);
+            uses.observe(checker, index, &statement, span)?;
+            let mut part = Part {
+                index,
+                through,
+                depth: 0,
+                is_result: false,
+                value: statement,
+            };
             if let Some(inputs) = inputs {
-                suffix.reverse();
-                let ty = match &tail {
-                    _ if diverges => p(P::Never),
-                    Some(value) => declaration_inputs::copy_input_domain(
-                        &value.ty,
-                        &mut checker.required_steps,
-                        span,
-                    )?,
-                    None => p(P::Void),
-                };
-                let body = n::Expr {
-                    source,
-                    ty,
-                    kind: K::Block {
-                        statements: std::mem::take(&mut suffix),
-                        result: tail,
-                    },
-                };
-                let body =
-                    checker.close_operand_consumer(body, &inputs, Consumer::Binding, span)?;
-                depth += 1; // The block containing this initializer.
-                let mut current = &body;
-                while let K::WithTypeInputs { body, .. } = &current.kind {
-                    depth += 1;
-                    current = body;
+                for input in inputs.values() {
+                    if let Some(&last) = uses.types.get(&input.binder.declaration) {
+                        part.through = part.through.max(last);
+                    }
                 }
-                if depth >= nir::copy_budget::MAX_COPY_DEPTH {
-                    return Err(error(span, "lexical operand nesting budget exhausted"));
-                }
-                tail = Some(Box::new(body));
-                diverges = false;
+                part = part.enclose(checker, &inputs, &mut parts, span)?;
+            }
+            parts.push(part);
+        }
+        for part in parts.into_iter().rev() {
+            if part.is_result {
+                *result = Some(Box::new(part.value));
+            } else {
+                statements.push(part.value);
             }
         }
-        if !self.0.is_empty() {
-            return Err(needs_frame(
-                span,
-                "local type initializer was lost during block completion",
-            ));
-        }
-        suffix.reverse();
-        *statements = suffix;
-        *result = tail;
         Ok(block)
+    }
+}
+
+/// One checked statement or completed lexical region. The extent may lie
+/// beyond this part if it introduces a local read by a later sibling.
+struct Part {
+    index: usize,
+    through: usize,
+    depth: usize,
+    is_result: bool,
+    value: n::Expr,
+}
+
+impl Part {
+    fn enclose(
+        mut self,
+        checker: &mut Checker<'_, '_>,
+        inputs: &Inputs,
+        parts: &mut Vec<Self>,
+        span: Span,
+    ) -> Result<Self, Error> {
+        let source = self.value.source;
+        let mut diverges = is_never(&self.value.ty);
+        let mut region = vec![self.value];
+        let mut tail = None;
+        while parts.last().is_some_and(|part| part.index <= self.through) {
+            let part = parts.pop().unwrap();
+            self.through = self.through.max(part.through);
+            self.depth = self.depth.max(part.depth);
+            if part.is_result {
+                tail = Some(Box::new(part.value));
+            } else {
+                diverges |= is_never(&part.value.ty);
+                region.push(part.value);
+            }
+        }
+        self.is_result = tail.is_some();
+        let ty = match &tail {
+            _ if diverges => p(P::Never),
+            Some(value) => {
+                declaration_inputs::copy_input_domain(&value.ty, &mut checker.required_steps, span)?
+            }
+            None => p(P::Void),
+        };
+        let body = n::Expr {
+            source,
+            ty,
+            kind: K::Block {
+                statements: region,
+                result: tail,
+            },
+        };
+        self.value = checker.close_operand_consumer(body, inputs, Consumer::Binding, span)?;
+        self.depth += 1;
+        let mut current = &self.value;
+        while let K::WithTypeInputs { body, .. } = &current.kind {
+            self.depth += 1;
+            current = body;
+        }
+        if self.depth >= nir::copy_budget::MAX_COPY_DEPTH {
+            return Err(error(span, "lexical operand nesting budget exhausted"));
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Default)]
+struct LastUses {
+    locals: BTreeMap<n::LocalId, usize>,
+    types: BTreeMap<DeclarationId, usize>,
+}
+
+impl LastUses {
+    fn observe(
+        &mut self,
+        checker: &mut Checker<'_, '_>,
+        index: usize,
+        value: &n::Expr,
+        span: Span,
+    ) -> Result<(), Error> {
+        for id in checker.checked_declaration_inputs(value, span)? {
+            self.types.entry(id).or_insert(index);
+        }
+        checker.with_observation_budget(span, |_, budget| {
+            let locals = nir::free_bindings::collect(value, &mut budget.steps)?;
+            budget.consume(locals.len())?;
+            for local in locals {
+                self.locals.entry(local).or_insert(index);
+            }
+            Ok(())
+        })
+    }
+
+    fn local_extent(
+        &self,
+        checker: &mut Checker<'_, '_>,
+        index: usize,
+        statement: &n::Expr,
+        span: Span,
+    ) -> Result<usize, Error> {
+        let mut end = index;
+        let mut include = |id| {
+            if let Some(&last) = self.locals.get(&id) {
+                end = end.max(last);
+            }
+        };
+        match &statement.kind {
+            K::Let { binding, .. } => include(*binding),
+            K::LetPattern { pattern, .. } => {
+                checker.with_observation_budget(span, |_, budget| {
+                    nir::free_bindings::visit_possible_pattern_bindings(
+                        pattern,
+                        &mut budget.steps,
+                        include,
+                    )?;
+                    Ok(())
+                })?
+            }
+            _ => {}
+        }
+        Ok(end)
     }
 }
 

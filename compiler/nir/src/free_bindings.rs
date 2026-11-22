@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod effects;
 pub use effects::{
     Access, access, remove_pattern_bindings, retain_unmodified, retain_unmodified_argument,
+    visit_possible_pattern_bindings,
 };
 mod lexical;
 mod walk;
