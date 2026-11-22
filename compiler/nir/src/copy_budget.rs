@@ -1018,11 +1018,16 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         0
                     }
                     K::WithTypeInputs {
+                        projections,
                         preparations,
                         parameters,
                         arguments,
                         body,
                     } => {
+                        charge_width(steps, projections.0.len())?;
+                        for path in projections.0.values() {
+                            charge_width(steps, path.len())?;
+                        }
                         charge_width(steps, preparations.len())?;
                         work.extend(
                             preparations

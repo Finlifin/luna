@@ -2762,3 +2762,107 @@ fn mixed_head_fields_deliver_a_collector_as_one_ordinary_value() {
         &[("Selected", 2), ("Packet", 0), ("elements", 2)],
     );
 }
+
+#[test]
+fn collected_annotation_fields_check_the_tuple_initializer_in_place() {
+    let source = "
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn inspect(flag: bool) -> bool {
+            let pair: Tuple<bool, ?Selected(flag)> = (true, null);
+            let (first, second) = pair;
+            first and (second matches null) and
+                (if flag { pair'type == Tuple<bool, ?bool> } else { pair'type == Tuple<bool, ?char> })
+        }
+        comptime fn check() -> bool { inspect(true) and inspect(false) }";
+    check_events(source, &[("Selected", 2)]);
+    let rejected = source.replace("(true, null)", "(null, null)");
+    let failure = sysroot::compile(&rejected).unwrap_err();
+    assert!(failure.contains("optional"), "{failure}");
+}
+
+#[test]
+fn collected_annotation_fields_reach_user_heads_and_keep_source_order() {
+    check_events(
+        "
+        pure comptime fn Packet<...items: meta.List<Type>> -> Type { bool }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn Element(value: ?Packet<bool, ?T>) -> Type where T { T }
+        comptime fn inspect(flag: bool) -> bool {
+            var ready = false;
+            let value: ?Packet<.items = [bool, ?Selected(do { ready = true; flag })]> = null;
+            ready and Element(value) == (if flag { bool } else { char })
+        }
+        comptime fn check() -> bool { inspect(true) and inspect(false) }",
+        &[("Selected", 2), ("Element", 2), ("Packet", 0)],
+    );
+}
+
+#[test]
+fn collected_annotation_fields_use_the_supplied_element_domain_and_spreads() {
+    check_events(
+        "
+        pure comptime fn Bag<T, ...items: meta.List<T>> -> Type { bool }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn inspect(flag: bool) -> bool {
+            let value: ?Bag<Type, ...[?Selected(flag)], u8> = null;
+            if flag { value'type == ?Bag<Type, ?bool, u8> }
+            else { value'type == ?Bag<Type, ?char, u8> }
+        }
+        comptime fn check() -> bool { inspect(true) and inspect(false) }",
+        &[("Selected", 2), ("Bag", 0)],
+    );
+}
+
+#[test]
+fn constructed_annotation_fields_recover_nested_type_components() {
+    check_events(
+        "
+        pure comptime fn Marker<T> -> Type { T }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn Inner(value: ?Marker<?*T>) -> Type where T { T }
+        comptime fn inspect(flag: bool) -> bool {
+            let value: ?Marker<?*Selected(flag)> = null;
+            Inner(value) == (if flag { bool } else { char })
+        }
+        comptime fn check() -> bool { inspect(true) and inspect(false) }",
+        &[("Selected", 2), ("Inner", 2), ("Marker", 0)],
+    );
+}
+
+#[test]
+fn collected_annotation_fields_wait_for_formation_and_keep_unknown_spread_widths() {
+    check_events(
+        "
+        pure comptime fn Packet<...items: meta.List<Type>> -> Type { bool }
+        comptime fn Selected(stop: bool) -> Type { if stop { Any } else { bool } }
+        comptime fn suffix(wide: bool) -> meta.List<Type> {
+            if wide { [u8, char] } else { [] }
+        }
+        comptime fn relay(stop: bool, wide: bool) -> bool {
+            let p: ?Packet<Selected(stop), do { if stop { return true; }; ?char }> = null;
+            let q: ?Packet<bool, ...suffix(wide), ?Selected(false)> = null;
+            p'type == ?Packet<bool, ?char> and
+                (if wide { q'type == ?Packet<bool, u8, char, ?bool> }
+                 else { q'type == ?Packet<bool, ?bool> })
+        }
+        comptime fn check() -> bool { relay(true, false) and relay(false, true) and relay(false, false) }",
+        &[("Selected", 5), ("suffix", 2), ("Packet", 0)],
+    );
+}
+
+#[test]
+fn collected_annotation_fields_preserve_ordinary_data_indices_in_block_spreads() {
+    check_events(
+        "
+        pure comptime fn Flags<...bits: meta.List<bool>> -> Type { bool }
+        comptime fn marked(b: bool) -> bool { b }
+        comptime fn first(value: ?Flags<head, true>) -> bool where head: bool { head }
+        comptime fn inspect(flag: bool) -> bool {
+            var ran = false;
+            let value: ?Flags<...do { ran = true; [marked(flag), true] }> = null;
+            ran and first(value) == flag
+        }
+        comptime fn check() -> bool { inspect(true) and inspect(false) }",
+        &[("marked", 2), ("first", 2), ("Flags", 0)],
+    );
+}

@@ -2517,6 +2517,7 @@ fn lexical_type_input_scopes_enforce_phase_distinctness_and_result_scope() {
             source: body.source,
             ty: result,
             kind: K::WithTypeInputs {
+                projections: Default::default(),
                 preparations: vec![],
                 arguments: vec![input.clone(); ids.len()],
                 parameters: ids,
@@ -2542,8 +2543,16 @@ fn lexical_type_input_scopes_enforce_phase_distinctness_and_result_scope() {
     };
     arguments[0].expression_mut().unwrap().ty =
         Term::Lift(Box::new(Term::Primitive(Primitive::Bool)));
+    let mut missing_slot = scope(vec![binder], Term::Primitive(Primitive::Bool));
+    let K::WithTypeInputs { projections, .. } = &mut missing_slot.kind else {
+        unreachable!()
+    };
+    projections
+        .0
+        .insert(1, vec![nir::program::TypeComponent::OptionalPayload]);
     for body in [
         lifted,
+        missing_slot,
         scope(vec![binder, binder], Term::Primitive(Primitive::Bool)),
         scope(
             vec![binder],

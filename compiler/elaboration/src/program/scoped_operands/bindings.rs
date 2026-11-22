@@ -17,7 +17,7 @@ impl BindingInputs {
             Self::Annotation(steps) => steps
                 .iter()
                 .flat_map(|s| s.outputs.iter())
-                .for_each(|(_, input, _)| f(input)),
+                .for_each(|output| f(&output.input)),
         }
     }
 
@@ -38,7 +38,7 @@ impl BindingInputs {
             .flat_map(|s| {
                 s.outputs
                     .iter()
-                    .map(|(_, input, _)| input.binder.declaration)
+                    .map(|output| output.input.binder.declaration)
             })
             .collect();
         if !checker
@@ -69,13 +69,31 @@ impl BindingInputs {
                         expression,
                     });
             }
-            for (local, input, domain) in step.outputs.iter() {
+            for output in step.outputs.iter() {
+                let input = &output.input;
                 let domain = declaration_inputs::copy_input_domain(
-                    domain,
+                    &output.domain,
                     &mut checker.required_steps,
                     span,
                 )?;
-                schedule.supply_in(input.binder.declaration, *local, input.producer, domain);
+                if let Some(slot) = schedule.supply_in(
+                    input.binder.declaration,
+                    output.local,
+                    input.producer,
+                    domain,
+                ) && !output.components.is_empty()
+                {
+                    dependent_inputs::tasks::spend(
+                        &mut checker.required_steps,
+                        output.components.len(),
+                        span,
+                    )?;
+                    schedule
+                        .current
+                        .projections
+                        .0
+                        .insert(slot, output.components.clone());
+                }
             }
         }
         schedule.segments.push(schedule.current);
@@ -229,8 +247,8 @@ impl BindingScopes {
                         if let Some(prep) = &step.preparation {
                             uses.observe(checker, index, prep, span)?;
                         } else {
-                            for (local, _, _) in step.outputs.iter() {
-                                uses.locals.entry(*local).or_insert(index);
+                            for output in step.outputs.iter() {
+                                uses.locals.entry(output.local).or_insert(index);
                             }
                         }
                     }
@@ -393,8 +411,16 @@ impl std::fmt::Display for BindingScopes {
                         if let Some(prep) = &step.preparation {
                             write!(f, " {prep}")?;
                         }
-                        for (local, input, domain) in step.outputs.iter() {
-                            write!(f, " (output {local} {} {domain})", input.binder)?;
+                        for output in step.outputs.iter() {
+                            write!(
+                                f,
+                                " (output {} {} {}",
+                                output.local, output.input.binder, output.domain
+                            )?;
+                            for component in &output.components {
+                                write!(f, " {component}")?;
+                            }
+                            f.write_str(")")?;
                         }
                         f.write_str(")")?;
                     }

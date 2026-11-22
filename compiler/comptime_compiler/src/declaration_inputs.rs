@@ -9,7 +9,7 @@ use nir::{DeclarationId, Primitive, Term};
 use std::{collections::BTreeSet, fmt, sync::Arc};
 
 #[derive(Clone, Copy, Debug)]
-pub enum Target<S, I, B> {
+pub enum Target<S, I, B, P> {
     Normal(DeclarationId),
     Selected {
         signature: S,
@@ -19,6 +19,7 @@ pub enum Target<S, I, B> {
     Nominal(DeclarationId),
     Callable(DeclarationId),
     Lexical {
+        projections: P,
         parameters: I,
         body: B,
     },
@@ -32,7 +33,7 @@ pub enum Target<S, I, B> {
 pub struct PlanView<'a> {
     pub source: SourceRange,
     pub ty: &'a Term,
-    pub target: Target<&'a Term, &'a [DeclarationId], &'a Expr>,
+    pub target: Target<&'a Term, &'a [DeclarationId], &'a Expr, &'a nir::program::TypeProjections>,
     pub arguments: &'a [NormalFormArgument],
     pub schedule: InputSchedule<'a>,
 }
@@ -52,8 +53,12 @@ impl<'a> PlanView<'a> {
             K::PlannedFunctionInstance { declaration, .. } => Target::Callable(*declaration),
             K::NominalType { declaration, .. } => Target::Nominal(*declaration),
             K::WithTypeInputs {
-                parameters, body, ..
+                parameters,
+                projections,
+                body,
+                ..
             } => Target::Lexical {
+                projections,
                 parameters: parameters.as_slice(),
                 body: body.as_ref(),
             },
@@ -90,7 +95,7 @@ impl<'a> PlanView<'a> {
 pub struct DeclarationInputPlan {
     source: SourceRange,
     ty: Term,
-    target: Target<Term, Vec<DeclarationId>, Box<Expr>>,
+    target: Target<Term, Vec<DeclarationId>, Box<Expr>, nir::program::TypeProjections>,
     arguments: Vec<NormalFormArgument>,
     order: Option<Vec<usize>>,
     bindings: Option<Vec<LocalId>>,
@@ -134,7 +139,12 @@ impl DeclarationInputPlan {
                 source,
                 input_ids: input_ids.to_vec(),
             },
-            Target::Lexical { parameters, body } => Target::Lexical {
+            Target::Lexical {
+                projections,
+                parameters,
+                body,
+            } => Target::Lexical {
+                projections: projections.clone(),
                 parameters: parameters.to_vec(),
                 body: Box::new(body.clone()),
             },
@@ -175,7 +185,12 @@ impl DeclarationInputPlan {
                 source: *source,
                 input_ids: input_ids.as_slice(),
             },
-            Target::Lexical { parameters, body } => Target::Lexical {
+            Target::Lexical {
+                projections,
+                parameters,
+                body,
+            } => Target::Lexical {
+                projections,
                 parameters: parameters.as_slice(),
                 body: body.as_ref(),
             },
@@ -217,8 +232,12 @@ impl fmt::Display for PlanView<'_> {
             Target::Normal(id) => write!(f, "(normal {id})")?,
             Target::Nominal(id) => write!(f, "(nominal {id})")?,
             Target::Callable(id) => write!(f, "(callable {id})")?,
-            Target::Lexical { parameters, body } => {
-                f.write_str("(lexical (parameters")?;
+            Target::Lexical {
+                projections,
+                parameters,
+                body,
+            } => {
+                write!(f, "(lexical {projections} (parameters")?;
                 for id in parameters {
                     write!(f, " {id}")?;
                 }

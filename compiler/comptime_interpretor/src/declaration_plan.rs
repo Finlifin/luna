@@ -108,13 +108,18 @@ impl<'a, 'e> Frame<'a, 'e> {
                     .map_err(|_| vm.failure(ErrorKind::Type, Some(view.source)))?;
                 (Receiver::Callable(target), parameters, domains, referenced)
             }
-            Target::Lexical { parameters, body } => {
+            Target::Lexical {
+                parameters,
+                body,
+                projections,
+            } => {
                 let valid = admitted_work(vm, view.source, |fuel| {
                     nir::program::check_lexical_type_inputs(
                         parameters,
                         view.arguments,
                         view.ty,
                         &body.ty,
+                        projections,
                         fuel,
                     )
                 })?;
@@ -347,7 +352,10 @@ impl Frame<'_, '_> {
             })?;
             let admitted = match receiver {
                 Receiver::Lexical => {
-                    let Target::Lexical { parameters, body } = view.target else {
+                    let Target::Lexical {
+                        parameters, body, ..
+                    } = view.target
+                    else {
                         unreachable!()
                     };
                     let substitution = vm.query_admission(Some(view.source), |vm, fuel| {

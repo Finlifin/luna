@@ -511,6 +511,7 @@ fn lexical_type_inputs_shadow_substitution_only_inside_the_body() {
         source,
         ty: p(Primitive::Type),
         kind: K::WithTypeInputs {
+            projections: Default::default(),
             parameters: vec![id(1)],
             preparations: vec![],
             arguments: vec![A::Value(read(outer.clone()))],
@@ -554,6 +555,7 @@ fn lexical_snapshot_domains_use_the_new_binders_before_body_specialization() {
         source,
         ty: p(Primitive::Bool),
         kind: K::WithTypeInputs {
+            projections: Default::default(),
             preparations: vec![],
             parameters: vec![id(1), id(3)],
             arguments: vec![

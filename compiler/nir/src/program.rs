@@ -22,7 +22,8 @@ pub use published_definitions::PublishedDefinitions;
 mod input_schedule;
 
 pub use input_schedule::{
-    CheckedInputSchedule, InputPath, InputSchedule, InputStep, check_lexical_type_inputs,
+    CheckedInputSchedule, InputPath, InputSchedule, InputStep, TypeComponent, TypeProjections,
+    check_lexical_type_inputs,
 };
 
 mod function;
@@ -1459,6 +1460,7 @@ pub enum ExprKind {
     /// and resume in the caller's environment. Each Value operand carries its
     /// declaration domain, including dependencies on other fresh slots.
     WithTypeInputs {
+        projections: TypeProjections,
         preparations: Vec<NormalFormPreparation>,
         parameters: Vec<DeclarationId>,
         arguments: Vec<NormalFormArgument>,
@@ -3668,6 +3670,7 @@ impl fmt::Display for ExprKind {
                 f.write_str(")")
             }
             Self::WithTypeInputs {
+                projections,
                 preparations,
                 parameters,
                 arguments,
@@ -3675,7 +3678,7 @@ impl fmt::Display for ExprKind {
             } => {
                 write!(
                     f,
-                    "(with-type-inputs {} (parameters",
+                    "(with-type-inputs {} {projections} (parameters",
                     InputSchedule {
                         preparations,
                         ..Default::default()
@@ -4708,6 +4711,7 @@ impl Expr {
                 }
             }
             ExprKind::WithTypeInputs {
+                projections: _,
                 arguments,
                 body,
                 preparations,

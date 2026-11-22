@@ -143,6 +143,22 @@ impl input_collection::Source for Source<'_> {
             .domains
             .get(slot)
             .unwrap_or(&Term::Primitive(Primitive::Type));
+        let value = if let input_collection::Target::Lexical { projections, .. } =
+            self.plan.view().target
+            && let Some(path) = projections.0.get(&slot)
+        {
+            vm.effect_charge(path.len(), Some(source))?;
+            let mut ty = vm.type_identity_term(value, source)?;
+            vm.check_type_description(&ty, Some(source))?;
+            for step in path {
+                ty = step
+                    .take(ty)
+                    .ok_or_else(|| vm.failure(ErrorKind::Type, Some(source)))?;
+            }
+            Value::Type(ty)
+        } else {
+            value
+        };
         self.completed.bind(
             vm,
             slot,
@@ -173,6 +189,68 @@ mod tests {
     use input_collection::InputPlan;
 
     #[test]
+    fn lexical_component_paths_check_each_constructor_before_publishing_the_leaf() {
+        use nir::program::{
+            TypeComponent::{OptionalPayload, Pointee},
+            TypeProjections,
+        };
+        let package = Package::default();
+        let id = DeclarationId {
+            package: 72,
+            local: 3,
+        };
+        let local = LocalId { owner: 3, index: 0 };
+        let source = SourceRange { start: 2, end: 4 };
+        let ty = Term::Primitive(Primitive::Type);
+        let scope = Expr {
+            source,
+            ty: ty.clone(),
+            kind: K::WithTypeInputs {
+                parameters: vec![id],
+                preparations: vec![],
+                projections: TypeProjections(BTreeMap::from([(0, vec![OptionalPayload, Pointee])])),
+                arguments: vec![A::Value(Expr {
+                    source,
+                    ty: ty.clone(),
+                    kind: K::Local(local),
+                })],
+                body: Box::new(Expr {
+                    source,
+                    ty,
+                    kind: K::TypeValue(Term::Rigid {
+                        declaration: id,
+                        sort: nir::Sort::Type,
+                    }),
+                }),
+            },
+        };
+        for tree in [false, true] {
+            let mut vm = if tree {
+                Interpreter::for_comptime_tree(&package, Budget::default()).unwrap()
+            } else {
+                Interpreter::for_comptime(&package, Budget::default()).unwrap()
+            };
+            let boolean = Term::Primitive(Primitive::Bool);
+            let mut env =
+                Environment::from([(local, Value::Type(OptionalPayload.wrap(boolean.clone())))]);
+            assert!(matches!(
+                vm.eval(&scope, &mut env),
+                Err(Error {
+                    kind: ErrorKind::Type,
+                    ..
+                })
+            ));
+            env.insert(
+                local,
+                Value::Type(OptionalPayload.wrap(Pointee.wrap(boolean.clone()))),
+            );
+            assert!(
+                matches!(vm.eval(&scope, &mut env).unwrap(), Flow::Value(Value::Type(t)) if t == boolean)
+            );
+        }
+    }
+
+    #[test]
     fn lexical_snapshot_waits_for_its_domain_and_rejects_mismatched_data() {
         let package = Package::default();
         let source = SourceRange { start: 4, end: 9 };
@@ -183,6 +261,7 @@ mod tests {
             source,
             ty: boolean.clone(),
             kind: K::WithTypeInputs {
+                projections: Default::default(),
                 preparations: vec![],
                 parameters: vec![id(0), id(1)],
                 arguments: vec![

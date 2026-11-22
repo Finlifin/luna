@@ -118,6 +118,7 @@ impl std::fmt::Display for Boundary {
 
 #[derive(Default)]
 struct Segment {
+    projections: n::TypeProjections,
     preparations: Vec<n::NormalFormPreparation>,
     parameters: Vec<DeclarationId>,
     arguments: Vec<n::NormalFormArgument>,
@@ -239,18 +240,21 @@ impl OperandSchedule {
         binding: n::LocalId,
         source: n::SourceRange,
         domain: Term,
-    ) {
-        if self.unavailable.remove(&binder) {
-            self.pending.insert(binder);
-            self.current.parameters.push(binder);
-            self.current
-                .arguments
-                .push(n::NormalFormArgument::Value(n::Expr {
-                    source,
-                    ty: domain,
-                    kind: K::Local(binding),
-                }));
+    ) -> Option<usize> {
+        if !self.unavailable.remove(&binder) {
+            return None;
         }
+        let slot = self.current.arguments.len();
+        self.pending.insert(binder);
+        self.current.parameters.push(binder);
+        self.current
+            .arguments
+            .push(n::NormalFormArgument::Value(n::Expr {
+                source,
+                ty: domain,
+                kind: K::Local(binding),
+            }));
+        Some(slot)
     }
 }
 
@@ -520,6 +524,7 @@ impl Checker<'_, '_> {
                 source,
                 ty,
                 kind: K::WithTypeInputs {
+                    projections: segment.projections,
                     preparations: segment.preparations,
                     parameters: segment.parameters,
                     arguments: segment.arguments,

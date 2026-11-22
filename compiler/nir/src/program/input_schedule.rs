@@ -204,6 +204,56 @@ impl ExprKind {
     }
 }
 
+/// A lexical Type input may select a component of its formed operand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TypeComponent {
+    OptionalPayload,
+    Pointee,
+}
+
+impl TypeComponent {
+    pub fn wrap(self, inner: crate::Term) -> crate::Term {
+        match self {
+            Self::OptionalPayload => crate::Term::Optional(Box::new(inner)),
+            Self::Pointee => crate::Term::Pointer(Box::new(inner)),
+        }
+    }
+
+    pub fn take(self, ty: crate::Term) -> Option<crate::Term> {
+        match (self, ty) {
+            (Self::OptionalPayload, crate::Term::Optional(inner))
+            | (Self::Pointee, crate::Term::Pointer(inner)) => Some(*inner),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for TypeComponent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::OptionalPayload => "optional-payload",
+            Self::Pointee => "pointee",
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TypeProjections(pub std::collections::BTreeMap<usize, Vec<TypeComponent>>);
+
+impl fmt::Display for TypeProjections {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("(projections")?;
+        for (slot, path) in &self.0 {
+            write!(f, " (slot {slot}")?;
+            for step in path {
+                write!(f, " {step}")?;
+            }
+            f.write_str(")")?;
+        }
+        f.write_str(")")
+    }
+}
+
 /// Each lexical input gets its domain from its checked operand. A domain may
 /// reference another slot in the telescope. The body can use these private
 /// identities, but the caller-visible result must be independent of them.
@@ -212,6 +262,7 @@ pub fn check_lexical_type_inputs(
     arguments: &[NormalFormArgument],
     result: &crate::Term,
     body_result: &crate::Term,
+    projections: &TypeProjections,
     fuel: &mut usize,
 ) -> Result<bool, crate::type_computations::Error> {
     use crate::{Sort, type_computations as types};
@@ -221,6 +272,17 @@ pub fn check_lexical_type_inputs(
     *fuel = fuel
         .checked_sub(parameters.len())
         .ok_or(types::Error::Budget)?;
+    for (&slot, path) in &projections.0 {
+        *fuel = fuel
+            .checked_sub(1 + path.len())
+            .ok_or(types::Error::Budget)?;
+        if path.is_empty()
+            || !matches!(arguments.get(slot), Some(NormalFormArgument::Value(expr))
+            if expr.ty == crate::Term::Primitive(crate::Primitive::Type))
+        {
+            return Ok(false);
+        }
+    }
     let bound: BTreeSet<_> = parameters.iter().copied().collect();
     if bound.len() != parameters.len() {
         return Ok(false);

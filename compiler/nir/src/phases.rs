@@ -1369,6 +1369,7 @@ impl<'a> PhaseContext<'a> {
                             work.push(Work::Expr(signature, false, ct), inspection_fuel)?;
                         }
                         K::WithTypeInputs {
+                            projections,
                             preparations,
                             parameters,
                             arguments,
@@ -1397,6 +1398,7 @@ impl<'a> PhaseContext<'a> {
                                 arguments,
                                 &expr.ty,
                                 &body.ty,
+                                projections,
                                 inspection_fuel,
                             )
                             .map_err(|_| {

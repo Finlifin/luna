@@ -1,6 +1,7 @@
 //! Local type annotations demand a concrete identity when execution reaches
 //! the declaration. The checked initializer still reads its original storage.
 use super::*;
+mod collections;
 use crate::program::normal::observation::{self, Failure};
 
 // Alias roots identify an immutable value, never a mutable slot. Keep these
@@ -52,7 +53,26 @@ pub(in crate::program) struct Annotation {
 #[derive(Clone)]
 pub(super) struct AnnotationStep {
     pub(super) preparation: Option<Arc<n::Expr>>,
-    pub(super) outputs: Arc<[(n::LocalId, Input, Term)]>,
+    pub(super) outputs: Arc<[Output]>,
+}
+
+#[derive(Clone)]
+pub(super) struct Output {
+    pub(super) local: n::LocalId,
+    pub(super) input: Input,
+    pub(super) domain: Term,
+    pub(super) components: Vec<n::TypeComponent>,
+}
+
+impl Output {
+    fn new(local: n::LocalId, input: Input, domain: Term) -> Self {
+        Self {
+            local,
+            input,
+            domain,
+            components: vec![],
+        }
+    }
 }
 
 impl Annotation {
@@ -276,11 +296,27 @@ impl Checker<'_, '_> {
             .zip(&fields)
             .map(|((id, domain), (_, rigid))| (*id, (domain, rigid)))
             .collect();
+        let constants = arguments
+            .iter()
+            .map(|arg| self.annotation_constant(arg.expression(), span))
+            .collect::<Result<Vec<_>, _>>()?;
+        // The lexical telescope retains every dependency. For a constructed
+        // value we can additionally use closed evidence for the Type formals,
+        // even when a dependent collector was written first.
+        let type_arguments: BTreeMap<_, _> = signature
+            .iter()
+            .zip(&fields)
+            .zip(&constants)
+            .filter_map(|(((_, ty), (binder, _)), known)| {
+                (*ty == p(P::Type)).then_some((binder.declaration, (ty, known.as_ref()?)))
+            })
+            .collect();
         let mut terms = Vec::with_capacity(count);
         let mut patterns = Vec::with_capacity(count);
+        let mut projections = Vec::new();
         let mut outputs = Vec::with_capacity(count);
-        for ((argument, (_, domain)), (binder, rigid)) in
-            arguments.iter().zip(&signature).zip(&fields)
+        for (slot, ((argument, (_, domain)), (binder, rigid))) in
+            arguments.iter().zip(&signature).zip(&fields).enumerate()
         {
             let domain = self.with_observation_budget(span, |_, budget| {
                 Ok(nir::instantiate_observed_domain(
@@ -291,23 +327,29 @@ impl Checker<'_, '_> {
                 )?)
             })?;
             let local = self.spread_binding(span)?;
-            let known = if let Some(expr) = argument.expression()
-                && matches!(expr.kind, K::TypeValue(_) | K::Literal(_))
-                && self.checked_declaration_inputs(expr, span)?.is_empty()
-            {
-                self.with_observation_budget(span, |checker, budget| {
-                    checker.normal_input_hint(expr, budget)
-                })?
-                .filter(|ty| ty.check_scope(&[]).is_ok())
+            let known = if let Some(value) = &constants[slot] {
+                Some(declaration_inputs::copy_input_domain(
+                    value,
+                    &mut self.required_steps,
+                    span,
+                )?)
             } else {
-                None
+                let exposed = self.with_observation_budget(span, |_, budget| {
+                    Ok(nir::instantiate_observed_domain(
+                        &domain,
+                        |id| type_arguments.get(&id).copied(),
+                        &[],
+                        &mut budget.steps,
+                    )?)
+                })?;
+                self.constructed_annotation(argument, &exposed, local, &mut projections, span)?
             };
             terms.push(known.unwrap_or_else(|| rigid.clone()));
             patterns.push(n::Pattern::Binding {
                 binding: local,
                 inner: Box::new(n::Pattern::Wild),
             });
-            outputs.push((
+            outputs.push(Output::new(
                 local,
                 Input {
                     binder: *binder,
@@ -339,6 +381,12 @@ impl Checker<'_, '_> {
                 preparation: Some(Arc::new(preparation)),
                 outputs: outputs.into(),
             });
+        self.input_facts
+            .annotation
+            .as_mut()
+            .unwrap()
+            .inputs
+            .extend(projections);
         Ok(CompletedType::Identity(Term::NormalForm {
             head,
             sort: Sort::Type,
@@ -383,7 +431,7 @@ impl Checker<'_, '_> {
             .inputs
             .push(AnnotationStep {
                 preparation,
-                outputs: Arc::from([(local, input, p(P::Type))]),
+                outputs: Arc::from([Output::new(local, input, p(P::Type))]),
             });
         Ok(CompletedType::Identity(known.unwrap_or(Term::Rigid {
             declaration: binder.declaration,
@@ -422,7 +470,7 @@ impl Checker<'_, '_> {
                 .inputs
                 .push(AnnotationStep {
                     preparation: None,
-                    outputs: Arc::from([(
+                    outputs: Arc::from([Output::new(
                         binding,
                         Input {
                             binder,
