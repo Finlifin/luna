@@ -11471,3 +11471,56 @@ fn generator_observes_replaced_type_list_in_a_standard_builder_draft() {
         fn run() -> bool { ~<generate()> }";
     assert_eq!(sysroot::run(source), Value::Bool(true));
 }
+
+#[test]
+fn generator_observes_nested_reference_writes_to_a_draft() {
+    let source = "typealias Type = .Type'builtin;
+        struct Flag { value: bool }
+        struct Idle { idle: bool }
+        struct Slot { kind: Type }
+        struct Draft { left: Slot, right: Slot }
+        impl Slot { comptime fn set(self, ty: Type) { self.kind = ty; } }
+        impl Draft {
+            comptime fn set_left(self, ty: Type) { self.left.set(ty); }
+        }
+        comptime fn draft(a: Type, b: Type) -> Draft {
+            let slot = Slot { kind: a };
+            let result = Draft { left: slot, right: slot };
+            result.set_left(b);
+            result
+        }
+        comptime fn generate() -> < |- bool > {
+            let schema = draft(Idle, Flag);
+            '(schema.left.kind { value: true }.value and schema.right.kind { idle: true }.idle)
+        }
+        fn run() -> bool { ~<generate()> }";
+    assert_eq!(run(source, "run", vec![]), Value::Bool(true));
+    let wrong = source
+        .replace(
+            "schema.right.kind { idle: true }.idle",
+            "schema.right.kind { value: true }.value",
+        )
+        .replace("~<generate()>", "true");
+    let failure = support::compile_with_protocols(&wrong, &Default::default()).unwrap_err();
+    assert!(failure.contains("field"), "{failure}");
+}
+
+#[test]
+fn generator_observes_public_add_field_and_generic_list_receiver_writeback() {
+    let source = "struct Flag { active: bool }
+        struct Idle { idle: bool }
+        comptime fn describe(first: Type, second: Type) -> meta.StructBuilder {
+            var draft = meta.StructBuilder.new(.name = .Row);
+            draft.add_field(.before, first);
+            draft.add_field(.after, second);
+            draft
+        }
+        comptime fn generate() -> < |- bool > {
+            let draft = describe(Idle, Flag);
+            let A = draft.field_types[0];
+            let B = draft.field_types[1];
+            '(A { idle: true }.idle and B { active: true }.active)
+        }
+        fn run() -> bool { ~<generate()> }";
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+}
