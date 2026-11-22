@@ -11810,3 +11810,90 @@ fn factory_exits_join_return_values_and_receiver_snapshots() {
         );
     }
 }
+
+#[test]
+fn factory_call_arguments_preserve_returns_and_live_method_receivers() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Cell { item: Type }
+        struct Pair { left: Type, right: Type }
+        impl Cell {
+            comptime fn Exchange(self, t: Type) -> Type {
+                let old = self.item;
+                self.item = t;
+                old
+            }
+            comptime fn pair(self, old: Type) -> Pair {
+                Pair { left: old, right: self.item }
+            }
+        }
+        comptime fn describe(early: bool) -> Pair {
+            var c = Cell { item: Before };
+            c.pair(do {
+                if early { return Pair { left: Before, right: After }; }
+                c.Exchange(After)
+            })
+        }
+        comptime fn generate(early: bool) -> <|-bool> {
+            let data = describe(early);
+            let A = data.left;
+            let B = data.right;
+            '(A { first: true }.first and B { second: true }.second)
+        }
+        fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let unused = source.replace("~<generate(true)> and ~<generate(false)>", "true");
+    for invalid in [
+        unused.replace("left: Before, right: After", "left: After, right: After"),
+        unused.replace("c.Exchange(After)", "c.Exchange(Before)"),
+    ] {
+        let failure = sysroot::compile(&invalid).unwrap_err();
+        assert!(
+            failure.contains("identity") || failure.contains("field"),
+            "{failure}"
+        );
+    }
+}
+
+#[test]
+fn factory_call_defaults_read_the_delivered_arguments() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Pair { left: Type, right: Type }
+        struct Cell { item: Type }
+        impl Cell {
+            comptime fn exchange(self, next: Type) -> Cell {
+                let old = Cell { item: self.item };
+                self.item = next;
+                old
+            }
+            comptime fn pair(self, current: Type) -> Pair {
+                Pair { left: self.item, right: current }
+            }
+        }
+        comptime fn cell(t: Type) -> Cell { Cell { item: t } }
+        comptime fn join(old: Cell, current: Type, .result: Pair = old.pair(current)) -> Pair {
+            result
+        }
+        comptime fn describe() -> Pair {
+            var data = cell(Before);
+            join(data.exchange(After), data.item)
+        }
+        comptime fn generate() -> <|-bool> {
+            let data = describe();
+            let A = data.left;
+            let B = data.right;
+            '(A { first: true }.first and B { second: true }.second)
+        }
+        fn run() -> bool { ~<generate()> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let temporary = source.replace(
+        "join(data.exchange(After), data.item)",
+        "data.exchange(After).pair(data.item)",
+    );
+    assert_eq!(sysroot::run(&temporary), Value::Bool(true));
+}

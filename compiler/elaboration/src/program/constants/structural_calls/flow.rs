@@ -7,12 +7,12 @@ pub(super) struct FactoryExit {
     pub(super) receiver: Option<Arc<PartialStagedValue>>,
 }
 
-struct Returns {
+pub(super) struct Returns {
     receiver: Option<n::LocalId>,
     exit: Option<FactoryExit>,
 }
 
-enum Completion {
+pub(super) enum Completion {
     Next(Arc<PartialStagedValue>),
     Returned,
     Unavailable,
@@ -96,7 +96,7 @@ impl Checker<'_, '_> {
         )
     }
 
-    fn observe_factory_expr(
+    pub(super) fn observe_factory_expr(
         &mut self,
         expr: &n::Expr,
         scope: &mut ObservationScope,
@@ -200,12 +200,7 @@ impl Checker<'_, '_> {
                 ));
             }
             K::Call { .. } => {
-                return Ok(Completion::observed(self.structural_call(
-                    expr,
-                    Some(scope),
-                    span,
-                    depth + 1,
-                )?));
+                return self.observe_direct_call(expr, Some(scope), returns, span, depth + 1);
             }
             _ => {}
         }

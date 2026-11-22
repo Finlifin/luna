@@ -3,7 +3,9 @@
 use super::*;
 use std::sync::Arc;
 
+mod arguments;
 mod flow;
+use flow::{Completion, FactoryExit};
 
 impl Checker<'_, '_> {
     pub(in crate::program) fn record_generator_initializer(
@@ -16,7 +18,8 @@ impl Checker<'_, '_> {
         if matches!(
             &value.ty,
             Term::Nominal { .. } | Term::NormalForm { .. } | Term::Record(_) | Term::Tuple(_)
-        ) && let Some(observed) = self.structural_call(value, None, span, 0)?
+        ) && let Completion::Next(observed) =
+            self.observe_direct_call(value, None, &mut None, span, 0)?
         {
             self.record_observed_pattern(pattern, &observed, span)?;
         }
@@ -35,72 +38,15 @@ impl Checker<'_, '_> {
         result.map_err(|e| error(span, e))
     }
 
-    fn structural_call(
+    fn invoke_observed_factory(
         &mut self,
-        expr: &n::Expr,
-        caller: Option<&mut ObservationScope>,
+        id: DeclarationId,
+        indices: &[Term],
+        inputs: &BTreeMap<usize, Arc<PartialStagedValue>>,
+        receiver: Option<usize>,
         span: Span,
         depth: usize,
-    ) -> Result<Option<Arc<PartialStagedValue>>, Error> {
-        let K::Call {
-            callee,
-            arguments,
-            parameter_bindings,
-            env_arguments,
-        } = &expr.kind
-        else {
-            return Ok(None);
-        };
-        if depth >= 32 || !env_arguments.is_empty() {
-            return Ok(None);
-        }
-        let (id, indices) = match &callee.kind {
-            K::Function(id) => (*id, &[][..]),
-            K::FunctionInstance {
-                declaration,
-                arguments,
-            } => (*declaration, arguments.as_slice()),
-            _ => return Ok(None),
-        };
-        let Some((inputs, writeback)) = self.schema_fuel(span, |this, fuel| {
-            let mut inputs = BTreeMap::new();
-            let mut defaults = ObservationScope::default();
-            let mut writeback = None;
-            for argument in arguments {
-                let frame = if argument.is_default {
-                    Some(&defaults)
-                } else {
-                    caller.as_deref()
-                };
-                if !structural_operand(&argument.value, frame, fuel)? {
-                    return Ok(None);
-                }
-                if argument.passing != n::ArgumentPassing::Value {
-                    // The receiver aliases one place in its caller. Suspend
-                    // observation when another reference could overlap it.
-                    if caller.is_none() || argument.is_default || writeback.is_some() {
-                        return Ok(None);
-                    }
-                    let Some(place) = structural_place(&argument.value, fuel)? else {
-                        return Ok(None);
-                    };
-                    writeback = Some((argument.parameter, place));
-                }
-                let value = match frame {
-                    Some(frame) => this.partial_staged_value_in(&argument.value, 0, fuel, frame)?,
-                    None => this.partial_staged_value(&argument.value, 0, fuel)?,
-                };
-                if let Some(formal) = parameter_bindings.get(argument.parameter) {
-                    defaults.insert(*formal, value.clone(), fuel)?;
-                }
-                inputs.insert(argument.parameter, value);
-            }
-            Ok(Some((inputs, writeback)))
-        })?
-        else {
-            return Ok(None);
-        };
-
+    ) -> Result<Option<FactoryExit>, Error> {
         // Compiler-provided operations also have checked bodies. Dispatch
         // through that body so wrappers and user methods share the same rules.
         let owner = self.source_declarations.owner(id);
@@ -168,35 +114,12 @@ impl Checker<'_, '_> {
                 })?;
             }
             let Some(mut frame) =
-                self.schema_fuel(span, |_, fuel| bind_inputs(&mut function, &inputs, fuel))?
+                self.schema_fuel(span, |_, fuel| bind_inputs(&mut function, inputs, fuel))?
             else {
                 return Ok(None);
             };
-            let receiver = writeback
-                .as_ref()
-                .map(|(index, _)| function.parameters[*index]);
-            let Some(exit) =
-                self.observe_factory_body(&function.body, &mut frame, receiver, span, depth)?
-            else {
-                return Ok(None);
-            };
-            if let Some((_, place)) = writeback {
-                let Some(updated) = exit.receiver else {
-                    return Ok(None);
-                };
-                if !self.schema_fuel(span, |this, fuel| {
-                    update_place(
-                        caller.unwrap(),
-                        &place,
-                        updated,
-                        this.protocols.meta_list,
-                        fuel,
-                    )
-                })? {
-                    return Ok(None);
-                }
-            }
-            Ok(Some(exit.value))
+            let receiver = receiver.and_then(|slot| function.parameters.get(slot).copied());
+            self.observe_factory_body(&function.body, &mut frame, receiver, span, depth)
         })();
         if !generated {
             self.observing_factory_bodies.remove(&owner.unwrap());
