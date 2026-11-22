@@ -2864,7 +2864,7 @@ struct Checker<'a, 'h> {
     input_facts: input_facts::State,
     in_required_comptime: bool,
     in_staged_input: bool,
-    preparing_inputs: Option<n::SourceRange>,
+    preparing_inputs: Option<arguments::InputPreparation>,
     pending_spread_inputs: BTreeMap<n::LocalId, spreads::PendingPacket>,
     observing_type: bool,
     control: control::Context,

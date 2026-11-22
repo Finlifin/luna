@@ -213,7 +213,6 @@ impl Checker<'_, '_> {
             Some(&source_partial_contexts),
             source_checked,
             source_packets,
-            1,
             build,
         )
     }
@@ -467,7 +466,6 @@ impl Checker<'_, '_> {
             Some(&partial_contexts),
             checked,
             packets,
-            0,
             |this, inputs, diverges| {
                 let expected = expected.filter(|_| !diverges);
                 let partial = partial.filter(|_| !diverges);
@@ -497,7 +495,6 @@ impl Checker<'_, '_> {
             None,
             inputs::PreparedInputs::new(),
             BTreeMap::new(),
-            0,
             build,
         )
     }
@@ -519,7 +516,6 @@ impl Checker<'_, '_> {
             Some(contexts),
             checked,
             packets,
-            0,
             |this, inputs, _| build(this, inputs),
         )
     }
@@ -533,7 +529,6 @@ impl Checker<'_, '_> {
         input_contexts: Option<&[Option<crate::calls::InputContext>]>,
         checked: inputs::PreparedInputs,
         packets: BTreeMap<usize, n::Expr>,
-        trailing: usize,
         build: impl FnOnce(&mut Self, &[Arg<'_>], bool) -> Result<n::Expr, Error>,
     ) -> Result<n::Expr, Error> {
         self.with_prepared_spreads(
@@ -578,7 +573,7 @@ impl Checker<'_, '_> {
                     if spreads.is_empty() {
                         return Ok(call);
                     }
-                    this.insert_spread_preparation(call, spreads, flat_count, trailing, expr.span)
+                    this.insert_spread_preparation(call, spreads, flat_count, expr.span)
                 })
             },
         )
@@ -1288,7 +1283,6 @@ impl Checker<'_, '_> {
         call: n::Expr,
         spreads: Vec<(usize, n::Expr)>,
         flat_count: usize,
-        trailing: usize,
         span: Span,
     ) -> Result<n::Expr, Error> {
         let source = call.source;
@@ -1300,8 +1294,7 @@ impl Checker<'_, '_> {
             result: Some(result),
         } = call.kind
         {
-            let result =
-                self.insert_spread_preparation(*result, spreads, flat_count, trailing, span)?;
+            let result = self.insert_spread_preparation(*result, spreads, flat_count, span)?;
             return Ok(n::Expr {
                 source,
                 ty: result.ty.clone(),
@@ -1321,57 +1314,66 @@ impl Checker<'_, '_> {
             }
             _ => return Err(error(span, "spread application requires an ordinary call")),
         };
-        let mut leading = Vec::new();
-        if let K::Variant { fields, .. } = &mut call.kind {
-            for field in fields {
-                statements.push(self.prepare_call_operand(field, span)?);
-            }
-        } else if let K::EffectRequest { arguments, .. } = &mut call.kind {
-            // An operation label has no runtime callee evaluation. Its inputs
-            // use the same source-order preparation as ordinary calls.
-            for argument in arguments {
-                statements.push(self.prepare_call_operand(argument, span)?);
-            }
-        } else if !prepared {
-            let K::Call {
-                callee, arguments, ..
-            } = &mut call.kind
-            else {
-                unreachable!()
-            };
-            leading.extend(self.prepare_call_callee(callee, span)?);
-            for argument in arguments.iter_mut().filter(|arg| !arg.is_default) {
-                statements.push(self.prepare_call_operand(&mut argument.value, span)?);
-            }
-        }
-        // Collection construction follows every source producer. It is not a
-        // receiver prefix and must not shift the spread insertion positions.
-        let tail_start = statements
-            .len()
-            .checked_sub(trailing)
-            .ok_or_else(|| error(span, "spread preparation tail is inconsistent"))?;
-        let tail = statements.split_off(tail_start);
-        let prefix = statements
-            .len()
-            .checked_sub(flat_count)
-            .ok_or_else(|| error(span, "spread preparation input mapping is inconsistent"))?;
-        let mut spreads = spreads.into_iter().peekable();
-        for (index, statement) in statements.into_iter().enumerate() {
-            if index >= prefix {
-                while spreads.peek().is_some_and(|(at, _)| *at == index - prefix) {
-                    leading.push(spreads.next().unwrap().1);
+        let mut offsets = Vec::new();
+        if prepared {
+            offsets = std::mem::take(&mut self.preparing_inputs.as_mut().unwrap().offsets);
+        } else {
+            match &mut call.kind {
+                K::Variant { fields, .. }
+                | K::EffectRequest {
+                    arguments: fields, ..
+                } => {
+                    for field in fields {
+                        offsets.push(statements.len());
+                        statements.push(self.prepare_call_operand(field, span)?);
+                    }
                 }
+                K::Call {
+                    callee, arguments, ..
+                } => {
+                    statements.extend(self.prepare_call_callee(callee, span)?);
+                    let written_count = arguments.iter().filter(|arg| !arg.is_default).count();
+                    let receivers = written_count
+                        .checked_sub(flat_count)
+                        .ok_or_else(|| error(span, "spread input count exceeds call operands"))?;
+                    for (position, arg) in arguments
+                        .iter_mut()
+                        .filter(|arg| !arg.is_default)
+                        .enumerate()
+                    {
+                        if position >= receivers {
+                            offsets.push(statements.len());
+                        }
+                        if let Some(operand) =
+                            arguments::operand_to_prepare(&mut arg.value, arg.passing)
+                        {
+                            statements.push(self.prepare_call_operand(operand, span)?);
+                        }
+                    }
+                }
+                _ => unreachable!(),
             }
-            leading.push(statement);
+            offsets.push(statements.len());
         }
-        // Empty packets still execute, including a packet after the last input.
-        for (at, spread) in spreads {
-            if at != flat_count {
-                return Err(error(span, "spread preparation position is inconsistent"));
-            }
-            leading.push(spread);
+        if offsets.len() != flat_count + 1 {
+            return Err(error(
+                span,
+                "spread preparation input mapping is inconsistent",
+            ));
         }
-        leading.extend(tail);
+        // Distinct written slots may have the same statement boundary: a
+        // receiver rooted in caller storage needs no temporary. Empty packets
+        // at the final boundary still execute before collection and defaults.
+        let mut leading = Vec::with_capacity(statements.len() + spreads.len());
+        let mut remaining = statements.into_iter();
+        let mut consumed = 0;
+        for (at, packet) in spreads {
+            let boundary = offsets[at];
+            leading.extend(remaining.by_ref().take(boundary - consumed));
+            leading.push(packet);
+            consumed = boundary;
+        }
+        leading.extend(remaining);
         let ty = if leading.iter().any(|statement| is_never(&statement.ty)) {
             p(P::Never)
         } else {

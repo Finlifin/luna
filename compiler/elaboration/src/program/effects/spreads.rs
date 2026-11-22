@@ -125,7 +125,6 @@ impl Checker<'_, '_> {
             Some(&contexts),
             checked,
             prepared_packets,
-            0,
             |this, inputs, diverges| {
                 let call = Expr {
                     kind: H::Application(head, inputs),

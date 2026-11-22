@@ -408,6 +408,12 @@ pub(super) fn route_arguments<'h>(
     Ok((routes, plan.assigned))
 }
 
+/// Statement boundaries for each written input while composing one call.
+pub(super) struct InputPreparation {
+    pub(super) site: n::SourceRange,
+    pub(super) offsets: Vec<usize>,
+}
+
 impl Checker<'_, '_> {
     pub(super) fn attempt_collection_fields(
         &mut self,
@@ -691,11 +697,24 @@ impl Checker<'_, '_> {
         }
         self.visit_routed_arguments(arguments, routes, offset, span, true, stage)?;
         let mut ordered: Vec<_> = selected.into_iter().collect();
+        let active = self
+            .preparing_inputs
+            .as_mut()
+            .filter(|plan| plan.site == source(span));
+        let mut offsets = active.map(|plan| &mut plan.offsets);
         for (position, statement) in statements.into_iter().enumerate() {
+            if position >= offset
+                && let Some(bounds) = &mut offsets
+            {
+                bounds.push(ordered.len());
+            }
             if let Some(prefix) = prefixes.remove(&position) {
                 ordered.extend(prefix);
             }
             ordered.extend(statement);
+        }
+        if let Some(bounds) = offsets {
+            bounds.push(ordered.len());
         }
         ordered.extend(after_explicit);
         let call = n::Expr {
@@ -718,7 +737,11 @@ impl Checker<'_, '_> {
         call: n::Expr,
         expr: &Expr<'_>,
     ) -> Result<n::Expr, Error> {
-        if self.preparing_inputs == Some(source(expr.span)) {
+        if self
+            .preparing_inputs
+            .as_ref()
+            .is_some_and(|plan| plan.site == source(expr.span))
+        {
             Ok(call)
         } else {
             self.freeze_staged_preparation(call, expr)
@@ -733,7 +756,18 @@ impl Checker<'_, '_> {
         expr: &Expr<'_>,
         build: impl FnOnce(&mut Self) -> Result<n::Expr, Error>,
     ) -> Result<n::Expr, Error> {
-        let saved = self.preparing_inputs.replace(source(expr.span));
+        let site = source(expr.span);
+        if self
+            .preparing_inputs
+            .as_ref()
+            .is_some_and(|plan| plan.site == site)
+        {
+            return build(self);
+        }
+        let saved = self.preparing_inputs.replace(InputPreparation {
+            site,
+            offsets: vec![],
+        });
         let call = build(self);
         self.preparing_inputs = saved;
         self.finish_input_preparation(call?, expr)

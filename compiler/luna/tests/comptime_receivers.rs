@@ -154,3 +154,94 @@ fn comptime_pointer_receivers_are_rejected_before_any_invocation() {
         );
     }
 }
+
+#[path = "support/sysroot_execution.rs"]
+#[allow(dead_code)]
+mod sysroot;
+
+#[test]
+fn packet_and_property_inputs_preserve_receiver_storage_and_order() {
+    use comptime_interpretor::Budget;
+    let package = sysroot::compile(
+        "
+        struct Cell { value: bool }
+        struct Pair { left: Cell, right: Cell }
+        comptime fn packet(ready: bool) -> Tuple<bool, bool> { assumes ready; (true, true) }
+        comptime fn options(...properties: T) -> T where T { properties }
+        const SAMPLE = options { flag: true };
+        typealias Options = SAMPLE'type;
+        impl Cell {
+            comptime fn replace(self, a: bool, b: bool) { self = Cell { value: a and b }; }
+            comptime fn collect(self, ...items: Tuple<bool, bool>) {
+                let (a, b) = items; self.replace(a, b);
+            }
+            comptime fn props(self, ...properties: Options) { self.value = properties.flag; }
+            comptime fn mixed(self, ...items: Tuple<bool, bool>, ...properties: Options) {
+                let (a, b) = items; self.value = a and b and properties.flag;
+            }
+            comptime fn produce(self) -> Cell { self.value = not self.value; Cell { value: false } }
+        }
+        comptime fn check() -> bool {
+            var cell = Cell { value: false };
+            cell.replace(...packet(true));
+            if not cell.value { return false; };
+            cell.value = false;
+            Cell.replace(cell, ...packet(true));
+            if not cell.value { return false; };
+            cell.value = false;
+            Cell.collect(cell, ...packet(true));
+            if not cell.value { return false; };
+            let pair = Pair { left: cell, right: cell };
+            pair.left.props { flag: false };
+            if pair.left.value or not pair.right.value { return false; };
+            var ready = false;
+            pair.left.mixed { flag: do {ready = true; true}, ...packet(ready) };
+            if not pair.left.value { return false; };
+            cell.value = false;
+            cell.produce().replace(...packet(cell.value));
+            cell.value
+        }
+        comptime fn exits() -> bool {
+            var cell = Cell { value: false };
+            cell.produce().replace(...do { return cell.value; packet(false) });
+            false
+        }
+        comptime fn forbidden() -> bool {
+            let cell = Cell { value: false };
+            Cell.replace(cell, ...packet(true));
+            true
+        }
+    ",
+    )
+    .unwrap();
+    let check = sysroot::source_function(&package, "check");
+    let forbidden = sysroot::source_function(&package, "forbidden");
+    let exits = sysroot::source_function(&package, "exits");
+    for tree in [false, true] {
+        sysroot::with_comptime(
+            &package,
+            Budget {
+                steps: 1_000_000,
+                depth: 128,
+            },
+            tree,
+            |vm| {
+                let failure = vm.invoke(forbidden, vec![]).unwrap_err();
+                assert_eq!(
+                    failure.kind,
+                    comptime_interpretor::ErrorKind::InvalidValueReference
+                );
+                assert_eq!(
+                    vm.invoke(exits, vec![]).unwrap(),
+                    Value::Bool(true),
+                    "tree={tree}"
+                );
+                assert_eq!(
+                    vm.invoke(check, vec![]).unwrap(),
+                    Value::Bool(true),
+                    "tree={tree}"
+                );
+            },
+        );
+    }
+}

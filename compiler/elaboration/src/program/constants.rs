@@ -2022,11 +2022,13 @@ impl Checker<'_, '_> {
             return Ok(call);
         }
         if self.in_required_comptime
-            || self.preparing_inputs
-                == Some(n::SourceRange {
-                    start: source.span.lo().0,
-                    end: source.span.hi().0,
-                })
+            || self.preparing_inputs.as_ref().is_some_and(|plan| {
+                plan.site
+                    == n::SourceRange {
+                        start: source.span.lo().0,
+                        end: source.span.hi().0,
+                    }
+            })
         {
             return Ok(call);
         }

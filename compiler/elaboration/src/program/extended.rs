@@ -409,7 +409,11 @@ impl Checker<'_, '_> {
         let mut statements = Vec::new();
         statements.extend(self.prepare_call_callee(callee, expr.span)?);
         for receiver in arguments.iter_mut().take(receiver_count) {
-            statements.push(self.prepare_call_operand(&mut receiver.value, expr.span)?);
+            if let Some(operand) =
+                arguments::operand_to_prepare(&mut receiver.value, receiver.passing)
+            {
+                statements.push(self.prepare_call_operand(operand, expr.span)?);
+            }
         }
         let positional_slots: Vec<_> = arguments
             .iter()
@@ -424,16 +428,23 @@ impl Checker<'_, '_> {
         let mut positional_slots = positional_slots.into_iter();
         // Argument inference may check these in a different order. Runtime
         // evaluation always uses the original producer order, exactly once.
+        let mut offsets = Vec::with_capacity(args.len() + 1);
         for input in args {
+            offsets.push(statements.len());
             let value = match input {
-                Arg::Named(name, _) => &mut fields[field_positions[name.name.as_str()]],
+                Arg::Named(name, _) => Some(&mut fields[field_positions[name.name.as_str()]]),
                 Arg::Positional(_) | Arg::PostLambda(_) => {
-                    &mut arguments[positional_slots.next().expect("one anchored input")].value
+                    let arg = &mut arguments[positional_slots.next().expect("one anchored input")];
+                    arguments::operand_to_prepare(&mut arg.value, arg.passing)
                 }
                 _ => unreachable!(),
             };
-            statements.push(self.prepare_call_operand(value, expr.span)?);
+            if let Some(value) = value {
+                statements.push(self.prepare_call_operand(value, expr.span)?);
+            }
         }
+        offsets.push(statements.len());
+        self.preparing_inputs.as_mut().unwrap().offsets = offsets;
         statements.push(n::Expr {
             ty: p(P::Void),
             source: anchor,
@@ -626,57 +637,59 @@ impl Checker<'_, '_> {
                 }
             })
             .ok_or_else(|| error(expr.span, "property packet preparation is missing"))?;
-        let slot = statements
+        let offsets = std::mem::take(&mut self.preparing_inputs.as_mut().unwrap().offsets);
+        // The collapsed call has one property input at the first written
+        // property's position. Its final step binds the constructed record.
+        let first = args
             .iter()
-            .position(
-                |statement| matches!(&statement.kind, K::Let { binding: id, .. } if *id == binding),
-            )
-            .ok_or_else(|| error(expr.span, "property packet binding is missing"))?;
-        let mut packet = statements.remove(slot);
-        let K::Let { value, .. } = &mut packet.kind else {
-            unreachable!()
+            .position(|arg| matches!(arg, Arg::Named(..)))
+            .ok_or_else(|| error(expr.span, "missing property input"))?;
+        let end = offsets
+            .get(first + 1)
+            .copied()
+            .filter(|end| *end > offsets[first] && *end <= statements.len())
+            .ok_or_else(|| error(expr.span, "property packet preparation is missing"))?;
+        let mut packet = statements.remove(end - 1);
+        let K::Let { binding: id, value } = &mut packet.kind else {
+            return Err(error(expr.span, "property packet binding is missing"));
         };
+        if *id != binding {
+            return Err(error(expr.span, "property packet binding mismatch"));
+        }
         layout::unprepare_packet(value, expr.span)?;
         let field_positions = layout::field_positions(&value.ty, expr.span)?;
         let K::AnonymousRecord { fields } = &mut value.kind else {
             return Err(error(
                 expr.span,
-                "property collection did not produce a record packet",
+                "property collection requires a completed record",
             ));
         };
-        // Preserve the callee and any staged receiver before interleaving
-        // positional producers with the original property expressions.
-        let positionals = args
-            .iter()
-            .filter(|arg| matches!(arg, Arg::Positional(_) | Arg::PostLambda(_)))
-            .count();
-        let prefix = statements
-            .len()
-            .checked_sub(positionals)
-            .ok_or_else(|| error(expr.span, "positional collection preparation is missing"))?;
-        let mut remaining = statements.split_off(prefix).into_iter();
-        let mut prepared = statements;
-        for argument in args {
-            match argument {
-                Arg::Named(name, _) => prepared.push(self.prepare_call_operand(
+        let mut remaining = statements.into_iter();
+        let mut prepared: Vec<_> = remaining.by_ref().take(offsets[0]).collect();
+        let mut lengths = offsets.windows(2).map(|w| w[1] - w[0]);
+        let mut new_offsets = Vec::with_capacity(args.len() + 1);
+        for (index, argument) in args.iter().enumerate() {
+            new_offsets.push(prepared.len());
+            if index == first || !matches!(argument, Arg::Named(..)) {
+                let len = lengths
+                    .next()
+                    .ok_or_else(|| error(expr.span, "missing input boundary"))?;
+                prepared.extend(remaining.by_ref().take(len - usize::from(index == first)));
+            }
+            if let Arg::Named(name, _) = argument {
+                prepared.push(self.prepare_call_operand(
                     &mut fields[field_positions[name.name.as_str()]],
                     expr.span,
-                )?),
-                Arg::Positional(_) | Arg::PostLambda(_) => {
-                    prepared.push(remaining.next().ok_or_else(|| {
-                        error(expr.span, "positional collection preparation is missing")
-                    })?)
-                }
-                _ => unreachable!(),
+                )?);
             }
         }
-        if remaining.next().is_some() {
-            return Err(error(
-                expr.span,
-                "unexpected remaining collection preparation",
-            ));
+        if lengths.next().is_some() {
+            return Err(error(expr.span, "unexpected remaining property inputs"));
         }
+        new_offsets.push(prepared.len());
+        self.preparing_inputs.as_mut().unwrap().offsets = new_offsets;
         prepared.push(packet);
+        prepared.extend(remaining);
         let diverges = prepared.iter().any(|statement| is_never(&statement.ty));
         Ok(n::Expr {
             ty: if diverges {
