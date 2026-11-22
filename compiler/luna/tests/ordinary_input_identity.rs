@@ -2950,3 +2950,59 @@ fn joined_annotation_fields_compose_independent_spreads() {
         &[("marked", 2 * width), ("Selected", width)],
     );
 }
+
+#[test]
+fn computed_annotations_join_the_type_producer_itself() {
+    let source = "
+        comptime fn marked(flag: bool) -> bool { flag }
+        comptime fn Selected(flag: bool) -> Type { if flag { bool } else { char } }
+        comptime fn inspect(flag: bool) -> bool {
+            let first: if marked(flag) { ?bool } else { ?Selected(false) } = null;
+            let second: flag match { true => ?Selected(true), false => ?char } = null;
+            (first matches null) and (second matches null) and
+                (if flag { first'type == ?bool and second'type == ?bool }
+                 else { first'type == ?char and second'type == ?char })
+        }
+        comptime fn check() -> bool { inspect(true) and inspect(false) }";
+    check_events(source, &[("marked", 2), ("Selected", 2)]);
+    let rejected = sysroot::compile(&source.replace("else { ?Selected(false) }", "else { char }"))
+        .unwrap_err();
+    assert!(rejected.contains("optional"), "{rejected}");
+}
+
+#[test]
+fn computed_annotations_join_after_early_return_and_recover_from_any() {
+    let package = sysroot::compile(
+        "
+        comptime fn Selected(gradual: bool) -> Type { if gradual { Any } else { char } }
+        comptime fn relay(skip: bool, gradual: bool) -> bool {
+            let item: when {
+                skip => do { return true; },
+                else => ?Selected(gradual),
+            } = null;
+            (item matches null) and item'type == ?char
+        }",
+    )
+    .unwrap();
+    let id = sysroot::source_function(&package, "relay");
+    let selected = sysroot::source_function(&package, "Selected");
+    for tree in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            let mut run =
+                |skip, gradual| vm.invoke(id, vec![Value::Bool(skip), Value::Bool(gradual)]);
+            assert_eq!(run(true, true).unwrap(), Value::Bool(true));
+            assert_eq!(
+                run(false, true).unwrap_err().kind,
+                comptime_interpretor::ErrorKind::TypeContractUnresolved
+            );
+            assert_eq!(run(false, false).unwrap(), Value::Bool(true));
+            assert_eq!(
+                vm.events()
+                    .iter()
+                    .filter(|e| matches!(e, Event::EnterFunction(id) if *id == selected))
+                    .count(),
+                2
+            );
+        });
+    }
+}

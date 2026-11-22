@@ -401,6 +401,10 @@ impl Checker<'_, '_> {
         known: Option<Term>,
         span: Span,
     ) -> Result<CompletedType, Error> {
+        let (components, leaf) = match known {
+            Some(identity) => (Vec::new(), Some(identity)),
+            None => self.annotation_type_components(&checked, span)?,
+        };
         let owner = self.input_facts.annotation.as_ref().unwrap().site.owner;
         let binder = self.fresh_type_binder(owner, span)?;
         let input = Input {
@@ -408,6 +412,13 @@ impl Checker<'_, '_> {
             producer: checked.source,
             stable_local: None,
         };
+        let identity = wrap_components(
+            &components,
+            leaf.unwrap_or(Term::Rigid {
+                declaration: binder.declaration,
+                sort: binder.sort,
+            }),
+        );
         let (local, preparation) = match checked.kind {
             K::Local(local) => (local, None),
             _ => {
@@ -432,12 +443,14 @@ impl Checker<'_, '_> {
             .inputs
             .push(AnnotationStep {
                 preparation,
-                outputs: Arc::from([Output::new(local, input, p(P::Type))]),
+                outputs: Arc::from([Output {
+                    local,
+                    input,
+                    domain: p(P::Type),
+                    components,
+                }]),
             });
-        Ok(CompletedType::Identity(known.unwrap_or(Term::Rigid {
-            declaration: binder.declaration,
-            sort: binder.sort,
-        })))
+        Ok(CompletedType::Identity(identity))
     }
 
     pub(in crate::program) fn named_type_identity(
@@ -502,4 +515,10 @@ impl Checker<'_, '_> {
             sort: binder.sort,
         }))
     }
+}
+
+fn wrap_components(path: &[n::TypeComponent], term: Term) -> Term {
+    path.iter()
+        .rev()
+        .fold(term, |inner, component| component.wrap(inner))
 }

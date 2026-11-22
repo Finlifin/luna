@@ -139,9 +139,3 @@ impl Checker<'_, '_> {
         Ok((term, output))
     }
 }
-
-fn wrap_components(path: &[n::TypeComponent], term: Term) -> Term {
-    path.iter()
-        .rev()
-        .fold(term, |inner, component| component.wrap(inner))
-}

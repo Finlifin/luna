@@ -139,9 +139,25 @@ impl Checker<'_, '_> {
         element: Option<&Term>,
         span: Span,
     ) -> Result<Construction, Error> {
+        self.fold_construction(Work::Input(input, View { domain, element }), span)
+    }
+
+    pub(super) fn annotation_type_components(
+        &mut self,
+        expr: &n::Expr,
+        span: Span,
+    ) -> Result<(Vec<TypeComponent>, Option<Term>), Error> {
+        let domain = p(P::Type);
+        match self.fold_construction(Work::Expr(expr, View::scalar(&domain)), span)? {
+            Construction::Field(field) => Ok(field.into_parts()),
+            _ => Ok((vec![], None)),
+        }
+    }
+
+    fn fold_construction(&mut self, root: Work<'_>, span: Span) -> Result<Construction, Error> {
         use Construction as C;
         use Work as W;
-        let mut work = vec![W::Input(input, View { domain, element })];
+        let mut work = vec![root];
         let mut values = Vec::new();
         while let Some(task) = work.pop() {
             spend(&mut self.required_steps, 1, span)?;
