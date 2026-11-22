@@ -727,9 +727,7 @@ impl<'a> Interpreter<'a> {
         let Term::Function { result, .. } = bound_signature.callable_signature() else {
             return Err(self.failure(ErrorKind::Type, Some(source)));
         };
-        self.require_closed_input_domain(result, source)?;
-        let result_type = self.selected_type_view(result, Some(source))?;
-        self.check_comptime_domain(&result_type, source)?;
+        let result_type = self.invocation_domain(result, source)?;
         if let Term::Computation { effects, .. } = &result_type {
             self.check_effect_environment(effects, None)?;
         } else {

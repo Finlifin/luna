@@ -8,6 +8,28 @@ fn charge_layout_work(fuel: &mut usize, count: usize) -> Result<(), StorageError
 }
 
 impl Interpreter<'_> {
+    /// Resolve the call boundary's storage domain. An intrinsic primitive is
+    /// closed and already selected. Its view and storage checks each visit
+    /// exactly one node, including when the remaining fuel is insufficient.
+    pub(super) fn invocation_domain(
+        &mut self,
+        raw: &Term,
+        source: SourceRange,
+    ) -> Result<Term, Error> {
+        let visits = 1 + u64::from(self.comptime_only);
+        if let Term::Primitive(primitive) = raw
+            && (!self.comptime_only || self.graph.is_some() || self.declaration_world.is_some())
+            && self.budget.steps >= visits
+        {
+            self.budget.steps -= visits;
+            return Ok(Term::Primitive(*primitive));
+        }
+        self.require_closed_input_domain(raw, source)?;
+        let domain = self.selected_type_view(raw, Some(source))?;
+        self.check_comptime_domain(&domain, source)?;
+        Ok(domain)
+    }
+
     pub(super) fn check_comptime_domain(
         &mut self,
         ty: &Term,
@@ -144,6 +166,7 @@ impl Interpreter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     fn package() -> Package {
         let binding = LocalId { owner: 1, index: 0 };
         Package {
@@ -189,6 +212,38 @@ mod tests {
             ..Default::default()
         }
     }
+
+    #[test]
+    fn primitive_domain_visits_preserve_fuel_and_failure_provenance() {
+        let source = SourceRange { start: 17, end: 24 };
+        let package = package();
+        let graph = iir::Package::default();
+        for mut vm in [
+            Interpreter::new(&package, Budget::default()).unwrap(),
+            Interpreter::for_comptime(&package, Budget::default()).unwrap(),
+            Interpreter::from_iir_for_comptime(&graph, Budget::default()).unwrap(),
+        ] {
+            // Inspecting a type is independent of the current execution depth.
+            vm.depth = vm.budget.depth;
+            for primitive in [Primitive::Type, Primitive::Object, Primitive::BitVec(129)] {
+                let ty = Term::Primitive(primitive);
+                for steps in 0..=3 {
+                    vm.budget.steps = steps;
+                    let expected = (|| {
+                        vm.require_closed_input_domain(&ty, source)?;
+                        let view = vm.selected_type_view(&ty, Some(source))?;
+                        vm.check_comptime_domain(&view, source)?;
+                        Ok(view)
+                    })();
+                    let remaining = vm.remaining_steps();
+                    vm.budget.steps = steps;
+                    assert_eq!(vm.invocation_domain(&ty, source), expected);
+                    assert_eq!(vm.remaining_steps(), remaining);
+                }
+            }
+        }
+    }
+
     #[test]
     fn object_payloads_reject_host_pointers_and_recover() {
         let package = package();
@@ -220,6 +275,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn shared_closure_cells_are_rechecked_after_mutation() {
         let mut package = package();
@@ -334,6 +390,7 @@ mod tests {
         assert_eq!(rejected.unwrap_err().kind, ErrorKind::PhaseMismatch);
         vm.check_comptime_graph(&root, source, 0).unwrap();
     }
+
     #[test]
     fn concrete_domain_lookup_does_not_rescan_unrelated_instances() {
         let ty = |local| Term::Nominal {

@@ -2223,9 +2223,7 @@ impl<'a> Interpreter<'a> {
                     .query_admission(Some(source), |_, fuel| Ok(prefix.next_type_bounded(fuel)?))?,
                 None => &parameter.ty,
             };
-            self.require_closed_input_domain(raw, source)?;
-            let expected = self.selected_type_view(raw, Some(source))?;
-            self.check_comptime_domain(&expected, source)?;
+            let expected = self.invocation_domain(raw, source)?;
             if self.comptime_only
                 && parameter.sort == nir::Sort::Runtime
                 && !matches!(argument, Value::Storage(_))
