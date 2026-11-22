@@ -456,7 +456,7 @@ fn ordinary_enum_builder_rejects_host_added_metadata_before_commit() {
 fn ordinary_struct_builder_rejects_host_added_metadata_before_commit() {
     for compiled in [false, true] {
         // Reuse the same meta.List world to exercise the sibling descriptor protocol.
-        for case in 0..4 {
+        for case in 0..5 {
             let world = world();
             let commits = Cell::new(0);
             let altered = Cell::new(true);
@@ -489,6 +489,7 @@ fn ordinary_struct_builder_rejects_host_added_metadata_before_commit() {
                                 subject: p(Primitive::Bool),
                                 interface: id(21),
                             }),
+                        4 => definition.packed = true,
                         _ => unreachable!(),
                     }
                 }
@@ -527,6 +528,7 @@ fn ordinary_struct_builder_rejects_host_added_metadata_before_commit() {
             assert_eq!(error.kind, ErrorKind::Type, "case {case}");
             assert_eq!(error.source, Some(source));
             assert_eq!(commits.get(), 0);
+            assert!(!vm.structs.contains_key(&id(10)));
             altered.set(false);
             assert!(
                 matches!(execute(&mut vm, compiled, &expr, &mut env(input)).unwrap(), Flow::Value(Value::Type(Term::Nominal { declaration, .. })) if declaration == id(10))
