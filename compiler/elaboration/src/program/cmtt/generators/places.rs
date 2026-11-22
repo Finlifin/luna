@@ -75,11 +75,17 @@ impl Checker<'_, '_> {
             roots,
             &mut self.required_steps,
         )
-        .map_err(|failure| {
-            error(
+        .map_err(|failure| match failure {
+            comptime_interpretor::ErrorKind::StepsExhausted => {
+                error(span, "generator checkpoint step budget exhausted")
+            }
+            comptime_interpretor::ErrorKind::DepthExhausted => {
+                error(span, "generator checkpoint depth budget exhausted")
+            }
+            other => error(
                 span,
-                format!("generator checkpoint capture failed: {failure:?}"),
-            )
+                format!("generator checkpoint capture failed: {other:?}"),
+            ),
         })
     }
 
@@ -415,21 +421,27 @@ impl Checker<'_, '_> {
         self.generator_data_expression_in_context(value, expected, None)
     }
 
-    /// Data inputs to either generator category are checked at comptime even
-    /// when the invocation occurs while constructing a runtime quote.
+    /// A data argument belongs to the generator invocation, even when its
+    /// call site belongs to the runtime body of a quoted expression or pattern.
+    fn in_generator_data_phase<T>(&mut self, check: impl FnOnce(&mut Self) -> T) -> T {
+        let code_body = std::mem::replace(&mut self.in_code_body, false);
+        let required = std::mem::replace(&mut self.in_required_comptime, true);
+        let result = check(self);
+        self.in_required_comptime = required;
+        self.in_code_body = code_body;
+        result
+    }
+
     pub(in crate::program::cmtt) fn check_generator_data_input(
         &mut self,
         value: &Expr<'_>,
         expected: Option<&Term>,
         context: Option<&crate::calls::InputContext>,
     ) -> Result<n::Expr, Error> {
-        let previous = std::mem::replace(&mut self.in_required_comptime, true);
-        let checked = match context {
-            Some(context) => self.input_context_expression(value, context),
-            None => self.expr(value, expected),
-        };
-        self.in_required_comptime = previous;
-        let checked = checked?;
+        let checked = self.in_generator_data_phase(|this| match context {
+            Some(context) => this.input_context_expression(value, context),
+            None => this.expr(value, expected),
+        })?;
         self.validate_generator_data(&checked, value.span)?;
         Ok(checked)
     }
@@ -458,10 +470,9 @@ impl Checker<'_, '_> {
             let Some(context) = context else {
                 return self.required_typed_expression(value, expected);
             };
-            let mode = std::mem::replace(&mut self.in_required_comptime, true);
-            let checked = self.input_context_expression(value, context);
-            self.in_required_comptime = mode;
-            return self.required_normal_input(value, checked?, vec![]);
+            let checked =
+                self.in_generator_data_phase(|this| this.input_context_expression(value, context))?;
+            return self.required_normal_input(value, checked, vec![]);
         }
         self.generator_data_frame_in_context(value, expected, context)?
             .ok_or_else(|| {
@@ -497,6 +508,14 @@ impl Checker<'_, '_> {
         value: &Expr<'_>,
         check: impl FnOnce(&mut Self) -> Result<n::Expr, Error>,
     ) -> Result<Option<(comptime_interpretor::Value, Term)>, Error> {
+        self.in_generator_data_phase(|this| this.evaluate_generator_data_frame(value, check))
+    }
+
+    fn evaluate_generator_data_frame(
+        &mut self,
+        value: &Expr<'_>,
+        check: impl FnOnce(&mut Self) -> Result<n::Expr, Error>,
+    ) -> Result<Option<(comptime_interpretor::Value, Term)>, Error> {
         // Keep every owned data binding as a local while checking the update.
         // Both selectors and RHS may modify siblings or other owned objects.
         // Only referenced roots enter the invocation as shared owned cells.
@@ -509,7 +528,6 @@ impl Checker<'_, '_> {
             .iter_mut()
             .map(|(id, value)| (*id, value.take()))
             .collect::<BTreeMap<_, _>>();
-        let mode = std::mem::replace(&mut self.in_required_comptime, true);
         let outer_invalidation = std::mem::take(&mut self.generator_schema_invalidated);
         let mut checkpoint = None;
         let result = (|| {
@@ -686,7 +704,6 @@ impl Checker<'_, '_> {
             }
             Ok(Some((completed, output, result_ty, cells)))
         })();
-        self.in_required_comptime = mode;
         if !self.checking_code_generator {
             self.input_facts.partial.clear();
         }
