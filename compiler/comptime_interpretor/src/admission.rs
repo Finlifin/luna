@@ -2,6 +2,7 @@
 //! authorization to duplicate resources or reuse an equality-sensitive query.
 use super::*;
 
+mod embedded;
 mod formation;
 
 #[cfg(test)]
@@ -210,51 +211,6 @@ impl Interpreter<'_> {
         self.check_value_type(value, ty, None)?;
         self.admit_value_types(value, 0)
     }
-    /// Host inputs can hide Type descriptions inside immutable aggregates.
-    /// Check their formation before invocation; this does not read pointers,
-    /// copy storage, or invoke user code.
-    pub(super) fn admit_embedded_type_descriptions(
-        &mut self,
-        value: &Value,
-        depth: usize,
-    ) -> Result<(), Error> {
-        if depth >= 128 {
-            return Err(self.failure(ErrorKind::DepthExhausted, None));
-        }
-        self.tick(None)?;
-        match value {
-            Value::Description(_) | Value::Type(_) | Value::List { .. } => {
-                self.admit_value_types(value, depth)?
-            }
-            Value::Optional { value, .. } => {
-                if let Some(value) = value {
-                    self.admit_embedded_type_descriptions(value, depth + 1)?;
-                }
-            }
-            Value::ErrorResult { value, .. } | Value::Newtype { value, .. } => {
-                self.admit_embedded_type_descriptions(value, depth + 1)?
-            }
-            Value::Tuple(fields) | Value::Record { fields, .. } | Value::Variant { fields, .. } => {
-                for field in fields {
-                    self.admit_embedded_type_descriptions(field, depth + 1)?;
-                }
-            }
-            Value::AnonymousRecord(fields) => {
-                for (_, field) in fields {
-                    self.admit_embedded_type_descriptions(field, depth + 1)?;
-                }
-            }
-            Value::Object(object) => {
-                for entry in object.entries() {
-                    self.admit_type(&entry.value().ty, depth + 1)?;
-                    self.admit_embedded_type_descriptions(&entry.value().value, depth + 1)?;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
     fn admit_value_types(&mut self, value: &Value, depth: usize) -> Result<(), Error> {
         if depth >= 128 {
             return Err(self.failure(ErrorKind::DepthExhausted, None));

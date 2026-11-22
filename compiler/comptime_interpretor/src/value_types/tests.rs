@@ -5,6 +5,7 @@ mod collection_admission;
 mod containers;
 mod observations;
 mod passive_views;
+mod receiver_admission;
 mod shape_preparation;
 
 const SOURCE: SourceRange = SourceRange { start: 3, end: 8 };

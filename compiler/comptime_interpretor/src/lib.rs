@@ -2228,26 +2228,13 @@ impl<'a> Interpreter<'a> {
                 && parameter.sort == nir::Sort::Runtime
                 && !matches!(argument, Value::Storage(_))
             {
-                // Ordinary inputs do not materialize dependent terms. Inspect
-                // owned values directly or hold a short receiver borrow, then
-                // release the lock before contract/type-description checks so
-                // re-entrant lookups cannot fail on a held borrow.
-                let snapshot = match &argument {
-                    Value::ComptimeReference(reference) => {
-                        let contents = reference
-                            .borrow(&mut self.budget.steps)
-                            .map_err(|kind| self.failure(kind, Some(source)))?;
-                        self.check_borrowed_representation(contents.value(), source, 0)?;
-                        Some(contents.value().clone())
-                    }
-                    _ => None,
-                };
-                if snapshot.is_none() {
+                if let Value::ComptimeReference(reference) = &argument {
+                    self.admit_reference_input(reference, &expected, source)?;
+                } else {
                     self.check_borrowed_representation(&argument, source, 0)?;
+                    self.check_value_type(&argument, &expected, Some(source))?;
+                    self.admit_embedded_type_descriptions(&argument, 0)?;
                 }
-                let representation = snapshot.as_ref().unwrap_or(&argument);
-                self.check_value_type(representation, &expected, Some(source))?;
-                self.admit_embedded_type_descriptions(representation, 0)?;
                 self.commit_input_domain(
                     builder.as_mut(),
                     observed.as_deref_mut(),

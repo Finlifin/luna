@@ -6,7 +6,7 @@ use super::*;
 #[cfg(test)]
 mod tests;
 
-enum ValueObligation {
+pub(super) enum ValueObligation {
     Nominal(Term),
     RuntimeMethod(TraitMethodIdentity),
     CallableType { signature: Term, expected: Term },
@@ -223,13 +223,31 @@ impl Interpreter<'_> {
         } else {
             ty
         };
+        let obligations = self.value_obligations(value, ty, source)?;
+        self.discharge_value_obligations(obligations, source)
+    }
+
+    pub(super) fn value_obligations(
+        &mut self,
+        value: &Value,
+        selected: &Term,
+        source: Option<SourceRange>,
+    ) -> Result<Vec<ValueObligation>, Error> {
         let mut obligations = Vec::new();
         self.check_value_shape(
             value,
-            ty,
+            selected,
             source,
             self.comptime_only.then_some(&mut obligations),
         )?;
+        Ok(obligations)
+    }
+
+    pub(super) fn discharge_value_obligations(
+        &mut self,
+        obligations: Vec<ValueObligation>,
+        source: Option<SourceRange>,
+    ) -> Result<(), Error> {
         for obligation in obligations {
             match obligation {
                 ValueObligation::Nominal(domain) => self.admit_type(&domain, 0)?,
