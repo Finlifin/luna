@@ -2,6 +2,8 @@
 use super::*;
 use std::sync::Arc;
 
+mod forward;
+
 type Inputs = BTreeMap<usize, nir::DeclarationParameter>;
 
 #[derive(Clone)]
@@ -91,7 +93,10 @@ impl OperandSchedule {
         expression: &n::Expr,
         span: Span,
     ) -> Result<(), Error> {
-        let uses = checker.checked_declaration_inputs(expression, span)?;
+        self.enter_uses(&checker.checked_declaration_inputs(expression, span)?, span)
+    }
+
+    fn enter_uses(&mut self, uses: &BTreeSet<DeclarationId>, span: Span) -> Result<(), Error> {
         if !uses.is_disjoint(&self.unavailable) {
             return Err(needs_frame(span, "operand needs a later type input"));
         }
@@ -249,7 +254,14 @@ impl Checker<'_, '_> {
                 break;
             }
             dependent_inputs::tasks::spend(&mut self.required_steps, 1, span)?;
-            schedule.enter(self, &argument.value, span)?;
+            let uses = self.checked_declaration_inputs(&argument.value, span)?;
+            if argument.passing == n::ArgumentPassing::Value
+                && !uses.is_disjoint(&schedule.unavailable)
+            {
+                self.prepare_forward_operand(&mut argument.value, &mut schedule, span)?;
+                continue;
+            }
+            schedule.enter_uses(&uses, span)?;
             if schedule.current.parameters.is_empty() && schedule.unavailable.is_empty() {
                 break;
             }

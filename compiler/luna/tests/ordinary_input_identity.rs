@@ -2025,3 +2025,71 @@ fn source_checks_a_later_operand_after_the_original_prefix_runs() {
         }
     });
 }
+
+#[test]
+fn forward_type_operand_preserves_source_control_and_block_snapshots() {
+    check_events(
+        "
+        comptime fn Selected(ready: bool, flag: bool) -> Type {
+            assumes ready;
+            if flag { bool } else { char }
+        }
+        comptime fn mark(value: bool) -> bool { value }
+        comptime fn inspect(comptime .ty: Type = bool,
+            .parts: Tuple<?ty, bool, bool> = (null, false, false)) -> ?ty {
+            let (value, a, b) = parts; assumes a and not b; value
+        }
+        comptime fn relay(flag: bool, stop: bool) -> bool {
+            var ready = false;
+            inspect(.parts = do {
+                if stop { return true; };
+                let saved = mark(ready);
+                ready = true;
+                (null, mark(ready), saved)
+            }, .ty = do {
+                let observed = ready; ready = false; Selected(observed, flag)
+            }) matches null
+        }
+        comptime fn check() -> bool { relay(true, true) and relay(false, false) and relay(true, false) }
+        ",
+        &[("Selected", 2), ("mark", 4), ("inspect", 2)],
+    );
+}
+
+#[test]
+fn forward_type_operand_exits_before_an_unavailable_identity_is_required() {
+    let source = "
+        comptime fn Selected(flag: bool) -> Type { if flag { Any } else { char } }
+        comptime fn empty(comptime .ty: Type = bool, .value: ?ty = null) -> ?ty { value }
+        comptime fn relay(stop: bool, flag: bool) -> bool {
+            empty(.value = do { if stop { return true; }; null }, .ty = Selected(flag)) matches null
+        }";
+    let package = sysroot::compile(source).unwrap();
+    let relay = sysroot::source_function(&package, "relay");
+    let selected = sysroot::source_function(&package, "Selected");
+    for tree in [false, true] {
+        sysroot::with_comptime(&package, sysroot::COMPTIME_BUDGET, tree, |vm| {
+            assert_eq!(
+                vm.invoke(relay, vec![Value::Bool(true), Value::Bool(true)])
+                    .unwrap(),
+                Value::Bool(true)
+            );
+            assert!(
+                !vm.events()
+                    .iter()
+                    .any(|event| matches!(event, Event::EnterFunction(id) if *id == selected))
+            );
+            assert_eq!(
+                vm.invoke(relay, vec![Value::Bool(false), Value::Bool(true)])
+                    .unwrap_err()
+                    .kind,
+                comptime_interpretor::ErrorKind::TypeContractUnresolved
+            );
+            assert_eq!(
+                vm.invoke(relay, vec![Value::Bool(false), Value::Bool(false)])
+                    .unwrap(),
+                Value::Bool(true)
+            );
+        });
+    }
+}
