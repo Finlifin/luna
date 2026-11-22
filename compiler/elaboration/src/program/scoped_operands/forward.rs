@@ -2,6 +2,8 @@
 //! result type mentions a witness supplied later in the same call.
 use super::*;
 
+mod branches;
+
 struct Capture {
     binding: n::LocalId,
     value: n::Expr,
@@ -82,6 +84,15 @@ impl Checker<'_, '_> {
         }
 
         match &mut operand.kind {
+            K::If {
+                else_branch: Some(_),
+                ..
+            }
+            | K::Match { .. } => {
+                let capture = self.capture_forward_choice(operand, schedule, span, depth)?;
+                captures.push(capture);
+                Ok(())
+            }
             K::OptionalAbsent => Ok(()),
             K::OptionalPresent(inner) => {
                 self.capture_forward_children(inner, schedule, captures, span, depth + 1)

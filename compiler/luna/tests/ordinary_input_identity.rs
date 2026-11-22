@@ -2124,3 +2124,66 @@ fn forward_type_operand_composes_with_collection_and_spread_preparations() {
         &[("Selected", 6), ("empty", 4), ("packet", 2), ("inspect", 2)],
     );
 }
+
+#[test]
+fn forward_type_operand_selects_and_captures_only_the_chosen_branch() {
+    check_events(
+        "
+        comptime fn Selected(ready: bool, flag: bool) -> Type {
+            assumes ready; if flag { bool } else { char }
+        }
+        comptime fn left() -> bool { true }
+        comptime fn right() -> bool { false }
+        comptime fn inspect(comptime .ty: Type = bool, .parts: Tuple<?ty, bool> = (null, false)) -> ?ty {
+            let (v, observed) = parts; assumes observed; v
+        }
+        comptime fn relay(flag: bool, stop: bool) -> bool {
+            var ready = false;
+            var branch = flag;
+            inspect(.parts = if branch {
+                if stop { return true; };
+                ready = left(); (null, ready)
+            } else {
+                ready = not right(); (null, ready)
+            }, .ty = do { branch = not branch; let T = Selected(ready, flag); ready = false; T }) matches null
+        }
+        comptime fn check() -> bool { relay(true, true) and relay(true, false) and relay(false, false) }
+        ",
+        &[("left", 1), ("right", 1), ("Selected", 2), ("inspect", 2)],
+    );
+}
+
+#[test]
+fn forward_type_operand_keeps_match_guards_bindings_and_returns_at_source() {
+    check_events(
+        "
+        comptime fn guard(value: bool) -> bool { value }
+        comptime fn selected_arm() -> bool { true }
+        comptime fn Selected(ready: bool, flag: bool) -> Type {
+            assumes ready; if flag { bool } else { char }
+        }
+        comptime fn inspect(comptime .ty: Type = bool,
+            .parts: Tuple<?ty, bool, bool> = (null, false, false)) -> ?ty {
+            let (v, first, second) = parts; assumes first and second; v
+        }
+        comptime fn relay(input: ?bool, flag: bool) -> bool {
+            var subject = input;
+            var tested = false;
+            var ready = false;
+            inspect(.parts = subject match {
+                v? if do { tested = true; guard(v) } => do {
+                    ready = selected_arm(); (null, v, ready)
+                },
+                v? => if tested {
+                    ready = selected_arm(); (null, not v, tested)
+                } else { return false; },
+                null => return not tested,
+            }, .ty = do {
+                subject = null; tested = false; let Ty = Selected(ready, flag); ready = false; Ty
+            }) matches null
+        }
+        comptime fn check() -> bool { relay(null, true) and relay(true, false) and relay(false, true) }
+        ",
+        &[("guard", 2), ("selected_arm", 2), ("Selected", 2), ("inspect", 2)],
+    );
+}
