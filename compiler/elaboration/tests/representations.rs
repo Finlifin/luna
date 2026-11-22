@@ -6,12 +6,14 @@ use std::sync::Arc;
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 71, local }
 }
+
 fn nominal(local: u32) -> Term {
     Term::Nominal {
         declaration: id(local),
         arguments: vec![],
     }
 }
+
 fn definition(local: u32, field: Term) -> Struct {
     Struct {
         declaration: id(local),
@@ -21,9 +23,10 @@ fn definition(local: u32, field: Term) -> Struct {
         requirements: vec![],
         capabilities: vec![],
         fields: vec![("field".into(), field)],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     }
 }
+
 fn enumeration(local: u32, field: Term) -> nir::program::Enum {
     nir::program::Enum {
         declaration: id(local),
@@ -215,6 +218,7 @@ fn mixed_representation_budget_failures_are_retryable_and_do_not_publish() {
     let receipt = checker.prepare_batch(structs, enums, &mut 100_000).unwrap();
     checker.commit(receipt).unwrap();
 }
+
 fn check(
     field: Term,
     tuple: Option<DeclarationId>,

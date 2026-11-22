@@ -114,7 +114,7 @@ fn attribute_queries_keep_target_identity_and_the_invocations_publication_state(
         declaration,
         name: format!("D{}", declaration.local),
         fields: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     };
     let package = Package {
         definition_attributes: DefinitionAttributes::Pending(BTreeSet::from([target]).into()),

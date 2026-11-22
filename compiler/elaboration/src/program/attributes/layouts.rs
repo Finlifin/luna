@@ -163,7 +163,7 @@ mod tests {
                 declaration: id(local),
                 name: format!("D{local}"),
                 fields: vec![("value".into(), ty)],
-                packed: false,
+                packed: nir::program::PackedMode::None,
                 requirements: vec![],
                 capabilities: vec![],
                 type_parameters: vec![],

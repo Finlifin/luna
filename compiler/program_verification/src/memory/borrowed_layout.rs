@@ -634,7 +634,7 @@ mod tests {
                         nominal(index + 1)
                     },
                 )],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             });
         }
         (package, nominal(0))
@@ -900,7 +900,7 @@ mod tests {
                     )
                 })
                 .collect(),
-            packed: false,
+            packed: nir::program::PackedMode::None,
         });
         package.enums.push(nir::program::Enum {
             declaration: wide_enum_id,
@@ -1131,7 +1131,7 @@ mod tests {
             requirements: vec![],
             capabilities: vec![],
             fields: vec![("inner".into(), deep_clean)],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         });
         package.structs.push(nir::program::Struct {
             declaration: wide_cb_id,
@@ -1141,7 +1141,7 @@ mod tests {
             requirements: vec![],
             capabilities: vec![],
             fields: vec![("items".into(), wide_cb)],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         });
         let bad_arity_id = DeclarationId {
             package: 98,
@@ -1158,7 +1158,7 @@ mod tests {
             requirements: vec![],
             capabilities: vec![],
             fields: vec![],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         });
         let deep_nominal = Term::Nominal {
             declaration: deep_clean_id,

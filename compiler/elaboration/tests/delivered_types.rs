@@ -48,9 +48,11 @@ fn description<'a>(
         nodes: OwnerNodes::new(),
     }
 }
+
 fn identities() -> BTreeMap<u32, u64> {
     BTreeMap::from([(0, 73)])
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
@@ -204,7 +206,7 @@ fn reflected_type_values_can_feed_generated_fields_without_source_reconstruction
         parameter_types: vec![],
         requirements: vec![],
         capabilities: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     let mut vm = comptime_interpretor::Interpreter::for_comptime(
         &source,

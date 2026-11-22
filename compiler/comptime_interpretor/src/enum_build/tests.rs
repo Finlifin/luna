@@ -1,12 +1,15 @@
 use super::*;
 use nir::Sort;
 use std::cell::Cell;
+
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 90, local }
 }
+
 fn p(value: Primitive) -> Term {
     Term::Primitive(value)
 }
+
 fn list(element: Term) -> Term {
     Term::NormalForm {
         head: id(1),
@@ -14,6 +17,7 @@ fn list(element: Term) -> Term {
         arguments: vec![element],
     }
 }
+
 fn world() -> nir::program::Package {
     nir::program::Package {
         normal_forms: vec![nir::normal_forms::Head {
@@ -31,6 +35,7 @@ fn world() -> nir::program::Package {
         ..Default::default()
     }
 }
+
 fn symbols(names: &[&str]) -> Value {
     Value::List {
         ty: list(p(Primitive::Symbol)),
@@ -40,6 +45,7 @@ fn symbols(names: &[&str]) -> Value {
             .collect(),
     }
 }
+
 fn input(shape: &str) -> Value {
     Value::Tuple(vec![
         Value::Symbol("Generated".into()),
@@ -56,6 +62,7 @@ fn input(shape: &str) -> Value {
         },
     ])
 }
+
 fn expression() -> Expr {
     let source = SourceRange { start: 3, end: 7 };
     Expr {
@@ -75,11 +82,13 @@ fn expression() -> Expr {
         })),
     }
 }
+
 fn env(value: Value) -> Environment {
     let mut env = Environment::new();
     env.insert(LocalId { owner: 9, index: 0 }, value);
     env
 }
+
 fn prepared<'a>(
     request: &EnumBuildRequest,
     commit: Box<dyn FnOnce() -> Result<(), Error> + 'a>,
@@ -103,6 +112,7 @@ fn prepared<'a>(
         commit,
     }
 }
+
 #[test]
 fn build_enum_installs_the_exact_descriptor_and_returns_its_type() {
     for compiled in [false, true] {
@@ -133,6 +143,7 @@ fn build_enum_installs_the_exact_descriptor_and_returns_its_type() {
         assert!(expression().to_string().contains("(build-enum"));
     }
 }
+
 #[test]
 fn malformed_shape_and_runtime_operation_do_not_call_the_builder() {
     for compiled in [false, true] {
@@ -168,6 +179,7 @@ fn malformed_shape_and_runtime_operation_do_not_call_the_builder() {
         assert_eq!(calls.get(), 0);
     }
 }
+
 #[test]
 fn mismatched_host_descriptor_and_failed_commit_leave_no_definition() {
     for compiled in [false, true] {
@@ -199,6 +211,7 @@ fn mismatched_host_descriptor_and_failed_commit_leave_no_definition() {
         assert_eq!(commits.get(), 1);
     }
 }
+
 #[test]
 fn host_cannot_refund_fuel_and_early_return_never_calls_it() {
     for compiled in [false, true] {
@@ -473,7 +486,7 @@ fn ordinary_struct_builder_rejects_host_added_metadata_before_commit() {
                     parameter_types: vec![],
                     requirements: vec![],
                     capabilities: vec![],
-                    packed: false,
+                    packed: nir::program::PackedMode::None,
                 };
                 if altered.get() {
                     match case {
@@ -553,6 +566,7 @@ fn symbol_input(codes: &[&str]) -> Value {
     values.push(symbols(codes));
     Value::Tuple(values)
 }
+
 fn symbol_expression() -> Expr {
     let mut expr = expression();
     let K::BuildEnum(inner) = &mut expr.kind else {
@@ -564,6 +578,7 @@ fn symbol_expression() -> Expr {
     types.push(list(p(Primitive::Symbol)));
     expr
 }
+
 #[test]
 fn symbol_enum_builder_installs_encoding_and_rejects_host_replacement() {
     for compiled in [false, true] {
@@ -625,6 +640,7 @@ fn symbol_enum_builder_installs_encoding_and_rejects_host_replacement() {
         );
     }
 }
+
 #[test]
 fn symbol_enum_builder_rejects_code_count_before_calling_host() {
     for compiled in [false, true] {
@@ -675,6 +691,7 @@ fn integers(values: &[u128]) -> Value {
             .collect(),
     }
 }
+
 fn fixed_input(width: u128, base: Option<Primitive>) -> Value {
     let Value::Tuple(mut values) = symbol_input(&[]) else {
         unreachable!()
@@ -694,6 +711,7 @@ fn fixed_input(width: u128, base: Option<Primitive>) -> Value {
     ]);
     Value::Tuple(values)
 }
+
 fn fixed_expression() -> Expr {
     let mut expr = symbol_expression();
     let K::BuildEnum(inner) = &mut expr.kind else {
@@ -711,6 +729,7 @@ fn fixed_expression() -> Expr {
     ]);
     expr
 }
+
 #[test]
 fn fixed_enum_builder_preserves_base_identity_and_rejects_host_changes() {
     for compiled in [false, true] {
@@ -762,6 +781,7 @@ fn fixed_enum_builder_preserves_base_identity_and_rejects_host_changes() {
         assert_eq!(encoding.variants()[0].fixed_value().words(), &[42]);
     }
 }
+
 #[test]
 fn fixed_enum_builder_checks_size_limits_before_host_publication() {
     for compiled in [false, true] {

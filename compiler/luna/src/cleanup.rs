@@ -2150,7 +2150,7 @@ mod tests {
                 },
                 name: "Present".into(),
                 fields: vec![],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             }),
         });
 

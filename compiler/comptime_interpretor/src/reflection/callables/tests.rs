@@ -4,9 +4,11 @@ use nir::{Parameter, Sort};
 fn p(value: Primitive) -> Term {
     Term::Primitive(value)
 }
+
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 91, local }
 }
+
 fn signature() -> Term {
     Term::Function {
         parameters: vec![
@@ -109,7 +111,7 @@ fn contextual_closure_checks_environment_and_signature_formation() {
         requirements: vec![nir::program::TypePredicate::Bool(false)],
         capabilities: vec![],
         fields: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     let nominal = Term::Nominal {
         declaration: id(1),

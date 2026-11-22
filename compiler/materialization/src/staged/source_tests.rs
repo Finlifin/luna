@@ -120,7 +120,7 @@ fn borrowed_capture_meters_unrelated_declarations_without_penalizing_shared_owne
         requirements: vec![],
         capabilities: vec![],
         fields: vec![("field".repeat(1000), Term::Primitive(nir::Primitive::Bool))],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     let before = package.clone();
     let failure = Snapshot::capture(DeclarationSource::Borrowed(&package), &mut 100)

@@ -1297,7 +1297,7 @@ mod tests {
                     ("item".into(), enum_ty.clone()),
                     ("tail".into(), Term::Primitive(P::U8)),
                 ],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             }),
         };
         graph.nominals = vec![enum_inst, wrap_inst];

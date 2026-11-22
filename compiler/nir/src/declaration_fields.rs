@@ -51,7 +51,7 @@ impl Struct {
         frames: &[Vec<Sort>],
         fuel: &mut usize,
     ) -> Result<Term, crate::NominalAdmissionError> {
-        if self.packed {
+        if self.packed.is_packed() {
             return Err("cannot take an aligned pointer to a field of a packed struct".into());
         }
         Ok(self.instantiate_field_bounded(index, arguments, frames, fuel)?)

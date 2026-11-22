@@ -2,9 +2,13 @@ use super::*;
 use nir::program::{MatchArm, Pattern as P, Place};
 
 const SOURCE: SourceRange = SourceRange { start: 50, end: 60 };
+
 const X: LocalId = LocalId { owner: 1, index: 0 };
+
 const Y: LocalId = LocalId { owner: 1, index: 1 };
+
 const TRACE: LocalId = LocalId { owner: 1, index: 2 };
+
 fn expr(kind: K) -> Expr {
     Expr {
         source: SOURCE,
@@ -12,15 +16,18 @@ fn expr(kind: K) -> Expr {
         kind,
     }
 }
+
 fn boolean(value: bool) -> Expr {
     expr(K::Literal(Literal::Bool(value)))
 }
+
 fn binding(id: LocalId) -> P {
     P::Binding {
         binding: id,
         inner: Box::new(P::Wild),
     }
 }
+
 fn effect() -> Expr {
     expr(K::Block {
         statements: vec![Expr {
@@ -37,6 +44,7 @@ fn effect() -> Expr {
         result: Some(Box::new(boolean(false))),
     })
 }
+
 fn execute(
     vm: &mut Interpreter<'_>,
     body: &Expr,
@@ -382,7 +390,7 @@ fn nominal_type_fields_convert_against_the_completed_telescope() {
         capabilities: vec![],
         requirements: vec![],
         fields: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     for compiled in [false, true] {
         let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();

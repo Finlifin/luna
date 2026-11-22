@@ -18468,7 +18468,7 @@ mod record_shape_tests {
                             boolean.clone()
                         },
                     )],
-                    packed: false,
+                    packed: nir::program::PackedMode::None,
                 }],
                 effects: vec![nir::effects::Declaration {
                     declaration: effect_id,

@@ -5,6 +5,7 @@ use nir::{DeclarationId, Primitive, Sort, Term};
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 1, local }
 }
+
 fn opaque(local: u32, ty: Term) -> Head {
     Head {
         declaration: id(local),
@@ -22,6 +23,7 @@ fn opaque(local: u32, ty: Term) -> Head {
         requirements: vec![],
     }
 }
+
 fn wrapper() -> nir::newtypes::Newtype {
     nir::newtypes::Newtype {
         declaration: id(1),
@@ -201,7 +203,7 @@ fn normal_form_heads_reject_runtime_lift_domains_and_structs_accept_them() {
             fields: vec![("value".into(), Term::Primitive(Primitive::U32))],
             requirements: vec![],
             capabilities: vec![],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         }],
         ..Default::default()
     };

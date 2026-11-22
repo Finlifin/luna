@@ -33,7 +33,7 @@ impl CheckedDefinitionPublisher<'_> {
                     .iter()
                     .map(|field| (field.name.clone(), field.ty.clone()))
                     .collect(),
-                packed: false,
+                packed: nir::program::PackedMode::None,
             }]
             .into();
             let prepared =
@@ -47,6 +47,7 @@ impl CheckedDefinitionPublisher<'_> {
         *steps = budget.steps;
         self.request_result(result, request.source)
     }
+
     pub fn prepare_newtype_request<'s>(
         &'s self,
         identity: DeclarationId,
@@ -82,6 +83,7 @@ impl CheckedDefinitionPublisher<'_> {
         *steps = budget.steps;
         self.request_result(result, request.source)
     }
+
     pub fn prepare_enum_request<'s>(
         &'s self,
         identity: DeclarationId,
@@ -120,6 +122,7 @@ impl CheckedDefinitionPublisher<'_> {
         *steps = budget.steps;
         self.request_result(result, request.source)
     }
+
     fn request_result<T>(
         &self,
         result: Result<T, Error>,
@@ -134,6 +137,7 @@ impl CheckedDefinitionPublisher<'_> {
         })
     }
 }
+
 fn charge_request(
     budget: &mut Budget,
     charge: impl FnOnce(&mut usize) -> Result<(), ()>,

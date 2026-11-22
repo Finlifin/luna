@@ -1,9 +1,11 @@
 use nir::newtypes::Newtype;
 use nir::program::Package;
 use nir::{DeclarationId, Primitive, Sort, Term};
+
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 1, local }
 }
+
 fn generic() -> Newtype {
     Newtype {
         capture_count: 0,
@@ -69,6 +71,7 @@ fn captured_environment_must_be_explicit_in_nominal_identity() {
         }
     );
 }
+
 #[test]
 fn representation_substitution_preserves_nominal_and_opaque_heads() {
     let definition = generic();
@@ -113,6 +116,7 @@ fn representation_substitution_preserves_nominal_and_opaque_heads() {
             .is_err()
     );
 }
+
 #[test]
 fn representation_instantiation_requires_the_callers_scope() {
     let definition = generic();
@@ -133,6 +137,7 @@ fn representation_instantiation_requires_the_callers_scope() {
         bound
     );
 }
+
 #[test]
 fn metadata_rejects_duplicate_identity_parameters_and_non_types() {
     let definition = generic();
@@ -155,7 +160,7 @@ fn metadata_rejects_duplicate_identity_parameters_and_non_types() {
         requirements: vec![],
         capabilities: vec![],
         fields: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     assert!(nir::normal_forms::validate(&package).is_err());
     package.structs.clear();
@@ -163,6 +168,7 @@ fn metadata_rejects_duplicate_identity_parameters_and_non_types() {
     package.newtypes[0].representation = Term::Bool(true);
     assert!(nir::normal_forms::validate(&package).is_err());
 }
+
 #[test]
 fn descriptor_dump_escapes_names_and_keeps_representation_separate() {
     let text = generic().to_string();
@@ -177,6 +183,7 @@ fn nominal(local: u32, arguments: Vec<Term>) -> Term {
         arguments,
     }
 }
+
 fn wrapper(local: u32, representation: Term) -> Newtype {
     Newtype {
         capture_count: 0,
@@ -189,6 +196,7 @@ fn wrapper(local: u32, representation: Term) -> Newtype {
         requirements: vec![],
     }
 }
+
 #[test]
 fn conversion_matrix_follows_only_declared_direct_edges() {
     use nir::newtypes::{Direction, conversion};
@@ -236,6 +244,7 @@ fn conversion_matrix_follows_only_declared_direct_edges() {
         }
     }
 }
+
 #[test]
 fn conversions_preserve_generic_arguments_scope_and_opaque_heads() {
     use nir::newtypes::{ConversionError, conversion};
@@ -290,6 +299,7 @@ fn conversions_preserve_generic_arguments_scope_and_opaque_heads() {
         .is_none()
     );
 }
+
 #[test]
 fn malformed_conversion_queries_are_errors_not_absent_edges() {
     use nir::newtypes::{ConversionError, conversion};
@@ -329,6 +339,7 @@ fn malformed_conversion_queries_are_errors_not_absent_edges() {
         Err(ConversionError::DuplicateIdentity(id(1)))
     );
 }
+
 #[test]
 fn conversion_budget_failure_is_recoverable_and_never_proves_absence() {
     use nir::newtypes::{ConversionError, conversion};
@@ -356,6 +367,7 @@ fn conversion_budget_failure_is_recoverable_and_never_proves_absence() {
             .is_some()
     );
 }
+
 #[test]
 fn representation_expansion_is_charged_before_substituting_repeated_arguments() {
     use nir::newtypes::ConversionError;

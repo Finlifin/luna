@@ -152,7 +152,7 @@ mod tests {
             declaration: id,
             name: "Generated".into(),
             fields: vec![],
-            packed: false,
+            packed: nir::program::PackedMode::None,
             type_parameters: vec![],
             parameter_types: vec![],
             requirements: vec![],

@@ -3692,6 +3692,15 @@ impl Builder<'_, '_> {
                                     .map_err(|e| format!("nominal dependency copy budget: {e:?}"))
                             })
                             .collect::<Result<Vec<_>, _>>()?;
+                        if definition.packed == nir::program::PackedMode::Bit {
+                            validate_materialized_bit_packed_struct(
+                                &definition,
+                                &fields,
+                                package,
+                                &self.nominals,
+                                &mut self.fuel,
+                            )?;
+                        }
                         self.nominals.push(iir::NominalInstance {
                             ty: ty.clone(),
                             definition: iir::NominalDefinition::Struct(definition),
@@ -4703,5 +4712,229 @@ impl Builder<'_, '_> {
             | K::StaticAddress(_) => {}
         }
         Ok(())
+    }
+}
+
+struct MaterializationLayoutWorld<'a> {
+    package: &'a n::Package,
+    nominals: &'a [iir::NominalInstance],
+}
+
+impl nir::LayoutWorld for MaterializationLayoutWorld<'_> {
+    fn target(&self) -> Option<nir::target::TargetData> {
+        self.package.target
+    }
+
+    fn is_tuple_head(&self, head: Id) -> bool {
+        self.package
+            .normal_forms
+            .iter()
+            .any(|h| h.declaration == head && h.role == nir::normal_forms::Role::Tuple)
+    }
+
+    fn is_list_head(&self, head: Id) -> bool {
+        self.package
+            .normal_forms
+            .iter()
+            .any(|h| h.declaration == head && h.role == nir::normal_forms::Role::TypeList)
+    }
+
+    fn nominal_kind(&self, ty: &Term) -> Option<nir::NominalKind> {
+        let Term::Nominal { declaration, .. } = ty else {
+            return None;
+        };
+        if self
+            .package
+            .structs
+            .iter()
+            .any(|s| s.declaration == *declaration)
+        {
+            Some(nir::NominalKind::Struct)
+        } else if self
+            .package
+            .enums
+            .iter()
+            .any(|e| e.declaration == *declaration)
+        {
+            Some(nir::NominalKind::Enum)
+        } else if self
+            .package
+            .newtypes
+            .iter()
+            .any(|n| n.declaration == *declaration)
+        {
+            Some(nir::NominalKind::Newtype)
+        } else {
+            None
+        }
+    }
+
+    fn nominal_layout(
+        &self,
+        ty: &Term,
+        fuel: &mut usize,
+    ) -> Result<Option<nir::NominalLayout>, nir::LayoutError> {
+        let Term::Nominal {
+            declaration,
+            arguments,
+        } = ty
+        else {
+            return Ok(None);
+        };
+        let admission_err = |err: nir::NominalAdmissionError| match err {
+            nir::NominalAdmissionError::Budget => nir::LayoutError::BudgetExhausted,
+            nir::NominalAdmissionError::Unresolved(_) => nir::LayoutError::Unresolved(ty.clone()),
+            nir::NominalAdmissionError::Invalid(_) => nir::LayoutError::Unsupported(ty.clone()),
+        };
+        if let Some(instance) = self.nominals.iter().find(|item| item.ty == *ty) {
+            return Ok(Some(match &instance.definition {
+                iir::NominalDefinition::Struct(def) => {
+                    let fields = def.fields.iter().map(|(_, t)| t.clone()).collect();
+                    match def.packed {
+                        n::PackedMode::None => nir::NominalLayout::Struct(fields),
+                        n::PackedMode::Byte => nir::NominalLayout::PackedStruct(fields),
+                        n::PackedMode::Bit => nir::NominalLayout::BitPackedStruct(fields),
+                    }
+                }
+                iir::NominalDefinition::Newtype(def) => {
+                    nir::NominalLayout::Newtype(def.representation.clone())
+                }
+                iir::NominalDefinition::Enum(def) => {
+                    if def.symbol_encoding.is_some() {
+                        nir::NominalLayout::EnumSymbol
+                    } else if let Some(encoding) = &def.encoding {
+                        let bits = u32::try_from(encoding.width())
+                            .map_err(|_| nir::LayoutError::Unsupported(ty.clone()))?;
+                        nir::NominalLayout::EnumFixedBits {
+                            width: bits,
+                            niche: encoding.layout.contiguous_niche(),
+                            exhaustive: encoding.layout.is_exhaustive(),
+                        }
+                    } else if def.variants.iter().all(|v| v.fields.is_empty()) {
+                        nir::NominalLayout::EnumUnit(def.variants.len())
+                    } else {
+                        nir::NominalLayout::EnumAggregate(
+                            def.variants.iter().map(|v| v.fields.clone()).collect(),
+                        )
+                    }
+                }
+            }));
+        }
+        if let Some(def) = self
+            .package
+            .structs
+            .iter()
+            .find(|s| s.declaration == *declaration)
+        {
+            let fields = def
+                .instantiate_stored_fields(arguments, &[], fuel)
+                .map_err(|err| admission_err(err.into()))?;
+            return Ok(Some(match def.packed {
+                n::PackedMode::None => nir::NominalLayout::Struct(fields),
+                n::PackedMode::Byte => nir::NominalLayout::PackedStruct(fields),
+                n::PackedMode::Bit => nir::NominalLayout::BitPackedStruct(fields),
+            }));
+        }
+        if let Some(def) = self
+            .package
+            .newtypes
+            .iter()
+            .find(|n| n.declaration == *declaration)
+        {
+            let repr =
+                def.representation_budgeted(arguments, &[], fuel)
+                    .map_err(|err| match err {
+                        nir::newtypes::ConversionError::Budget => nir::LayoutError::BudgetExhausted,
+                        _ => nir::LayoutError::Unsupported(ty.clone()),
+                    })?;
+            return Ok(Some(nir::NominalLayout::Newtype(repr)));
+        }
+        if let Some(def) = self
+            .package
+            .enums
+            .iter()
+            .find(|e| e.declaration == *declaration)
+        {
+            if def.symbol_encoding.is_some() {
+                return Ok(Some(nir::NominalLayout::EnumSymbol));
+            }
+            if let Some(encoding) = &def.encoding {
+                let bits = u32::try_from(encoding.width())
+                    .map_err(|_| nir::LayoutError::Unsupported(ty.clone()))?;
+                return Ok(Some(nir::NominalLayout::EnumFixedBits {
+                    width: bits,
+                    niche: encoding.layout.contiguous_niche(),
+                    exhaustive: encoding.layout.is_exhaustive(),
+                }));
+            }
+            if def.variants.iter().all(|v| v.fields.is_empty()) {
+                return Ok(Some(nir::NominalLayout::EnumUnit(def.variants.len())));
+            }
+            let variants = def
+                .instantiate_variant_fields(arguments, &[], fuel)
+                .map_err(|err| admission_err(err.into()))?;
+            return Ok(Some(nir::NominalLayout::EnumAggregate(variants)));
+        }
+        Ok(None)
+    }
+}
+
+fn validate_materialized_bit_packed_struct(
+    definition: &n::Struct,
+    fields: &[Term],
+    package: &n::Package,
+    nominals: &[iir::NominalInstance],
+    fuel: &mut usize,
+) -> Result<(), String> {
+    let world = MaterializationLayoutWorld { package, nominals };
+    match nir::bit_packed_struct_layout(&world, fields, fuel) {
+        Ok(_) | Err(nir::BitPackedError::Layout(nir::LayoutError::Unresolved(_))) => Ok(()),
+        Err(nir::BitPackedError::Layout(nir::LayoutError::TargetRequired)) => {
+            for (field_index, field_ty) in fields.iter().enumerate() {
+                match nir::bit_packed_field_info(&world, field_ty, fuel) {
+                    Ok(_)
+                    | Err(nir::BitPackedError::Layout(
+                        nir::LayoutError::TargetRequired | nir::LayoutError::Unresolved(_),
+                    )) => {}
+                    Err(nir::BitPackedError::UnsupportedField { ty, reason, .. }) => {
+                        let name = definition
+                            .fields
+                            .get(field_index)
+                            .map(|(n, _)| n.as_str())
+                            .unwrap_or("<field>");
+                        return Err(format!(
+                            "attrs.packed.bit struct `{}` field `{name}` of type `{ty}` is not allowed: {reason}",
+                            definition.name
+                        ));
+                    }
+                    Err(err) => {
+                        return Err(format!(
+                            "attrs.packed.bit struct `{}`: {err}",
+                            definition.name
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        Err(nir::BitPackedError::UnsupportedField {
+            field_index,
+            ty,
+            reason,
+        }) => {
+            let name = definition
+                .fields
+                .get(field_index)
+                .map(|(n, _)| n.as_str())
+                .unwrap_or("<field>");
+            Err(format!(
+                "attrs.packed.bit struct `{}` field `{name}` of type `{ty}` is not allowed: {reason}",
+                definition.name
+            ))
+        }
+        Err(err) => Err(format!(
+            "attrs.packed.bit struct `{}`: {err}",
+            definition.name
+        )),
     }
 }

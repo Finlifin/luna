@@ -4,15 +4,18 @@ use nir::{DeclarationId, DeclarationParameter, Parameter, Primitive, Sort, Term}
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 9, local }
 }
+
 fn bound(depth: u32, index: usize, sort: Sort) -> Term {
     Term::Bound { depth, index, sort }
 }
+
 fn rigid(local: u32, sort: Sort) -> Term {
     Term::Rigid {
         declaration: id(local),
         sort,
     }
 }
+
 fn inputs() -> Vec<DeclarationParameter> {
     vec![
         DeclarationParameter {
@@ -25,6 +28,7 @@ fn inputs() -> Vec<DeclarationParameter> {
         },
     ]
 }
+
 fn indexed(ty: Term, value: Term) -> Term {
     Term::NormalForm {
         head: id(3),
@@ -211,7 +215,7 @@ fn nominal_fields_and_variants_instantiate_in_explicit_input_frames() {
         fields: vec![("value".into(), field.clone())],
         requirements: vec![],
         capabilities: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     };
     let frames = vec![vec![Sort::Type]];
     let arguments = vec![bound(0, 0, Sort::Type)];

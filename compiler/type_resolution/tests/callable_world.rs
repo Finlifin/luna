@@ -8,9 +8,11 @@ use type_resolution::ptc::Budget;
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 11, local }
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
+
 fn callable(domain: Term) -> Term {
     Term::Function {
         parameters: vec![nir::Parameter {
@@ -20,6 +22,7 @@ fn callable(domain: Term) -> Term {
         result: Box::new(domain),
     }
 }
+
 fn function(local: u32) -> Function {
     let binding = LocalId {
         owner: local,
@@ -56,6 +59,7 @@ fn function(local: u32) -> Function {
         runtime_deliveries: Default::default(),
     }
 }
+
 fn package(noise: u32) -> Package {
     let mut generic = function(1);
     generic.type_parameters = vec![id(10)];
@@ -431,7 +435,7 @@ fn metadata_payloads_are_charged_but_borrowed_function_bodies_are_not_copied() {
         capabilities: vec![],
         requirements: vec![],
         fields: vec![("x".repeat(200_000), boolean())],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     let mut limited = Budget::default();
     assert!(matches!(

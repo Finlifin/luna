@@ -4,15 +4,18 @@ use nir::{Sort, program::Struct};
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 71, local }
 }
+
 fn p(primitive: Primitive) -> Term {
     Term::Primitive(primitive)
 }
+
 fn nominal(arguments: Vec<Term>) -> Term {
     Term::Nominal {
         declaration: id(1),
         arguments,
     }
 }
+
 fn package() -> Package {
     let mut package = Package::default();
     package.structs.push(Struct {
@@ -38,7 +41,7 @@ fn package() -> Package {
                 }]))),
             ),
         ],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     package
 }
@@ -243,6 +246,7 @@ fn associated(member: u32) -> Term {
         subject: Box::new(p(Primitive::Bool)),
     }
 }
+
 fn associated_key(member: u32) -> (InterfaceInstance, Term, DeclarationId) {
     (
         InterfaceInstance {
@@ -253,6 +257,7 @@ fn associated_key(member: u32) -> (InterfaceInstance, Term, DeclarationId) {
         id(member),
     )
 }
+
 fn selected_type(ty: Term) -> Expr {
     Expr {
         source: SourceRange { start: 0, end: 0 },

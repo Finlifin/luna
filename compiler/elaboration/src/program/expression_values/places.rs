@@ -15,7 +15,11 @@ impl Checker<'_, '_> {
                     declaration,
                     ..
                 } => {
-                    if self.structs.get(declaration).is_some_and(|def| def.packed) {
+                    if self
+                        .structs
+                        .get(declaration)
+                        .is_some_and(|def| def.packed.is_packed())
+                    {
                         return true;
                     }
                     cursor = value;

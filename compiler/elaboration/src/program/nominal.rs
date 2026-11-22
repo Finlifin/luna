@@ -555,18 +555,20 @@ impl Checker<'_, '_> {
         else {
             return Ok(());
         };
-        if self.structs.contains_key(id)
-            || self.enums.contains_key(id)
-            || self.newtypes.contains_key(id)
+        if !self.structs.contains_key(id)
+            && !self.enums.contains_key(id)
+            && !self.newtypes.contains_key(id)
         {
-            return Ok(());
+            let owner = self
+                .source_declarations
+                .owner(*id)
+                .ok_or_else(|| error(span, "nominal declaration is missing"))?;
+            self.ensure_nominal(owner, span)?;
         }
-        let owner = self
-            .source_declarations
-            .owner(*id)
-            .ok_or_else(|| error(span, "nominal declaration is missing"))?;
-        self.ensure_nominal(owner, span)
+        self.validate_bit_packed_use(ty, span)?;
+        Ok(())
     }
+
     pub(super) fn ensure_nominal(&mut self, owner: OwnerId, span: Span) -> Result<(), Error> {
         let id = declaration(self.package, &self.package_identities, owner);
         if self.structs.contains_key(&id)
@@ -792,7 +794,11 @@ impl Checker<'_, '_> {
                             declaration: declaration(self.package, &self.package_identities, owner),
                             name: item.ident.name.as_str().into(),
                             fields,
-                            packed: self.packed_structs.contains(&owner),
+                            packed: self
+                                .packed_structs
+                                .get(&owner)
+                                .copied()
+                                .unwrap_or(n::PackedMode::None),
                         },
                     );
                 }

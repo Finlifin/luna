@@ -20,12 +20,14 @@ fn id(local: usize) -> DeclarationId {
         local: u32::try_from(local).expect("declaration index overflow"),
     }
 }
+
 fn nominal(local: usize) -> Term {
     Term::Nominal {
         declaration: id(local),
         arguments: vec![],
     }
 }
+
 fn baseline(count: usize) -> Package {
     Package {
         structs: (0..count)
@@ -39,12 +41,13 @@ fn baseline(count: usize) -> Package {
                 fields: (0..4)
                     .map(|field| (format!("field{field}"), Term::Primitive(Primitive::Bool)))
                     .collect(),
-                packed: false,
+                packed: nir::program::PackedMode::None,
             })
             .collect(),
         ..Default::default()
     }
 }
+
 fn requests(base: usize, count: usize) -> Vec<StructBuildRequest> {
     (0..count)
         .map(|index| StructBuildRequest {

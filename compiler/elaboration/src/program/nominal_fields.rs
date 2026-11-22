@@ -115,6 +115,7 @@ impl Checker<'_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn constructor_observation_debits_failures_and_recovers_without_copying_contracts() {
         let declaration = DeclarationId {
@@ -139,7 +140,7 @@ mod tests {
             )],
             requirements: vec![],
             capabilities: vec![],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         };
         let arguments = [Term::Primitive(P::Bool)];
         let mut steps = 500;

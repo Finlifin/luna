@@ -2154,10 +2154,10 @@ impl nir::LayoutWorld for Checker<'_, '_> {
                 fuel,
             )
             .map_err(admission_err)?;
-            return Ok(Some(if def.packed {
-                nir::NominalLayout::PackedStruct(fields)
-            } else {
-                nir::NominalLayout::Struct(fields)
+            return Ok(Some(match def.packed {
+                n::PackedMode::None => nir::NominalLayout::Struct(fields),
+                n::PackedMode::Byte => nir::NominalLayout::PackedStruct(fields),
+                n::PackedMode::Bit => nir::NominalLayout::BitPackedStruct(fields),
             }));
         }
         if let Some(def) = self.newtypes.get(declaration) {
@@ -2179,6 +2179,7 @@ impl nir::LayoutWorld for Checker<'_, '_> {
                 return Ok(Some(nir::NominalLayout::EnumFixedBits {
                     width: bits,
                     niche: encoding.layout.contiguous_niche(),
+                    exhaustive: encoding.layout.is_exhaustive(),
                 }));
             }
             if def.variants.iter().all(|v| v.fields.is_empty()) {

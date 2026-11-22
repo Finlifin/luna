@@ -5,27 +5,33 @@ use nir::{
     program::{Enum, Package, SourceRange, Struct, Variant, VariantShape},
 };
 use std::sync::Arc;
+
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 74, local }
 }
+
 fn ty(local: u32) -> Term {
     Term::Nominal {
         declaration: id(local),
         arguments: vec![],
     }
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
+
 fn source() -> SourceRange {
     SourceRange { start: 7, end: 19 }
 }
+
 fn fuel() -> Budget {
     Budget {
         steps: 1_000_000,
         depth: 128,
     }
 }
+
 fn structs(local: u32, field: Term) -> Arc<[Struct]> {
     vec![Struct {
         declaration: id(local),
@@ -35,10 +41,11 @@ fn structs(local: u32, field: Term) -> Arc<[Struct]> {
         requirements: vec![],
         capabilities: vec![],
         fields: vec![("value".into(), field)],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     }]
     .into()
 }
+
 fn enumeration(local: u32, field: Term) -> Enum {
     Enum {
         declaration: id(local),
@@ -58,6 +65,7 @@ fn enumeration(local: u32, field: Term) -> Enum {
         }],
     }
 }
+
 fn enums(local: u32, field: Term) -> Arc<[Enum]> {
     vec![enumeration(local, field)].into()
 }

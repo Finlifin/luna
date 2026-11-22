@@ -4,6 +4,7 @@ use nir::normal_forms::{Head, Kind, Parameter, Role};
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 94, local }
 }
+
 const SOURCE: SourceRange = SourceRange { start: 10, end: 20 };
 
 #[test]
@@ -319,7 +320,7 @@ fn registered_runtime_dependency_in_type_description_is_admitted_and_domain_chec
         structs: vec![nir::program::Struct {
             declaration: id(10),
             name: "Holder".into(),
-            packed: false,
+            packed: nir::program::PackedMode::None,
             type_parameters: vec![id(11)],
             parameter_types: vec![lift_alloc.clone()],
             requirements: vec![],
@@ -385,7 +386,7 @@ fn projected_indices_require_an_admitted_root_field_and_lifted_domain() {
     package.structs.push(nir::program::Struct {
         declaration: id(10),
         name: "Choice".into(),
-        packed: false,
+        packed: nir::program::PackedMode::None,
         type_parameters: vec![id(11)],
         parameter_types: vec![lift(ptr(boolean.clone()))],
         requirements: vec![],
@@ -411,7 +412,7 @@ fn projected_indices_require_an_admitted_root_field_and_lifted_domain() {
     package.structs.push(nir::program::Struct {
         declaration: id(20),
         name: "Packed".into(),
-        packed: true,
+        packed: nir::program::PackedMode::Byte,
         type_parameters: vec![],
         parameter_types: vec![],
         requirements: vec![],

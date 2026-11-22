@@ -95,14 +95,71 @@ impl std::error::Error for LayoutError {}
 pub enum NominalLayout {
     Struct(Vec<Term>),
     PackedStruct(Vec<Term>),
+    BitPackedStruct(Vec<Term>),
     Newtype(Term),
     EnumUnit(usize),
     EnumSymbol,
     EnumFixedBits {
         width: u32,
         niche: Option<(u64, u64)>,
+        exhaustive: bool,
     },
     EnumAggregate(Vec<Vec<Term>>),
+}
+
+/// LSB-first bit range and value restriction summary for one field inside an
+/// `attrs.packed.bit` struct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct BitPackedFieldLayout {
+    pub bit_offset: u32,
+    pub bit_width: u32,
+    pub restricted: bool,
+}
+
+/// Exact bit-level layout computed for an `attrs.packed.bit` struct.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BitPackedStructLayout {
+    pub total_bits: u32,
+    pub fields: Vec<BitPackedFieldLayout>,
+    pub restricted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BitPackedError {
+    Layout(LayoutError),
+    UnsupportedField {
+        field_index: usize,
+        ty: Term,
+        reason: &'static str,
+    },
+    WidthOverflow,
+}
+
+impl fmt::Display for BitPackedError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Layout(error) => error.fmt(f),
+            Self::UnsupportedField {
+                field_index,
+                ty,
+                reason,
+            } => write!(
+                f,
+                "field {field_index} of type {ty} is unsupported in attrs.packed.bit: {reason}"
+            ),
+            Self::WidthOverflow => {
+                f.write_str("attrs.packed.bit total bit width exceeds supported maximum")
+            }
+        }
+    }
+}
+
+impl std::error::Error for BitPackedError {}
+
+impl From<LayoutError> for BitPackedError {
+    fn from(error: LayoutError) -> Self {
+        Self::Layout(error)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -556,6 +613,17 @@ fn layout_with_niche_at(
                         .collect::<Result<Vec<_>, _>>()?;
                     Ok(no_niche(packed_struct_layout(&layouts)?))
                 }
+                NominalLayout::BitPackedStruct(fields) => {
+                    let bp = bit_packed_struct_layout_at(world, &fields, depth + 1, visiting, fuel)
+                        .map_err(|err| match err {
+                            BitPackedError::Layout(layout_err) => layout_err,
+                            BitPackedError::UnsupportedField { .. } => {
+                                LayoutError::Unsupported(ty.clone())
+                            }
+                            BitPackedError::WidthOverflow => LayoutError::Overflow,
+                        })?;
+                    Ok(no_niche(int_layout(bp.total_bits, ty)?))
+                }
                 NominalLayout::Newtype(representation) => {
                     layout_with_niche_at(world, &representation, depth + 1, visiting, fuel)
                 }
@@ -582,7 +650,11 @@ fn layout_with_niche_at(
                         TypeLayout { size: 8, align: 8 },
                     ])?))
                 }
-                NominalLayout::EnumFixedBits { width, niche } => {
+                NominalLayout::EnumFixedBits {
+                    width,
+                    niche,
+                    exhaustive: _,
+                } => {
                     let layout = int_layout(width, ty)?;
                     let niche = niche.filter(|_| matches!(width, 8 | 16 | 32 | 64)).map(
                         |(start, count)| Niche {
@@ -741,6 +813,233 @@ pub fn packed_struct_layout(fields: &[TypeLayout]) -> Result<TypeLayout, LayoutE
     Ok(TypeLayout { size, align: 1 })
 }
 
+/// Compute `(bit_width, restricted)` for a field allowed inside an
+/// `attrs.packed.bit` struct, recursing through transparent `newtype`s and
+/// nested `attrs.packed.bit` structs without byte padding.
+pub fn bit_packed_field_info(
+    world: &impl LayoutWorld,
+    ty: &Term,
+    fuel: &mut usize,
+) -> Result<(u32, bool), BitPackedError> {
+    let mut visiting = Vec::new();
+    bit_packed_field_info_at(world, ty, 0, &mut visiting, fuel)
+}
+
+/// Compute the LSB-first bit layout of an `attrs.packed.bit` struct's fields.
+pub fn bit_packed_struct_layout(
+    world: &impl LayoutWorld,
+    fields: &[Term],
+    fuel: &mut usize,
+) -> Result<BitPackedStructLayout, BitPackedError> {
+    let mut visiting = Vec::new();
+    bit_packed_struct_layout_at(world, fields, 0, &mut visiting, fuel)
+}
+
+fn bit_packed_field_info_at(
+    world: &impl LayoutWorld,
+    ty: &Term,
+    depth: usize,
+    visiting: &mut Vec<Term>,
+    fuel: &mut usize,
+) -> Result<(u32, bool), BitPackedError> {
+    charge(fuel, 1)?;
+    if depth >= MAX_LAYOUT_DEPTH {
+        return Err(BitPackedError::Layout(LayoutError::BudgetExhausted));
+    }
+    let unsupported = |reason: &'static str| BitPackedError::UnsupportedField {
+        field_index: 0,
+        ty: ty.clone(),
+        reason,
+    };
+    match ty {
+        Term::Primitive(Primitive::Void) => Ok((0, false)),
+        Term::Primitive(Primitive::Bool) => Ok((1, false)),
+        Term::Primitive(Primitive::BitVec(width)) => {
+            let bits = u32::try_from(*width).map_err(|_| BitPackedError::WidthOverflow)?;
+            if bits > MAX_BIT_WIDTH {
+                return Err(BitPackedError::WidthOverflow);
+            }
+            Ok((bits, false))
+        }
+        Term::Primitive(Primitive::F16 | Primitive::Bf16) => Ok((16, false)),
+        Term::Primitive(Primitive::F32) => Ok((32, false)),
+        Term::Primitive(Primitive::F64) => Ok((64, false)),
+        Term::Primitive(Primitive::Char) => Ok((32, true)),
+        Term::Primitive(Primitive::I8 | Primitive::U8) => Ok((8, false)),
+        Term::Primitive(Primitive::I16 | Primitive::U16) => Ok((16, false)),
+        Term::Primitive(Primitive::I32 | Primitive::U32) => Ok((32, false)),
+        Term::Primitive(Primitive::I64 | Primitive::U64) => Ok((64, false)),
+        Term::Primitive(Primitive::I128 | Primitive::U128) => Ok((128, false)),
+        Term::Primitive(Primitive::Isize | Primitive::Usize) => {
+            let bits = world
+                .target()
+                .ok_or(BitPackedError::Layout(LayoutError::TargetRequired))?
+                .pointer_bits();
+            if bits > MAX_BIT_WIDTH {
+                return Err(BitPackedError::WidthOverflow);
+            }
+            Ok((bits, false))
+        }
+        Term::Primitive(Primitive::Str | Primitive::Symbol) => Err(unsupported(
+            "str and Symbol are not allowed in an attrs.packed.bit struct",
+        )),
+        Term::Primitive(Primitive::Never) => Err(unsupported(
+            "Never is not allowed in an attrs.packed.bit struct",
+        )),
+        Term::Primitive(
+            Primitive::Type
+            | Primitive::Object
+            | Primitive::Integer
+            | Primitive::Float
+            | Primitive::Unit,
+        ) => Err(BitPackedError::Layout(LayoutError::ComptimeOnly(
+            ty.clone(),
+        ))),
+        Term::Pointer(_)
+        | Term::Function { .. }
+        | Term::UnsafeFunction(_)
+        | Term::Closure { .. } => Err(unsupported(
+            "pointer and callable types are not allowed in an attrs.packed.bit struct",
+        )),
+        Term::Optional(_) | Term::ErrorResult { .. } | Term::Computation { .. } => {
+            Err(unsupported(
+                "optional, error-result, and effect types are not allowed in an attrs.packed.bit struct",
+            ))
+        }
+        Term::Tuple(_) | Term::Record(_) => Err(unsupported(
+            "tuple and structural record types are not allowed in an attrs.packed.bit struct",
+        )),
+        Term::NormalForm {
+            head,
+            sort: Sort::Type,
+            ..
+        } => {
+            if world.is_list_head(*head) {
+                Err(BitPackedError::Layout(LayoutError::ComptimeOnly(
+                    ty.clone(),
+                )))
+            } else if world.is_tuple_head(*head) {
+                Err(unsupported(
+                    "tuple and structural record types are not allowed in an attrs.packed.bit struct",
+                ))
+            } else {
+                Err(unsupported(
+                    "opaque normal-form types are not allowed in an attrs.packed.bit struct",
+                ))
+            }
+        }
+        Term::NormalForm { .. }
+        | Term::ComptimeFunction(_)
+        | Term::NormalFormFunction(..)
+        | Term::Lift(_) => Err(BitPackedError::Layout(LayoutError::ComptimeOnly(
+            ty.clone(),
+        ))),
+        Term::Nominal { .. } => {
+            if visiting.contains(ty) {
+                return Err(BitPackedError::Layout(LayoutError::Cycle(ty.clone())));
+            }
+            let Some(definition) = world.nominal_layout(ty, fuel)? else {
+                return Err(BitPackedError::Layout(LayoutError::Unresolved(ty.clone())));
+            };
+            visiting.push(ty.clone());
+            let result = match definition {
+                NominalLayout::BitPackedStruct(inner_fields) => {
+                    let inner = bit_packed_struct_layout_at(
+                        world,
+                        &inner_fields,
+                        depth + 1,
+                        visiting,
+                        fuel,
+                    )?;
+                    Ok((inner.total_bits, inner.restricted))
+                }
+                NominalLayout::Newtype(repr) => {
+                    bit_packed_field_info_at(world, &repr, depth + 1, visiting, fuel)
+                }
+                NominalLayout::EnumFixedBits {
+                    width, exhaustive, ..
+                } => {
+                    if width > MAX_BIT_WIDTH {
+                        Err(BitPackedError::WidthOverflow)
+                    } else {
+                        Ok((width, !exhaustive))
+                    }
+                }
+                NominalLayout::Struct(_) => Err(unsupported(
+                    "ordinary struct is not allowed in an attrs.packed.bit struct",
+                )),
+                NominalLayout::PackedStruct(_) => Err(unsupported(
+                    "attrs.packed.byte struct is not allowed in an attrs.packed.bit struct",
+                )),
+                NominalLayout::EnumUnit(_)
+                | NominalLayout::EnumSymbol
+                | NominalLayout::EnumAggregate(_) => Err(unsupported(
+                    "only fixed-width bit-encoded enums are allowed in an attrs.packed.bit struct",
+                )),
+            };
+            visiting.pop();
+            result
+        }
+        Term::Rigid { .. }
+        | Term::Bound { .. }
+        | Term::Hole { .. }
+        | Term::AssociatedType { .. }
+        | Term::ContextualClosure { .. }
+        | Term::ClosureContextType
+        | Term::ClosureContextValue(_) => {
+            Err(BitPackedError::Layout(LayoutError::Unresolved(ty.clone())))
+        }
+        Term::Runtime(_) | Term::RuntimeField { .. } => Err(unsupported(
+            "runtime-dependent types are not allowed in an attrs.packed.bit struct",
+        )),
+        _ => Err(BitPackedError::Layout(LayoutError::Unsupported(ty.clone()))),
+    }
+}
+
+fn bit_packed_struct_layout_at(
+    world: &impl LayoutWorld,
+    fields: &[Term],
+    depth: usize,
+    visiting: &mut Vec<Term>,
+    fuel: &mut usize,
+) -> Result<BitPackedStructLayout, BitPackedError> {
+    charge(fuel, fields.len())?;
+    let mut bit_fields = Vec::with_capacity(fields.len());
+    let mut total_bits = 0u32;
+    let mut restricted = false;
+    for (field_index, field_ty) in fields.iter().enumerate() {
+        let (bit_width, field_restricted) =
+            bit_packed_field_info_at(world, field_ty, depth, visiting, fuel).map_err(|err| {
+                match err {
+                    BitPackedError::UnsupportedField { ty, reason, .. } => {
+                        BitPackedError::UnsupportedField {
+                            field_index,
+                            ty,
+                            reason,
+                        }
+                    }
+                    other => other,
+                }
+            })?;
+        let next_total = total_bits
+            .checked_add(bit_width)
+            .filter(|&w| w <= MAX_BIT_WIDTH)
+            .ok_or(BitPackedError::WidthOverflow)?;
+        bit_fields.push(BitPackedFieldLayout {
+            bit_offset: total_bits,
+            bit_width,
+            restricted: field_restricted,
+        });
+        total_bits = next_total;
+        restricted |= field_restricted;
+    }
+    Ok(BitPackedStructLayout {
+        total_bits,
+        fields: bit_fields,
+        restricted,
+    })
+}
+
 fn closure_env_state_count(
     world: &impl LayoutWorld,
     fields: &[Term],
@@ -804,6 +1103,7 @@ fn closure_field_state_count(
             Some(NominalLayout::PackedStruct(fields)) => {
                 closure_env_state_count(world, &fields, depth + 1, fuel)
             }
+            Some(NominalLayout::BitPackedStruct(_)) => Ok(1),
             Some(NominalLayout::Newtype(repr)) => {
                 closure_field_state_count(world, &repr, depth + 1, fuel)
             }
@@ -862,9 +1162,9 @@ mod tests {
         fn nominal_kind(&self, ty: &Term) -> Option<crate::NominalKind> {
             let (_, descriptor) = self.nominals.iter().find(|(key, _)| key == ty)?;
             Some(match descriptor {
-                NominalLayout::Struct(_) | NominalLayout::PackedStruct(_) => {
-                    crate::NominalKind::Struct
-                }
+                NominalLayout::Struct(_)
+                | NominalLayout::PackedStruct(_)
+                | NominalLayout::BitPackedStruct(_) => crate::NominalKind::Struct,
                 NominalLayout::Newtype(_) => crate::NominalKind::Newtype,
                 _ => crate::NominalKind::Enum,
             })
@@ -1481,11 +1781,181 @@ mod tests {
             NominalLayout::EnumFixedBits {
                 width: 8,
                 niche: Some((1, 159)),
+                exhaustive: false,
             },
         ));
         assert_eq!(
             compute_layout(&world, &Term::Optional(Box::new(packet_ty)), &mut fuel),
             Ok(TypeLayout { size: 1, align: 1 })
         );
+    }
+
+    #[test]
+    fn bit_packed_structs_compute_lsb_offsets_nested_bits_and_reject_non_pod_fields() {
+        let mut world = TestWorldVec::new(Some(TargetData::new(64).unwrap()));
+        let mut fuel = 10_000;
+
+        // Inner bit-packed struct: bool (1) + BitVec<4> (4) = 5 bits (no byte padding when nested!).
+        let inner = Term::Nominal {
+            declaration: id(101),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            inner.clone(),
+            NominalLayout::BitPackedStruct(vec![
+                Term::Primitive(Primitive::Bool),
+                Term::Primitive(Primitive::BitVec(4)),
+            ]),
+        ));
+        assert_eq!(
+            compute_layout(&world, &inner, &mut fuel),
+            Ok(TypeLayout { size: 1, align: 1 })
+        );
+
+        // Outer bit-packed struct: inner (5) + Void (0) + inner (5) = 10 bits -> size 2, align 2.
+        let outer = Term::Nominal {
+            declaration: id(102),
+            arguments: vec![],
+        };
+        let outer_fields = vec![
+            inner.clone(),
+            Term::Primitive(Primitive::Void),
+            inner.clone(),
+        ];
+        world.nominals.push((
+            outer.clone(),
+            NominalLayout::BitPackedStruct(outer_fields.clone()),
+        ));
+        let layout = bit_packed_struct_layout(&world, &outer_fields, &mut fuel).unwrap();
+        assert_eq!(layout.total_bits, 10);
+        assert!(!layout.restricted);
+        assert_eq!(
+            layout.fields,
+            vec![
+                BitPackedFieldLayout {
+                    bit_offset: 0,
+                    bit_width: 5,
+                    restricted: false,
+                },
+                BitPackedFieldLayout {
+                    bit_offset: 5,
+                    bit_width: 0,
+                    restricted: false,
+                },
+                BitPackedFieldLayout {
+                    bit_offset: 5,
+                    bit_width: 5,
+                    restricted: false,
+                },
+            ]
+        );
+        assert_eq!(
+            compute_layout(&world, &outer, &mut fuel),
+            Ok(TypeLayout { size: 2, align: 2 })
+        );
+
+        // Byte-packed struct holding inner bit-packed struct sees standalone BitVec<5> byte layout (size 1).
+        let byte_holder = Term::Nominal {
+            declaration: id(103),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            byte_holder.clone(),
+            NominalLayout::PackedStruct(vec![Term::Primitive(Primitive::U8), inner.clone()]),
+        ));
+        assert_eq!(
+            compute_layout(&world, &byte_holder, &mut fuel),
+            Ok(TypeLayout { size: 2, align: 1 })
+        );
+
+        // Newtype, exhaustive vs sparse EnumFixedBits, and char restrictedness.
+        let nt_bits = Term::Nominal {
+            declaration: id(104),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            nt_bits.clone(),
+            NominalLayout::Newtype(Term::Primitive(Primitive::BitVec(5))),
+        ));
+        let full_enum = Term::Nominal {
+            declaration: id(105),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            full_enum.clone(),
+            NominalLayout::EnumFixedBits {
+                width: 3,
+                niche: None,
+                exhaustive: true,
+            },
+        ));
+        let sparse_enum = Term::Nominal {
+            declaration: id(106),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            sparse_enum.clone(),
+            NominalLayout::EnumFixedBits {
+                width: 3,
+                niche: Some((5, 3)),
+                exhaustive: false,
+            },
+        ));
+        let unrestricted = bit_packed_struct_layout(
+            &world,
+            &[
+                nt_bits,
+                full_enum,
+                Term::Primitive(Primitive::F16),
+                Term::Primitive(Primitive::Bf16),
+                Term::Primitive(Primitive::F32),
+                Term::Primitive(Primitive::F64),
+                Term::Primitive(Primitive::Usize),
+            ],
+            &mut fuel,
+        )
+        .unwrap();
+        assert_eq!(unrestricted.total_bits, 5 + 3 + 16 + 16 + 32 + 64 + 64);
+        assert!(!unrestricted.restricted);
+        let with_char =
+            bit_packed_struct_layout(&world, &[Term::Primitive(Primitive::Char)], &mut fuel)
+                .unwrap();
+        assert_eq!(with_char.total_bits, 32);
+        assert!(with_char.restricted);
+        let with_sparse = bit_packed_struct_layout(&world, &[sparse_enum], &mut fuel).unwrap();
+        assert_eq!(with_sparse.total_bits, 3);
+        assert!(with_sparse.restricted);
+
+        // Disallowed fields fail cleanly.
+        for bad in [
+            Term::Pointer(Box::new(Term::Primitive(Primitive::U8))),
+            Term::Primitive(Primitive::Str),
+            Term::Primitive(Primitive::Symbol),
+            Term::Optional(Box::new(Term::Primitive(Primitive::U8))),
+            Term::Tuple(vec![Term::Primitive(Primitive::U8)]),
+            byte_holder,
+        ] {
+            assert!(
+                matches!(
+                    bit_packed_struct_layout(&world, &[bad.clone()], &mut fuel),
+                    Err(BitPackedError::UnsupportedField { field_index: 0, .. })
+                ),
+                "expected unsupported field error for {bad}"
+            );
+        }
+
+        // Cycle fails cleanly.
+        let cycle = Term::Nominal {
+            declaration: id(107),
+            arguments: vec![],
+        };
+        world.nominals.push((
+            cycle.clone(),
+            NominalLayout::BitPackedStruct(vec![cycle.clone()]),
+        ));
+        assert!(matches!(
+            bit_packed_struct_layout(&world, &[cycle], &mut fuel),
+            Err(BitPackedError::Layout(LayoutError::Cycle(_)))
+        ));
     }
 }

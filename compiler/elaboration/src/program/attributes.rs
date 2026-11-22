@@ -96,7 +96,7 @@ impl Checker<'_, '_> {
             let packed = packed_structs(self.package, &selected, &mut budget)?;
             let packed_owners: BTreeSet<OwnerId> = packed
                 .iter()
-                .filter(|entry| entry.enabled)
+                .filter(|entry| entry.mode.is_packed())
                 .map(|entry| entry.owner)
                 .collect();
             let volatile = volatile_targets(self.package, &selected, &packed_owners, &mut budget)?;
@@ -145,6 +145,7 @@ impl Checker<'_, '_> {
                                 | "packed"
                                 | "__flurry_direct_passing"
                                 | "__flurry_metadata"
+                                | "__flurry_packed_mode"
                                 | "__flurry_volatile"
                                 | "__flurry_abi"
                         )
@@ -195,9 +196,14 @@ impl Checker<'_, '_> {
             })
             .collect();
         self.packed_structs = packed
+            .iter()
+            .filter(|entry| entry.mode.is_packed())
+            .map(|entry| (entry.owner, entry.mode))
+            .collect();
+        self.packed_struct_sources = packed
             .into_iter()
-            .filter(|entry| entry.enabled)
-            .map(|entry| entry.owner)
+            .filter(|entry| entry.mode.is_packed())
+            .map(|entry| (entry.owner, entry.source))
             .collect();
         self.volatile_storage = Default::default();
         for entry in volatile {

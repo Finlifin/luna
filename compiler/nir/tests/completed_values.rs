@@ -1,12 +1,15 @@
 use nir::program::{Capture, Expr, ExprKind as K, Literal, LocalId, SourceRange};
 use nir::{Primitive, Term};
 use std::sync::Arc;
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
+
 fn id(index: u32) -> LocalId {
     LocalId { owner: 7, index }
 }
+
 fn expr(ty: Term, kind: K) -> Expr {
     Expr {
         ty,
@@ -14,12 +17,14 @@ fn expr(ty: Term, kind: K) -> Expr {
         source: SourceRange { start: 0, end: 1 },
     }
 }
+
 fn signature(result: Term) -> Term {
     Term::ComptimeFunction(Box::new(Term::Function {
         parameters: vec![],
         result: Box::new(result),
     }))
 }
+
 fn frozen() -> Expr {
     let ty = Term::Closure {
         environment: vec![boolean()],
@@ -67,6 +72,7 @@ fn frozen() -> Expr {
         },
     )
 }
+
 fn validate(value: &Expr) -> Result<(), nir::NominalAdmissionError> {
     nir::completed_values::validate(value, &mut 10000)
 }
@@ -98,6 +104,7 @@ fn tuple_layout(head: nir::DeclarationId) -> nir::normal_forms::Head {
         requirements: vec![],
     }
 }
+
 fn tuple_input(metadata: &nir::normal_forms::Head, fields: Vec<Term>) -> Term {
     Term::NominalValue {
         ty: Box::new(metadata.parameters[0].ty.clone()),
@@ -168,6 +175,7 @@ fn target_ranges_reach_nested_values_and_closure_captures() {
             .unwrap();
     }
 }
+
 #[test]
 fn frozen_closures_require_closed_explicit_captures_and_private_bindings() {
     let original = frozen();
@@ -204,6 +212,7 @@ fn frozen_closures_require_closed_explicit_captures_and_private_bindings() {
     }
     validate(&original).unwrap();
 }
+
 #[test]
 fn reconstruction_cannot_execute_arbitrary_declarations_or_statements() {
     let mut value = frozen();
@@ -229,6 +238,7 @@ fn reconstruction_cannot_execute_arbitrary_declarations_or_statements() {
     statements.push(expr(boolean(), K::Literal(Literal::Bool(true))));
     assert!(validate(&value).is_err());
 }
+
 #[test]
 fn completed_graph_validation_recovers_after_budget_exhaustion() {
     let value = frozen();
@@ -849,7 +859,7 @@ fn nominal_completed_values_check_instantiated_layouts_and_constructor_identity(
         capabilities: vec![],
         requirements: vec![],
         fields: vec![("value".into(), parameter.clone())],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     };
     let enumeration = Enum {
         declaration: decl(2),
@@ -1316,7 +1326,7 @@ fn completed_nominal_lookup_distinguishes_absence_budget_and_duplicate_identity(
         capabilities: vec![],
         requirements: vec![],
         fields: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     };
     let mut package = nir::program::Package::default();
     package.structs.push(definition.clone());

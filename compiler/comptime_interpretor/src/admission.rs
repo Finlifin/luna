@@ -136,7 +136,7 @@ impl Interpreter<'_> {
             let Some(ConcreteNominal::Struct(def)) = self.concrete_nominal(ty) else {
                 return Err("runtime field requires an admitted struct instance".into());
             };
-            if def.packed {
+            if def.packed.is_packed() {
                 return Err("packed struct field cannot supply an aligned address".into());
             }
             let (_, field) = def
@@ -177,6 +177,7 @@ impl Interpreter<'_> {
     pub fn validate_immutable_input(&mut self, value: &Value, ty: &Term) -> Result<(), Error> {
         self.admitted_immutable_size(value, ty).map(|_| ())
     }
+
     /// Return the representation measurements from this admission. A caller
     /// retaining the immutable value can use them to budget a copy or comparison.
     pub fn admitted_immutable_size(
@@ -211,6 +212,7 @@ impl Interpreter<'_> {
         self.check_value_type(value, ty, None)?;
         self.admit_value_types(value, 0)
     }
+
     fn admit_value_types(&mut self, value: &Value, depth: usize) -> Result<(), Error> {
         if depth >= 128 {
             return Err(self.failure(ErrorKind::DepthExhausted, None));

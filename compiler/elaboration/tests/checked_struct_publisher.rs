@@ -9,15 +9,18 @@ use std::sync::Arc;
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 73, local }
 }
+
 fn nominal(local: u32) -> Term {
     Term::Nominal {
         declaration: id(local),
         arguments: vec![],
     }
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
+
 fn request(ty: Term) -> StructBuildRequest {
     StructBuildRequest {
         name: "Generated".into(),
@@ -28,6 +31,7 @@ fn request(ty: Term) -> StructBuildRequest {
         source: SourceRange { start: 11, end: 23 },
     }
 }
+
 fn baseline() -> Package {
     Package {
         structs: vec![Struct {
@@ -38,7 +42,7 @@ fn baseline() -> Package {
             parameter_types: vec![],
             requirements: vec![],
             capabilities: vec![],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         }],
         ..Default::default()
     }

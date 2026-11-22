@@ -679,3 +679,104 @@ fn discriminant_intervals_decompose_contiguous_and_residual_variants_exactly() {
         vec![(u128::MAX - 1, u128::MAX)]
     );
 }
+
+#[test]
+fn is_exhaustive_detects_full_and_sparse_encodings_across_widths() {
+    let mut budget = Budget::default();
+
+    // Full 2-bit split: 0b00, 0b01, 0b1x (mask 0b10 val 0b10 with 1 free bit).
+    let v00 = Variant::new(
+        "a".into(),
+        bits(2, 0b11),
+        bits(2, 0b00),
+        vec![],
+        &mut budget,
+    )
+    .unwrap();
+    let v01 = Variant::new(
+        "b".into(),
+        bits(2, 0b11),
+        bits(2, 0b01),
+        vec![],
+        &mut budget,
+    )
+    .unwrap();
+    let v1x = Variant::new(
+        "c".into(),
+        bits(2, 0b10),
+        bits(2, 0b10),
+        vec![Field {
+            name: "p".into(),
+            start: 0,
+            width: 1,
+        }],
+        &mut budget,
+    )
+    .unwrap();
+    let full2 = Layout::new(2, vec![v00.clone(), v01, v1x], &mut budget).unwrap();
+    assert!(full2.is_exhaustive());
+
+    // Missing 0b01 -> non-exhaustive.
+    let sparse2 = Layout::new(2, vec![v00], &mut budget).unwrap();
+    assert!(!sparse2.is_exhaustive());
+
+    // Exact 128-bit split (two variants covering 2^127 patterns each).
+    let low_zero = Variant::new(
+        "even".into(),
+        BitVec::from_words(128, &[1, 0, 0, 0], &mut budget).unwrap(),
+        BitVec::from_words(128, &[0, 0, 0, 0], &mut budget).unwrap(),
+        vec![Field {
+            name: "hi".into(),
+            start: 1,
+            width: 127,
+        }],
+        &mut budget,
+    )
+    .unwrap();
+    let low_one = Variant::new(
+        "odd".into(),
+        BitVec::from_words(128, &[1, 0, 0, 0], &mut budget).unwrap(),
+        BitVec::from_words(128, &[1, 0, 0, 0], &mut budget).unwrap(),
+        vec![Field {
+            name: "hi".into(),
+            start: 1,
+            width: 127,
+        }],
+        &mut budget,
+    )
+    .unwrap();
+    let full128 = Layout::new(128, vec![low_zero.clone(), low_one], &mut budget).unwrap();
+    assert!(full128.is_exhaustive());
+    let half128 = Layout::new(128, vec![low_zero], &mut budget).unwrap();
+    assert!(!half128.is_exhaustive());
+
+    // >128-bit encoding: 130-bit split across top bit.
+    let v130_a = Variant::new(
+        "lo".into(),
+        BitVec::from_words(130, &[0, 0, 0, 0, 0b10], &mut budget).unwrap(),
+        BitVec::from_words(130, &[0, 0, 0, 0, 0], &mut budget).unwrap(),
+        vec![Field {
+            name: "payload".into(),
+            start: 0,
+            width: 129,
+        }],
+        &mut budget,
+    )
+    .unwrap();
+    let v130_b = Variant::new(
+        "hi".into(),
+        BitVec::from_words(130, &[0, 0, 0, 0, 0b10], &mut budget).unwrap(),
+        BitVec::from_words(130, &[0, 0, 0, 0, 0b10], &mut budget).unwrap(),
+        vec![Field {
+            name: "payload".into(),
+            start: 0,
+            width: 129,
+        }],
+        &mut budget,
+    )
+    .unwrap();
+    let full130 = Layout::new(130, vec![v130_a.clone(), v130_b], &mut budget).unwrap();
+    assert!(full130.is_exhaustive());
+    let half130 = Layout::new(130, vec![v130_a], &mut budget).unwrap();
+    assert!(!half130.is_exhaustive());
+}

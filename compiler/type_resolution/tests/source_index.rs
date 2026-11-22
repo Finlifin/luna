@@ -10,6 +10,7 @@ use type_resolution::{
 fn id(local: u32) -> Id {
     Id { package: 1, local }
 }
+
 fn bool_ty() -> Term {
     Term::Primitive(Primitive::Bool)
 }
@@ -113,7 +114,7 @@ fn metadata_copy_and_invalid_domains_are_bounded_before_publication() {
             .collect(),
         requirements: vec![],
         capabilities: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     let mut limited = Budget {
         steps: cost,

@@ -11,6 +11,7 @@ fn flag(kind: K) -> Expr {
         source: SourceRange { start: 1, end: 2 },
     }
 }
+
 fn function(local: u32, phase: Phase, inputs: &[Sort]) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
@@ -254,6 +255,7 @@ fn text_queries_validate_packet_domains_in_both_phases() {
         }
     }
 }
+
 fn call(target: &Function, arguments: Vec<(usize, Expr)>) -> Expr {
     flag(K::Call {
         callee: Box::new(Expr {
@@ -729,7 +731,7 @@ fn nominal_callback_storage_preserves_ordinary_input_frames() {
                 sort: Sort::Type,
             },
         )],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     };
     let mut root = function(1, Phase::Runtime, &[Sort::Type, Sort::Runtime]);
     let callback = Term::Function {
@@ -810,7 +812,7 @@ fn recursive_runtime_callback_storage_terminates_across_function_frames() {
         requirements: vec![],
         capabilities: vec![],
         fields: vec![("next".into(), callback)],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     };
     let mut root = function(1, Phase::Runtime, &[Sort::Runtime]);
     let Term::Function { parameters, .. } = &mut root.signature else {

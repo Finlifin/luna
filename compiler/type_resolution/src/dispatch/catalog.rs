@@ -310,6 +310,7 @@ pub enum DeclarationSource<'a> {
     Prepared(&'a BorrowedCatalog<'a>),
     Snapshot(&'a DeclarationSnapshot),
 }
+
 impl<'a> DeclarationSource<'a> {
     pub fn phase_inspection(self) -> nir::phases::Inspection<'a> {
         let inspection = nir::phases::Inspection::new(self.package());
@@ -471,6 +472,7 @@ pub(super) struct DeclarationMetadata {
     pub runtime_callables: HashMap<Id, usize>,
     pub normal_heads: HashMap<Id, usize>,
 }
+
 impl DeclarationMetadata {
     pub(super) fn function<'a>(
         &self,
@@ -598,7 +600,7 @@ mod tests {
                         requirements: vec![],
                         capabilities: vec![],
                         fields: vec![],
-                        packed: false,
+                        packed: nir::program::PackedMode::None,
                     })
                     .collect::<Vec<_>>()
                     .into(),
@@ -696,7 +698,7 @@ mod tests {
             capabilities: vec![],
             requirements: vec![],
             fields: vec![],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         };
         let package = Arc::new(n::Package {
             structs: vec![definition],

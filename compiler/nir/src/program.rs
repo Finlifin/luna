@@ -45,6 +45,40 @@ pub use crate::match_plan::{
 };
 pub use volatile_storage::{VolatileNominal, VolatileStorage};
 
+/// Explicit struct layout packing mode derived from `__flurry_packed_mode` or
+/// the transitional `packed` attribute.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PackedMode {
+    #[default]
+    None,
+    Byte,
+    Bit,
+}
+
+impl PackedMode {
+    pub const fn is_packed(self) -> bool {
+        !matches!(self, Self::None)
+    }
+
+    pub const fn is_byte(self) -> bool {
+        matches!(self, Self::Byte)
+    }
+
+    pub const fn is_bit(self) -> bool {
+        matches!(self, Self::Bit)
+    }
+}
+
+impl fmt::Display for PackedMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::None => "none",
+            Self::Byte => "byte",
+            Self::Bit => "bit",
+        })
+    }
+}
+
 /// Relative selections of a writable bit view, in source order.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BitSelection {
@@ -3165,7 +3199,7 @@ pub struct Struct {
     pub declaration: DeclarationId,
     pub name: String,
     pub fields: Vec<(String, Term)>,
-    pub packed: bool,
+    pub packed: PackedMode,
 }
 
 impl Struct {
@@ -3214,10 +3248,10 @@ impl fmt::Display for Struct {
             string(f, name)?;
             write!(f, ") (type {ty}))")?;
         }
-        if self.packed {
-            f.write_str(") (packed true))")
-        } else {
-            f.write_str("))")
+        match self.packed {
+            PackedMode::None => f.write_str("))"),
+            PackedMode::Byte => f.write_str(") (packed byte))"),
+            PackedMode::Bit => f.write_str(") (packed bit))"),
         }
     }
 }

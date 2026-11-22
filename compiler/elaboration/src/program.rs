@@ -79,6 +79,7 @@ mod nominal_encoding;
 mod normal;
 mod open_functions;
 mod operators;
+mod packed_bit;
 mod pattern_checking;
 mod returned_environment;
 mod runtime_defaults;
@@ -109,6 +110,13 @@ use nir::{DeclarationId, Parameter, Primitive as P, Sort, Term};
 use rustc_span::Span;
 use std::collections::{BTreeMap, BTreeSet};
 use type_data::CompletedType;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Warning {
+    pub code: Option<&'static str>,
+    pub source: n::SourceRange,
+    pub message: String,
+}
 
 #[derive(Debug)]
 pub struct DiagnosticNote {
@@ -245,6 +253,23 @@ fn is_never(ty: &Term) -> bool {
 
 pub fn elaborate(package: &hir::Package<'_>) -> Result<n::Package, Error> {
     elaborate_in_package(package, 0)
+}
+
+pub fn elaborate_with_warnings(
+    package: &hir::Package<'_>,
+) -> Result<(n::Package, Vec<Warning>), Error> {
+    let mut invocation_steps = default_elaboration_steps(1);
+    let identities = BTreeMap::from([(0, 0)]);
+    elaborate_with_attributes_incremental(
+        package,
+        &identities,
+        &Protocols::default(),
+        None,
+        false,
+        &mut invocation_steps,
+        &IncrementalOptions::default(),
+    )
+    .map(|(program, _, _, warnings)| (program, warnings))
 }
 
 /// The driver supplies a stable build/package identity. HIR owner IDs remain
@@ -417,6 +442,26 @@ pub fn elaborate_packages_incremental_with_cache(
     )
 }
 
+pub fn elaborate_packages_incremental_with_cache_and_warnings(
+    package: &hir::Package<'_>,
+    package_identities: &BTreeMap<u32, u64>,
+    protocols: &Protocols,
+    target: Option<nir::target::TargetData>,
+    incremental: &IncrementalOptions,
+) -> Result<(n::Package, Option<CachedUpstreamBodies>, Vec<Warning>), Error> {
+    let mut invocation_steps = default_elaboration_steps(package_identities.len());
+    elaborate_with_attributes_incremental(
+        package,
+        package_identities,
+        protocols,
+        target,
+        false,
+        &mut invocation_steps,
+        incremental,
+    )
+    .map(|(program, _, cache, warnings)| (program, cache, warnings))
+}
+
 /// Share required comptime invocation/preparation fuel across elaborations.
 /// This is not a budget for PTC, template expansion or every semantic pass.
 /// Errors preserve consumed work; no fresh invocation allowance is created.
@@ -473,7 +518,7 @@ pub fn elaborate_packages_with_invocation_budget_incremental_with_cache(
         invocation_steps,
         incremental,
     )
-    .map(|(program, _, cache)| (program, cache))
+    .map(|(program, _, cache, _)| (program, cache))
 }
 
 enum ElaborationMode<'r> {
@@ -502,7 +547,7 @@ fn elaborate_with_attributes(
         invocation_steps,
         &IncrementalOptions::default(),
     )
-    .map(|(program, attrs, _)| (program, attrs))
+    .map(|(program, attrs, _, _)| (program, attrs))
 }
 
 fn elaborate_with_attributes_incremental(
@@ -518,6 +563,7 @@ fn elaborate_with_attributes_incremental(
         n::Package,
         Vec<attributes::EvaluatedAttribute>,
         Option<CachedUpstreamBodies>,
+        Vec<Warning>,
     ),
     Error,
 > {
@@ -550,6 +596,7 @@ fn elaborate_in_mode(
         n::Package,
         Vec<attributes::EvaluatedAttribute>,
         Option<CachedUpstreamBodies>,
+        Vec<Warning>,
     ),
     Error,
 > {
@@ -724,7 +771,12 @@ fn elaborate_in_mode(
         self_containers: BTreeMap::new(),
         interfaces_ready: false,
         member_phases: BTreeMap::new(),
-        packed_structs: BTreeSet::new(),
+        packed_structs: BTreeMap::new(),
+        packed_struct_sources: BTreeMap::new(),
+        bit_packed_validation_ready: false,
+        validated_bit_packed_instances: std::collections::HashSet::new(),
+        warned_bit_packed_instances: std::collections::HashSet::new(),
+        warnings: Vec::new(),
         volatile_storage: n::VolatileStorage::default(),
         match_plans: n::MatchPlans::default(),
         active_body_declaration: None,
@@ -965,6 +1017,7 @@ fn elaborate_candidate<'a, 'h>(
         n::Package,
         Vec<attributes::EvaluatedAttribute>,
         Option<CachedUpstreamBodies>,
+        Vec<Warning>,
     ),
     Error,
 > {
@@ -1296,6 +1349,7 @@ fn elaborate_candidate<'a, 'h>(
                 },
                 Vec::new(),
                 None,
+                Vec::new(),
             ));
         }
     };
@@ -1316,6 +1370,7 @@ fn elaborate_candidate<'a, 'h>(
             },
             prepared_attributes,
             None,
+            Vec::new(),
         ));
     }
     checker.checked_implementations = checker.check_interfaces()?;
@@ -1573,6 +1628,7 @@ fn elaborate_candidate<'a, 'h>(
     checker.signature_owner = None;
     checker.context = checker.nominal_context();
     checker.check_struct_cycles()?;
+    checker.validate_bit_packed_structs()?;
     // Resolve formation only after the complete concrete implementation world
     // exists. Contract operands may use binder capabilities, not their own
     // unproved requires predicates.
@@ -1607,6 +1663,7 @@ fn elaborate_candidate<'a, 'h>(
             None => checker.nominal_context(),
         };
         checker.check_formation_requirements(target, &arguments, span)?;
+        checker.validate_bit_packed_type_application(target, &arguments.terms, span)?;
     }
     // Early required invocations can see provisional layouts. Only now have
     // source contracts, including the formation of their operands, settled.
@@ -2097,7 +2154,8 @@ fn elaborate_candidate<'a, 'h>(
         &output,
         &mut checker.required_steps,
     )?;
-    Ok((output, attributes, recorded_bodies))
+    let warnings = std::mem::take(&mut checker.warnings);
+    Ok((output, attributes, recorded_bodies, warnings))
 }
 
 impl Checker<'_, '_> {
@@ -2783,7 +2841,12 @@ struct Checker<'a, 'h> {
     self_containers: BTreeMap<OwnerId, OwnerId>,
     interfaces_ready: bool,
     member_phases: BTreeMap<OwnerId, n::TraitPhase>,
-    packed_structs: BTreeSet<OwnerId>,
+    packed_structs: BTreeMap<OwnerId, n::PackedMode>,
+    packed_struct_sources: BTreeMap<OwnerId, n::SourceRange>,
+    bit_packed_validation_ready: bool,
+    validated_bit_packed_instances: std::collections::HashSet<(DeclarationId, Vec<Term>)>,
+    warned_bit_packed_instances: std::collections::HashSet<(DeclarationId, Vec<Term>)>,
+    warnings: Vec<Warning>,
     volatile_storage: n::VolatileStorage,
     match_plans: n::MatchPlans,
     active_body_declaration: Option<DeclarationId>,
@@ -5337,7 +5400,8 @@ impl Checker<'_, '_> {
             pending.push((scope, !self.checking_contract, owner, arguments, span));
             Ok(())
         } else {
-            self.check_formation_requirements(owner, &arguments, span)
+            self.check_formation_requirements(owner, &arguments, span)?;
+            self.validate_bit_packed_type_application(owner, &arguments.terms, span)
         }
     }
 
@@ -7913,6 +7977,7 @@ impl Checker<'_, '_> {
     fn type_observation_operand(&mut self, arg: &Expr<'_>) -> Result<n::Expr, Error> {
         if self.runtime_value_context() {
             let ty = self.type_expr(arg)?;
+            self.validate_bit_packed_use(&ty, arg.span)?;
             return Ok(n::Expr {
                 source: source(arg.span),
                 ty: p(P::Type),
@@ -7925,6 +7990,7 @@ impl Checker<'_, '_> {
             && let Some(ty) = self.checked_normal_input_in(&operand, &BTreeMap::new(), arg.span)?
             && ty.sort() == Sort::Type
         {
+            self.validate_bit_packed_use(&ty, arg.span)?;
             return Ok(n::Expr {
                 source: operand.source,
                 ty: p(P::Type),

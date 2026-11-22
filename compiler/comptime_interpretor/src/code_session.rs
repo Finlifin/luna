@@ -1,8 +1,10 @@
 //! Immutable-world code reuse across independently budgeted invocations.
 use super::*;
 use std::sync::OnceLock;
+
 #[cfg(test)]
 mod phase_tests;
+
 #[cfg(test)]
 mod scoped_tests;
 
@@ -23,12 +25,14 @@ pub struct CodeSession {
     // Specialized bodies only; callable identity belongs to each VM.
     instances: function_instances::Cache,
 }
+
 /// Scoped to the exact immutable world retained by CodeSession.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum CodeOrigin {
     Declaration(DeclarationId),
     GraphInstance(usize),
 }
+
 impl fmt::Display for CodeOrigin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -42,6 +46,7 @@ enum CodeWorld {
     Source(Arc<Package>),
     Graph(Arc<iir::Package>),
 }
+
 impl CodeSession {
     pub fn new(package: Arc<Package>) -> Self {
         Self {
@@ -143,6 +148,7 @@ struct Scope<'session, 'vm, 'program> {
     session: &'session mut CodeSession,
     vm: &'vm mut Interpreter<'program>,
 }
+
 impl Drop for Scope<'_, '_, '_> {
     fn drop(&mut self) {
         // A host callback may replace the VM; never publish another world's code.
@@ -786,6 +792,7 @@ mod tests {
             )
         );
     }
+
     #[test]
     fn layout_catalog_publication_exhaustion_leaves_session_unpublished() {
         let source = Arc::new(Package {
@@ -800,7 +807,7 @@ mod tests {
                 fields: vec![],
                 requirements: vec![],
                 capabilities: vec![],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             }],
             ..Default::default()
         });

@@ -1546,6 +1546,7 @@ impl Checker<'_, '_> {
                         None => self.nominal_context(),
                     };
                     self.check_formation_requirements(owner, &arguments, span)?;
+                    self.validate_bit_packed_type_application(owner, &arguments.terms, span)?;
                 }
                 Ok(())
             })();

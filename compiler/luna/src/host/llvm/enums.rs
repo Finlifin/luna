@@ -1193,7 +1193,7 @@ mod tests {
                     ("head".into(), Term::Primitive(P::U64)),
                     ("tail".into(), Term::Primitive(P::U8)),
                 ],
-                packed: true,
+                packed: nir::program::PackedMode::Byte,
             }),
         };
         let (mixed_packed_ty, mixed_packed_inst) = enum_def(

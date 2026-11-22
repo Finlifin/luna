@@ -50,7 +50,7 @@ fn nominal_publication_charges_metadata_and_recovers_after_failure() {
                 capabilities: vec![],
                 requirements: vec![],
                 fields: vec![],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             });
         }
         let ty = Term::Nominal {
@@ -116,7 +116,7 @@ fn nominal_formation_uses_instantiated_parameter_domains() {
                 capabilities: vec![],
                 requirements,
                 fields: vec![],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             }),
             1 => package.enums.push(n::Enum {
                 declaration: id(10),
@@ -1023,7 +1023,7 @@ fn closure_context_inputs_retain_capture_layouts() {
         capabilities: vec![],
         requirements: vec![],
         fields: vec![("value".into(), Term::Primitive(Primitive::Bool))],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     package.structs.push(n::Struct {
         declaration: id(51),
@@ -1033,7 +1033,7 @@ fn closure_context_inputs_retain_capture_layouts() {
         capabilities: vec![],
         requirements: vec![],
         fields: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     let context = Term::ClosureContextValue(vec![nominal.clone()]);
     let carrier = Term::Nominal {

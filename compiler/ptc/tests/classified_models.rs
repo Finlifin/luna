@@ -8,18 +8,21 @@ fn id(local: u32) -> DeclarationId {
         local,
     }
 }
+
 fn input(local: u32) -> Term {
     Term::Rigid {
         declaration: id(local),
         sort: Sort::Type,
     }
 }
+
 fn unsigned(local: u32) -> F {
     F::Kind(KindQuery {
         ty: input(local),
         kind: TypeKind::UnsignedInteger,
     })
 }
+
 fn constraint() -> F {
     F::And(vec![
         unsigned(0),
@@ -187,7 +190,7 @@ fn nominal_model_search_requires_formation_evidence_for_unmentioned_heads() {
         declaration: id(local),
         name: format!("R{local}"),
         fields: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
         type_parameters: vec![],
         parameter_types: vec![],
         requirements: vec![],

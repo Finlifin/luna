@@ -22,7 +22,7 @@ fn nominal_contract_substitution_charges_payloads_before_copying() {
             fields: vec![],
             capabilities: vec![],
             requirements: vec![TypePredicate::Equal(wide.clone(), wide)],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         }],
         ..Default::default()
     };
@@ -156,7 +156,7 @@ fn nested_value_domains_use_the_telescope_that_declared_the_index() {
         fields: vec![],
         requirements: vec![TypePredicate::Equal(formal.clone(), formal.clone())],
         capabilities: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     };
     let operation = nir::effects::Declaration {
         declaration: id(13),
@@ -258,7 +258,7 @@ fn callable_formation_keeps_inner_binders_out_of_closed_proof_queries() {
             fields: vec![],
             requirements: vec![TypePredicate::Equal(subject, ty(Primitive::Bool))],
             capabilities: vec![],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         }],
         ..Default::default()
     };

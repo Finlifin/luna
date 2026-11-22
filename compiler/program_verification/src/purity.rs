@@ -4953,7 +4953,7 @@ mod resource_world_tests {
                 .collect(),
             requirements: vec![],
             capabilities: vec![],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         });
         let mut analysis = Analysis::new(&wide, true);
         analysis.fuel = base_cost + 64;
@@ -5262,7 +5262,7 @@ mod pointer_projection_p4_tests {
             requirements: vec![],
             capabilities: vec![],
             fields: vec![("first".into(), i32_ty()), ("second".into(), i32_ty())],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         });
         package
     }

@@ -7,12 +7,14 @@ use nir::{DeclarationId, Primitive, Sort, Term};
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 1, local }
 }
+
 fn signature(result: Term) -> Term {
     Term::Function {
         parameters: vec![],
         result: Box::new(result),
     }
 }
+
 fn package() -> Package {
     let callable = signature(Term::Primitive(Primitive::Bool));
     Package {
@@ -515,7 +517,7 @@ fn body_free_runtime_identity_checks_unused_value_parameter_domains() {
         fields: vec![],
         requirements: vec![],
         capabilities: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     package.runtime_function_identities[0].signature = signature(Term::Primitive(Primitive::Bool));
     for value in [Term::Char('x'), Term::Bool(true), Term::Bool(false)] {
@@ -563,7 +565,7 @@ fn runtime_identity_admission_checks_structured_value_layouts() {
         fields: vec![("enabled".into(), Term::Primitive(Primitive::Bool))],
         requirements: vec![],
         capabilities: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     package
         .function_parameters
@@ -759,7 +761,7 @@ fn host_runtime_identity_checks_dependent_domains_inside_aggregates() {
         fields: vec![("enabled".into(), Term::Primitive(Primitive::Bool))],
         requirements: vec![],
         capabilities: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     let mut vm = Interpreter::for_comptime(&package, Budget::default()).unwrap();
     for (domain, value, valid) in [

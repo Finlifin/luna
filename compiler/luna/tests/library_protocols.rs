@@ -1,16 +1,21 @@
 //! Compile repository library declarations, rather than fixture copies.
 #[path = "support/frozen_lists.rs"]
 mod frozen_lists;
+
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use comptime_interpretor::Value;
 use elaboration::arithmetic::Operator;
 use support::compile_with_source_bindings;
 
 const PRIMITIVES: &str = include_str!("../../../library/builtin/primitives.fl");
+
 const OPERATORS: &str = include!("support/operators_source.rs");
+
 const TUPLE: &str = include!("support/tuple_source.rs");
+
 const RESOURCES: &str = include!("support/resources_source.rs");
 
 #[test]
@@ -745,7 +750,7 @@ fn tuple_implementation_infers_one_complete_type_list_input() {
             requirements: vec![],
             capabilities: vec![],
             fields: vec![],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         }],
         vec![],
         vec![],

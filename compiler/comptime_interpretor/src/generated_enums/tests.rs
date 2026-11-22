@@ -4,15 +4,18 @@ use nir::program::{Enum, Variant, VariantShape};
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 89, local }
 }
+
 fn ty(local: u32) -> Term {
     Term::Nominal {
         declaration: id(local),
         arguments: vec![],
     }
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
+
 fn enumeration(local: u32) -> Enum {
     Enum {
         declaration: id(local),
@@ -39,6 +42,7 @@ fn enumeration(local: u32) -> Enum {
         ],
     }
 }
+
 fn package() -> Package {
     Package {
         enums: vec![enumeration(10)],
@@ -214,7 +218,7 @@ fn enum_formation_phase_and_cross_kind_collisions_are_checked() {
         requirements: vec![],
         capabilities: vec![],
         fields: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     };
     package.structs.push(structure.clone());
     let collision = [enumeration(30)];

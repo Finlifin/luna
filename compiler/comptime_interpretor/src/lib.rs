@@ -6139,7 +6139,7 @@ mod normal_input_data_tests {
                 parameter_types: vec![],
                 requirements: vec![],
                 capabilities: vec![],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             }],
             ..Default::default()
         };
@@ -6922,7 +6922,7 @@ mod nominal_environment_tests {
                 requirements: vec![],
                 capabilities: vec![],
                 fields: vec![],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             }],
             ..Default::default()
         };

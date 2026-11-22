@@ -4,15 +4,18 @@ use nir::program::{Function, FunctionPhase, Struct};
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 81, local }
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
+
 fn ty(local: u32) -> Term {
     Term::Nominal {
         declaration: id(local),
         arguments: vec![],
     }
 }
+
 fn structure(local: u32, fields: Vec<(&str, Term)>) -> Struct {
     Struct {
         declaration: id(local),
@@ -25,9 +28,10 @@ fn structure(local: u32, fields: Vec<(&str, Term)>) -> Struct {
             .into_iter()
             .map(|(name, ty)| (name.into(), ty))
             .collect(),
-        packed: false,
+        packed: nir::program::PackedMode::None,
     }
 }
+
 fn package() -> Package {
     let binding = LocalId { owner: 1, index: 0 };
     Package {

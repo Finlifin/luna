@@ -395,6 +395,65 @@ impl Layout {
         &self.variants
     }
 
+    /// Reports whether every bit pattern in `0..2^width` matches some variant.
+    pub fn is_exhaustive(&self) -> bool {
+        if self.width == 0 {
+            return !self.variants.is_empty();
+        }
+        if self
+            .variants
+            .iter()
+            .any(|variant| variant.fixed_mask().words().iter().all(|&word| word == 0))
+        {
+            return true;
+        }
+        if self.width > 128 {
+            let mut budget = Budget::default();
+            return matches!(self.uncovered(&mut budget), Ok(None));
+        }
+        let full_mask = if self.width == 128 {
+            u128::MAX
+        } else {
+            (1u128 << self.width) - 1
+        };
+        let words_u128 = |words: &[u32]| -> u128 {
+            let mut acc = 0u128;
+            for (k, word) in words.iter().take(4).enumerate() {
+                acc |= u128::from(*word) << (k * 32);
+            }
+            acc & full_mask
+        };
+        let mut covered = 0u128;
+        let mut exact_2_128 = false;
+        for variant in &self.variants {
+            let mask = words_u128(variant.fixed_mask().words());
+            let fixed_bits = mask.count_ones() as usize;
+            let free_bits = self.width.saturating_sub(fixed_bits);
+            if free_bits >= 128 {
+                return true;
+            }
+            if exact_2_128 {
+                return false;
+            }
+            let add = 1u128 << free_bits;
+            if let Some(next) = covered.checked_add(add) {
+                covered = next;
+            } else {
+                let gap = u128::MAX - covered;
+                if add - 1 == gap && self.width == 128 {
+                    exact_2_128 = true;
+                } else {
+                    return false;
+                }
+            }
+        }
+        if self.width == 128 {
+            exact_2_128
+        } else {
+            !exact_2_128 && covered == (1u128 << self.width)
+        }
+    }
+
     /// Largest contiguous unused `(start, count)` interval in `0..2^width`
     /// strictly outside every variant's value range, for scalar machine widths.
     pub fn contiguous_niche(&self) -> Option<(u64, u64)> {

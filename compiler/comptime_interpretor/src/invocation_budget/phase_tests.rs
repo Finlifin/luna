@@ -441,7 +441,7 @@ fn source_definition_admission_demands_proof_and_recovers_without_publication() 
         requirements: vec![obligation.clone()],
         capabilities: vec![],
         fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     }]
     .into();
     for (outcome, expected) in [

@@ -672,10 +672,12 @@ impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
             return Ok(Some(match concrete {
                 ConcreteNominal::Struct(def) => {
                     let fields = def.fields.iter().map(|(_, t)| t.clone()).collect();
-                    if def.packed {
-                        nir::NominalLayout::PackedStruct(fields)
-                    } else {
-                        nir::NominalLayout::Struct(fields)
+                    match def.packed {
+                        nir::program::PackedMode::None => nir::NominalLayout::Struct(fields),
+                        nir::program::PackedMode::Byte => nir::NominalLayout::PackedStruct(fields),
+                        nir::program::PackedMode::Bit => {
+                            nir::NominalLayout::BitPackedStruct(fields)
+                        }
                     }
                 }
                 ConcreteNominal::Newtype(def) => {
@@ -690,6 +692,7 @@ impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
                         nir::NominalLayout::EnumFixedBits {
                             width: bits,
                             niche: encoding.layout.contiguous_niche(),
+                            exhaustive: encoding.layout.is_exhaustive(),
                         }
                     } else if def.variants.iter().all(|v| v.fields.is_empty()) {
                         nir::NominalLayout::EnumUnit(def.variants.len())
@@ -710,10 +713,10 @@ impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
                 fuel,
             )
             .map_err(admission_err)?;
-            return Ok(Some(if def.packed {
-                nir::NominalLayout::PackedStruct(fields)
-            } else {
-                nir::NominalLayout::Struct(fields)
+            return Ok(Some(match def.packed {
+                nir::program::PackedMode::None => nir::NominalLayout::Struct(fields),
+                nir::program::PackedMode::Byte => nir::NominalLayout::PackedStruct(fields),
+                nir::program::PackedMode::Bit => nir::NominalLayout::BitPackedStruct(fields),
             }));
         }
         if let Some(def) = self.0.newtypes.get(declaration) {
@@ -735,6 +738,7 @@ impl nir::LayoutWorld for InterpreterLayoutWorld<'_, '_> {
                 return Ok(Some(nir::NominalLayout::EnumFixedBits {
                     width: bits,
                     niche: encoding.layout.contiguous_niche(),
+                    exhaustive: encoding.layout.is_exhaustive(),
                 }));
             }
             if def.variants.iter().all(|v| v.fields.is_empty()) {

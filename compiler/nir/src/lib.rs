@@ -93,7 +93,9 @@ pub mod intrinsics;
 pub mod layout;
 
 pub use layout::{
-    LayoutError, LayoutWorld, NominalLayout, TypeLayout, TypeLayoutQuery, compute_layout,
+    BitPackedError, BitPackedFieldLayout, BitPackedStructLayout, LayoutError, LayoutWorld,
+    NominalLayout, TypeLayout, TypeLayoutQuery, bit_packed_field_info, bit_packed_struct_layout,
+    compute_layout,
 };
 
 pub mod type_budget;

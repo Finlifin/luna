@@ -18,7 +18,7 @@ fn structure(fields: Vec<Term>) -> Struct {
             .enumerate()
             .map(|(i, ty)| (format!("slot{i}"), ty))
             .collect(),
-        packed: false,
+        packed: nir::program::PackedMode::None,
     }
 }
 

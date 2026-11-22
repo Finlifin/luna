@@ -26,7 +26,7 @@ fn wide_nominal(kind: usize) -> (Package, Term, Value) {
                 fields: vec![("payload".into(), representation)],
                 capabilities: vec![],
                 requirements: vec![],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             });
             Value::Record {
                 declaration: id(1),

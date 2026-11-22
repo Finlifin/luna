@@ -1710,7 +1710,7 @@ mod tuple_layout_tests {
                     fields: (0..64)
                         .map(|i| (format!("slot{i}"), parameter.clone()))
                         .collect(),
-                    packed: false,
+                    packed: nir::program::PackedMode::None,
                 });
             }
             let failure = layout(&package, &ty, &mut 2000)
@@ -1866,7 +1866,7 @@ mod verified_drop_cache_tests {
         let mut package = Package {
             structs: vec![Struct {
                 capabilities: vec![],
-                packed: false,
+                packed: nir::program::PackedMode::None,
                 declaration: struct_id,
                 name: "Owned".into(),
                 type_parameters: vec![],
@@ -2063,7 +2063,7 @@ mod verified_drop_cache_tests {
         let package = Package {
             structs: vec![Struct {
                 capabilities: vec![],
-                packed: false,
+                packed: nir::program::PackedMode::None,
                 declaration: writer_id,
                 name: "Writer".into(),
                 type_parameters: vec![],

@@ -1,17 +1,21 @@
 use super::*;
 use nir::program::{Enum, Struct, Variant, VariantShape};
+
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 93, local }
 }
+
 fn ty(local: u32, argument: Term) -> Term {
     Term::Nominal {
         declaration: id(local),
         arguments: vec![argument],
     }
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
+
 fn newtype(local: u32, representation: Term) -> iir::NominalDefinition {
     iir::NominalDefinition::Newtype(nir::newtypes::Newtype {
         declaration: id(local),
@@ -24,6 +28,7 @@ fn newtype(local: u32, representation: Term) -> iir::NominalDefinition {
         representation,
     })
 }
+
 fn graph(padding: u32) -> iir::Package {
     let mut nominals: Vec<_> = (100..100 + padding)
         .map(|local| iir::NominalInstance {
@@ -42,7 +47,7 @@ fn graph(padding: u32) -> iir::Package {
                 requirements: vec![],
                 capabilities: vec![],
                 fields: vec![("value".into(), scalar.clone())],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             }),
         });
         nominals.push(iir::NominalInstance {
@@ -75,6 +80,7 @@ fn graph(padding: u32) -> iir::Package {
         ..Default::default()
     }
 }
+
 fn frozen(local: u32, payload: Term, scalar: Term) -> Term {
     Term::NominalValue {
         ty: Box::new(ty(local, scalar)),
@@ -82,6 +88,7 @@ fn frozen(local: u32, payload: Term, scalar: Term) -> Term {
         fields: vec![payload],
     }
 }
+
 fn value(local: u32, payload: Value, scalar: Term) -> Value {
     match local {
         1 => Value::Record {
@@ -286,6 +293,7 @@ fn fresh(local: u32) -> Term {
         arguments: vec![],
     }
 }
+
 #[test]
 fn generated_graph_definitions_are_transactional_and_reject_artifact_collisions() {
     let mut graph = graph(0);
@@ -329,7 +337,7 @@ fn generated_graph_definitions_are_transactional_and_reject_artifact_collisions(
         requirements: vec![],
         capabilities: vec![],
         fields: vec![("base".into(), ty(1, boolean()))],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     }]
     .into();
     assert!(

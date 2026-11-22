@@ -1869,8 +1869,8 @@ fn compile_packages_core(
         BTreeSet::new()
     };
 
-    let (mut nir, recorded_bodies) =
-        elaboration::program::elaborate_packages_incremental_with_cache(
+    let (mut nir, recorded_bodies, warnings) =
+        elaboration::program::elaborate_packages_incremental_with_cache_and_warnings(
             package,
             &identities,
             &protocols,
@@ -1883,6 +1883,7 @@ fn compile_packages_core(
             },
         )
         .map_err(|e| format!("multi-package elaboration failed: {e}"))?;
+    crate::frontend::emit_elaboration_warnings(&instance.diag_ctx, &warnings);
     if reordered_packages {
         reorder_nir_by_package_rank(&mut nir, caller_packages);
     }

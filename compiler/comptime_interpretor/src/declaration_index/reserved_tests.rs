@@ -6,15 +6,18 @@ use nir::program::{
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 97, local }
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
+
 fn signature() -> Term {
     Term::Function {
         parameters: vec![],
         result: Box::new(boolean()),
     }
 }
+
 fn interface(base: u32) -> Trait {
     Trait {
         declaration: id(base),
@@ -54,6 +57,7 @@ fn interface(base: u32) -> Trait {
         }],
     }
 }
+
 fn source() -> Arc<Package> {
     Arc::new(Package {
         traits: (0..64).map(|index| interface(100 + index * 10)).collect(),
@@ -142,6 +146,7 @@ fn source_declaration_views_preserve_provenance_without_dumping_code() {
     assert!(functions.declaration(&absent).is_none());
     assert!(functions.definition(&absent).is_none());
 }
+
 fn structure(identity: DeclarationId) -> nir::program::Struct {
     nir::program::Struct {
         declaration: identity,
@@ -151,7 +156,7 @@ fn structure(identity: DeclarationId) -> nir::program::Struct {
         capabilities: vec![],
         requirements: vec![],
         fields: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     }
 }
 

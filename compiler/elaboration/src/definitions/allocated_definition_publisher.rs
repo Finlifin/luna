@@ -40,6 +40,7 @@ pub struct AllocatedDefinitionPublisher<'a> {
     diagnostic: RefCell<Option<String>>,
     imports: RefCell<VecDeque<(comptime_interpretor::NominalBatch, n::SourceRange)>>,
 }
+
 impl<'a> AllocatedDefinitionPublisher<'a> {
     /// The frontier covers all source declarations, including those absent from
     /// the invocation snapshot. Rejected or abandoned reserved IDs are not reused.
@@ -58,6 +59,7 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
             imports: Default::default(),
         }
     }
+
     pub fn new_with_type_solver(
         baseline: &'a n::Package,
         package: u64,
@@ -74,6 +76,7 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
             imports: Default::default(),
         }
     }
+
     /// A VM that only reflects on a received value needs no second admission
     /// world. Retain the descriptor handles until it actually calls a builder.
     pub(crate) fn queue_imports(
@@ -110,15 +113,18 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
     pub fn remaining_structural_fuel(&self) -> usize {
         self.fuel.get()
     }
+
     pub fn finish(self) -> (PublishedDefinitions, u32) {
         (self.checked.into_definitions(), self.identities.next())
     }
+
     pub fn last_diagnostic(&self) -> Option<String> {
         self.diagnostic
             .borrow()
             .clone()
             .or_else(|| self.checked.last_diagnostic())
     }
+
     pub fn prepare_struct<'s>(
         &'s self,
         request: &StructBuildRequest,
@@ -129,6 +135,7 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
         self.checked
             .prepare_struct_request(identity, request, steps)
     }
+
     pub fn prepare_newtype<'s>(
         &'s self,
         request: &NewtypeBuildRequest,
@@ -139,6 +146,7 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
         self.checked
             .prepare_newtype_request(identity, request, steps)
     }
+
     pub fn prepare_enum<'s>(
         &'s self,
         request: &EnumBuildRequest,
@@ -148,6 +156,7 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
         let identity = self.reserve(request.source, |fuel| request.charge_assembly(fuel))?;
         self.checked.prepare_enum_request(identity, request, steps)
     }
+
     fn reserve(
         &self,
         source: n::SourceRange,
@@ -181,6 +190,7 @@ impl<'a> AllocatedDefinitionPublisher<'a> {
         })
     }
 }
+
 impl StructBuildService for AllocatedDefinitionPublisher<'_> {
     fn prepare<'s>(
         &'s self,
@@ -189,6 +199,7 @@ impl StructBuildService for AllocatedDefinitionPublisher<'_> {
     ) -> Result<PreparedStructBuild<'s>, Error> {
         self.prepare_struct(request, steps)
     }
+
     fn prepare_newtype<'s>(
         &'s self,
         request: &NewtypeBuildRequest,
@@ -196,6 +207,7 @@ impl StructBuildService for AllocatedDefinitionPublisher<'_> {
     ) -> Result<PreparedNewtypeBuild<'s>, Error> {
         AllocatedDefinitionPublisher::prepare_newtype(self, request, steps)
     }
+
     fn prepare_enum<'s>(
         &'s self,
         request: &EnumBuildRequest,
@@ -203,10 +215,12 @@ impl StructBuildService for AllocatedDefinitionPublisher<'_> {
     ) -> Result<PreparedEnumBuild<'s>, Error> {
         AllocatedDefinitionPublisher::prepare_enum(self, request, steps)
     }
+
     fn last_diagnostic(&self) -> Option<String> {
         self.last_diagnostic()
     }
 }
+
 impl std::fmt::Display for AllocatedDefinitionPublisher<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -240,7 +254,7 @@ mod tests {
         let batch = NominalBatch::Structs(Arc::from([n::Struct {
             declaration: original,
             name: "Imported".into(),
-            packed: false,
+            packed: nir::program::PackedMode::None,
             fields: vec![("enabled".into(), Term::Primitive(Primitive::Bool))],
             type_parameters: vec![],
             parameter_types: vec![],

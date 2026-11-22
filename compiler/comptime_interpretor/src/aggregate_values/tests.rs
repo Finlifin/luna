@@ -1,10 +1,15 @@
 use super::*;
+
 const SOURCE: SourceRange = SourceRange { start: 1, end: 2 };
+
 const INPUT: LocalId = LocalId { owner: 1, index: 0 };
+
 const TRACE: LocalId = LocalId { owner: 1, index: 1 };
+
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 1, local }
 }
+
 fn expr(ty: Term, kind: K) -> Expr {
     Expr {
         source: SOURCE,
@@ -12,6 +17,7 @@ fn expr(ty: Term, kind: K) -> Expr {
         kind,
     }
 }
+
 fn package() -> Package {
     let parameter = Term::Rigid {
         declaration: id(3),
@@ -26,7 +32,7 @@ fn package() -> Package {
             declaration: id(1),
             name: "Holder".into(),
             fields: vec![("item".into(), parameter.clone())],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         }],
         enums: vec![nir::program::Enum {
             is_intrinsic: false,

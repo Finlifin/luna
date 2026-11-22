@@ -375,10 +375,10 @@ impl nir::LayoutWorld for HostLayoutWorld<'_> {
         Ok(Some(match &instance.definition {
             iir::NominalDefinition::Struct(def) => {
                 let fields = def.fields.iter().map(|(_, t)| t.clone()).collect();
-                if def.packed {
-                    nir::NominalLayout::PackedStruct(fields)
-                } else {
-                    nir::NominalLayout::Struct(fields)
+                match def.packed {
+                    nir::program::PackedMode::None => nir::NominalLayout::Struct(fields),
+                    nir::program::PackedMode::Byte => nir::NominalLayout::PackedStruct(fields),
+                    nir::program::PackedMode::Bit => nir::NominalLayout::BitPackedStruct(fields),
                 }
             }
             iir::NominalDefinition::Newtype(def) => {
@@ -393,6 +393,7 @@ impl nir::LayoutWorld for HostLayoutWorld<'_> {
                     nir::NominalLayout::EnumFixedBits {
                         width: bits,
                         niche: encoding.layout.contiguous_niche(),
+                        exhaustive: encoding.layout.is_exhaustive(),
                     }
                 } else if def.variants.iter().all(|v| v.fields.is_empty()) {
                     nir::NominalLayout::EnumUnit(def.variants.len())
@@ -643,11 +644,13 @@ fn repr_at(
                     .map(|(_, ty)| repr_at(graph, ty, depth + 1, checked, remaining))
                     .collect::<Result<Vec<_>, _>>()?,
             );
-            Ok(if definition.packed {
-                Ty::PackedRecord(fields)
-            } else {
-                Ty::Record(fields)
-            })
+            match definition.packed {
+                nir::program::PackedMode::None => Ok(Ty::Record(fields)),
+                nir::program::PackedMode::Byte => Ok(Ty::PackedRecord(fields)),
+                nir::program::PackedMode::Bit => Err(
+                    "host LLVM lowering for attrs.packed.bit structs is not yet implemented".into(),
+                ),
+            }
         }
         Term::Closure {
             environment,
@@ -951,7 +954,8 @@ impl Emitter<'_> {
         matches!(ty, Term::Nominal { declaration, .. } if self.graph.nominals.iter().any(|instance| {
             matches!(
                 &instance.definition,
-                iir::NominalDefinition::Struct(def) if def.declaration == *declaration && def.packed
+                iir::NominalDefinition::Struct(def)
+                    if def.declaration == *declaration && def.packed.is_packed()
             )
         }))
     }
@@ -967,7 +971,7 @@ impl Emitter<'_> {
                     matches!(
                         &instance.definition,
                         iir::NominalDefinition::Struct(def)
-                            if def.declaration == *declaration && def.packed
+                            if def.declaration == *declaration && def.packed.is_packed()
                     )
                 });
                 packed || self.is_packed_pointer_field(pointer)
@@ -3847,7 +3851,7 @@ mod recursive_layout_tests {
                     requirements: vec![],
                     type_parameters: vec![],
                     fields: vec![("next".into(), field)],
-                    packed: false,
+                    packed: nir::program::PackedMode::None,
                 }),
             }],
             ..Default::default()
@@ -3893,7 +3897,7 @@ mod layout_budget_tests {
                     requirements: vec![],
                     type_parameters: vec![],
                     fields: vec![("left".into(), ty.clone()), ("right".into(), ty)],
-                    packed: false,
+                    packed: nir::program::PackedMode::None,
                 }),
             });
             ty = next;

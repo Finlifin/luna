@@ -17,6 +17,7 @@ fn list_package() -> Package {
         ..Default::default()
     }
 }
+
 fn list_type(element: Term) -> Term {
     Term::NormalForm {
         head: id(1),
@@ -125,7 +126,7 @@ fn nominal_decoding_can_spend_more_than_the_old_private_query_ceiling() {
                 .collect(),
             capabilities: vec![],
             requirements: vec![],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         }],
         ..Default::default()
     };

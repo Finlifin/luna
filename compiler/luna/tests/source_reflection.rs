@@ -2,9 +2,11 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 #[path = "support/sysroot_execution.rs"]
 #[allow(dead_code)]
 mod sysroot;
+
 use comptime_interpretor::Value;
 
 fn compile(source: &str) -> Result<nir::program::Package, String> {
@@ -430,7 +432,7 @@ fn source_struct_build_rejection_does_not_commit_and_can_retry_in_the_same_vm() 
                 .iter()
                 .map(|field| (field.name.clone(), field.ty.clone()))
                 .collect(),
-            packed: false,
+            packed: nir::program::PackedMode::None,
         };
         let mode = &mode;
         let commits = &commits;
@@ -518,7 +520,7 @@ fn source_struct_build_shares_budget_and_does_not_request_after_early_return() {
                 .iter()
                 .map(|field| (field.name.clone(), field.ty.clone()))
                 .collect(),
-            packed: false,
+            packed: nir::program::PackedMode::None,
         };
         let commits = &commits;
         Ok(PreparedStructBuild {

@@ -5,9 +5,11 @@ use std::sync::Arc;
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 31, local }
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
+
 fn expr() -> n::Expr {
     n::Expr {
         source: n::SourceRange { start: 0, end: 1 },
@@ -15,6 +17,7 @@ fn expr() -> n::Expr {
         kind: n::ExprKind::Literal(n::Literal::Bool(true)),
     }
 }
+
 fn text() -> n::Expr {
     n::Expr {
         ty: Term::Primitive(Primitive::Str),
@@ -22,6 +25,7 @@ fn text() -> n::Expr {
         ..expr()
     }
 }
+
 fn function() -> n::Function {
     n::Function {
         interface: crate::program::FunctionDeclaration {
@@ -53,6 +57,7 @@ fn function() -> n::Function {
         runtime_deliveries: Default::default(),
     }
 }
+
 fn interface() -> n::Trait {
     n::Trait {
         comptime_only: false,
@@ -68,6 +73,7 @@ fn interface() -> n::Trait {
         methods: vec![],
     }
 }
+
 fn method() -> n::MethodContract {
     n::MethodContract {
         source: n::SourceRange { start: 0, end: 0 },
@@ -89,6 +95,7 @@ fn method() -> n::MethodContract {
         default: None,
     }
 }
+
 fn implementation() -> n::Implementation {
     n::Implementation {
         phases: Default::default(),
@@ -105,6 +112,7 @@ fn implementation() -> n::Implementation {
         methods: vec![],
     }
 }
+
 fn enumeration() -> n::Enum {
     n::Enum {
         is_intrinsic: false,
@@ -120,6 +128,7 @@ fn enumeration() -> n::Enum {
         symbol_encoding: None,
     }
 }
+
 fn packages() -> Vec<(&'static str, n::Package)> {
     let mut cases = vec![];
     let mut package = n::Package::default();
@@ -144,7 +153,7 @@ fn packages() -> Vec<(&'static str, n::Package)> {
         declaration: id(7),
         name: "Record".into(),
         fields: vec![("field".repeat(512), boolean())],
-        packed: false,
+        packed: crate::program::PackedMode::None,
     });
     cases.push(("nominal labels", package));
 

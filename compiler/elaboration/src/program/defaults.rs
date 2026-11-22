@@ -135,6 +135,7 @@ impl Checker<'_, '_> {
                 let checked = self.check_formation_requirements(*target, arguments, *span);
                 self.context = caller;
                 checked?;
+                self.validate_bit_packed_type_application(*target, &arguments.terms, *span)?;
             }
         } else {
             self.signature_type_uses.extend(uses.iter().cloned());

@@ -4,21 +4,25 @@ use type_resolution::implementation::{
     ImplementationHead, Index, InherentHead, InherentIndex, Selection, TypeAssessment,
 };
 use type_resolution::ptc::{Budget, Context, Formula};
+
 fn id(local: u32) -> Id {
     Id { package: 0, local }
 }
+
 fn var(n: u32) -> Term {
     Term::Rigid {
         declaration: id(n),
         sort: Sort::Type,
     }
 }
+
 fn boxed(t: Term) -> Term {
     Term::Nominal {
         declaration: id(10),
         arguments: vec![t],
     }
 }
+
 fn head(n: u32, subject: Term, parameters: Vec<Id>, names: &[&str]) -> InherentHead {
     InherentHead {
         parameter_types: vec![],
@@ -29,6 +33,7 @@ fn head(n: u32, subject: Term, parameters: Vec<Id>, names: &[&str]) -> InherentH
         members: names.iter().map(|s| (*s).to_owned()).collect(),
     }
 }
+
 fn context() -> Context {
     let mut c = Context::default();
     c.admit_nominal_constructor(id(10));
@@ -188,6 +193,7 @@ fn inherent_closed_exclusion_remains_proof_backed_across_budget_boundaries() {
         Selection::NoApplicableCandidate
     );
 }
+
 #[test]
 fn inherent_selection_filters_names_before_precision() {
     let mut index = InherentIndex::default();
@@ -252,6 +258,7 @@ fn inherent_selection_filters_names_before_precision() {
         Selection::Deferred { .. }
     ));
 }
+
 #[test]
 fn inherent_requires_are_proved_and_coherence_ignores_caller_assumptions() {
     let mut index = InherentIndex::default();
@@ -290,6 +297,7 @@ fn inherent_requires_are_proved_and_coherence_ignores_caller_assumptions() {
             .is_err()
     );
 }
+
 #[test]
 fn inherent_admission_is_atomic_and_resolution_tracks_world_identity() {
     let mut index = InherentIndex::default();
@@ -353,6 +361,7 @@ fn inherent_admission_is_atomic_and_resolution_tracks_world_identity() {
             .is_err()
     );
 }
+
 #[test]
 fn inherent_matching_does_not_resolve_an_open_trait_head() {
     let head = ImplementationHead {
@@ -379,6 +388,7 @@ fn inherent_matching_does_not_resolve_an_open_trait_head() {
     assert!(dump.contains("inherent-head"));
     assert!(dump.contains("quote\\\"newline\\n"), "{dump}");
 }
+
 fn super_head() -> InherentHead {
     head(20, boxed(var(1)), vec![id(1)], &["quote\"newline\n"])
 }
@@ -493,7 +503,7 @@ fn nominal_payload_layouts_govern_selection_replay_and_revision() {
         fields: vec![("flag".into(), Term::Primitive(P::Bool))],
         requirements: vec![],
         capabilities: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     };
     index.set_nominal_layouts(vec![layout.clone()], vec![], vec![]);
     assert!(!index.resolution_is_current(&before));

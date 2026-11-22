@@ -1,5 +1,6 @@
 #[path = "support/domain_shapes.rs"]
 mod domain_shapes;
+
 use domain_shapes::supported_input_type;
 use nir::normal_forms::{ApplicationError, Head, Kind, Parameter};
 use nir::program::LocalId;
@@ -27,6 +28,7 @@ fn list_head() -> Head {
         parameters: vec![parameter(91, Kind::Type, primitive(P::Type))],
     }
 }
+
 fn tuple_head() -> Head {
     Head {
         declaration: id(9),
@@ -44,6 +46,7 @@ fn tuple_head() -> Head {
         )],
     }
 }
+
 fn collection_domain(
     domain: &Term,
     fuel: &mut usize,
@@ -58,9 +61,11 @@ fn collection_domain(
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 1, local }
 }
+
 fn primitive(p: P) -> Term {
     Term::Primitive(p)
 }
+
 fn type_list(fields: Vec<Term>) -> Term {
     Term::NominalValue {
         ty: Box::new(Term::NormalForm {
@@ -72,6 +77,7 @@ fn type_list(fields: Vec<Term>) -> Term {
         fields,
     }
 }
+
 fn parameter(index: u32, kind: Kind, ty: Term) -> Parameter {
     Parameter {
         declaration: id(index),
@@ -80,6 +86,7 @@ fn parameter(index: u32, kind: Kind, ty: Term) -> Parameter {
         ty,
     }
 }
+
 fn head(ty: Term) -> Head {
     Head {
         collector: None,
@@ -89,9 +96,11 @@ fn head(ty: Term) -> Head {
         requirements: vec![],
     }
 }
+
 fn record(name: &str, ty: Term) -> Term {
     Term::Record(vec![(name.into(), ty)])
 }
+
 fn value(name: &str, value: Term) -> Term {
     Term::RecordValue(vec![(name.into(), value)])
 }
@@ -1598,7 +1607,7 @@ fn receiving_world_fields_admit_registered_products_in_nested_nominal_inputs() {
         fields: vec![("value".into(), primitive(P::Bool))],
         requirements: vec![],
         capabilities: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     let instance = |value| Term::Nominal {
         declaration: id(40),

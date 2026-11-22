@@ -9,6 +9,7 @@ fn list(element: Term) -> Term {
         arguments: vec![element],
     }
 }
+
 fn world() -> Package {
     Package {
         normal_forms: vec![Head {
@@ -26,6 +27,7 @@ fn world() -> Package {
         ..Default::default()
     }
 }
+
 fn symbols(names: &[&str]) -> Value {
     Value::List {
         ty: list(ty(Primitive::Symbol)),
@@ -35,6 +37,7 @@ fn symbols(names: &[&str]) -> Value {
             .collect(),
     }
 }
+
 fn packet(kind: BuildKind) -> (Term, Value) {
     let symbol = ty(Primitive::Symbol);
     let types = list(ty(Primitive::Type));
@@ -86,6 +89,7 @@ fn packet(kind: BuildKind) -> (Term, Value) {
     };
     (Term::Tuple(domains), Value::Tuple(values))
 }
+
 fn assign(index: u32, value: Expr) -> Expr {
     expr(
         ty(Primitive::Void),
@@ -98,6 +102,7 @@ fn assign(index: u32, value: Expr) -> Expr {
         },
     )
 }
+
 fn fixture(kind: BuildKind) -> (Arc<comptime_compiler::Program>, Environment) {
     let (domain, value) = packet(kind);
     let operand = Box::new(expr(
@@ -158,11 +163,13 @@ enum Failure {
     Commit,
     CommitPanic,
 }
+
 struct Host {
     preparations: Cell<usize>,
     commits: Cell<usize>,
     failure: Cell<Failure>,
 }
+
 impl Host {
     fn new(failure: Failure) -> Self {
         Self {
@@ -171,6 +178,7 @@ impl Host {
             failure: Cell::new(failure),
         }
     }
+
     fn prepare(&self) -> Result<(), Error> {
         self.preparations.set(self.preparations.get() + 1);
         match self.failure.get() {
@@ -182,6 +190,7 @@ impl Host {
             _ => Ok(()),
         }
     }
+
     fn commit(&self) -> Result<(), Error> {
         self.commits.set(self.commits.get() + 1);
         match self.failure.get() {
@@ -193,6 +202,7 @@ impl Host {
             _ => Ok(()),
         }
     }
+
     fn structure(&self, request: &StructBuildRequest) -> Result<PreparedStructBuild<'_>, Error> {
         self.prepare()?;
         Ok(PreparedStructBuild {
@@ -209,12 +219,13 @@ impl Host {
                     .iter()
                     .map(|field| (field.name.clone(), field.ty.clone()))
                     .collect(),
-                packed: false,
+                packed: nir::program::PackedMode::None,
             }]
             .into(),
             commit: Box::new(|| self.commit()),
         })
     }
+
     fn enumeration(&self, request: &EnumBuildRequest) -> Result<PreparedEnumBuild<'_>, Error> {
         self.prepare()?;
         Ok(PreparedEnumBuild {
@@ -236,6 +247,7 @@ impl Host {
             commit: Box::new(|| self.commit()),
         })
     }
+
     fn newtype(&self, request: &NewtypeBuildRequest) -> Result<PreparedNewtypeBuild<'_>, Error> {
         self.prepare()?;
         Ok(PreparedNewtypeBuild {

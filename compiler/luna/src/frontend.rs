@@ -29,6 +29,42 @@ impl std::fmt::Display for Artifact {
     }
 }
 
+pub(crate) fn emit_elaboration_warnings(
+    diag_ctx: &diagnostic::DiagnosticContext<'_>,
+    warnings: &[elaboration::program::Warning],
+) {
+    for warning in warnings {
+        let formatted = match warning.code {
+            Some(code) => format!("[{code}] {}", warning.message),
+            None => warning.message.clone(),
+        };
+        let can_render = warning.source.expansion_index().is_none()
+            && warning.source.start <= warning.source.end
+            && diag_ctx.source_map().files().iter().any(|file| {
+                file.src.as_ref().is_some_and(|src| {
+                    let start = file.start_pos.0;
+                    let end = start.saturating_add(src.len() as u32);
+                    start <= warning.source.start && warning.source.end <= end
+                })
+            });
+        if can_render {
+            let span = rustc_span::Span::new(
+                rustc_span::BytePos(warning.source.start),
+                rustc_span::BytePos(warning.source.end),
+            );
+            diagnostic::DiagnosticBuilder::warning(formatted)
+                .with_primary_span(span)
+                .with_warning_label(span, "bit-packed width exceeds 256 bits".to_string())
+                .emit(diag_ctx);
+        } else {
+            match warning.code {
+                Some(code) => eprintln!("warning[{code}]: {}", warning.message),
+                None => eprintln!("warning: {}", warning.message),
+            }
+        }
+    }
+}
+
 /// Produce a diagnostic report only; selection does not authorize a consumer.
 pub(crate) fn attribute_artifact(
     package: &hir::Package<'_>,
@@ -508,18 +544,20 @@ fn compile_bound_for_target_with_invocation(
                 protocols,
             ));
         }
-        let program = elaboration::program::elaborate_packages_incremental(
-            package.package(),
-            &std::collections::BTreeMap::from([(0, package_identity)]),
-            &protocols,
-            target,
-            &elaboration::program::IncrementalOptions {
-                verified_upstream_packages: std::collections::BTreeSet::new(),
-                jobs: Some(options.incremental.effective_jobs()),
-                ..Default::default()
-            },
-        )
-        .map_err(|error| format!("elaboration failed: {error}"))?;
+        let (program, _, warnings) =
+            elaboration::program::elaborate_packages_incremental_with_cache_and_warnings(
+                package.package(),
+                &std::collections::BTreeMap::from([(0, package_identity)]),
+                &protocols,
+                target,
+                &elaboration::program::IncrementalOptions {
+                    verified_upstream_packages: std::collections::BTreeSet::new(),
+                    jobs: Some(options.incremental.effective_jobs()),
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| format!("elaboration failed: {error}"))?;
+        emit_elaboration_warnings(&instance.diag_ctx, &warnings);
         crate::protocols::type_constructors::validate(&program, &protocols)?;
         let program = if let Some(invocation) = invocation {
             invocation.execute(

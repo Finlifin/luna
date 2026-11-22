@@ -5,21 +5,25 @@ use type_resolution::{
     implementation::{ImplementationHead, Index, Selection},
     ptc::{Budget, Context},
 };
+
 fn id(local: u32) -> Id {
     Id { package: 0, local }
 }
+
 fn var() -> Term {
     Term::Rigid {
         declaration: id(1),
         sort: Sort::Type,
     }
 }
+
 fn boxed(t: Term) -> Term {
     Term::Nominal {
         declaration: id(10),
         arguments: vec![t],
     }
 }
+
 fn implementation(
     n: u32,
     interface: u32,
@@ -42,6 +46,7 @@ fn implementation(
         methods: vec![],
     }
 }
+
 fn index(implementations: &[Implementation]) -> Index {
     let mut index = Index::default();
     for i in implementations {
@@ -62,6 +67,7 @@ fn index(implementations: &[Implementation]) -> Index {
     }
     index
 }
+
 fn requirement(interface: u32, subject: Term) -> TraitRequirement {
     TraitRequirement {
         interface_arguments: vec![],
@@ -69,6 +75,7 @@ fn requirement(interface: u32, subject: Term) -> TraitRequirement {
         subject,
     }
 }
+
 fn context() -> Context {
     let mut c = Context::default();
     c.admit_nominal_constructor(id(10));
@@ -170,6 +177,7 @@ fn unknown_conditional_trait_domains_do_not_exclude_the_candidate() {
         .verify_condition_support(&result, Budget::default())
         .unwrap();
 }
+
 #[test]
 fn qualification_absence_is_world_local_and_does_not_poison_later_queries() {
     let mut implementations = vec![
@@ -224,6 +232,7 @@ fn qualification_absence_is_world_local_and_does_not_poison_later_queries() {
     );
     assert!(!new_index.type_resolution_is_current(&result.types));
 }
+
 #[test]
 fn qualification_abstract_absence_is_pending_and_parent_assumptions_are_scoped() {
     let implementations = vec![
@@ -297,6 +306,7 @@ fn qualification_abstract_absence_is_pending_and_parent_assumptions_are_scoped()
         Selection::Deferred { .. }
     ));
 }
+
 #[test]
 fn qualification_cycles_do_not_create_positive_or_negative_proofs() {
     let implementations = vec![
@@ -899,6 +909,7 @@ fn scoped_given_evidence_retains_closed_type_equalities() {
             .is_err_and(|error| matches!(error, nir::NominalAdmissionError::Invalid(_)))
     );
 }
+
 #[test]
 fn symbol_indexed_world_queries_check_domains_and_preserve_evidence() {
     use type_resolution::{
@@ -2503,7 +2514,7 @@ fn nominal_trait_indices_resolve_only_with_valid_layouts() {
             fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
             requirements: vec![],
             capabilities: vec![],
-            packed: false,
+            packed: nir::program::PackedMode::None,
         }],
         vec![],
         vec![],
@@ -2563,7 +2574,7 @@ fn nominal_capability_sources_and_subject_facts_require_layout_evidence() {
         fields: vec![("flag".into(), Term::Primitive(Primitive::Bool))],
         requirements: vec![],
         capabilities: vec![],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     });
     let assumptions = vec![assumption];
     let domains = Default::default();

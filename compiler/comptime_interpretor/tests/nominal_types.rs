@@ -5,9 +5,11 @@ use nir::{DeclarationId, Primitive as P, Sort, Term};
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 1, local }
 }
+
 fn p(value: P) -> Term {
     Term::Primitive(value)
 }
+
 fn expr(ty: Term, kind: K) -> Expr {
     Expr {
         ty,
@@ -15,9 +17,11 @@ fn expr(ty: Term, kind: K) -> Expr {
         source: SourceRange { start: 1, end: 2 },
     }
 }
+
 fn value(ty: Term) -> Expr {
     expr(p(P::Type), K::TypeValue(ty))
 }
+
 fn function(local: u32, body: Expr) -> Function {
     Function {
         interface: nir::program::FunctionDeclaration {
@@ -49,6 +53,7 @@ fn function(local: u32, body: Expr) -> Function {
         runtime_deliveries: Default::default(),
     }
 }
+
 fn call(local: u32) -> Expr {
     let signature = Term::Function {
         parameters: vec![],
@@ -81,9 +86,10 @@ fn record(requirements: Vec<nir::program::TypePredicate>) -> nir::program::Struc
                 sort: Sort::Type,
             },
         )],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     }
 }
+
 fn nominal(argument: Expr) -> Expr {
     expr(
         p(P::Type),

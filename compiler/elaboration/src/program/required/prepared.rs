@@ -5,6 +5,7 @@ use super::*;
 use crate::materialization::{DeclarationSnapshot, DeclarationSource};
 use comptime_interpretor::{CodeSession, InvocationValue};
 use std::sync::{Arc, Mutex, OnceLock};
+
 mod inputs;
 mod result_guarantees;
 
@@ -23,11 +24,13 @@ struct RequiredCode<'a> {
     world: &'a RequiredWorld,
     session: Option<CodeSession>,
 }
+
 impl RequiredCode<'_> {
     fn session(&mut self) -> &mut CodeSession {
         self.session.as_mut().expect("live code lease")
     }
 }
+
 impl Drop for RequiredCode<'_> {
     fn drop(&mut self) {
         let mut retained = self
@@ -1019,7 +1022,7 @@ mod tests {
                     )],
                     capabilities: vec![],
                     fields: vec![],
-                    packed: false,
+                    packed: nir::program::PackedMode::None,
                 });
                 let representation = Term::Nominal {
                     declaration: owner,
@@ -1648,7 +1651,7 @@ mod tests {
                 capabilities: vec![],
                 requirements: vec![],
                 fields: vec![],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             });
             package
                 .runtime_function_identities

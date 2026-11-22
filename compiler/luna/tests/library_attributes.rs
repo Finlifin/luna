@@ -476,9 +476,55 @@ fn repository_attribute_package_inspects_packed_byte_and_bit_with_merge_override
 
     let mut ordinary = arguments;
     *ordinary.last_mut().unwrap() = "nir";
-    let rejected = run(&ordinary);
-    assert_eq!(rejected.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("__flurry_packed_mode"));
+    let nir_out = run(&ordinary);
+    assert!(
+        nir_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&nir_out.stderr)
+    );
+    let nir_dump = String::from_utf8_lossy(&nir_out.stdout);
+    assert_eq!(nir_dump.matches("(packed byte)").count(), 1, "{nir_dump}");
+    assert_eq!(nir_dump.matches("(packed bit)").count(), 2, "{nir_dump}");
+
+    for (invalid_source, expected_diag) in [
+        (
+            "struct ConfigPacked { .__flurry_packed_mode .bit, a: u8 }",
+            "configuration",
+        ),
+        (
+            "^{ __flurry_packed_mode: .word } struct BadMode { a: u8 }",
+            "byte or .bit",
+        ),
+        (
+            "^{ __flurry_packed_mode: 1 } struct BadDomain { a: u8 }",
+            "Symbol",
+        ),
+        (
+            "^attrs.packed.bit fn bad_fn() -> u8 { 1 }",
+            "struct definition",
+        ),
+        (
+            "^attrs.layout.packed ^attrs.packed.bit struct MixedPacked { a: u8 }",
+            "cannot combine legacy packed",
+        ),
+        (
+            "^attrs.packed.bit ^attrs.mem.volatile struct BitVol { a: u8 }",
+            "packed",
+        ),
+    ] {
+        std::fs::write(directory.join("input.fl"), invalid_source).unwrap();
+        let rejected = run(&ordinary);
+        assert_eq!(
+            rejected.status.code(),
+            Some(1),
+            "expected failure for `{invalid_source}`"
+        );
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(
+            stderr.contains(expected_diag),
+            "expected `{expected_diag}` in stderr for `{invalid_source}`:\n{stderr}"
+        );
+    }
     std::fs::remove_dir_all(directory).unwrap();
 }
 

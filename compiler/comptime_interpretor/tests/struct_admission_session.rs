@@ -8,12 +8,14 @@ use std::{cell::Cell, sync::Arc};
 fn id(local: u32) -> DeclarationId {
     DeclarationId { package: 19, local }
 }
+
 fn nominal(local: u32) -> Term {
     Term::Nominal {
         declaration: id(local),
         arguments: vec![],
     }
 }
+
 fn batch(local: u32, field: Term) -> Arc<[Struct]> {
     vec![Struct {
         declaration: id(local),
@@ -23,13 +25,15 @@ fn batch(local: u32, field: Term) -> Arc<[Struct]> {
         requirements: vec![],
         capabilities: vec![],
         fields: vec![("value".into(), field)],
-        packed: false,
+        packed: nir::program::PackedMode::None,
     }]
     .into()
 }
+
 fn boolean() -> Term {
     Term::Primitive(Primitive::Bool)
 }
+
 fn budget() -> Budget {
     Budget {
         steps: 1_000_000,

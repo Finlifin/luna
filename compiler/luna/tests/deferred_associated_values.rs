@@ -2,6 +2,7 @@
 #[path = "support/execution.rs"]
 #[allow(dead_code)]
 mod support;
+
 use comptime_interpretor::Value;
 
 const SOURCE: &str = "typealias Type=.Type'builtin; typealias char=.char'builtin;
@@ -752,7 +753,7 @@ fn a_failed_type_traversal_keeps_spent_fuel_and_discards_new_observations() {
                     parameter_types: vec![],
                     requirements: vec![],
                     capabilities: vec![],
-                    packed: false,
+                    packed: nir::program::PackedMode::None,
                     fields: vec![("value".into(), Term::Primitive(Primitive::Bool))],
                 };
                 Ok(type_resolution::associated::TypeInitializerResult {

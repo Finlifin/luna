@@ -1232,7 +1232,7 @@ mod validate_memo_tests {
                     declaration: struct_decl,
                     name: "WidePod".into(),
                     fields: fields.clone(),
-                    packed: false,
+                    packed: nir::program::PackedMode::None,
                 }),
             }],
             functions: (1..=fn_count)

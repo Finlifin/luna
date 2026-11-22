@@ -8,6 +8,7 @@ use crate::ptc::{Budget, Context};
 use nir::program::{Enum, Literal, Pattern, Struct};
 use nir::{DeclarationId, Primitive, Term};
 use std::collections::{BTreeMap, HashMap};
+
 mod negation;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,6 +163,7 @@ enum Head<'a> {
     // cannot cover this domain; only the default (wildcard) rows contribute.
     Other,
 }
+
 struct Engine<'a> {
     collection: &'a dyn Fn(&Term, &mut usize) -> Result<Option<Term>, nir::NominalAdmissionError>,
     target: Option<nir::target::TargetData>,
@@ -173,7 +175,9 @@ struct Engine<'a> {
     exact: bool,
     steps: usize,
 }
+
 static WILD: Pattern = Pattern::Wild;
+
 impl Engine<'_> {
     fn covers_candidate(
         &mut self,
@@ -204,6 +208,7 @@ impl Engine<'_> {
         self.steps = remaining;
         Ok(())
     }
+
     // Equality evidence changes only the type domain inspected by this matrix.
     // Runtime patterns, guards and coverage propositions never enter PTC.
     // The cache is local to one matrix/context; no assumptions escape its scope.
@@ -268,6 +273,7 @@ impl Engine<'_> {
         self.domains.insert(ty.clone(), domain.clone());
         Ok(domain)
     }
+
     fn wildcard(&mut self, pat: &Pattern) -> Result<bool, ()> {
         enum Work<'a> {
             Visit(&'a Pattern),
@@ -312,6 +318,7 @@ impl Engine<'_> {
         }
         values.pop().ok_or(())
     }
+
     // Universal coverage independent of the subject domain. The ordinary
     // wildcard path stays iterative even for very long sequential patterns.
     fn unconditional(&mut self, pat: &Pattern, depth: usize) -> Result<bool, ()> {
@@ -339,6 +346,7 @@ impl Engine<'_> {
             _ => Ok(false),
         }
     }
+
     fn matrix<'a>(
         &mut self,
         types: Vec<&'a Term>,
@@ -551,6 +559,7 @@ impl Engine<'_> {
         }
         Ok(true)
     }
+
     fn float_matrix<'a>(
         &mut self,
         tail_types: &[&'a Term],
@@ -593,6 +602,7 @@ impl Engine<'_> {
     ) -> Result<bool, ()> {
         self.interval_matrix_with_float(domain, tail_types, rows, depth, None)
     }
+
     fn interval_matrix_with_float<'a>(
         &mut self,
         domain: &[crate::interval_coverage::Interval],
@@ -640,6 +650,7 @@ impl Engine<'_> {
         }
         Ok(true)
     }
+
     fn bit_matrix<'a>(
         &mut self,
         width: usize,
@@ -706,6 +717,7 @@ impl Engine<'_> {
         }
         Ok(true)
     }
+
     fn specialize<'a>(
         &mut self,
         pat: &'a Pattern,
@@ -841,9 +853,11 @@ impl Engine<'_> {
 mod tests {
     use super::*;
     use nir::program::{Variant, VariantShape};
+
     fn boolean(value: bool) -> Pattern {
         Pattern::Literal(Literal::Bool(value))
     }
+
     fn product(fields: Vec<Pattern>) -> Pattern {
         Pattern::Variant {
             declaration: id(),
@@ -851,6 +865,7 @@ mod tests {
             fields,
         }
     }
+
     #[test]
     fn candidate_coverage_requires_an_unshadowed_witness() {
         use nir::program::{Expr, ExprKind, SourceRange};
@@ -970,6 +985,7 @@ mod tests {
             local: 1,
         }
     }
+
     fn setup(fields: Vec<Term>) -> (BTreeMap<DeclarationId, Enum>, Term) {
         (
             BTreeMap::from([(
@@ -998,6 +1014,7 @@ mod tests {
             },
         )
     }
+
     #[test]
     fn matrix_agrees_with_exhaustive_boolean_oracle() {
         // Every subset of a pattern basis, including correlated columns and
@@ -1048,7 +1065,7 @@ mod tests {
                         ("left".into(), Term::Primitive(Primitive::Bool)),
                         ("right".into(), Term::Primitive(Primitive::Bool)),
                     ],
-                    packed: false,
+                    packed: nir::program::PackedMode::None,
                 },
             )]);
             let record_patterns: Vec<_> = selected
@@ -1153,7 +1170,7 @@ mod tests {
                         requirements: vec![],
                         capabilities: vec![],
                         fields: vec![("payload".into(), fields[0].clone())],
-                        packed: false,
+                        packed: nir::program::PackedMode::None,
                     },
                 );
                 enums.clear();
@@ -1214,6 +1231,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn wide_products_do_not_enumerate_values() {
         let (enums, ty) = setup(vec![Term::Primitive(Primitive::Bool); 64]);
@@ -1226,6 +1244,7 @@ mod tests {
             Coverage::Missing
         );
     }
+
     #[test]
     fn exhaustion_is_not_a_counterexample_or_a_proof() {
         let enums = BTreeMap::new();
@@ -1240,6 +1259,7 @@ mod tests {
             Coverage::Exhaustive
         );
     }
+
     #[test]
     fn empty_payloads_and_open_literal_domains_are_distinct() {
         let (enums, ty) = setup(vec![Term::Primitive(Primitive::Never)]);
@@ -1265,6 +1285,7 @@ mod tests {
 mod contextual_tests {
     use super::*;
     use nir::Sort;
+
     fn variable() -> Term {
         Term::Rigid {
             declaration: DeclarationId {
@@ -1274,6 +1295,7 @@ mod contextual_tests {
             sort: Sort::Type,
         }
     }
+
     #[test]
     fn equality_domains_are_scoped_and_do_not_unfold_opaque_heads() {
         let enums = BTreeMap::new();
@@ -1320,6 +1342,7 @@ mod contextual_tests {
             );
         }
     }
+
     #[test]
     fn disjunctive_information_does_not_choose_a_runtime_domain() {
         let mut context = Context::default();
@@ -1341,6 +1364,7 @@ mod contextual_tests {
             Coverage::Missing
         );
     }
+
     #[test]
     fn empty_and_unit_domains_require_evidence() {
         let mut context = Context::default();
@@ -1390,6 +1414,7 @@ mod contextual_tests {
 mod sequential_budget_tests {
     use super::*;
     use nir::program::{Expr, ExprKind, SourceRange};
+
     fn next(first: Pattern, next: Pattern) -> Pattern {
         Pattern::Then {
             first: Box::new(first),
@@ -1401,6 +1426,7 @@ mod sequential_budget_tests {
             next: Box::new(next),
         }
     }
+
     #[test]
     fn long_sequential_wildcards_use_bounded_iterative_work() {
         let mut pattern = Pattern::Wild;
@@ -1433,6 +1459,7 @@ mod sequential_budget_tests {
 mod bit_tests {
     use super::*;
     use nir::program::{Expr, ExprKind, LocalId, SourceRange};
+
     fn expression(ty: Term, kind: ExprKind) -> Expr {
         Expr {
             ty,
@@ -1440,6 +1467,7 @@ mod bit_tests {
             source: SourceRange { start: 0, end: 0 },
         }
     }
+
     fn mask(width: usize, bits: u64, value: u64) -> Pattern {
         let binding = LocalId { owner: 0, index: 0 };
         let mut pattern = Pattern::Binding {
@@ -1472,6 +1500,7 @@ mod bit_tests {
         }
         pattern
     }
+
     #[test]
     fn symbolic_bit_masks_agree_with_exhaustive_small_value_oracle() {
         let mut random = 0x123456789abcdefu64;
@@ -1511,6 +1540,7 @@ mod bit_tests {
             );
         }
     }
+
     #[test]
     fn typed_unsigned_segments_cover_exactly_their_values() {
         let binding = LocalId { owner: 1, index: 0 };
@@ -1542,6 +1572,7 @@ mod bit_tests {
             Coverage::Missing
         );
     }
+
     #[test]
     fn typed_signed_segments_cover_exactly_their_values() {
         let binding = LocalId { owner: 1, index: 0 };
@@ -1573,6 +1604,7 @@ mod bit_tests {
             Coverage::Missing
         );
     }
+
     #[test]
     fn sparse_masks_cover_large_widths_without_enumerating_values() {
         let width = 65536;
@@ -1610,6 +1642,7 @@ mod bit_tests {
             Coverage::Exhaustive
         );
     }
+
     #[test]
     fn bit_coverage_exhaustion_is_unknown_and_does_not_poison_later_checks() {
         let ty = Term::Primitive(Primitive::BitVec(1024));
@@ -1636,9 +1669,11 @@ mod bit_tests {
 mod exact_float_tests {
     use super::*;
     use nir::program::{Expr, ExprKind as K, LocalId, MatchArm, SourceRange};
+
     fn lit(text: &str) -> Pattern {
         Pattern::Literal(Literal::Float(text.into()))
     }
+
     fn negate(pattern: Pattern) -> Pattern {
         let binding = LocalId { owner: 1, index: 0 };
         let boolean = |value| Expr {
@@ -1676,6 +1711,7 @@ mod exact_float_tests {
             }),
         }
     }
+
     #[test]
     fn singleton_partitions_agree_with_independent_three_cell_oracle() {
         let patterns = [
@@ -1732,6 +1768,7 @@ mod exact_float_tests {
             Coverage::Exhaustive
         );
     }
+
     #[test]
     fn float_complements_require_the_same_subject_and_exact_numeric_identity() {
         let excluded = negate(lit("1.0000000000000000000000000000001"));
@@ -1996,6 +2033,7 @@ mod tuple_layout_tests {
     fn id(local: u32) -> DeclarationId {
         DeclarationId { package: 73, local }
     }
+
     #[test]
     fn tuple_coverage_uses_the_declared_list_domain_without_unfolding_heads() {
         let domain = Term::NormalForm {

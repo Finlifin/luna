@@ -2932,7 +2932,7 @@ mod tests {
                 declaration: pair_decl,
                 name: "Pair".into(),
                 fields: vec![("s".into(), str_ty.clone()), ("n".into(), u32_ty.clone())],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             }],
             functions: vec![
                 Function {
@@ -3631,7 +3631,7 @@ mod tests {
                 requirements: vec![],
                 capabilities: vec![],
                 fields: vec![("s".into(), str_ty)],
-                packed: false,
+                packed: nir::program::PackedMode::None,
             }],
             functions,
             ..Default::default()
