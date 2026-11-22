@@ -392,9 +392,10 @@ impl Checker<'_, '_> {
         self.context = self.binder_context(owner);
         let result = (|| {
             let clauses = match &self.package.item(owner).unwrap().kind {
-                ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) => {
-                    sig.clause_constraints
-                }
+                ItemKind::Fn(sig, _)
+                | ItemKind::Case(sig, _)
+                | ItemKind::FnDeclaration(sig)
+                | ItemKind::Effect(sig, _) => sig.clause_constraints,
                 ItemKind::EffectGroup(group) => group.clause_constraints,
                 ItemKind::TypeAlias(_, _, constraints) | ItemKind::Newtype(_, _, constraints) => {
                     *constraints

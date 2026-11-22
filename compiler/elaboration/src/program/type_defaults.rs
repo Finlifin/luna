@@ -156,9 +156,10 @@ impl<'h> Checker<'_, 'h> {
             ItemKind::TypeAlias(_, clauses, _) | ItemKind::Newtype(_, clauses, _) => {
                 Cow::Borrowed(clauses)
             }
-            ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) => {
-                Cow::Borrowed(sig.clause_params)
-            }
+            ItemKind::Fn(sig, _)
+            | ItemKind::Case(sig, _)
+            | ItemKind::FnDeclaration(sig)
+            | ItemKind::Effect(sig, _) => Cow::Borrowed(sig.clause_params),
             ItemKind::Const(annotation, _) => function_types::normal_form_inputs(annotation)
                 .into_iter()
                 .flatten()
@@ -826,6 +827,7 @@ impl<'h> Checker<'_, 'h> {
         }
         Ok(arguments)
     }
+
     /// Validate a default under its declaration binders without invoking it.
     /// Concrete normalization is performed separately when the slot is omitted.
     pub(super) fn check_type_defaults(&mut self, owner: OwnerId) -> Result<(), Error> {

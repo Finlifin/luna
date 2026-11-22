@@ -350,6 +350,7 @@ impl Display for ItemKind<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Fn(sig, body) => form!(f, "fn", "signature" => sig, "body" => body),
+            Self::Case(sig, body) => form!(f, "case", "signature" => sig, "body" => body),
             Self::FunctionTemplateInstance {
                 template,
                 signature,

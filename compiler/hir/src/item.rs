@@ -56,6 +56,9 @@ pub enum ItemKind<'hir> {
         ports: Vec<TestTemplatePort>,
         body: BodyId,
     },
+    /// A custom pattern-matching view (`case id (params) -> result clauses? block`),
+    /// never an ordinary callable function.
+    Case(FnSig<'hir>, BodyId),
     /// Required interface member or bodyless declaration. No synthetic runtime
     /// body may be invented for a signature-only function.
     FnDeclaration(FnSig<'hir>),
@@ -371,6 +374,7 @@ pub enum UseKind<'hir> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DefKind {
     Fn,
+    Case,
     FunctionTemplateInstance,
     TestTemplateInstance,
     Effect,
@@ -394,6 +398,7 @@ impl DefKind {
     pub fn from_item_kind(kind: &ItemKind<'_>) -> Self {
         match kind {
             ItemKind::Fn(..) | ItemKind::FnDeclaration(..) => DefKind::Fn,
+            ItemKind::Case(..) => DefKind::Case,
             ItemKind::FunctionTemplateInstance { .. } => DefKind::FunctionTemplateInstance,
             ItemKind::TestTemplateInstance { .. } => DefKind::TestTemplateInstance,
             ItemKind::Effect(..) => DefKind::Effect,

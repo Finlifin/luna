@@ -323,9 +323,10 @@ impl SymbolIndex {
 
 fn item_clauses<'hir>(item: &Item<'hir>) -> &'hir [ClauseParam<'hir>] {
     match &item.kind {
-        ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) => {
-            sig.clause_params
-        }
+        ItemKind::Fn(sig, _)
+        | ItemKind::Case(sig, _)
+        | ItemKind::FnDeclaration(sig)
+        | ItemKind::Effect(sig, _) => sig.clause_params,
         ItemKind::FunctionTemplateInstance {
             signature: Some(sig),
             ..
@@ -1231,7 +1232,7 @@ impl<'a> IndexBuilder<'a> {
             }
 
             match &item.kind {
-                ItemKind::Fn(sig, body_id) => {
+                ItemKind::Fn(sig, body_id) | ItemKind::Case(sig, body_id) => {
                     self.walk_fn_sig(&ctx, sig, Some(*body_id));
                     if let Some(body) = pkg.hir_pkg.body(*body_id) {
                         self.walk_body(&ctx, body);
@@ -2278,7 +2279,18 @@ impl<'a> IndexBuilder<'a> {
                     self.walk_pattern_inner(ctx, sub, nominal_hint, prefix, ty_suffix, is_mutable);
                 }
             }
-            PatternKind::Const(expr) | PatternKind::Comptime(expr) => {
+            PatternKind::Const(expr) => {
+                if let ExprKind::Lit(lit) = &expr.kind
+                    && let hir::common::LitKind::Symbol(sym) = lit.kind
+                    && let Some(nom) = nominal_hint
+                    && let Some(mkey) = self.find_member_key(nom, sym.as_str())
+                    && let Some((file, span)) = span_to_file_offsets(self.source_map, expr.span)
+                {
+                    self.record_occurrence(file, span, mkey, false, false);
+                }
+                self.walk_expr(ctx, expr, false);
+            }
+            PatternKind::Comptime(expr) => {
                 self.walk_expr(ctx, expr, false);
             }
             PatternKind::Projection(base, ident) => {
@@ -2577,7 +2589,10 @@ impl<'a> IndexBuilder<'a> {
             && let Some(item) = ctx.pkg.hir_pkg.item(owner)
         {
             match &item.kind {
-                ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) => {
+                ItemKind::Fn(sig, _)
+                | ItemKind::Case(sig, _)
+                | ItemKind::FnDeclaration(sig)
+                | ItemKind::Effect(sig, _) => {
                     return sig.return_ty.and_then(extract_head_def_id);
                 }
                 _ => {}
@@ -2907,6 +2922,10 @@ fn item_lsp_kinds(kind: &ItemKind<'_>) -> (u32, u32) {
         DefKind::Fn | DefKind::FunctionTemplateInstance | DefKind::TestTemplateInstance => {
             (lsp_symbol_kind::FUNCTION, lsp_completion_kind::FUNCTION)
         }
+        DefKind::Case => (
+            lsp_symbol_kind::ENUM_MEMBER,
+            lsp_completion_kind::ENUM_MEMBER,
+        ),
         DefKind::Effect => (lsp_symbol_kind::EVENT, lsp_completion_kind::FUNCTION),
         DefKind::EffectGroup => (lsp_symbol_kind::INTERFACE, lsp_completion_kind::INTERFACE),
         DefKind::Struct | DefKind::Newtype => {
@@ -2939,6 +2958,7 @@ pub fn format_item_signature(
         ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => {
             format_fn_item_sig(name, sig, source_map, "fn")
         }
+        ItemKind::Case(sig, _) => format_fn_item_sig(name, sig, source_map, "case"),
         ItemKind::Effect(sig, _) => format_fn_item_sig(name, sig, source_map, "effect"),
         ItemKind::FunctionTemplateInstance {
             signature: Some(sig),
@@ -3343,6 +3363,17 @@ pub fn lexical_fallback_symbols(file: &Path, src: &str) -> Vec<SymbolInfo> {
                 lsp_completion_kind::FUNCTION,
                 "effect",
             )),
+            TokenKind::Case
+                if tokens
+                    .get(i + 2)
+                    .is_some_and(|tok| tok.kind == TokenKind::LParen) =>
+            {
+                Some((
+                    lsp_symbol_kind::ENUM_MEMBER,
+                    lsp_completion_kind::ENUM_MEMBER,
+                    "case",
+                ))
+            }
             _ => None,
         };
         if let Some((sk, ck, kw)) = item_kind

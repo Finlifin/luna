@@ -39,6 +39,7 @@ impl Parser<'_> {
                     if [
                         TokenKind::Effect,
                         TokenKind::Fn,
+                        TokenKind::Case,
                         TokenKind::Unsafe,
                         TokenKind::Spec,
                         TokenKind::Verified,

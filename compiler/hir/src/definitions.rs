@@ -7,32 +7,46 @@ use crate::{Body, BodyId, ItemKind, LocalDefId, OwnerId, OwnerInfo, Package};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use symbol::DefId;
+
 mod copy_budget;
 mod omit;
 mod resolution;
 mod staged;
+
 pub use omit::omit_generation_sources;
 pub use resolution::ResolutionEvidence;
+
 pub(crate) mod members;
+
 pub use members::clauses as declared_clause_parameters;
+
 mod nodes;
+
 pub use nodes::DefinitionNodes;
+
 mod structs;
+
 pub use structs::{
     TypedField, assemble_struct, assemble_struct_definition, assemble_struct_with_defaults,
 };
+
 mod implementations;
 mod interfaces;
+
 pub use implementations::assemble_inherent_impl;
 pub use interfaces::{assemble_impl, assemble_trait};
+
 mod enums;
+
 pub use enums::{assemble_enum, assemble_enum_definition};
+
 mod associated;
 mod containers;
 mod effects;
 mod functions;
 mod parameters;
 mod types;
+
 pub use associated::assemble_associated;
 pub use containers::{assemble_constant, assemble_module};
 pub use effects::{assemble_effect, assemble_effect_group};
@@ -44,6 +58,7 @@ pub struct Error {
     pub kind: &'static str,
     pub owner: Option<OwnerId>,
 }
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(definition-error (kind {:?}) (owner ", self.kind)?;
@@ -54,13 +69,16 @@ impl fmt::Display for Error {
         f.write_str("))")
     }
 }
+
 impl std::error::Error for Error {}
+
 fn error(kind: &'static str, owner: OwnerId) -> Error {
     Error {
         kind,
         owner: Some(owner),
     }
 }
+
 fn charge(fuel: &mut usize) -> Result<(), Error> {
     *fuel = fuel.checked_sub(1).ok_or(Error {
         kind: "budget exhausted",
@@ -93,6 +111,7 @@ pub enum PublicationError<E> {
     Structure(Error),
     Check(E),
 }
+
 impl<E: fmt::Display> fmt::Display for PublicationError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -105,6 +124,7 @@ impl<E: fmt::Display> fmt::Display for PublicationError<E> {
         }
     }
 }
+
 impl<E: std::error::Error + 'static> std::error::Error for PublicationError<E> {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(match self {
@@ -128,6 +148,7 @@ pub struct DefinitionBatch<'package, 'hir> {
     resolution: Vec<(crate::HirId, ResolutionEvidence)>,
     staged_parameters: Vec<(crate::HirId, DefId)>,
 }
+
 /// An immutable checked candidate holding exclusive access to its original draft.
 /// Dropping it abandons preparation without changing published tables or drafts.
 /// Commit performs no further validation, allocation or user callback.
@@ -137,16 +158,20 @@ pub struct PreparedPublication<'batch, 'package, 'hir, T> {
     owners: Vec<OwnerId>,
     checked: T,
 }
+
 impl<'batch, 'package, 'hir, T> PreparedPublication<'batch, 'package, 'hir, T> {
     pub fn published(&self) -> &Package<'hir> {
         self.batch.published()
     }
+
     pub fn candidate(&self) -> &Package<'hir> {
         &self.candidate
     }
+
     pub fn owners(&self) -> &[OwnerId] {
         &self.owners
     }
+
     pub fn checked(&self) -> &T {
         &self.checked
     }
@@ -177,6 +202,7 @@ impl<'batch, 'package, 'hir, T> PreparedPublication<'batch, 'package, 'hir, T> {
         (self.owners, self.checked)
     }
 }
+
 impl<T> fmt::Display for PreparedPublication<'_, '_, '_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(prepared-publication (owners")?;
@@ -206,10 +232,12 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
             staged_parameters: Vec::new(),
         }
     }
+
     /// Read-only access to previously published definitions, never draft entries.
     pub fn published(&self) -> &Package<'hir> {
         self.package
     }
+
     pub fn reserve(&mut self) -> Result<OwnerId, Error> {
         let raw = self
             .base
@@ -223,6 +251,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         self.definitions.push(None);
         Ok(OwnerId::new(LocalDefId::new(raw)))
     }
+
     /// Reserve a resolver identity for a generated owner or clause. The source
     /// scan prefix is preserved even for declarations without an HIR owner.
     /// Failed publication retains reservations; dropping an unpublished batch
@@ -237,6 +266,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         self.identity_next = allocator.count();
         Ok(identity)
     }
+
     fn slot(&self, owner: OwnerId) -> Option<usize> {
         owner
             .def_id
@@ -244,6 +274,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
             .checked_sub(self.base)
             .filter(|i| *i < self.definitions.len())
     }
+
     /// Replace an unfinished description, for example after correcting a failed
     /// validation. Already-published owners cannot be changed through this API.
     /// `lexical_parent` describes a block-local declaration's enclosing scope;
@@ -273,6 +304,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         });
         Ok(())
     }
+
     pub fn body(&mut self, id: BodyId, body: Body<'hir>) -> Result<(), Error> {
         self.slot(id.hir_id.owner)
             .ok_or_else(|| error("body owner not reserved in this batch", id.hir_id.owner))?;
@@ -284,17 +316,20 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         }
         Ok(())
     }
+
     /// Replace the draft's complete attribute sequence, preserving application
     /// order and lexical provenance. Targets must belong to this batch; lexical
     /// contexts may refer to previously published definitions.
     pub fn set_attributes(&mut self, attributes: Vec<crate::DeferredDefinitionAttribute<'hir>>) {
         self.attributes = attributes;
     }
+
     fn exists(&self, owner: OwnerId) -> bool {
         self.slot(owner)
             .is_some_and(|i| self.definitions[i].is_some())
             || self.package.owner(owner).is_some()
     }
+
     /// Check an isolated candidate containing both published and draft owners.
     /// Only a successful check installs the candidate and consumes the drafts.
     /// Errors and unwinding leave the target and drafts unchanged. Side effects
@@ -344,6 +379,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
             checked: result,
         })
     }
+
     /// Check every entry before making any mutation. Budget exhaustion is also
     /// transactional; a caller can supply fresh fuel and retry the same draft.
     pub fn publish(&mut self, fuel: &mut usize) -> Result<Vec<OwnerId>, Error> {
@@ -486,6 +522,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
             }
             let body = match &item.kind {
                 ItemKind::Fn(_, id)
+                | ItemKind::Case(_, id)
                 | ItemKind::FunctionTemplateInstance { body: id, .. }
                 | ItemKind::TestTemplateInstance { body: id, .. } => Some(*id),
                 ItemKind::Deriver(definition) => Some(definition.body),
@@ -562,6 +599,7 @@ impl<'package, 'hir> DefinitionBatch<'package, 'hir> {
         Ok(owners)
     }
 }
+
 fn children<'a>(kind: &'a ItemKind<'_>) -> &'a [OwnerId] {
     match kind {
         ItemKind::Mod(definition) => &definition.items,
@@ -573,6 +611,7 @@ fn children<'a>(kind: &'a ItemKind<'_>) -> &'a [OwnerId] {
         _ => &[],
     }
 }
+
 impl fmt::Display for DefinitionBatch<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

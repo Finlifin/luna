@@ -37,6 +37,7 @@ impl DefinitionBatch<'_, '_> {
             charge(fuel)?;
             let parameters = match &definition.info.node.expect_item().kind {
                 ItemKind::Fn(signature, _)
+                | ItemKind::Case(signature, _)
                 | ItemKind::FnDeclaration(signature)
                 | ItemKind::Effect(signature, _) => signature.params,
                 ItemKind::Associated(definition) => definition.parameters,

@@ -151,7 +151,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     .push((span, "function template expansion".into()));
                 owner
             }
-            NodeKind::Function => self.lower_function(node, FnModifiers::default()),
+            NodeKind::Function | NodeKind::CaseDef => {
+                self.lower_function(node, FnModifiers::default())
+            }
             NodeKind::TestDef => self.lower_function(
                 node,
                 FnModifiers {
@@ -291,11 +293,28 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                         self.ast.get_node_kind(cursor),
                         Some(
                             NodeKind::Function
+                                | NodeKind::CaseDef
                                 | NodeKind::FunctionTemplateInstance
                                 | NodeKind::FunctionTemplateInstanceWithParams
                         )
                     )
                 {
+                    if self.ast.get_node_kind(cursor) == Some(NodeKind::CaseDef) {
+                        if modifiers.is_quote {
+                            self.emit_malformed(
+                                "quote modifier is not valid on case declarations",
+                                span,
+                            );
+                            modifiers.is_quote = false;
+                        }
+                        if modifiers.is_unsafe && modifiers.is_comptime {
+                            self.package
+                                .pending_semantics
+                                .push((span, "unsafe staged function admission".into()));
+                        }
+                        modifiers.is_inline = effect_modifiers.is_inline;
+                        return self.lower_function(cursor, modifiers);
+                    }
                     if modifiers.is_quote && modifiers.is_comptime {
                         self.emit_malformed("quote fn is not a comptime fn", span);
                     }
@@ -618,6 +637,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         debug_assert!(matches!(
             kind,
             NodeKind::Function
+                | NodeKind::CaseDef
                 | NodeKind::DeriverDef
                 | NodeKind::AlgebraicEffect
                 | NodeKind::TestDef
@@ -881,7 +901,9 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
         let item = Item {
             owner_id,
             ident,
-            kind: if let Some(trait_ref) = strategy_target {
+            kind: if kind == NodeKind::CaseDef {
+                ItemKind::Case(fn_sig, body_id)
+            } else if let Some(trait_ref) = strategy_target {
                 ItemKind::Deriver(hir::item::DeriverDef {
                     parameters: fn_sig.params,
                     trait_ref,
@@ -1098,8 +1120,10 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
     fn is_wrapped_callable_member(&self, mut node: NodeIndex) -> bool {
         loop {
             match self.ast.get_node_kind(node) {
-                Some(NodeKind::Function | NodeKind::NormalFormHeadDef) => return true,
-                Some(NodeKind::Pub) => {
+                Some(NodeKind::Function | NodeKind::CaseDef | NodeKind::NormalFormHeadDef) => {
+                    return true;
+                }
+                Some(NodeKind::Pub | NodeKind::Private) => {
                     let Some(inner) = self.ast.get_children(node).first() else {
                         return false;
                     };
@@ -1203,6 +1227,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 }
                 Some(
                     NodeKind::Function
+                    | NodeKind::CaseDef
                     | NodeKind::NormalFormHeadDef
                     | NodeKind::TypealiasDef
                     | NodeKind::NewtypeDef
@@ -1226,6 +1251,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                     | NodeKind::StructDef
                                     | NodeKind::EnumDef
                                     | NodeKind::Function
+                                    | NodeKind::CaseDef
                                     | NodeKind::NormalFormHeadDef
                                     | NodeKind::ConstDef
                                     | NodeKind::ConstDecl
@@ -1241,6 +1267,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                             self.ast.get_node_kind(*inner),
                             Some(
                                 NodeKind::Function
+                                    | NodeKind::CaseDef
                                     | NodeKind::NormalFormHeadDef
                                     | NodeKind::TypealiasDef
                                     | NodeKind::NewtypeDef
@@ -1573,6 +1600,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 }
                 Some(
                     NodeKind::Function
+                    | NodeKind::CaseDef
                     | NodeKind::TypealiasDef
                     | NodeKind::NewtypeDef
                     | NodeKind::StructDef
@@ -1593,6 +1621,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                                     | NodeKind::StructDef
                                     | NodeKind::EnumDef
                                     | NodeKind::Function
+                                    | NodeKind::CaseDef
                                     | NodeKind::NormalFormHeadDef
                                     | NodeKind::ConstDef
                                     | NodeKind::ConstDecl
@@ -1608,6 +1637,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                             self.ast.get_node_kind(*inner),
                             Some(
                                 NodeKind::Function
+                                    | NodeKind::CaseDef
                                     | NodeKind::TypealiasDef
                                     | NodeKind::NewtypeDef
                                     | NodeKind::StructDef
@@ -1877,6 +1907,7 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 }
                 Some(
                     NodeKind::Function
+                    | NodeKind::CaseDef
                     | NodeKind::NormalFormHeadDef
                     | NodeKind::AssocDecl
                     | NodeKind::TypealiasDef

@@ -1170,6 +1170,18 @@ fn function_signatures_preserve_parameters_flags_clauses_return_binding_and_body
     let function = tree.list()[3].list()[1].field("node").field("kind");
     assert_eq!(function.tag(), "fn");
     assert_id(function.field("body"), 7, 0);
+    let case_item = Item {
+        owner_id: owner(8),
+        ident: name("view"),
+        kind: ItemKind::Case(sig.clone(), BodyId::new(id(0))),
+        span: DUMMY_SP,
+    };
+    assert_eq!(DefKind::from_item_kind(&case_item.kind), DefKind::Case);
+    let parsed_case = parsed(&case_item);
+    let case_tree = parsed_case.field("kind");
+    assert_eq!(case_tree.tag(), "case");
+    assert_id(case_tree.field("body"), 7, 0);
+    assert_eq!(case_tree.field("signature"), function.field("signature"));
     let signature = function.field("signature");
     signature.field("span").field("lo").atom(4);
     signature.field("span").field("hi").atom(90);

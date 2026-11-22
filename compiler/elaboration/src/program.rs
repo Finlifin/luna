@@ -991,7 +991,9 @@ fn elaborate_candidate<'a, 'h>(
             ItemKind::Associated(def) => def.clause_params,
             ItemKind::Effect(sig, _) => sig.clause_params,
             ItemKind::EffectGroup(group) => group.clause_params,
-            ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => sig.clause_params,
+            ItemKind::Fn(sig, _) | ItemKind::Case(sig, _) | ItemKind::FnDeclaration(sig) => {
+                sig.clause_params
+            }
             _ => continue,
         };
         let parameters = clauses
@@ -1428,6 +1430,12 @@ fn elaborate_candidate<'a, 'h>(
         match &item.kind {
             ItemKind::TestTemplateInstance { .. } => continue,
             ItemKind::Fn(sig, _) if sig.modifiers.is_test_template => continue,
+            ItemKind::Case(..) => {
+                return Err(error(
+                    item.span,
+                    "elaboration is not implemented for case definition",
+                ));
+            }
             ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) => {
                 if checker.is_data_consumer(owner) {
                     checker.ensure_data_consumer(owner, item.span)?;

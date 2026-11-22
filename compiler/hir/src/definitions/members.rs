@@ -7,9 +7,10 @@ use std::collections::BTreeSet;
 /// Only declarations introduce clause identities; template links borrow them.
 pub fn clauses<'hir>(item: &Item<'hir>) -> &'hir [ClauseParam<'hir>] {
     match &item.kind {
-        ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) => {
-            sig.clause_params
-        }
+        ItemKind::Fn(sig, _)
+        | ItemKind::Case(sig, _)
+        | ItemKind::FnDeclaration(sig)
+        | ItemKind::Effect(sig, _) => sig.clause_params,
         ItemKind::Struct(def) => def.clause_params,
         ItemKind::Enum(def) => def.clause_params,
         ItemKind::Associated(def) => def.clause_params,
@@ -35,7 +36,10 @@ pub(super) fn validate(item: &Item<'_>, fuel: &mut usize) -> Result<(), Error> {
         fuel,
     };
     let (params, constraints) = match &item.kind {
-        ItemKind::Fn(sig, _) | ItemKind::FnDeclaration(sig) | ItemKind::Effect(sig, _) => {
+        ItemKind::Fn(sig, _)
+        | ItemKind::Case(sig, _)
+        | ItemKind::FnDeclaration(sig)
+        | ItemKind::Effect(sig, _) => {
             members.parameters(sig.params)?;
             if let Some(id) = sig.return_binding {
                 members.id(id)?;
@@ -149,6 +153,7 @@ struct Members<'a> {
     seen: BTreeSet<ItemLocalId>,
     fuel: &'a mut usize,
 }
+
 impl Members<'_> {
     fn id(&mut self, id: HirId) -> Result<(), Error> {
         charge(self.fuel)?;
@@ -163,12 +168,14 @@ impl Members<'_> {
         }
         Ok(())
     }
+
     fn fields(&mut self, fields: &[FieldDef<'_>]) -> Result<(), Error> {
         for field in fields {
             self.id(field.hir_id)?;
         }
         Ok(())
     }
+
     fn parameters(&mut self, params: &[FnParam<'_>]) -> Result<(), Error> {
         for param in params {
             self.id(param.hir_id)?;
@@ -193,9 +200,11 @@ mod tests {
     fn id(local: u32) -> HirId {
         HirId::new(OwnerId::new(LocalDefId::new(1)), ItemLocalId::new(local))
     }
+
     fn name() -> Ident {
         Ident::new(Symbol::intern("p"), DUMMY_SP)
     }
+
     fn item(kind: ItemKind<'_>) -> Item<'_> {
         Item {
             owner_id: id(0).owner,
@@ -204,6 +213,7 @@ mod tests {
             span: DUMMY_SP,
         }
     }
+
     fn parameter() -> FnParam<'static> {
         FnParam {
             template_annotation: None,
@@ -219,6 +229,7 @@ mod tests {
             span: DUMMY_SP,
         }
     }
+
     #[test]
     fn parameter_mirrors_and_return_binding_are_checked() {
         let param = parameter();
@@ -257,6 +268,7 @@ mod tests {
         sig.return_binding = Some(id(1));
         assert!(validate(&item(ItemKind::FnDeclaration(sig)), &mut 20).is_err());
     }
+
     #[test]
     fn explicit_template_parameters_mirror_bindings_and_allow_foreign_formals() {
         let param = parameter();
@@ -300,6 +312,7 @@ mod tests {
         }
         assert!(validate(&with_port, &mut 30).is_err());
     }
+
     #[test]
     fn nested_variants_share_identity_namespace_and_budget() {
         let leaf = Variant {
@@ -406,6 +419,51 @@ mod tests {
         assert!(validate(&make(&valid), &mut 10).is_ok());
         assert_eq!(
             validate(&make(&duplicate), &mut 10).unwrap_err().kind,
+            "duplicate declaration member identity"
+        );
+    }
+
+    #[test]
+    fn case_members_validate_parameters_return_binding_and_clauses() {
+        let param = parameter();
+        let make = |return_binding, clause_params| {
+            item(ItemKind::Case(
+                FnSig {
+                    params: std::slice::from_ref(&param),
+                    return_ty: None,
+                    return_bind: Some(name()),
+                    return_binding,
+                    modifiers: FnModifiers::default(),
+                    clause_params,
+                    clause_constraints: &[],
+                    span: DUMMY_SP,
+                },
+                BodyId { hir_id: id(0) },
+            ))
+        };
+        let clause = ClauseParam {
+            hir_id: id(3),
+            definition: None,
+            name: name(),
+            kind: ClauseParamKind::Type(name()),
+            span: DUMMY_SP,
+        };
+        assert!(validate(&make(Some(id(2)), std::slice::from_ref(&clause)), &mut 20).is_ok());
+        assert_eq!(
+            validate(&make(Some(id(1)), &[]), &mut 20).unwrap_err().kind,
+            "duplicate declaration member identity"
+        );
+        let duplicate_clause = ClauseParam {
+            hir_id: id(2),
+            ..clause.clone()
+        };
+        assert_eq!(
+            validate(
+                &make(Some(id(2)), std::slice::from_ref(&duplicate_clause)),
+                &mut 20
+            )
+            .unwrap_err()
+            .kind,
             "duplicate declaration member identity"
         );
     }

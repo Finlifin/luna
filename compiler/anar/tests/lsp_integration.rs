@@ -519,3 +519,135 @@ pub fn keep_raw(a:i32)->i32{a}
     let ws_syms = analyzer.workspace_symbols("messy");
     assert!(!ws_syms.is_empty());
 }
+
+#[test]
+fn lsp_case_definitions_outline_hover_definition_and_references() {
+    let tmp = TempDir::new("case_defs");
+    let src = "\
+struct Value {} struct Student {
+    name: Value,
+    age: Value,
+
+    -- Match adult students.
+    pub case adult(*self) -> ?Value {
+        if true { self.age } else { null }
+    }
+}
+
+impl Student {
+    case minor(*self) -> ?Value {
+        if false { self.age } else { null }
+    }
+}
+
+fn classify(student: Student) -> ?Value {
+    student match {
+        .adult(age) => age,
+        .minor(age) => age,
+        _ => null,
+    }
+}
+";
+    let path = tmp.write("cases.fl", src);
+    let uri = path_to_uri(&path);
+
+    let mut analyzer = anar::WorkspaceAnalyzer::new(None);
+    analyzer.open_document(&uri, 1, src.to_owned());
+    assert!(
+        analyzer.diagnostics_for(&path).is_empty(),
+        "valid case definitions should have 0 diagnostics: {:?}",
+        analyzer.diagnostics_for(&path)
+    );
+
+    let symbols = analyzer.document_symbols(&path);
+    let student_sym = symbols
+        .iter()
+        .find(|s| s.get_str("name") == Some("Student"))
+        .expect("Student in document symbols");
+    let student_children = student_sym
+        .get_array("children")
+        .expect("Student children in outline");
+    let adult_sym = student_children
+        .iter()
+        .find(|c| c.get_str("name") == Some("adult"))
+        .expect("case adult in Student outline");
+    assert_eq!(adult_sym.get_u32("kind"), Some(22));
+    let impl_sym = symbols
+        .iter()
+        .find(|s| {
+            s.get_str("name")
+                .is_some_and(|name| name.contains("impl Student"))
+        })
+        .expect("impl Student in document symbols");
+    let minor_sym = impl_sym
+        .get_array("children")
+        .expect("impl children")
+        .iter()
+        .find(|c| c.get_str("name") == Some("minor"))
+        .expect("case minor in impl outline");
+    assert_eq!(minor_sym.get_u32("kind"), Some(22));
+
+    // Line 18: `        .adult(age) => age,` -> col 10 is inside `.adult`
+    let defs = analyzer.goto_definition(&path, anar::LspPosition::new(18, 10));
+    assert_eq!(defs.len(), 1, "goto_definition on .adult: {defs:?}");
+    let def_line = defs[0]
+        .get("range")
+        .unwrap()
+        .get("start")
+        .unwrap()
+        .get_u32("line");
+    assert_eq!(
+        def_line,
+        Some(5),
+        "expected jump to line 5 `pub case adult`"
+    );
+
+    let hover = analyzer
+        .hover(&path, anar::LspPosition::new(18, 10))
+        .expect("hover on .adult");
+    let hover_md = hover.get("contents").unwrap().get_str("value").unwrap();
+    assert!(
+        hover_md.contains("case adult(*self) -> ?Value"),
+        "unexpected hover signature: {hover_md}"
+    );
+    assert!(
+        hover_md.contains("Match adult students."),
+        "missing doc comment on case hover: {hover_md}"
+    );
+
+    let refs = analyzer.find_references(&path, anar::LspPosition::new(5, 14), true);
+    assert_eq!(refs.len(), 2, "expected decl + match reference: {refs:?}");
+
+    // Line 19: `        .minor(age) => age,` -> col 10 is inside `.minor` (impl case)
+    let minor_defs = analyzer.goto_definition(&path, anar::LspPosition::new(19, 10));
+    assert_eq!(
+        minor_defs.len(),
+        1,
+        "goto_definition on .minor: {minor_defs:?}"
+    );
+    assert_eq!(
+        minor_defs[0]
+            .get("range")
+            .unwrap()
+            .get("start")
+            .unwrap()
+            .get_u32("line"),
+        Some(11)
+    );
+
+    // Lexical fallback outline also recognizes `case` in an unparseable buffer.
+    let broken_path = tmp.write(
+        "broken_case.fl",
+        "struct Value {} struct Broken {\n    case view(*self) -> ?Value {\n        return null;\n    \n",
+    );
+    let broken_uri = path_to_uri(&broken_path);
+    let broken_text = fs::read_to_string(&broken_path).unwrap();
+    analyzer.open_document(&broken_uri, 1, broken_text);
+    let fallback_syms = analyzer.document_symbols(&broken_path);
+    assert!(
+        fallback_syms
+            .iter()
+            .any(|s| s.get_str("name") == Some("view") && s.get_u32("kind") == Some(22)),
+        "expected lexical fallback case symbol: {fallback_syms:?}"
+    );
+}

@@ -95,6 +95,7 @@ impl<'a> AstScanner<'a> {
                 | NodeKind::FunctionTemplateInstance
                 | NodeKind::FunctionTemplateInstanceWithParams
                 | NodeKind::Function
+                | NodeKind::CaseDef
                 | NodeKind::DeriverDef
                 | NodeKind::AssocDecl
                 | NodeKind::NormalFormHeadDef
@@ -209,6 +210,7 @@ impl<'a> AstScanner<'a> {
             _ => Some(vec![self.trait_parent_path(node, depth + 1)?]),
         }
     }
+
     fn trait_parent_path(
         &self,
         node: NodeIndex,
@@ -354,7 +356,7 @@ impl<'a> AstScanner<'a> {
         );
         if matches!(
             self.ast.get_node_kind(item),
-            Some(NodeKind::Function | NodeKind::DeriverDef)
+            Some(NodeKind::Function | NodeKind::CaseDef | NodeKind::DeriverDef)
         ) {
             let entries = self.ast.get_children(item)[1];
             let mut parameters = Vec::new();
@@ -524,7 +526,12 @@ impl<'a> AstScanner<'a> {
             self.scan_clauses(scope_id, def_id, item, 3)?;
         } else if matches!(
             self.ast.get_node_kind(item),
-            Some(NodeKind::Function | NodeKind::DeriverDef | NodeKind::AlgebraicEffect)
+            Some(
+                NodeKind::Function
+                    | NodeKind::CaseDef
+                    | NodeKind::DeriverDef
+                    | NodeKind::AlgebraicEffect
+            )
         ) {
             self.scan_clauses(scope_id, def_id, item, 3)?;
         } else {
@@ -533,7 +540,7 @@ impl<'a> AstScanner<'a> {
 
         if matches!(
             self.ast.get_node_kind(item),
-            Some(NodeKind::Function | NodeKind::DeriverDef)
+            Some(NodeKind::Function | NodeKind::CaseDef | NodeKind::DeriverDef)
         ) {
             // Defaults and annotations contain ordinary lexical blocks too.
             // Register their local definitions before HIR resolves the signature;

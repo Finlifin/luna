@@ -709,7 +709,7 @@ impl<'a, 'h> Reads<'a, 'h> {
             }
         }
         match &item.kind {
-            ItemKind::Fn(sig, body) => {
+            ItemKind::Fn(sig, body) | ItemKind::Case(sig, body) => {
                 self.push(Node::Signature(sig))?;
                 self.push(Node::Body(*body))?;
             }
