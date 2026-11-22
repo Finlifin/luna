@@ -1,4 +1,4 @@
-//! A straight-line generator prefix can describe a fresh struct before it
+//! Checked generator statements can describe a fresh struct before it
 //! exists. Its rigid Type and layout are scoped to definition checking.
 use super::*;
 use std::sync::Arc;
@@ -52,14 +52,11 @@ impl Checker<'_, '_> {
     pub(in crate::program) fn with_schema_statement<R>(
         &mut self,
         sequence: &mut SchemaSequence,
-        mut statement: &Expr<'_>,
+        statement: &Expr<'_>,
         check: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> Result<R, Error> {
         if !self.checking_code_generator {
             return check(self);
-        }
-        while let H::Semi(value) = statement.kind {
-            statement = value;
         }
         let site = match &statement.kind {
             // A computed annotation or pattern can call user code outside the
@@ -100,6 +97,87 @@ impl Checker<'_, '_> {
             *sequence = step.sequence;
         }
         result
+    }
+
+    pub(in crate::program) fn fork_generator_branch(
+        &mut self,
+        sequence: &mut SchemaSequence,
+        condition: Option<&n::Expr>,
+        span: Span,
+    ) -> Result<SchemaSequence, Error> {
+        self.schema_fuel(span, |_, fuel| {
+            if let Some(condition) = condition
+                && !super::structural_calls::structural_operand(
+                    condition,
+                    Some(&sequence.frame),
+                    fuel,
+                )?
+            {
+                *sequence = SchemaSequence::default();
+            }
+            Ok(SchemaSequence {
+                frame: sequence.frame.fork(fuel)?,
+            })
+        })
+    }
+
+    pub(in crate::program) fn join_generator_schemas(
+        &mut self,
+        yes: &mut SchemaSequence,
+        no: SchemaSequence,
+        yes_continues: bool,
+        no_continues: bool,
+        span: Span,
+    ) -> Result<(), Error> {
+        match (yes_continues, no_continues) {
+            (true, false) => {}
+            (false, true) => *yes = no,
+            (false, false) => *yes = SchemaSequence::default(),
+            (true, true) => self.schema_fuel(span, |this, fuel| {
+                let left = std::mem::take(yes);
+                for (binding, value) in left.frame.values {
+                    *fuel = fuel
+                        .checked_sub(1)
+                        .ok_or("generator schema join budget exhausted")?;
+                    if let Some(other) = no.frame.values.get(&binding) {
+                        let common = if Arc::ptr_eq(&value, other) {
+                            value
+                        } else {
+                            PartialStagedValue::common(
+                                &value,
+                                other,
+                                this.protocols.meta_list,
+                                0,
+                                fuel,
+                            )?
+                        };
+                        yes.frame.insert(binding, common, fuel)?;
+                    }
+                }
+                Ok(())
+            })?,
+        }
+        Ok(())
+    }
+
+    pub(in crate::program) fn retain_visible_schema(
+        &mut self,
+        sequence: &mut SchemaSequence,
+        span: Span,
+    ) -> Result<(), Error> {
+        let frame = &mut sequence.frame;
+        self.schema_fuel(span, |this, fuel| {
+            *fuel = fuel
+                .checked_sub(frame.values.len().saturating_add(frame.known.len()))
+                .ok_or("generator schema scope budget exhausted")?;
+            frame
+                .values
+                .retain(|id, _| this.generator_data.contains_key(id));
+            frame
+                .known
+                .retain(|id, _| this.generator_data.contains_key(id));
+            Ok(())
+        })
     }
 
     pub(in crate::program) fn observe_schema_step(

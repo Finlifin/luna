@@ -191,28 +191,29 @@ impl Checker<'_, '_> {
         }
         Ok(Control::Abstract(previous))
     }
-    pub(super) fn generator_statement(
-        &mut self,
-        value: &Expr<'_>,
-        interface: Option<&Interface>,
-        result_context: Option<&crate::calls::InputContext>,
-        depth: usize,
-        loops: &mut Vec<n::LocalId>,
-    ) -> Result<Control, Error> {
-        self.generator_statement_with_result(
-            value,
-            ResultInterface::Expression(interface, result_context),
-            depth,
-            loops,
-        )
-    }
-
     pub(in crate::program::cmtt) fn generator_statement_with_result(
         &mut self,
         value: &Expr<'_>,
         interface: ResultInterface<'_>,
         depth: usize,
         loops: &mut Vec<n::LocalId>,
+    ) -> Result<Control, Error> {
+        self.generator_statement_in_sequence(
+            value,
+            interface,
+            depth,
+            loops,
+            &mut Default::default(),
+        )
+    }
+
+    pub(super) fn generator_statement_in_sequence(
+        &mut self,
+        value: &Expr<'_>,
+        interface: ResultInterface<'_>,
+        depth: usize,
+        loops: &mut Vec<n::LocalId>,
+        sequence: &mut constants::SchemaSequence,
     ) -> Result<Control, Error> {
         if depth >= 64 {
             return Err(error(
@@ -226,8 +227,145 @@ impl Checker<'_, '_> {
             .ok_or_else(|| error(value.span, "generator construction step budget exhausted"))?;
         match &value.kind {
             H::Semi(inner) => {
-                self.generator_statement_with_result(inner, interface, depth + 1, loops)
+                self.generator_statement_in_sequence(inner, interface, depth + 1, loops, sequence)
             }
+            H::InlineControl(inner)
+                if matches!(inner.kind, H::If(..) | H::When(..) | H::Match(..)) =>
+            {
+                self.generator_statement_in_sequence(inner, interface, depth + 1, loops, sequence)
+            }
+            H::Block(block) => {
+                self.generator_block_in_sequence(block, interface, depth + 1, loops, sequence)
+            }
+            H::If(condition, yes, no) => {
+                if self.checking_code_generator {
+                    let (selected, mut alternative) =
+                        self.check_schema_condition(Some(condition), sequence, condition.span)?;
+                    let yes = self.generator_block_in_sequence(
+                        yes,
+                        interface,
+                        depth + 1,
+                        loops,
+                        sequence,
+                    )?;
+                    let no = if let Some(no) = no {
+                        self.generator_statement_in_sequence(
+                            no,
+                            interface,
+                            depth + 1,
+                            loops,
+                            &mut alternative,
+                        )?
+                    } else {
+                        Control::Next
+                    };
+                    let yes = yes.flow();
+                    let no = no.flow();
+                    self.join_generator_schemas(
+                        sequence,
+                        alternative,
+                        yes.next && selected != Some(false),
+                        no.next && selected != Some(true),
+                        value.span,
+                    )?;
+                    Ok(Control::Abstract(match selected {
+                        Some(true) => yes,
+                        Some(false) => no,
+                        None => self.join_generator_flows(yes, no, value.span)?,
+                    }))
+                } else {
+                    let (condition_value, _) =
+                        self.generator_data_expression(condition, Some(&p(P::Bool)))?;
+                    match condition_value {
+                        comptime_interpretor::Value::Bool(true) => {
+                            self.generator_statement_block(yes, interface, depth + 1, loops)
+                        }
+                        comptime_interpretor::Value::Bool(false) => match no {
+                            Some(no) => self.generator_statement_with_result(
+                                no,
+                                interface,
+                                depth + 1,
+                                loops,
+                            ),
+                            None => Ok(Control::Next),
+                        },
+                        _ => Err(error(
+                            condition.span,
+                            "generator branch requires a comptime boolean",
+                        )),
+                    }
+                }
+            }
+            H::When(arms) => {
+                let mut exits = constants::SchemaSequence::default();
+                let mut flow = Flow::default();
+                let mut pending = true;
+                for arm in *arms {
+                    if self.checking_code_generator {
+                        let (selected, mut branch) =
+                            self.check_schema_condition(arm.cond, sequence, arm.span)?;
+                        let control = self.generator_scope(arm.span, |this| {
+                            this.generator_statement_in_sequence(
+                                arm.body,
+                                interface,
+                                depth + 1,
+                                loops,
+                                &mut branch,
+                            )
+                        })?;
+                        if pending && selected != Some(false) {
+                            self.retain_visible_schema(&mut branch, arm.span)?;
+                            let arm_flow = control.flow();
+                            self.join_generator_schemas(
+                                &mut exits,
+                                branch,
+                                flow.next,
+                                arm_flow.next,
+                                arm.span,
+                            )?;
+                            flow = self.join_generator_flows(flow, arm_flow, arm.span)?;
+                        }
+                        pending &= selected != Some(true);
+                    } else if self.generator_when_condition(arm.cond)? == Some(true) {
+                        return self.generator_scope(arm.span, |this| {
+                            this.generator_statement_with_result(
+                                arm.body,
+                                interface,
+                                depth + 1,
+                                loops,
+                            )
+                        });
+                    }
+                }
+                if self.checking_code_generator {
+                    self.join_generator_schemas(
+                        &mut exits,
+                        std::mem::take(sequence),
+                        flow.next,
+                        pending,
+                        value.span,
+                    )?;
+                    *sequence = exits;
+                    flow.next |= pending;
+                    Ok(Control::Abstract(flow))
+                } else {
+                    Ok(Control::Next)
+                }
+            }
+            _ => self.with_schema_statement(sequence, value, |this| {
+                this.generator_leaf_statement(value, interface, depth, loops)
+            }),
+        }
+    }
+
+    fn generator_leaf_statement(
+        &mut self,
+        value: &Expr<'_>,
+        interface: ResultInterface<'_>,
+        depth: usize,
+        loops: &mut Vec<n::LocalId>,
+    ) -> Result<Control, Error> {
+        match &value.kind {
             H::Let(decl) if decl.otherwise.is_some() => {
                 self.generator_conditional_binding(value, decl, interface, depth + 1, loops)
             }
@@ -253,94 +391,8 @@ impl Checker<'_, '_> {
                 self.assign_generator_binding(target, &expression, depth + 1)?;
                 Ok(Control::Next)
             }
-            H::InlineControl(inner)
-                if matches!(inner.kind, H::If(..) | H::When(..) | H::Match(..)) =>
-            {
-                self.generator_statement_with_result(inner, interface, depth + 1, loops)
-            }
             H::InlineControl(inner) if matches!(inner.kind, H::For { .. }) => {
                 self.generator_inline_range(inner, interface, depth + 1, loops)
-            }
-            H::Block(block) => self.generator_statement_block(block, interface, depth + 1, loops),
-            H::If(condition, yes, no) => {
-                if self.checking_code_generator {
-                    let condition_ir = self.expr(condition, Some(&p(P::Bool)))?;
-                    self.validate_generator_data(&condition_ir, condition.span)?;
-                    let yes = self.generator_statement_block(yes, interface, depth + 1, loops)?;
-                    let no = if let Some(no) = no {
-                        self.generator_statement_with_result(no, interface, depth + 1, loops)?
-                    } else {
-                        Control::Next
-                    };
-                    match known_boolean(&condition_ir, 0) {
-                        Some(true) => Ok(yes),
-                        Some(false) => Ok(no),
-                        None => Ok(Control::Abstract(self.join_generator_flows(
-                            yes.flow(),
-                            no.flow(),
-                            value.span,
-                        )?)),
-                    }
-                } else {
-                    let (condition_value, _) =
-                        self.generator_data_expression(condition, Some(&p(P::Bool)))?;
-                    match condition_value {
-                        comptime_interpretor::Value::Bool(true) => {
-                            self.generator_statement_block(yes, interface, depth + 1, loops)
-                        }
-                        comptime_interpretor::Value::Bool(false) => match no {
-                            Some(no) => self.generator_statement_with_result(
-                                no,
-                                interface,
-                                depth + 1,
-                                loops,
-                            ),
-                            None => Ok(Control::Next),
-                        },
-                        _ => Err(error(
-                            condition.span,
-                            "generator branch requires a comptime boolean",
-                        )),
-                    }
-                }
-            }
-            H::When(arms) => {
-                let mut flow = Flow::default();
-                let mut pending = true;
-                for arm in *arms {
-                    let selected = self.generator_when_condition(arm.cond)?;
-                    if self.checking_code_generator {
-                        let control = self.generator_scope(arm.span, |this| {
-                            this.generator_statement_with_result(
-                                arm.body,
-                                interface,
-                                depth + 1,
-                                loops,
-                            )
-                        })?;
-                        if pending && selected != Some(false) {
-                            flow = self.join_generator_flows(flow, control.flow(), arm.span)?;
-                        }
-                        if selected == Some(true) {
-                            pending = false;
-                        }
-                    } else if selected == Some(true) {
-                        return self.generator_scope(arm.span, |this| {
-                            this.generator_statement_with_result(
-                                arm.body,
-                                interface,
-                                depth + 1,
-                                loops,
-                            )
-                        });
-                    }
-                }
-                if self.checking_code_generator {
-                    flow.next |= pending;
-                    Ok(Control::Abstract(flow))
-                } else {
-                    Ok(Control::Next)
-                }
             }
             H::Match(subject, arms) => {
                 let controls =
@@ -999,6 +1051,28 @@ impl Checker<'_, '_> {
         result
     }
 
+    fn check_generator_condition(&mut self, condition: &Expr<'_>) -> Result<n::Expr, Error> {
+        let checked = self.expr(condition, Some(&p(P::Bool)))?;
+        self.validate_generator_data(&checked, condition.span)?;
+        Ok(checked)
+    }
+
+    fn check_schema_condition(
+        &mut self,
+        condition: Option<&Expr<'_>>,
+        sequence: &mut constants::SchemaSequence,
+        span: Span,
+    ) -> Result<(Option<bool>, constants::SchemaSequence), Error> {
+        let checked = condition
+            .map(|expr| self.check_generator_condition(expr))
+            .transpose()?;
+        let selected = checked
+            .as_ref()
+            .map_or(Some(true), |expr| known_boolean(expr, 0));
+        let alternative = self.fork_generator_branch(sequence, checked.as_ref(), span)?;
+        Ok((selected, alternative))
+    }
+
     pub(in crate::program::cmtt) fn generator_when_condition(
         &mut self,
         condition: Option<&Expr<'_>>,
@@ -1007,9 +1081,10 @@ impl Checker<'_, '_> {
             return Ok(Some(true));
         };
         if self.checking_code_generator {
-            let checked = self.expr(condition, Some(&p(P::Bool)))?;
-            self.validate_generator_data(&checked, condition.span)?;
-            Ok(known_boolean(&checked, 0))
+            Ok(known_boolean(
+                &self.check_generator_condition(condition)?,
+                0,
+            ))
         } else {
             let (value, _) = self.generator_data_expression(condition, Some(&p(P::Bool)))?;
             match value {
@@ -1228,11 +1303,27 @@ impl Checker<'_, '_> {
         depth: usize,
         loops: &mut Vec<n::LocalId>,
     ) -> Result<Control, Error> {
-        self.generator_scope(block.span, |this| {
+        self.generator_block_in_sequence(block, interface, depth, loops, &mut Default::default())
+    }
+
+    fn generator_block_in_sequence(
+        &mut self,
+        block: &hir::Block<'_>,
+        interface: ResultInterface<'_>,
+        depth: usize,
+        loops: &mut Vec<n::LocalId>,
+        sequence: &mut constants::SchemaSequence,
+    ) -> Result<Control, Error> {
+        let result = self.generator_scope(block.span, |this| {
             let mut result = Control::Next;
             for value in block.stmts.iter().chain(block.expr.into_iter()) {
-                let control =
-                    this.generator_statement_with_result(value, interface, depth + 1, loops)?;
+                let control = this.generator_statement_in_sequence(
+                    value,
+                    interface,
+                    depth + 1,
+                    loops,
+                    sequence,
+                )?;
                 if this.checking_code_generator {
                     result = this.sequence_generator_control(result, control, value.span)?;
                 } else if !matches!(control, Control::Next) {
@@ -1240,6 +1331,8 @@ impl Checker<'_, '_> {
                 }
             }
             Ok(result)
-        })
+        })?;
+        self.retain_visible_schema(sequence, block.span)?;
+        Ok(result)
     }
 }

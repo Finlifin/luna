@@ -11581,3 +11581,64 @@ fn generated_struct_layout_is_independent_of_its_supplied_name() {
         Value::Bool(true)
     );
 }
+
+#[test]
+fn generator_joins_builder_fields_from_continuing_branches() {
+    let source = r#"
+        comptime fn generate(flag: bool) -> < |- bool > {
+            var builder = meta.StructBuilder.new(.name = .Joined);
+            if flag {
+                let label: Symbol = .active;
+                builder.add_field(label, bool);
+            } else {
+                builder.add_field(.active, bool);
+            }
+            builder.add_field(.extra, bool);
+            let T = builder.Build();
+            '(T { active: true, extra: false }.active)
+        }
+        fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+
+    let returning = source.replace("builder.add_field(.active, bool);", "return '(true);");
+    assert_eq!(sysroot::run(&returning), Value::Bool(true));
+
+    let unused = source.replace("~<generate(true)> and ~<generate(false)>", "true");
+    for different in ["builder.add_field(.other, bool);", "builder.add_field(.active, char);", ""] {
+        let invalid = unused.replace("builder.add_field(.active, bool);", different);
+        let failure = sysroot::compile(&invalid).unwrap_err();
+        assert!(failure.contains("result identity known during definition checking"), "{failure}");
+    }
+}
+
+#[test]
+fn generator_when_joins_fallthrough_without_replaying_selectors() {
+    let source = r#"
+        comptime fn generate(flag: bool) -> < |- bool > {
+            var builder = meta.StructBuilder.new(.name = .Selected);
+            builder.add_field(.base, bool);
+            when {
+                not flag => { builder.add_field(.active, bool); },
+                true => { builder.add_field(.active, bool); },
+                else => { builder.add_field(.unreachable, char); },
+            }
+            let T = builder.Build();
+            '(T { base: true, active: true }.active)
+        }
+        fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+
+    let unused = source.replace("~<generate(true)> and ~<generate(false)>", "true");
+    let effectful_guard = unused.replace(
+        "not flag =>",
+        "do { builder = meta.StructBuilder.new(.name = .Empty); not flag } =>",
+    );
+    let missing_arm = unused.replace("true => { builder.add_field(.active, bool); },", "")
+        .replace("else => { builder.add_field(.unreachable, char); },", "");
+    for invalid in [effectful_guard, missing_arm] {
+        let failure = sysroot::compile(&invalid).unwrap_err();
+        assert!(failure.contains("result identity known during definition checking"), "{failure}");
+    }
+}

@@ -1710,9 +1710,10 @@ impl Checker<'_, '_> {
             let mut control = Control::Next;
             let mut sequence = constants::SchemaSequence::default();
             for statement in block.stmts {
-                let next = this.with_schema_statement(&mut sequence, statement, |this| {
-                    this.generator_statement(statement, interface, result_context, depth + 1, &mut loops)
-                })?;
+                let next = this.generator_statement_in_sequence(
+                    statement, statements::ResultInterface::Expression(interface, result_context),
+                    depth + 1, &mut loops, &mut sequence,
+                )?;
                 if this.checking_code_generator {
                     control = this.sequence_generator_control(control, next, statement.span)?;
                 } else {
@@ -1749,7 +1750,10 @@ impl Checker<'_, '_> {
                     || matches!(control_expr.kind, H::When(arms) if !arms.iter().any(|arm| arm.cond.is_none()))
                     || matches!(control_expr.kind, H::Match(..) | H::When(..)) && !this.code_producer(value)?
                 {
-                    this.generator_statement(value, interface, result_context, depth + 1, &mut loops)?
+                    this.generator_statement_in_sequence(
+                        value, statements::ResultInterface::Expression(interface, result_context),
+                        depth + 1, &mut loops, &mut sequence,
+                    )?
                 } else {
                     Control::Return(this.code_value_in_context(value, interface, result_context, depth + 1)?)
                 };

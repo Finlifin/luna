@@ -418,6 +418,14 @@ pub(super) fn structural_operand(
                 | K::TypeListIndex(..)
                 | K::ListConcat(..)
                 | K::ListLength(_)
+                | K::Not(_)
+                | K::And(..)
+                | K::Or(..)
+                | K::ScalarEqual(..)
+                | K::ScalarLess(..)
+                | K::ScalarLessEqual(..)
+                | K::ScalarGreater(..)
+                | K::ScalarGreaterEqual(..)
         );
         Ok(transparent)
     })?;
