@@ -567,8 +567,8 @@ fn direct_passing_effect_attribute_aliases_overrides_and_validation() {
     let case = NativeCase::new(valid);
     let llvm = case.emit_llvm().unwrap();
     assert!(
-        llvm.contains("(i64 %effect0, i64 %effect1)")
-            && llvm.contains("(ptr %effect0_entry, ptr %effect0_env)"),
+        llvm.contains("(i64 %effect0, i64 %effect1, ptr %task)")
+            && llvm.contains("(ptr %effect0_entry, ptr %effect0_env, ptr %task)"),
         "{llvm}"
     );
     assert_success(&case.build("0"));
