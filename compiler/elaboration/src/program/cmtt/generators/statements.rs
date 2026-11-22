@@ -207,7 +207,7 @@ impl Checker<'_, '_> {
         )
     }
 
-    pub(super) fn generator_statement_in_sequence(
+    pub(in crate::program::cmtt) fn generator_statement_in_sequence(
         &mut self,
         value: &Expr<'_>,
         interface: ResultInterface<'_>,

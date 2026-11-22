@@ -11642,3 +11642,32 @@ fn generator_when_joins_fallthrough_without_replaying_selectors() {
         assert!(failure.contains("result identity known during definition checking"), "{failure}");
     }
 }
+
+#[test]
+fn contextual_pattern_and_data_bodies_share_branch_field_evidence() {
+    let make = "var builder = meta.StructBuilder.new(.name = .Scoped);
+        if choice {builder.add_field(.active, bool);} else {builder.add_field(.active, bool);}
+        let T = builder.Build();";
+    let source = format!(
+        "comptime fn select(choice: bool) -> <bool -| found:bool> {{
+            {make}
+            '<(_ and T {{ active: true }}.active is found)>
+        }}
+        comptime fn inspect(input: <|-bool>, choice: bool) -> bool {{
+            {make}
+            let projection: <|-bool> = '(T {{ active: false }}.active);
+            true
+        }}
+        fn run() -> bool {{
+            const valid = inspect('(true), false);
+            const pat = select(true);
+            valid and (false match {{ ~<pat> => found, _ => false }})
+        }}"
+    );
+    assert_eq!(sysroot::run(&source), Value::Bool(true));
+    for initializer in ["active: true", "active: false"] {
+        let invalid = source.replace(initializer, "other: true");
+        let failure = sysroot::compile(&invalid).unwrap_err();
+        assert!(failure.contains("unknown struct field other"), "{failure}");
+    }
+}

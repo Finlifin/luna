@@ -599,12 +599,14 @@ impl Checker<'_, '_> {
         self.generator_scope(block.span, |this| {
             let mut control = Control::Next;
             let mut loops = Vec::new();
+            let mut sequence = Default::default();
             for statement in block.stmts {
-                let next = this.generator_statement_with_result(
+                let next = this.generator_statement_in_sequence(
                     statement,
                     ResultInterface::Data(ty),
                     depth + 1,
                     &mut loops,
+                    &mut sequence,
                 )?;
                 if this.checking_code_generator {
                     control = this.sequence_generator_control(control, next, statement.span)?;

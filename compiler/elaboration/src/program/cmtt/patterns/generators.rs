@@ -1432,13 +1432,15 @@ impl Checker<'_, '_> {
         use crate::program::cmtt::generators::statements::{Control, ResultInterface};
         self.generator_scope(block.span, |this| {
             let mut loops = Vec::new();
+            let mut sequence = Default::default();
             let mut control = Control::Next;
             for statement in block.stmts {
-                let next = this.generator_statement_with_result(
+                let next = this.generator_statement_in_sequence(
                     statement,
                     ResultInterface::Pattern(definition, subject, input_context),
                     depth + 1,
                     &mut loops,
+                    &mut sequence,
                 )?;
                 if this.checking_code_generator {
                     control = this.sequence_generator_control(control, next, statement.span)?;
@@ -1475,11 +1477,12 @@ impl Checker<'_, '_> {
                         | H::For { .. }
                 );
                 let next = if statement {
-                    this.generator_statement_with_result(
+                    this.generator_statement_in_sequence(
                         tail,
                         ResultInterface::Pattern(definition, subject, input_context),
                         depth + 1,
                         &mut loops,
+                        &mut sequence,
                     )?
                 } else {
                     Control::PatternReturn(this.pattern_generator_value_inferred(
