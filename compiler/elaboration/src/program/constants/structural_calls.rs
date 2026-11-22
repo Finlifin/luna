@@ -6,6 +6,7 @@ use std::sync::Arc;
 mod arguments;
 mod flow;
 mod instances;
+mod matching;
 use flow::{Completion, FactoryExit};
 
 impl Checker<'_, '_> {

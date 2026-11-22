@@ -12027,3 +12027,102 @@ fn factory_call_specializes_the_forwarded_instances_default() {
     let failure = sysroot::compile(&wrong).unwrap_err();
     assert!(failure.contains("unknown struct field first"), "{failure}");
 }
+
+#[test]
+fn factory_match_observes_failed_guards_before_later_arms() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Cell { item: Type }
+        comptime fn inspect(flag: bool) -> Cell {
+            var cell = Cell { item: Before };
+            flag match {
+                true if do { cell.item = After; false } => Cell { item: Before },
+                true => cell,
+                false => Cell { item: After },
+            }
+        }
+        comptime fn generate(flag: bool) -> <|-bool> {
+            let packet = inspect(flag);
+            let A = packet.item;
+            '(A { second: true }.second)
+        }
+        fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let characters = source
+        .replace("flag: bool", "flag: char")
+        .replace("true if", "'a' if")
+        .replace("true => cell", "'a' => cell")
+        .replace("false => Cell", "_ => Cell")
+        .replace("generate(true)", "generate('a')")
+        .replace("generate(false)", "generate('b')");
+    assert_eq!(sysroot::run(&characters), Value::Bool(true));
+    let unused = source.replace("~<generate(true)> and ~<generate(false)>", "true");
+    for bad in [
+        unused.replace("cell.item = After", "cell.item = Before"),
+        unused.replace("false => Cell { item: After }", "false => Cell { item: Before }"),
+        unused.replace("cell.item = After; false", "cell.item = After; true"),
+    ] {
+        let error = sysroot::compile(&bad).unwrap_err();
+        assert!(error.contains("identity") || error.contains("field"), "{error}");
+    }
+}
+
+#[test]
+fn factory_match_keeps_pattern_bindings_and_guard_returns_in_scope() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Packet { item: Type }
+        comptime fn describe(flag: bool) -> Packet {
+            (flag, After) match {
+                (x, t) if do { if x { return Packet { item: t }; } false } => Packet { item: Before },
+                (_, t) => Packet { item: t },
+            }
+        }
+        comptime fn generate(flag: bool) -> <|-bool> {
+            let p = describe(flag);
+            let A = p.item;
+            '(A { second: true }.second)
+        }
+        fn run() -> bool { ~<generate(false)> and ~<generate(true)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let unused = source.replace("~<generate(false)> and ~<generate(true)>", "true");
+    let bad = unused.replace("return Packet { item: t }", "return Packet { item: Before }");
+    let error = sysroot::compile(&bad).unwrap_err();
+    assert!(error.contains("identity") || error.contains("field"), "{error}");
+}
+
+#[test]
+fn factory_match_preserves_computed_field_writes_across_or_candidates() {
+    let source = r#"
+        struct Before { first: bool }
+        struct After { second: bool }
+        struct Packet { item: Type, seen: Type }
+        comptime fn inspect(flag: bool) -> Packet {
+            var observed = Before;
+            (Before, After, flag) match {
+                (t and (do { observed = After; false }) is true, _, _) or (_, t, _) =>
+                    Packet { item: t, seen: observed },
+            }
+        }
+        comptime fn generate(flag: bool) -> <|-bool> {
+            let p = inspect(flag);
+            let A = p.item;
+            let B = p.seen;
+            '(A { second: true }.second and B { second: true }.second)
+        }
+        fn run() -> bool { ~<generate(true)> and ~<generate(false)> }
+    "#;
+    assert_eq!(sysroot::run(source), Value::Bool(true));
+    let unused = source.replace("~<generate(true)> and ~<generate(false)>", "true");
+    for wrong in [
+        unused.replace("observed = After; false", "observed = Before; false"),
+        unused.replace("observed = After; false", "observed = After; true"),
+    ] {
+        let error = sysroot::compile(&wrong).unwrap_err();
+        assert!(error.contains("unknown struct field second"), "{error}");
+    }
+}

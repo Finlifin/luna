@@ -165,6 +165,13 @@ impl Checker<'_, '_> {
                     depth + 1,
                 );
             }
+            K::Match { value, arms } => {
+                let test = self.observe_factory_expr(value, scope, returns, span, depth + 1)?;
+                let Completion::Next(subject) = test else {
+                    return Ok(test);
+                };
+                return self.observe_factory_match(&subject, arms, scope, returns, span, depth + 1);
+            }
             K::Let { binding, value } => {
                 let result = self.observe_factory_expr(value, scope, returns, span, depth + 1)?;
                 let Completion::Next(value) = result else {
@@ -295,6 +302,17 @@ impl Checker<'_, '_> {
             return Ok(left);
         }
         let right = otherwise(self, &mut alternative, returns)?;
+        self.merge_factory_paths(scope, left, alternative, right, span)
+    }
+
+    pub(super) fn merge_factory_paths(
+        &mut self,
+        scope: &mut ObservationScope,
+        left: Completion,
+        alternative: ObservationScope,
+        right: Completion,
+        span: Span,
+    ) -> Result<Completion, Error> {
         match (left, right) {
             (_, Completion::Unavailable) | (Completion::Unavailable, _) => {
                 Ok(Completion::Unavailable)

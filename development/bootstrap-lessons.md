@@ -349,3 +349,9 @@ Release 的 `borrowed_aggregate` 在一次外层 invocation 内调用 16 次接�
 生成器可以先把具名工厂存入 record，再通过字段调用它，最后在 quote 中使用工厂返回的类型。检查 `choice.make(t)` 时，函数签名只给出了结果的类型。要判断这个结果里的 `item: Type` 是否有某个字段，还要知道到达调用点的函数声明和这次实例的子句实参。现在定义检查按调用顺序先观察 callee，保存此时的身份，再观察显式实参。实参可以改写 `choice.make`，也可以从调用者提前返回。两条分支都交付同一实例时，可以继续检查其函数体；两条分支交付不同实例时，当前观察器会失去确切的目标。[调用顺序](../compiler/elaboration/src/program/constants/structural_calls/arguments.rs)
 
 例如 `wrap<Pick(flag)>()` 的可选参数声明为 `.item: Type = T`。即使 `flag` 在定义检查时未知，若 `Pick` 的两个出口都返回 `Before`，便能知道默认值是 `Before`。检查器依次观察子句准备语句和各槽位的操作数，将实参代入调用点已有的默认表达式，并保留普通参数的绑定层。VM 在实际调用时仍求值并检查这些操作数。自举要保留这两层的对应关系。当前的代价是定义检查另有一份处理词法作用域、写回和提前返回的代码。捕获闭包需要环境身份，trait 成员需要分派证据，两者都超出了只保存声明与子句实参的表示。[实例观察](../compiler/elaboration/src/program/constants/structural_calls/instances.rs) · [VM 默认参数](../compiler/comptime_interpretor/src/dynamic_instances.rs) · [源码验收](../compiler/luna/tests/cmtt.rs)
+
+### 工厂调用里失败的 match guard
+
+`subject match { p if guard => first, p => second, ... }` 有两条不同的路径抵达第二臂。主语第一次未匹配 `p` 时不会执行 guard。主语匹配而 guard 返回 false 时，guard 对外层局部变量和接收者的写入仍然有效。若立即合并这两个存储状态，检查 `second` 时就可能丢失其中唯一能到达它的字段类型。现在定义检查只观察一次主语，分别保存结构匹配失败和 guard 失败的状态。相邻两臂对同一主语使用相同的纯结构模式时，后者可以复用前者的判断。计算模式仍按源顺序执行，`or` 更换候选时撤销先前的模式绑定，保留它对外层的写入。[分支与作用域](../compiler/elaboration/src/program/constants/structural_calls/matching.rs)
+
+这里选择有限的路径信息。遇到不同的结构测试时，观察器先合并能继续的状态；因而相隔数臂或写法不同的等价模式可能失去精度。结构证据不足以定位有副作用的子模式时，定义检查放弃这条观察。VM 始终执行原有匹配程序。自举时可把主语投影、候选绑定的回滚和外层存储的写回显式放进共享的匹配指令，让具体求值与定义检查共用控制顺序。[结构投影](../compiler/elaboration/src/program/constants/structural_calls/matching/structure.rs) · [源码验收](../compiler/luna/tests/cmtt.rs)
