@@ -1040,7 +1040,7 @@ fn prepare_source_impl(
                     function,
                     &observations,
                     fuel,
-                    |expr, _| {
+                    |expr, fuel| {
                         if !matches!(expr.kind, K::CallPreparation { .. })
                             && !expr.shares_discard_temporary_boundary()
                         {
@@ -1049,6 +1049,12 @@ fn prepare_source_impl(
                         if let K::Match { arms, .. } = &expr.kind {
                             for arm in arms {
                                 projection_hooks.push(arm.body.source);
+                                collect_pattern_then_hooks(
+                                    &arm.pattern,
+                                    &mut projection_hooks,
+                                    &mut hooks,
+                                    fuel,
+                                )?;
                                 if !matches!(
                                     arm.body.kind,
                                     K::Block { .. } | K::CallPreparation { .. }
@@ -1060,9 +1066,15 @@ fn prepare_source_impl(
                         if let K::EnumName(value) = &expr.kind {
                             projection_hooks.push(value.source);
                         }
-                        if let K::LetPattern { value, .. } = &expr.kind {
+                        if let K::LetPattern { pattern, value, .. } = &expr.kind {
                             projection_hooks.push(expr.source);
                             projection_hooks.push(value.source);
+                            collect_pattern_then_hooks(
+                                pattern,
+                                &mut projection_hooks,
+                                &mut hooks,
+                                fuel,
+                            )?;
                         }
                         if let K::AnonymousField { value, .. } | K::Field { value, .. } = &expr.kind
                         {
@@ -1547,6 +1559,7 @@ fn prepare_source_impl(
                         CleanupReason::Continue => Boundary::Continue,
                         CleanupReason::Replacement => Boundary::Replacement,
                         CleanupReason::PredicateFailure => Boundary::PredicateFailure,
+                        CleanupReason::PatternFailure => Boundary::PatternFailure,
                         CleanupReason::TemporaryEnd => Boundary::TemporaryEnd,
                     };
                     if site.interface_precondition {
@@ -1751,7 +1764,8 @@ fn prepare_source_impl(
                         // require explicit path discrimination.
                         let failure_alternatives = matches!(
                             boundary,
-                            Boundary::DefaultFailure(_)
+                            Boundary::PatternFailure
+                                | Boundary::DefaultFailure(_)
                                 | Boundary::InterfacePreconditionFailure
                                 | Boundary::InterfacePostconditionFailure
                         );
@@ -1986,6 +2000,57 @@ fn prepare_source_impl(
         retained_caches = verification_session.into_caches();
         retained_caches.retain_unaffected(&changed_cleanup_keys);
     }
+}
+
+fn collect_pattern_then_hooks(
+    pattern: &nir::program::Pattern,
+    projection_hooks: &mut Vec<nir::program::SourceRange>,
+    hooks: &mut Vec<(nir::program::SourceRange, iir::cleanup::Boundary)>,
+    fuel: &mut usize,
+) -> Result<(), String> {
+    use iir::cleanup::Boundary;
+    use nir::program::Pattern;
+    let mut pending = vec![pattern];
+    while let Some(pattern) = pending.pop() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("pattern cleanup hook budget exhausted")?;
+        match pattern {
+            Pattern::Then { first, value, next } => {
+                projection_hooks.push(value.source);
+                hooks.push((value.source, Boundary::PatternFailure));
+                pending.push(next);
+                pending.push(first);
+            }
+            Pattern::OptionalPresent(inner)
+            | Pattern::ErrorResult { inner, .. }
+            | Pattern::Observe { inner, .. }
+            | Pattern::Guard { pattern: inner, .. }
+            | Pattern::Remap { pattern: inner, .. }
+            | Pattern::Binding { inner, .. } => pending.push(inner),
+            Pattern::Tuple(fields)
+            | Pattern::TypeTuple(fields)
+            | Pattern::Or(fields)
+            | Pattern::NominalType { fields, .. }
+            | Pattern::Record { fields, .. }
+            | Pattern::AnonymousRecord { fields, .. }
+            | Pattern::Variant { fields, .. }
+            | Pattern::NormalForm {
+                arguments: fields, ..
+            } => {
+                *fuel = fuel
+                    .checked_sub(fields.len())
+                    .ok_or("pattern cleanup hook field budget exhausted")?;
+                pending.extend(fields.iter().rev());
+            }
+            Pattern::CodeEvidence { .. }
+            | Pattern::OptionalAbsent
+            | Pattern::Wild
+            | Pattern::Unit
+            | Pattern::Literal(_) => {}
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

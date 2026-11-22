@@ -3,6 +3,14 @@ use nir::program::{MatchArm, Pattern};
 
 type Receipt = BTreeMap<LocalId, (Value, Value)>;
 
+struct PendingThen {
+    source: nir::program::SourceRange,
+    fail_slot: Slot,
+    fail_flag: Slot,
+    receipt_slots: BTreeMap<LocalId, (Slot, Slot)>,
+    conditional: bool,
+}
+
 impl Emitter<'_> {
     fn accept(&mut self, condition: Value, failure: &str) -> Result<(), String> {
         if self.terminated {
@@ -28,6 +36,7 @@ impl Emitter<'_> {
         depth: usize,
         path: Option<Vec<usize>>,
         receipt: &mut Receipt,
+        pending_then: &mut Vec<PendingThen>,
     ) -> Result<(), String> {
         if self.terminated {
             return Ok(());
@@ -60,6 +69,7 @@ impl Emitter<'_> {
                         depth,
                         child_path(&path, index),
                         receipt,
+                        pending_then,
                     )?;
                 }
             }
@@ -80,6 +90,7 @@ impl Emitter<'_> {
                         depth,
                         child_path(&path, 0),
                         receipt,
+                        pending_then,
                     )?;
                 }
             }
@@ -102,6 +113,7 @@ impl Emitter<'_> {
                     depth,
                     child_path(&path, 0),
                     receipt,
+                    pending_then,
                 )?;
             }
             Pattern::Variant { index, fields, .. } => {
@@ -119,6 +131,7 @@ impl Emitter<'_> {
                         depth,
                         child_path(&path, field),
                         receipt,
+                        pending_then,
                     )?;
                 }
             }
@@ -137,7 +150,15 @@ impl Emitter<'_> {
                 self.accept(equal, failure)?;
             }
             Pattern::Binding { binding, inner } => {
-                self.pattern(inner, value, failure, depth, path.clone(), receipt)?;
+                self.pattern(
+                    inner,
+                    value,
+                    failure,
+                    depth,
+                    path.clone(),
+                    receipt,
+                    pending_then,
+                )?;
                 if !self.terminated {
                     self.bind(*binding, value)?;
                     let code = match &path {
@@ -162,14 +183,30 @@ impl Emitter<'_> {
             Pattern::Observe { binding, inner } => {
                 let previous = self.locals.get(binding).cloned();
                 self.bind(*binding, value)?;
-                self.pattern(inner, value, failure, depth, path.clone(), receipt)?;
+                self.pattern(
+                    inner,
+                    value,
+                    failure,
+                    depth,
+                    path.clone(),
+                    receipt,
+                    pending_then,
+                )?;
                 self.locals.remove(binding);
                 if let Some(previous) = previous {
                     self.locals.insert(*binding, previous);
                 }
             }
             Pattern::Guard { pattern, condition } => {
-                self.pattern(pattern, value, failure, depth, path.clone(), receipt)?;
+                self.pattern(
+                    pattern,
+                    value,
+                    failure,
+                    depth,
+                    path.clone(),
+                    receipt,
+                    pending_then,
+                )?;
                 let condition = self.expr(condition, depth)?;
                 self.accept(condition, failure)?;
             }
@@ -178,12 +215,94 @@ impl Emitter<'_> {
                 value: expression,
                 next,
             } => {
-                self.pattern(first, value, failure, depth, path.clone(), receipt)?;
+                self.pattern(
+                    first,
+                    value,
+                    failure,
+                    depth,
+                    path.clone(),
+                    receipt,
+                    pending_then,
+                )?;
+                if self.terminated {
+                    return Ok(());
+                }
                 let next_value = self.expr(expression, depth)?;
-                self.pattern(next, &next_value, failure, depth, None, receipt)?;
+                if self.terminated {
+                    return Ok(());
+                }
+                let fail_slot = self.slot(next_value.ty.clone());
+                self.store(&fail_slot, &next_value)?;
+                let fail_flag = self.slot(Ty::Bool);
+                self.prologue
+                    .push_str(&format!("  store i1 false, ptr {}\n", fail_flag.pointer));
+                self.store(
+                    &fail_flag,
+                    &Value {
+                        ty: Ty::Bool,
+                        text: "true".into(),
+                    },
+                )?;
+                let pt_index = pending_then.len();
+                pending_then.push(PendingThen {
+                    source: expression.source,
+                    fail_slot,
+                    fail_flag,
+                    receipt_slots: BTreeMap::new(),
+                    conditional: false,
+                });
+                let mut then_receipt = Receipt::new();
+                self.pattern(
+                    next,
+                    &next_value,
+                    failure,
+                    depth,
+                    Some(vec![]),
+                    &mut then_receipt,
+                    pending_then,
+                )?;
+                if !self.terminated {
+                    let base_rank = receipt.len();
+                    let mut receipt_slots = BTreeMap::new();
+                    for (id, (path_val, rank_val)) in then_receipt {
+                        let path_slot = self.slot(Ty::Int(32, false));
+                        self.prologue
+                            .push_str(&format!("  store i32 -1, ptr {}\n", path_slot.pointer));
+                        self.store(&path_slot, &path_val)?;
+                        let rank_slot = self.slot(Ty::Int(32, false));
+                        self.prologue
+                            .push_str(&format!("  store i32 -1, ptr {}\n", rank_slot.pointer));
+                        self.store(&rank_slot, &rank_val)?;
+                        receipt_slots.insert(id, (path_slot, rank_slot));
+                        let combined_rank = self.instruction(
+                            Ty::Int(32, false),
+                            format!("add i32 {base_rank}, {}", rank_val.text),
+                        );
+                        receipt.insert(
+                            id,
+                            (
+                                Value {
+                                    ty: Ty::Int(32, false),
+                                    text: "-1".into(),
+                                },
+                                combined_rank,
+                            ),
+                        );
+                    }
+                    pending_then[pt_index].receipt_slots = receipt_slots;
+                }
             }
             Pattern::Remap { pattern, bindings } => {
-                self.pattern(pattern, value, failure, depth, path.clone(), receipt)?;
+                let then_start = pending_then.len();
+                self.pattern(
+                    pattern,
+                    value,
+                    failure,
+                    depth,
+                    path.clone(),
+                    receipt,
+                    pending_then,
+                )?;
                 if self.terminated {
                     return Ok(());
                 }
@@ -217,6 +336,15 @@ impl Emitter<'_> {
                     self.set_live(id, &[], true)?;
                 }
                 receipt.extend(mapped_receipt);
+                for pt in &mut pending_then[then_start..] {
+                    let mapped_slots = bindings
+                        .iter()
+                        .filter_map(|(from, to)| {
+                            pt.receipt_slots.remove(from).map(|slots| (*to, slots))
+                        })
+                        .collect::<Vec<_>>();
+                    pt.receipt_slots.extend(mapped_slots);
+                }
             }
             Pattern::Or(alternatives) => {
                 if alternatives.is_empty() {
@@ -249,11 +377,21 @@ impl Emitter<'_> {
                 let mut receipt_slots: Option<BTreeMap<LocalId, (Slot, Slot)>> = None;
                 let success = self.fresh();
                 let mut merged: Option<BTreeMap<LocalId, Slot>> = None;
+                let mut or_pending = Vec::new();
                 for alternative in alternatives {
                     let next = self.fresh();
                     self.locals = outer.clone();
                     *receipt = original_receipt.clone();
-                    self.pattern(alternative, value, &next, depth, path.clone(), receipt)?;
+                    let mut alt_pending = Vec::new();
+                    self.pattern(
+                        alternative,
+                        value,
+                        &next,
+                        depth,
+                        path.clone(),
+                        receipt,
+                        &mut alt_pending,
+                    )?;
                     if !self.terminated {
                         let exports: BTreeMap<_, _> = self
                             .locals
@@ -301,9 +439,14 @@ impl Emitter<'_> {
                             self.store(&slots[id].0, path)?;
                             self.store(&slots[id].1, rank)?;
                         }
+                        for pt in &mut alt_pending {
+                            pt.conditional = true;
+                        }
                         self.branch(&success);
                     }
                     self.label(&next);
+                    self.emit_pending_then_failure(&alt_pending)?;
+                    or_pending.extend(alt_pending);
                 }
                 self.branch(failure);
                 self.locals = outer;
@@ -318,6 +461,7 @@ impl Emitter<'_> {
                     for (id, (path, rank)) in receipt_slots.unwrap_or_default() {
                         receipt.insert(id, (self.load(&path), self.load(&rank)));
                     }
+                    pending_then.extend(or_pending);
                 }
             }
             _ => return Err("host aggregate/resource pattern is not implemented".into()),
@@ -342,7 +486,16 @@ impl Emitter<'_> {
         let failure = self.fresh();
         let done = self.fresh();
         let mut receipt = Receipt::new();
-        self.pattern(pattern, &value, &failure, depth, Some(vec![]), &mut receipt)?;
+        let mut pending_then = Vec::new();
+        self.pattern(
+            pattern,
+            &value,
+            &failure,
+            depth,
+            Some(vec![]),
+            &mut receipt,
+            &mut pending_then,
+        )?;
         if let Some(guard) = guard {
             let condition = self.expr(guard, depth)?;
             self.accept(condition, &failure)?;
@@ -350,11 +503,13 @@ impl Emitter<'_> {
         let continues = !self.terminated;
         let matched = self.locals.clone();
         if continues {
+            self.commit_pending_then(&pending_then)?;
             self.retain_pattern(source, &value, &receipt)?;
             self.branch(&done);
         }
         self.label(&failure);
         self.locals = outer;
+        self.emit_pending_then_failure(&pending_then)?;
         if let Some(otherwise) = otherwise {
             self.retain_pattern(expression.source, &value, &Receipt::new())?;
             self.expr(otherwise, depth)?;
@@ -419,22 +574,26 @@ impl Emitter<'_> {
             self.locals = outer.clone();
             self.loops = lexical_loops.clone();
             let outcome = (|| {
+                let arm_fail = self.fresh();
+                let mut pending_then = Vec::new();
                 let mut receipt = Receipt::new();
                 self.pattern(
                     &arm.pattern,
                     &value,
-                    &next,
+                    &arm_fail,
                     depth,
                     Some(vec![]),
                     &mut receipt,
+                    &mut pending_then,
                 )?;
                 if let Some(guard) = &arm.guard {
                     let condition = self.expr(guard, depth)?;
                     if !self.terminated {
-                        self.accept(condition, &next)?;
+                        self.accept(condition, &arm_fail)?;
                     }
                 }
                 if !self.terminated {
+                    self.commit_pending_then(&pending_then)?;
                     self.retain_pattern(arm.body.source, &value, &receipt)?;
                 }
                 let selected = self.expr_with_effects(&arm.body, depth, selected)?;
@@ -457,6 +616,9 @@ impl Emitter<'_> {
                         continues = true;
                     }
                 }
+                self.label(&arm_fail);
+                self.emit_pending_then_failure(&pending_then)?;
+                self.branch(&next);
                 Ok::<(), String>(())
             })();
             if let Some(suspended) = suspended {
@@ -643,6 +805,154 @@ impl Emitter<'_> {
             },
         )?;
         self.temporary_live.insert(key, flag);
+        Ok(())
+    }
+
+    fn emit_pending_then_failure(&mut self, pending: &[PendingThen]) -> Result<(), String> {
+        for pt in pending.iter().rev() {
+            let needs_failure = self.cleanup.is_some_and(|schedule| {
+                schedule.sites.iter().any(|site| {
+                    site.source == pt.source
+                        && site.boundary == iir::cleanup::Boundary::PatternFailure
+                        && site
+                            .actions
+                            .iter()
+                            .any(|action| super::cleanup::has_invoke(&action.program.steps))
+                })
+            });
+            if !needs_failure {
+                continue;
+            }
+            let active = self.load(&pt.fail_flag);
+            let drop_bb = self.fresh();
+            let skip_bb = self.fresh();
+            self.line(format!(
+                "br i1 {}, label %{drop_bb}, label %{skip_bb}",
+                active.text
+            ));
+            self.label(&drop_bb);
+            let key = (pt.source.start, pt.source.end);
+            let previous_temp = self.temporaries.insert(key, pt.fail_slot.clone());
+            let previous_live = self.temporary_live.insert(key, pt.fail_flag.clone());
+            let field_keys: Vec<_> = self
+                .temporary_fields
+                .keys()
+                .filter(|(k, _)| *k == key)
+                .cloned()
+                .collect();
+            let mut previous_fields = Vec::with_capacity(field_keys.len());
+            for field_key in field_keys {
+                if let Some(slot) = self.temporary_fields.remove(&field_key) {
+                    previous_fields.push((field_key, slot));
+                }
+            }
+            let cleaned = self.cleanup_boundary(pt.source, iir::cleanup::Boundary::PatternFailure);
+            match previous_temp {
+                Some(slot) => {
+                    self.temporaries.insert(key, slot);
+                }
+                None => {
+                    self.temporaries.remove(&key);
+                }
+            }
+            match previous_live {
+                Some(slot) => {
+                    self.temporary_live.insert(key, slot);
+                }
+                None => {
+                    self.temporary_live.remove(&key);
+                }
+            }
+            for (field_key, slot) in previous_fields {
+                self.temporary_fields.insert(field_key, slot);
+            }
+            cleaned?;
+            if !self.terminated {
+                self.store(
+                    &pt.fail_flag,
+                    &Value {
+                        ty: Ty::Bool,
+                        text: "false".into(),
+                    },
+                )?;
+                self.branch(&skip_bb);
+            }
+            self.label(&skip_bb);
+        }
+        Ok(())
+    }
+
+    fn commit_pending_then(&mut self, pending: &[PendingThen]) -> Result<(), String> {
+        for pt in pending {
+            if !pt.conditional {
+                self.store(
+                    &pt.fail_flag,
+                    &Value {
+                        ty: Ty::Bool,
+                        text: "false".into(),
+                    },
+                )?;
+                let val = self.load(&pt.fail_slot);
+                let mut pt_receipt = Receipt::new();
+                for (id, (path_slot, rank_slot)) in &pt.receipt_slots {
+                    pt_receipt.insert(*id, (self.load(path_slot), self.load(rank_slot)));
+                }
+                self.retain_pattern(pt.source, &val, &pt_receipt)?;
+                continue;
+            }
+            let needed = self.cleanup.is_some_and(|schedule| {
+                schedule
+                    .pattern_orders
+                    .iter()
+                    .any(|order| order.source == pt.source)
+                    || schedule
+                        .sites
+                        .iter()
+                        .flat_map(|site| &site.actions)
+                        .any(|action| {
+                            matches!(
+                                action.target,
+                                iir::cleanup::Target::Temporary { source: origin, .. }
+                                if origin == pt.source
+                            ) && super::cleanup::has_invoke(&action.program.steps)
+                        })
+            });
+            if !needed {
+                self.store(
+                    &pt.fail_flag,
+                    &Value {
+                        ty: Ty::Bool,
+                        text: "false".into(),
+                    },
+                )?;
+                continue;
+            }
+            let active = self.load(&pt.fail_flag);
+            let yes_bb = self.fresh();
+            let done_bb = self.fresh();
+            self.line(format!(
+                "br i1 {}, label %{yes_bb}, label %{done_bb}",
+                active.text
+            ));
+            self.label(&yes_bb);
+            self.store(
+                &pt.fail_flag,
+                &Value {
+                    ty: Ty::Bool,
+                    text: "false".into(),
+                },
+            )?;
+            let val = self.load(&pt.fail_slot);
+            let mut pt_receipt = Receipt::new();
+            for (id, (path_slot, rank_slot)) in &pt.receipt_slots {
+                pt_receipt.insert(*id, (self.load(path_slot), self.load(rank_slot)));
+            }
+            self.retain_pattern(pt.source, &val, &pt_receipt)?;
+            if !self.terminated {
+                self.branch(&done_bb);
+            }
+            self.label(&done_bb);
+        }
         Ok(())
     }
 }

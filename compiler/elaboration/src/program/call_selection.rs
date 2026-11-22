@@ -503,9 +503,9 @@ impl<'pkg, 'arena> Checker<'pkg, 'arena> {
         let declarations = direct
             .and_then(|owner| self.package.item(owner))
             .and_then(|item| match &item.kind {
-                ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature) => {
-                    Some(signature.params)
-                }
+                ItemKind::Fn(signature, _)
+                | ItemKind::Case(signature, _)
+                | ItemKind::FnDeclaration(signature) => Some(signature.params),
                 _ => None,
             });
         let offset = prefix.len();

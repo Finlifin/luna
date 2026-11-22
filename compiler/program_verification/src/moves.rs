@@ -159,6 +159,7 @@ pub enum CleanupReason {
     Return,
     FunctionEnd,
     PredicateFailure,
+    PatternFailure,
     Break,
     Continue,
     ScopeEnd,
@@ -185,6 +186,7 @@ impl fmt::Display for CleanupReason {
             Self::Return => "return",
             Self::FunctionEnd => "function-end",
             Self::PredicateFailure => "predicate-failure",
+            Self::PatternFailure => "pattern-failure",
             Self::Break => "break",
             Self::Continue => "continue",
             Self::ScopeEnd => "scope-end",
@@ -2408,6 +2410,7 @@ struct Analyzer<'a, F, G> {
     report: Report,
     candidate_observations: Option<Report>,
     observation_region: bool,
+    allow_owned_then_result: bool,
     observation_locals: BTreeSet<PlaceId>,
     method_callees: super::memory::MethodCalleesStorage<'a>,
     persistent_roots: BTreeSet<PlaceId>,
@@ -8571,6 +8574,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow: &Flow,
         depth: usize,
     ) -> Result<Option<Callable>, Error> {
+        let allow_owned = std::mem::replace(&mut self.allow_owned_then_result, false);
         if self.fuel == 0 || depth > 128 {
             return Err(error(expr.source, "guard observation budget exhausted"));
         }
@@ -8582,7 +8586,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         } = &expr.kind
         {
             if statements.is_empty() && matches!(expr.ty, Term::Pointer(_)) {
-                return self.observe_guard_result(result, flow, depth + 1);
+                self.allow_owned_then_result = allow_owned;
+                let checked = self.observe_guard_result(result, flow, depth + 1);
+                self.allow_owned_then_result = false;
+                return checked;
             }
         }
         // A compound condition is one full expression. Discover owned
@@ -8629,10 +8636,37 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
             if !matches!(expr.ty, Term::Pointer(_))
                 && !self.observation_value_type(&expr.ty, source)?
             {
-                return Err(error(
-                    source,
-                    "observation region result needs failure-path resource transfer",
-                ));
+                let is_internal_packet = matches!(
+                    &expr.ty,
+                    Term::Nominal { declaration, .. }
+                        if self.package.is_some_and(|package| {
+                            package.internal_return_packets.contains(declaration)
+                        })
+                );
+                if !allow_owned
+                    || is_internal_packet
+                    || !matches!(
+                        expr.ty,
+                        Term::Nominal { .. }
+                            | Term::Record(_)
+                            | Term::Tuple(_)
+                            | Term::NormalForm { .. }
+                            | Term::ErrorResult { .. }
+                            | Term::Optional(_)
+                    )
+                {
+                    return Err(error(
+                        source,
+                        "observation region result needs failure-path resource transfer",
+                    ));
+                }
+                if !self.copy_readable_representation(&expr.ty, source)? {
+                    return Err(error(
+                        source,
+                        "guard result lacks a readable owned representation",
+                    ));
+                }
+                self.check_observation_cleanup(&expr.ty, source)?;
             }
             let previous = std::mem::replace(&mut self.observation_region, true);
             let previous_locals = std::mem::replace(
@@ -8656,7 +8690,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 if body.ty != expr.ty {
                     return Err(error(source, "unsafe observation result type mismatch"));
                 }
-                result_code = self.observe_guard_result(body, flow, depth + 1)?;
+                self.allow_owned_then_result = allow_owned;
+                let checked = self.observe_guard_result(body, flow, depth + 1);
+                self.allow_owned_then_result = false;
+                result_code = checked?;
             }
             K::Intrinsic { inputs, .. } => {
                 let binding =
@@ -8814,11 +8851,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 self.observe_guard(condition, flow, depth + 1)?;
                 let known = constant_bool(condition, 0);
                 if known != Some(false) {
-                    result_code = self.observe_guard_result(then_branch, flow, depth + 1)?;
+                    self.allow_owned_then_result = allow_owned;
+                    let checked = self.observe_guard_result(then_branch, flow, depth + 1);
+                    self.allow_owned_then_result = false;
+                    result_code = checked?;
                 }
                 if known != Some(true) {
                     if let Some(other) = else_branch {
-                        let other = self.observe_guard_result(other, flow, depth + 1)?;
+                        self.allow_owned_then_result = allow_owned;
+                        let checked = self.observe_guard_result(other, flow, depth + 1);
+                        self.allow_owned_then_result = false;
+                        let other = checked?;
                         result_code = if known == Some(false) {
                             other
                         } else {
@@ -8980,7 +9023,10 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                     }
                 }
                 if let Some(result) = result {
-                    result_code = self.observe_guard_result(result, &scope, depth + 1)?;
+                    self.allow_owned_then_result = allow_owned;
+                    let checked = self.observe_guard_result(result, &scope, depth + 1);
+                    self.allow_owned_then_result = false;
+                    result_code = checked?;
                 }
                 let locals: Vec<_> = scope
                     .order
@@ -8994,7 +9040,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 }
             }
             K::Call { .. } => {
-                result_code = self.observe_guard_call(expr, flow, depth + 1, false)?;
+                result_code = self.observe_guard_call(expr, flow, depth + 1, false, allow_owned)?;
             }
             _ => {
                 return Err(error(
@@ -9071,6 +9117,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         flow: &Flow,
         depth: usize,
         region_owned: bool,
+        allow_owned_result: bool,
     ) -> Result<Option<Callable>, Error> {
         let source = expr.source;
         if depth > 128 || self.fuel == 0 {
@@ -9090,7 +9137,15 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         // only the prepared frame; the outer observation still protects every
         // caller resource. Owned results require captured cleanup evidence.
         if !self.observation_value_type(&expr.ty, source)? && !matches!(expr.ty, Term::Pointer(_)) {
-            if !region_owned
+            let is_internal_packet = matches!(
+                &expr.ty,
+                Term::Nominal { declaration, .. }
+                    if self.package.is_some_and(|package| {
+                        package.internal_return_packets.contains(declaration)
+                    })
+            );
+            if (!region_owned && !allow_owned_result)
+                || is_internal_packet
                 || !matches!(
                     expr.ty,
                     Term::Nominal { .. }
@@ -9472,6 +9527,31 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         path: &mut Vec<usize>,
         depth: usize,
     ) -> Result<(), Error> {
+        self.bind_pattern_with_pointer_guards_and_remaps(
+            pattern,
+            ty,
+            origins,
+            pointer_guards,
+            flow,
+            source,
+            path,
+            depth,
+            &[],
+        )
+    }
+
+    fn bind_pattern_with_pointer_guards_and_remaps(
+        &mut self,
+        pattern: &Pattern,
+        ty: &Term,
+        origins: &ValueOrigins,
+        pointer_guards: &ValuePointerGuards,
+        flow: &mut Flow,
+        source: SourceRange,
+        path: &mut Vec<usize>,
+        depth: usize,
+        initial_remaps: &[BTreeMap<LocalId, LocalId>],
+    ) -> Result<(), Error> {
         let subject_conditions = ValueConditions {
             domains: copy_enum_domains(&flow.value_variants, &mut self.fuel, source)?,
             pointers: self.copy_value_pointer_guards(pointer_guards, source)?,
@@ -9516,7 +9596,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 moved_bindings: vec![],
                 variants: vec![],
                 copy_bindings: false,
-                binding_remaps: vec![],
+                binding_remaps: initial_remaps.to_vec(),
             };
             let mut candidate_flow = if index + 1 == candidates.len() {
                 std::mem::take(flow)
@@ -9629,7 +9709,17 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
         } = layouts.remove(0);
         *flow = candidate_flow;
         if orders.len() > 1 {
-            let published = patterns::binding_orders(pattern, &mut self.fuel, source, depth)?;
+            let mut published = patterns::binding_orders(pattern, &mut self.fuel, source, depth)?;
+            for order in &mut published {
+                for id in order.iter_mut() {
+                    for mapping in initial_remaps.iter().rev() {
+                        self.fuel = self.fuel.checked_sub(1).ok_or_else(|| {
+                            error(source, "pattern cleanup remap budget exhausted")
+                        })?;
+                        *id = mapping.get(id).copied().unwrap_or(*id);
+                    }
+                }
+            }
             for order in &published {
                 self.fuel = self
                     .fuel
@@ -10074,41 +10164,157 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 let pointer = matches!(value.ty, Term::Pointer(_))
                     && (self.delivery)(&value.ty).map_err(|reason| error(value.source, reason))?
                         == Delivery::Copy;
-                if !pointer && !self.observation_value_type(&value.ty, value.source)? {
-                    return Err(error(
-                        value.source,
-                        "computed pattern value needs independent resource and failure-path transfer",
-                    ));
+                let scalar_or_copy =
+                    pointer || self.observation_value_type(&value.ty, value.source)?;
+                if !scalar_or_copy {
+                    let is_internal_packet = matches!(
+                        &value.ty,
+                        Term::Nominal { declaration, .. }
+                            if self.package.is_some_and(|package| {
+                                package.internal_return_packets.contains(declaration)
+                            })
+                    );
+                    let owned_shape = matches!(
+                        value.ty,
+                        Term::Nominal { .. }
+                            | Term::Record(_)
+                            | Term::Tuple(_)
+                            | Term::NormalForm { .. }
+                            | Term::ErrorResult { .. }
+                            | Term::Optional(_)
+                    );
+                    if is_internal_packet
+                        || !owned_shape
+                        || !self
+                            .pointer_input_layout(&value.ty, value.source)?
+                            .is_empty()
+                        || !self.copy_readable_representation(&value.ty, value.source)?
+                    {
+                        return Err(error(
+                            value.source,
+                            "computed pattern value needs independent resource and failure-path transfer",
+                        ));
+                    }
+                    self.check_observation_cleanup(&value.ty, value.source)?;
+                    self.acquire_cleanup(&value.ty, value.source)?;
                 }
-                let (callable, origins) =
-                    self.observe_pattern_value(value, flow, preparation, depth + 1)?;
+                let previous_allow_owned =
+                    std::mem::replace(&mut self.allow_owned_then_result, !scalar_or_copy);
+                let observed = self.observe_pattern_value(value, flow, preparation, depth + 1);
+                self.allow_owned_then_result = previous_allow_owned;
+                let (callable, origins) = observed?;
                 let mut callables = BTreeMap::new();
                 if let Some(callable) = callable {
                     callables.insert(vec![], callable);
                 }
-                // Copy observations have no residual owner. Pointer results
-                // retain their targets; binders never subtract subject fields.
-                let mut computed = PatternPreparation {
-                    origins: &origins,
-                    pointer_guards: BTreeMap::new(),
-                    selected_pointer_variants: vec![],
-                    domains: BTreeMap::new(),
-                    callables,
-                    transfers: vec![],
-                    moved_bindings: vec![],
-                    variants: vec![],
-                    copy_bindings: true,
-                    binding_remaps: preparation.binding_remaps.clone(),
-                };
-                self.bind_components(
-                    next,
-                    &value.ty,
-                    flow,
-                    source,
-                    &mut vec![],
-                    &mut computed,
-                    depth + 1,
-                )?;
+                if scalar_or_copy {
+                    // Copy observations have no residual owner. Pointer results
+                    // retain their targets; binders never subtract subject fields.
+                    let mut computed = PatternPreparation {
+                        origins: &origins,
+                        pointer_guards: BTreeMap::new(),
+                        selected_pointer_variants: vec![],
+                        domains: BTreeMap::new(),
+                        callables,
+                        transfers: vec![],
+                        moved_bindings: vec![],
+                        variants: vec![],
+                        copy_bindings: true,
+                        binding_remaps: preparation.binding_remaps.clone(),
+                    };
+                    self.bind_components(
+                        next,
+                        &value.ty,
+                        flow,
+                        source,
+                        &mut vec![],
+                        &mut computed,
+                        depth + 1,
+                    )?;
+                } else {
+                    let description = TemporaryCleanup {
+                        scope: self.temporary_scope,
+                        source: value.source,
+                        ty: value.ty.clone(),
+                        fields: vec![],
+                    };
+                    let mut full_state = State::default();
+                    let temp_shape = (self.shape)(&value.ty).map_err(|e| error(value.source, e))?;
+                    let full_root = PlaceId {
+                        owner: u64::MAX,
+                        local: 0,
+                    };
+                    full_state
+                        .declare(full_root, &temp_shape, true, &mut self.fuel)
+                        .map_err(|e| {
+                            error(value.source, format!("computed temporary shape: {e:?}"))
+                        })?;
+                    if full_state
+                        .cleanup_tree(
+                            &Place {
+                                root: full_root,
+                                fields: vec![],
+                            },
+                            &mut self.fuel,
+                        )
+                        .map_err(|e| {
+                            error(value.source, format!("computed temporary cleanup: {e:?}"))
+                        })?
+                        .is_some()
+                    {
+                        let failure_temp = ActiveTemporary {
+                            conditions: ValueConditions::default(),
+                            alternatives: vec![],
+                            origins: ValueOrigins::default(),
+                            variants: vec![],
+                            scope_id: self.temporary_scope_id,
+                            description,
+                            remaining: full_state,
+                            presence: Availability::Present,
+                            locals_before: flow.order.clone(),
+                        };
+                        let failure_id = self.sequence(value.source)?;
+                        let failure_action = self.temporary_action(
+                            failure_id,
+                            &failure_temp,
+                            flow,
+                            &[],
+                            value.source,
+                        )?;
+                        let site = CleanupSite {
+                            default_origin: None,
+                            result_origin: None,
+                            interface_precondition: false,
+                            interface_postcondition: false,
+                            source: value.source,
+                            reason: CleanupReason::PatternFailure,
+                            actions: vec![failure_action],
+                        };
+                        if let Some(candidate_observations) = &mut self.candidate_observations {
+                            candidate_observations.cleanup_sites.push(site);
+                        } else {
+                            self.report.cleanup_sites.push(site);
+                        }
+                    }
+                    let previous_callables =
+                        std::mem::replace(&mut flow.value_callables, callables);
+                    let previous_variants =
+                        std::mem::replace(&mut flow.value_variants, EnumDomains::new());
+                    let bound = self.bind_pattern_with_pointer_guards_and_remaps(
+                        next,
+                        &value.ty,
+                        &origins,
+                        &BTreeMap::new(),
+                        flow,
+                        value.source,
+                        &mut vec![],
+                        depth + 1,
+                        &preparation.binding_remaps,
+                    );
+                    flow.value_callables = previous_callables;
+                    flow.value_variants = previous_variants;
+                    bound?;
+                }
                 return Ok(shape);
             }
             Pattern::Or(alternatives) if preparation.copy_bindings => {
@@ -14349,7 +14555,7 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 self.observation_region = false;
                 let report = self.take_nested_report(expr.source)?;
                 let observations = self.candidate_observations.take();
-                let checked = self.observe_guard_call(expr, flow, depth + 1, true);
+                let checked = self.observe_guard_call(expr, flow, depth + 1, true, false);
                 self.report = report;
                 self.candidate_observations = observations;
                 self.observation_region = true;
@@ -14940,6 +15146,7 @@ fn analyze_with_shapes_and_borrowed_code<'a>(
         report: Report::default(),
         candidate_observations: None,
         observation_region: false,
+        allow_owned_then_result: false,
         observation_locals: BTreeSet::new(),
         method_callees: method_callees.map_or_else(
             || super::memory::MethodCalleesStorage::Owned(Default::default()),
@@ -19724,6 +19931,7 @@ mod env_parameter_frame_tests {
             report: Report::default(),
             candidate_observations: None,
             observation_region: false,
+            allow_owned_then_result: false,
             observation_locals: BTreeSet::new(),
             method_callees: Default::default(),
             persistent_roots: BTreeSet::new(),

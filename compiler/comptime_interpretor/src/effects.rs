@@ -13,6 +13,7 @@ pub(super) struct Entry {
     operation: Operation,
     activation: Arc<Activation>,
 }
+
 struct Activation {
     identity: u64,
     invocation: u64,
@@ -26,6 +27,7 @@ struct Activation {
     cleanup_frame: Option<iir::InstanceKey>,
     cleanup_context: Vec<iir::cleanup::ContextKey>,
 }
+
 #[derive(Default)]
 pub(super) struct State {
     pub(super) environment: Vec<Entry>,
@@ -37,6 +39,7 @@ pub(super) struct State {
     // suspended loops in nested handlers sharing that invocation.
     loops: Vec<(u64, LocalId, Vec<iir::cleanup::ContextKey>)>,
 }
+
 impl fmt::Display for Entry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -46,6 +49,7 @@ impl fmt::Display for Entry {
         )
     }
 }
+
 impl Interpreter<'_> {
     pub(super) fn effect_charge(
         &mut self,
@@ -59,6 +63,7 @@ impl Interpreter<'_> {
             .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, source))?;
         Ok(())
     }
+
     fn inspect_effect_operation(
         &self,
         operation: &Operation,
@@ -116,6 +121,7 @@ impl Interpreter<'_> {
         }
         Ok(())
     }
+
     pub(super) fn eval_effect(
         &mut self,
         expr: &Expr,
@@ -355,6 +361,7 @@ impl Interpreter<'_> {
             _ => unreachable!(),
         }
     }
+
     /// Effect qualification belongs to the result computation. In particular
     /// the arguments of an effectful call remain caller-side computations.
     fn eval_mapped_computation(
@@ -411,15 +418,19 @@ impl Interpreter<'_> {
                 let mut selected = Some(selected);
                 for arm in arms {
                     let matched = environment.scoped(|environment| {
-                        let (matched, bindings) = vm.match_arm_guard_with_bindings(
-                            &arm.pattern,
-                            arm.guard.as_ref(),
-                            &value,
-                            environment,
-                        )?;
+                        let (matched, bindings, pending_then) = vm
+                            .match_arm_guard_with_bindings_and_then(
+                                &arm.pattern,
+                                arm.guard.as_ref(),
+                                &value,
+                                environment,
+                            )?;
                         match matched {
                             Flow::Value(Value::Bool(false)) => Ok(None),
                             Flow::Value(Value::Bool(true)) => {
+                                for pt in &pending_then {
+                                    vm.retain_pattern_residual(pt.source, &pt.value, &pt.bindings)?;
+                                }
                                 vm.retain_pattern_residual(arm.body.source, &value, &bindings)?;
                                 let result = vm.eval_mapped_computation(
                                     &arm.body,
@@ -509,15 +520,23 @@ impl Interpreter<'_> {
                         arm_index,
                         source,
                         |this| {
-                            let (matched, bindings) = this.match_arm_guard_with_bindings(
-                                &arm.pattern,
-                                arm.guard.as_ref(),
-                                &inputs,
-                                &mut local,
-                            )?;
+                            let (matched, bindings, pending_then) = this
+                                .match_arm_guard_with_bindings_and_then(
+                                    &arm.pattern,
+                                    arm.guard.as_ref(),
+                                    &inputs,
+                                    &mut local,
+                                )?;
                             match matched {
                                 Flow::Value(Value::Bool(false)) => Ok(None),
                                 Flow::Value(Value::Bool(true)) => {
+                                    for pt in &pending_then {
+                                        this.retain_pattern_residual(
+                                            pt.source,
+                                            &pt.value,
+                                            &pt.bindings,
+                                        )?;
+                                    }
                                     this.retain_pattern_residual(
                                         arm.body.source,
                                         &inputs,
@@ -868,6 +887,7 @@ mod resource_context_tests {
             arguments: vec![].into(),
         }
     }
+
     fn activation() -> Activation {
         Activation {
             identity: 1,
@@ -898,6 +918,7 @@ mod resource_context_tests {
             cleanup_context: vec![],
         }
     }
+
     fn context(activation: &Activation, arm: usize) -> ContextKey {
         ContextKey::EffectHandler {
             installation: activation.installation,
@@ -905,6 +926,7 @@ mod resource_context_tests {
             arm,
         }
     }
+
     fn schedule(activation: &Activation) -> Schedule {
         Schedule {
             closure_definitions: vec![],

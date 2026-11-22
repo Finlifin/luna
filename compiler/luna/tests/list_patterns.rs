@@ -1,6 +1,8 @@
 use comptime_interpretor::{Budget, Interpreter, Value};
+
 #[path = "support/execution.rs"]
 mod support;
+
 use support::{compile_with_tuple_selectors as compile_with_source_bindings, id};
 
 const PROTOCOL: &str = "typealias Type=.Type'builtin; typealias Size=.u64'builtin;
@@ -1369,17 +1371,16 @@ fn list_views_extract_normal_form_tuples_with_ordered_nested_bindings() {
     let without_copy = source.replace("impl Duplicate for Tuple<bool,bool> {}", "");
     let package =
         compile_with_source_bindings(&without_copy, &Default::default(), selectors).unwrap();
-    let error = luna::execution::interpret_with_protocols(
-        &package,
-        "entry",
-        "Duplicate",
-        "Retire",
-        300_000,
-    )
-    .unwrap_err();
-    assert!(
-        error.contains("computed pattern value needs independent resource"),
-        "{error}"
+    assert_eq!(
+        luna::execution::interpret_with_protocols(
+            &package,
+            "entry",
+            "Duplicate",
+            "Retire",
+            300_000,
+        )
+        .unwrap(),
+        Value::Bool(true)
     );
 }
 
@@ -1429,7 +1430,7 @@ fn list_views_extract_copy_records_and_retry_failed_candidates() {
     let without_copy = source.replace("impl Duplicate for Item {}", "");
     let package =
         compile_with_source_bindings(&without_copy, &Default::default(), selectors).unwrap();
-    assert!(
+    assert_eq!(
         luna::execution::interpret_with_protocols(
             &package,
             "entry",
@@ -1437,7 +1438,8 @@ fn list_views_extract_copy_records_and_retry_failed_candidates() {
             "Retire",
             300_000
         )
-        .is_err()
+        .unwrap(),
+        Value::Bool(true)
     );
 }
 
@@ -1636,10 +1638,9 @@ fn list_view_normal_form_tuple_composes_with_nominal_elements() {
         error.contains("Copy component has no Copy capability"),
         "{error}"
     );
-    let error = run(&source.replace("impl Duplicate for Tuple<Item,bool> {}", "")).unwrap_err();
-    assert!(
-        error.contains("computed pattern value needs independent resource"),
-        "{error}"
+    assert_eq!(
+        run(&source.replace("impl Duplicate for Tuple<Item,bool> {}", "")).unwrap(),
+        Value::Bool(true)
     );
 }
 

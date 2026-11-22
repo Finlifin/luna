@@ -108,6 +108,7 @@ pub use value_reference::ValueReference;
 
 mod definition_installation;
 mod source_values;
+
 pub use source_values::{AttributeSource, NominalBatch, SourcedValue};
 
 mod generated_newtypes;
@@ -3693,30 +3694,69 @@ impl<'a> Interpreter<'a> {
         value: &Value,
         environment: &mut Environment,
     ) -> Result<(Flow, PatternBindings), Error> {
-        let (matched, bindings) = self.match_pattern_with_bindings(pattern, value, environment)?;
+        let (flow, bindings, _) =
+            self.match_arm_guard_with_bindings_and_then(pattern, guard, value, environment)?;
+        Ok((flow, bindings))
+    }
+
+    fn match_arm_guard_with_bindings_and_then(
+        &mut self,
+        pattern: &nir::program::Pattern,
+        guard: Option<&Expr>,
+        value: &Value,
+        environment: &mut Environment,
+    ) -> Result<(Flow, PatternBindings, Vec<PendingThen>), Error> {
+        let (matched, bindings, mut pending_then) =
+            self.match_pattern_with_bindings_and_then(pattern, value, environment)?;
         if !matches!(matched, Flow::Value(Value::Bool(true))) {
-            return Ok((matched, PatternBindings::default()));
+            return Ok((matched, PatternBindings::default(), Vec::new()));
         }
         let flow = if let Some(guard) = guard {
-            match self.eval(guard, environment)? {
-                flow @ Flow::Value(Value::Bool(_)) => flow,
-                Flow::Value(Value::AbstractValue { .. }) => {
+            match self.eval(guard, environment) {
+                Ok(flow @ Flow::Value(Value::Bool(_))) => flow,
+                Ok(Flow::Value(Value::AbstractValue { .. })) => {
+                    let _ = self.cleanup_pending_then(&mut pending_then, 0, environment);
                     return Err(
                         self.failure(ErrorKind::AbstractValueUnresolved, Some(guard.source))
                     );
                 }
-                Flow::Value(_) => return Err(self.failure(ErrorKind::Type, Some(guard.source))),
-                flow => flow,
+                Ok(Flow::Value(_)) => {
+                    let _ = self.cleanup_pending_then(&mut pending_then, 0, environment);
+                    return Err(self.failure(ErrorKind::Type, Some(guard.source)));
+                }
+                Ok(flow) => {
+                    self.cleanup_pending_then(&mut pending_then, 0, environment)?;
+                    flow
+                }
+                Err(error) => {
+                    let _ = self.cleanup_pending_then(&mut pending_then, 0, environment);
+                    return Err(error);
+                }
             }
         } else {
             Flow::Value(Value::Bool(true))
         };
-        let bindings = if matches!(flow, Flow::Value(Value::Bool(true))) {
-            bindings
+        if matches!(flow, Flow::Value(Value::Bool(true))) {
+            Ok((flow, bindings, pending_then))
         } else {
-            PatternBindings::default()
-        };
-        Ok((flow, bindings))
+            if matches!(flow, Flow::Value(Value::Bool(false))) {
+                self.cleanup_pending_then(&mut pending_then, 0, environment)?;
+            }
+            Ok((flow, PatternBindings::default(), Vec::new()))
+        }
+    }
+
+    fn cleanup_pending_then(
+        &mut self,
+        pending: &mut Vec<PendingThen>,
+        mark: usize,
+        environment: &mut Environment,
+    ) -> Result<(), Error> {
+        while pending.len() > mark {
+            let item = pending.pop().unwrap();
+            self.cleanup_pattern_then_failure(item.source, item.value, environment)?;
+        }
+        Ok(())
     }
 
     #[inline(never)]
@@ -3727,16 +3767,20 @@ impl<'a> Interpreter<'a> {
                 for arm in arms {
                     let flow = environment.scoped(|environment| {
                         self.tick(Some(expr.source))?;
-                        let (matched, bindings) = self.match_arm_guard_with_bindings(
-                            &arm.pattern,
-                            arm.guard.as_ref(),
-                            &value,
-                            environment,
-                        )?;
+                        let (matched, bindings, pending_then) = self
+                            .match_arm_guard_with_bindings_and_then(
+                                &arm.pattern,
+                                arm.guard.as_ref(),
+                                &value,
+                                environment,
+                            )?;
                         match matched {
                             Flow::Value(Value::Bool(false)) => return Ok(None),
                             Flow::Value(Value::Bool(true)) => {}
                             flow => return Ok(Some(flow)),
+                        }
+                        for pt in &pending_then {
+                            self.retain_pattern_residual(pt.source, &pt.value, &pt.bindings)?;
                         }
                         self.retain_pattern_residual(arm.body.source, &value, &bindings)?;
                         let result = self.eval(&arm.body, environment)?;
@@ -3830,13 +3874,21 @@ impl<'a> Interpreter<'a> {
                 let value_source = value.source;
                 let value = value!(self.eval(value, environment));
                 environment.begin_scope();
-                let succeeds = self.match_arm_guard_with_bindings(
+                let succeeds = self.match_arm_guard_with_bindings_and_then(
                     pattern,
                     guard.as_deref(),
                     &value,
                     environment,
                 );
-                if let Ok((Flow::Value(Value::Bool(true)), bindings)) = &succeeds {
+                if let Ok((Flow::Value(Value::Bool(true)), bindings, pending_then)) = &succeeds {
+                    for pt in pending_then {
+                        if let Err(error) =
+                            self.retain_pattern_residual(pt.source, &pt.value, &pt.bindings)
+                        {
+                            environment.leave_scope();
+                            return Err(error);
+                        }
+                    }
                     match self.retain_pattern_residual(expr.source, &value, bindings) {
                         Ok(()) => {
                             environment.commit_scope();
@@ -4936,7 +4988,7 @@ mod pattern_remap_tests;
 mod pattern_structure;
 mod type_patterns;
 
-use pattern_journal::{PatternBindings, PatternJournal};
+use pattern_journal::{PatternBindings, PatternJournal, PendingThen};
 
 impl Interpreter<'_> {
     #[cfg(test)]
@@ -4950,15 +5002,27 @@ impl Interpreter<'_> {
             .map(|(flow, _)| flow)
     }
 
+    #[allow(dead_code)]
     fn match_pattern_with_bindings(
         &mut self,
         pattern: &nir::program::Pattern,
         value: &Value,
         environment: &mut Environment,
     ) -> Result<(Flow, PatternBindings), Error> {
+        let (flow, bindings, _) =
+            self.match_pattern_with_bindings_and_then(pattern, value, environment)?;
+        Ok((flow, bindings))
+    }
+
+    fn match_pattern_with_bindings_and_then(
+        &mut self,
+        pattern: &nir::program::Pattern,
+        value: &Value,
+        environment: &mut Environment,
+    ) -> Result<(Flow, PatternBindings, Vec<PendingThen>), Error> {
         let mut journal = PatternJournal::new();
         let flow = self.match_pattern_node(pattern, value, environment, &mut journal)?;
-        Ok((flow, journal.bindings))
+        Ok((flow, journal.bindings, journal.pending_then))
     }
 
     fn match_pattern_node(
@@ -4970,10 +5034,25 @@ impl Interpreter<'_> {
     ) -> Result<Flow, Error> {
         self.tick(None)?;
         let mark = undo.len();
+        let then_mark = undo.then_len();
         let result =
             self.with_native_depth(|vm| vm.match_pattern_inner(pattern, value, environment, undo));
         if !matches!(result, Ok(Flow::Value(Value::Bool(true)))) {
             undo.rollback(mark, environment);
+            if undo.then_len() > then_mark {
+                match &result {
+                    Ok(_) => {
+                        self.cleanup_pending_then(&mut undo.pending_then, then_mark, environment)?;
+                    }
+                    Err(_) => {
+                        let _ = self.cleanup_pending_then(
+                            &mut undo.pending_then,
+                            then_mark,
+                            environment,
+                        );
+                    }
+                }
+            }
         }
         result
     }
@@ -5172,8 +5251,71 @@ impl Interpreter<'_> {
                 ) {
                     false
                 } else {
-                    let value = value!(self.eval(value, environment));
-                    return self.match_pattern_field(next, &value, environment, undo, None);
+                    let value_source = value.source;
+                    let computed = value!(self.eval(value, environment));
+                    let pt_index = undo.pending_then.len();
+                    undo.pending_then.push(PendingThen {
+                        source: value_source,
+                        value: computed.clone(),
+                        bindings: PatternBindings::default(),
+                    });
+                    let mut then_journal = PatternJournal::new();
+                    let result = match self.match_pattern_node(
+                        next,
+                        &computed,
+                        environment,
+                        &mut then_journal,
+                    ) {
+                        Ok(flow) => flow,
+                        Err(error) => {
+                            let _ = self.cleanup_pending_then(
+                                &mut then_journal.pending_then,
+                                0,
+                                environment,
+                            );
+                            let _ = self.cleanup_pending_then(
+                                &mut undo.pending_then,
+                                pt_index,
+                                environment,
+                            );
+                            return Err(error);
+                        }
+                    };
+                    if !matches!(result, Flow::Value(Value::Bool(true))) {
+                        self.cleanup_pending_then(&mut then_journal.pending_then, 0, environment)?;
+                        self.cleanup_pending_then(&mut undo.pending_then, pt_index, environment)?;
+                        return Ok(result);
+                    }
+                    let base_rank = undo.len();
+                    let mut ranked = Vec::with_capacity(then_journal.bindings.1.len());
+                    for (id, rank) in &then_journal.bindings.1 {
+                        ranked.push((*rank, *id));
+                    }
+                    ranked.sort();
+                    undo.pending_then[pt_index].bindings = then_journal.bindings;
+                    let nested_then = then_journal.pending_then;
+                    let mut seen_bindings = BTreeSet::new();
+                    for (id, old_val, old_origin, old_rank) in then_journal.changes {
+                        let first_change = seen_bindings.insert(id);
+                        let effective_origin = if first_change {
+                            undo.bindings.0.get(&id).cloned()
+                        } else {
+                            old_origin
+                        };
+                        let effective_rank = if first_change {
+                            undo.bindings.1.get(&id).copied()
+                        } else {
+                            old_rank
+                        };
+                        undo.changes
+                            .push((id, old_val, effective_origin, effective_rank));
+                    }
+                    for (offset, (_, id)) in ranked.into_iter().enumerate() {
+                        undo.bindings.0.insert(id, None);
+                        undo.bindings.1.insert(id, base_rank + offset);
+                    }
+                    undo.pending_then.extend(nested_then);
+                    true
                 }
             }
             _ => unreachable!("pattern dispatcher selected an incompatible evaluator"),
@@ -5258,6 +5400,7 @@ impl Interpreter<'_> {
                     }
                 }
                 let candidate_start = undo.len();
+                let then_start = undo.then_len();
                 if !matches!(
                     value!(self.match_pattern_node(pattern, input, environment, undo)),
                     Value::Bool(true)
@@ -5308,6 +5451,20 @@ impl Interpreter<'_> {
                     for (from, _) in bindings {
                         if !targets.contains(from) {
                             undo.restore_outer(*from, candidate_start, environment);
+                        }
+                    }
+                    for pt in &mut undo.pending_then[then_start..] {
+                        let mapped_bindings = bindings
+                            .iter()
+                            .filter_map(|(from, to)| {
+                                let origin = pt.bindings.0.remove(from)?;
+                                let rank = pt.bindings.1.remove(from)?;
+                                Some((*to, origin, rank))
+                            })
+                            .collect::<Vec<_>>();
+                        for (to, origin, rank) in mapped_bindings {
+                            pt.bindings.0.insert(to, origin);
+                            pt.bindings.1.insert(to, rank);
                         }
                     }
                     true

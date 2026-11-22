@@ -3,6 +3,7 @@
 use crate::InstanceKey;
 use nir::Term;
 use std::fmt;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Program {
     pub ty: Term,
@@ -10,11 +11,13 @@ pub struct Program {
     pub guards: Vec<(Vec<usize>, usize)>,
     pub steps: Vec<Step>,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct VariantCase {
     pub guards: Vec<(Vec<usize>, usize)>,
     pub steps: Vec<Step>,
 }
+
 impl fmt::Display for VariantCase {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(variant-case (guards")?;
@@ -30,6 +33,7 @@ impl fmt::Display for VariantCase {
         f.write_str("))")
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
     /// Exactly one case must match, before any case executes. Guards are
@@ -56,6 +60,7 @@ pub enum Step {
         ty: Term,
     },
 }
+
 fn path(f: &mut fmt::Formatter<'_>, indices: &[usize]) -> fmt::Result {
     f.write_str("(path")?;
     for index in indices {
@@ -63,6 +68,7 @@ fn path(f: &mut fmt::Formatter<'_>, indices: &[usize]) -> fmt::Result {
     }
     f.write_str(")")
 }
+
 impl fmt::Display for Step {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -126,6 +132,7 @@ impl fmt::Display for Step {
         }
     }
 }
+
 impl fmt::Display for Program {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(cleanup-program (type {}) (variant-guards", self.ty)?;
@@ -161,12 +168,14 @@ pub enum Boundary {
     Continue,
     Replacement,
     PredicateFailure,
+    PatternFailure,
     InterfacePreconditionFailure,
     /// Invocation inputs have transferred; its result is still pending delivery.
     InterfacePostconditionFailure,
     DefaultFailure(usize),
     PostconditionFailure(nir::program::SourceRange),
 }
+
 impl fmt::Display for Boundary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Self::EffectBreak(id) | Self::EffectContinue(id) = self {
@@ -197,12 +206,14 @@ impl fmt::Display for Boundary {
             Self::Continue => "continue",
             Self::Replacement => "replacement",
             Self::PredicateFailure => "predicate-failure",
+            Self::PatternFailure => "pattern-failure",
             Self::InterfacePreconditionFailure => "interface-precondition-failure",
             Self::InterfacePostconditionFailure => "interface-postcondition-failure",
             Self::DefaultFailure(_) | Self::PostconditionFailure(_) => unreachable!(),
         })
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     Temporary {
@@ -219,17 +230,20 @@ pub enum Target {
         value_source: nir::program::SourceRange,
     },
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Action {
     pub target: Target,
     pub program: Program,
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Site {
     pub source: nir::program::SourceRange,
     pub boundary: Boundary,
     pub actions: Vec<Action>,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ContextKey {
     EffectHandler {
@@ -250,6 +264,7 @@ pub enum ContextKey {
         definition: nir::program::SourceRange,
     },
 }
+
 impl fmt::Display for ContextKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -278,6 +293,7 @@ impl fmt::Display for ContextKey {
         }
     }
 }
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FunctionSchedule {
     pub instance: InstanceKey,
@@ -290,11 +306,13 @@ pub struct FunctionSchedule {
     pub pattern_transfers: Vec<Transfer>,
     pub pattern_orders: Vec<BindingOrder>,
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BindingOrder {
     pub source: nir::program::SourceRange,
     pub alternatives: Vec<Vec<nir::program::LocalId>>,
 }
+
 impl fmt::Display for BindingOrder {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(pattern-order (source {})", self.source)?;
@@ -308,12 +326,14 @@ impl fmt::Display for BindingOrder {
         f.write_str(")")
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Transfer {
     pub source: nir::program::SourceRange,
     pub binding: nir::program::LocalId,
     pub fields: Vec<usize>,
 }
+
 impl fmt::Display for Transfer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -325,6 +345,7 @@ impl fmt::Display for Transfer {
         f.write_str(")")
     }
 }
+
 /// A whole result discarded at its own full-expression boundary.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DiscardCleanup {
@@ -332,6 +353,7 @@ pub struct DiscardCleanup {
     pub value_source: nir::program::SourceRange,
     pub program: Program,
 }
+
 impl fmt::Display for DiscardCleanup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -341,6 +363,7 @@ impl fmt::Display for DiscardCleanup {
         )
     }
 }
+
 /// A recursive call with the same validated callable/enum premises as an
 /// ancestor reuses that ancestor's finite cleanup specialization.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -349,6 +372,7 @@ pub struct ContextAlias {
     pub context: Vec<ContextKey>,
     pub target: Vec<ContextKey>,
 }
+
 impl fmt::Display for ContextAlias {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -366,6 +390,7 @@ impl fmt::Display for ContextAlias {
         f.write_str("))")
     }
 }
+
 #[derive(Clone, Debug, Default)]
 pub struct Schedule {
     /// Concrete closure evidence for an invocation scope. Source ranges alone
@@ -383,6 +408,7 @@ pub struct ClosureDefinition {
     pub context: Vec<ContextKey>,
     pub definition: nir::program::Expr,
 }
+
 impl fmt::Display for ClosureDefinition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -402,6 +428,7 @@ pub enum ScopeLookupError {
     Missing,
     Ambiguous,
 }
+
 impl fmt::Display for ScopeLookupError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -410,6 +437,7 @@ impl fmt::Display for ScopeLookupError {
         })
     }
 }
+
 impl std::error::Error for ScopeLookupError {}
 
 impl Schedule {
@@ -433,6 +461,7 @@ impl Schedule {
         Ok(result)
     }
 }
+
 impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -456,11 +485,13 @@ impl fmt::Display for Target {
         }
     }
 }
+
 impl fmt::Display for Action {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(scheduled-cleanup {} {})", self.target, self.program)
     }
 }
+
 impl fmt::Display for Site {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -474,6 +505,7 @@ impl fmt::Display for Site {
         f.write_str("))")
     }
 }
+
 impl fmt::Display for FunctionSchedule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(function-cleanup {} (context", self.instance)?;
@@ -513,6 +545,7 @@ impl fmt::Display for FunctionSchedule {
         f.write_str("))")
     }
 }
+
 impl fmt::Display for Schedule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("(cleanup-schedule (borrowed-callable-functions")?;

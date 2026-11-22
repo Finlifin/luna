@@ -546,10 +546,17 @@ pub(super) fn admitted_direct_program(
                 }
                 Target::Temporary {source, ..} => {
                     let mut retained = false;
-                    let result = nir::visit::expressions_in_scope_with_observations(&instance.function, &observations, fuel, |expr, _| {
+                    let result = nir::visit::expressions_in_scope_with_observations(&instance.function, &observations, fuel, |expr, fuel| {
                         retained |= match &expr.kind {
-                            K::Match {arms, ..} => arms.iter().any(|arm| arm.body.source == *source),
-                            K::LetPattern {value, ..} => expr.source == *source || value.source == *source,
+                            K::Match {arms, ..} => {
+                                let mut matched = false;
+                                for arm in arms {
+                                    matched |= arm.body.source == *source
+                                        || pattern_has_then_source(&arm.pattern, *source, fuel)?;
+                                }
+                                matched
+                            }
+                            K::LetPattern {pattern, value, ..} => expr.source == *source || value.source == *source || pattern_has_then_source(pattern, *source, fuel)?,
                             K::Call {callee,..} => callee.source == *source,
                             K::EnumName(value) => value.source == *source,
                             _ => false,
@@ -626,6 +633,26 @@ pub(super) fn admitted_direct_program(
                 });
                 result.is_ok() && found
             }
+            Boundary::PatternFailure => {
+                let mut found = false;
+                let result = nir::visit::expressions_in_scope_with_observations(&instance.function, &observations, fuel, |expr, fuel| {
+                    found |= match &expr.kind {
+                        K::Match { arms, .. } => {
+                            let mut matched = false;
+                            for arm in arms {
+                                matched |= pattern_has_then_source(&arm.pattern, site.source, fuel)?;
+                            }
+                            matched
+                        }
+                        K::LetPattern { pattern, .. } => {
+                            pattern_has_then_source(pattern, site.source, fuel)?
+                        }
+                        _ => false,
+                    };
+                    Ok(())
+                });
+                result.is_ok() && found
+            }
             Boundary::ScopeEnd
             | Boundary::Return
             | Boundary::Break
@@ -649,7 +676,6 @@ pub(super) fn admitted_direct_program(
                 });
                 result.is_ok() && found
             }
-            _ => false,
         };
         supported
     })
@@ -992,6 +1018,56 @@ impl Emitter<'_> {
         self.set_live(*binding, fields, false)?;
         Ok(())
     }
+}
+
+fn pattern_has_then_source(
+    pattern: &nir::program::Pattern,
+    target: nir::program::SourceRange,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    use nir::program::Pattern;
+    let mut pending = vec![pattern];
+    while let Some(pattern) = pending.pop() {
+        *fuel = fuel
+            .checked_sub(1)
+            .ok_or("host pattern cleanup source budget exhausted")?;
+        match pattern {
+            Pattern::Then { first, value, next } => {
+                if value.source == target {
+                    return Ok(true);
+                }
+                pending.push(next);
+                pending.push(first);
+            }
+            Pattern::OptionalPresent(inner)
+            | Pattern::ErrorResult { inner, .. }
+            | Pattern::Observe { inner, .. }
+            | Pattern::Guard { pattern: inner, .. }
+            | Pattern::Remap { pattern: inner, .. }
+            | Pattern::Binding { inner, .. } => pending.push(inner),
+            Pattern::Tuple(fields)
+            | Pattern::TypeTuple(fields)
+            | Pattern::Or(fields)
+            | Pattern::NominalType { fields, .. }
+            | Pattern::Record { fields, .. }
+            | Pattern::AnonymousRecord { fields, .. }
+            | Pattern::Variant { fields, .. }
+            | Pattern::NormalForm {
+                arguments: fields, ..
+            } => {
+                *fuel = fuel
+                    .checked_sub(fields.len())
+                    .ok_or("host pattern cleanup field budget exhausted")?;
+                pending.extend(fields.iter().rev());
+            }
+            Pattern::CodeEvidence { .. }
+            | Pattern::OptionalAbsent
+            | Pattern::Wild
+            | Pattern::Unit
+            | Pattern::Literal(_) => {}
+        }
+    }
+    Ok(false)
 }
 
 impl Emitter<'_> {

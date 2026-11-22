@@ -4,7 +4,9 @@ use super::*;
 
 mod default_outputs;
 mod default_writes;
+
 pub(super) use default_outputs::DefaultOutputs;
+
 pub(super) mod tasks;
 
 /// Borrow the selected function telescope, including its result under the
@@ -153,7 +155,10 @@ impl Checker<'_, '_> {
         let Some(item) = self.package.item(owner) else {
             return false;
         };
-        let (ItemKind::Fn(signature, _) | ItemKind::FnDeclaration(signature)) = &item.kind else {
+        let (ItemKind::Fn(signature, _)
+        | ItemKind::Case(signature, _)
+        | ItemKind::FnDeclaration(signature)) = &item.kind
+        else {
             return false;
         };
         !signature.modifiers.is_comptime

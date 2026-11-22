@@ -27,6 +27,12 @@ impl fmt::Display for PatternBindings {
     }
 }
 
+pub(super) struct PendingThen {
+    pub source: SourceRange,
+    pub value: Value,
+    pub bindings: PatternBindings,
+}
+
 pub(super) struct PatternJournal {
     pub changes: Vec<(
         LocalId,
@@ -36,18 +42,27 @@ pub(super) struct PatternJournal {
     )>,
     pub bindings: PatternBindings,
     pub path: Option<Vec<usize>>,
+    pub pending_then: Vec<PendingThen>,
 }
+
 impl PatternJournal {
     pub fn new() -> Self {
         Self {
             changes: vec![],
             bindings: PatternBindings::default(),
             path: Some(vec![]),
+            pending_then: vec![],
         }
     }
+
     pub fn len(&self) -> usize {
         self.changes.len()
     }
+
+    pub fn then_len(&self) -> usize {
+        self.pending_then.len()
+    }
+
     pub fn insert(
         &mut self,
         id: LocalId,
@@ -57,6 +72,7 @@ impl PatternJournal {
     ) {
         self.insert_ranked(id, value, path, self.changes.len(), env);
     }
+
     pub fn insert_ranked(
         &mut self,
         id: LocalId,
@@ -72,6 +88,7 @@ impl PatternJournal {
             self.bindings.1.insert(id, rank),
         ));
     }
+
     pub fn remove(&mut self, id: LocalId, env: &mut Environment) {
         self.changes.push((
             id,
@@ -80,6 +97,7 @@ impl PatternJournal {
             self.bindings.1.remove(&id),
         ));
     }
+
     pub fn restore_outer(&mut self, id: LocalId, mark: usize, env: &mut Environment) {
         if let Some((_, old_val, old_origin, old_rank)) = self
             .changes
@@ -106,6 +124,7 @@ impl PatternJournal {
             self.remove(id, env);
         }
     }
+
     pub fn rollback(&mut self, mark: usize, env: &mut Environment) {
         while self.changes.len() > mark {
             let (id, value, origin, rank) = self.changes.pop().unwrap();
@@ -151,6 +170,7 @@ impl Interpreter<'_> {
         journal.path = previous;
         result
     }
+
     fn pattern_path_work(&mut self, path: &[usize]) -> Result<(), Error> {
         for _ in path {
             self.tick(None)?;

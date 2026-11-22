@@ -1,14 +1,18 @@
 //! Reference execution of published cleanup operations on real owner storage.
 use super::*;
 use iir::cleanup::{Program, Step};
+
 #[cfg(test)]
 mod description_tests;
+
 struct CleanupInspectionError(ErrorKind);
+
 impl From<ErrorKind> for CleanupInspectionError {
     fn from(kind: ErrorKind) -> Self {
         Self(kind)
     }
 }
+
 impl From<nir::visit::Error> for CleanupInspectionError {
     fn from(error: nir::visit::Error) -> Self {
         Self(match error {
@@ -17,10 +21,12 @@ impl From<nir::visit::Error> for CleanupInspectionError {
         })
     }
 }
+
 pub(super) struct PreparedFrame {
     pub(super) source: SourceRange,
     pub(super) values: Vec<(usize, SourceRange, Option<Storage>)>,
 }
+
 impl Interpreter<'_> {
     fn cleanup_requires_context(&mut self, signature: &Term) -> Result<bool, Error> {
         let Term::Function { parameters, result } = signature.callable_signature() else {
@@ -55,6 +61,7 @@ impl Interpreter<'_> {
         }
         Ok(false)
     }
+
     fn index_cleanup_effect_context(&mut self) -> Result<(), Error> {
         let graph = self
             .graph
@@ -116,9 +123,11 @@ impl Interpreter<'_> {
         self.cleanup_effect_context = contexts;
         Ok(())
     }
+
     fn cleanup_callable_value(&mut self, ty: &Term, depth: usize) -> Result<bool, Error> {
         self.cleanup_value_context(ty, depth, false)
     }
+
     fn cleanup_value_context(
         &mut self,
         ty: &Term,
@@ -199,6 +208,7 @@ impl Interpreter<'_> {
         }
         Ok(false)
     }
+
     /// Execute a resource-verified program. A failed destructor stops subsequent
     /// operations; storage retains completed writes/releases. No automatic retry
     /// or exception cleanup is implied. Currently requires a fully typed input
@@ -213,6 +223,7 @@ impl Interpreter<'_> {
         }
         self.execute_cleanup_at(program, storage, &[])
     }
+
     fn execute_cleanup_at(
         &mut self,
         program: &Program,
@@ -246,12 +257,14 @@ impl Interpreter<'_> {
         }
         self.cleanup_steps(&program.steps, storage, base, 0)
     }
+
     fn cleanup_path_work(&mut self, path: &[usize]) -> Result<(), Error> {
         for _ in path {
             self.tick(None)?;
         }
         Ok(())
     }
+
     fn cleanup_steps(
         &mut self,
         steps: &[Step],
@@ -426,6 +439,7 @@ impl<'a> Interpreter<'a> {
             }
         }
     }
+
     pub(super) fn cleanup_copy_delivery(
         &mut self,
         source: SourceRange,
@@ -460,6 +474,7 @@ impl<'a> Interpreter<'a> {
         }
         Ok(())
     }
+
     // Code and external pointer targets retain identity. Owned capture storage
     // receives fresh cells, recursively, so copying a callable does not make its
     // receiver state alias the source. Capability checking happens in publication.
@@ -473,9 +488,11 @@ impl<'a> Interpreter<'a> {
             .ok_or_else(|| self.failure(ErrorKind::StepsExhausted, Some(source)))?;
         Ok(())
     }
+
     fn copy_type_work(&mut self, ty: &Term, source: SourceRange) -> Result<(), Error> {
         self.check_closed_type_description(ty, Some(source))
     }
+
     fn copy_invocation_type_work(
         &mut self,
         ty: &Term,
@@ -510,6 +527,7 @@ impl<'a> Interpreter<'a> {
             Ok(())
         })
     }
+
     pub(super) fn copy_representation(
         &mut self,
         value: &Value,
@@ -920,6 +938,7 @@ impl<'a> Interpreter<'a> {
             }
         })
     }
+
     pub(super) fn cleanup_transfer(
         &mut self,
         source: SourceRange,
@@ -975,6 +994,7 @@ impl<'a> Interpreter<'a> {
             .and_then(|pointer| pointer.transfer())
             .map_err(|e| self.failure(e, Some(source)))
     }
+
     pub(super) fn invocation_cleanup_context(
         &mut self,
         function: &Value,
@@ -1055,6 +1075,7 @@ impl<'a> Interpreter<'a> {
         }
         Err(invalid())
     }
+
     pub(super) fn cleanup_block(
         &mut self,
         source: SourceRange,
@@ -1090,6 +1111,7 @@ impl<'a> Interpreter<'a> {
         }
         Ok(())
     }
+
     pub(super) fn retain_residual(
         &mut self,
         source: SourceRange,
@@ -1097,6 +1119,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<(), Error> {
         self.retain_residual_with_bindings(source, value, None)
     }
+
     pub(super) fn retain_pattern_residual(
         &mut self,
         source: SourceRange,
@@ -1105,6 +1128,7 @@ impl<'a> Interpreter<'a> {
     ) -> Result<(), Error> {
         self.retain_residual_with_bindings(source, value, Some(bindings))
     }
+
     fn retain_residual_with_bindings(
         &mut self,
         source: SourceRange,
@@ -1269,6 +1293,7 @@ impl<'a> Interpreter<'a> {
         }
         result.map(|_| ())
     }
+
     pub(super) fn with_prepared_frame<T>(
         &mut self,
         source: SourceRange,
@@ -1286,6 +1311,7 @@ impl<'a> Interpreter<'a> {
         self.prepared_frames.truncate(depth);
         result
     }
+
     pub(super) fn retain_prepared(
         &mut self,
         slot: usize,
@@ -1315,6 +1341,7 @@ impl<'a> Interpreter<'a> {
             .push((slot, source, Some(Storage::new(value.clone()))));
         Ok(())
     }
+
     pub(super) fn prepare_argument(
         &mut self,
         slot: usize,
@@ -1339,6 +1366,7 @@ impl<'a> Interpreter<'a> {
         frame.values.push((slot, source, Some(storage.clone())));
         Ok(Value::Storage(storage))
     }
+
     pub(super) fn evaluate_default(
         &mut self,
         construction: SourceRange,
@@ -1397,6 +1425,7 @@ impl<'a> Interpreter<'a> {
             other => other,
         }
     }
+
     pub(super) fn transfer_prepared(&mut self) {
         if let Some(frame) = self.prepared_frames.last_mut() {
             frame.values.clear();
@@ -1600,6 +1629,7 @@ impl<'a> Interpreter<'a> {
         self.cleanup_schedule = Some(schedule);
         Ok(self)
     }
+
     pub(super) fn cleanup_discard(
         &mut self,
         source: SourceRange,
@@ -1637,6 +1667,65 @@ impl<'a> Interpreter<'a> {
         }
         Err(self.failure(ErrorKind::InvalidCallPlan, Some(source)))
     }
+
+    pub(super) fn cleanup_pattern_then_failure(
+        &mut self,
+        source: SourceRange,
+        value: Value,
+        environment: &mut Environment,
+    ) -> Result<(), Error> {
+        let Some(_schedule) = self.cleanup_schedule else {
+            return Ok(());
+        };
+        let key = self
+            .cleanup_frame
+            .clone()
+            .ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+        let mut found = None;
+        for candidate in self.current_cleanup_scopes(source)? {
+            self.tick(Some(source))?;
+            if candidate.instance == key && candidate.context == self.cleanup_context {
+                found = Some(candidate);
+                break;
+            }
+        }
+        let function =
+            found.ok_or_else(|| self.failure(ErrorKind::InvalidCallPlan, Some(source)))?;
+        let has_site = self
+            .cleanup_sites
+            .get(&(source.start, source.end))
+            .is_some_and(|sites| {
+                sites.iter().any(|(owner, site)| {
+                    std::ptr::eq(*owner, function)
+                        && site.boundary == iir::cleanup::Boundary::PatternFailure
+                        && site.actions.iter().any(|action| {
+                            matches!(
+                                action.target,
+                                iir::cleanup::Target::Temporary { source: origin, .. }
+                                    if origin == source
+                            )
+                        })
+                })
+            });
+        if !has_site {
+            return Ok(());
+        }
+        let before = self.residual_temporaries.len();
+        self.residual_temporaries
+            .push((source, Storage::new(value)));
+        let cleaned =
+            self.cleanup_site(source, iir::cleanup::Boundary::PatternFailure, environment);
+        if self.residual_temporaries.len() > before
+            && self
+                .residual_temporaries
+                .last()
+                .is_some_and(|(origin, _)| *origin == source)
+        {
+            self.residual_temporaries.pop();
+        }
+        cleaned
+    }
+
     pub(super) fn cleanup_site(
         &mut self,
         source: SourceRange,
@@ -1891,6 +1980,7 @@ mod tuple_context_tests {
 #[cfg(test)]
 mod representation_copy_tests {
     use super::*;
+
     #[test]
     fn copy_preserves_value_instance_arguments_without_relaxing_type_lists() {
         let package = Package::default();
@@ -1953,6 +2043,7 @@ mod representation_copy_tests {
             },
         }))
     }
+
     #[test]
     fn authorized_pointer_read_detaches_owned_capture_storage() {
         let source = SourceRange { start: 1, end: 2 };
@@ -2060,6 +2151,7 @@ mod representation_copy_tests {
         let mut fresh = Interpreter::new(&package, Budget::default()).unwrap();
         assert!(fresh.copy_representation(&original, source, 0).is_ok());
     }
+
     #[test]
     fn representation_copy_rejects_capture_storage_with_moved_children() {
         let package = Package::default();
@@ -2119,6 +2211,7 @@ mod copy_budget_tests {
     }
 
     use super::*;
+
     #[test]
     fn immutable_payload_summary_does_not_authorize_scoped_root_export() {
         let package = Package::default();
@@ -2195,6 +2288,7 @@ mod copy_budget_tests {
         );
         assert_eq!(fresh.copy_representation(&ty, location, 0).unwrap(), ty);
     }
+
     #[test]
     fn representation_copy_rejects_owned_storage_cycles_and_releases_locks() {
         let package = Package::default();
@@ -2218,6 +2312,7 @@ mod copy_budget_tests {
         assert_eq!(copied.read().unwrap(), Value::Bool(true));
         assert_ne!(copied, storage);
     }
+
     #[test]
     fn representation_copy_respects_configured_depth_without_consuming_source() {
         let package = Package::default();
@@ -2245,6 +2340,7 @@ mod copy_budget_tests {
 mod variant_selection_tests {
     use super::*;
     use iir::cleanup::VariantCase;
+
     fn subject() -> Storage {
         Storage::new(Value::Variant {
             declaration: DeclarationId {
@@ -2256,6 +2352,7 @@ mod variant_selection_tests {
             fields: vec![Value::Bool(true)],
         })
     }
+
     fn case(guards: Vec<(Vec<usize>, usize)>) -> VariantCase {
         VariantCase {
             guards,
@@ -2265,6 +2362,7 @@ mod variant_selection_tests {
             }],
         }
     }
+
     fn constructed(storage: &Storage) -> bool {
         storage
             .owned_pointer(Term::Primitive(Primitive::Void), &[])
@@ -2272,6 +2370,7 @@ mod variant_selection_tests {
             .is_constructed()
             .unwrap()
     }
+
     #[test]
     fn selection_rejects_missing_or_ambiguous_cases_before_effects() {
         let package = Package::default();
@@ -2289,6 +2388,7 @@ mod variant_selection_tests {
             assert!(constructed(&storage));
         }
     }
+
     #[test]
     fn enclosing_tag_failure_skips_inactive_payload_paths() {
         let package = Package::default();
@@ -2304,6 +2404,7 @@ mod variant_selection_tests {
         vm.cleanup_steps(&[step], &storage, &[], 0).unwrap();
         assert!(!constructed(&storage));
     }
+
     #[test]
     fn selection_budget_failure_preserves_storage_for_fresh_invocation() {
         let package = Package::default();
