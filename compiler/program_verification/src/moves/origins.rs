@@ -59,7 +59,15 @@ pub(super) fn pointer_possible(
     // as its ownership shape. Inspect that layout without exporting a memory
     // contract for the closure or unfolding its code.
     let fields_layout = match ty {
-        Term::Closure { environment, .. } => Some(environment.as_slice()),
+        Term::Closure {
+            environment,
+            signature,
+        } => {
+            if fields.is_empty() && matches!(signature.as_ref(), Term::TraitObject { .. }) {
+                return Ok(true);
+            }
+            Some(environment.as_slice())
+        }
         _ => nir::normal_forms::tuple_fields(package, ty),
     };
     if let Some(types) = fields_layout {
@@ -84,7 +92,7 @@ pub(super) fn pointer_possible(
         return result;
     }
     match ty {
-        Term::Pointer(_) => Ok(fields.is_empty()),
+        Term::Pointer(_) | Term::TraitObject { .. } => Ok(fields.is_empty()),
         Term::Primitive(_) => Ok(false),
         Term::Record(types) => {
             let Some((&field, rest)) = fields.split_first() else {
@@ -276,6 +284,7 @@ pub(super) fn pointer_possible(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn conditional_input_binding_distinguishes_absence_unknown_and_live_targets() {
         use crate::{PlaceId, memory::PointerInputLeaf, ownership::Place};

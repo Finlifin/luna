@@ -97,6 +97,9 @@ impl Checker<'_, '_> {
                     },
                 )
             }
+            H::DynCast(value, trait_expr) => {
+                return self.dyn_cast_expression(expr, value, trait_expr, expected);
+            }
             H::Cast(value, target) => {
                 let target = self.type_expr(target)?;
                 let value = self.expr(value, None)?;
@@ -209,7 +212,10 @@ impl Checker<'_, '_> {
             }
             H::TakeAttribute(value) => {
                 if self.runtime_value_context() || self.in_code_body {
-                    return Err(error(expr.span, "attribute view requires comptime invocation"));
+                    return Err(error(
+                        expr.span,
+                        "attribute view requires comptime invocation",
+                    ));
                 }
                 let target = self.expr(value, None)?;
                 let ty = if is_never(&target.ty) {

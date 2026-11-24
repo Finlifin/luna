@@ -172,6 +172,7 @@ fn llvm_ir_prepared_with_entry_mode(
         true,
         Some(&executable.schedule),
         Some(&executable.entry),
+        &executable.dyn_cleanups,
         mode,
         &prepared.attributes,
     )
@@ -250,6 +251,7 @@ fn llvm_ir_declaration_with_entry_mode(
         false,
         None,
         None,
+        &[],
         mode,
         &package.definition_attributes,
     )

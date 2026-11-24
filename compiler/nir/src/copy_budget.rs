@@ -913,6 +913,56 @@ fn walk_node_terms<E: From<CopyBudgetExhausted>>(
                         );
                         parameter_bindings.len()
                     }
+                    K::TraitObjectType { arguments, .. } => {
+                        charge_width(steps, arguments.len())?;
+                        work.extend(
+                            arguments
+                                .iter()
+                                .map(|argument| (Node::Expr(argument), depth + 1)),
+                        );
+                        0
+                    }
+                    K::DynCast(cast) => {
+                        charge_width(steps, cast.interface.arguments.len())?;
+                        charge_width(steps, cast.env_arguments.len())?;
+                        charge_width(steps, cast.env_identities.len())?;
+                        work.push((Node::Type(&cast.subject), depth + 1));
+                        work.extend(
+                            cast.interface
+                                .arguments
+                                .iter()
+                                .map(|ty| (Node::Type(ty), depth + 1)),
+                        );
+                        work.push((Node::Expr(&cast.value), depth + 1));
+                        work.extend(
+                            cast.env_arguments
+                                .iter()
+                                .map(|argument| (Node::Expr(argument), depth + 1)),
+                        );
+                        work.extend(
+                            cast.env_identities
+                                .iter()
+                                .map(|ty| (Node::Type(ty), depth + 1)),
+                        );
+                        0
+                    }
+                    K::DynCall(call) => {
+                        charge_width(steps, call.interface.arguments.len())?;
+                        charge_width(steps, call.arguments.len())?;
+                        work.extend(
+                            call.interface
+                                .arguments
+                                .iter()
+                                .map(|ty| (Node::Type(ty), depth + 1)),
+                        );
+                        work.push((Node::Expr(&call.receiver), depth + 1));
+                        work.extend(
+                            call.arguments
+                                .iter()
+                                .map(|argument| (Node::Expr(&argument.value), depth + 1)),
+                        );
+                        call.parameter_bindings.len()
+                    }
                     K::ComptimeFunctionInstance { inputs, .. } => {
                         charge_width(steps, inputs.observations.len())?;
                         work.extend(

@@ -547,6 +547,28 @@ impl Walker<'_> {
                 }
                 self.child(signature, state, depth)?;
             }
+            K::TraitObjectType { arguments, .. } => {
+                for arg in arguments {
+                    self.child(arg, state, depth)?;
+                }
+            }
+            K::DynCast(cast) => {
+                self.child(&cast.value, state, depth)?;
+                for arg in &cast.env_arguments {
+                    self.child(arg, state, depth)?;
+                }
+                return self.unknown_value(&expr.ty);
+            }
+            K::DynCall(call) => {
+                self.child(&call.receiver, state, depth)?;
+                for arg in &call.arguments {
+                    self.child(&arg.value, state, depth)?;
+                }
+                if state.facts.is_reachable() {
+                    state.havoc(self.limits)?;
+                }
+                return self.unknown_value(&expr.ty);
+            }
             K::TypeEqual(left, right) => {
                 self.child(left, state, depth)?;
                 self.child(right, state, depth)?;

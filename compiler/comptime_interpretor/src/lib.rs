@@ -2753,9 +2753,10 @@ impl<'a> Interpreter<'a> {
             K::FunctionType { .. } | K::FunctionResultType { .. } => {
                 self.eval_type_constructor(expr, environment)
             }
-            K::OptionalType(..) | K::PointerType(..) | K::ClosureType { .. } => {
-                self.eval_type_constructor(expr, environment)
-            }
+            K::OptionalType(..)
+            | K::PointerType(..)
+            | K::TraitObjectType { .. }
+            | K::ClosureType { .. } => self.eval_type_constructor(expr, environment),
             K::PlannedFunctionInstance { .. } | K::NominalType { .. } => {
                 self.eval_declaration_plan(expr, environment)
             }
@@ -2845,7 +2846,7 @@ impl<'a> Interpreter<'a> {
             K::Not(..) => self.eval_not(expr, environment),
             K::And(..) | K::Or(..) => self.eval_and(expr, environment),
             K::Call { .. } => self.eval_call(expr, environment),
-            K::ConstAddress { .. } | K::StaticAddress(_) => {
+            K::ConstAddress { .. } | K::StaticAddress(_) | K::DynCast(_) | K::DynCall(_) => {
                 return Err(self.failure(
                     if self.comptime_only {
                         ErrorKind::PhaseMismatch

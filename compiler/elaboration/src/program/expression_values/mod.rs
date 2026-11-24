@@ -65,6 +65,7 @@ impl Checker<'_, '_> {
             }
             H::Index(..)
             | H::Cast(..)
+            | H::DynCast(..)
             | H::TakeOld(_)
             | H::TakeTupleEnumerate(_)
             | H::TakeTupleIndexed(_)

@@ -1023,6 +1023,20 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                     span,
                 }
             }
+            NodeKind::DynCast => {
+                let expr = self.lower_expr(ctx, children[0]);
+                let interface = self.lower_expr(ExprContext::Trait, children[1]);
+                let hir_id = self.next_hir_id();
+                self.record_trait_sources(hir_id, span);
+                Expr {
+                    hir_id,
+                    kind: ExprKind::DynCast(
+                        self.arena.alloc_expr(expr),
+                        self.arena.alloc_expr(interface),
+                    ),
+                    span,
+                }
+            }
             NodeKind::Lambda => self.lower_lambda_expr(ctx, node, span),
             NodeKind::PostLambda => {
                 self.lower_post_lambda_expr(ctx, children[0], children[1], span)
@@ -1042,6 +1056,15 @@ impl<'hir, 'ast, 'resolver: 'ast> LoweringContext<'hir, 'ast, 'resolver> {
                 Expr {
                     hir_id: self.next_hir_id(),
                     kind: ExprKind::TyOptional(inner_ref),
+                    span,
+                }
+            }
+            NodeKind::TraitObjectType => {
+                let inner = self.lower_expr(ExprContext::Trait, children[0]);
+                let inner_ref = self.arena.alloc_expr(inner);
+                Expr {
+                    hir_id: self.next_hir_id(),
+                    kind: ExprKind::TyTraitObject(inner_ref),
                     span,
                 }
             }

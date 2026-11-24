@@ -11,7 +11,9 @@ pub enum Kind {
     Optional,
     Pointer,
     Closure,
+    TraitObject(nir::DeclarationId),
 }
+
 impl fmt::Display for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -29,15 +31,18 @@ impl fmt::Display for Kind {
             Self::Optional => write!(f, "(optional)"),
             Self::Pointer => write!(f, "(pointer)"),
             Self::Closure => write!(f, "(closure)"),
+            Self::TraitObject(id) => write!(f, "(trait-object {id})"),
         }
     }
 }
+
 #[derive(Debug)]
 pub struct Constructor {
     pub kind: Kind,
     pub ty: Term,
     pub inputs: Vec<Term>,
 }
+
 impl fmt::Display for Constructor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(

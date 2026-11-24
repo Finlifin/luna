@@ -108,7 +108,9 @@ impl Checker<'_, '_> {
                 | H::TyType
                 | H::TyVoid
                 | H::TyNoReturn => {}
-                H::Defer(inner) | H::TyOptional(inner) => pending.push(inner),
+                H::Defer(inner) | H::TyOptional(inner) | H::TyTraitObject(inner) => {
+                    pending.push(inner)
+                }
                 H::Block(block) if block.stmts.is_empty() => pending.extend(block.expr),
                 H::If(cond, yes, no) if yes.stmts.is_empty() => {
                     pending.push(cond);

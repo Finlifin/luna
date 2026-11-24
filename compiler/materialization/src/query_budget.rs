@@ -69,6 +69,8 @@ mod tests {
             global_runtime_deliveries: BTreeMap::new(),
             nominals: vec![],
             interface_contracts: vec![],
+            dyn_interfaces: vec![],
+            dyn_vtables: vec![],
             effect_contracts: vec![],
             effect_instances: HashSet::new(),
             frozen_methods: vec![],

@@ -88,6 +88,7 @@ impl Interpreter<'_> {
             Kind::Result => inputs.len() == 2,
             Kind::Optional | Kind::Pointer => inputs.len() == 1,
             Kind::Closure => !inputs.is_empty(),
+            Kind::TraitObject(_) => true,
         };
         if !valid {
             return Err(self.failure(ErrorKind::Type, Some(source)));
@@ -109,7 +110,10 @@ impl Interpreter<'_> {
             Kind::Result if index == 0 => matches!(ty.callable_signature(), Term::Function { .. }),
             Kind::Closure if count > 1 && index + 1 == count => matches!(
                 ty,
-                Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                Term::Function { .. }
+                    | Term::ComptimeFunction(_)
+                    | Term::UnsafeFunction(_)
+                    | Term::TraitObject { .. }
             ),
             Kind::Pointer => !matches!(
                 ty,
@@ -200,6 +204,10 @@ impl Interpreter<'_> {
                     }
                 }
             }
+            Kind::TraitObject(interface) => Term::TraitObject {
+                interface: *interface,
+                arguments: inputs,
+            },
         };
         Ok(Value::Type(ty))
     }
@@ -224,6 +232,10 @@ impl Interpreter<'_> {
             K::FunctionResultType { signature, result } => (Kind::Result, vec![signature, result]),
             K::OptionalType(inner) => (Kind::Optional, vec![inner]),
             K::PointerType(inner) => (Kind::Pointer, vec![inner]),
+            K::TraitObjectType {
+                interface,
+                arguments,
+            } => (Kind::TraitObject(*interface), arguments.iter().collect()),
             K::ClosureType {
                 environment,
                 signature,

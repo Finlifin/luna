@@ -247,7 +247,7 @@ impl Report {
                         pending.extend(branch.steps.iter().rev());
                     }
                 }
-                CleanupStep::Release { .. } => {}
+                CleanupStep::Release { .. } | CleanupStep::DropTraitObject { .. } => {}
             }
         }
         for (effect, targets) in resolved {

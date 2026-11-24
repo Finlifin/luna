@@ -226,6 +226,13 @@ fn walk<'p, L: Lookup<'p>>(
             declaration: *declaration,
             arguments: walk_many(arguments, values, fuel, depth + 1)?,
         },
+        Term::TraitObject {
+            interface,
+            arguments,
+        } => Term::TraitObject {
+            interface: *interface,
+            arguments: walk_many(arguments, values, fuel, depth + 1)?,
+        },
         Term::NormalForm {
             head,
             sort,

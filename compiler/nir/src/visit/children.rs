@@ -355,6 +355,26 @@ pub(super) fn expand<'a, T: From<Node<'a>>>(
                 );
                 extend!(work, fuel, env_arguments.iter().map(Node::Expr));
             }
+            K::TraitObjectType { arguments, .. } => {
+                extend!(work, fuel, arguments.iter().map(Node::Expr));
+            }
+            K::DynCast(cast) => {
+                work::charge_entries(fuel, cast.env_arguments.len())?;
+                push!(work, fuel, Node::Expr(&cast.value));
+                extend!(work, fuel, cast.env_arguments.iter().map(Node::Expr));
+            }
+            K::DynCall(call) => {
+                work::charge_entries(fuel, call.arguments.len())?;
+                push!(work, fuel, Node::Expr(&call.receiver));
+                extend!(
+                    work,
+                    fuel,
+                    call.arguments
+                        .iter()
+                        .filter(|a| include_defaults || !a.is_default)
+                        .map(|a| Node::Expr(&a.value)),
+                );
+            }
             K::WritePointer {
                 pointer: a,
                 value: b,

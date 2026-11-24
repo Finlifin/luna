@@ -108,6 +108,7 @@ impl Payloads<'_> {
             | Term::Optional(result)
             | Term::Pointer(result)
             | Term::UnsafeFunction(result) => self.check(result, frames, next, fuel),
+            Term::TraitObject { .. } => Ok(()),
             Term::Tuple(items) => self.fields(items, frames, next, fuel),
             Term::Record(fields) => {
                 self.fields(fields.iter().map(|(_, ty)| ty), frames, next, fuel)

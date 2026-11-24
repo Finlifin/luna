@@ -140,7 +140,10 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             K::Continue(identity) => self.loop_edge(*identity, false, flow, source)?,
             K::Return(_) => self.expr_return(expr, flow, depth)?,
             K::Call { .. } => self.expr_call(expr, flow, depth)?,
-            K::Tuple(_)
+            K::TraitObjectType { .. }
+            | K::DynCast(_)
+            | K::DynCall(_)
+            | K::Tuple(_)
             | K::AnonymousRecord { .. }
             | K::Record { .. }
             | K::OptionalPresent(_)

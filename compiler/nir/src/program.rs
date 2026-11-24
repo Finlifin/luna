@@ -1355,6 +1355,26 @@ impl fmt::Display for EnumStructureQuery {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct DynCast {
+    pub interface: InterfaceInstance,
+    pub subject: Term,
+    pub by_pointer: bool,
+    pub value: Box<Expr>,
+    pub env_arguments: Vec<Expr>,
+    pub env_identities: Vec<Term>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynCall {
+    pub interface: InterfaceInstance,
+    pub member: DeclarationId,
+    pub receiver: Box<Expr>,
+    pub by_value_receiver: bool,
+    pub arguments: Vec<CallArgument>,
+    pub parameter_bindings: Vec<LocalId>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum ExprKind {
     /// Preserve the entire operand as the payload of one new optional layer.
     OptionalPresent(Box<Expr>),
@@ -1362,6 +1382,15 @@ pub enum ExprKind {
     OptionalAbsent,
     /// Comptime construction of an optional Type from a Type-valued expression.
     OptionalType(Box<Expr>),
+    /// Comptime construction of a `dyn Trait<args>` Type when arguments are symbolic.
+    TraitObjectType {
+        interface: DeclarationId,
+        arguments: Vec<Expr>,
+    },
+    /// Encapsulate a pointer view (`by_pointer = true`) or owned value into `dyn Trait` / `%c dyn Trait`.
+    DynCast(Box<DynCast>),
+    /// Dynamic dispatch of a trait method on `dyn Trait` / `%c dyn Trait`.
+    DynCall(Box<DynCall>),
     /// Explicit result construction/transport, independent of effect continuations.
     ErrorConvert {
         conversion: crate::error_results::Conversion,
@@ -3335,6 +3364,57 @@ impl fmt::Display for ExprKind {
             Self::OptionalPresent(inner) => write!(f, "(optional-present {inner})"),
             Self::OptionalAbsent => f.write_str("(optional-absent)"),
             Self::OptionalType(inner) => write!(f, "(optional-type-value {inner})"),
+            Self::TraitObjectType {
+                interface,
+                arguments,
+            } => {
+                write!(f, "(trait-object-type-value {interface} (arguments")?;
+                for argument in arguments {
+                    write!(f, " {argument}")?;
+                }
+                f.write_str("))")
+            }
+            Self::DynCast(cast) => {
+                write!(
+                    f,
+                    "(dyn-cast (interface {}) (subject {}) (by-pointer {}) (value {})",
+                    cast.interface, cast.subject, cast.by_pointer, cast.value
+                )?;
+                if !cast.env_arguments.is_empty() {
+                    f.write_str(" (env-arguments")?;
+                    for arg in &cast.env_arguments {
+                        write!(f, " {arg}")?;
+                    }
+                    f.write_str(")")?;
+                }
+                if !cast.env_identities.is_empty() {
+                    f.write_str(" (env-identities")?;
+                    for id in &cast.env_identities {
+                        write!(f, " {id}")?;
+                    }
+                    f.write_str(")")?;
+                }
+                f.write_str(")")
+            }
+            Self::DynCall(call) => {
+                write!(
+                    f,
+                    "(dyn-call (interface {}) (member {}) (by-value-receiver {}) (receiver {}) (arguments",
+                    call.interface, call.member, call.by_value_receiver, call.receiver
+                )?;
+                for arg in &call.arguments {
+                    write!(f, " {arg}")?;
+                }
+                f.write_str(")")?;
+                if !call.parameter_bindings.is_empty() {
+                    f.write_str(" (parameter-bindings")?;
+                    for binding in &call.parameter_bindings {
+                        write!(f, " {binding}")?;
+                    }
+                    f.write_str(")")?;
+                }
+                f.write_str(")")
+            }
             Self::EffectResume(value) => write!(f, "(effect-resume {value})"),
             Self::EffectHandle {
                 computation,
@@ -4327,6 +4407,9 @@ impl Expr {
                     | ExprKind::If { .. }
                     | ExprKind::Return(_)
                     | ExprKind::Call { .. }
+                    | ExprKind::DynCast(_)
+                    | ExprKind::DynCall(_)
+                    | ExprKind::TraitObjectType { .. }
                     | ExprKind::FunctionType { .. }
                     | ExprKind::TypeList(_)
                     | ExprKind::Intrinsic { .. }
@@ -4483,6 +4566,32 @@ impl Expr {
                             .map(|argument| Work::Expr(&mut argument.value)),
                     );
                     work.push(Work::Expr(callee));
+                }
+                ExprKind::TraitObjectType { arguments, .. } => {
+                    work.extend(arguments.iter_mut().rev().map(Work::Expr));
+                }
+                ExprKind::DynCast(cast) => {
+                    rewriter.ty(&mut cast.subject)?;
+                    for argument in &mut cast.interface.arguments {
+                        rewriter.ty(argument)?;
+                    }
+                    for identity in &mut cast.env_identities {
+                        rewriter.ty(identity)?;
+                    }
+                    work.extend(cast.env_arguments.iter_mut().rev().map(Work::Expr));
+                    work.push(Work::Expr(&mut cast.value));
+                }
+                ExprKind::DynCall(call) => {
+                    for argument in &mut call.interface.arguments {
+                        rewriter.ty(argument)?;
+                    }
+                    work.extend(
+                        call.arguments
+                            .iter_mut()
+                            .rev()
+                            .map(|argument| Work::Expr(&mut argument.value)),
+                    );
+                    work.push(Work::Expr(&mut call.receiver));
                 }
                 ExprKind::FunctionType {
                     parameters: fields, ..
@@ -5025,6 +5134,33 @@ impl Expr {
                 }
                 for env_arg in env_arguments {
                     env_arg.rewrite_with(rewriter)?;
+                }
+            }
+            ExprKind::TraitObjectType { arguments, .. } => {
+                for argument in arguments {
+                    argument.rewrite_with(rewriter)?;
+                }
+            }
+            ExprKind::DynCast(cast) => {
+                for arg in &mut cast.interface.arguments {
+                    rewriter.ty(arg)?;
+                }
+                rewriter.ty(&mut cast.subject)?;
+                cast.value.rewrite_with(rewriter)?;
+                for env_arg in &mut cast.env_arguments {
+                    env_arg.rewrite_with(rewriter)?;
+                }
+                for env_id in &mut cast.env_identities {
+                    rewriter.ty(env_id)?;
+                }
+            }
+            ExprKind::DynCall(call) => {
+                for arg in &mut call.interface.arguments {
+                    rewriter.ty(arg)?;
+                }
+                call.receiver.rewrite_with(rewriter)?;
+                for arg in &mut call.arguments {
+                    arg.value.rewrite_with(rewriter)?;
                 }
             }
             ExprKind::Literal(_)

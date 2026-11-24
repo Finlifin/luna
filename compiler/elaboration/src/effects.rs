@@ -192,6 +192,7 @@ fn charge(term: &Term, fuel: &mut usize, depth: usize) -> Result<(), Error> {
             terms(errors, fuel, depth - 1)?;
             charge(result, fuel, depth - 1)
         }
+        Term::TraitObject { arguments, .. } => terms(arguments, fuel, depth - 1),
         Term::Computation { effects, result } => {
             if effects.len() > *fuel {
                 return Err(Error::BudgetExhausted);

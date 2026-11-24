@@ -712,6 +712,11 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             "cast",
             vec![("value", &a_tree), ("type", &b_tree)],
         ),
+        (
+            ExprKind::DynCast(&a, &b),
+            "dyn-cast",
+            vec![("value", &a_tree), ("trait", &b_tree)],
+        ),
         (ExprKind::Let(&decl), "let", vec![]),
         (ExprKind::Semi(&a), "semi", vec![("value", &a_tree)]),
         (ExprKind::Item(owner(8)), "item-ref", vec![]),
@@ -753,6 +758,11 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             ExprKind::TyOptional(&b),
             "ty-optional",
             vec![("type", &b_tree)],
+        ),
+        (
+            ExprKind::TyTraitObject(&b),
+            "ty-trait-object",
+            vec![("trait", &b_tree)],
         ),
         (ExprKind::LiftType(&b), "lift", vec![("type", &b_tree)]),
         (ExprKind::TyFn(&typarams), "ty-fn", vec![]),
@@ -839,7 +849,7 @@ fn every_expression_variant_keeps_its_tag_and_payload() {
             vec![("value", &a_tree)],
         ),
     ];
-    assert_eq!(cases.len(), 89);
+    assert_eq!(cases.len(), 91);
     for (kind, tag, children) in cases {
         let tree = parsed(&kind);
         assert_eq!(tree.tag(), tag);

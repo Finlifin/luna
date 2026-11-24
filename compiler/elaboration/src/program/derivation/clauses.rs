@@ -215,6 +215,7 @@ fn expr_mentions_clause<'h>(
         }
         E::TyPtr(inner)
         | E::TyOptional(inner)
+        | E::TyTraitObject(inner)
         | E::LiftType(inner)
         | E::Ref(inner)
         | E::Deref(inner)
@@ -228,6 +229,7 @@ fn expr_mentions_clause<'h>(
         | E::EffectQualifiedType(a, b)
         | E::TraitBound(a, b)
         | E::Cast(a, b)
+        | E::DynCast(a, b)
         | E::Index(a, b)
         | E::TyClosure(a, b) => {
             Ok(expr_mentions_clause(a, target, fuel, d)?
@@ -347,6 +349,7 @@ fn hir_expr_syntactically_equal(
         | (E::Unit, E::Unit) => Ok(true),
         (E::TyPtr(a), E::TyPtr(b))
         | (E::TyOptional(a), E::TyOptional(b))
+        | (E::TyTraitObject(a), E::TyTraitObject(b))
         | (E::LiftType(a), E::LiftType(b)) => hir_expr_syntactically_equal(a, b, fuel, d),
         (E::NFApplication(ah, aa), E::NFApplication(bh, ba)) => {
             if aa.len() != ba.len() || !hir_expr_syntactically_equal(ah, bh, fuel, d)? {
@@ -502,6 +505,7 @@ fn match_hir_expr<'h>(
         }
         (E::TyPtr(a), E::TyPtr(b))
         | (E::TyOptional(a), E::TyOptional(b))
+        | (E::TyTraitObject(a), E::TyTraitObject(b))
         | (E::LiftType(a), E::LiftType(b))
         | (E::Ref(a), E::Ref(b))
         | (E::Deref(a), E::Deref(b))
@@ -513,6 +517,7 @@ fn match_hir_expr<'h>(
         | (E::TyFnArrow(a1, a2), E::TyFnArrow(b1, b2))
         | (E::TyClosure(a1, a2), E::TyClosure(b1, b2))
         | (E::Cast(a1, a2), E::Cast(b1, b2))
+        | (E::DynCast(a1, a2), E::DynCast(b1, b2))
         | (E::Index(a1, a2), E::Index(b1, b2)) => {
             match_hir_expr(a1, b1, strategy_defs, bound, fuel, d)?;
             match_hir_expr(a2, b2, strategy_defs, bound, fuel, d)?;
@@ -687,6 +692,7 @@ impl<'s, 'h> DraftSubst<'s, 'h> {
             E::Projection(a, f) => E::Projection(self.subst_source_expr(a, d)?, *f),
             E::TyPtr(a) => E::TyPtr(self.subst_source_expr(a, d)?),
             E::TyOptional(a) => E::TyOptional(self.subst_source_expr(a, d)?),
+            E::TyTraitObject(a) => E::TyTraitObject(self.subst_source_expr(a, d)?),
             E::LiftType(a) => E::LiftType(self.subst_source_expr(a, d)?),
             E::Ref(a) => E::Ref(self.subst_source_expr(a, d)?),
             E::Deref(a) => E::Deref(self.subst_source_expr(a, d)?),
@@ -705,6 +711,9 @@ impl<'s, 'h> DraftSubst<'s, 'h> {
                 E::TraitBound(self.subst_source_expr(a, d)?, self.subst_source_expr(b, d)?)
             }
             E::Cast(a, b) => E::Cast(self.subst_source_expr(a, d)?, self.subst_source_expr(b, d)?),
+            E::DynCast(a, b) => {
+                E::DynCast(self.subst_source_expr(a, d)?, self.subst_source_expr(b, d)?)
+            }
             E::Index(a, b) => {
                 E::Index(self.subst_source_expr(a, d)?, self.subst_source_expr(b, d)?)
             }
@@ -924,6 +933,7 @@ impl<'s, 'h> DraftSubst<'s, 'h> {
             E::Projection(a, f) => E::Projection(self.rewrite_expr(a, d)?, *f),
             E::TyPtr(a) => E::TyPtr(self.rewrite_expr(a, d)?),
             E::TyOptional(a) => E::TyOptional(self.rewrite_expr(a, d)?),
+            E::TyTraitObject(a) => E::TyTraitObject(self.rewrite_expr(a, d)?),
             E::LiftType(a) => E::LiftType(self.rewrite_expr(a, d)?),
             E::TyClosure(env, sig) => {
                 E::TyClosure(self.rewrite_expr(env, d)?, self.rewrite_expr(sig, d)?)

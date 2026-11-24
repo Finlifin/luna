@@ -887,6 +887,26 @@ fn walk_mut(
                         );
                         extend!(work, fuel, env_arguments.iter_mut().map(Node::Expr));
                     }
+                    K::TraitObjectType { arguments, .. } => {
+                        extend!(work, fuel, arguments.iter_mut().map(Node::Expr));
+                    }
+                    K::DynCast(cast) => {
+                        work::charge_entries(fuel, cast.env_arguments.len())?;
+                        push!(work, fuel, Node::Expr(&mut cast.value));
+                        extend!(work, fuel, cast.env_arguments.iter_mut().map(Node::Expr));
+                    }
+                    K::DynCall(call) => {
+                        work::charge_entries(fuel, call.arguments.len())?;
+                        push!(work, fuel, Node::Expr(&mut call.receiver));
+                        extend!(
+                            work,
+                            fuel,
+                            call.arguments
+                                .iter_mut()
+                                .filter(|arg| scope != MutableScope::CallerFrame || !arg.is_default)
+                                .map(|a| Node::Expr(&mut a.value))
+                        );
+                    }
                     K::WritePointer {
                         pointer: a,
                         value: b,

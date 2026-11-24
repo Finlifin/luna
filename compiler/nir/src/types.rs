@@ -467,6 +467,12 @@ pub enum Term {
         declaration: DeclarationId,
         arguments: Vec<Term>,
     },
+    /// Dynamic trait interface object `dyn Trait<args>`.
+    /// Never unfolds; bare representation is fixed at two usize words.
+    TraitObject {
+        interface: DeclarationId,
+        arguments: Vec<Term>,
+    },
     /// No body or reduction callback is stored: substitution preserves the head.
     NormalForm {
         head: DeclarationId,
@@ -811,6 +817,7 @@ impl Term {
                 | Self::FunctionValue { arguments, .. }
                 | Self::NormalForm { arguments, .. }
                 | Self::Nominal { arguments, .. }
+                | Self::TraitObject { arguments, .. }
                 | Self::Tuple(arguments)
                 | Self::TupleValue(arguments)
                 | Self::ClosureContextValue(arguments) => pending.extend(arguments),
@@ -1237,6 +1244,7 @@ impl Term {
                 | Term::ComptimeFunction(_)
                 | Term::NormalFormFunction(..)
                 | Term::UnsafeFunction(_)
+                | Term::TraitObject { .. }
         ) {
             return Err(TypeError::InvalidClosureSignature);
         }
@@ -1689,6 +1697,13 @@ impl Term {
                 arguments,
             } => Self::Nominal {
                 declaration: *declaration,
+                arguments: many(arguments, leaf)?,
+            },
+            Self::TraitObject {
+                interface,
+                arguments,
+            } => Self::TraitObject {
+                interface: *interface,
                 arguments: many(arguments, leaf)?,
             },
             Self::ClosureSnapshot { factory, arguments } => Self::ClosureSnapshot {
@@ -2459,6 +2474,7 @@ fn validate<'term>(
                     | Term::ComptimeFunction(_)
                     | Term::NormalFormFunction(..)
                     | Term::UnsafeFunction(_)
+                    | Term::TraitObject { .. }
             ) {
                 return Err(TypeError::InvalidClosureSignature);
             }
@@ -2497,6 +2513,7 @@ fn validate<'term>(
                     | Term::ComptimeFunction(_)
                     | Term::NormalFormFunction(..)
                     | Term::UnsafeFunction(_)
+                    | Term::TraitObject { .. }
             ) {
                 return Err(TypeError::InvalidClosureSignature);
             }
@@ -2537,6 +2554,11 @@ fn validate<'term>(
         Term::Optional(inner) | Term::Pointer(inner) | Term::Lift(inner) => {
             require_sort(inner, Sort::Type)?;
             validate(inner, holes, frames, allow_free, core)?;
+        }
+        Term::TraitObject { arguments, .. } => {
+            for argument in arguments {
+                validate(argument, holes, frames, allow_free, core)?;
+            }
         }
         Term::OptionalValue { ty, value } => {
             if !matches!(ty.as_ref(), Term::Optional(_)) {
@@ -2910,6 +2932,20 @@ impl fmt::Display for Term {
             }
             Self::UnsafeFunction(inner) => write!(f, "(unsafe-function {inner})"),
             Self::Optional(inner) => write!(f, "(optional {inner})"),
+            Self::TraitObject {
+                interface,
+                arguments,
+            } => {
+                write!(f, "(trait-object {interface}")?;
+                if !arguments.is_empty() {
+                    f.write_str(" (arguments")?;
+                    for argument in arguments {
+                        write!(f, " {argument}")?;
+                    }
+                    f.write_str(")")?;
+                }
+                f.write_str(")")
+            }
             Self::Pointer(inner) => write!(f, "(pointer {inner})"),
             Self::Lift(inner) => write!(f, "(lift {inner})"),
             Self::Function { parameters, result } => {

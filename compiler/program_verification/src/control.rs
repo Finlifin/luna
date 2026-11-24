@@ -268,6 +268,48 @@ fn loop_may_transfer(
                     );
                     return Ok(false);
                 }
+                K::TraitObjectType { arguments, .. } => {
+                    *fuel = fuel
+                        .checked_sub(arguments.len())
+                        .ok_or("loop completion budget exhausted")?;
+                    for arg in arguments {
+                        pending.push(arg);
+                        if is_never(&arg.ty) {
+                            break;
+                        }
+                    }
+                    return Ok(false);
+                }
+                K::DynCast(cast) => {
+                    *fuel = fuel
+                        .checked_sub(cast.env_arguments.len().saturating_add(1))
+                        .ok_or("loop completion budget exhausted")?;
+                    pending.push(&cast.value);
+                    if !is_never(&cast.value.ty) {
+                        for arg in &cast.env_arguments {
+                            pending.push(arg);
+                            if is_never(&arg.ty) {
+                                break;
+                            }
+                        }
+                    }
+                    return Ok(false);
+                }
+                K::DynCall(call) => {
+                    *fuel = fuel
+                        .checked_sub(call.arguments.len().saturating_add(1))
+                        .ok_or("loop completion budget exhausted")?;
+                    pending.push(&call.receiver);
+                    if !is_never(&call.receiver.ty) {
+                        for arg in &call.arguments {
+                            pending.push(&arg.value);
+                            if is_never(&arg.value.ty) {
+                                break;
+                            }
+                        }
+                    }
+                    return Ok(false);
+                }
                 K::Call {
                     callee, arguments, ..
                 } => {

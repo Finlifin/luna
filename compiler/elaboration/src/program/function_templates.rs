@@ -771,6 +771,7 @@ impl<'h> Rebind<'_, 'h> {
             E::Projection(a, field) => E::Projection(self.expr(a, depth)?, *field),
             E::TyPtr(a) => E::TyPtr(self.expr(a, depth)?),
             E::TyOptional(a) => E::TyOptional(self.expr(a, depth)?),
+            E::TyTraitObject(a) => E::TyTraitObject(self.expr(a, depth)?),
             E::LiftType(a) => E::LiftType(self.expr(a, depth)?),
             E::TyClosure(environment, signature) => {
                 E::TyClosure(self.expr(environment, depth)?, self.expr(signature, depth)?)
@@ -810,6 +811,7 @@ impl<'h> Rebind<'_, 'h> {
             }
             E::TraitBound(a, b) => E::TraitBound(self.expr(a, depth)?, self.expr(b, depth)?),
             E::Cast(a, b) => E::Cast(self.expr(a, depth)?, self.expr(b, depth)?),
+            E::DynCast(a, b) => E::DynCast(self.expr(a, depth)?, self.expr(b, depth)?),
             E::Index(a, b) => E::Index(self.expr(a, depth)?, self.expr(b, depth)?),
             E::Range {
                 start,

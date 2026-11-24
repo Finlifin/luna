@@ -345,6 +345,7 @@ fn separation_goal(
                     used.insert(*declaration);
                 }
                 Term::Nominal { arguments, .. }
+                | Term::TraitObject { arguments, .. }
                 | Term::NormalForm { arguments, .. }
                 | Term::Tuple(arguments)
                 | Term::ClosureContextValue(arguments)

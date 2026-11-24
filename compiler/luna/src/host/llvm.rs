@@ -7,6 +7,7 @@ mod cleanup;
 mod closures;
 mod control;
 mod defaults;
+mod dyn_interfaces;
 mod effects;
 mod entry;
 mod enums;
@@ -126,6 +127,8 @@ enum Ty {
     // Capturing environments and foreign ABIs do not use this representation.
     FunctionPointer,
     Closure(std::sync::Arc<Vec<Ty>>),
+    TraitObject,
+    TraitObjectClosure(std::sync::Arc<Vec<Ty>>),
     // Table-local identity tags are not callable machine addresses.
     TemplateIdentity(std::sync::Arc<Term>),
     Enum(std::sync::Arc<enums::EnumLayout>),
@@ -184,6 +187,12 @@ impl Ty {
             },
             Self::Closure(fields) => format!(
                 "{{ ptr, {}, [{} x i1] }}",
+                Self::Record(fields.clone()).llvm(),
+                closures::state_count(fields)
+            ),
+            Self::TraitObject => "{ ptr, ptr }".into(),
+            Self::TraitObjectClosure(fields) => format!(
+                "{{ {{ ptr, ptr }}, {}, [{} x i1] }}",
                 Self::Record(fields.clone()).llvm(),
                 closures::state_count(fields)
             ),
@@ -341,6 +350,30 @@ impl Ty {
                     .map_err(|_| "closure state count overflow".to_string())?;
                 nir::layout::struct_layout(&[
                     ptr,
+                    env,
+                    nir::TypeLayout {
+                        size: state_count,
+                        align: 1,
+                    },
+                ])
+                .map_err(|e| e.to_string())
+            }
+            Self::TraitObject => {
+                let ptr = nir::layout::integer_layout(pointer_bits).map_err(|e| e.to_string())?;
+                nir::layout::struct_layout(&[ptr, ptr]).map_err(|e| e.to_string())
+            }
+            Self::TraitObjectClosure(fields) => {
+                let ptr = nir::layout::integer_layout(pointer_bits).map_err(|e| e.to_string())?;
+                let fat_ptr = nir::layout::struct_layout(&[ptr, ptr]).map_err(|e| e.to_string())?;
+                let mut env_layouts = Vec::with_capacity(fields.len());
+                for field in fields.iter() {
+                    env_layouts.push(field.storage_layout_at(pointer_bits, depth + 1, fuel)?);
+                }
+                let env = nir::layout::struct_layout(&env_layouts).map_err(|e| e.to_string())?;
+                let state_count = u64::try_from(closures::state_count(fields))
+                    .map_err(|_| "closure state count overflow".to_string())?;
+                nir::layout::struct_layout(&[
+                    fat_ptr,
                     env,
                     nir::TypeLayout {
                         size: state_count,
@@ -737,19 +770,22 @@ fn repr_at(
                 }
             }
         }
+        Term::TraitObject { .. } => Ok(Ty::TraitObject),
         Term::Closure {
             environment,
             signature,
         } => {
-            if repr_at(graph, signature, depth + 1, checked, remaining)? != Ty::FunctionPointer {
-                return Err("host captured closure requires a runtime signature".into());
-            }
-            Ok(Ty::Closure(std::sync::Arc::new(
+            let fields = std::sync::Arc::new(
                 environment
                     .iter()
                     .map(|ty| repr_at(graph, ty, depth + 1, checked, remaining))
                     .collect::<Result<Vec<_>, _>>()?,
-            )))
+            );
+            match repr_at(graph, signature, depth + 1, checked, remaining)? {
+                Ty::FunctionPointer => Ok(Ty::Closure(fields)),
+                Ty::TraitObject => Ok(Ty::TraitObjectClosure(fields)),
+                _ => Err("host captured closure requires a runtime signature".into()),
+            }
         }
         Term::UnsafeFunction(signature) => repr_at(graph, signature, depth + 1, checked, remaining),
         Term::Function { parameters, .. } => {
@@ -1574,6 +1610,11 @@ impl Emitter<'_> {
             | K::EffectHandle { .. }
             | K::EffectRequest { .. } => self.effect(expr, depth),
             K::Closure { .. } => self.closure(expr, depth),
+            K::TraitObjectType { .. } => {
+                Err("host cannot emit symbolic dyn Trait type at runtime".into())
+            }
+            K::DynCast(cast) => self.dyn_cast(expr, cast, depth),
+            K::DynCall(call) => self.dyn_call(expr, call, depth),
             K::Function(_) | K::FunctionInstance { .. } | K::TraitMethod { .. } => {
                 self.callable(expr)
             }
@@ -3245,17 +3286,20 @@ pub(super) fn emit(
         checked,
         schedule,
         entry,
+        &[],
         EntryMode::Display,
         &Default::default(),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_with_entry_mode(
     graph: &iir::Package,
     mut fuel: usize,
     checked: bool,
     schedule: Option<&iir::cleanup::Schedule>,
     entry: Option<&iir::InstanceKey>,
+    dyn_cleanups: &[crate::cleanup::DynCleanup],
     mode: EntryMode,
     attributes: &nir::program::DefinitionAttributes,
 ) -> Result<String, String> {
@@ -3714,6 +3758,20 @@ pub(super) fn emit_with_entry_mode(
             b.body
         ));
     }
+    dyn_interfaces::emit_dyn_vtables(
+        graph,
+        dyn_cleanups,
+        checked,
+        &mut functions,
+        &mut declarations,
+        &lambdas,
+        &template_identities,
+        &mut text_constants,
+        &mut attr_table,
+        &mut bitvec_cache,
+        schedule,
+        &mut fuel,
+    )?;
     let attr_defs = attr_table.render_declarations();
     let finish_module = |mut module: String, fuel: &mut usize| -> Result<String, String> {
         control::export_c_entries(graph, attributes, &mut module, checked, fuel)?;
@@ -4114,6 +4172,7 @@ pub(super) fn validate_cleanup(
                             representations.push(&env_arg.ty);
                         }
                     }
+                    Step::DropTraitObject { .. } => {}
                 }
             }
             representations.push(&program.ty);

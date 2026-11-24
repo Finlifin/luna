@@ -266,6 +266,45 @@ pub fn borrowed_input_layout(
             }));
             continue;
         }
+        if matches!(ty.as_ref(), Term::TraitObject { .. }) {
+            let cost = guards
+                .iter()
+                .try_fold(
+                    input.len().saturating_add(storage.len()).saturating_add(1),
+                    |cost, (path, _)| cost.checked_add(path.len().saturating_add(1)),
+                )
+                .ok_or("dyn trait pointer layout budget exhausted")?;
+            *fuel = fuel
+                .checked_sub(cost)
+                .ok_or("dyn trait pointer layout budget exhausted")?;
+            output.push(BorrowedInputLeaf::Pointer(PointerInputLeaf {
+                input_fields: input.clone(),
+                storage_fields: storage.clone(),
+                guards: guards.clone(),
+                pointee: Term::Primitive(Primitive::Void),
+            }));
+            continue;
+        }
+        if let Term::Closure { signature, .. } = ty.as_ref()
+            && matches!(signature.as_ref(), Term::TraitObject { .. })
+        {
+            let cost = guards
+                .iter()
+                .try_fold(
+                    input.len().saturating_add(storage.len()).saturating_add(1),
+                    |cost, (path, _)| cost.checked_add(path.len().saturating_add(1)),
+                )
+                .ok_or("dyn trait closure layout budget exhausted")?;
+            *fuel = fuel
+                .checked_sub(cost)
+                .ok_or("dyn trait closure layout budget exhausted")?;
+            output.push(BorrowedInputLeaf::Pointer(PointerInputLeaf {
+                input_fields: input.clone(),
+                storage_fields: storage.clone(),
+                guards: guards.clone(),
+                pointee: Term::Primitive(Primitive::Void),
+            }));
+        }
         if intrinsic_pointer_value(&ty)
             || matches!(
                 ty.as_ref(),

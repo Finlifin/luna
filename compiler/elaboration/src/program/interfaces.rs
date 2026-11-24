@@ -1553,7 +1553,7 @@ impl Checker<'_, '_> {
             if self.input_facts.type_identity(&local(*id)).is_some())
     }
 
-    fn is_computed_method_subject(value: &Expr<'_>) -> bool {
+    pub(in crate::program) fn is_computed_method_subject(value: &Expr<'_>) -> bool {
         matches!(
             value.kind,
             H::NFApplication(..)
@@ -2344,6 +2344,9 @@ impl Checker<'_, '_> {
         expected: Option<&Term>,
         partial: Option<&crate::calls::CallableContext>,
     ) -> Result<Option<n::Expr>, Error> {
+        if let Some(call) = self.try_dyn_receiver_call(expr, callee, args, expected)? {
+            return Ok(Some(call));
+        }
         if let H::NFApplication(head, clause_args) = callee.kind {
             let Some((method, prefix)) = self.resolve_receiver(expr, head)? else {
                 return Ok(None);

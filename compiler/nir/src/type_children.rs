@@ -33,6 +33,7 @@ macro_rules! visit_children {
                 }
             }
             Self::Nominal { arguments, .. }
+            | Self::TraitObject { arguments, .. }
             | Self::NormalForm { arguments, .. }
             | Self::FunctionValue { arguments, .. }
             | Self::ClosureSnapshot { arguments, .. }

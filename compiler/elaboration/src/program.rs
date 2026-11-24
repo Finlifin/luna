@@ -10,6 +10,7 @@ mod computed_patterns;
 mod control;
 mod delivered_types;
 mod delivery;
+mod dynamic_interfaces;
 mod effects;
 mod error_handlers;
 mod expression_values;
@@ -5390,6 +5391,7 @@ impl Checker<'_, '_> {
             | H::TyNoReturn
             | H::TyPtr(_)
             | H::TyOptional(_)
+            | H::TyTraitObject(_)
             | H::LiftType(_)
             | H::TyClosure(..)
             | H::TyFn(_)
@@ -5755,7 +5757,10 @@ impl Checker<'_, '_> {
                 }
                 if !matches!(
                     body,
-                    Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                    Term::Function { .. }
+                        | Term::ComptimeFunction(_)
+                        | Term::UnsafeFunction(_)
+                        | Term::TraitObject { .. }
                 ) {
                     return Err(error(
                         expr.span,
@@ -5853,6 +5858,7 @@ impl Checker<'_, '_> {
             H::TyType => Ok(p(P::Type)),
             H::TyNoReturn => Ok(p(P::Never)),
             H::TyOptional(inner) => Ok(Term::Optional(Box::new(self.type_expr(inner)?))),
+            H::TyTraitObject(trait_expr) => self.dyn_trait_type_term(trait_expr, expr.span),
             H::TyPtr(inner) => Ok(Term::Pointer(Box::new(self.type_expr(inner)?))),
             H::LiftType(inner) => Ok(Term::Lift(Box::new(self.type_expr(inner)?))),
             H::Tuple(_) => Err(error(

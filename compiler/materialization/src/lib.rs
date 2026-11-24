@@ -141,6 +141,8 @@ struct Builder<'a, 'e> {
     global_runtime_deliveries: BTreeMap<nir::RuntimeId, n::Expr>,
     nominals: Vec<iir::NominalInstance>,
     interface_contracts: Vec<iir::InterfaceContract>,
+    dyn_interfaces: Vec<iir::DynInterface>,
+    dyn_vtables: Vec<iir::DynVtable>,
     effect_contracts: Vec<iir::effects::Contract>,
     effect_instances: HashSet<nir::effects::Operation>,
     frozen_methods: Vec<n::Expr>,
@@ -496,6 +498,8 @@ struct IncrementalIir<'a> {
     global_runtime_deliveries: BTreeMap<nir::RuntimeId, n::Expr>,
     nominals: Vec<iir::NominalInstance>,
     interface_contracts: Vec<iir::InterfaceContract>,
+    dyn_interfaces: Vec<iir::DynInterface>,
+    dyn_vtables: Vec<iir::DynVtable>,
     effect_contracts: Vec<iir::effects::Contract>,
     effect_instances: HashSet<nir::effects::Operation>,
     frozen_methods: Vec<n::Expr>,
@@ -559,6 +563,8 @@ impl<'a> InstantiationSession<'a> {
             functions,
             nominals,
             interfaces,
+            dyn_interfaces,
+            dyn_vtables,
             expansion_sources,
             effect_contracts,
             callable_identities,
@@ -627,6 +633,8 @@ impl<'a> InstantiationSession<'a> {
             match_plans: source_match_plans.clone(),
             nominals,
             interfaces,
+            dyn_interfaces,
+            dyn_vtables,
             normal_forms,
             callable_identities,
             statics: package.statics.clone(),
@@ -712,6 +720,8 @@ impl<'a> InstantiationSession<'a> {
                     global_runtime_deliveries: prev.global_runtime_deliveries,
                     nominals: prev.nominals,
                     interface_contracts: prev.interface_contracts,
+                    dyn_interfaces: prev.dyn_interfaces,
+                    dyn_vtables: prev.dyn_vtables,
                     effect_contracts: prev.effect_contracts,
                     effect_instances: prev.effect_instances,
                     frozen_methods: prev.frozen_methods,
@@ -770,6 +780,8 @@ impl<'a> InstantiationSession<'a> {
                     global_runtime_deliveries: BTreeMap::new(),
                     nominals: vec![],
                     interface_contracts: vec![],
+                    dyn_interfaces: vec![],
+                    dyn_vtables: vec![],
                     effect_contracts: vec![],
                     effect_instances: HashSet::new(),
                     frozen_methods: vec![],
@@ -866,6 +878,8 @@ impl<'a> InstantiationSession<'a> {
             match_plans: source_match_plans.clone(),
             nominals: builder.nominals.clone(),
             interfaces: builder.interface_contracts.clone(),
+            dyn_interfaces: builder.dyn_interfaces.clone(),
+            dyn_vtables: builder.dyn_vtables.clone(),
             normal_forms,
             callable_identities: builder.callable_identities.clone(),
             statics: package.statics.clone(),
@@ -896,6 +910,8 @@ impl<'a> InstantiationSession<'a> {
             global_runtime_deliveries: builder.global_runtime_deliveries,
             nominals: builder.nominals,
             interface_contracts: builder.interface_contracts,
+            dyn_interfaces: builder.dyn_interfaces,
+            dyn_vtables: builder.dyn_vtables,
             effect_contracts: builder.effect_contracts,
             effect_instances: builder.effect_instances,
             frozen_methods: builder.frozen_methods,
@@ -942,6 +958,8 @@ struct BuildResult {
     functions: Vec<iir::FunctionInstance>,
     nominals: Vec<iir::NominalInstance>,
     interfaces: Vec<iir::InterfaceContract>,
+    dyn_interfaces: Vec<iir::DynInterface>,
+    dyn_vtables: Vec<iir::DynVtable>,
     remaining: usize,
     expansion_sources: Vec<n::ExpansionSource>,
     effect_contracts: Vec<iir::effects::Contract>,
@@ -1051,6 +1069,8 @@ fn build(
         global_runtime_deliveries: BTreeMap::new(),
         nominals: vec![],
         interface_contracts: vec![],
+        dyn_interfaces: vec![],
+        dyn_vtables: vec![],
         effect_contracts: vec![],
         effect_instances: HashSet::new(),
         frozen_methods: vec![],
@@ -1200,6 +1220,8 @@ fn build(
         functions: builder.instances.unwrap_or_default(),
         nominals: builder.nominals,
         interfaces: builder.interface_contracts,
+        dyn_interfaces: builder.dyn_interfaces,
+        dyn_vtables: builder.dyn_vtables,
         remaining: builder.fuel,
         expansion_sources: builder.quote_sources,
         effect_contracts: builder.effect_contracts,
@@ -1704,6 +1726,129 @@ impl Builder<'_, '_> {
             ));
         }
         Ok(slot)
+    }
+
+    fn record_dyn_interface(
+        &mut self,
+        interface: &n::InterfaceInstance,
+    ) -> Result<Option<iir::DynInterface>, String> {
+        if let Some(existing) = self
+            .dyn_interfaces
+            .iter()
+            .find(|item| item.interface == *interface)
+        {
+            return Ok(Some(existing.clone()));
+        }
+        let Some(contract) = self
+            .package
+            .traits
+            .iter()
+            .find(|t| t.declaration == interface.declaration)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        let self_param = contract.self_parameter;
+        let substitution = if contract.type_parameters.is_empty() {
+            None
+        } else {
+            let parameter_domains = self
+                .world
+                .input_domains(&contract.type_parameters, &mut self.fuel)?;
+            Some(
+                nir::DeclarationSubstitution::bounded(
+                    &contract.type_parameters,
+                    &parameter_domains,
+                    &interface.arguments,
+                    &[],
+                    &mut self.fuel,
+                )
+                .map_err(|e| e.to_string())?,
+            )
+        };
+        let mut methods = Vec::new();
+        for method in &contract.methods {
+            if method.phase != n::TraitPhase::Runtime
+                || method.is_quote
+                || !method.type_parameters.is_empty()
+            {
+                continue;
+            }
+            let Ok(raw_sig) = method.signature.ordinary() else {
+                continue;
+            };
+            let Term::Function { parameters, result } = raw_sig.callable_signature() else {
+                continue;
+            };
+            let skip_self_param = parameters.iter().skip(1).any(|p| {
+                nir::type_computations::mentions_rigid_bounded(&p.ty, &mut 10_000, |id| {
+                    id == self_param
+                })
+                .unwrap_or(true)
+            });
+            if skip_self_param {
+                continue;
+            }
+            let mentions_self_result =
+                nir::type_computations::mentions_rigid_bounded(result, &mut 10_000, |id| {
+                    id == self_param
+                })
+                .unwrap_or(true);
+            let exact_self_result = matches!(
+                result.as_ref(),
+                Term::Rigid { declaration, sort: nir::Sort::Type } if *declaration == self_param
+            );
+            if mentions_self_result && !exact_self_result {
+                continue;
+            }
+
+            let mut inst_params = Vec::with_capacity(parameters.len());
+            for (idx, param) in parameters.iter().enumerate() {
+                if idx == 0 {
+                    inst_params.push(param.clone());
+                    continue;
+                }
+                let ty = if let Some(sub) = &substitution {
+                    sub.instantiate_bounded(&param.ty, &mut self.fuel)
+                        .map_err(|e| e.to_string())?
+                } else {
+                    param.ty.clone()
+                };
+                let ty = self.normalized_type(&ty)?;
+                inst_params.push(nir::Parameter {
+                    sort: param.sort,
+                    ty,
+                });
+            }
+            let inst_result = if exact_self_result {
+                Term::TraitObject {
+                    interface: interface.declaration,
+                    arguments: interface.arguments.clone(),
+                }
+            } else {
+                let res = if let Some(sub) = &substitution {
+                    sub.instantiate_bounded(result, &mut self.fuel)
+                        .map_err(|e| e.to_string())?
+                } else {
+                    result.as_ref().clone()
+                };
+                self.normalized_type(&res)?
+            };
+
+            methods.push(iir::DynInterfaceMethod {
+                member: method.declaration,
+                returns_self: exact_self_result,
+                by_reference_receiver: method.by_reference_receiver,
+                parameters: inst_params,
+                result: inst_result,
+            });
+        }
+        let item = iir::DynInterface {
+            interface: interface.clone(),
+            methods,
+        };
+        self.dyn_interfaces.push(item.clone());
+        Ok(Some(item))
     }
 
     fn specialize_method(
@@ -4672,6 +4817,88 @@ impl Builder<'_, '_> {
                     self.expr(field, depth + 1, comptime)?;
                 }
                 self.expr(signature, depth + 1, comptime)?;
+            }
+            K::TraitObjectType { arguments, .. } => {
+                for arg in arguments {
+                    self.expr(arg, depth + 1, comptime)?;
+                }
+            }
+            K::DynCast(cast) => {
+                if self.instances.is_some()
+                    && !cast.env_arguments.is_empty()
+                    && matches!(expr.ty, Term::TraitObject { .. })
+                {
+                    return Err(
+                        "materialized dyn cast cannot silently drop non-empty runtime environment"
+                            .into(),
+                    );
+                }
+                self.expr(&cast.value, depth + 1, comptime)?;
+                for arg in &cast.env_arguments {
+                    self.expr(arg, depth + 1, comptime)?;
+                }
+                self.queue.push_back(Task::Type(cast.subject.clone()));
+                let slot = self.interface(cast.interface.clone(), cast.subject.clone())?;
+                let instance = self.output[slot].interface_instance();
+                let subject = self.output[slot].subject.clone();
+                if let Some(dyn_iface) = self.record_dyn_interface(&instance)? {
+                    let mut vtable_methods = Vec::new();
+                    for method in dyn_iface.methods {
+                        let selected =
+                            self.specialize_method(slot, &instance, &subject, method.member, &[])?;
+                        self.queue
+                            .push_back(Task::Function(selected.body, selected.arguments.clone()));
+                        vtable_methods.push(iir::DynVtableMethod {
+                            member: method.member,
+                            returns_self: method.returns_self,
+                            by_reference_receiver: method.by_reference_receiver,
+                            body: selected.body,
+                            arguments: selected.arguments,
+                        });
+                    }
+                    if !self.dyn_vtables.iter().any(|existing| {
+                        existing.interface == instance
+                            && existing.subject == subject
+                            && existing.by_pointer == cast.by_pointer
+                            && existing.env_identities == cast.env_identities
+                    }) {
+                        self.dyn_vtables.push(iir::DynVtable {
+                            interface: instance.clone(),
+                            subject: subject.clone(),
+                            by_pointer: cast.by_pointer,
+                            env_identities: cast.env_identities.clone(),
+                            methods: vtable_methods.clone(),
+                        });
+                    }
+                    if cast.by_pointer
+                        && vtable_methods.iter().any(|m| m.returns_self)
+                        && !self.dyn_vtables.iter().any(|existing| {
+                            existing.interface == instance
+                                && existing.subject == subject
+                                && !existing.by_pointer
+                                && existing.env_identities == cast.env_identities
+                        })
+                    {
+                        self.dyn_vtables.push(iir::DynVtable {
+                            interface: instance,
+                            subject,
+                            by_pointer: false,
+                            env_identities: cast.env_identities.clone(),
+                            methods: vtable_methods,
+                        });
+                    }
+                }
+            }
+            K::DynCall(call) => {
+                let mut instance = call.interface.clone();
+                for arg in &mut instance.arguments {
+                    *arg = self.normalized_interface_input(arg)?;
+                }
+                let _ = self.record_dyn_interface(&instance)?;
+                self.expr(&call.receiver, depth + 1, comptime)?;
+                for arg in &call.arguments {
+                    self.expr(&arg.value, depth + 1, comptime)?;
+                }
             }
             K::WithTypeInputs {
                 arguments,

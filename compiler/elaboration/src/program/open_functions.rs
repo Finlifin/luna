@@ -1383,7 +1383,8 @@ impl Checker<'_, '_> {
                 | H::AssignOp(_, left, right)
                 | H::Index(left, right)
                 | H::Assign(left, right)
-                | H::Cast(left, right) => {
+                | H::Cast(left, right)
+                | H::DynCast(left, right) => {
                     pending.push(left);
                     pending.push(right);
                 }
@@ -1442,6 +1443,7 @@ impl Checker<'_, '_> {
                 | H::Defer(value)
                 | H::TyPtr(value)
                 | H::TyOptional(value)
+                | H::TyTraitObject(value)
                 | H::LiftType(value)
                 | H::Unary(_, value)
                 | H::Projection(value, _)
@@ -2862,7 +2864,10 @@ impl Checker<'_, '_> {
                 }
                 D::Known(expected_ty.clone())
             }
-            H::TyPtr(inner) | H::TyOptional(inner) | H::LiftType(inner) => {
+            H::TyPtr(inner)
+            | H::TyOptional(inner)
+            | H::TyTraitObject(inner)
+            | H::LiftType(inner) => {
                 self.describe_open_expression(
                     inner,
                     locals,
@@ -3669,6 +3674,24 @@ impl Checker<'_, '_> {
                         })?
                     }
                 }
+            }
+            H::DynCast(value, target) => {
+                let description =
+                    self.describe_open_expression(value, locals, returns, None, depth + 1)?;
+                let D::Known(ty) = description else {
+                    return Err(error(
+                        value.span,
+                        "dynamic trait cast requires an established source type",
+                    ));
+                };
+                self.with_open_operand(ty, value.span, |this, placeholder| {
+                    let probe = Expr {
+                        hir_id: expr.hir_id,
+                        span: expr.span,
+                        kind: H::DynCast(placeholder, target),
+                    };
+                    this.describe_known_region(&probe, expected)
+                })?
             }
             H::Cast(value, target) => {
                 let description =

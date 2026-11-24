@@ -644,10 +644,12 @@ fn evaluate_not_sized_at(
             environment,
             signature,
         } => {
-            if !matches!(
-                signature.callable_signature(),
-                Term::Function { parameters, .. } if parameters.iter().all(|p| p.sort == Sort::Runtime)
-            ) {
+            if !matches!(signature.as_ref(), Term::TraitObject { .. })
+                && !matches!(
+                    signature.callable_signature(),
+                    Term::Function { parameters, .. } if parameters.iter().all(|p| p.sort == Sort::Runtime)
+                )
+            {
                 return Err(LayoutError::ComptimeOnly(ty.clone()));
             }
             evaluate_not_sized_aggregate(world, environment.iter(), depth + 1, visiting, fuel)
@@ -678,6 +680,7 @@ fn evaluate_not_sized_at(
             | Primitive::BitVec(_),
         )
         | Term::Pointer(_) => Ok(Some(false)),
+        Term::TraitObject { .. } => Ok(Some(false)),
         Term::Optional(inner) => evaluate_not_sized_at(world, inner, depth + 1, visiting, fuel),
         Term::Tuple(elements) => {
             evaluate_not_sized_aggregate(world, elements.iter(), depth + 1, visiting, fuel)
@@ -1003,6 +1006,10 @@ fn layout_with_niche_at(
                 needs_bool_widen: false,
             }),
         }),
+        Term::TraitObject { .. } => {
+            let ptr = pointer_layout(world, ty)?;
+            Ok(no_niche(struct_layout(&[ptr, ptr])?))
+        }
         Term::UnsafeFunction(signature) => {
             layout_with_niche_at(world, signature, depth + 1, visiting, fuel)
         }
@@ -1273,13 +1280,18 @@ fn layout_with_niche_at(
             environment,
             signature,
         } => {
-            if !matches!(
-                signature.callable_signature(),
-                Term::Function { parameters, .. } if parameters.iter().all(|p| p.sort == Sort::Runtime)
-            ) {
-                return Err(LayoutError::ComptimeOnly(ty.clone()));
-            }
-            let ptr = pointer_layout(world, ty)?;
+            let body = if matches!(signature.as_ref(), Term::TraitObject { .. }) {
+                let ptr = pointer_layout(world, ty)?;
+                struct_layout(&[ptr, ptr])?
+            } else {
+                if !matches!(
+                    signature.callable_signature(),
+                    Term::Function { parameters, .. } if parameters.iter().all(|p| p.sort == Sort::Runtime)
+                ) {
+                    return Err(LayoutError::ComptimeOnly(ty.clone()));
+                }
+                pointer_layout(world, ty)?
+            };
             charge(fuel, environment.len())?;
             let env_layouts = environment
                 .iter()
@@ -1291,7 +1303,7 @@ fn layout_with_niche_at(
             let env = struct_layout(&env_layouts)?;
             let state_count = closure_env_state_count(world, environment, depth + 1, fuel)?;
             Ok(no_niche(struct_layout(&[
-                ptr,
+                body,
                 env,
                 TypeLayout {
                     size: u64::try_from(state_count).map_err(|_| LayoutError::Overflow)?,
@@ -1414,10 +1426,11 @@ fn bit_packed_field_info_at(
             ty.clone(),
         ))),
         Term::Pointer(_)
+        | Term::TraitObject { .. }
         | Term::Function { .. }
         | Term::UnsafeFunction(_)
         | Term::Closure { .. } => Err(unsupported(
-            "pointer and callable types are not allowed in an attrs.packed.bit struct",
+            "pointer, trait-object, and callable types are not allowed in an attrs.packed.bit struct",
         )),
         Term::Optional(_) | Term::ErrorResult { .. } | Term::Computation { .. } => {
             Err(unsupported(

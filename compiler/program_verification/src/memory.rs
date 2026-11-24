@@ -6585,6 +6585,58 @@ impl<'a> Infer<'a, '_> {
                 self.may_reject |= !captures.is_empty();
             }
             K::ComptimeValue(_) => self.captured_data(expr, depth + 1)?,
+            K::TraitObjectType { arguments, .. } => {
+                for arg in arguments {
+                    self.walk(arg, depth + 1)?;
+                }
+            }
+            K::DynCast(cast) => {
+                self.may_reject |= !cast.by_pointer || !cast.env_arguments.is_empty();
+                self.walk(&cast.value, depth + 1)?;
+                for env_arg in &cast.env_arguments {
+                    self.walk(env_arg, depth + 1)?;
+                }
+                let ty = self.ty(&expr.ty)?;
+                let mut aggregate = BTreeMap::new();
+                if cast.by_pointer
+                    && !super::pattern_facts::cannot_complete(&cast.value, self.fuel, 0)?
+                {
+                    if let Some(targets) = self.optional_target(&cast.value, depth + 1)? {
+                        aggregate.insert(vec![], Some(targets));
+                    }
+                } else {
+                    let nested = self.pointer_fields_for(&cast.value)?;
+                    let mut flattened = BTreeSet::new();
+                    let mut had_some = false;
+                    for targets in nested.into_values().flatten() {
+                        had_some = true;
+                        flattened.extend(targets);
+                    }
+                    if had_some {
+                        aggregate.insert(vec![], Some(flattened));
+                    }
+                }
+                for (slot, env_arg) in cast.env_arguments.iter().enumerate() {
+                    for (mut path, targets) in self.pointer_fields_for(env_arg)? {
+                        self.step(path.len())?;
+                        path.insert(0, slot);
+                        aggregate.insert(path, targets);
+                    }
+                }
+                if matches!(ty, Term::Closure { .. } | Term::TraitObject { .. }) {
+                    self.aggregate_pointers
+                        .insert(expr as *const Expr as usize, aggregate);
+                }
+            }
+            K::DynCall(call) => {
+                self.may_reject = true;
+                self.walk(&call.receiver, depth + 1)?;
+                for arg in &call.arguments {
+                    self.walk(&arg.value, depth + 1)?;
+                }
+                self.expression_results
+                    .insert(expr as *const Expr as usize, None);
+            }
             K::Unit
             | K::Literal(_)
             | K::TypeValue(_)
@@ -9167,6 +9219,7 @@ pub(crate) fn signature_may_have_effects(signature: &Term) -> bool {
             | Term::ErrorResult { .. }
             | Term::Function { .. }
             | Term::Closure { .. }
+            | Term::TraitObject { .. }
             | Term::BitVec(_) => false,
             _ => true,
         },

@@ -586,6 +586,9 @@ impl Checker<'_, '_> {
                     kind,
                 }));
             }
+            H::TyTraitObject(trait_expr) => {
+                return self.dyn_trait_type_expr(expr, trait_expr, expected);
+            }
             H::TyPtr(inner) => {
                 let inner = self.expr(inner, Some(&p(P::Type)))?;
                 let ty = inner.ty.clone();
@@ -642,7 +645,8 @@ impl Checker<'_, '_> {
                             "closure environment sources require dependency/provenance checking not yet implemented",
                         ));
                     }
-                    environment.push(self.expr(binding.ty, Some(&p(P::Type)))?);
+                    let ty_expr = self.expr(binding.ty, Some(&p(P::Type)))?;
+                    environment.push(ty_expr);
                 }
                 let signature = self.expr(body, Some(&p(P::Type)))?;
                 let ty = if environment
@@ -669,7 +673,10 @@ impl Checker<'_, '_> {
                     }
                     if !matches!(
                         body,
-                        Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                        Term::Function { .. }
+                            | Term::ComptimeFunction(_)
+                            | Term::UnsafeFunction(_)
+                            | Term::TraitObject { .. }
                     ) {
                         return Err(error(
                             expr.span,

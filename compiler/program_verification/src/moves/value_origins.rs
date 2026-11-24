@@ -194,6 +194,9 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
                 self.expr(expr, flow, depth + 1)?;
                 Ok(std::mem::take(&mut flow.constructed_capture_origins))
             }
+            K::TraitObjectType { .. } => self.trait_object_type_origins(expr, flow, depth),
+            K::DynCast(cast) => self.dyn_cast_origins(expr, cast, flow, depth),
+            K::DynCall(call) => self.dyn_call_origins(expr, call, flow, depth),
             K::AnonymousField { .. } | K::Field { .. } if expression_place(expr).is_none() => {
                 self.project_temporary(expr, flow, depth + 1)
             }
@@ -700,5 +703,200 @@ impl<F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<Shap
             }
             _ => unreachable!("conditional_value_origins dispatcher"),
         }
+    }
+
+    #[inline(never)]
+    fn trait_object_type_origins(
+        &mut self,
+        expr: &Expr,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<ValueOrigins, Error> {
+        let K::TraitObjectType { arguments, .. } = &expr.kind else {
+            unreachable!("trait_object_type_origins dispatcher");
+        };
+        for arg in arguments {
+            self.expr(arg, flow, depth + 1)?;
+            if !flow.live {
+                return Ok(BTreeMap::new());
+            }
+        }
+        Ok(BTreeMap::new())
+    }
+
+    #[inline(never)]
+    fn dyn_cast_origins(
+        &mut self,
+        expr: &Expr,
+        cast: &nir::program::DynCast,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<ValueOrigins, Error> {
+        let mut origins = BTreeMap::new();
+        let value_origins = self.evaluate_value_origins(&cast.value, flow, depth + 1)?;
+        if !flow.live {
+            return Ok(BTreeMap::new());
+        }
+        for (slot, env_arg) in cast.env_arguments.iter().enumerate() {
+            let child_origins = self.evaluate_value_origins(env_arg, flow, depth + 1)?;
+            if !flow.live {
+                return Ok(BTreeMap::new());
+            }
+            for (mut path, targets) in child_origins {
+                self.fuel = self
+                    .fuel
+                    .checked_sub(path.len().saturating_add(1))
+                    .ok_or_else(|| error(expr.source, "dyn env origin budget exhausted"))?;
+                path.insert(0, slot);
+                origins.insert(path, targets);
+            }
+        }
+        if cast.by_pointer {
+            if let Some(targets) = value_origins.get(&vec![]) {
+                self.pointer_work(targets, expr.source)?;
+                let mut collected = targets.clone();
+                for target in targets {
+                    for (slot, nested) in &flow.pointers {
+                        if slot.root == target.root && slot.fields.starts_with(&target.fields) {
+                            self.pointer_work(nested, expr.source)?;
+                            collected.extend(nested.iter().cloned());
+                        }
+                    }
+                }
+                origins.insert(vec![], collected);
+            }
+        } else {
+            let mut nested = BTreeSet::new();
+            for targets in value_origins.values() {
+                self.pointer_work(targets, expr.source)?;
+                nested.extend(targets.iter().cloned());
+            }
+            if !nested.is_empty() {
+                origins.insert(vec![], nested);
+            }
+        }
+        Ok(origins)
+    }
+
+    #[inline(never)]
+    fn dyn_call_origins(
+        &mut self,
+        expr: &Expr,
+        call: &nir::program::DynCall,
+        flow: &mut Flow,
+        depth: usize,
+    ) -> Result<ValueOrigins, Error> {
+        let mut flat_origins = BTreeSet::new();
+        let receiver_origins = if call.by_value_receiver {
+            let origins = self.evaluate_value_origins(&call.receiver, flow, depth + 1)?;
+            for targets in origins.values() {
+                self.pointer_work(targets, expr.source)?;
+                flat_origins.extend(targets.iter().cloned());
+            }
+            origins
+        } else {
+            let targets = self.evaluate_pointer_value(&call.receiver, flow, depth + 1)?;
+            if !flow.live {
+                return Ok(BTreeMap::new());
+            }
+            let mut env = BTreeMap::new();
+            if let Some(targets) = &targets {
+                for target in targets {
+                    flow.state.require_present(target).map_err(|reason| {
+                        error(
+                            expr.source,
+                            format!(
+                                "dynamic method call on unavailable receiver {target}: {reason:?}"
+                            ),
+                        )
+                    })?;
+                    let mut saw_pointer_slot = false;
+                    for (slot, val) in &flow.pointers {
+                        if slot.root == target.root && slot.fields.starts_with(&target.fields) {
+                            let rel = slot.fields[target.fields.len()..].to_vec();
+                            if rel.is_empty() {
+                                saw_pointer_slot = true;
+                                for pointed in val {
+                                    if flow.types.contains_key(&pointed.root) {
+                                        flow.state.require_present(pointed).map_err(|reason| {
+                                            error(
+                                                expr.source,
+                                                format!(
+                                                    "dynamic method call dereferences moved or dropped target {pointed}: {reason:?}"
+                                                ),
+                                            )
+                                        })?;
+                                    }
+                                    flat_origins.insert(pointed.clone());
+                                    for (nested_slot, nested_val) in &flow.pointers {
+                                        if nested_slot.root == pointed.root
+                                            && nested_slot.fields.starts_with(&pointed.fields)
+                                        {
+                                            self.pointer_work(nested_val, expr.source)?;
+                                            flat_origins.extend(nested_val.iter().cloned());
+                                        }
+                                    }
+                                }
+                            } else {
+                                self.pointer_work(val, expr.source)?;
+                                flat_origins.extend(val.iter().cloned());
+                                env.entry(rel)
+                                    .or_insert_with(BTreeSet::new)
+                                    .extend(val.iter().cloned());
+                            }
+                        }
+                    }
+                    if !saw_pointer_slot {
+                        flat_origins.insert(target.clone());
+                    }
+                }
+                self.pointer_work(&flat_origins, expr.source)?;
+            }
+            env
+        };
+        if !flow.live {
+            return Ok(BTreeMap::new());
+        }
+        for arg in &call.arguments {
+            let arg_origins = self.evaluate_value_origins(&arg.value, flow, depth + 1)?;
+            if !flow.live {
+                return Ok(BTreeMap::new());
+            }
+            for targets in arg_origins.values() {
+                self.pointer_work(targets, expr.source)?;
+                flat_origins.extend(targets.iter().cloned());
+            }
+        }
+        let mut result_origins = BTreeMap::new();
+        let out_ty = completion_type(&expr.ty);
+        let returns_dyn = matches!(out_ty, Term::TraitObject { .. })
+            || matches!(
+                out_ty,
+                Term::Closure { signature, .. }
+                    if matches!(signature.as_ref(), Term::TraitObject { .. })
+            );
+        if returns_dyn {
+            for (path, targets) in receiver_origins {
+                if !path.is_empty() {
+                    self.pointer_work(&targets, expr.source)?;
+                    result_origins.insert(path, targets);
+                }
+            }
+            if !flat_origins.is_empty() {
+                self.pointer_work(&flat_origins, expr.source)?;
+                result_origins.insert(vec![], flat_origins);
+            }
+        } else if !flat_origins.is_empty() {
+            if matches!(out_ty, Term::Pointer(_)) {
+                self.pointer_work(&flat_origins, expr.source)?;
+                result_origins.insert(vec![], flat_origins);
+            } else if self.storage_inputs_are_closed(out_ty, expr.source)? {
+                for leaf in self.pointer_input_layout(out_ty, expr.source)? {
+                    self.pointer_work(&flat_origins, expr.source)?;
+                    result_origins.insert(leaf.storage_fields, flat_origins.clone());
+                }
+            }
+        }
+        Ok(result_origins)
     }
 }

@@ -107,7 +107,11 @@ fn local_identity(
             Term::Nominal { declaration, .. } if declaration.package == package => {
                 return Ok(Some(*declaration));
             }
+            Term::TraitObject { interface, .. } if interface.package == package => {
+                return Ok(Some(*interface));
+            }
             Term::Nominal { arguments, .. }
+            | Term::TraitObject { arguments, .. }
             | Term::Tuple(arguments)
             | Term::TupleValue(arguments) => arguments,
             Term::OptionalValue { ty, value } => {

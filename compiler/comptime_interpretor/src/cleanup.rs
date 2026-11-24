@@ -373,6 +373,9 @@ impl Interpreter<'_> {
                         .map_err(|e| self.failure(e, None))?;
                     pointer.release().map_err(|e| self.failure(e, None))?;
                 }
+                Step::DropTraitObject { .. } => {
+                    return Err(self.failure(ErrorKind::Unsupported, None));
+                }
             }
         }
         Ok(())

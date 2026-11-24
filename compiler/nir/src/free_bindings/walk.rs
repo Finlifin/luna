@@ -363,6 +363,16 @@ impl<'a> Walk<'a> {
                 self.sequence(env_arguments, Step::Expr, fuel)?;
                 self.tasks.push(Step::Expr(callee));
             }
+            K::DynCall(call) => {
+                if !call.arguments.is_empty() {
+                    self.tasks.push(Step::Call(Box::new(Call {
+                        arguments: &call.arguments,
+                        bindings: &call.parameter_bindings,
+                        environment: Environment::default(),
+                    })));
+                }
+                self.tasks.push(Step::Expr(&call.receiver));
+            }
             K::NominalType { .. }
             | K::CheckTypeAlias { .. }
             | K::WithTypeInputs { .. }

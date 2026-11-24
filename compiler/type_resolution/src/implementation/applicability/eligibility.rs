@@ -9,6 +9,7 @@ fn query_failure(reason: crate::ptc::UnknownReason) -> QueryError {
         reason => QueryError::Unresolved(format!("subject eligibility: {reason:?}")),
     }
 }
+
 fn assessment(error: QueryError) -> TypeAssessment {
     match error {
         QueryError::Budget => TypeAssessment::BudgetExhausted,
@@ -75,6 +76,7 @@ pub(super) fn eligible_shape(context: &Context, ty: &Term) -> bool {
         Term::Primitive(_)
             | Term::ErrorResult { .. }
             | Term::Nominal { .. }
+            | Term::TraitObject { .. }
             | Term::Tuple(_)
             | Term::Record(_)
             | Term::Optional(_)
@@ -146,6 +148,7 @@ pub(super) fn eligible_alternatives(context: &Context, subject: &Term, formula: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
     fn an_independent_disjunction_proof_can_recover_after_view_exhaustion() {
         let subject = Term::Rigid {

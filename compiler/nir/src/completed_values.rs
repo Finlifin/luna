@@ -10,6 +10,7 @@ fn charge(fuel: &mut usize, amount: usize) -> Result<(), Error> {
     *fuel = fuel.checked_sub(amount).ok_or(Error::Budget)?;
     Ok(())
 }
+
 fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
     let mut pending = vec![(ty, 0)];
     while let Some((ty, depth)) = pending.pop() {
@@ -30,6 +31,7 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
             }
             Term::AssociatedType { arguments, .. } => arguments.len().saturating_add(1),
             Term::Nominal { arguments, .. }
+            | Term::TraitObject { arguments, .. }
             | Term::ClosureSnapshot { arguments, .. }
             | Term::FunctionValue { arguments, .. }
             | Term::NormalForm { arguments, .. }
@@ -74,6 +76,7 @@ fn ty(ty: &Term, fuel: &mut usize) -> Result<(), Error> {
                 children.extend(arguments);
             }
             Term::Nominal { arguments, .. }
+            | Term::TraitObject { arguments, .. }
             | Term::ClosureSnapshot { arguments, .. }
             | Term::FunctionValue { arguments, .. }
             | Term::NormalForm { arguments, .. }
@@ -370,6 +373,7 @@ pub fn validate_with_collection_evidence_in<'d>(
         target,
     )
 }
+
 fn value_in<'a, 'd>(
     value: &'a Expr,
     fuel: &mut usize,

@@ -254,6 +254,7 @@ impl Checker<'_, '_> {
                 | H::Block(_)
                 | H::TyPtr(_)
                 | H::TyOptional(_)
+                | H::TyTraitObject(_)
                 | H::LiftType(_)
                 | H::TyFn(_)
                 | H::TyComptimeFn(_)

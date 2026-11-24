@@ -59,6 +59,12 @@ pub enum Step {
         path: Vec<usize>,
         ty: Term,
     },
+    DropTraitObject {
+        path: Vec<usize>,
+        interface: nir::DeclarationId,
+        interface_arguments: Vec<Term>,
+        env_count: usize,
+    },
 }
 
 fn path(f: &mut fmt::Formatter<'_>, indices: &[usize]) -> fmt::Result {
@@ -113,6 +119,20 @@ impl fmt::Display for Step {
                 f.write_str("(cleanup-release ")?;
                 path(f, indices)?;
                 write!(f, " (type {ty}))")
+            }
+            Self::DropTraitObject {
+                path: indices,
+                interface,
+                interface_arguments,
+                env_count,
+            } => {
+                f.write_str("(cleanup-drop-trait-object ")?;
+                path(f, indices)?;
+                write!(f, " (interface {interface} (arguments")?;
+                for arg in interface_arguments {
+                    write!(f, " {arg}")?;
+                }
+                write!(f, ")) (env-count {env_count}))")
             }
             Self::Switch {
                 path: indices,

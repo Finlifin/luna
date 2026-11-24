@@ -330,7 +330,7 @@ fn collect_cleanup_steps(
     for step in steps {
         spend(fuel, 1)?;
         match step {
-            Step::Release { .. } => {}
+            Step::Release { .. } | Step::DropTraitObject { .. } => {}
             Step::IfConstructed { steps, .. } => {
                 collect_cleanup_steps(index, steps, edges, fuel)?;
             }
@@ -471,6 +471,7 @@ fn type_may_contain_pointer(graph: &iir::Package, ty: &Term, fuel: &mut usize) -
         }
         match cur {
             Term::Pointer(_)
+            | Term::TraitObject { .. }
             | Term::Function { .. }
             | Term::UnsafeFunction(_)
             | Term::Closure { .. } => return true,
@@ -832,6 +833,10 @@ impl<'a, 'b> Analyzer<'a, 'b> {
             spend(self.fuel, 1)?;
             match step {
                 Step::Release { .. } => {}
+                Step::DropTraitObject { .. } => {
+                    self.mark_trap();
+                    self.fail_all_conservative();
+                }
                 Step::Select { .. } => {
                     // Runtime tag selection in `host/llvm/cleanup.rs` may guard unique arms.
                     self.mark_trap();
@@ -1262,6 +1267,34 @@ impl<'a, 'b> Analyzer<'a, 'b> {
                     self.mark_escaped(&o);
                 }
                 self.apply_intrinsic(expr);
+                if type_may_contain_pointer(self.index.graph, &expr.ty, self.fuel) {
+                    Some(PtrOrigin::unknown())
+                } else {
+                    Some(PtrOrigin::default())
+                }
+            }
+
+            K::DynCast(cast) => {
+                let val_origin = self.visit_expr(&cast.value, next)?;
+                self.mark_escaped(&val_origin);
+                for env_arg in &cast.env_arguments {
+                    let o = self.visit_expr(env_arg, next)?;
+                    self.mark_escaped(&o);
+                }
+                if !cast.by_pointer {
+                    self.fail_all_conservative();
+                }
+                Some(PtrOrigin::unknown())
+            }
+
+            K::DynCall(call) => {
+                let recv_origin = self.visit_expr(&call.receiver, next)?;
+                self.mark_escaped(&recv_origin);
+                for arg in &call.arguments {
+                    let o = self.visit_expr(&arg.value, next)?;
+                    self.mark_escaped(&o);
+                }
+                self.fail_all_conservative();
                 if type_may_contain_pointer(self.index.graph, &expr.ty, self.fuel) {
                     Some(PtrOrigin::unknown())
                 } else {

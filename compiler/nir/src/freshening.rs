@@ -158,6 +158,22 @@ impl n::Rewriter for Renamer<'_> {
                 result?;
                 return Ok(false);
             }
+            K::DynCall(call) => {
+                self.ty(&mut expression.ty)?;
+                call.receiver.rewrite_with(self)?;
+                for argument in &mut call.arguments {
+                    if argument.is_default {
+                        let defaults = call.parameter_bindings.iter().map(|&id| (id, id)).collect();
+                        let saved = std::mem::replace(&mut self.bindings, defaults);
+                        let result = argument.value.rewrite_with(self);
+                        self.bindings = saved;
+                        result?;
+                    } else {
+                        argument.value.rewrite_with(self)?;
+                    }
+                }
+                return Ok(false);
+            }
             K::Call {
                 callee,
                 arguments,

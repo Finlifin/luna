@@ -78,11 +78,13 @@ fn evaluate_at(
             environment,
             signature,
         } => {
-            if !matches!(
-                signature.callable_signature(),
-                Term::Function { parameters, .. }
-                    if parameters.iter().all(|param| param.sort == Sort::Runtime)
-            ) {
+            if !matches!(signature.as_ref(), Term::TraitObject { .. })
+                && !matches!(
+                    signature.callable_signature(),
+                    Term::Function { parameters, .. }
+                        if parameters.iter().all(|param| param.sort == Sort::Runtime)
+                )
+            {
                 return NotSizedStatus::InvalidRepresentation(COMPTIME_ONLY_REASON);
             }
             evaluate_aggregate(environment.iter(), constructors, list_heads, depth + 1)
@@ -112,8 +114,8 @@ fn evaluate_at(
             | Primitive::F64
             | Primitive::BitVec(_),
         ) => NotSizedStatus::Known(false),
-        // Pointers carry target pointer width regardless of pointee representation.
-        Term::Pointer(_) => NotSizedStatus::Known(false),
+        // Pointers and bare dynamic trait objects carry fixed target pointer representation.
+        Term::Pointer(_) | Term::TraitObject { .. } => NotSizedStatus::Known(false),
         Term::Optional(inner) => evaluate_at(inner, constructors, list_heads, depth + 1),
         Term::Tuple(elements) => {
             evaluate_aggregate(elements.iter(), constructors, list_heads, depth + 1)

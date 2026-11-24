@@ -405,6 +405,14 @@ impl Writer {
                 self.terms(arguments, d)?;
                 self.term(subject, d)?;
             }
+            T::TraitObject {
+                interface,
+                arguments,
+            } => {
+                self.byte(41)?;
+                self.id(*interface)?;
+                self.terms(arguments, d)?;
+            }
             _ => {
                 return Err(failure(
                     "descriptor is not supported by metadata wire v1; executable and store-backed values are not transportable",
@@ -664,6 +672,10 @@ impl<'a> Reader<'a> {
             38 => T::ErrorRowType,
             39 => T::ReachabilityType,
             40 => T::AnyType,
+            41 => T::TraitObject {
+                interface: self.id()?,
+                arguments: self.terms(d)?,
+            },
             30 => T::ClosureContextValue(self.terms(d)?),
             31 => T::ContextualClosure {
                 context: Box::new(self.term(d)?),

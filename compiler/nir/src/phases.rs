@@ -1075,6 +1075,29 @@ impl<'a> PhaseContext<'a> {
                                 ));
                             }
                         }
+                        K::TraitObjectType { arguments, .. } => {
+                            work.extend(
+                                arguments.iter().map(|a| Work::Expr(a, false, ct)),
+                                inspection_fuel,
+                            )?;
+                        }
+                        K::DynCast(cast) => {
+                            if ct && !cast.env_arguments.is_empty() {
+                                return Err(error(
+                                    "comptime dyn cast cannot capture runtime environment arguments",
+                                ));
+                            }
+                            work.push(Work::Expr(&cast.value, false, ct), inspection_fuel)?;
+                            for env_arg in &cast.env_arguments {
+                                work.push(Work::Expr(env_arg, false, ct), inspection_fuel)?;
+                            }
+                        }
+                        K::DynCall(call) => {
+                            work.push(Work::Expr(&call.receiver, false, ct), inspection_fuel)?;
+                            for argument in &call.arguments {
+                                work.push(Work::Expr(&argument.value, false, ct), inspection_fuel)?;
+                            }
+                        }
                         K::Call {
                             callee,
                             arguments,
@@ -2069,6 +2092,7 @@ impl<'a> PhaseContext<'a> {
                                     matches!(
                                         value.kind,
                                         K::Call { .. }
+                                            | K::DynCall(_)
                                             | K::Variant { .. }
                                             | K::EffectRequest { .. }
                                             | K::Block { .. }

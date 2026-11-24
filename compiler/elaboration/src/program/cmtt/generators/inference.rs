@@ -1427,6 +1427,9 @@ impl Checker<'_, '_> {
             H::TyOptional(inner) => Ok(self
                 .generator_static_type_hint(inner, depth + 1, bindings)?
                 .map(|ty| Term::Optional(Box::new(ty)))),
+            H::TyTraitObject(trait_expr) => {
+                self.dyn_trait_type_term(trait_expr, value.span).map(Some)
+            }
             H::Builtin(_) | H::TyType | H::TyVoid | H::TyNoReturn => {
                 self.type_expr(value).map(Some)
             }
@@ -1606,7 +1609,10 @@ impl Checker<'_, '_> {
                 }
                 if !matches!(
                     signature,
-                    Term::Function { .. } | Term::ComptimeFunction(_) | Term::UnsafeFunction(_)
+                    Term::Function { .. }
+                        | Term::ComptimeFunction(_)
+                        | Term::UnsafeFunction(_)
+                        | Term::TraitObject { .. }
                 ) {
                     return Ok(None);
                 }

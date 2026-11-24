@@ -861,6 +861,9 @@ impl Display for ExprKind<'_> {
                 form!(f, "closure", "params" => List(params), "return-type" => Maybe(*ret), "body" => body)
             }
             Self::Cast(value, ty) => form!(f, "cast", "value" => value, "type" => ty),
+            Self::DynCast(value, trait_expr) => {
+                form!(f, "dyn-cast", "value" => value, "trait" => trait_expr)
+            }
             Self::Let(decl) => form!(f, "let", "declaration" => decl),
             Self::Semi(value) => form!(f, "semi", "value" => value),
             Self::Item(owner) => form!(f, "item-ref", "owner" => Owner(*owner)),
@@ -892,6 +895,9 @@ impl Display for ExprKind<'_> {
             }
             Self::TyPtr(ty) => form!(f, "ty-ptr", "type" => ty),
             Self::TyOptional(ty) => form!(f, "ty-optional", "type" => ty),
+            Self::TyTraitObject(trait_expr) => {
+                form!(f, "ty-trait-object", "trait" => trait_expr)
+            }
             Self::LiftType(ty) => form!(f, "lift", "type" => ty),
             Self::TyComptimeFn(params) => form!(f, "ty-comptime-fn", "params" => List(params)),
             Self::TyFn(params) => form!(f, "ty-fn", "params" => List(params)),

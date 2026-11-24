@@ -35,6 +35,7 @@ use std::fmt;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Head {
     Nominal(DeclarationId),
+    TraitObject(DeclarationId),
     Tuple,
     Record(Vec<String>),
     Optional,
@@ -72,6 +73,7 @@ fn spend(fuel: &mut usize) -> Result<(), Error> {
 enum KeyDiscriminant {
     Primitive(nir::Primitive),
     Nominal(DeclarationId),
+    TraitObject(DeclarationId),
     Tuple,
     Optional,
     Pointer,
@@ -86,6 +88,7 @@ impl Key {
         match self {
             Self::Leaf(Term::Primitive(primitive)) => Some(KeyDiscriminant::Primitive(*primitive)),
             Self::Node(Head::Nominal(id), _) => Some(KeyDiscriminant::Nominal(*id)),
+            Self::Node(Head::TraitObject(id), _) => Some(KeyDiscriminant::TraitObject(*id)),
             Self::Node(Head::Tuple, _) => Some(KeyDiscriminant::Tuple),
             Self::Node(Head::Optional, _) => Some(KeyDiscriminant::Optional),
             Self::Node(Head::Pointer, _) => Some(KeyDiscriminant::Pointer),
@@ -144,6 +147,15 @@ impl Key {
                         return Err(Error::BudgetExhausted);
                     }
                     (Head::Nominal(*declaration), arguments.iter().collect())
+                }
+                Term::TraitObject {
+                    interface,
+                    arguments,
+                } => {
+                    if arguments.len() > *fuel {
+                        return Err(Error::BudgetExhausted);
+                    }
+                    (Head::TraitObject(*interface), arguments.iter().collect())
                 }
                 Term::Tuple(items) => {
                     if items.len() > *fuel {
@@ -1063,6 +1075,7 @@ impl fmt::Display for Key {
                 f.write_str("(structure ")?;
                 match head {
                     Head::Nominal(id) => write!(f, "(nominal {id})")?,
+                    Head::TraitObject(id) => write!(f, "(trait-object {id})")?,
                     Head::Tuple => f.write_str("tuple")?,
                     Head::Record(names) => {
                         f.write_str("(record")?;

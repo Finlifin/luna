@@ -152,6 +152,7 @@ pub enum ExprKind<'hir> {
     },
     Closure(&'hir [ClosureParam<'hir>], Option<&'hir Expr<'hir>>, BodyId),
     Cast(&'hir Expr<'hir>, &'hir Expr<'hir>),
+    DynCast(&'hir Expr<'hir>, &'hir Expr<'hir>),
 
     /// Statement-as-expression: `let pat = init`
     Let(&'hir LetDecl<'hir>),
@@ -194,6 +195,8 @@ pub enum ExprKind<'hir> {
     TyClosureEnvironment(&'hir [ClosureEnvironmentBinding<'hir>]),
     /// Optional type `??`.
     TyOptional(&'hir Expr<'hir>),
+    /// Trait object type `dyn Trait`.
+    TyTraitObject(&'hir Expr<'hir>),
     /// Lifted comptime-to-runtime domain wrapper `lift T`.
     LiftType(&'hir Expr<'hir>),
     /// Function types are constructed using `TyFn` and `TyFnArrow`.

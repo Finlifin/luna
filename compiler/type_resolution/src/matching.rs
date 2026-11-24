@@ -3,6 +3,7 @@
 mod aliases;
 mod effects;
 mod error_rows;
+
 use crate::ptc::Budget;
 use crate::{InferenceContext, InferenceError, InferenceTerm as I};
 use nir::{Sort, Term};
@@ -11,8 +12,10 @@ struct MatchContext<'a> {
     theory: &'a crate::ptc::Context,
     alias_views: bool,
 }
+
 impl std::ops::Deref for MatchContext<'_> {
     type Target = crate::ptc::Context;
+
     fn deref(&self) -> &Self::Target {
         self.theory
     }
@@ -23,6 +26,7 @@ pub enum MatchError {
     Inference(InferenceError),
     BudgetExhausted,
 }
+
 impl From<InferenceError> for MatchError {
     fn from(value: InferenceError) -> Self {
         Self::Inference(value)
@@ -184,6 +188,7 @@ fn tick(fuel: &mut usize, depth: usize, limit: usize) -> Result<(), MatchError> 
     *fuel = fuel.checked_sub(1).ok_or(MatchError::BudgetExhausted)?;
     Ok(())
 }
+
 #[allow(clippy::too_many_arguments)]
 fn decompose(
     template: &Term,
@@ -289,6 +294,7 @@ fn decompose(
         ) if matches!(
             actual,
             Term::Closure { .. }
+                | Term::TraitObject { .. }
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)
                 | Term::NormalFormFunction(..)
@@ -342,6 +348,7 @@ fn decompose(
         ) if matches!(
             template,
             Term::Closure { .. }
+                | Term::TraitObject { .. }
                 | Term::Function { .. }
                 | Term::ComptimeFunction(_)
                 | Term::NormalFormFunction(..)
@@ -527,6 +534,32 @@ fn decompose(
                 decompose(
                     a,
                     b,
+                    arguments,
+                    actual_arguments,
+                    nesting,
+                    depth + 1,
+                    fuel,
+                    limit,
+                    context,
+                    scope,
+                    work,
+                )?;
+            }
+        }
+        (
+            Term::TraitObject {
+                interface: a,
+                arguments: left,
+            },
+            Term::TraitObject {
+                interface: b,
+                arguments: right,
+            },
+        ) if a == b && left.len() == right.len() => {
+            for (left, right) in left.iter().zip(right) {
+                decompose(
+                    left,
+                    right,
                     arguments,
                     actual_arguments,
                     nesting,

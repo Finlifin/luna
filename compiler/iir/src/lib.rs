@@ -209,6 +209,95 @@ impl fmt::Display for InterfaceContract {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynVtableMethod {
+    pub member: nir::DeclarationId,
+    pub returns_self: bool,
+    pub by_reference_receiver: bool,
+    pub body: nir::DeclarationId,
+    pub arguments: Vec<Term>,
+}
+
+impl fmt::Display for DynVtableMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(dyn-method (member {}) (returns-self {}) (by-ref {}) (body {}) (arguments",
+            self.member, self.returns_self, self.by_reference_receiver, self.body
+        )?;
+        for arg in &self.arguments {
+            write!(f, " {arg}")?;
+        }
+        f.write_str("))")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynVtable {
+    pub interface: nir::program::InterfaceInstance,
+    pub subject: Term,
+    pub by_pointer: bool,
+    pub env_identities: Vec<Term>,
+    pub methods: Vec<DynVtableMethod>,
+}
+
+impl fmt::Display for DynVtable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(dyn-vtable (interface {}) (subject {}) (by-pointer {}) (envs",
+            self.interface, self.subject, self.by_pointer
+        )?;
+        for env in &self.env_identities {
+            write!(f, " {env}")?;
+        }
+        f.write_str(") (methods")?;
+        for method in &self.methods {
+            write!(f, " {method}")?;
+        }
+        f.write_str("))")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynInterfaceMethod {
+    pub member: nir::DeclarationId,
+    pub returns_self: bool,
+    pub by_reference_receiver: bool,
+    pub parameters: Vec<nir::Parameter>,
+    pub result: Term,
+}
+
+impl fmt::Display for DynInterfaceMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "(dyn-interface-method (member {}) (returns-self {}) (by-ref {}) (params",
+            self.member, self.returns_self, self.by_reference_receiver
+        )?;
+        for param in &self.parameters {
+            write!(f, " {}", param.ty)?;
+        }
+        write!(f, ") (result {}))", self.result)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynInterface {
+    pub interface: nir::program::InterfaceInstance,
+    pub methods: Vec<DynInterfaceMethod>,
+}
+
+impl fmt::Display for DynInterface {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(dyn-interface (interface {}) (methods", self.interface)?;
+        for method in &self.methods {
+            write!(f, " {method}")?;
+        }
+        f.write_str("))")
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Package {
     pub target: Option<nir::target::TargetData>,
@@ -216,6 +305,8 @@ pub struct Package {
     pub roots: Vec<InstanceKey>,
     pub nominals: Vec<NominalInstance>,
     pub interfaces: Vec<InterfaceContract>,
+    pub dyn_interfaces: Vec<DynInterface>,
+    pub dyn_vtables: Vec<DynVtable>,
     pub normal_forms: Vec<nir::normal_forms::Head>,
     pub callable_identities: Vec<CallableIdentity>,
     pub functions: Vec<FunctionInstance>,
@@ -629,6 +720,18 @@ impl Package {
                 K::ConstAddress { value, .. } => {
                     if !nir::free_bindings::collect(value, fuel)?.is_empty() {
                         return Err("IIR constant address retains free local bindings".into());
+                    }
+                }
+                K::DynCast(cast) => {
+                    if phase == nir::program::FunctionPhase::Comptime {
+                        return Err("IIR comptime body cannot perform runtime dyn cast".into());
+                    }
+                    if !cast.env_arguments.is_empty() && matches!(expr.ty, Term::TraitObject { .. })
+                    {
+                        return Err(
+                            "IIR dyn cast cannot silently drop non-empty runtime environment"
+                                .into(),
+                        );
                     }
                 }
                 _ => {}
@@ -1084,6 +1187,18 @@ impl fmt::Display for Package {
         f.write_str(") (dispatch")?;
         for instance in &self.dispatch {
             write!(f, "\n {instance}")?;
+        }
+        if !self.dyn_interfaces.is_empty() {
+            f.write_str(") (dyn-interfaces")?;
+            for iface in &self.dyn_interfaces {
+                write!(f, "\n {iface}")?;
+            }
+        }
+        if !self.dyn_vtables.is_empty() {
+            f.write_str(") (dyn-vtables")?;
+            for vtable in &self.dyn_vtables {
+                write!(f, "\n {vtable}")?;
+            }
         }
         f.write_str("))\n")
     }

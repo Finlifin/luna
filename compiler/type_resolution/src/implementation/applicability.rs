@@ -507,6 +507,9 @@ pub(super) fn validate(
                 | Term::Nominal {
                     arguments: items, ..
                 }
+                | Term::TraitObject {
+                    arguments: items, ..
+                }
                 | Term::NormalForm {
                     arguments: items, ..
                 },

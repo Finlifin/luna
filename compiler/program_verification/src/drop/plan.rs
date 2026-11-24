@@ -241,6 +241,13 @@ pub enum CleanupStep {
     },
     /// Complete ownership responsibility; this does not free backing allocation.
     Release { place: Place, ty: Term },
+    /// Dynamically invoke Drop (if owned) and free heap allocation on a trait object.
+    DropTraitObject {
+        place: Place,
+        interface: DeclarationId,
+        interface_arguments: Vec<Term>,
+        env_count: usize,
+    },
 }
 
 impl fmt::Display for CleanupStep {
@@ -276,6 +283,21 @@ impl fmt::Display for CleanupStep {
                 f.write_str(")")
             }
             Self::Release { place, ty } => write!(f, "(release-position {place} (type {ty}))"),
+            Self::DropTraitObject {
+                place,
+                interface,
+                interface_arguments,
+                env_count,
+            } => {
+                write!(
+                    f,
+                    "(drop-trait-object {place} (interface {interface} (arguments"
+                )?;
+                for arg in interface_arguments {
+                    write!(f, " {arg}")?;
+                }
+                write!(f, ")) (env-count {env_count}))")
+            }
             Self::SwitchVariant { place, branches } => {
                 write!(f, "(switch-variant {place} (branches")?;
                 for branch in branches {
@@ -387,6 +409,7 @@ fn layout(package: &Package, ty: &Term, fuel: &mut usize) -> Result<Layout<Term>
         } => Ok(Layout::Fields(fields.clone())),
         Term::Primitive(_)
         | Term::Pointer(_)
+        | Term::TraitObject { .. }
         | Term::Function { .. }
         | Term::UnsafeFunction(_)
         | Term::ComptimeFunction(_)
@@ -856,6 +879,43 @@ impl Planner<'_, '_> {
                 }
             }
         }
+        let dyn_drop_info = match &binding.ty {
+            Term::TraitObject {
+                interface,
+                arguments,
+            } => Some((*interface, arguments.clone(), 0usize)),
+            Term::Closure {
+                environment,
+                signature,
+            } => {
+                if let Term::TraitObject {
+                    interface,
+                    arguments,
+                } = signature.as_ref()
+                {
+                    Some((*interface, arguments.clone(), environment.len()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((interface, interface_arguments, env_count)) = dyn_drop_info {
+            let dyn_drop = CleanupStep::DropTraitObject {
+                place: tree.place.clone(),
+                interface,
+                interface_arguments,
+                env_count,
+            };
+            steps.push(if conditional {
+                CleanupStep::IfConstructed {
+                    place: tree.place.clone(),
+                    steps: vec![dyn_drop],
+                }
+            } else {
+                dyn_drop
+            });
+        }
         match &binding.layout {
             Layout::Atomic => (),
             Layout::Fields(fields) => self.children(fields, state, tree, depth, steps)?,
@@ -1250,6 +1310,156 @@ impl<'a, 'w> CleanupSession<'a, 'w> {
 
     pub fn take_missing_runtime_instances(&mut self) -> Vec<RequiredDropInstance> {
         std::mem::take(&mut self.missing_runtime_instances)
+    }
+
+    /// Plan complete cleanup for an owned subject type without a enclosing local
+    /// variable, recording any unmaterialized runtime `Drop` instances.
+    pub fn plan_subject(&mut self, ty: &Term, fuel: &mut usize) -> Result<CleanupPlan, String> {
+        <Self as crate::moves::CleanupPolicy>::acquire(self, ty, fuel)?;
+        let mut shape_cache = crate::moves::OwnershipShapeCache::default();
+        let shape = shape_cache.shape(self.package, ty, fuel)?;
+        let place = Place {
+            root: crate::PlaceId { owner: 0, local: 0 },
+            fields: vec![],
+        };
+        let mut state = State::default();
+        state
+            .declare(place.root, &shape, true, fuel)
+            .map_err(|error| {
+                format!("cannot initialize dynamic subject cleanup state: {error:?}")
+            })?;
+
+        let mut types = BTreeMap::new();
+        types.insert(place.root, ty.clone());
+        let mut slots: BTreeMap<Place, BTreeSet<Place>> = BTreeMap::new();
+        let mut next_local = 1u32;
+        let mut visited_pointees = Vec::new();
+
+        #[allow(clippy::too_many_arguments)]
+        fn populate_pointers(
+            package: &Package,
+            shape_cache: &mut crate::moves::OwnershipShapeCache,
+            state: &mut State,
+            types: &mut BTreeMap<crate::PlaceId, Term>,
+            slots: &mut BTreeMap<Place, BTreeSet<Place>>,
+            next_local: &mut u32,
+            visited_pointees: &mut Vec<Term>,
+            root: crate::PlaceId,
+            path: &mut Vec<usize>,
+            current_ty: &Term,
+            depth: usize,
+            fuel: &mut usize,
+        ) -> Result<(), String> {
+            step(fuel, depth)?;
+            if depth >= 8 {
+                return Ok(());
+            }
+            if let Term::Pointer(pointee) = current_ty {
+                let target_root = crate::PlaceId {
+                    owner: 0,
+                    local: *next_local,
+                };
+                *next_local = next_local
+                    .checked_add(1)
+                    .ok_or("dynamic subject pointer provenance limit exceeded")?;
+                let target_shape = shape_cache.shape(package, pointee, fuel)?;
+                state
+                    .declare(target_root, &target_shape, true, fuel)
+                    .map_err(|error| {
+                        format!("cannot initialize dynamic subject pointer target: {error:?}")
+                    })?;
+                types.insert(target_root, (**pointee).clone());
+                slots
+                    .entry(Place {
+                        root,
+                        fields: path.clone(),
+                    })
+                    .or_default()
+                    .insert(Place {
+                        root: target_root,
+                        fields: vec![],
+                    });
+                if !visited_pointees.contains(pointee.as_ref()) {
+                    visited_pointees.push((**pointee).clone());
+                    let mut inner_path = Vec::new();
+                    populate_pointers(
+                        package,
+                        shape_cache,
+                        state,
+                        types,
+                        slots,
+                        next_local,
+                        visited_pointees,
+                        target_root,
+                        &mut inner_path,
+                        pointee,
+                        depth + 1,
+                        fuel,
+                    )?;
+                    visited_pointees.pop();
+                }
+                return Ok(());
+            }
+            match layout(package, current_ty, fuel)? {
+                Layout::Atomic | Layout::Variants(_) => {}
+                Layout::Fields(fields) => {
+                    for (index, field_ty) in fields.iter().enumerate() {
+                        path.push(index);
+                        populate_pointers(
+                            package,
+                            shape_cache,
+                            state,
+                            types,
+                            slots,
+                            next_local,
+                            visited_pointees,
+                            root,
+                            path,
+                            field_ty,
+                            depth + 1,
+                            fuel,
+                        )?;
+                        path.pop();
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        let mut root_path = Vec::new();
+        populate_pointers(
+            self.package,
+            &mut shape_cache,
+            &mut state,
+            &mut types,
+            &mut slots,
+            &mut next_local,
+            &mut visited_pointees,
+            place.root,
+            &mut root_path,
+            ty,
+            0,
+            fuel,
+        )?;
+        let enum_domains = BTreeMap::new();
+        let pointer_conditions = BTreeMap::new();
+        let memory = super::access::PointerMemory {
+            types: &types,
+            slots: &slots,
+            enum_domains: &enum_domains,
+            pointer_conditions: &pointer_conditions,
+            retired: &[],
+            env: None,
+        };
+        <Self as crate::moves::CleanupPolicy>::plan_with_memory(
+            self,
+            ty,
+            &state,
+            &place,
+            &[],
+            Some(memory),
+            fuel,
+        )
     }
 
     pub(super) fn mark_active_read_queries_provisional(&mut self) {

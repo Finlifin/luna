@@ -61,9 +61,11 @@ impl SelectedTypeInitializer {
         };
         Ok((result, fact))
     }
+
     pub fn needs_inputs(&self) -> bool {
         self.open_inputs
     }
+
     pub fn complete(
         self,
         value: Term,
@@ -283,6 +285,7 @@ pub struct AssociatedTypeNormalization {
     /// Closed program reads retained for source dispatch in this traversal.
     pub initializer_dependencies: Vec<Term>,
 }
+
 #[derive(Clone, Debug)]
 pub struct AssociatedTypeStep {
     pub projection: Term,
@@ -507,6 +510,7 @@ impl World<'_> {
 /// frames and completed projections while the requesting context services a read.
 pub trait TypeProjectionEnvironment {
     fn world(&self) -> World<'_>;
+
     fn resolve_type(
         &mut self,
         projection: &Term,
@@ -530,6 +534,7 @@ impl TypeProjectionEnvironment for PassiveProjectionWorld<'_, '_> {
     fn world(&self) -> World<'_> {
         self.world
     }
+
     fn resolve_type(
         &mut self,
         projection: &Term,
@@ -551,6 +556,7 @@ pub struct TypeInitializerResult {
     pub value: Term,
     pub publication: Option<(nir::program::PublishedDefinitions, u32)>,
 }
+
 impl From<Term> for TypeInitializerResult {
     fn from(value: Term) -> Self {
         Self {
@@ -774,6 +780,7 @@ struct Normalizer<'a, E> {
     initializer_dependencies: Vec<Term>,
     frames: Vec<Vec<nir::Sort>>,
 }
+
 impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
     fn spend(&mut self, steps: usize) -> Result<(), QueryError> {
         self.remaining = self
@@ -782,9 +789,11 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
             .ok_or(QueryError::Budget)?;
         Ok(())
     }
+
     fn charge_copy(&mut self, term: &Term) -> Result<(), QueryError> {
         charge_projection_copy(term, &mut self.remaining)
     }
+
     fn many(&mut self, terms: &[Term], depth: usize) -> Result<Vec<Term>, QueryError> {
         if terms.len() > self.remaining {
             return Err(QueryError::Budget);
@@ -794,6 +803,7 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
             .map(|term| self.normalize(term, depth))
             .collect()
     }
+
     fn normalize(&mut self, term: &Term, depth: usize) -> Result<Term, QueryError> {
         if depth >= self.budget.max_depth.min(64) {
             return Err(QueryError::Budget);
@@ -1161,6 +1171,13 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
                 }
             }
             Term::Optional(inner) => Term::Optional(Box::new(self.normalize(inner, depth + 1)?)),
+            Term::TraitObject {
+                interface,
+                arguments,
+            } => Term::TraitObject {
+                interface: *interface,
+                arguments: self.many(arguments, depth + 1)?,
+            },
             Term::Pointer(inner) => Term::Pointer(Box::new(self.normalize(inner, depth + 1)?)),
             Term::Lift(inner) => Term::Lift(Box::new(self.normalize(inner, depth + 1)?)),
             Term::NormalFormFunction(inner, collector) => {
@@ -1228,6 +1245,7 @@ impl<E: TypeProjectionEnvironment> Normalizer<'_, E> {
         })
     }
 }
+
 impl fmt::Display for AssociatedTypeStep {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -1237,6 +1255,7 @@ impl fmt::Display for AssociatedTypeStep {
         )
     }
 }
+
 impl fmt::Display for AssociatedTypeNormalization {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -1710,6 +1729,7 @@ mod shared_cache_tests {
 }
 
 mod values;
+
 pub use values::{
     AssociatedRead, AssociatedValueResolution, PendingAssociatedSource, PreparedAssociatedMember,
     SelectedAssociatedMember, SelectedMemberData,

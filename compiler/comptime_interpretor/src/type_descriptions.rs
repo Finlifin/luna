@@ -526,6 +526,9 @@ pub(super) fn inspect<'signature>(
             Term::MethodValue(method) => {
                 pending.extend(method.terms().map(|term| Work::Visit(term, depth + 1)));
             }
+            Term::TraitObject { arguments, .. } => {
+                pending.extend(arguments.iter().map(|term| Work::Visit(term, depth + 1)));
+            }
             Term::OptionalValue { ty, value } => {
                 pending.push(Work::Visit(ty, depth + 1));
                 if let Some(value) = value {

@@ -700,7 +700,7 @@ impl Emitter<'_> {
         let mut owner = None;
         for (depth, field) in path.iter().copied().enumerate() {
             match ty {
-                Ty::Closure(fields) => {
+                Ty::Closure(fields) | Ty::TraitObjectClosure(fields) => {
                     owner = Some((fields, depth, indices.len()));
                     indices.push(1);
                     indices.push(field);
@@ -1234,6 +1234,15 @@ impl Emitter<'_> {
         Err("host cleanup tag requires enum, optional or error result".into())
     }
 
+    pub(super) fn cleanup_subject_steps(
+        &mut self,
+        slot: &Slot,
+        steps: &[Step],
+        logical: Option<&Term>,
+    ) -> Result<(), String> {
+        self.cleanup_steps(slot, steps, &BTreeMap::new(), None, logical)
+    }
+
     fn cleanup_steps(
         &mut self,
         slot: &Slot,
@@ -1405,6 +1414,62 @@ impl Emitter<'_> {
                 self.line("call void @llvm.trap()");
                 self.line("unreachable");
                 self.label(&done);
+                continue;
+            }
+
+            if let Step::DropTraitObject { path, .. } = step {
+                let target = self.cleanup_tagged_slot(slot.clone(), path, tags, logical)?;
+                let fat_ptr = match &target.ty {
+                    Ty::TraitObject => self.load(&target),
+                    Ty::TraitObjectClosure(_) => {
+                        let ptr_name = self.fresh();
+                        self.line(format!(
+                            "%{ptr_name} = getelementptr {}, ptr {}, i32 0, i32 0",
+                            target.ty.llvm(),
+                            target.pointer
+                        ));
+                        self.load(&Slot::new(Ty::TraitObject, format!("%{ptr_name}"), None))
+                    }
+                    _ => return Err("host dyn drop requires a trait object slot".into()),
+                };
+                let data_ptr = self.instruction(
+                    Ty::Pointer,
+                    format!("extractvalue {{ ptr, ptr }} {}, 0", fat_ptr.text),
+                );
+                let vtable_ptr = self.instruction(
+                    Ty::Pointer,
+                    format!("extractvalue {{ ptr, ptr }} {}, 1", fat_ptr.text),
+                );
+                let has_vtable =
+                    self.instruction(Ty::Bool, format!("icmp ne ptr {}, null", vtable_ptr.text));
+                let check_drop = self.fresh();
+                let skip_drop = self.fresh();
+                self.line(format!(
+                    "br i1 {}, label %{check_drop}, label %{skip_drop}",
+                    has_vtable.text
+                ));
+                self.label(&check_drop);
+                let drop_fn =
+                    self.instruction(Ty::Pointer, format!("load ptr, ptr {}", vtable_ptr.text));
+                let has_drop =
+                    self.instruction(Ty::Bool, format!("icmp ne ptr {}, null", drop_fn.text));
+                let call_drop = self.fresh();
+                self.line(format!(
+                    "br i1 {}, label %{call_drop}, label %{skip_drop}",
+                    has_drop.text
+                ));
+                self.label(&call_drop);
+                let args = vec![format!("ptr {}", data_ptr.text)];
+                let (_, ctrl) = self.machine_call(&drop_fn.text, &args, Ty::Unit, "");
+                if let Some(ctrl) = ctrl {
+                    self.accept_control(
+                        &ctrl,
+                        nir::program::SourceRange { start: 0, end: 0 },
+                        false,
+                    )?;
+                }
+                self.branch(&skip_drop);
+                self.label(&skip_drop);
                 continue;
             }
 
@@ -1604,7 +1669,7 @@ pub(super) fn has_invoke(steps: &[Step]) -> bool {
     let mut pending: Vec<_> = steps.iter().collect();
     while let Some(step) = pending.pop() {
         match step {
-            Step::Invoke { .. } => return true,
+            Step::Invoke { .. } | Step::DropTraitObject { .. } => return true,
             Step::Switch { branches, .. } => pending.extend(branches.iter().flatten()),
             Step::Select { cases } => pending.extend(cases.iter().flat_map(|c| &c.steps)),
             Step::IfConstructed { steps, .. } => pending.extend(steps),
@@ -1628,7 +1693,7 @@ fn field_layout(ty: &Ty, field: usize, tag: Option<usize>) -> Option<(Ty, Vec<(T
         Ty::Record(fields) | Ty::PackedRecord(fields) => {
             Some((fields.get(field)?.clone(), vec![(ty.clone(), vec![field])]))
         }
-        Ty::Closure(fields) => Some((
+        Ty::Closure(fields) | Ty::TraitObjectClosure(fields) => Some((
             fields.get(field)?.clone(),
             vec![(ty.clone(), vec![1, field])],
         )),
@@ -1814,6 +1879,14 @@ fn admit_steps(
             // Release is logical ownership bookkeeping, not a memory access;
             // e.g. a newtype field can be erased from the target layout.
             Step::Release { .. } => {}
+            Step::DropTraitObject { path, .. } => {
+                let Some((_, at)) = cleanup_projection(graph, logical, ty, path, tags) else {
+                    return false;
+                };
+                if !matches!(at, Ty::TraitObject | Ty::TraitObjectClosure(_)) {
+                    return false;
+                }
+            }
             Step::Invoke {
                 path,
                 subject,
@@ -2787,7 +2860,10 @@ enum Owner {
 pub(super) fn product_paths(ty: &Ty, prefix: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
     out.push(prefix.clone());
     match ty {
-        Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) => {
+        Ty::Record(fields)
+        | Ty::PackedRecord(fields)
+        | Ty::Closure(fields)
+        | Ty::TraitObjectClosure(fields) => {
             for (index, field) in fields.iter().enumerate() {
                 prefix.push(index);
                 product_paths(field, prefix, out);
@@ -2810,9 +2886,10 @@ pub(super) fn product_paths(ty: &Ty, prefix: &mut Vec<usize>, out: &mut Vec<Vec<
 fn product_projection<'a>(mut ty: &'a Ty, path: &[usize]) -> Option<&'a Ty> {
     for index in path {
         ty = match ty {
-            Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) => {
-                fields.get(*index)?
-            }
+            Ty::Record(fields)
+            | Ty::PackedRecord(fields)
+            | Ty::Closure(fields)
+            | Ty::TraitObjectClosure(fields) => fields.get(*index)?,
             Ty::BitPackedRecord(layout) => &layout.fields.get(*index)?.ty,
             _ => return None,
         };

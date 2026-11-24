@@ -1262,6 +1262,9 @@ fn subterms(term: &Term) -> Vec<&Term> {
         | Term::Nominal {
             arguments: items, ..
         }
+        | Term::TraitObject {
+            arguments: items, ..
+        }
         | Term::NormalForm {
             arguments: items, ..
         } => items.iter().collect(),
@@ -1339,6 +1342,9 @@ fn has_bound(term: &Term) -> bool {
         | Term::ClosureContextValue(items)
         | Term::TupleValue(items)
         | Term::Nominal {
+            arguments: items, ..
+        }
+        | Term::TraitObject {
             arguments: items, ..
         }
         | Term::NormalForm {
@@ -1690,6 +1696,7 @@ enum Head {
     Function(Vec<Sort>),
     Closure(usize),
     Nominal(DeclarationId, usize),
+    TraitObject(DeclarationId, usize),
 }
 
 fn constructor(term: &Term) -> Option<Head> {
@@ -1710,6 +1717,10 @@ fn constructor(term: &Term) -> Option<Head> {
             declaration,
             arguments,
         } => Some(Head::Nominal(*declaration, arguments.len())),
+        Term::TraitObject {
+            interface,
+            arguments,
+        } => Some(Head::TraitObject(*interface, arguments.len())),
         _ => None,
     }
 }
@@ -1728,7 +1739,8 @@ pub fn distinct_outer_type_heads(left: &Term, right: &Term) -> bool {
         | Term::NormalFormFunction(..)
         | Term::UnsafeFunction(_)
         | Term::Tuple(_)
-        | Term::Nominal { .. } => constructor(term),
+        | Term::Nominal { .. }
+        | Term::TraitObject { .. } => constructor(term),
         _ => None,
     };
     matches!((head(left), head(right)), (Some(left), Some(right)) if left != right)
@@ -2426,6 +2438,7 @@ fn strict_structural_children<'a>(context: &Context, terms: &'a Terms, id: usize
         Term::Nominal { declaration, .. } if context.is_nominal_constructor(*declaration) => {
             children
         }
+        Term::TraitObject { .. } => children,
         Term::Computation { effects, .. } if !effects.is_empty() => &children[..children.len() - 1],
         Term::ErrorResult { errors, .. } if !errors.is_empty() => &children[..errors.len()],
         _ => &[],
@@ -2888,6 +2901,13 @@ fn rebuild(
             arguments,
         } if arguments.is_empty() || nominal.contains_key(declaration) => Some(Term::Nominal {
             declaration: *declaration,
+            arguments: arguments.iter().map(&mut *child).collect::<Option<_>>()?,
+        }),
+        Term::TraitObject {
+            interface,
+            arguments,
+        } => Some(Term::TraitObject {
+            interface: *interface,
             arguments: arguments.iter().map(&mut *child).collect::<Option<_>>()?,
         }),
         _ => None,

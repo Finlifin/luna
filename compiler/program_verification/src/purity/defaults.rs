@@ -303,6 +303,9 @@ pub fn stable_default(expr: &n::Expr) -> bool {
         | K::BitWritePointer { .. }
         | K::OptionalType(_)
         | K::PointerType(_)
+        | K::TraitObjectType { .. }
+        | K::DynCast(_)
+        | K::DynCall(_)
         | K::ClosureType { .. }
         | K::FunctionType { .. }
         | K::FunctionResultType { .. } => false,

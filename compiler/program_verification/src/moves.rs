@@ -8882,7 +8882,9 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 }
                 owned_observation = matches!(node.kind, K::Tuple(_) | K::AnonymousRecord { .. } | K::Record { .. } | K::OptionalPresent(_)
                 | K::OptionalAbsent
-                | K::Variant { .. })
+                | K::Variant { .. }
+                | K::DynCast(_)
+                | K::DynCall(_))
                     || matches!(&node.kind, K::Call { arguments, .. }
                     if arguments.iter().any(|argument| matches!(argument.value.ty,
                         Term::Nominal { .. } | Term::Record(_) | Term::Tuple(_) | Term::NormalForm { .. })))
@@ -14207,6 +14209,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 | K::OptionalPresent(_)
                 | K::OptionalAbsent
                 | K::Variant { .. }
+                | K::DynCast(_)
+                | K::DynCall(_)
                 | K::ErrorConvert { .. }
                 | K::Field { .. }
                 | K::AnonymousField { .. }
@@ -14936,6 +14940,8 @@ impl<'a, F: FnMut(&Term) -> Result<Delivery, String>, G: FnMut(&Term) -> Result<
                 | K::OptionalPresent(_)
                 | K::OptionalAbsent
                 | K::Variant { .. }
+                | K::DynCast(_)
+                | K::DynCall(_)
                 | K::ErrorConvert { .. }
                 | K::EffectRequest { .. }
                 | K::EffectHandle { .. }

@@ -1063,7 +1063,9 @@ fn const_zero_value(ty: &Ty) -> Result<ConstValue, String> {
         | Ty::String
         | Ty::Symbol
         | Ty::ErrorResult(_)
-        | Ty::Closure(_) => Ok(ConstValue::Atom {
+        | Ty::Closure(_)
+        | Ty::TraitObject
+        | Ty::TraitObjectClosure(_) => Ok(ConstValue::Atom {
             ty: ty.clone(),
             llvm_ty: ty.llvm(),
             llvm_init: if matches!(ty, Ty::Pointer | Ty::FunctionPointer) {
@@ -1072,7 +1074,12 @@ fn const_zero_value(ty: &Ty) -> Result<ConstValue, String> {
                 "0.0".into()
             } else if matches!(
                 ty,
-                Ty::String | Ty::Symbol | Ty::ErrorResult(_) | Ty::Closure(_)
+                Ty::String
+                    | Ty::Symbol
+                    | Ty::ErrorResult(_)
+                    | Ty::Closure(_)
+                    | Ty::TraitObject
+                    | Ty::TraitObjectClosure(_)
             ) {
                 "zeroinitializer".into()
             } else {

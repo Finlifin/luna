@@ -6061,6 +6061,9 @@ impl Walker<'_> {
             | K::FunctionType { .. }
             | K::OptionalType(_)
             | K::PointerType(_)
+            | K::TraitObjectType { .. }
+            | K::DynCast(_)
+            | K::DynCall(_)
             | K::BitVecType(_)
             | K::FunctionResultType { .. }
             | K::ClosureType { .. }

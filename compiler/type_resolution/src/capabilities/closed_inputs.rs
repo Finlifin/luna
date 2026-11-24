@@ -13,6 +13,7 @@ impl World<'_> {
     ) -> Result<bool, QueryError> {
         self.closed_inputs_metered(query.inputs(), budget)
     }
+
     pub fn closed_inputs_metered<'t>(
         &self,
         inputs: impl IntoIterator<Item = &'t Term>,
@@ -26,6 +27,7 @@ impl World<'_> {
         Ok(true)
     }
 }
+
 fn closed(
     ty: &Term,
     context: &Context,
@@ -47,7 +49,9 @@ fn closed(
         return Ok(false);
     }
     let children: Vec<&Term> = match ty {
-        Term::Nominal { arguments, .. } | Term::Tuple(arguments) => arguments.iter().collect(),
+        Term::Nominal { arguments, .. }
+        | Term::TraitObject { arguments, .. }
+        | Term::Tuple(arguments) => arguments.iter().collect(),
         Term::OptionalValue { ty, value } => std::iter::once(ty.as_ref())
             .chain(value.as_deref())
             .collect(),

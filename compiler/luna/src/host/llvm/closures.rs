@@ -6,9 +6,10 @@ use super::*;
 pub(super) fn state_count(fields: &std::sync::Arc<Vec<Ty>>) -> usize {
     fn count(ty: &Ty) -> usize {
         match ty {
-            Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) => {
-                state_count(fields)
-            }
+            Ty::Record(fields)
+            | Ty::PackedRecord(fields)
+            | Ty::Closure(fields)
+            | Ty::TraitObjectClosure(fields) => state_count(fields),
             Ty::BitPackedRecord(layout) => {
                 1 + layout.fields.iter().map(|f| count(&f.ty)).sum::<usize>()
             }
@@ -29,9 +30,10 @@ pub(super) fn state_index(
 ) -> Result<usize, String> {
     fn product_child(ty: &Ty, index: usize) -> Option<&Ty> {
         match ty {
-            Ty::Record(children) | Ty::PackedRecord(children) | Ty::Closure(children) => {
-                children.get(index)
-            }
+            Ty::Record(children)
+            | Ty::PackedRecord(children)
+            | Ty::Closure(children)
+            | Ty::TraitObjectClosure(children) => children.get(index),
             Ty::BitPackedRecord(layout) => layout.fields.get(index).map(|f| &f.ty),
             _ => None,
         }
@@ -43,7 +45,10 @@ pub(super) fn state_index(
         fuel: &mut usize,
     ) -> Result<(), String> {
         match ty {
-            Ty::Record(fields) | Ty::PackedRecord(fields) | Ty::Closure(fields) => {
+            Ty::Record(fields)
+            | Ty::PackedRecord(fields)
+            | Ty::Closure(fields)
+            | Ty::TraitObjectClosure(fields) => {
                 *fuel = fuel
                     .checked_sub(fields.len())
                     .ok_or("host capture state index budget exhausted")?;
@@ -69,7 +74,11 @@ pub(super) fn state_index(
             .ok_or("host capture state index budget exhausted")?;
         if !matches!(
             current,
-            Ty::Record(_) | Ty::PackedRecord(_) | Ty::Closure(_) | Ty::BitPackedRecord(_)
+            Ty::Record(_)
+                | Ty::PackedRecord(_)
+                | Ty::Closure(_)
+                | Ty::TraitObjectClosure(_)
+                | Ty::BitPackedRecord(_)
         ) {
             return Err("host capture state path is not a product".into());
         }
@@ -388,7 +397,7 @@ fn collect_step_env_locals(
                     collect_step_env_locals(branch, out, fuel, depth + 1)?;
                 }
             }
-            Step::Release { .. } => {}
+            Step::Release { .. } | Step::DropTraitObject { .. } => {}
         }
     }
     Ok(())

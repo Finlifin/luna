@@ -144,6 +144,17 @@ fn lower(
                 path: relative(place)?,
                 ty: ty.clone(),
             },
+            CleanupStep::DropTraitObject {
+                place,
+                interface,
+                interface_arguments,
+                env_count,
+            } => iir::cleanup::Step::DropTraitObject {
+                path: relative(place)?,
+                interface: *interface,
+                interface_arguments: interface_arguments.clone(),
+                env_count: *env_count,
+            },
             CleanupStep::SwitchVariant { place, branches } => {
                 if branches
                     .windows(2)
@@ -194,11 +205,18 @@ fn lower(
     Ok(output)
 }
 
+#[derive(Clone, Debug)]
+pub struct DynCleanup {
+    pub subject: nir::Term,
+    pub program: iir::cleanup::Program,
+}
+
 #[derive(Debug)]
 pub struct Executable {
     pub entry: iir::InstanceKey,
     pub graph: iir::Package,
     pub schedule: iir::cleanup::Schedule,
+    pub dyn_cleanups: Vec<DynCleanup>,
 }
 
 impl fmt::Display for Executable {
@@ -253,8 +271,121 @@ fn type_already_in_graph(graph: &iir::Package, ty: &nir::Term, depth: usize) -> 
         nir::Term::Record(fields) => fields
             .iter()
             .all(|(_, field)| type_already_in_graph(graph, field, depth + 1)),
+        nir::Term::TraitObject { .. } => true,
+        nir::Term::Closure {
+            environment,
+            signature,
+        } => {
+            environment
+                .iter()
+                .all(|item| type_already_in_graph(graph, item, depth + 1))
+                && type_already_in_graph(graph, signature, depth + 1)
+        }
         _ => false,
     }
+}
+
+fn trait_has_self_return(
+    package: &Package,
+    interface: nir::DeclarationId,
+    fuel: &mut usize,
+) -> Result<bool, String> {
+    let Some(contract) = package.traits.iter().find(|t| t.declaration == interface) else {
+        return Ok(false);
+    };
+    for method in &contract.methods {
+        if let nir::code_interfaces::MethodSignature::Callable(sig) = &method.signature
+            && let nir::Term::Function { result, .. } = sig.callable_signature()
+        {
+            let mut ids = std::collections::BTreeSet::new();
+            nir::type_computations::rigid_declarations_bounded(result, fuel, &mut ids)
+                .map_err(|e| format!("dyn trait self-return inspection failed: {e:?}"))?;
+            if ids.contains(&contract.self_parameter) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_dyn_cleanups(
+    package: &Package,
+    graph: &iir::Package,
+    cleanup_session: &mut Option<elaboration::verification::drop::CleanupSession<'_, '_>>,
+    initial_roots_len: usize,
+    roots: &mut Vec<iir::InstanceKey>,
+    receivers: &mut Vec<(iir::InstanceKey, nir::Term)>,
+    types: &mut Vec<nir::Term>,
+    fuel: &mut usize,
+) -> Result<Vec<DynCleanup>, String> {
+    let mut subjects = Vec::new();
+    for instance in &graph.functions {
+        nir::visit::expressions(&instance.function, fuel, |expr, fuel| {
+            if let nir::program::ExprKind::DynCast(cast) = &expr.kind {
+                let needs_box = !cast.by_pointer
+                    || trait_has_self_return(package, cast.interface.declaration, fuel)?;
+                if needs_box && !subjects.contains(&cast.subject) {
+                    subjects.push(cast.subject.clone());
+                }
+            }
+            Ok(())
+        })?;
+    }
+    let mut result = Vec::new();
+    let mut any_missing = false;
+    for subject in subjects {
+        if !type_already_in_graph(graph, &subject, 0) && !types.contains(&subject) {
+            types.push(subject.clone());
+        }
+        if let Some(session) = cleanup_session.as_mut() {
+            let plan = session.plan_subject(&subject, fuel)?;
+            let missing = session.take_missing_runtime_instances();
+            if register_missing_roots(missing, initial_roots_len, roots, receivers)? {
+                any_missing = true;
+                continue;
+            }
+            let mut methods = vec![];
+            let steps = lower(
+                &plan.steps,
+                &plan.receiver,
+                &mut methods,
+                receivers,
+                fuel,
+                0,
+            )?;
+            for method in methods {
+                if !roots.contains(&method) {
+                    roots.push(method);
+                }
+            }
+            result.push(DynCleanup {
+                subject: subject.clone(),
+                program: iir::cleanup::Program {
+                    ty: subject,
+                    guards: plan
+                        .variants
+                        .iter()
+                        .map(|v| (v.fields.clone(), v.index))
+                        .collect(),
+                    steps,
+                },
+            });
+        } else {
+            result.push(DynCleanup {
+                subject: subject.clone(),
+                program: iir::cleanup::Program {
+                    ty: subject,
+                    guards: vec![],
+                    steps: vec![],
+                },
+            });
+        }
+    }
+    if any_missing {
+        return Ok(Vec::new());
+    }
+    Ok(result)
 }
 
 #[derive(Default)]
@@ -1949,6 +2080,22 @@ fn prepare_source_impl(
             continue;
         }
         if previous == (roots.len(), types.len()) {
+            let dyn_cleanups = collect_dyn_cleanups(
+                package,
+                graph,
+                &mut cleanup_session,
+                initial_roots_len,
+                &mut roots,
+                &mut receivers,
+                &mut types,
+                fuel,
+            )?;
+            if previous != (roots.len(), types.len()) {
+                drop(cleanup_session);
+                retained_caches = verification_session.into_caches();
+                retained_caches.retain_unaffected(&changed_cleanup_keys);
+                continue;
+            }
             // Contract proofs use the final runtime-instance and cleanup-access
             // overlay. Provisional rounds are never published, and repeating
             // these proofs while dependencies grow provides no reusable evidence.
@@ -1994,6 +2141,7 @@ fn prepare_source_impl(
                 entry,
                 graph,
                 schedule,
+                dyn_cleanups,
             });
         }
         drop(cleanup_session);

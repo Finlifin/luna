@@ -2295,6 +2295,7 @@ fn compile_root<'a>(
                     | K::FunctionResultType { .. }
                     | K::OptionalType(_)
                     | K::PointerType(_)
+                    | K::TraitObjectType { .. }
                     | K::ClosureType { .. } => {
                         use type_constructors::{Constructor, Kind};
                         let count = match &expr.kind {
@@ -2305,6 +2306,9 @@ fn compile_root<'a>(
                             } => comptime_parameters.len().saturating_add(parameters.len()),
                             K::ClosureType { environment, .. } => {
                                 environment.len().saturating_add(1)
+                            }
+                            K::TraitObjectType { arguments, .. } => {
+                                arguments.len().saturating_add(1)
                             }
                             _ => 2,
                         };
@@ -2326,6 +2330,10 @@ fn compile_root<'a>(
                             }
                             K::OptionalType(inner) => (Kind::Optional, vec![inner]),
                             K::PointerType(inner) => (Kind::Pointer, vec![inner]),
+                            K::TraitObjectType {
+                                interface,
+                                arguments,
+                            } => (Kind::TraitObject(*interface), arguments.iter().collect()),
                             K::ClosureType {
                                 environment,
                                 signature,
@@ -3353,6 +3361,8 @@ fn compile_root<'a>(
                     | K::StagedValue(_)
                     | K::ConstAddress { .. }
                     | K::StaticAddress(_)
+                    | K::DynCast(_)
+                    | K::DynCall(_)
                     | K::TemplateEqual(..) => return Err(Error::Unsupported(source)),
                 }
             }

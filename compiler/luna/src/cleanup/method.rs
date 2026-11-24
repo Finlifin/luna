@@ -14,6 +14,7 @@ pub struct MethodCallCleanup {
     pub roots: Vec<iir::InstanceKey>,
     pub receivers: Vec<(iir::InstanceKey, nir::Term)>,
 }
+
 impl fmt::Display for MethodCallCleanup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "(method-call-cleanup (callee {}) (sites", self.callee)?;
@@ -40,7 +41,7 @@ fn invokes(steps: &[CleanupStep], fuel: &mut usize) -> Result<bool, String> {
     let mut found = false;
     while let Some(step) = pending.pop() {
         match step {
-            CleanupStep::Invoke { .. } => found = true,
+            CleanupStep::Invoke { .. } | CleanupStep::DropTraitObject { .. } => found = true,
             CleanupStep::Release { .. } => (),
             CleanupStep::IfConstructed { steps, .. } => {
                 *fuel = fuel
